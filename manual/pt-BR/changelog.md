@@ -7,6 +7,20 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ## 2.0.1 - 2026-09-12
 
+### Alterado
+
+- **Os endpoints do Live não carregam segmento de versão.**
+  `/__live/v1/action`, `/__live/v1/upload`, `/__live/v1/assets/*` e a
+  família `/__live/v1/async/*` agora vivem nos mesmos caminhos sem `/v1`:
+  `/__live/action`, `/__live/upload`, `/__live/assets/*`,
+  `/__live/async/*`. A versão do Suprnova é a tag do git e o runtime do
+  navegador sai em sincronia com o framework, então uma segunda versão
+  dentro do espaço de URLs prometia um caminho de evolução que nunca
+  seria usado. As aplicações não são afetadas: o framework registra essas
+  rotas e o runtime constrói cada URL; referências escritas à mão a
+  caminhos `/__live/` nunca foram suportadas. Isto chegou ao main depois
+  da tag `v2.0.1`.
+
 ### Corrigido
 
 - **Uma URL `redis://` com índice de banco de dados seleciona esse banco

@@ -568,13 +568,13 @@ mod tests {
     fn stream_acceptance_ignores_parameters_and_case() {
         let request = Request::for_test_with_headers(
             "GET",
-            "/__live/v1/async/events",
+            "/__live/async/events",
             [("accept", "text/html, TEXT/EVENT-STREAM;q=0.9")],
         );
         assert!(accepts_event_stream(&request));
         let request = Request::for_test_with_headers(
             "GET",
-            "/__live/v1/async/events",
+            "/__live/async/events",
             [("accept", "application/json")],
         );
         assert!(!accepts_event_stream(&request));
@@ -585,13 +585,13 @@ mod tests {
     fn bearer_credentials_require_the_async_scheme() {
         let request = Request::for_test_with_headers(
             "POST",
-            "/__live/v1/async/memberships",
+            "/__live/async/memberships",
             [("authorization", "SuprnovaAsync abc123")],
         );
         assert_eq!(bearer_credential(&request).as_deref(), Some("abc123"));
         let request = Request::for_test_with_headers(
             "POST",
-            "/__live/v1/async/memberships",
+            "/__live/async/memberships",
             [("authorization", "Bearer abc123")],
         );
         assert!(bearer_credential(&request).is_none());

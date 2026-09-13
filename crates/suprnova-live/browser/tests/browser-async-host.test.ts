@@ -88,7 +88,7 @@ describe("the default browser async host", () => {
       stream: "activity",
     });
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.url).toBe("http://127.0.0.1:4178/__live/v1/async/subscriptions");
+    expect(calls[0]?.url).toBe("http://127.0.0.1:4178/__live/async/subscriptions");
     const init = calls[0]?.init ?? {};
     expect(init.method).toBe("POST");
     expect(init.credentials).toBe("same-origin");
@@ -216,7 +216,7 @@ describe("the default browser async host", () => {
         });
       }),
     );
-    expect(calls[0]?.url).toBe("http://127.0.0.1:4178/__live/v1/async/memberships");
+    expect(calls[0]?.url).toBe("http://127.0.0.1:4178/__live/async/memberships");
     expect((calls[0]?.init.headers as Record<string, string>)["Authorization"]).toBe(
       "SuprnovaAsync cred-1",
     );

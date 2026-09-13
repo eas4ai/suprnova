@@ -28,9 +28,9 @@ in `framework/src/live/` and the application surface it exposes as
 ## Reserved routes and the route guard
 
 `Router::try_live()` installs the versioned reserved namespace exactly once
-after a collision preflight: `/__live/v1/action`, `/__live/v1/upload`, the
-three `/__live/v1/async/*` control routes, the `/__live/v1/async/socket`
-WebSocket handshake, and the immutable `/__live/v1/assets/*` routes. Every
+after a collision preflight: `/__live/action`, `/__live/upload`, the
+three `/__live/async/*` control routes, the `/__live/async/socket`
+WebSocket handshake, and the immutable `/__live/assets/*` routes. Every
 request route carries the strict Live policy, so session, origin, CSRF,
 principal, tenant, proxy, rate-limit, and middleware facts must all be present
 with a typed disposition before engine work starts.
@@ -92,9 +92,9 @@ and subscribes each through the runtime's registered calls.
 The asynchronous feature of the browser runtime stays inert until a host
 supplies clocks, timers, randomness, transports, and an authority that issues
 subscriptions. The runtime's asynchronous artifacts now ship that host:
-`browserAsyncOptions()` issues and renews through `/__live/v1/async/subscriptions`
+`browserAsyncOptions()` issues and renews through `/__live/async/subscriptions`
 with the browser's same-origin credentials, drives SSE membership control
-through `/__live/v1/async/memberships` with the issued bearer credential, and
+through `/__live/async/memberships` with the issued bearer credential, and
 opens the native transports. A document whose islands declare streams boots
 through `suprnova-live.boot.async.esm.js`, which configures that host before
 `boot()`; the classic boot configures `window.SuprnovaLiveAsync` when the

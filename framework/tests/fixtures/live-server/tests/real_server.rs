@@ -158,7 +158,7 @@ fn downstream_suprnova_only_binary_serves_document_action_and_clean_shutdown() {
         r#"{{"base_revision":"0","component":"fixtures.counter","correlation_id":"AAECAwQFBgcICQoLDA0ODw","extensions":{{"x_suprnova_live_document_key_v1":"fixture-counter"}},"idempotency_key":"EBESExQVFhcYGRobHB0eHw","model_proposals":{{}},"operations":[{{"arguments":{{}},"kind":"invoke_action","name":"increment"}}],"protocol_version":1,"runtime_contract_version":1,"snapshot":{{"browser_nonce":"ICEiIyQlJicoKSorLC0uLw","envelope":{seed},"kind":"seed_promotion"}},"snapshot_schema_version":1}}"#,
     );
     let post = format!(
-        "POST /__live/v1/action HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/vnd.suprnova.live+json; charset=utf-8; version=1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /__live/action HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/vnd.suprnova.live+json; charset=utf-8; version=1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         update.len(),
         update,
     );

@@ -233,7 +233,7 @@ fn runtime_is_bound_before_fallible_routes_and_reused_on_reentry() {
     {
         let expires_at = prepare_live_request_with_fixed_clock_for_test(
             &after_routes,
-            Request::for_test("POST", "/__live/v1/action").with_route_pattern("/__live/v1/action"),
+            Request::for_test("POST", "/__live/action").with_route_pattern("/__live/action"),
             LiveTestOperation::Action,
             10_000,
         )

@@ -97,7 +97,7 @@ describe("bounded upload transfer", () => {
       signal: new AbortController().signal,
     });
 
-    expect(calls[0]?.input).toBe("/__live/v1/upload");
+    expect(calls[0]?.input).toBe("/__live/upload");
     const requestInput = calls[0]?.input;
     if (typeof requestInput !== "string") throw new Error("expected string upload endpoint");
     expect(requestInput).not.toContain("secret-transfer-grant");

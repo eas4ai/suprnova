@@ -291,7 +291,7 @@ fn action_request(envelope: Value, document_key: &str) -> hyper::Request<Full<By
     .expect("encode hostile-test request");
     hyper::Request::builder()
         .method(hyper::Method::POST)
-        .uri("/__live/v1/action")
+        .uri("/__live/action")
         .header(
             "content-type",
             "application/vnd.suprnova.live+json; charset=utf-8; version=1",
@@ -338,7 +338,7 @@ fn params_changed_request(
     .expect("encode child-parameter request");
     hyper::Request::builder()
         .method(hyper::Method::POST)
-        .uri("/__live/v1/action")
+        .uri("/__live/action")
         .header(
             "content-type",
             "application/vnd.suprnova.live+json; charset=utf-8; version=2",

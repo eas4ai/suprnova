@@ -66,7 +66,7 @@ check plus the tracked bytes mean a rebuilt `dist/` must be byte-identical to
 what the engine embeds.
 
 `Router::try_live()` serves the artifacts at
-`/__live/v1/assets/<asset_identity>/<file>` for `GET` and `HEAD`. The asset
+`/__live/assets/<asset_identity>/<file>` for `GET` and `HEAD`. The asset
 identity is `suprnova-live-<runtime version>-<first sixteen hex characters of
 the manifest digest>`, so the URLs are immutable and carry the recorded
 `public, max-age=31536000, immutable` policy; the manifest itself is served
@@ -86,7 +86,7 @@ integrity values, so a document loads only external scripts.
 A document calls `LiveDocument::bootstrap(LiveBootstrapOptions)` after its
 last mount and inserts the returned markup in `<head>` through
 `|trusted_html`. The markup is the inert `suprnova-live-config` JSON element
-(canonical key order, `endpoint` `/__live/v1/action`, the asset identity, the
+(canonical key order, `endpoint` `/__live/action`, the asset identity, the
 protocol range, and bounded limits; the response budget is the configured
 `LiveConfig` limit bounded to the runtime's accepted 1 KiB to 4 MiB range)
 followed by one delivery form: for ESM a

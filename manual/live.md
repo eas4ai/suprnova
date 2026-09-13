@@ -121,8 +121,8 @@ validation port, fails registration with a typed `RegistryError`.
 ## Routes
 
 `Router::try_live()` installs the reserved namespace exactly once:
-`/__live/v1/action`, `/__live/v1/upload`, the `/__live/v1/async/*` control
-routes and WebSocket handshake, and the immutable `/__live/v1/assets/*`
+`/__live/action`, `/__live/upload`, the `/__live/async/*` control
+routes and WebSocket handshake, and the immutable `/__live/assets/*`
 routes. Startup fails if an application route can claim `/__live`.
 
 The reserved request routes carry a strict policy: every request needs
@@ -312,7 +312,7 @@ impl AvatarUploader {
 
 The view binds the field with `<input type="file" live:upload="avatar">`. The
 runtime creates, transfers, and completes the upload through
-`/__live/v1/upload`; the file waits in quarantine until the declared finalize
+`/__live/upload`; the file waits in quarantine until the declared finalize
 action runs, when the framework hands it to your `UploadFinalizer`. Bind the
 finalizer, and any scanner or validator, before the runtime assembles:
 
@@ -389,7 +389,7 @@ registered calls.
 ## Assets and no-build use
 
 The framework serves the exact reviewed runtime artifacts at
-`/__live/v1/assets/<identity>/<file>` with immutable caching, strong
+`/__live/assets/<identity>/<file>` with immutable caching, strong
 validators, and integrity attributes in the bootstrap tags. A strict
 `script-src 'self'` policy holds because documents contain no inline script.
 To publish the same bytes to a CDN or a static directory:

@@ -6,6 +6,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## 2.0.1 - 2026-09-12
 
+### Changed
+
+- **The Live endpoints carry no version segment.** `/__live/v1/action`,
+  `/__live/v1/upload`, `/__live/v1/assets/*`, and the `/__live/v1/async/*`
+  family now live at the same paths without `/v1`: `/__live/action`,
+  `/__live/upload`, `/__live/assets/*`, `/__live/async/*`. Suprnova's
+  version is the git tag and the browser runtime ships in lockstep with
+  the framework, so a second version inside the URL space promised an
+  evolution path that would never be used. Applications are unaffected:
+  the framework registers these routes and the runtime builds every URL,
+  and hand-written references to `/__live/` paths were never supported.
+  This landed on main after the `v2.0.1` tag.
+
 ### Fixed
 
 - **A `redis://` URL with a database index selects that database everywhere.**

@@ -125,9 +125,9 @@ mit einem typisierten `RegistryError` fehlschlagen.
 ## Routing
 
 `Router::try_live()` installiert den reservierten Namensraum genau einmal:
-`/__live/v1/action`, `/__live/v1/upload`, die Steuerrouten und den
-WebSocket-Handshake unter `/__live/v1/async/*` sowie die unveränderlichen
-Routen unter `/__live/v1/assets/*`. Der Start schlägt fehl, wenn eine
+`/__live/action`, `/__live/upload`, die Steuerrouten und den
+WebSocket-Handshake unter `/__live/async/*` sowie die unveränderlichen
+Routen unter `/__live/assets/*`. Der Start schlägt fehl, wenn eine
 Anwendungsroute `/__live` beanspruchen kann.
 
 Die reservierten Anfragerouten tragen eine strikte Richtlinie: Jede Anfrage
@@ -323,7 +323,7 @@ impl AvatarUploader {
 
 Die View bindet das Feld mit `<input type="file" live:upload="avatar">`. Die
 Laufzeit erstellt, überträgt und vervollständigt den Upload über
-`/__live/v1/upload`; die Datei wartet in Quarantäne, bis die deklarierte
+`/__live/upload`; die Datei wartet in Quarantäne, bis die deklarierte
 Finalisierungsaktion läuft, woraufhin das Framework sie an Ihren
 `UploadFinalizer` übergibt. Binden Sie den Finalizer sowie jeden Scanner oder
 Validator, bevor die Laufzeit zusammengesetzt wird:
@@ -402,7 +402,7 @@ mehreren Streams abonniert jeden über die registrierten Aufrufe der Laufzeit.
 ## Assets und Nutzung ohne Build
 
 Das Framework liefert die exakt geprüften Laufzeit-Artefakte unter
-`/__live/v1/assets/<identity>/<file>` mit unveränderlichem Caching, starken
+`/__live/assets/<identity>/<file>` mit unveränderlichem Caching, starken
 Validatoren und Integritätsattributen in den Bootstrap-Tags aus. Eine strikte
 Richtlinie `script-src 'self'` hält, weil Dokumente kein Inline-Script
 enthalten. Um dieselben Bytes auf ein CDN oder in ein statisches Verzeichnis zu

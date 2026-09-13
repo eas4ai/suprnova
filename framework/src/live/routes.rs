@@ -17,8 +17,8 @@ use super::attestation::LiveOperation;
 use super::context::{LiveRouteMetadata, LiveRouteSecurityPolicy};
 
 pub(crate) const LIVE_ROUTE_VERSION: u16 = 1;
-pub(crate) const LIVE_UPDATE_PATH: &str = "/__live/v1/action";
-pub(crate) const LIVE_UPLOAD_PATH: &str = "/__live/v1/upload";
+pub(crate) const LIVE_UPDATE_PATH: &str = "/__live/action";
+pub(crate) const LIVE_UPLOAD_PATH: &str = "/__live/upload";
 const LIVE_HTTP_METHODS: [Method; 7] = [
     Method::GET,
     Method::POST,

@@ -35,12 +35,12 @@ use app::migrations::Migrator;
 use app::models::users::User;
 use app::providers::DatabaseUserProvider;
 
-pub const ACTION_PATH: &str = "/__live/v1/action";
-pub const UPLOAD_PATH: &str = "/__live/v1/upload";
-pub const SUBSCRIPTION_PATH: &str = "/__live/v1/async/subscriptions";
-pub const MEMBERSHIP_PATH: &str = "/__live/v1/async/memberships";
-pub const EVENTS_PATH: &str = "/__live/v1/async/events";
-pub const SOCKET_PATH: &str = "/__live/v1/async/socket";
+pub const ACTION_PATH: &str = "/__live/action";
+pub const UPLOAD_PATH: &str = "/__live/upload";
+pub const SUBSCRIPTION_PATH: &str = "/__live/async/subscriptions";
+pub const MEMBERSHIP_PATH: &str = "/__live/async/memberships";
+pub const EVENTS_PATH: &str = "/__live/async/events";
+pub const SOCKET_PATH: &str = "/__live/async/socket";
 pub const LIVE_MEDIA: &str = "application/vnd.suprnova.live+json; charset=utf-8; version=2";
 pub const CORRELATION_ID: &str = "MDEyMzQ1Njc4OTo7PD0-Pw";
 pub const BROWSER_NONCE: &str = "ICEiIyQlJicoKSorLC0uLw";

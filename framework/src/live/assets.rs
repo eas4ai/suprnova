@@ -28,9 +28,9 @@ use super::LiveConfig;
 use super::routes::LIVE_UPDATE_PATH;
 
 /// Reserved path prefix under which every Live artifact is served.
-pub const LIVE_ASSET_PATH_PREFIX: &str = "/__live/v1/assets";
-pub(crate) const LIVE_ASSET_ROUTE: &str = "/__live/v1/assets/{identity}/{file}";
-pub(crate) const LIVE_ASSET_MISS_ROUTE: &str = "/__live/v1/assets/{file}";
+pub const LIVE_ASSET_PATH_PREFIX: &str = "/__live/assets";
+pub(crate) const LIVE_ASSET_ROUTE: &str = "/__live/assets/{identity}/{file}";
+pub(crate) const LIVE_ASSET_MISS_ROUTE: &str = "/__live/assets/{file}";
 
 const MANIFEST_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const MANIFEST_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";

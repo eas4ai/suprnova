@@ -7,6 +7,20 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ## 2.0.1 - 2026-09-12
 
+### Geändert
+
+- **Die Live-Endpunkte tragen kein Versionssegment.** `/__live/v1/action`,
+  `/__live/v1/upload`, `/__live/v1/assets/*` und die
+  `/__live/v1/async/*`-Familie liegen jetzt auf denselben Pfaden ohne
+  `/v1`: `/__live/action`, `/__live/upload`, `/__live/assets/*`,
+  `/__live/async/*`. Suprnovas Version ist das Git-Tag, und die
+  Browser-Laufzeit erscheint im Gleichschritt mit dem Framework - eine
+  zweite Version im URL-Raum versprach einen Entwicklungspfad, der nie
+  benutzt worden wäre. Anwendungen sind nicht betroffen: das Framework
+  registriert diese Routen und die Laufzeit baut jede URL; von Hand
+  geschriebene `/__live/`-Pfade waren nie unterstützt. Dies landete auf
+  main nach dem Tag `v2.0.1`.
+
 ### Behoben
 
 - **Eine `redis://`-URL mit Datenbankindex wählt diese Datenbank überall

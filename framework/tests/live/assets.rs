@@ -212,7 +212,7 @@ fn catalog() -> &'static LiveAssetCatalog {
 }
 
 fn asset_path(file: &str) -> String {
-    format!("/__live/v1/assets/{}/{file}", catalog().identity())
+    format!("/__live/assets/{}/{file}", catalog().identity())
 }
 
 #[tokio::test]
@@ -333,13 +333,13 @@ async fn artifact_routes_are_a_closed_immutable_namespace() {
     let identity = catalog().identity().to_owned();
 
     let rejected = [
-        format!("/__live/v1/assets/{identity}/index.d.ts"),
-        format!("/__live/v1/assets/{identity}/missing.js"),
-        format!("/__live/v1/assets/{identity}/..%2Fsuprnova-live.esm.js"),
-        format!("/__live/v1/assets/{identity}/suprnova-live.esm.js?v=1"),
-        format!("/__live/v1/assets/{identity}/SUPRNOVA-LIVE.ESM.JS"),
-        "/__live/v1/assets/stale-identity/suprnova-live.esm.js".to_owned(),
-        "/__live/v1/assets/suprnova-live.esm.js".to_owned(),
+        format!("/__live/assets/{identity}/index.d.ts"),
+        format!("/__live/assets/{identity}/missing.js"),
+        format!("/__live/assets/{identity}/..%2Fsuprnova-live.esm.js"),
+        format!("/__live/assets/{identity}/suprnova-live.esm.js?v=1"),
+        format!("/__live/assets/{identity}/SUPRNOVA-LIVE.ESM.JS"),
+        "/__live/assets/stale-identity/suprnova-live.esm.js".to_owned(),
+        "/__live/assets/suprnova-live.esm.js".to_owned(),
     ];
     for path in rejected {
         let reply = dispatch(Arc::clone(&router), Method::GET, &path, &[]).await;
@@ -530,7 +530,7 @@ async fn esm_bootstrap_emits_config_preload_optional_roles_and_boot_in_order() {
         json!({
             "asset_identity": identity,
             "credentials": "same-origin",
-            "endpoint": "/__live/v1/action",
+            "endpoint": "/__live/action",
             "max_parallel_per_island": 1,
             "max_queued_per_island": 8,
             "max_response_bytes": 1_048_576,
@@ -556,19 +556,19 @@ async fn esm_bootstrap_emits_config_preload_optional_roles_and_boot_in_order() {
     let boot = catalog.boot_script_for(suprnova::live::LiveBootstrapStrategy::Esm, true);
     assert_eq!(boot.file(), "suprnova-live.boot.async.esm.js");
     let core_link = format!(
-        "<link rel=\"modulepreload\" href=\"/__live/v1/assets/{identity}/suprnova-live.esm.js\" integrity=\"{}\" crossorigin=\"anonymous\">",
+        "<link rel=\"modulepreload\" href=\"/__live/assets/{identity}/suprnova-live.esm.js\" integrity=\"{}\" crossorigin=\"anonymous\">",
         core.sri()
     );
     let uploads_tag = format!(
-        "<script type=\"module\" src=\"/__live/v1/assets/{identity}/suprnova-live.uploads.esm.js\" integrity=\"{}\" crossorigin=\"anonymous\"></script>",
+        "<script type=\"module\" src=\"/__live/assets/{identity}/suprnova-live.uploads.esm.js\" integrity=\"{}\" crossorigin=\"anonymous\"></script>",
         uploads.sri()
     );
     let async_tag = format!(
-        "<script type=\"module\" src=\"/__live/v1/assets/{identity}/suprnova-live.async.esm.js\" integrity=\"{}\" crossorigin=\"anonymous\"></script>",
+        "<script type=\"module\" src=\"/__live/assets/{identity}/suprnova-live.async.esm.js\" integrity=\"{}\" crossorigin=\"anonymous\"></script>",
         async_role.sri()
     );
     let boot_tag = format!(
-        "<script type=\"module\" src=\"/__live/v1/assets/{identity}/{}\" integrity=\"{}\" crossorigin=\"anonymous\"></script>",
+        "<script type=\"module\" src=\"/__live/assets/{identity}/{}\" integrity=\"{}\" crossorigin=\"anonymous\"></script>",
         boot.file(),
         boot.sri()
     );
@@ -630,27 +630,27 @@ async fn classic_bootstrap_orders_optional_roles_before_core_and_boot() {
         &[
             "suprnova-live-config",
             &format!(
-                "<link rel=\"preload\" as=\"script\" href=\"/__live/v1/assets/{identity}/suprnova-live.classic.js\" integrity=\"{}\" crossorigin=\"anonymous\">",
+                "<link rel=\"preload\" as=\"script\" href=\"/__live/assets/{identity}/suprnova-live.classic.js\" integrity=\"{}\" crossorigin=\"anonymous\">",
                 sri(ArtifactRole::CoreClassic)
             ),
             &format!(
-                "<script defer src=\"/__live/v1/assets/{identity}/suprnova-live.stimulus.classic.js\" integrity=\"{}\" crossorigin=\"anonymous\" nonce=\"test-nonce\"></script>",
+                "<script defer src=\"/__live/assets/{identity}/suprnova-live.stimulus.classic.js\" integrity=\"{}\" crossorigin=\"anonymous\" nonce=\"test-nonce\"></script>",
                 sri(ArtifactRole::StimulusClassic)
             ),
             &format!(
-                "<script defer src=\"/__live/v1/assets/{identity}/suprnova-live.uploads.classic.js\" integrity=\"{}\" crossorigin=\"anonymous\" nonce=\"test-nonce\"></script>",
+                "<script defer src=\"/__live/assets/{identity}/suprnova-live.uploads.classic.js\" integrity=\"{}\" crossorigin=\"anonymous\" nonce=\"test-nonce\"></script>",
                 sri(ArtifactRole::UploadsClassic)
             ),
             &format!(
-                "<script defer src=\"/__live/v1/assets/{identity}/suprnova-live.async.classic.js\" integrity=\"{}\" crossorigin=\"anonymous\" nonce=\"test-nonce\"></script>",
+                "<script defer src=\"/__live/assets/{identity}/suprnova-live.async.classic.js\" integrity=\"{}\" crossorigin=\"anonymous\" nonce=\"test-nonce\"></script>",
                 sri(ArtifactRole::AsyncClassic)
             ),
             &format!(
-                "<script defer src=\"/__live/v1/assets/{identity}/suprnova-live.classic.js\" integrity=\"{}\" crossorigin=\"anonymous\" nonce=\"test-nonce\"></script>",
+                "<script defer src=\"/__live/assets/{identity}/suprnova-live.classic.js\" integrity=\"{}\" crossorigin=\"anonymous\" nonce=\"test-nonce\"></script>",
                 sri(ArtifactRole::CoreClassic)
             ),
             &format!(
-                "<script defer src=\"/__live/v1/assets/{identity}/{}\" integrity=\"{}\" crossorigin=\"anonymous\" nonce=\"test-nonce\"></script>",
+                "<script defer src=\"/__live/assets/{identity}/{}\" integrity=\"{}\" crossorigin=\"anonymous\" nonce=\"test-nonce\"></script>",
                 boot.file(),
                 boot.sri()
             ),

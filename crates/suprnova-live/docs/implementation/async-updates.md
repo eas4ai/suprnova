@@ -268,10 +268,10 @@ subscription authority is touched.
 
 | Path | Method | Purpose |
 |---|---|---|
-| `/__live/v1/async/subscriptions` | `POST` | `issue` or `renew` one logical subscription for a browser-selected mount |
-| `/__live/v1/async/memberships` | `POST` | `subscribe` or `unsubscribe` one issued subscription on an open SSE transport |
-| `/__live/v1/async/events` | `GET` | The single reader of one SSE document transport |
-| `/__live/v1/async/socket` | WebSocket | One same-origin WebSocket document transport |
+| `/__live/async/subscriptions` | `POST` | `issue` or `renew` one logical subscription for a browser-selected mount |
+| `/__live/async/memberships` | `POST` | `subscribe` or `unsubscribe` one issued subscription on an open SSE transport |
+| `/__live/async/events` | `GET` | The single reader of one SSE document transport |
+| `/__live/async/socket` | WebSocket | One same-origin WebSocket document transport |
 
 Control bodies are JSON objects of at most 16 KiB with unknown fields
 rejected, the `x-suprnova-live: async-v1` header, and `protocol_version` 1. A
@@ -336,7 +336,7 @@ no-store`. Test-only inspection lives in `suprnova::live::testing`
 The asynchronous artifacts ship a default browser host, `browserAsyncOptions()`
 (ESM) and `window.SuprnovaLiveAsync.browserOptions()` (classic), that issues
 and renews subscriptions and drives SSE membership through the reserved
-`/__live/v1/async/*` routes; an application on another host supplies its own
+`/__live/async/*` routes; an application on another host supplies its own
 `AsyncFeatureOptions` through `configureAsync` before boot instead. The bearer
 SSE reader fetches with same-origin credentials: the bearer stays the
 transport authority and never enters a URL, while the same-origin cookie lets

@@ -96,9 +96,9 @@ suprnova::App::singleton(crate::live::registry().expect("Live component registry
 
 ## 路由
 
-`Router::try_live()` 恰好安装一次保留命名空间：`/__live/v1/action`、
-`/__live/v1/upload`、`/__live/v1/async/*` 的控制路由与 WebSocket 握手，以及不可变的
-`/__live/v1/assets/*` 路由。如果某条应用路由能够占据 `/__live`，启动将失败。
+`Router::try_live()` 恰好安装一次保留命名空间：`/__live/action`、
+`/__live/upload`、`/__live/async/*` 的控制路由与 WebSocket 握手，以及不可变的
+`/__live/assets/*` 路由。如果某条应用路由能够占据 `/__live`，启动将失败。
 
 保留的请求路由带有严格策略：每个请求都需要会话、来源、CSRF、主体、租户和限流事实。框架记录会话和 CSRF 证明；你的应用通过路由守卫附加其余部分：
 
@@ -260,7 +260,7 @@ impl AvatarUploader {
 ```
 
 视图通过 `<input type="file" live:upload="avatar">` 绑定该字段。运行时通过
-`/__live/v1/upload` 创建、传输并完成上传；文件在隔离区等待，直到声明的最终化动作运行，此时框架把它交给你的 `UploadFinalizer`。在运行时组装之前绑定最终化器，以及任何扫描器或验证器：
+`/__live/upload` 创建、传输并完成上传；文件在隔离区等待，直到声明的最终化动作运行，此时框架把它交给你的 `UploadFinalizer`。在运行时组装之前绑定最终化器，以及任何扫描器或验证器：
 
 ```rust
 App::singleton(LiveUploadHost::new().with_finalizer(Arc::new(AppUploadFinalizer::default())));
@@ -321,7 +321,7 @@ streams.refresh("activity").await?;
 
 ## 资产与免构建使用
 
-框架在 `/__live/v1/assets/<identity>/<file>` 提供经过审阅的精确运行时工件，带有不可变缓存、强验证器以及引导标签中的完整性属性。由于文档不包含内联脚本，严格的
+框架在 `/__live/assets/<identity>/<file>` 提供经过审阅的精确运行时工件，带有不可变缓存、强验证器以及引导标签中的完整性属性。由于文档不包含内联脚本，严格的
 `script-src 'self'` 策略得以成立。要把相同的字节发布到 CDN 或静态目录：
 
 ```bash

@@ -188,7 +188,7 @@ async fn issuance_returns_a_document_scoped_bearer_subscription() {
         server.port,
         &alice,
         Method::POST,
-        "/__live/v1/async/poll",
+        "/__live/async/poll",
         &[("content-type", "application/json")],
         Bytes::from_static(b"{}"),
     )

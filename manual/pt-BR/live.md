@@ -124,9 +124,9 @@ port de validação, faz o registro falhar com um `RegistryError` tipado.
 ## Rotas
 
 `Router::try_live()` instala o namespace reservado exatamente uma vez:
-`/__live/v1/action`, `/__live/v1/upload`, as rotas de controle e o handshake
-WebSocket de `/__live/v1/async/*`, e as rotas imutáveis de
-`/__live/v1/assets/*`. A inicialização falha se uma rota da aplicação puder
+`/__live/action`, `/__live/upload`, as rotas de controle e o handshake
+WebSocket de `/__live/async/*`, e as rotas imutáveis de
+`/__live/assets/*`. A inicialização falha se uma rota da aplicação puder
 reivindicar `/__live`.
 
 As rotas de requisição reservadas carregam uma política estrita: toda
@@ -319,7 +319,7 @@ impl AvatarUploader {
 ```
 
 A view vincula o campo com `<input type="file" live:upload="avatar">`. O
-runtime cria, transfere e conclui o upload por `/__live/v1/upload`; o arquivo
+runtime cria, transfere e conclui o upload por `/__live/upload`; o arquivo
 aguarda em quarentena até a ação de finalização declarada ser executada,
 quando o framework o entrega ao seu `UploadFinalizer`. Vincule o finalizador,
 e qualquer scanner ou validador, antes que o runtime seja montado:
@@ -397,7 +397,7 @@ chamadas registradas do runtime.
 ## Assets e uso sem build
 
 O framework serve os artefatos de runtime exatos e revisados em
-`/__live/v1/assets/<identity>/<file>` com cache imutável, validadores fortes e
+`/__live/assets/<identity>/<file>` com cache imutável, validadores fortes e
 atributos de integridade nas tags de bootstrap. Uma política estrita
 `script-src 'self'` se sustenta porque os documentos não contêm script inline.
 Para publicar os mesmos bytes em uma CDN ou em um diretório estático:

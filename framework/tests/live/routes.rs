@@ -9,7 +9,7 @@ use suprnova::{
     Crypt, EncryptionKey, HttpResponse, MiddlewareRegistry, Request, Router, handle_request,
 };
 
-const LIVE_UPDATE_PATH: &str = "/__live/v1/action";
+const LIVE_UPDATE_PATH: &str = "/__live/action";
 
 fn existing_route(path: &str) -> Router {
     Router::new()
@@ -149,7 +149,7 @@ fn live_installation_is_strictly_single_shot_and_routes_method_rejection() {
 #[test]
 fn live_namespace_preflight_rejects_literal_dynamic_and_catch_all_overlap() {
     for path in [
-        "/__live/v1/action",
+        "/__live/action",
         "/__live/custom",
         "/:feature/v1/action",
         "/{feature}/custom",

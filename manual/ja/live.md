@@ -97,8 +97,8 @@ suprnova::App::singleton(crate::live::registry().expect("Live component registry
 ## ルーティング
 
 `Router::try_live()` は予約済み名前空間を正確に一度インストールします。
-`/__live/v1/action`、`/__live/v1/upload`、`/__live/v1/async/*` の制御ルートと
-WebSocket ハンドシェイク、そして不変の `/__live/v1/assets/*` ルートです。アプリケーションルートが `/__live` を要求できる場合、起動は失敗します。
+`/__live/action`、`/__live/upload`、`/__live/async/*` の制御ルートと
+WebSocket ハンドシェイク、そして不変の `/__live/assets/*` ルートです。アプリケーションルートが `/__live` を要求できる場合、起動は失敗します。
 
 予約済みのリクエストルートは厳格なポリシーを持ちます。すべてのリクエストにはセッション、オリジン、CSRF、プリンシパル、テナント、レート制限の事実が必要です。フレームワークはセッションと CSRF の証明を記録し、アプリケーションは残りをルートガードで取り付けます:
 
@@ -258,7 +258,7 @@ impl AvatarUploader {
 }
 ```
 
-ビューは `<input type="file" live:upload="avatar">` でフィールドをバインドします。ランタイムは `/__live/v1/upload` を通じてアップロードを作成、転送、完了させます。ファイルは、宣言された確定アクションが実行されるまで隔離領域で待機し、そのときフレームワークが `UploadFinalizer` に渡します。ファイナライザーと、スキャナーやバリデーターがあればそれも、ランタイムが組み立てられる前にバインドします:
+ビューは `<input type="file" live:upload="avatar">` でフィールドをバインドします。ランタイムは `/__live/upload` を通じてアップロードを作成、転送、完了させます。ファイルは、宣言された確定アクションが実行されるまで隔離領域で待機し、そのときフレームワークが `UploadFinalizer` に渡します。ファイナライザーと、スキャナーやバリデーターがあればそれも、ランタイムが組み立てられる前にバインドします:
 
 ```rust
 App::singleton(LiveUploadHost::new().with_finalizer(Arc::new(AppUploadFinalizer::default())));
@@ -321,7 +321,7 @@ streams.refresh("activity").await?;
 ## アセットとビルド不要の利用
 
 フレームワークは、精査済みのランタイム成果物そのものを
-`/__live/v1/assets/<identity>/<file>` で、不変キャッシュ、強いバリデーター、ブートストラップタグ内の整合性属性とともに配信します。ドキュメントにインラインスクリプトが含まれないため、厳格な `script-src 'self'` ポリシーが成り立ちます。同じバイト列を CDN や静的ディレクトリに公開するには:
+`/__live/assets/<identity>/<file>` で、不変キャッシュ、強いバリデーター、ブートストラップタグ内の整合性属性とともに配信します。ドキュメントにインラインスクリプトが含まれないため、厳格な `script-src 'self'` ポリシーが成り立ちます。同じバイト列を CDN や静的ディレクトリに公開するには:
 
 ```bash
 suprnova live:assets --out public/__live

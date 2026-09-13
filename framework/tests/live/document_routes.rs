@@ -400,7 +400,7 @@ fn live_action_request(
     .expect("encode Live action request");
     hyper::Request::builder()
         .method(hyper::Method::POST)
-        .uri("/__live/v1/action")
+        .uri("/__live/action")
         .header(
             "content-type",
             "application/vnd.suprnova.live+json; charset=utf-8; version=2",
@@ -768,7 +768,7 @@ async fn public_seed_get_promotes_and_executes_an_action_through_the_real_http_e
     );
     let post = hyper::Request::builder()
         .method(hyper::Method::POST)
-        .uri("/__live/v1/action")
+        .uri("/__live/action")
         .header(
             "content-type",
             "application/vnd.suprnova.live+json; charset=utf-8; version=1",
@@ -816,7 +816,7 @@ async fn public_seed_get_promotes_and_executes_an_action_through_the_real_http_e
     .expect("encode fresh-render request");
     let post = hyper::Request::builder()
         .method(hyper::Method::POST)
-        .uri("/__live/v1/action")
+        .uri("/__live/action")
         .header(
             "content-type",
             "application/vnd.suprnova.live+json; charset=utf-8; version=2",
@@ -918,7 +918,7 @@ async fn registered_action_redirect_resolves_through_the_real_http_endpoint() {
     );
     let post = hyper::Request::builder()
         .method(hyper::Method::POST)
-        .uri("/__live/v1/action")
+        .uri("/__live/action")
         .header(
             "content-type",
             "application/vnd.suprnova.live+json; charset=utf-8; version=1",

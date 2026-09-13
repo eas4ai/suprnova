@@ -30,10 +30,10 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
-pub const SUBSCRIPTION_PATH: &str = "/__live/v1/async/subscriptions";
-pub const MEMBERSHIP_PATH: &str = "/__live/v1/async/memberships";
-pub const EVENTS_PATH: &str = "/__live/v1/async/events";
-pub const SOCKET_PATH: &str = "/__live/v1/async/socket";
+pub const SUBSCRIPTION_PATH: &str = "/__live/async/subscriptions";
+pub const MEMBERSHIP_PATH: &str = "/__live/async/memberships";
+pub const EVENTS_PATH: &str = "/__live/async/events";
+pub const SOCKET_PATH: &str = "/__live/async/socket";
 pub const ORDERS_COMPONENT: &str = "tests.async-orders";
 pub const INVENTORY_COMPONENT: &str = "tests.async-inventory";
 

@@ -34,7 +34,7 @@ use suprnova::{
 };
 use suprnova_live_test_support::DirectProviderConformanceAdapter;
 
-const LIVE_UPLOAD_PATH: &str = "/__live/v1/upload";
+const LIVE_UPLOAD_PATH: &str = "/__live/upload";
 static SAVE_ACTION_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Default)]
@@ -619,7 +619,7 @@ fn upload_action_request(
     .expect("encode upload action request");
     hyper::Request::builder()
         .method(Method::POST)
-        .uri("/__live/v1/action")
+        .uri("/__live/action")
         .header(
             "content-type",
             "application/vnd.suprnova.live+json; charset=utf-8; version=1",
@@ -861,7 +861,7 @@ fn upload_reacquisition_is_an_explicit_application_route_outside_the_reserved_na
         router
             .match_route(
                 &Method::POST,
-                "/__live/v1/uploads/00000000-0000-4000-8000-000000000000/reacquire",
+                "/__live/uploads/00000000-0000-4000-8000-000000000000/reacquire",
             )
             .is_none(),
         "Live installation must not invent a reserved reacquisition route",
@@ -886,7 +886,7 @@ fn upload_reacquisition_is_an_explicit_application_route_outside_the_reserved_na
     );
     assert!(
         Router::new()
-            .try_live_upload_reacquisition("/__live/v1/uploads/{handle}/reacquire")
+            .try_live_upload_reacquisition("/__live/uploads/{handle}/reacquire")
             .is_err(),
         "an application reacquisition route cannot enter the reserved namespace",
     );
@@ -1046,7 +1046,7 @@ async fn protocol_two_actions_reach_upload_capable_components() {
     .expect("encode protocol 2 action");
     let request = hyper::Request::builder()
         .method(Method::POST)
-        .uri("/__live/v1/action")
+        .uri("/__live/action")
         .header(
             "content-type",
             "application/vnd.suprnova.live+json; charset=utf-8; version=2",

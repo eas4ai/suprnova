@@ -71,7 +71,7 @@ fn anonymous_policy() -> LiveTestRoutePolicy {
 
 fn complete_anonymous_request(operation: LiveTestOperation) -> Request {
     let mut request = prepare_live_request_for_test(
-        Request::for_test("POST", "/__live/v1/control").with_route_pattern("/__live/v1/control"),
+        Request::for_test("POST", "/__live/control").with_route_pattern("/__live/control"),
         operation,
     );
     assert!(record_live_security_pass_for_test(
@@ -170,10 +170,8 @@ fn live_session_middleware() -> SessionMiddleware {
 
 #[test]
 fn a_fresh_request_has_unique_identity_and_no_implicit_security_proof() {
-    let first =
-        Request::for_test("POST", "/__live/v1/action").with_route_pattern("/__live/v1/action");
-    let second =
-        Request::for_test("POST", "/__live/v1/action").with_route_pattern("/__live/v1/action");
+    let first = Request::for_test("POST", "/__live/action").with_route_pattern("/__live/action");
+    let second = Request::for_test("POST", "/__live/action").with_route_pattern("/__live/action");
 
     assert!(!same_request_identity(&first, &second));
 
@@ -202,7 +200,7 @@ async fn registered_live_route_prepares_before_owner_middleware_and_completes_po
     let captured = Arc::new(Mutex::new(None));
     let captured_in_handler = Arc::clone(&captured);
     let mut router: Router = Router::new()
-        .post("/__live/v1/sse/control", move |request: Request| {
+        .post("/__live/sse/control", move |request: Request| {
             let captured = Arc::clone(&captured_in_handler);
             async move {
                 *captured.lock().expect("capture lock") =
@@ -215,7 +213,7 @@ async fn registered_live_route_prepares_before_owner_middleware_and_completes_po
     register_live_route_for_test(
         &mut router,
         hyper::Method::POST,
-        "/__live/v1/sse/control",
+        "/__live/sse/control",
         LiveTestOperation::SseControl,
         anonymous_policy(),
     )
@@ -223,7 +221,7 @@ async fn registered_live_route_prepares_before_owner_middleware_and_completes_po
 
     let request = hyper::Request::builder()
         .method("POST")
-        .uri("/__live/v1/sse/control")
+        .uri("/__live/sse/control")
         .header("host", "localhost")
         .header("sec-fetch-site", "same-origin")
         .body(Full::new(Bytes::new()))
@@ -298,8 +296,7 @@ fn production_context_validator_rejects_the_full_hostile_matrix_for_every_operat
         }
 
         let mut wrong_order = prepare_live_request_for_test(
-            Request::for_test("POST", "/__live/v1/control")
-                .with_route_pattern("/__live/v1/control"),
+            Request::for_test("POST", "/__live/control").with_route_pattern("/__live/control"),
             operation,
         );
         assert!(record_live_security_pass_for_test(
@@ -320,7 +317,7 @@ fn production_context_validator_rejects_the_full_hostile_matrix_for_every_operat
         let bypassed = prepare_live_request_for_test(
             Request::for_test_with_headers(
                 "POST",
-                "/__live/v1/control",
+                "/__live/control",
                 [
                     ("origin", "https://attacker.invalid"),
                     ("x-csrf-token", "forged"),
@@ -328,7 +325,7 @@ fn production_context_validator_rejects_the_full_hostile_matrix_for_every_operat
                     ("x-tenant-id", "forged"),
                 ],
             )
-            .with_route_pattern("/__live/v1/control"),
+            .with_route_pattern("/__live/control"),
             operation,
         );
         assert!(
@@ -337,8 +334,7 @@ fn production_context_validator_rejects_the_full_hostile_matrix_for_every_operat
         );
 
         let mut short_circuited = prepare_live_request_for_test(
-            Request::for_test("POST", "/__live/v1/control")
-                .with_route_pattern("/__live/v1/control"),
+            Request::for_test("POST", "/__live/control").with_route_pattern("/__live/control"),
             operation,
         );
         assert!(record_live_security_pass_for_test(
@@ -352,8 +348,7 @@ fn production_context_validator_rejects_the_full_hostile_matrix_for_every_operat
         );
 
         let mut expired = prepare_live_request_until_for_test(
-            Request::for_test("POST", "/__live/v1/control")
-                .with_route_pattern("/__live/v1/control"),
+            Request::for_test("POST", "/__live/control").with_route_pattern("/__live/control"),
             operation,
             1,
         );
@@ -388,7 +383,7 @@ fn production_context_validator_rejects_the_full_hostile_matrix_for_every_operat
 #[test]
 fn dropping_a_prepared_request_cancels_host_owned_live_work() {
     let request = prepare_live_request_for_test(
-        Request::for_test("POST", "/__live/v1/action").with_route_pattern("/__live/v1/action"),
+        Request::for_test("POST", "/__live/action").with_route_pattern("/__live/action"),
         LiveTestOperation::Action,
     );
     let cancellation =
@@ -402,7 +397,7 @@ fn dropping_a_prepared_request_cancels_host_owned_live_work() {
 fn attacker_headers_do_not_mint_framework_security_evidence() {
     let request = Request::for_test_with_headers(
         "POST",
-        "/__live/v1/action",
+        "/__live/action",
         [
             ("origin", "https://example.test"),
             ("x-csrf-token", "attacker-controlled"),
@@ -412,7 +407,7 @@ fn attacker_headers_do_not_mint_framework_security_evidence() {
             ("x-live-rate-limit", "passed"),
         ],
     )
-    .with_route_pattern("/__live/v1/action");
+    .with_route_pattern("/__live/action");
 
     let report = inspect_request_attestation(&request);
     assert!(!report.is_complete());
@@ -427,10 +422,10 @@ async fn live_actions_accept_the_browser_origin_proof_under_the_default_policy()
     let request = prepare_live_request_for_test(
         Request::for_test_with_headers(
             "POST",
-            "/__live/v1/action",
+            "/__live/action",
             [("sec-fetch-site", "same-origin")],
         )
-        .with_route_pattern("/__live/v1/action"),
+        .with_route_pattern("/__live/action"),
         LiveTestOperation::Action,
     );
     let captured = Arc::new(Mutex::new(None));
@@ -494,8 +489,8 @@ async fn live_reads_record_the_origin_proof_and_no_csrf_requirement() {
             headers.push(("sec-fetch-site", site));
         }
         let request = prepare_live_request_for_test(
-            Request::for_test_with_headers("GET", "/__live/v1/async/events", headers)
-                .with_route_pattern("/__live/v1/async/events"),
+            Request::for_test_with_headers("GET", "/__live/async/events", headers)
+                .with_route_pattern("/__live/async/events"),
             LiveTestOperation::SseControl,
         );
         let captured = Arc::new(Mutex::new(None));
@@ -534,10 +529,10 @@ async fn live_actions_without_an_origin_proof_fall_back_to_the_token() {
     let with_token = prepare_live_request_for_test(
         Request::for_test_with_headers(
             "POST",
-            "/__live/v1/action",
+            "/__live/action",
             [("x-csrf-token", "test_csrf_token")],
         )
-        .with_route_pattern("/__live/v1/action"),
+        .with_route_pattern("/__live/action"),
         LiveTestOperation::Action,
     );
     let captured = Arc::new(Mutex::new(None));
@@ -563,10 +558,10 @@ async fn live_actions_without_an_origin_proof_fall_back_to_the_token() {
     let without_token = prepare_live_request_for_test(
         Request::for_test_with_headers(
             "POST",
-            "/__live/v1/action",
+            "/__live/action",
             [("sec-fetch-site", "cross-site")],
         )
-        .with_route_pattern("/__live/v1/action"),
+        .with_route_pattern("/__live/action"),
         LiveTestOperation::Action,
     );
     let captured = Arc::new(Mutex::new(None));
@@ -592,10 +587,10 @@ async fn live_sse_control_records_csrf_as_explicitly_not_required() {
     let request = prepare_live_request_for_test(
         Request::for_test_with_headers(
             "POST",
-            "/__live/v1/sse/control",
+            "/__live/sse/control",
             [("sec-fetch-site", "same-origin")],
         )
-        .with_route_pattern("/__live/v1/sse/control"),
+        .with_route_pattern("/__live/sse/control"),
         LiveTestOperation::SseControl,
     );
     let captured = Arc::new(Mutex::new(None));
@@ -665,7 +660,7 @@ async fn drive_rate_limit(
     )
     .on_backend_error(policy);
     let request = prepare_live_request_for_test(
-        Request::for_test("POST", "/__live/v1/action").with_route_pattern("/__live/v1/action"),
+        Request::for_test("POST", "/__live/action").with_route_pattern("/__live/action"),
         LiveTestOperation::Action,
     );
     let captured = Arc::new(Mutex::new(None));
@@ -709,7 +704,7 @@ async fn only_a_successful_rate_decision_mints_rate_evidence() {
 #[tokio::test]
 async fn successful_session_resolution_mints_request_bound_session_evidence() {
     let request = prepare_live_request_for_test(
-        Request::for_test("POST", "/__live/v1/action").with_route_pattern("/__live/v1/action"),
+        Request::for_test("POST", "/__live/action").with_route_pattern("/__live/action"),
         LiveTestOperation::Action,
     );
     let captured = Arc::new(Mutex::new(None));
@@ -733,7 +728,7 @@ async fn successful_session_resolution_mints_request_bound_session_evidence() {
 #[tokio::test]
 async fn only_authenticated_middleware_mints_principal_evidence() {
     let request = prepare_live_request_for_test(
-        Request::for_test("POST", "/__live/v1/action").with_route_pattern("/__live/v1/action"),
+        Request::for_test("POST", "/__live/action").with_route_pattern("/__live/action"),
         LiveTestOperation::Action,
     );
     let captured = Arc::new(Mutex::new(None));
@@ -768,7 +763,7 @@ async fn only_authenticated_middleware_mints_principal_evidence() {
     );
 
     let anonymous = prepare_live_request_for_test(
-        Request::for_test("POST", "/__live/v1/action").with_route_pattern("/__live/v1/action"),
+        Request::for_test("POST", "/__live/action").with_route_pattern("/__live/action"),
         LiveTestOperation::Action,
     );
     let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -801,13 +796,13 @@ async fn tenant_and_proxy_evidence_come_only_from_framework_owned_resolution() {
     let request = prepare_live_request_for_test(
         Request::for_test_with_headers(
             "POST",
-            "/__live/v1/action",
+            "/__live/action",
             [
                 ("x-tenant-id", "forged-tenant"),
                 ("x-forwarded-for", "203.0.113.8"),
             ],
         )
-        .with_route_pattern("/__live/v1/action"),
+        .with_route_pattern("/__live/action"),
         LiveTestOperation::Action,
     );
     let prepared = inspect_request_attestation(&request);
@@ -834,7 +829,7 @@ async fn tenant_and_proxy_evidence_come_only_from_framework_owned_resolution() {
     );
 
     let tenantless = prepare_live_request_for_test(
-        Request::for_test("POST", "/__live/v1/action").with_route_pattern("/__live/v1/action"),
+        Request::for_test("POST", "/__live/action").with_route_pattern("/__live/action"),
         LiveTestOperation::Action,
     );
     let captured = Arc::new(Mutex::new(None));

@@ -34,8 +34,8 @@ pub mod filters {
 
 pub const DOCUMENT_PATH: &str = "/dogfood";
 pub const DOCUMENT_KEY: &str = "dogfood-counter";
-pub const ACTION_PATH: &str = "/__live/v1/action";
-pub const SUBSCRIPTION_PATH: &str = "/__live/v1/async/subscriptions";
+pub const ACTION_PATH: &str = "/__live/action";
+pub const SUBSCRIPTION_PATH: &str = "/__live/async/subscriptions";
 
 #[derive(LiveComponent)]
 #[live(

@@ -8,6 +8,20 @@ recientes primero.
 
 ## 2.0.1 - 2026-09-12
 
+### Cambiado
+
+- **Los endpoints de Live no llevan segmento de versión.**
+  `/__live/v1/action`, `/__live/v1/upload`, `/__live/v1/assets/*` y la
+  familia `/__live/v1/async/*` viven ahora en las mismas rutas sin `/v1`:
+  `/__live/action`, `/__live/upload`, `/__live/assets/*`,
+  `/__live/async/*`. La versión de Suprnova es el tag de git y el runtime
+  del navegador se publica al mismo paso que el framework, así que una
+  segunda versión dentro del espacio de URLs prometía un camino de
+  evolución que nunca se usaría. Las aplicaciones no se ven afectadas: el
+  framework registra estas rutas y el runtime construye cada URL; las
+  referencias escritas a mano a rutas `/__live/` nunca estuvieron
+  soportadas. Esto llegó a main después del tag `v2.0.1`.
+
 ### Corregido
 
 - **Una URL `redis://` con índice de base de datos selecciona esa base de

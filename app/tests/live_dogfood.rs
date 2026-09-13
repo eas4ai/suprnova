@@ -38,7 +38,7 @@ async fn the_public_page_renders_for_anonymous_visitors_and_the_dashboard_requir
         !html.contains("suprnova-live.async.esm.js"),
         "no async role without a stream"
     );
-    assert_eq!(config_json(&html)["endpoint"], "/__live/v1/action");
+    assert_eq!(config_json(&html)["endpoint"], "/__live/action");
 
     let reply = get(&app, "/live", None).await;
     assert!(
@@ -161,17 +161,11 @@ async fn csrf_origin_and_principal_gates_hold_on_the_real_stack() {
     );
 
     // Cross-site proof: refused the same way.
-    let cross = request(
-        &app,
-        Method::POST,
-        "/__live/v1/action",
-        Some(&session),
-        false,
-    )
-    .header("sec-fetch-site", "cross-site")
-    .header("content-type", live_support::LIVE_MEDIA)
-    .body(empty())
-    .expect("build");
+    let cross = request(&app, Method::POST, "/__live/action", Some(&session), false)
+        .header("sec-fetch-site", "cross-site")
+        .header("content-type", live_support::LIVE_MEDIA)
+        .body(empty())
+        .expect("build");
     let reply = send(app.addr, cross).await;
     assert_eq!(reply.status, StatusCode::from_u16(419).expect("419"));
 
@@ -265,7 +259,7 @@ async fn polling_recovery_and_assets_work_through_the_real_stack() {
         .to_owned();
     let reply = get(
         &app,
-        &format!("/__live/v1/assets/{identity}/suprnova-live.esm.js"),
+        &format!("/__live/assets/{identity}/suprnova-live.esm.js"),
         None,
     )
     .await;
@@ -278,7 +272,7 @@ async fn polling_recovery_and_assets_work_through_the_real_stack() {
         reply.header("content-type"),
         Some("text/javascript; charset=utf-8")
     );
-    let reply = get(&app, "/__live/v1/assets/stale/suprnova-live.esm.js", None).await;
+    let reply = get(&app, "/__live/assets/stale/suprnova-live.esm.js", None).await;
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
     assert!(reply.body.is_empty());
 }

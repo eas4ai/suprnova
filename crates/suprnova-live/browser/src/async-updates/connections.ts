@@ -21,8 +21,8 @@ const MAX_SSE_RECORD_BYTES = 65_536;
 const MAX_WEBSOCKET_ACK_BYTES = 512;
 // Reserved versioned routes of the framework host: one SSE reader per document
 // transport and one same-origin WebSocket per document transport.
-const ASYNC_EVENTS_PATH = "/__live/v1/async/events";
-const ASYNC_SOCKET_PATH = "/__live/v1/async/socket";
+const ASYNC_EVENTS_PATH = "/__live/async/events";
+const ASYNC_SOCKET_PATH = "/__live/async/socket";
 const WEBSOCKET_CONTROL_NONCE = /^[0-9a-z]{16}$/u;
 const SSE_CONNECTION_BRAND = Symbol("suprnova.live.async.sse.connection");
 const WEBSOCKET_ACK_LIMITS: CanonicalLimits = Object.freeze({

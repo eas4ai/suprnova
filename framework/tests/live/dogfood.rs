@@ -150,7 +150,7 @@ async fn the_guard_and_the_configured_csrf_proof_fail_closed() {
         serde_json::from_str(&html[open..close]).expect("config JSON")
     };
     let asset = format!(
-        "/__live/v1/assets/{}/suprnova-live.esm.js",
+        "/__live/assets/{}/suprnova-live.esm.js",
         config["asset_identity"].as_str().expect("asset identity")
     );
     let (status, headers, _) = dispatch(router, middleware, get(&asset)).await;

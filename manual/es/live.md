@@ -124,9 +124,9 @@ validación sin un puerto de validación, hacen fallar el registro con un
 ## Rutas
 
 `Router::try_live()` instala el espacio de nombres reservado exactamente una
-vez: `/__live/v1/action`, `/__live/v1/upload`, las rutas de control y el
-handshake WebSocket de `/__live/v1/async/*`, y las rutas inmutables de
-`/__live/v1/assets/*`. El arranque falla si una ruta de la aplicación puede
+vez: `/__live/action`, `/__live/upload`, las rutas de control y el
+handshake WebSocket de `/__live/async/*`, y las rutas inmutables de
+`/__live/assets/*`. El arranque falla si una ruta de la aplicación puede
 reclamar `/__live`.
 
 Las rutas de petición reservadas llevan una política estricta: cada petición
@@ -318,7 +318,7 @@ impl AvatarUploader {
 ```
 
 La vista enlaza el campo con `<input type="file" live:upload="avatar">`. El
-runtime crea, transfiere y completa la subida mediante `/__live/v1/upload`; el
+runtime crea, transfiere y completa la subida mediante `/__live/upload`; el
 archivo espera en cuarentena hasta que se ejecuta la acción de finalización
 declarada, momento en que el framework lo entrega a tu `UploadFinalizer`.
 Enlaza el finalizador, y cualquier escáner o validador, antes de que el runtime
@@ -397,7 +397,7 @@ suscribe a cada uno mediante las llamadas registradas del runtime.
 ## Assets y uso sin build
 
 El framework sirve los artefactos de runtime exactos revisados en
-`/__live/v1/assets/<identity>/<file>` con caché inmutable, validadores fuertes
+`/__live/assets/<identity>/<file>` con caché inmutable, validadores fuertes
 y atributos de integridad en las etiquetas de bootstrap. Una política estricta
 `script-src 'self'` se mantiene porque los documentos no contienen script
 inline. Para publicar los mismos bytes en una CDN o en un directorio estático:

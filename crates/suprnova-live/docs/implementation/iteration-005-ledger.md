@@ -1,5 +1,10 @@
 # Iteration 005 implementation ledger
 
+On 2026-09-12 the versioned `/__live/v1/*` namespace recorded below was
+removed per the owner's original ruling (no version segment in the Live
+endpoints); the routes keep the same shapes at `/__live/...`. The `v1`
+paths in this ledger are the historical record.
+
 On 2026-09-05 the framework's integration tests were folded into one binary
 per module under `framework/tests/<module>/`. The `--test <former_file>`
 commands quoted below are historical - they name binaries that no longer

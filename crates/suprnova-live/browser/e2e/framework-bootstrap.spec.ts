@@ -5,7 +5,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { ISLAND_SELECTOR, STATUS_ATTRIBUTE } from "./support/runtime-page.js";
 
 const FRAMEWORK_ORIGIN = "http://127.0.0.1:4177";
-const ASSET_PREFIX = "/__live/v1/assets/";
+const ASSET_PREFIX = "/__live/assets/";
 const RUNTIME_SYMBOL = "suprnova.live.runtime.v1";
 
 interface AssetManifest {

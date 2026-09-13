@@ -57,13 +57,13 @@ use super::streams::LiveEventTarget;
 use crate::FrameworkError;
 
 /// Reserved versioned control path for issuing and renewing subscriptions.
-pub(crate) const LIVE_ASYNC_SUBSCRIPTION_PATH: &str = "/__live/v1/async/subscriptions";
+pub(crate) const LIVE_ASYNC_SUBSCRIPTION_PATH: &str = "/__live/async/subscriptions";
 /// Reserved versioned control path for SSE membership changes.
-pub(crate) const LIVE_ASYNC_MEMBERSHIP_PATH: &str = "/__live/v1/async/memberships";
+pub(crate) const LIVE_ASYNC_MEMBERSHIP_PATH: &str = "/__live/async/memberships";
 /// Reserved versioned Server-Sent Events stream path.
-pub(crate) const LIVE_ASYNC_EVENTS_PATH: &str = "/__live/v1/async/events";
+pub(crate) const LIVE_ASYNC_EVENTS_PATH: &str = "/__live/async/events";
 /// Reserved versioned WebSocket transport path.
-pub(crate) const LIVE_ASYNC_SOCKET_PATH: &str = "/__live/v1/async/socket";
+pub(crate) const LIVE_ASYNC_SOCKET_PATH: &str = "/__live/async/socket";
 
 pub(crate) const SUBSCRIPTION_LIFETIME_MS: u64 = 120_000;
 pub(crate) const HEARTBEAT_TIMEOUT_MS: u64 = 15_000;

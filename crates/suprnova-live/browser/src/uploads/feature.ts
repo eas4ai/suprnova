@@ -29,7 +29,7 @@ import {
   type UploadHandle,
 } from "./types.js";
 
-const DEFAULT_UPLOAD_ENDPOINT = "/__live/v1/upload";
+const DEFAULT_UPLOAD_ENDPOINT = "/__live/upload";
 const DEFAULT_ACTIVE_UPLOADS = 4;
 const DEFAULT_MANAGER_BYTES = 256 * 1024;
 const MAX_UPLOAD_RESPONSE_BYTES = 16 * 1024;

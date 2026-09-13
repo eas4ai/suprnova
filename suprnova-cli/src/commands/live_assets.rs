@@ -152,7 +152,7 @@ fn run_inner(out: &Path, replace: bool, timeout_secs: u64) -> Result<(), String>
         "Serve this directory with long immutable caching; the framework's bootstrap references",
     );
     ui::hint(&format!(
-        "/__live/v1/assets/{identity}/<file> for this exact build."
+        "/__live/assets/{identity}/<file> for this exact build."
     ));
     Ok(())
 }

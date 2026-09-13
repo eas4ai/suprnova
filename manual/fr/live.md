@@ -125,9 +125,9 @@ typé.
 ## Routage
 
 `Router::try_live()` installe l'espace de noms réservé exactement une fois :
-`/__live/v1/action`, `/__live/v1/upload`, les routes de contrôle et la
-poignée de main WebSocket de `/__live/v1/async/*`, ainsi que les routes
-immuables de `/__live/v1/assets/*`. Le démarrage échoue si une route
+`/__live/action`, `/__live/upload`, les routes de contrôle et la
+poignée de main WebSocket de `/__live/async/*`, ainsi que les routes
+immuables de `/__live/assets/*`. Le démarrage échoue si une route
 applicative peut revendiquer `/__live`.
 
 Les routes de requête réservées portent une politique stricte : chaque requête
@@ -320,7 +320,7 @@ impl AvatarUploader {
 ```
 
 La vue lie le champ avec `<input type="file" live:upload="avatar">`. Le runtime
-crée, transfère et achève le téléversement via `/__live/v1/upload` ; le
+crée, transfère et achève le téléversement via `/__live/upload` ; le
 fichier attend en quarantaine jusqu'à l'exécution de l'action de finalisation
 déclarée, moment où le framework le remet à votre `UploadFinalizer`. Liez le
 finaliseur, ainsi que tout scanner ou validateur, avant que le runtime ne
@@ -399,7 +399,7 @@ par les appels enregistrés du runtime.
 ## Assets et usage sans build
 
 Le framework sert les artefacts de runtime exacts et relus à
-`/__live/v1/assets/<identity>/<file>` avec un cache immuable, des validateurs
+`/__live/assets/<identity>/<file>` avec un cache immuable, des validateurs
 forts et des attributs d'intégrité dans les balises de bootstrap. Une politique
 stricte `script-src 'self'` tient parce que les documents ne contiennent aucun
 script inline. Pour publier les mêmes octets sur un CDN ou dans un répertoire

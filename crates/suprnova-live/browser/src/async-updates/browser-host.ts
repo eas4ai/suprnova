@@ -3,7 +3,7 @@
  *
  * The feature stays inert until an application supplies clocks, timers,
  * randomness, transports, and an authority. A framework that serves the
- * reserved `/__live/v1/async/*` routes can hand the runtime this default host,
+ * reserved `/__live/async/*` routes can hand the runtime this default host,
  * which issues and renews subscriptions and drives SSE membership control
  * against those routes with the browser's own credentials, and opens the
  * physical transports through the native `EventSource`, `WebSocket`, and
@@ -34,8 +34,8 @@ import type {
   StreamPosition,
 } from "./types.js";
 
-const SUBSCRIPTION_PATH = "/__live/v1/async/subscriptions";
-const MEMBERSHIP_PATH = "/__live/v1/async/memberships";
+const SUBSCRIPTION_PATH = "/__live/async/subscriptions";
+const MEMBERSHIP_PATH = "/__live/async/memberships";
 const CONTROL_MARKER = "async-v1";
 const MAX_CONTROL_RESPONSE_BYTES = 256 * 1024;
 const MAX_REPLAY_ENVELOPES = 4096;

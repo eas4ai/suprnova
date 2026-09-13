@@ -25,7 +25,7 @@ test("a signed-in user runs actions through the production middleware stack", as
   const actions: number[] = [];
   page.on("response", (response) => {
     const url = new URL(response.url());
-    if (url.pathname === "/__live/v1/action") actions.push(response.status());
+    if (url.pathname === "/__live/action") actions.push(response.status());
   });
   await page.goto(`${APP_ORIGIN}/live/demo-login`);
   await expect(page).toHaveURL(`${APP_ORIGIN}/live`);
@@ -51,7 +51,7 @@ test("an anonymous visitor promotes the public island and increments it", async 
   const statuses: number[] = [];
   page.on("response", (response) => {
     const url = new URL(response.url());
-    if (url.pathname === "/__live/v1/action") statuses.push(response.status());
+    if (url.pathname === "/__live/action") statuses.push(response.status());
   });
   await page.goto(`${APP_ORIGIN}/live/public`);
   await expectConnected(page, 1);
@@ -69,16 +69,16 @@ test("the activity feed subscribes over the asynchronous transport and refreshes
   page.on("console", (message) => console.push(`${message.type()}: ${message.text()}`));
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.pathname.startsWith("/__live/v1/async/")) transports.push(url.pathname);
+    if (url.pathname.startsWith("/__live/async/")) transports.push(url.pathname);
   });
   page.on("response", (response) => {
     const url = new URL(response.url());
-    if (url.pathname === "/__live/v1/action") renders.push(response.status());
+    if (url.pathname === "/__live/action") renders.push(response.status());
   });
   await page.goto(`${APP_ORIGIN}/live/demo-login`);
   await expectConnected(page, 3);
   const issued = await expect
-    .poll(() => transports.some((path) => path === "/__live/v1/async/subscriptions"))
+    .poll(() => transports.some((path) => path === "/__live/async/subscriptions"))
     .toBe(true)
     .then(
       () => true,
@@ -91,9 +91,7 @@ test("the activity feed subscribes over the asynchronous transport and refreshes
   }
   await expect
     .poll(() =>
-      transports.some(
-        (path) => path === "/__live/v1/async/events" || path === "/__live/v1/async/socket",
-      ),
+      transports.some((path) => path === "/__live/async/events" || path === "/__live/async/socket"),
     )
     .toBe(true);
   const before = renders.length;
