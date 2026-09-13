@@ -149,3 +149,35 @@ async fn no_store_is_a_storage_veto() {
         "each request rendered its own body"
     );
 }
+/// CACHE-002: a handler's `Vary` must agree with the declared key
+/// dimensions, or the response is not stored. The audit (ASTRA-09) served
+/// the `vanilla` body to a `chocolate` request from storage, with the
+/// `Vary: X-Flavor` the handler declared dropped from the hit.
+#[tokio::test]
+#[serial_test::serial]
+async fn vary_must_match_declared_dimensions() {
+    let harness = boot_with_render_cache().await;
+
+    let vanilla = dispatch_get(&harness, "/vary-undeclared", &[("x-flavor", "vanilla")]).await;
+    assert_eq!(vanilla.status, StatusCode::OK);
+    assert_eq!(&vanilla.body[..], b"vanilla");
+    assert_eq!(vanilla.header("vary"), Some("X-Flavor"));
+
+    let chocolate = dispatch_get(&harness, "/vary-undeclared", &[("x-flavor", "chocolate")]).await;
+    assert_eq!(chocolate.status, StatusCode::OK);
+    assert_eq!(
+        &chocolate.body[..],
+        b"chocolate",
+        "one variant's body was served to another"
+    );
+    assert_eq!(
+        chocolate.header("vary"),
+        Some("X-Flavor"),
+        "the handler's Vary contract reached the second response"
+    );
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "an undeclared Vary field must not be stored under a key that omits it"
+    );
+}

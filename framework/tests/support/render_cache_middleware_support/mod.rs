@@ -861,6 +861,12 @@ async fn boot(
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("no store policy");
+    // CACHE-002: the plain public shape, declaring no header dimension, on a
+    // route whose handler varies on a request header of its own.
+    let vary_undeclared_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("vary undeclared policy");
     let stale_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(60_000, 60_000, 120_000).expect("freshness"))
         .build()
@@ -1207,6 +1213,9 @@ async fn boot(
         .into();
     let router: Router = router.get("/csp-nonce", csp_nonce_handler).into();
     let router: Router = router.get("/no-store", no_store_handler).into();
+    let router: Router = router
+        .get("/vary-undeclared", vary_undeclared_handler)
+        .into();
     let router: Router = router.get("/overflow", overflow_handler).into();
     let router: Router = router
         .get("/stitched-gate-only", stitched_gate_only_handler)
@@ -1432,6 +1441,11 @@ async fn boot(
         .expect("attach csp nonce policy")
         .try_render_cache("/no-store", GroupPolicy::from(no_store_policy))
         .expect("attach no store policy")
+        .try_render_cache(
+            "/vary-undeclared",
+            GroupPolicy::from(vary_undeclared_policy),
+        )
+        .expect("attach vary undeclared policy")
         .try_render_cache("/overflow", GroupPolicy::from(overflow_policy))
         .expect("attach overflow policy")
         .try_render_cache(
@@ -2018,6 +2032,17 @@ async fn no_store_handler(_request: Request) -> Response {
     let _ = Post::find(1).await;
     let n = counting_route::renders();
     Ok(HttpResponse::html(format!("private render {n}")).header("Cache-Control", "no-store"))
+}
+
+/// Renders the request's `X-Flavor` and declares `Vary: X-Flavor`, on a
+/// route whose policy declares no such dimension (CACHE-002, from audit
+/// finding ASTRA-09). The body is the flavor, so a variant served to the
+/// wrong request is visible.
+async fn vary_undeclared_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    let flavor = request.header("x-flavor").unwrap_or("absent").to_owned();
+    Ok(HttpResponse::text(flavor).header("Vary", "X-Flavor"))
 }
 
 /// Renders with a replayable header whose value the wire cannot carry.

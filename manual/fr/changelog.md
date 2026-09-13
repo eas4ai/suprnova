@@ -105,6 +105,18 @@ en premier.
 
 ### Sécurité
 
+- **Le contrat `Vary` d'un handler est appliqué avant que RenderCache ne
+  stocke.** Un handler qui faisait varier son corps selon un en-tête de
+  requête à lui et le déclarait par `Vary` était stocké sous une clé
+  construite à partir de la seule politique de la route, si bien que le corps
+  de la première variante était servi à toutes les autres, l'en-tête `Vary`
+  manquant au hit. Partout où cet en-tête sélectionnait un contenu propre à un
+  utilisateur, un appareil ou une expérimentation, le contenu d'une requête
+  parvenait à une autre. RenderCache analyse désormais le `Vary` de la réponse
+  avant publication et refuse le stockage quand il nomme `*` ou un champ que
+  la politique ne déclare pas comme dimension de clé (motif de refus
+  `vary_undeclared`). Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-09)
+  ; arrivé sur main après le tag `v2.0.1`.
 - **Le `Cache-Control: no-store` d'un handler est respecté par RenderCache.**
   Une route inscrite dans le cache stockait une réponse dont le handler disait
   `no-store` et la rejouait sous le `public, max-age=60, s-maxage=60` de la

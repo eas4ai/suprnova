@@ -104,6 +104,18 @@ recientes primero.
 
 ### Seguridad
 
+- **El contrato `Vary` de un handler se aplica antes de que RenderCache
+  almacene.** Un handler que variaba su cuerpo según una cabecera de petición
+  propia y lo declaraba con `Vary` se almacenaba bajo una clave construida
+  solo a partir de la política de la ruta, así que el cuerpo de la primera
+  variante se servía a todas las demás, con la cabecera `Vary` ausente en el
+  acierto. Allí donde esa cabecera seleccionaba contenido específico de
+  usuario, dispositivo o experimento, el contenido de una petición llegaba a
+  otra. RenderCache ahora analiza el `Vary` de la respuesta antes de publicar
+  y rehúsa almacenar cuando nombra `*` o un campo que la política no declara
+  como dimensión de clave (motivo de rechazo `vary_undeclared`). Detectado por
+  la auditoría adversarial del 2026-09-13 (ASTRA-09); aterrizó en main después
+  de la etiqueta `v2.0.1`.
 - **RenderCache respeta el `Cache-Control: no-store` de un handler.** Una ruta
   incorporada a la caché almacenaba una respuesta cuyo handler decía
   `no-store` y la reproducía bajo el `public, max-age=60, s-maxage=60` de la

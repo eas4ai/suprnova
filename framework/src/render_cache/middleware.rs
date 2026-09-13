@@ -2186,6 +2186,18 @@ async fn lead_render(
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     }
+    // CACHE-002: the handler's own `Vary` is a contract about which request
+    // fields chose these bytes. The lookup key was built before the handler
+    // ran, from the policy's declared dimensions alone, so a field the key
+    // does not carry would store one variant under a key every variant
+    // shares (audit finding ASTRA-09). `Vary: *` names every field. Either
+    // declines; a field the key already varies on is proven consistent and
+    // stores as before.
+    if vary_names_an_undeclared_field(&response, job.variance()) {
+        LookupOutcome::Declined(LookupDeclineReason::VaryUndeclared).record();
+        let _ = runtime.coordinator.release(lease).await;
+        return Ok(response);
+    }
     // Fix round 4, Leak B: classification is driven by what the collector
     // observed, never by re-reading an accessor - the previous version
     // re-read `Auth::id()` here, which is the *default guard's* slot
@@ -3397,6 +3409,26 @@ async fn store_entry(
             .publish(job.key(), encoded, fence, now, retention_ms)
             .await;
     }
+}
+
+/// Whether the response's `Vary` header names `*` or a field the declared
+/// variance does not turn into a key dimension. Field names compare
+/// case-insensitively, as HTTP header names do; an absent or empty `Vary`
+/// declares nothing and passes.
+fn vary_names_an_undeclared_field(response: &HttpResponse, variance: &VarianceDescriptor) -> bool {
+    let declared = variance.vary_headers();
+    response
+        .headers()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("vary"))
+        .flat_map(|(_, value)| value.split(','))
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+        .any(|field| {
+            field == "*"
+                || !declared
+                    .iter()
+                    .any(|declared| declared.eq_ignore_ascii_case(field))
+        })
 }
 
 /// Whether the stored `Content-Security-Policy` names a nonce source

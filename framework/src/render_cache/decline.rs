@@ -81,6 +81,9 @@ pub(crate) enum LookupDeclineReason {
     /// a Complete entry would replay that per-response secret to every
     /// later hit (CACHE-004). Only the stitched publisher can re-nonce.
     NonceSourcePolicy,
+    /// The response's `Vary` names `*` or a field the declared variance does
+    /// not turn into a key dimension (CACHE-002).
+    VaryUndeclared,
     /// A stitched capture was marked invalid.
     CompositeCaptureInvalid,
     /// A stitched capture's slot count did not match the mounted islands.
@@ -147,6 +150,7 @@ impl LookupDeclineReason {
             Self::SeedDeadlineElapsed => "seed_deadline_elapsed",
             Self::UnsafeHeaderValue => "unsafe_header_value",
             Self::NonceSourcePolicy => "nonce_source_policy",
+            Self::VaryUndeclared => "vary_undeclared",
             Self::CompositeCaptureInvalid => "composite_capture_invalid",
             Self::CompositeSlotCountMismatch => "composite_slot_count_mismatch",
             Self::CompositeTooManySlots => "composite_too_many_slots",
@@ -193,6 +197,7 @@ impl LookupDeclineReason {
         Self::SeedDeadlineElapsed,
         Self::UnsafeHeaderValue,
         Self::NonceSourcePolicy,
+        Self::VaryUndeclared,
         Self::CompositeCaptureInvalid,
         Self::CompositeSlotCountMismatch,
         Self::CompositeTooManySlots,

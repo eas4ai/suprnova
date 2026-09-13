@@ -100,6 +100,17 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ### Segurança
 
+- **O contrato `Vary` de um handler é aplicado antes de o RenderCache
+  armazenar.** Um handler que variava seu corpo por um cabeçalho de requisição
+  próprio e o declarava com `Vary` era armazenado sob uma chave construída
+  apenas a partir da política da rota, então o corpo da primeira variante era
+  servido a todas as outras, com o cabeçalho `Vary` ausente no acerto. Onde
+  esse cabeçalho selecionava conteúdo específico de usuário, dispositivo ou
+  experimento, o conteúdo de uma requisição chegava a outra. O RenderCache
+  agora analisa o `Vary` da resposta antes de publicar e recusa armazenar
+  quando ele nomeia `*` ou um campo que a política não declara como dimensão
+  de chave (motivo de recusa `vary_undeclared`). Encontrado pela auditoria
+  adversarial de 2026-09-13 (ASTRA-09); chegou à main depois da tag `v2.0.1`.
 - **O `Cache-Control: no-store` de um handler é respeitado pelo RenderCache.**
   Uma rota incluída no cache armazenava uma resposta cujo handler dizia
   `no-store` e a reproduzia sob o `public, max-age=60, s-maxage=60` da

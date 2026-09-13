@@ -352,6 +352,19 @@ prose.
 
 ## Decisions and revisions
 
+- 2026-09-13 -- Made the handler's `Vary` part of the publication decision:
+  before storing, the framework parses the concrete response's `Vary` and
+  declines publication, under the new reason `vary_undeclared`, when it
+  names `*` or any field the declared variance does not turn into a key
+  dimension (only `Accept-Language`, `Accept`, and `Accept-Encoding` ever
+  are). The adversarial audit of the same day (finding ASTRA-09) had a
+  handler answer `Vary: X-Flavor` under a policy that declared no such
+  dimension, and the cache served the first variant's body to every other
+  variant with the `Vary` header gone from the hit. The key, the `Vary`
+  header, and the stored representation now agree by construction: a
+  field is either a declared dimension the key already carries, or a
+  reason not to store. Recorded under Variance and keying; the framework's
+  requirement is CACHE-002 in `docs/spec/render-cache.md`.
 - 2026-09-13 -- Closed the nonce gap for Complete entries: a response whose
   `Content-Security-Policy` names a nonce source is declined storage as a
   Complete representation, with the new publication decline reason

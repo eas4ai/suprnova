@@ -120,3 +120,23 @@ the `no-store` token, decline reason `no_store_directive`,
 with both requests rendered and both carrying `no-store`; the engine's
 policy tests gain a unit test for the token rule, and the full
 `render_cache` binary (368 tests) passes.
+
+### CACHE-002, `cache-vary`, 2026-09-13 14:45
+
+Violating example: the test `vary_must_match_declared_dimensions` on the
+tree at `1d1605d8`, with only the test and its `/vary-undeclared` support
+route added. Result:
+
+    FAIL hardening::vary_must_match_declared_dimensions
+    assertion `left == right` failed: one variant's body was served to
+    another
+      left: "vanilla"
+     right: "chocolate"
+
+That is ASTRA-09 as the audit reproduced it. After the fix (the lead
+render parses the response's `Vary` after eligibility and declines
+publication on `*` or any field outside the declared variance's header
+set, decline reason `vary_undeclared`,
+`framework/src/render_cache/middleware.rs`) the same test passes with
+each variant rendered and carrying its own `Vary`, and the full
+`render_cache` binary (369 tests) passes.

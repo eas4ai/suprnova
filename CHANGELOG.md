@@ -91,6 +91,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **A handler's `Vary` contract is enforced before RenderCache stores.**
+  A handler that varied its body on a request header of its own and said
+  so with `Vary` was stored under a key built from the route policy alone,
+  so the first variant's body was served to every other variant, with the
+  `Vary` header missing from the hit. Wherever that header selected user,
+  device, or experiment-specific content, one request's content reached
+  another's. RenderCache now parses the response's `Vary` before
+  publication and declines to store when it names `*` or a field the
+  policy does not declare as a key dimension (decline reason
+  `vary_undeclared`). Found by the 2026-09-13 adversarial audit
+  (ASTRA-09); landed on main after the `v2.0.1` tag.
 - **A handler's `Cache-Control: no-store` is honored by RenderCache.** A
   route opted into the cache stored a response whose handler said
   `no-store` and replayed it under the policy's own

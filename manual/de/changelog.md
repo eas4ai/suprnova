@@ -103,6 +103,18 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Sicherheit
 
+- **Der `Vary`-Vertrag eines Handlers wird durchgesetzt, bevor RenderCache
+  speichert.** Ein Handler, der seinen Body anhand eines eigenen
+  Request-Headers variierte und das per `Vary` mitteilte, wurde unter einem
+  allein aus der Routenrichtlinie gebauten Schlüssel gespeichert, sodass der
+  Body der ersten Variante an jede andere Variante ausgeliefert wurde, und der
+  `Vary`-Header fehlte beim Treffer. Wo dieser Header benutzer-, geräte- oder
+  experimentspezifische Inhalte auswählte, erreichte der Inhalt einer Anfrage
+  eine andere. RenderCache parst jetzt vor der Veröffentlichung das `Vary` der
+  Antwort und lehnt das Speichern ab, wenn es `*` oder ein Feld nennt, das die
+  Richtlinie nicht als Schlüsseldimension deklariert (Ablehnungsgrund
+  `vary_undeclared`). Gefunden durch das adversariale Audit vom 2026-09-13
+  (ASTRA-09); nach dem Tag `v2.0.1` auf main gelandet.
 - **Das `Cache-Control: no-store` eines Handlers wird von RenderCache
   respektiert.** Eine in den Cache aufgenommene Route speicherte eine Antwort,
   deren Handler `no-store` sagte, und gab sie unter dem `public, max-age=60,
