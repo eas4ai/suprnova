@@ -104,6 +104,35 @@ recientes primero.
 
 ### Seguridad
 
+- **RenderCache respeta las directivas `Cache-Control` de una petición.** Una
+  petición con `no-cache` se respondía desde el almacenamiento con `Age`, y
+  una petición fría con `no-store` sembraba la caché para la siguiente.
+  `no-store` ahora omite por igual la búsqueda y la publicación, y `no-cache`
+  salta la búsqueda para que la petición se responda con un renderizado
+  fresco. Detectado por la auditoría adversarial del 2026-09-13 (ASTRA-13);
+  aterrizó en main después de la etiqueta `v2.0.1`.
+- **Un renderizado sin instantánea nunca se publica.** Cuando la transacción
+  de instantánea no podía abrirse, RenderCache renderizaba sin vista de
+  lectura y aun así publicaba si la relectura de generaciones coincidía, así
+  que un renderizado intercalado con una escritura concurrente de varias filas
+  podía almacenar una mezcla de dos estados de la base de datos. Tal
+  renderizado ahora se sirve pero no se almacena (motivo de rechazo
+  `snapshot_unavailable`), y su arrendamiento de reconstrucción se libera.
+  Detectado por la auditoría adversarial del 2026-09-13 (ASTRA-08); aterrizó
+  en main después de la etiqueta `v2.0.1`.
+- **Una respuesta en caché reproduce su `Content-Encoding`.** Un cuerpo
+  precomprimido se almacenaba sin su codificación de contenido, así que un
+  acierto servía bytes gzip como texto plano. La codificación se almacena con
+  el cuerpo y se reproduce en cada acierto. Detectado por la auditoría
+  adversarial del 2026-09-13 (ASTRA-04); aterrizó en main después de la
+  etiqueta `v2.0.1`.
+- **Una petición HEAD nunca siembra la representación GET.** Un HEAD frío
+  sobre una ruta que no renderiza nada para HEAD almacenaba un cuerpo vacío
+  bajo la clave que comparte cada GET, así que los GET posteriores respondían
+  cero bytes. Un fallo de HEAD ahora se sirve tal como se renderizó y no se
+  almacena (motivo de rechazo `head_render`). Detectado por la auditoría
+  adversarial del 2026-09-13 (ASTRA-03); aterrizó en main después de la
+  etiqueta `v2.0.1`.
 - **El límite de suscripciones Live por ámbito se mantiene bajo
   concurrencia.** La emisión contaba las suscripciones de un ámbito, soltaba
   el bloqueo, esperaba al autorizador e insertaba después, así que una ráfaga

@@ -352,6 +352,16 @@ prose.
 
 ## Decisions and revisions
 
+- 2026-09-13 -- Stored a response's content coding with its body and
+  replayed it on every hit: the entry header's content-encoding field,
+  present since the codec was designed and never filled, now carries the
+  handler's `Content-Encoding`, and the hit response builder emits it
+  beside the stored bytes. The adversarial audit of the same day (finding
+  ASTRA-04) saw a gzip body replayed without the header, so a browser
+  parsed compressed bytes as text. An assembled stitched document is
+  never a pre-encoded body and carries none. Recorded under Media and
+  Encoding negotiation; the framework's requirement is CACHE-005 in
+  `docs/spec/render-cache.md`.
 - 2026-09-13 -- Made the handler's `Vary` part of the publication decision:
   before storing, the framework parses the concrete response's `Vary` and
   declines publication, under the new reason `vary_undeclared`, when it

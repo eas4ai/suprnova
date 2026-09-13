@@ -124,7 +124,7 @@ provider, or a backend:
   variance dimension, or an exhausted waiter list.
 - `moved` - the reread after rendering found a dependency or the epoch had
   changed; the candidate was discarded, never published.
-- `declined` - the render was not storable, for one of the forty-two
+- `declined` - the render was not storable, for one of the forty-four
   reasons below, carried in the `reason` attribute beside `outcome`.
   `reason` is emitted only alongside `outcome="declined"`; every other
   outcome carries none. The reason is computed from a typed value at the
@@ -136,7 +136,7 @@ provider, or a backend:
     `streaming`, `sets_cookie`, `unsafe_header_name`, `no_store_directive`.
   - Observation (the collector's report and the in-transaction ledger
     read): `observation_overflowed`, `ledger_read_failed`,
-    `handler_not_begun`, `foreign_connection_read`.
+    `handler_not_begun`, `foreign_connection_read`, `snapshot_unavailable`.
   - Classification narrowed to `Uncacheable`: `session_value_read`,
     `secret_context_read`, `undeclared_context`.
   - Live document facts: `identity_bound_without_stitching`,
@@ -148,7 +148,8 @@ provider, or a backend:
     `principal_divergent`, `tenant_undeclared`, `tenant_divergent`,
     `locale_undeclared`, `locale_divergent`.
   - Publication: `seed_deadline_elapsed`, `unsafe_header_value`,
-    `nonce_source_policy`, `vary_undeclared`, `composite_capture_invalid`,
+    `nonce_source_policy`, `vary_undeclared`, `head_render`,
+    `composite_capture_invalid`,
     `composite_slot_count_mismatch`,
     `composite_too_many_slots`, `composite_digest_mismatch`,
     `composite_empty_slot`, `composite_slot_not_found`,

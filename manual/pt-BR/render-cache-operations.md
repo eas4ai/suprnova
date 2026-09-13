@@ -132,7 +132,7 @@ um provedor ou um backend:
 - `moved` - a releitura depois de renderizar encontrou uma dependência ou o
   epoch alterados; o candidato foi descartado, nunca publicado.
 - `declined` - a renderização não era armazenável, por uma de quarenta e
-  duas razões abaixo, carregada no atributo `reason` ao lado de `outcome`.
+  quatro razões abaixo, carregada no atributo `reason` ao lado de `outcome`.
   `reason` só é emitido junto de `outcome="declined"`; qualquer outro
   desfecho não carrega nenhum. A razão é calculada a partir de um valor
   tipado no ramo exato que recusou, nunca reconstruída depois a partir da
@@ -144,7 +144,7 @@ um provedor ou um backend:
     `streaming`, `sets_cookie`, `unsafe_header_name`, `no_store_directive`.
   - Observação (o relatório do coletor e a leitura do ledger dentro da
     transação): `observation_overflowed`, `ledger_read_failed`,
-    `handler_not_begun`, `foreign_connection_read`.
+    `handler_not_begun`, `foreign_connection_read`, `snapshot_unavailable`.
   - Classificação reduzida a `Uncacheable`: `session_value_read`,
     `secret_context_read`, `undeclared_context`.
   - Fatos do documento Live: `identity_bound_without_stitching`,
@@ -156,7 +156,7 @@ um provedor ou um backend:
     `principal_divergent`, `tenant_undeclared`, `tenant_divergent`,
     `locale_undeclared`, `locale_divergent`.
   - Publicação: `seed_deadline_elapsed`, `unsafe_header_value`,
-    `nonce_source_policy`, `vary_undeclared`, `composite_capture_invalid`, `composite_slot_count_mismatch`,
+    `nonce_source_policy`, `vary_undeclared`, `head_render`, `composite_capture_invalid`, `composite_slot_count_mismatch`,
     `composite_too_many_slots`, `composite_digest_mismatch`,
     `composite_empty_slot`, `composite_slot_not_found`,
     `composite_slot_ambiguous`, `composite_nested_unauthorizable`,

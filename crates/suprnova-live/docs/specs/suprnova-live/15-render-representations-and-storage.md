@@ -251,6 +251,24 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-13 -- Honored the request's own `Cache-Control`: a request
+  carrying `no-store` bypasses lookup and publication alike and is answered
+  by the handler directly, and one carrying `no-cache` skips the lookup so
+  it is answered by a fresh render, which may still be published for
+  everyone else. The adversarial audit of the same day (finding ASTRA-13)
+  saw a `no-cache` request answered from storage with `Age` and a cold
+  `no-store` request seed the cache for the next request. Recorded under
+  HTTP cache metadata; the framework's requirement is CACHE-007 in
+  `docs/spec/render-cache.md`.
+- 2026-09-13 -- Kept a HEAD render out of the GET representation: the
+  lookup key carries no method, and a handler may legitimately render
+  nothing for HEAD, so a HEAD miss is served as rendered and declined
+  publication under the new reason `head_render`; the first GET renders
+  the representation both methods then share. The adversarial audit of
+  the same day (finding ASTRA-03) had a cold HEAD leave every later GET
+  answering zero bytes from storage. Recorded under Complete and Composite
+  representation models; the framework's requirement is CACHE-006 in
+  `docs/spec/render-cache.md`.
 - 2026-09-13 -- Made a handler's `Cache-Control: no-store` a storage veto:
   the eligibility check reads the concrete response's `Cache-Control` and
   declines storage when it carries the `no-store` token, under the new

@@ -39,6 +39,9 @@ pub(crate) enum LookupDeclineReason {
     /// A stitched route's handler never began, so its content bucket is
     /// empty.
     HandlerNotBegun,
+    /// The snapshot transaction could not open, so no consistent read view
+    /// covered the render at all (CACHE-010).
+    SnapshotUnavailable,
     /// A read ran on a connection other than the snapshot's, so one
     /// consistent read view never covered the render (CACHE-008).
     ForeignConnectionRead,
@@ -87,6 +90,9 @@ pub(crate) enum LookupDeclineReason {
     /// The response's `Vary` names `*` or a field the declared variance does
     /// not turn into a key dimension (CACHE-002).
     VaryUndeclared,
+    /// The render answered a HEAD request, which never seeds the GET
+    /// representation (CACHE-006).
+    HeadRender,
     /// A stitched capture was marked invalid.
     CompositeCaptureInvalid,
     /// A stitched capture's slot count did not match the mounted islands.
@@ -137,6 +143,7 @@ impl LookupDeclineReason {
             Self::LedgerReadFailed => "ledger_read_failed",
             Self::HandlerNotBegun => "handler_not_begun",
             Self::ForeignConnectionRead => "foreign_connection_read",
+            Self::SnapshotUnavailable => "snapshot_unavailable",
             Self::SessionValueRead => "session_value_read",
             Self::SecretContextRead => "secret_context_read",
             Self::UndeclaredContext => "undeclared_context",
@@ -155,6 +162,7 @@ impl LookupDeclineReason {
             Self::UnsafeHeaderValue => "unsafe_header_value",
             Self::NonceSourcePolicy => "nonce_source_policy",
             Self::VaryUndeclared => "vary_undeclared",
+            Self::HeadRender => "head_render",
             Self::CompositeCaptureInvalid => "composite_capture_invalid",
             Self::CompositeSlotCountMismatch => "composite_slot_count_mismatch",
             Self::CompositeTooManySlots => "composite_too_many_slots",
@@ -185,6 +193,7 @@ impl LookupDeclineReason {
         Self::LedgerReadFailed,
         Self::HandlerNotBegun,
         Self::ForeignConnectionRead,
+        Self::SnapshotUnavailable,
         Self::SessionValueRead,
         Self::SecretContextRead,
         Self::UndeclaredContext,
@@ -203,6 +212,7 @@ impl LookupDeclineReason {
         Self::UnsafeHeaderValue,
         Self::NonceSourcePolicy,
         Self::VaryUndeclared,
+        Self::HeadRender,
         Self::CompositeCaptureInvalid,
         Self::CompositeSlotCountMismatch,
         Self::CompositeTooManySlots,

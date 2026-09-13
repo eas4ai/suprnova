@@ -135,7 +135,7 @@ un fournisseur, ou un backend :
   déclarée impossible à résoudre, ou une liste d'attente épuisée.
 - `moved` - la relecture après le rendu a trouvé qu'une dépendance ou
   l'epoch avait changé ; le candidat a été écarté, jamais publié.
-- `declined` - le rendu n'était pas stockable, pour l'une des quarante-deux
+- `declined` - le rendu n'était pas stockable, pour l'une des quarante-quatre
   raisons ci-dessous, portée dans l'attribut `reason` à côté de `outcome`.
   `reason` n'est émis qu'aux côtés de `outcome="declined"` ; tout autre
   résultat n'en porte aucun. La raison est calculée à partir d'une valeur
@@ -148,7 +148,7 @@ un fournisseur, ou un backend :
     `streaming`, `sets_cookie`, `unsafe_header_name`, `no_store_directive`.
   - Observation (le rapport du collecteur et la lecture du registre à
     l'intérieur de la transaction) : `observation_overflowed`,
-    `ledger_read_failed`, `handler_not_begun`, `foreign_connection_read`.
+    `ledger_read_failed`, `handler_not_begun`, `foreign_connection_read`, `snapshot_unavailable`.
   - Classification réduite à `Uncacheable` : `session_value_read`,
     `secret_context_read`, `undeclared_context`.
   - Faits du document Live : `identity_bound_without_stitching`,
@@ -160,7 +160,7 @@ un fournisseur, ou un backend :
     `principal_undeclared`, `principal_divergent`, `tenant_undeclared`,
     `tenant_divergent`, `locale_undeclared`, `locale_divergent`.
   - Publication : `seed_deadline_elapsed`, `unsafe_header_value`,
-    `nonce_source_policy`, `vary_undeclared`, `composite_capture_invalid`, `composite_slot_count_mismatch`,
+    `nonce_source_policy`, `vary_undeclared`, `head_render`, `composite_capture_invalid`, `composite_slot_count_mismatch`,
     `composite_too_many_slots`, `composite_digest_mismatch`,
     `composite_empty_slot`, `composite_slot_not_found`,
     `composite_slot_ambiguous`, `composite_nested_unauthorizable`,

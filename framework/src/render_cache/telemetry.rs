@@ -104,7 +104,7 @@ pub const OUTCOME: &str = "outcome";
 /// - Eligibility: `policy_uncacheable`, `method`, `status`, `streaming`,
 ///   `sets_cookie`, `unsafe_header_name`, `no_store_directive`.
 /// - Observation: `observation_overflowed`, `ledger_read_failed`,
-///   `handler_not_begun`, `foreign_connection_read`.
+///   `handler_not_begun`, `foreign_connection_read`, `snapshot_unavailable`.
 /// - Classification narrowed to `Uncacheable`: `session_value_read`,
 ///   `secret_context_read`, `undeclared_context`.
 /// - Live document facts: `identity_bound_without_stitching`,
@@ -114,7 +114,8 @@ pub const OUTCOME: &str = "outcome";
 ///   `principal_undeclared`, `principal_divergent`, `tenant_undeclared`,
 ///   `tenant_divergent`, `locale_undeclared`, `locale_divergent`.
 /// - Publication: `seed_deadline_elapsed`, `unsafe_header_value`,
-///   `nonce_source_policy`, `vary_undeclared`, `composite_capture_invalid`,
+///   `nonce_source_policy`, `vary_undeclared`, `head_render`,
+///   `composite_capture_invalid`,
 ///   `composite_slot_count_mismatch`,
 ///   `composite_too_many_slots`, `composite_digest_mismatch`,
 ///   `composite_empty_slot`, `composite_slot_not_found`,

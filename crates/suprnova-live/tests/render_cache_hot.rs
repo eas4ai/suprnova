@@ -159,6 +159,7 @@ fn parts_of<'a>(
         published_at_ms: PUBLISHED_AT_MS,
         seed_deadline_ms: header.seed_deadline_ms,
         cache_control_override,
+        content_encoding: header.content_encoding.as_deref(),
     }
 }
 

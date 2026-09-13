@@ -66,13 +66,13 @@ cargo run --bin console -- render-cache:epoch-advance
 - `miss`: 何も見つからなかったか、エラー時に配信するための再構築が進行中か、死亡したエントリ。
 - `bypass`: 宣言されていないクエリパラメータ、解決できない宣言済みバリエーションディメンション、または使い切られた待機者の一覧。
 - `moved`: レンダリング後の読み直しで、依存かエポックが変わっていたことが判明した。候補は破棄され、公開はされなかった。
-- `declined`: レンダリングが保存できませんでした。理由は下記 42 個のうちのいずれかで、`outcome` の隣にある `reason` 属性に載って運ばれます。
+- `declined`: レンダリングが保存できませんでした。理由は下記 44 個のうちのいずれかで、`outcome` の隣にある `reason` 属性に載って運ばれます。
   `reason` が出るのは `outcome="declined"` のときだけで、それ以外の結果には一切運ばれません。この理由は、実際に却下したその分岐において型付きの値から計算されるのであって、あとからレスポンスを見て再構成されるのではありません。つまり、実際にレンダリングを拒んだ契約の名前がそのまま出ます:
 
   - 適格性（`policy.eligibility`。エンジン自身の `DeclineReason` を映し取ります）: `policy_uncacheable`、`method`、`status`、
     `streaming`、`sets_cookie`、`unsafe_header_name`、`no_store_directive`。
   - 観測（コレクターのレポートとトランザクション内でのレジャー読み取り）:
-    `observation_overflowed`、`ledger_read_failed`、`handler_not_begun`、`foreign_connection_read`。
+    `observation_overflowed`、`ledger_read_failed`、`handler_not_begun`、`foreign_connection_read`、`snapshot_unavailable`。
   - `Uncacheable` へ絞り込まれた分類: `session_value_read`、
     `secret_context_read`、`undeclared_context`。
   - Live ドキュメントの事実: `identity_bound_without_stitching`、
@@ -83,7 +83,7 @@ cargo run --bin console -- render-cache:epoch-advance
     `principal_divergent`、`tenant_undeclared`、`tenant_divergent`、
     `locale_undeclared`、`locale_divergent`。
   - 公開: `seed_deadline_elapsed`、`unsafe_header_value`、
-    `nonce_source_policy`、`vary_undeclared`、`composite_capture_invalid`、`composite_slot_count_mismatch`、
+    `nonce_source_policy`、`vary_undeclared`、`head_render`、`composite_capture_invalid`、`composite_slot_count_mismatch`、
     `composite_too_many_slots`、`composite_digest_mismatch`、
     `composite_empty_slot`、`composite_slot_not_found`、
     `composite_slot_ambiguous`、`composite_nested_unauthorizable`、

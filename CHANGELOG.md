@@ -91,6 +91,32 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **A request's `Cache-Control` directives are honored by RenderCache.**
+  A request carrying `no-cache` was answered from storage with `Age`, and
+  a cold request carrying `no-store` seeded the cache for the next
+  request. `no-store` now bypasses lookup and publication alike, and
+  `no-cache` skips the lookup so the request is answered by a fresh
+  render. Found by the 2026-09-13 adversarial audit (ASTRA-13); landed on
+  main after the `v2.0.1` tag.
+- **A render without a snapshot is never published.** When the snapshot
+  transaction could not open, RenderCache rendered without a read view and
+  still published if the generation reread agreed, so a render that
+  interleaved with a concurrent multi-row write could store a mix of two
+  database states. Such a render is now served but not stored (decline
+  reason `snapshot_unavailable`), and its rebuild lease is released. Found
+  by the 2026-09-13 adversarial audit (ASTRA-08); landed on main after the
+  `v2.0.1` tag.
+- **A cached response replays its `Content-Encoding`.** A pre-compressed
+  body was stored without its content coding, so a hit served gzip bytes
+  as plain text. The coding is stored with the body and replayed on every
+  hit. Found by the 2026-09-13 adversarial audit (ASTRA-04); landed on
+  main after the `v2.0.1` tag.
+- **A HEAD request never seeds the GET representation.** A cold HEAD on a
+  route that renders nothing for HEAD stored an empty body under the key
+  every GET shares, so later GETs answered zero bytes. A HEAD miss is now
+  served as rendered and not stored (decline reason `head_render`). Found
+  by the 2026-09-13 adversarial audit (ASTRA-03); landed on main after the
+  `v2.0.1` tag.
 - **The Live per-scope subscription limit holds under concurrency.**
   Issuance counted a scope's subscriptions, released the lock, awaited the
   authorizer, and inserted afterwards, so a burst of concurrent requests

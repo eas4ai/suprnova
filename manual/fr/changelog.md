@@ -105,6 +105,32 @@ en premier.
 
 ### Sécurité
 
+- **Les directives `Cache-Control` d'une requête sont respectées par
+  RenderCache.** Une requête portant `no-cache` était servie depuis le
+  stockage avec `Age`, et une requête froide portant `no-store` amorçait le
+  cache pour la requête suivante. `no-store` contourne désormais la recherche
+  comme la publication, et `no-cache` saute la recherche pour que la requête
+  soit servie par un rendu frais. Trouvé par l'audit adversarial du 2026-09-13
+  (ASTRA-13) ; arrivé sur main après le tag `v2.0.1`.
+- **Un rendu sans instantané n'est jamais publié.** Quand la transaction
+  d'instantané ne pouvait pas s'ouvrir, RenderCache rendait sans vue de
+  lecture et publiait quand même si la relecture des générations concordait,
+  si bien qu'un rendu entrelacé avec une écriture concurrente multi-lignes
+  pouvait stocker un mélange de deux états de la base. Un tel rendu est
+  désormais servi mais non stocké (motif de refus `snapshot_unavailable`), et
+  son bail de reconstruction est libéré. Trouvé par l'audit adversarial du
+  2026-09-13 (ASTRA-08) ; arrivé sur main après le tag `v2.0.1`.
+- **Une réponse en cache rejoue son `Content-Encoding`.** Un corps
+  précompressé était stocké sans son codage de contenu, si bien qu'un hit
+  servait des octets gzip comme du texte brut. Le codage est stocké avec le
+  corps et rejoué à chaque hit. Trouvé par l'audit adversarial du 2026-09-13
+  (ASTRA-04) ; arrivé sur main après le tag `v2.0.1`.
+- **Une requête HEAD n'amorce jamais la représentation GET.** Un HEAD froid
+  sur une route qui ne rend rien pour HEAD stockait un corps vide sous la clé
+  que chaque GET partage, si bien que les GET suivants répondaient zéro octet.
+  Un miss HEAD est désormais servi tel que rendu et non stocké (motif de refus
+  `head_render`). Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-03) ;
+  arrivé sur main après le tag `v2.0.1`.
 - **La limite d'abonnements Live par portée tient sous concurrence.**
   L'émission comptait les abonnements d'une portée, relâchait le verrou,
   attendait l'autorisateur puis insérait, si bien qu'une rafale de requêtes

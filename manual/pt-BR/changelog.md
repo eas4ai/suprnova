@@ -100,6 +100,32 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ### Segurança
 
+- **As diretivas `Cache-Control` de uma requisição são respeitadas pelo
+  RenderCache.** Uma requisição com `no-cache` era respondida do armazenamento
+  com `Age`, e uma requisição fria com `no-store` semeava o cache para a
+  próxima. `no-store` agora ignora tanto a busca quanto a publicação, e
+  `no-cache` pula a busca para que a requisição seja respondida por uma
+  renderização nova. Encontrado pela auditoria adversarial de 2026-09-13
+  (ASTRA-13); chegou à main depois da tag `v2.0.1`.
+- **Uma renderização sem snapshot nunca é publicada.** Quando a transação de
+  snapshot não conseguia abrir, o RenderCache renderizava sem visão de leitura
+  e ainda assim publicava se a releitura das gerações concordasse, então uma
+  renderização intercalada com uma escrita concorrente de várias linhas podia
+  armazenar uma mistura de dois estados do banco. Tal renderização agora é
+  servida, mas não armazenada (motivo de recusa `snapshot_unavailable`), e seu
+  lease de reconstrução é liberado. Encontrado pela auditoria adversarial de
+  2026-09-13 (ASTRA-08); chegou à main depois da tag `v2.0.1`.
+- **Uma resposta em cache reproduz seu `Content-Encoding`.** Um corpo
+  pré-comprimido era armazenado sem sua codificação de conteúdo, então um
+  acerto servia bytes gzip como texto puro. A codificação é armazenada com o
+  corpo e reproduzida em todo acerto. Encontrado pela auditoria adversarial de
+  2026-09-13 (ASTRA-04); chegou à main depois da tag `v2.0.1`.
+- **Uma requisição HEAD nunca semeia a representação GET.** Um HEAD frio em
+  uma rota que não renderiza nada para HEAD armazenava um corpo vazio sob a
+  chave que todo GET compartilha, então os GETs seguintes respondiam zero
+  bytes. Um miss de HEAD agora é servido como renderizado e não é armazenado
+  (motivo de recusa `head_render`). Encontrado pela auditoria adversarial de
+  2026-09-13 (ASTRA-03); chegou à main depois da tag `v2.0.1`.
 - **O limite de assinaturas Live por escopo se mantém sob concorrência.** A
   emissão contava as assinaturas de um escopo, soltava o lock, aguardava o
   autorizador e inseria depois, então uma rajada de requisições concorrentes

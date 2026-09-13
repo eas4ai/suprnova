@@ -878,6 +878,16 @@ async fn boot(
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("named connection policy");
+    // CACHE-006 and CACHE-005: the plain public shape on a route that renders
+    // nothing for HEAD, and on one that serves pre-compressed bytes.
+    let head_empty_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("head empty policy");
+    let encoded_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("encoded policy");
     let stale_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(60_000, 60_000, 120_000).expect("freshness"))
         .build()
@@ -1233,6 +1243,8 @@ async fn boot(
     let router: Router = router
         .get("/named-connection", named_connection_handler)
         .into();
+    let router: Router = router.get("/head-empty", head_empty_handler).into();
+    let router: Router = router.get("/encoded", encoded_handler).into();
     let router: Router = router.get("/overflow", overflow_handler).into();
     let router: Router = router
         .get("/stitched-gate-only", stitched_gate_only_handler)
@@ -1473,6 +1485,10 @@ async fn boot(
             GroupPolicy::from(named_connection_policy),
         )
         .expect("attach named connection policy")
+        .try_render_cache("/head-empty", GroupPolicy::from(head_empty_policy))
+        .expect("attach head empty policy")
+        .try_render_cache("/encoded", GroupPolicy::from(encoded_policy))
+        .expect("attach encoded policy")
         .try_render_cache("/overflow", GroupPolicy::from(overflow_policy))
         .expect("attach overflow policy")
         .try_render_cache(
@@ -2099,6 +2115,36 @@ async fn named_connection_handler(_request: Request) -> Response {
         None => String::new(),
     };
     Ok(HttpResponse::text(marker))
+}
+
+/// Renders an empty body for HEAD and a real one for GET (CACHE-006, from
+/// audit finding ASTRA-03), the shape that let a cold HEAD poison the GET
+/// representation.
+async fn head_empty_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    Ok(if request.method().as_str() == "HEAD" {
+        HttpResponse::html("")
+    } else {
+        HttpResponse::html("GET body")
+    })
+}
+
+/// A valid gzip member holding `<p>encoded body</p>`, served with
+/// `Content-Encoding: gzip` (CACHE-005, from audit finding ASTRA-04).
+pub const GZIP_BODY: &[u8] = &[
+    31, 139, 8, 0, 0, 0, 0, 0, 2, 255, 179, 41, 176, 115, 205, 75, 206, 79, 73, 77, 81, 72, 202,
+    79, 169, 180, 209, 47, 176, 3, 0, 169, 189, 227, 35, 19, 0, 0, 0,
+];
+
+/// Renders pre-compressed bytes with their content coding declared.
+async fn encoded_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    Ok(
+        HttpResponse::bytes(Bytes::from_static(GZIP_BODY), "text/html")
+            .header("Content-Encoding", "gzip"),
+    )
 }
 
 /// Renders with a replayable header whose value the wire cannot carry.

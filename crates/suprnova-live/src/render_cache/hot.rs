@@ -115,6 +115,8 @@ struct FormedValues {
     /// the case for a body with an embedded public seed deadline.
     cache_control: Option<HeaderValue>,
     vary: Option<HeaderValue>,
+    /// The stored content coding, if the body is encoded.
+    content_encoding: Option<HeaderValue>,
     extra: Vec<(HeaderName, HeaderValue)>,
 }
 
@@ -214,6 +216,10 @@ fn form_values(parts: &ResponseParts<'_>) -> Result<FormedValues, RenderCacheErr
         Some(value) => Some(HeaderValue::from_str(&value).map_err(|_| invalid())?),
         None => None,
     };
+    let content_encoding = match parts.content_encoding {
+        Some(value) => Some(HeaderValue::from_str(value).map_err(|_| invalid())?),
+        None => None,
+    };
     Ok(FormedValues {
         status,
         etag,
@@ -221,6 +227,7 @@ fn form_values(parts: &ResponseParts<'_>) -> Result<FormedValues, RenderCacheErr
         content_type,
         cache_control,
         vary,
+        content_encoding,
         extra,
     })
 }
@@ -245,6 +252,9 @@ fn build(
     };
     let mut headers = HeaderMap::with_capacity(FORMED_HEADERS + values.extra.len());
     headers.insert(http::header::CONTENT_TYPE, values.content_type.clone());
+    if let Some(encoding) = &values.content_encoding {
+        headers.insert(http::header::CONTENT_ENCODING, encoding.clone());
+    }
     for (name, value) in &values.extra {
         headers.append(name.clone(), value.clone());
     }
@@ -363,6 +373,7 @@ impl HotEntry {
                 published_at_ms,
                 seed_deadline_ms: header.seed_deadline_ms,
                 cache_control_override: None,
+                content_encoding: header.content_encoding.as_deref(),
             })?
         };
         values.promote();
@@ -467,6 +478,9 @@ pub struct ResponseParts<'a> {
     /// A fixed `Cache-Control` that replaces the computed one (a slotted
     /// Composite assembly is `private, no-store`).
     pub cache_control_override: Option<&'static str>,
+    /// The stored content coding, replayed as `Content-Encoding` with the
+    /// bytes it describes (CACHE-005); `None` for an unencoded body.
+    pub content_encoding: Option<&'a str>,
 }
 
 /// Written by hand rather than derived, for the reason [`HotEntry`]'s own

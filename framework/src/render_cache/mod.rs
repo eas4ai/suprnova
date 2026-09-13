@@ -344,6 +344,17 @@ pub struct RenderCache;
 /// [`is_installed`] before issuing any SQL.
 static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// See [`RenderCache::fail_next_snapshot_begin_for_test`].
+#[cfg(any(test, feature = "testing"))]
+static SNAPSHOT_BEGIN_FAILS_NEXT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Consumes the armed snapshot-begin failure, if any.
+#[cfg(any(test, feature = "testing"))]
+pub(crate) fn take_snapshot_begin_failure_for_test() -> bool {
+    SNAPSHOT_BEGIN_FAILS_NEXT.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
 /// True once a RenderCache runtime has been installed for this process.
 #[must_use]
 pub(crate) fn is_installed() -> bool {
@@ -1187,6 +1198,15 @@ impl RenderCache {
     pub fn uninstall_for_test() {
         INSTALLED.store(false, std::sync::atomic::Ordering::Relaxed);
         write_side::reset_for_test();
+    }
+
+    /// Arms the next miss render to behave as if its snapshot transaction
+    /// could not open (CACHE-010): the render runs with no read view and
+    /// must be served uncacheable. Consumed by the next render.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn fail_next_snapshot_begin_for_test() {
+        SNAPSHOT_BEGIN_FAILS_NEXT.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test-only: forces the configuration answer the write side's probe

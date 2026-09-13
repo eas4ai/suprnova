@@ -6,6 +6,7 @@ inputs:
   - framework/src/eloquent/
   - framework/tests/render_cache/
   - crates/suprnova-live/src/
+  - crates/suprnova-live/tests/
   - Cargo.lock
   - framework/tests/support/
   - framework/tests/templates/

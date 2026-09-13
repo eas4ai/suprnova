@@ -807,6 +807,9 @@ fn respond(
             published_at_ms,
             seed_deadline_ms: header.seed_deadline_ms,
             cache_control_override,
+            // An assembled document is built from plain shell bytes; it is
+            // never a stored, pre-encoded body.
+            content_encoding: None,
         },
         // `None` rather than the request's own value: an assembly never
         // answers 304, for the reason this function's doc gives, and the

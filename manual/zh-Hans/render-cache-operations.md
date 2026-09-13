@@ -64,14 +64,14 @@ L0，它会在下一次权威读取时跟上 - 在 `CoherenceMode::Authority` �
 - `miss` - 什么也没找到、一次出错时陈旧重建正在进行中，或者一个已死的条目。
 - `bypass` - 一个未声明的查询参数、一个无法解析的已声明差异化维度，或者一份已耗尽的等待者名单。
 - `moved` - 渲染之后的那次重读发现某项依赖或纪元变过了；候选被丢弃，从未发布。
-- `declined` - 这次渲染不可存储，属于下面四十二个理由中的一个，携带在
+- `declined` - 这次渲染不可存储，属于下面四十四个理由中的一个，携带在
   `outcome` 旁边的 `reason` 属性里。`reason` 只在 `outcome="declined"` 时才会给出；其他任何结果都不携带它。这个理由是在真正做出拒绝的那个分支上，从一个类型化的值计算出来的，而绝不是事后从响应反推出来的，所以它点名的正是真正拒绝了这次渲染的那份契约：
 
   - 资格审查（`policy.eligibility`，映照引擎自身的 `DeclineReason`）：
     `policy_uncacheable`、`method`、`status`、`streaming`、`sets_cookie`、
     `unsafe_header_name`、`no_store_directive`。
   - 观察（收集器的报告以及事务内部的账本读取）：`observation_overflowed`、
-    `ledger_read_failed`、`handler_not_begun`、`foreign_connection_read`。
+    `ledger_read_failed`、`handler_not_begun`、`foreign_connection_read`、`snapshot_unavailable`。
   - 被收窄为 `Uncacheable` 的分类：`session_value_read`、
     `secret_context_read`、`undeclared_context`。
   - Live 文档事实：`identity_bound_without_stitching`、
@@ -82,7 +82,7 @@ L0，它会在下一次权威读取时跟上 - 在 `CoherenceMode::Authority` �
     `principal_divergent`、`tenant_undeclared`、`tenant_divergent`、
     `locale_undeclared`、`locale_divergent`。
   - 发布：`seed_deadline_elapsed`、`unsafe_header_value`、
-    `nonce_source_policy`、`vary_undeclared`、`composite_capture_invalid`、`composite_slot_count_mismatch`、
+    `nonce_source_policy`、`vary_undeclared`、`head_render`、`composite_capture_invalid`、`composite_slot_count_mismatch`、
     `composite_too_many_slots`、`composite_digest_mismatch`、
     `composite_empty_slot`、`composite_slot_not_found`、
     `composite_slot_ambiguous`、`composite_nested_unauthorizable`、

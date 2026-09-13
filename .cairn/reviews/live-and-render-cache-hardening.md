@@ -283,3 +283,36 @@ under that burst, some of the admitted requests on one SSE document
 instance answer `async_authority_invalid` from the subscription
 service's connect step. Captured in `.cairn/backlog/` from LIVE-018 for
 the owner; not fixed here.
+
+### CACHE-006, CACHE-005, CACHE-010, CACHE-007, 2026-09-13 18:10
+
+Landed together in two stages so each baseline is honest: stage A added
+the four tests, their support routes, the two new decline labels, the
+content-coding plumbing with the field still unfilled, and the
+snapshot-begin test seam with the fallback unchanged; stage B added only
+the four behavior changes. Violating examples on the tree at `8f4c0638`
+plus stage A:
+
+    FAIL hardening::head_first_does_not_publish_get
+      left: [] right: "GET body"            (ASTRA-03: the GET served the
+                                              HEAD's empty body)
+    FAIL hardening::content_encoding_replays
+      left: None right: Some("gzip")         (ASTRA-04)
+    FAIL hardening::snapshot_failure_is_uncacheable
+      left: 1 right: 2                       (ASTRA-08: the fallback render
+                                              was published)
+    FAIL hardening::request_directives_are_honored
+      left: 1 right: 2                       (ASTRA-13: no-cache served from
+                                              storage)
+
+After stage B (`cache-head-first`: a HEAD miss declines publication under
+`head_render`; `cache-content-encoding`: the entry header carries the
+handler's `Content-Encoding` and the hit builder emits it;
+`cache-snapshot-failure`: the begin-failure fallback reports
+`SnapshotUnavailable`, which declines under `snapshot_unavailable` and
+releases the lease; `cache-request-directives`: `no-store` bypasses
+lookup and publication, `no-cache` skips the lookup) all four pass and
+the full `render_cache` binary (376 tests) passes. One test adjustment
+on the way: a fresh render legitimately answers `Age: 0`, so the
+directive test accepts an absent or zero `Age` and rejects any older
+value.

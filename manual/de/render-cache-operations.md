@@ -138,7 +138,7 @@ Provider oder ein Backend benannt:
   eine Abhängigkeit oder die Epoche geändert hatte; der Kandidat wurde
   verworfen und nie veröffentlicht.
 - `declined` - das Rendering war nicht speicherbar, aus einem von
-  zweiundvierzig Gründen unten, mitgeführt im Attribut `reason` neben
+  vierundvierzig Gründen unten, mitgeführt im Attribut `reason` neben
   `outcome`. `reason` wird nur zusammen mit `outcome="declined"`
   ausgegeben; jedes andere Ergebnis führt keinen. Der Grund wird aus einem
   typisierten Wert an genau der Verzweigung berechnet, die abgelehnt hat,
@@ -150,7 +150,7 @@ Provider oder ein Backend benannt:
     `sets_cookie`, `unsafe_header_name`, `no_store_directive`.
   - Beobachtung (der Bericht des Collectors und das Ledger-Lesen innerhalb
     der Transaktion): `observation_overflowed`, `ledger_read_failed`,
-    `handler_not_begun`, `foreign_connection_read`.
+    `handler_not_begun`, `foreign_connection_read`, `snapshot_unavailable`.
   - Klassifizierung, die zu `Uncacheable` eingeengt wurde:
     `session_value_read`, `secret_context_read`, `undeclared_context`.
   - Fakten des Live-Dokuments: `identity_bound_without_stitching`,
@@ -162,7 +162,7 @@ Provider oder ein Backend benannt:
     `principal_undeclared`, `principal_divergent`, `tenant_undeclared`,
     `tenant_divergent`, `locale_undeclared`, `locale_divergent`.
   - Veröffentlichung: `seed_deadline_elapsed`, `unsafe_header_value`,
-    `nonce_source_policy`, `vary_undeclared`, `composite_capture_invalid`, `composite_slot_count_mismatch`,
+    `nonce_source_policy`, `vary_undeclared`, `head_render`, `composite_capture_invalid`, `composite_slot_count_mismatch`,
     `composite_too_many_slots`, `composite_digest_mismatch`,
     `composite_empty_slot`, `composite_slot_not_found`,
     `composite_slot_ambiguous`, `composite_nested_unauthorizable`,

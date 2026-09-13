@@ -15,7 +15,9 @@
 use crate::render_cache_middleware_support;
 use render_cache_middleware_support::{
     Post, SECURITY_HEADERS, User, boot_with_render_cache, counting_route, dispatch_get,
+    dispatch_head,
 };
+use suprnova::render_cache::RenderCache;
 use suprnova::{ConnectionTrait, DB, Model, StatusCode, attrs};
 
 /// CACHE-003: a response carrying a security header is either replayed
@@ -388,5 +390,134 @@ async fn serving_stops_while_a_named_connection_advance_is_unconfirmed() {
         counting_route::renders(),
         renders_before,
         "once an advancement lands, stored entries are served again"
+    );
+}
+
+/// CACHE-006: a HEAD render never seeds the GET representation. The audit
+/// (ASTRA-03) sent a cold HEAD to a route that renders an empty body for
+/// HEAD, and every later GET answered zero bytes from storage.
+#[tokio::test]
+#[serial_test::serial]
+async fn head_first_does_not_publish_get() {
+    let harness = boot_with_render_cache().await;
+
+    let head = dispatch_head(&harness, "/head-empty").await;
+    assert_eq!(head.status, StatusCode::OK);
+    assert!(head.body.is_empty(), "the handler renders nothing for HEAD");
+    assert_eq!(counting_route::renders(), 1);
+
+    let get = dispatch_get(&harness, "/head-empty", &[]).await;
+    assert_eq!(get.status, StatusCode::OK);
+    assert_eq!(
+        &get.body[..],
+        b"GET body",
+        "a GET after a cold HEAD renders its own body"
+    );
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "the HEAD render was not published"
+    );
+}
+
+/// CACHE-005: a response's content coding is stored with its body and
+/// replayed on every hit. The audit (ASTRA-04) saw gzip bytes replayed
+/// without `Content-Encoding`, so a browser parsed compressed bytes as
+/// text.
+#[tokio::test]
+#[serial_test::serial]
+async fn content_encoding_replays() {
+    let harness = boot_with_render_cache().await;
+
+    let first = dispatch_get(&harness, "/encoded", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(first.header("content-encoding"), Some("gzip"));
+
+    let second = dispatch_get(&harness, "/encoded", &[]).await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1, "the second request was a hit");
+    assert_eq!(
+        second.body, first.body,
+        "the encoded bytes replayed unchanged"
+    );
+    assert_eq!(
+        second.header("content-encoding"),
+        Some("gzip"),
+        "the content coding replayed with the bytes"
+    );
+}
+
+/// CACHE-010: when the snapshot transaction cannot open, the render is
+/// served uncacheable and the rebuild lease released. The audit
+/// (ASTRA-08) traced that the fallback render, run with no read view,
+/// could still pass the generation reread and be published.
+#[tokio::test]
+#[serial_test::serial]
+async fn snapshot_failure_is_uncacheable() {
+    let harness = boot_with_render_cache().await;
+
+    RenderCache::fail_next_snapshot_begin_for_test();
+    let first = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(
+        first.status,
+        StatusCode::OK,
+        "the fallback render is served"
+    );
+    assert_eq!(counting_route::renders(), 1);
+
+    let second = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "a render without a snapshot was not published"
+    );
+
+    let third = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(third.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "the lease was released, so the next render published normally"
+    );
+}
+
+/// CACHE-007: a request's `Cache-Control: no-cache` renders fresh instead
+/// of serving storage, and its `no-store` bypasses both lookup and
+/// publication. The audit (ASTRA-13) saw a `no-cache` request answered
+/// from storage with `Age`, and a cold `no-store` request seed the cache.
+#[tokio::test]
+#[serial_test::serial]
+async fn request_directives_are_honored() {
+    let harness = boot_with_render_cache().await;
+
+    let warm = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(warm.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1);
+
+    let revalidated = dispatch_get(&harness, "/cached/1", &[("cache-control", "no-cache")]).await;
+    assert_eq!(revalidated.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "a no-cache request is rendered fresh, not served from storage"
+    );
+    // A fresh render answers with no Age, or with the zero a just-published
+    // representation legitimately carries; anything older came from storage.
+    assert!(
+        revalidated.header("age").is_none_or(|age| age == "0"),
+        "a fresh render carries no stored Age, saw {:?}",
+        revalidated.header("age")
+    );
+
+    let cold = dispatch_get(&harness, "/cached/2", &[("cache-control", "no-store")]).await;
+    assert_eq!(cold.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 3);
+    let after = dispatch_get(&harness, "/cached/2", &[]).await;
+    assert_eq!(after.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        4,
+        "a no-store request populated nothing for the next request"
     );
 }

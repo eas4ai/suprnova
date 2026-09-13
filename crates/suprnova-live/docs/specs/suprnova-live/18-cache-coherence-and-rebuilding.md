@@ -337,6 +337,17 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-13 -- Served a render whose snapshot transaction could not open
+  as uncacheable. The fallback that renders without a read view when
+  `begin` fails now reports its observation as unavailable, so the lead
+  render declines publication under the new reason `snapshot_unavailable`
+  and releases its rebuild lease, and the next request rebuilds under a
+  snapshot. The adversarial audit of the same day (finding ASTRA-08)
+  traced that such a render can interleave with a concurrent multi-row
+  write and still pass the generation reread, publishing a mix of two
+  database states. A test seam injects the `begin` failure
+  deterministically. Recorded under Failed rebuilds; the framework's
+  requirement is CACHE-010 in `docs/spec/render-cache.md`.
 - 2026-09-13 -- Kept a miss render's queries on the connections they name.
   The executor routing preferred the ambient transaction over an explicit
   or model-declared connection, and a RenderCache miss opens its snapshot

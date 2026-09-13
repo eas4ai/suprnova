@@ -826,9 +826,22 @@ impl RenderCacheMiddleware {
         };
         let mut job = RenderJob::new(input, key);
 
-        let hit = match lookup(runtime, policy, job.key()).await {
-            Ok(hit) => hit,
-            Err(()) => return Err(ProviderFailure::new(request, next)),
+        // CACHE-007 (audit finding ASTRA-13): the request's own directives.
+        // `no-store` bypasses lookup and publication alike; `no-cache` skips
+        // the lookup so the request is answered by a fresh render, which may
+        // still be published for everyone else.
+        let directives = request_cache_directives(&request);
+        if directives.no_store {
+            LookupOutcome::Bypass.record();
+            return Ok(next(request).await);
+        }
+        let hit = if directives.no_cache {
+            None
+        } else {
+            match lookup(runtime, policy, job.key()).await {
+                Ok(hit) => hit,
+                Err(()) => return Err(ProviderFailure::new(request, next)),
+            }
         };
         let Some(found) = hit else {
             LookupOutcome::Miss.record();
@@ -1763,6 +1776,7 @@ pub(crate) fn complete_response(
             published_at_ms,
             seed_deadline_ms: header.seed_deadline_ms,
             cache_control_override: None,
+            content_encoding: header.content_encoding.as_deref(),
         },
         HotRequest {
             method,
@@ -2174,6 +2188,9 @@ async fn lead_render(
                 RenderObservationFailure::Overflowed => LookupDeclineReason::ObservationOverflowed,
                 RenderObservationFailure::LedgerRead => LookupDeclineReason::LedgerReadFailed,
                 RenderObservationFailure::HandlerNotBegun => LookupDeclineReason::HandlerNotBegun,
+                RenderObservationFailure::SnapshotUnavailable => {
+                    LookupDeclineReason::SnapshotUnavailable
+                }
             };
             LookupOutcome::Declined(reason).record();
             let _ = runtime.coordinator.release(lease).await;
@@ -2210,6 +2227,16 @@ async fn lead_render(
     // publication is declined.
     if report.context.foreign_connection_read || report.gate.context.foreign_connection_read {
         LookupOutcome::Declined(LookupDeclineReason::ForeignConnectionRead).record();
+        let _ = runtime.coordinator.release(lease).await;
+        return Ok(response);
+    }
+    // CACHE-006: a HEAD render may legitimately carry no body, and the key
+    // carries no method, so publishing it would seed the GET representation
+    // with whatever the handler chose to render for HEAD (audit finding
+    // ASTRA-03). A HEAD miss is served as rendered and stores nothing; the
+    // first GET renders the representation both methods then share.
+    if method == "HEAD" {
+        LookupOutcome::Declined(LookupDeclineReason::HeadRender).record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     }
@@ -2920,6 +2947,9 @@ pub(crate) enum RenderObservationFailure {
     /// A stitched route's handler never began, so its content bucket is
     /// empty (see `render_under_collector`'s own doc).
     HandlerNotBegun,
+    /// The snapshot transaction could not open, so the render ran with no
+    /// consistent read view; served, never published (CACHE-010).
+    SnapshotUnavailable,
 }
 
 /// Closes a collector report into the generations it observed, or the typed
@@ -3112,38 +3142,50 @@ async fn run_render(
     let slot_for_closure = Arc::clone(&slot);
     let next_for_closure = next.clone();
     let ledger_for_closure = Arc::clone(&runtime.ledger);
-    let result = DB::transaction_with_isolation(render_isolation_level(backend), move |_tx| {
-        let slot = Arc::clone(&slot_for_closure);
-        let next = next_for_closure.clone();
-        let ledger = Arc::clone(&ledger_for_closure);
-        Box::pin(async move {
-            let Some(request) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() else {
-                // Unreachable: this closure is the only taker while the
-                // transaction is open. Reported as an error rather than a
-                // panic so a violation cannot unwind through the request
-                // task or poison the slot's mutex for the fallback below.
-                debug_assert!(
-                    false,
-                    "the request is taken exactly once, by this closure, when it runs"
-                );
-                return Err(crate::FrameworkError::internal(
-                    "render cache: the render request was already taken",
-                ));
-            };
-            Ok::<_, crate::FrameworkError>(
-                render_under_collector(
-                    request,
-                    next,
-                    epoch,
-                    ledger.as_ref(),
-                    observes_permission_generation,
-                    stitched,
+    // CACHE-010: the test seam stands in for a pool or `begin` failure; the
+    // fallback below is the same either way.
+    #[cfg(any(test, feature = "testing"))]
+    let begin_fails = super::take_snapshot_begin_failure_for_test();
+    #[cfg(not(any(test, feature = "testing")))]
+    let begin_fails = false;
+    let result = if begin_fails {
+        Err(crate::FrameworkError::database(
+            "snapshot begin failure injected for test",
+        ))
+    } else {
+        DB::transaction_with_isolation(render_isolation_level(backend), move |_tx| {
+            let slot = Arc::clone(&slot_for_closure);
+            let next = next_for_closure.clone();
+            let ledger = Arc::clone(&ledger_for_closure);
+            Box::pin(async move {
+                let Some(request) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+                    // Unreachable: this closure is the only taker while the
+                    // transaction is open. Reported as an error rather than a
+                    // panic so a violation cannot unwind through the request
+                    // task or poison the slot's mutex for the fallback below.
+                    debug_assert!(
+                        false,
+                        "the request is taken exactly once, by this closure, when it runs"
+                    );
+                    return Err(crate::FrameworkError::internal(
+                        "render cache: the render request was already taken",
+                    ));
+                };
+                Ok::<_, crate::FrameworkError>(
+                    render_under_collector(
+                        request,
+                        next,
+                        epoch,
+                        ledger.as_ref(),
+                        observes_permission_generation,
+                        stitched,
+                    )
+                    .await,
                 )
-                .await,
-            )
+            })
         })
-    })
-    .await;
+        .await
+    };
     match result {
         Ok(triple) => Ok(triple),
         Err(_) => {
@@ -3162,7 +3204,10 @@ async fn run_render(
                 debug_assert!(false, "a failed DB::transaction never invoked its closure");
                 return Err(RenderRequestLost);
             };
-            Ok(render_under_collector(
+            // CACHE-010 (audit finding ASTRA-08): a render with no read view
+            // can interleave with a concurrent multi-row write and pass the
+            // generation reread anyway, so it is served but never published.
+            let (response, report, _observed) = render_under_collector(
                 request,
                 next,
                 epoch,
@@ -3170,7 +3215,12 @@ async fn run_render(
                 observes_permission_generation,
                 stitched,
             )
-            .await)
+            .await;
+            Ok((
+                response,
+                report,
+                Err(RenderObservationFailure::SnapshotUnavailable),
+            ))
         }
     }
 }
@@ -3289,7 +3339,12 @@ fn entry_header(
         seed_deadline_ms,
         status: 200,
         headers: safe_headers,
-        content_encoding: None,
+        // CACHE-005: the content coding travels with the bytes it describes
+        // (audit finding ASTRA-04: gzip bytes replayed without it).
+        content_encoding: response
+            .headers()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-encoding"))
+            .map(|(_, value)| value.to_owned()),
     })
 }
 
@@ -3424,6 +3479,32 @@ async fn store_entry(
             .publish(job.key(), encoded, fence, now, retention_ms)
             .await;
     }
+}
+
+/// The two request `Cache-Control` directives the cache honors (CACHE-007).
+#[derive(Clone, Copy, Default)]
+struct RequestCacheDirectives {
+    no_cache: bool,
+    no_store: bool,
+}
+
+/// Parses the request's `Cache-Control` for `no-cache` and `no-store`:
+/// comma-separated, case-insensitive, whole tokens only.
+fn request_cache_directives(request: &Request) -> RequestCacheDirectives {
+    let mut directives = RequestCacheDirectives::default();
+    for directive in request
+        .header("cache-control")
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+    {
+        if directive.eq_ignore_ascii_case("no-cache") {
+            directives.no_cache = true;
+        } else if directive.eq_ignore_ascii_case("no-store") {
+            directives.no_store = true;
+        }
+    }
+    directives
 }
 
 /// Whether the response's `Vary` header names `*` or a field the declared

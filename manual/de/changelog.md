@@ -103,6 +103,36 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Sicherheit
 
+- **Die `Cache-Control`-Direktiven einer Anfrage werden von RenderCache
+  respektiert.** Eine Anfrage mit `no-cache` wurde aus dem Speicher mit `Age`
+  beantwortet, und eine kalte Anfrage mit `no-store` befüllte den Cache für
+  die nächste Anfrage. `no-store` umgeht jetzt Nachschlagen und
+  Veröffentlichung gleichermaßen, und `no-cache` überspringt das Nachschlagen,
+  sodass die Anfrage durch ein frisches Rendern beantwortet wird. Gefunden
+  durch das adversariale Audit vom 2026-09-13 (ASTRA-13); nach dem Tag
+  `v2.0.1` auf main gelandet.
+- **Ein Rendern ohne Snapshot wird nie veröffentlicht.** Konnte die
+  Snapshot-Transaktion nicht geöffnet werden, renderte RenderCache ohne
+  Lesesicht und veröffentlichte trotzdem, wenn das erneute Lesen der
+  Generationen übereinstimmte, sodass ein Rendern, das sich mit einem
+  gleichzeitigen mehrzeiligen Schreibvorgang verschränkte, eine Mischung
+  zweier Datenbankzustände speichern konnte. Ein solches Rendern wird jetzt
+  ausgeliefert, aber nicht gespeichert (Ablehnungsgrund
+  `snapshot_unavailable`), und sein Rebuild-Lease wird freigegeben. Gefunden
+  durch das adversariale Audit vom 2026-09-13 (ASTRA-08); nach dem Tag
+  `v2.0.1` auf main gelandet.
+- **Eine zwischengespeicherte Antwort gibt ihr `Content-Encoding` wieder.**
+  Ein vorkomprimierter Body wurde ohne seine Inhaltskodierung gespeichert,
+  sodass ein Treffer gzip-Bytes als Klartext auslieferte. Die Kodierung wird
+  jetzt mit dem Body gespeichert und bei jedem Treffer wiedergegeben. Gefunden
+  durch das adversariale Audit vom 2026-09-13 (ASTRA-04); nach dem Tag
+  `v2.0.1` auf main gelandet.
+- **Eine HEAD-Anfrage befüllt nie die GET-Repräsentation.** Ein kalter HEAD
+  auf einer Route, die für HEAD nichts rendert, speicherte einen leeren Body
+  unter dem Schlüssel, den jeder GET teilt, sodass spätere GETs null Bytes
+  beantworteten. Ein HEAD-Miss wird jetzt wie gerendert ausgeliefert und nicht
+  gespeichert (Ablehnungsgrund `head_render`). Gefunden durch das adversariale
+  Audit vom 2026-09-13 (ASTRA-03); nach dem Tag `v2.0.1` auf main gelandet.
 - **Das Live-Abonnementlimit pro Scope hält auch unter Nebenläufigkeit.** Die
   Ausstellung zählte die Abonnements eines Scopes, gab die Sperre frei,
   wartete auf den Autorisierer und fügte danach ein, sodass ein Schwall
