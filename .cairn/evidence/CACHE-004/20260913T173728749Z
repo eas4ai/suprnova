@@ -1,0 +1,21 @@
+requirement: CACHE-004
+requirement_digest: sha256:405fc705fbb9171362fffa6f8c4d59bf829559119bf85509f70bb7d27c5566ef
+sequence: 2
+history_digest: sha256:e0128c39415fcc8aca1c762376357ff7e90f9b55f8c1271e9da1e7560df8082a
+mechanism: cache-csp-nonce
+commit: 1c8126e4
+inputs_digest: sha256:a3b71a5f7e90e369f16a4bfd2aaa61a80970e625356d78c34566a921b68be2d9
+mechanism_digest: sha256:3c587f44ccb59be5a313e88aec4207c51eb4d726471de35cec5bf6a75d5d2dcb
+inputs_detail: .cairn/evidence/CACHE-004/20260913T173727753Z-1244637.inputs.json
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::csp_nonce_is_never_replayed)'
+cwd: .
+exit: 0
+output_digest: sha256:43ed0b3ca326583c9d6d574bcf05033c6c063ae6dcdb245a929fd8df85aa8e94
+output: .cairn/evidence/CACHE-004/20260913T173727753Z-1244637.out
+stderr_output: .cairn/evidence/CACHE-004/20260913T173727753Z-1244637.err
+stderr_digest: sha256:43ed0b3ca326583c9d6d574bcf05033c6c063ae6dcdb245a929fd8df85aa8e94
+signal: none
+execution_error: null
+result: pass
+source: exit
+recorded: 2026-09-13T17:37:28.749Z
