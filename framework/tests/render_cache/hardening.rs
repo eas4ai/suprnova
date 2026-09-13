@@ -14,9 +14,9 @@
 
 use crate::render_cache_middleware_support;
 use render_cache_middleware_support::{
-    SECURITY_HEADERS, boot_with_render_cache, counting_route, dispatch_get,
+    Post, SECURITY_HEADERS, boot_with_render_cache, counting_route, dispatch_get,
 };
-use suprnova::StatusCode;
+use suprnova::{ConnectionTrait, DB, Model, StatusCode, attrs};
 
 /// CACHE-003: a response carrying a security header is either replayed
 /// with that header byte for byte or never stored. The audit (ASTRA-11)
@@ -179,5 +179,61 @@ async fn vary_must_match_declared_dimensions() {
         counting_route::renders(),
         2,
         "an undeclared Vary field must not be stored under a key that omits it"
+    );
+}
+
+/// CACHE-009: a data write and its generation advancement commit together
+/// on the autocommit path, so a failure of either leaves neither. The
+/// audit (ASTRA-10) removed the generation log table, issued a raw
+/// `UPDATE`, and saw the row committed while the advancement failed: the
+/// API returned an error, the data was durable, and the cached page kept
+/// serving the pre-write body under the old generation.
+///
+/// After the fix the two share one transaction: the failed advancement
+/// rolls the row write back, so the database and the cache agree.
+#[tokio::test]
+#[serial_test::serial]
+async fn write_and_generation_commit_together() {
+    let harness = boot_with_render_cache().await;
+    let post = Post::create(attrs! { title: "before" })
+        .await
+        .expect("seed the row the route renders");
+    let path = format!("/write-atomicity/{}", post.id);
+
+    let first = dispatch_get(&harness, &path, &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(&first.body[..], b"before");
+
+    // Through the raw connection, not `DB::statement`: the facade's own
+    // write hook would try to advance generations for the drop itself.
+    DB::connection()
+        .expect("the harness connected the primary database")
+        .inner()
+        .execute_unprepared("DROP TABLE suprnova_render_generation_log")
+        .await
+        .expect("remove the generation log so advancement fails");
+    let write = DB::statement(
+        &format!("UPDATE posts SET title = 'after' WHERE id = {}", post.id),
+        Vec::new(),
+    )
+    .await;
+    assert!(
+        write.is_err(),
+        "a write whose advancement cannot be recorded reports failure"
+    );
+
+    let direct = Post::find(post.id)
+        .await
+        .expect("read the row back")
+        .expect("the row still exists");
+    assert_eq!(
+        direct.title, "before",
+        "the row write rolled back with its failed advancement"
+    );
+    let second = dispatch_get(&harness, &path, &[]).await;
+    assert_eq!(
+        &second.body[..],
+        b"before",
+        "the cache and the database agree after the failed write"
     );
 }

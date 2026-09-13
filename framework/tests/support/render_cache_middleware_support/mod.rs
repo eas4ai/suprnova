@@ -867,6 +867,11 @@ async fn boot(
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("vary undeclared policy");
+    // CACHE-009: the plain public shape on a route that renders one row.
+    let write_atomicity_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("write atomicity policy");
     let stale_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(60_000, 60_000, 120_000).expect("freshness"))
         .build()
@@ -1216,6 +1221,9 @@ async fn boot(
     let router: Router = router
         .get("/vary-undeclared", vary_undeclared_handler)
         .into();
+    let router: Router = router
+        .get("/write-atomicity/{id}", write_atomicity_handler)
+        .into();
     let router: Router = router.get("/overflow", overflow_handler).into();
     let router: Router = router
         .get("/stitched-gate-only", stitched_gate_only_handler)
@@ -1446,6 +1454,11 @@ async fn boot(
             GroupPolicy::from(vary_undeclared_policy),
         )
         .expect("attach vary undeclared policy")
+        .try_render_cache(
+            "/write-atomicity/{id}",
+            GroupPolicy::from(write_atomicity_policy),
+        )
+        .expect("attach write atomicity policy")
         .try_render_cache("/overflow", GroupPolicy::from(overflow_policy))
         .expect("attach overflow policy")
         .try_render_cache(
@@ -2043,6 +2056,23 @@ async fn vary_undeclared_handler(request: Request) -> Response {
     let _ = Post::find(1).await;
     let flavor = request.header("x-flavor").unwrap_or("absent").to_owned();
     Ok(HttpResponse::text(flavor).header("Vary", "X-Flavor"))
+}
+
+/// Renders the named post's title and nothing else (CACHE-009, from audit
+/// finding ASTRA-10), so a stale body after a write is visible as the old
+/// title.
+async fn write_atomicity_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let id: i64 = request
+        .param("id")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let title = Post::find(id)
+        .await?
+        .map(|post| post.title)
+        .unwrap_or_default();
+    Ok(HttpResponse::text(title))
 }
 
 /// Renders with a replayable header whose value the wire cannot carry.

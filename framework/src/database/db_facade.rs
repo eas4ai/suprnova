@@ -382,6 +382,11 @@ impl DbTableBuilder {
     /// parameter-bound; explicit nulls are emitted as the constant SQL literal
     /// `NULL` so PostgreSQL can infer each target column's type.
     pub async fn insert(self, attrs: Attrs) -> Result<i64, FrameworkError> {
+        let connection = self.connection_override.clone();
+        crate::render_cache::orm::atomic(connection.as_deref(), || self.insert_inner(attrs)).await
+    }
+
+    async fn insert_inner(self, attrs: Attrs) -> Result<i64, FrameworkError> {
         // Audit HIGH `database` #2 - validate identifiers and operators
         // captured in the builder state, plus the attrs keys which are
         // themselves identifiers being interpolated into SQL.
@@ -499,6 +504,11 @@ impl DbTableBuilder {
     /// explicit nulls use the constant SQL literal `NULL` to retain the target
     /// column type on PostgreSQL.
     pub async fn update(self, attrs: Attrs) -> Result<u64, FrameworkError> {
+        let connection = self.connection_override.clone();
+        crate::render_cache::orm::atomic(connection.as_deref(), || self.update_inner(attrs)).await
+    }
+
+    async fn update_inner(self, attrs: Attrs) -> Result<u64, FrameworkError> {
         if attrs.is_empty() {
             return Err(FrameworkError::database(format!(
                 "DB::table(\"{}\")::update called with empty attrs",
@@ -554,6 +564,11 @@ impl DbTableBuilder {
     /// the same implementation. Prefer the `_all` name when the
     /// table-wide intent is the point of the call site.
     pub async fn delete(self) -> Result<u64, FrameworkError> {
+        let connection = self.connection_override.clone();
+        crate::render_cache::orm::atomic(connection.as_deref(), || self.delete_inner()).await
+    }
+
+    async fn delete_inner(self) -> Result<u64, FrameworkError> {
         // Audit HIGH `database` #2 - identifier + operator validation.
         self.validate_inputs()?;
         // T11/T12: route through resolve_write.
@@ -932,20 +947,22 @@ impl DB {
         sql: &str,
         values: impl IntoIterator<Item = SeaValue>,
     ) -> Result<bool, FrameworkError> {
-        let exec =
-            crate::database::transaction::ExecutorChoice::resolve_write(None, None, None).await?;
-        let backend = exec.backend();
-        let stmt =
-            Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
-        let ok = exec
-            .run(stmt)
-            .await
-            .map(|_| true)
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        if !is_select_statement(sql) {
-            crate::render_cache::orm::after_unknown_write().await?;
-        }
-        Ok(ok)
+        let values: Vec<SeaValue> = values.into_iter().collect();
+        crate::render_cache::orm::atomic(None, || async move {
+            let exec =
+                crate::database::transaction::ExecutorChoice::resolve_write(None, None, None)
+                    .await?;
+            let backend = exec.backend();
+            let stmt = Statement::from_sql_and_values(backend, sql, values);
+            exec.run(stmt)
+                .await
+                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            if !is_select_statement(sql) {
+                crate::render_cache::orm::after_unknown_write().await?;
+            }
+            Ok(true)
+        })
+        .await
     }
 
     /// Run a raw, unprepared SQL statement (no placeholder binding).
@@ -955,54 +972,56 @@ impl DB {
     /// Necessary for DDL on backends that reject parameter-bound
     /// statements: `CREATE INDEX`, `ALTER TABLE`, `VACUUM`, etc.
     pub async fn unprepared(sql: &str) -> Result<bool, FrameworkError> {
-        use sea_orm::ConnectionTrait;
-        let exec =
-            crate::database::transaction::ExecutorChoice::resolve_write(None, None, None).await?;
-        // Emit QueryExecuted for unprepared statements as well - they
-        // are still queries from the observer's perspective.
-        let ok = if super::events::is_dispatching() || !super::events::query_observation_active() {
-            match &exec {
-                crate::database::transaction::ExecutorChoice::Tx(t, _) => {
-                    t.execute_unprepared(sql).await
+        crate::render_cache::orm::atomic(None, || async move {
+            use sea_orm::ConnectionTrait;
+            let exec =
+                crate::database::transaction::ExecutorChoice::resolve_write(None, None, None)
+                    .await?;
+            // Emit QueryExecuted for unprepared statements as well - they
+            // are still queries from the observer's perspective.
+            if super::events::is_dispatching() || !super::events::query_observation_active() {
+                match &exec {
+                    crate::database::transaction::ExecutorChoice::Tx(t, _) => {
+                        t.execute_unprepared(sql).await
+                    }
+                    crate::database::transaction::ExecutorChoice::Pool(c, _) => {
+                        c.inner().execute_unprepared(sql).await
+                    }
                 }
-                crate::database::transaction::ExecutorChoice::Pool(c, _) => {
-                    c.inner().execute_unprepared(sql).await
-                }
+                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            } else {
+                let conn_name = exec.connection_name().to_string();
+                let start = std::time::Instant::now();
+                let res = match &exec {
+                    crate::database::transaction::ExecutorChoice::Tx(t, _) => {
+                        t.execute_unprepared(sql).await
+                    }
+                    crate::database::transaction::ExecutorChoice::Pool(c, _) => {
+                        c.inner().execute_unprepared(sql).await
+                    }
+                };
+                let elapsed = start.elapsed();
+                let result_for_event: Result<(), String> = match &res {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(e.to_string()),
+                };
+                let event = super::events::QueryExecuted {
+                    sql: sql.to_string(),
+                    bindings: vec![],
+                    time: elapsed,
+                    connection_name: conn_name,
+                    read_write_type: Some(super::events::ReadWriteType::Write),
+                    result: result_for_event,
+                };
+                super::transaction::emit_query_executed(event).await;
+                res.map_err(|e| FrameworkError::database(e.to_string()))?;
             }
-            .map(|_| true)
-            .map_err(|e| FrameworkError::database(e.to_string()))?
-        } else {
-            let conn_name = exec.connection_name().to_string();
-            let start = std::time::Instant::now();
-            let res = match &exec {
-                crate::database::transaction::ExecutorChoice::Tx(t, _) => {
-                    t.execute_unprepared(sql).await
-                }
-                crate::database::transaction::ExecutorChoice::Pool(c, _) => {
-                    c.inner().execute_unprepared(sql).await
-                }
-            };
-            let elapsed = start.elapsed();
-            let result_for_event: Result<(), String> = match &res {
-                Ok(_) => Ok(()),
-                Err(e) => Err(e.to_string()),
-            };
-            let event = super::events::QueryExecuted {
-                sql: sql.to_string(),
-                bindings: vec![],
-                time: elapsed,
-                connection_name: conn_name,
-                read_write_type: Some(super::events::ReadWriteType::Write),
-                result: result_for_event,
-            };
-            super::transaction::emit_query_executed(event).await;
-            res.map(|_| true)
-                .map_err(|e| FrameworkError::database(e.to_string()))?
-        };
-        if !is_select_statement(sql) {
-            crate::render_cache::orm::after_unknown_write().await?;
-        }
-        Ok(ok)
+            if !is_select_statement(sql) {
+                crate::render_cache::orm::after_unknown_write().await?;
+            }
+            Ok(true)
+        })
+        .await
     }
 
     /// Run a raw statement that produces a `rows_affected` result.
@@ -1015,17 +1034,21 @@ impl DB {
     ) -> Result<u64, FrameworkError> {
         // T11/T12: route through resolve_write - affecting statements
         // (INSERT/UPDATE/DELETE/UPSERT) never go to the replica.
-        let exec =
-            crate::database::transaction::ExecutorChoice::resolve_write(None, None, None).await?;
-        let backend = exec.backend();
-        let stmt =
-            Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
-        let result = exec
-            .run(stmt)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        crate::render_cache::orm::after_unknown_write().await?;
-        Ok(result.rows_affected())
+        let values: Vec<SeaValue> = values.into_iter().collect();
+        crate::render_cache::orm::atomic(None, || async move {
+            let exec =
+                crate::database::transaction::ExecutorChoice::resolve_write(None, None, None)
+                    .await?;
+            let backend = exec.backend();
+            let stmt = Statement::from_sql_and_values(backend, sql, values);
+            let result = exec
+                .run(stmt)
+                .await
+                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            crate::render_cache::orm::after_unknown_write().await?;
+            Ok(result.rows_affected())
+        })
+        .await
     }
 
     /// [`DB::affecting_statement`] for a write whose single table the caller
@@ -1037,16 +1060,20 @@ impl DB {
         values: Vec<SeaValue>,
         table: &str,
     ) -> Result<u64, FrameworkError> {
-        let exec =
-            crate::database::transaction::ExecutorChoice::resolve_write(None, None, None).await?;
-        let backend = exec.backend();
-        let stmt = Statement::from_sql_and_values(backend, sql, values);
-        let result = exec
-            .run(stmt)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        crate::render_cache::orm::after_table_write(table).await?;
-        Ok(result.rows_affected())
+        crate::render_cache::orm::atomic(None, || async move {
+            let exec =
+                crate::database::transaction::ExecutorChoice::resolve_write(None, None, None)
+                    .await?;
+            let backend = exec.backend();
+            let stmt = Statement::from_sql_and_values(backend, sql, values);
+            let result = exec
+                .run(stmt)
+                .await
+                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            crate::render_cache::orm::after_table_write(table).await?;
+            Ok(result.rows_affected())
+        })
+        .await
     }
 
     // ---- Phase 10C T12 - connection-pinned raw escapes ------------------
@@ -1100,24 +1127,25 @@ impl DB {
         sql: &str,
         values: impl IntoIterator<Item = SeaValue>,
     ) -> Result<bool, FrameworkError> {
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            None,
-            Some(conn_name),
-            None,
-        )
-        .await?;
-        let backend = exec.backend();
-        let stmt =
-            Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
-        let ok = exec
-            .run(stmt)
-            .await
-            .map(|_| true)
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        if !is_select_statement(sql) {
-            crate::render_cache::orm::after_unknown_write().await?;
-        }
-        Ok(ok)
+        let values: Vec<SeaValue> = values.into_iter().collect();
+        crate::render_cache::orm::atomic(Some(conn_name), || async move {
+            let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                None,
+                Some(conn_name),
+                None,
+            )
+            .await?;
+            let backend = exec.backend();
+            let stmt = Statement::from_sql_and_values(backend, sql, values);
+            exec.run(stmt)
+                .await
+                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            if !is_select_statement(sql) {
+                crate::render_cache::orm::after_unknown_write().await?;
+            }
+            Ok(true)
+        })
+        .await
     }
 
     /// Phase 10C T12 - `DB::affecting_statement` variant pinned to the
@@ -1128,21 +1156,24 @@ impl DB {
         sql: &str,
         values: impl IntoIterator<Item = SeaValue>,
     ) -> Result<u64, FrameworkError> {
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            None,
-            Some(conn_name),
-            None,
-        )
-        .await?;
-        let backend = exec.backend();
-        let stmt =
-            Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
-        let result = exec
-            .run(stmt)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        crate::render_cache::orm::after_unknown_write().await?;
-        Ok(result.rows_affected())
+        let values: Vec<SeaValue> = values.into_iter().collect();
+        crate::render_cache::orm::atomic(Some(conn_name), || async move {
+            let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                None,
+                Some(conn_name),
+                None,
+            )
+            .await?;
+            let backend = exec.backend();
+            let stmt = Statement::from_sql_and_values(backend, sql, values);
+            let result = exec
+                .run(stmt)
+                .await
+                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            crate::render_cache::orm::after_unknown_write().await?;
+            Ok(result.rows_affected())
+        })
+        .await
     }
 }
 

@@ -96,18 +96,6 @@ fn is_missing_table_error_for(message: &str, table: &str) -> bool {
             || message.contains("doesn't exist"))
 }
 
-/// Once-per-process warning that a write path skipped advancing a
-/// generation because `suprnova_render_epochs` is missing, even though a
-/// RenderCache runtime is installed for this process. See ruling R65: a
-/// missing table on a process that never called `RenderCache::install` is
-/// silent by design (`MissingTablePolicy::Skip`'s ordinary case, matching
-/// every uninstalled application and test database); a missing table
-/// after `RenderCache::install` succeeded is a schema regression - a bad
-/// deploy, a dropped table - that would otherwise stop advancing
-/// generations, and therefore stop invalidating anything, silently
-/// forever.
-static WARNED_MISSING_TABLE_AFTER_INSTALL: std::sync::Once = std::sync::Once::new();
-
 /// Collapses a database failure into the one closed provider kind
 /// [`RenderCacheError`] exposes for this contract. The underlying message
 /// is dropped from the returned error deliberately: `RenderCacheError`'s
@@ -374,16 +362,13 @@ fn upsert_sql(backend: DbBackend) -> Result<&'static str, FrameworkError> {
 ///
 /// A missing-table failure on the probe below always propagates here
 /// rather than being swallowed: `Transaction::current()` is the ambient
-/// transaction the *caller* opened with `DB::transaction`, which may hold
-/// other writes. On Postgres a failed statement poisons the whole
-/// transaction, and `COMMIT` on a poisoned transaction returns the
-/// ROLLBACK tag without raising - so swallowing here would let the
-/// caller's later `commit()` report success while silently discarding
-/// everything it wrote. See fix1 item 1. The no-ambient-transaction
-/// fallback (`orm::advance` opening a transaction solely to hold this
-/// advance, with nothing else riding on it) uses this crate's own
-/// `advance_in_dedicated_transaction` instead, which is safe to swallow
-/// in.
+/// transaction the *caller* opened with `DB::transaction`, or the one
+/// `orm::atomic` opened around a row write (CACHE-009), and it holds that
+/// write. On Postgres a failed statement poisons the whole transaction,
+/// and `COMMIT` on a poisoned transaction returns the ROLLBACK tag without
+/// raising - so swallowing here would let the caller's later `commit()`
+/// report success while silently discarding everything it wrote. See fix1
+/// item 1.
 pub async fn advance_in_current_transaction(
     identities: &[DependencyIdentity],
 ) -> Result<(), FrameworkError> {
@@ -396,21 +381,20 @@ pub async fn advance_in_current_transaction(
     let tx = Transaction::current().ok_or_else(|| {
         FrameworkError::internal("RenderCache generation advance requires the owning transaction")
     })?;
-    advance_through(
-        &ExecutorChoice::from_tx(&tx),
-        identities,
-        MissingTablePolicy::Propagate,
-    )
-    .await
+    advance_through(&ExecutorChoice::from_tx(&tx), identities).await
 }
 
 /// Advances `identities` inside a transaction that `orm::advance`'s
-/// no-ambient-transaction fallback opened solely to hold this advance -
-/// nothing else rides on it, so a missing-table failure is safe to treat
-/// as "RenderCache is not installed against this specific database" and
-/// skip, the same reasoning [`advance_in_current_transaction`] documents
-/// for why it must NOT do the same. `pub(crate)`: this is `orm::advance`'s
-/// own implementation detail, not a second public entry point.
+/// no-ambient-transaction fallback opened solely to hold this advance: the
+/// path a write on a named connection takes, since the ledger lives on the
+/// primary and cannot share that write's transaction (CACHE-009). A
+/// missing-table failure propagates here as everywhere else since the
+/// audit of 2026-09-13 (finding ASTRA-10): a table that vanished after the
+/// write side said it was present is a schema regression, and swallowing
+/// it left every dependent entry served without invalidation, silently,
+/// until the migration was reapplied. `orm::advance` answers the failure
+/// by suspending serving. `pub(crate)`: this is `orm::advance`'s own
+/// implementation detail, not a second public entry point.
 pub(crate) async fn advance_in_dedicated_transaction(
     identities: &[DependencyIdentity],
 ) -> Result<(), FrameworkError> {
@@ -420,27 +404,7 @@ pub(crate) async fn advance_in_dedicated_transaction(
     let tx = Transaction::current().ok_or_else(|| {
         FrameworkError::internal("RenderCache generation advance requires the owning transaction")
     })?;
-    advance_through(
-        &ExecutorChoice::from_tx(&tx),
-        identities,
-        MissingTablePolicy::Skip,
-    )
-    .await
-}
-
-/// Whether [`advance_through`] propagates or swallows a missing-table
-/// failure on its epoch probe. See [`advance_in_current_transaction`] and
-/// [`advance_in_dedicated_transaction`] for which case is which and why.
-#[derive(Clone, Copy)]
-enum MissingTablePolicy {
-    /// The ambient transaction is the caller's own; swallowing would risk
-    /// converting a poisoned transaction into a silent rollback reported
-    /// as success.
-    Propagate,
-    /// The transaction holds nothing but this advance; a missing table
-    /// means RenderCache is not installed here, and there is nothing else
-    /// in the transaction that swallowing the error could put at risk.
-    Skip,
+    advance_through(&ExecutorChoice::from_tx(&tx), identities).await
 }
 
 /// The upsert-and-log body shared by [`advance_in_current_transaction`],
@@ -460,7 +424,6 @@ enum MissingTablePolicy {
 async fn advance_through(
     exec: &ExecutorChoice,
     identities: &[DependencyIdentity],
-    on_missing_table: MissingTablePolicy,
 ) -> Result<(), FrameworkError> {
     if identities.is_empty() {
         return Ok(());
@@ -475,31 +438,6 @@ async fn advance_through(
         .await
     {
         Ok(row) => row,
-        Err(e)
-            if matches!(on_missing_table, MissingTablePolicy::Skip)
-                && is_missing_table_error(&e.to_string()) =>
-        {
-            // A table that disappeared after the write side said it was
-            // present is the same schema regression in a worker as in the
-            // server (ruling R65, re-keyed for iteration 006): both stop
-            // advancing generations, and every entry that depended on the
-            // tables the write touched is served without invalidation until
-            // the migration is applied.
-            if super::write_side::decision() == super::write_side::WriteSideDecision::Open {
-                WARNED_MISSING_TABLE_AFTER_INSTALL.call_once(|| {
-                    tracing::warn!(
-                        target: "suprnova::render_cache",
-                        "a write skipped advancing a RenderCache generation because \
-                         suprnova_render_epochs is missing, even though a RenderCache \
-                         runtime is installed for this process; every entry that \
-                         depends on the tables this write touched will keep being \
-                         served without invalidation until the RenderCache migration \
-                         is applied",
-                    );
-                });
-            }
-            return Ok(());
-        }
         Err(e) => return Err(FrameworkError::database(e.to_string())),
     }
     .ok_or_else(|| {
@@ -668,12 +606,7 @@ pub async fn advance_via_handle(
     if !super::write_side_open(true).await? {
         return Ok(());
     }
-    advance_through(
-        &ExecutorChoice::from_handle(handle),
-        identities,
-        MissingTablePolicy::Propagate,
-    )
-    .await
+    advance_through(&ExecutorChoice::from_handle(handle), identities).await
 }
 
 /// The application-database generation authority: a [`GenerationLedger`]

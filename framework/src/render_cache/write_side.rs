@@ -173,13 +173,6 @@ pub(crate) async fn write_side_open(
 }
 
 /// The decision this process has fixed, or `Undecided` before it probes.
-///
-/// Compiled unconditionally, because the missing-table warning (ruling R65)
-/// reads it from a synchronous match arm with no place to await a probe: it
-/// reports a schema regression only for a process that had already decided
-/// it advances generations, which is exactly the process for which a
-/// vanished table is a regression rather than the ordinary uninstalled
-/// case.
 #[must_use]
 pub fn decision() -> WriteSideDecision {
     match STATE.load(Ordering::Relaxed) {
@@ -190,6 +183,31 @@ pub fn decision() -> WriteSideDecision {
 }
 
 /// Returns the probe to `Unknown`, so the next write decides again.
+/// CACHE-009: set when an advancement that could not share its row write's
+/// transaction (a write on a named connection, whose ledger lives on the
+/// primary) failed after the row landed. While set, every lookup in this
+/// process misses, so no entry whose invalidation is uncertain is served;
+/// the next successful advancement clears it. Process-local: another node
+/// learns nothing from it, which Live spec 17 records as the limit of this
+/// fallback.
+static SERVING_SUSPENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stops serving stored entries until [`confirm_advancement`].
+pub(crate) fn suspend_serving() {
+    SERVING_SUSPENDED.store(true, Ordering::Relaxed);
+}
+
+/// An advancement landed, so stored entries are trustworthy again.
+pub(crate) fn confirm_advancement() {
+    SERVING_SUSPENDED.store(false, Ordering::Relaxed);
+}
+
+/// Whether [`suspend_serving`] is in force.
+#[must_use]
+pub(crate) fn serving_suspended() -> bool {
+    SERVING_SUSPENDED.load(Ordering::Relaxed)
+}
+
 #[cfg(any(test, feature = "testing"))]
 pub(crate) fn reset_for_test() {
     STATE.store(UNKNOWN, Ordering::Relaxed);

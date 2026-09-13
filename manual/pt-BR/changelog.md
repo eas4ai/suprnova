@@ -100,6 +100,23 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ### Segurança
 
+- **Uma escrita de dados e sua invalidação no RenderCache são confirmadas
+  juntas.** No caminho de autocommit, um save de modelo, uma escrita do query
+  builder ou uma instrução crua gravava primeiro a linha e avançava as
+  gerações de dependência depois, em uma segunda transação. Quando essa
+  segunda transação falhava, a linha era durável, a API retornava um erro e
+  toda página em cache que dependia da linha continuava passando na
+  verificação de coerência e servindo o conteúdo anterior à escrita: uma
+  mudança de visibilidade, de permissão ou uma exclusão podia ficar invisível
+  até a próxima invalidação bem-sucedida. Todo terminal de escrita agora
+  executa a escrita da linha e seu avanço dentro de uma transação aberta para
+  isso, então ambos são confirmados ou nenhum é. Uma tabela do ledger que some
+  depois de o RenderCache decidir que ela estava presente agora faz a escrita
+  falhar em vez de ser pulada com um aviso. Uma escrita destinada a uma
+  conexão nomeada, cujo ledger vive na primária, mantém seu avanço separado;
+  se esse avanço falhar, o processo para de servir entradas armazenadas até
+  que um tenha sucesso. Encontrado pela auditoria adversarial de 2026-09-13
+  (ASTRA-10); chegou à main depois da tag `v2.0.1`.
 - **O contrato `Vary` de um handler é aplicado antes de o RenderCache
   armazenar.** Um handler que variava seu corpo por um cabeçalho de requisição
   próprio e o declarava com `Vary` era armazenado sob uma chave construída

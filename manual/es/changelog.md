@@ -104,6 +104,24 @@ recientes primero.
 
 ### Seguridad
 
+- **Una escritura de datos y su invalidación de RenderCache se confirman
+  juntas.** En la ruta de autocommit, un guardado de modelo, una escritura del
+  query builder o una sentencia cruda dejaba primero la fila y avanzaba las
+  generaciones de dependencia después, en una segunda transacción. Cuando esa
+  segunda transacción fallaba, la fila era durable, la API devolvía un error y
+  cada página en caché que dependía de la fila seguía pasando su comprobación
+  de coherencia y sirviendo el contenido previo a la escritura: un cambio de
+  visibilidad, de permisos o un borrado podía quedar invisible hasta la
+  siguiente invalidación exitosa. Cada terminal de escritura ahora ejecuta la
+  escritura de la fila y su avance dentro de una transacción abierta para
+  ello, así que ambos se confirman o ninguno lo hace. Una tabla del ledger que
+  desaparece después de que RenderCache decidió que estaba presente ahora hace
+  fallar la escritura en lugar de omitirse con una advertencia. Una escritura
+  destinada a una conexión con nombre, cuyo ledger vive en la primaria,
+  conserva su avance separado; si ese avance falla, el proceso deja de servir
+  entradas almacenadas hasta que uno tenga éxito. Detectado por la auditoría
+  adversarial del 2026-09-13 (ASTRA-10); aterrizó en main después de la
+  etiqueta `v2.0.1`.
 - **El contrato `Vary` de un handler se aplica antes de que RenderCache
   almacene.** Un handler que variaba su cuerpo según una cabecera de petición
   propia y lo declaraba con `Vary` se almacenaba bajo una clave construida

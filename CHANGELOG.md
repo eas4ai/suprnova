@@ -91,6 +91,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **A data write and its RenderCache invalidation commit together.** On
+  the autocommit path, a model save, a query-builder write, or a raw
+  statement landed its row first and advanced the dependency generations
+  in a second transaction afterwards. When that second transaction failed,
+  the row was durable, the API returned an error, and every cached page
+  that depended on the row kept passing its coherence check and serving
+  the pre-write content: a visibility, entitlement, or deletion change
+  could stay invisible until the next successful invalidation. Every write
+  terminal now runs the row write and its advancement inside one
+  transaction opened for the purpose, so both commit or neither does. A
+  ledger table that vanishes after RenderCache decided it was present now
+  fails the write instead of being skipped with a warning. A write bound
+  for a named connection, whose ledger lives on the primary, keeps its
+  separate advancement; if that advancement fails, the process stops
+  serving stored entries until one succeeds. Found by the 2026-09-13
+  adversarial audit (ASTRA-10); landed on main after the `v2.0.1` tag.
 - **A handler's `Vary` contract is enforced before RenderCache stores.**
   A handler that varied its body on a request header of its own and said
   so with `Vary` was stored under a key built from the route policy alone,

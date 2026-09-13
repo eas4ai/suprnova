@@ -105,6 +105,25 @@ en premier.
 
 ### Sécurité
 
+- **Une écriture de données et son invalidation RenderCache sont validées
+  ensemble.** Sur le chemin autocommit, une sauvegarde de modèle, une écriture
+  du query builder ou une instruction brute posait d'abord la ligne, puis
+  faisait avancer les générations de dépendance dans une seconde transaction.
+  Quand cette seconde transaction échouait, la ligne était durable, l'API
+  renvoyait une erreur, et chaque page en cache dépendant de la ligne
+  continuait de passer son contrôle de cohérence et de servir le contenu
+  d'avant l'écriture : un changement de visibilité, de droits ou une
+  suppression pouvait rester invisible jusqu'à la prochaine invalidation
+  réussie. Chaque terminal d'écriture exécute désormais l'écriture de la ligne
+  et son avancement dans une transaction ouverte à cet effet, si bien que les
+  deux sont validés ou aucun ne l'est. Une table du registre qui disparaît
+  après que RenderCache l'a jugée présente fait désormais échouer l'écriture
+  au lieu d'être ignorée avec un avertissement. Une écriture destinée à une
+  connexion nommée, dont le registre vit sur la connexion primaire, garde son
+  avancement séparé ; si cet avancement échoue, le processus cesse de servir
+  les entrées stockées jusqu'à ce qu'un avancement réussisse. Trouvé par
+  l'audit adversarial du 2026-09-13 (ASTRA-10) ; arrivé sur main après le tag
+  `v2.0.1`.
 - **Le contrat `Vary` d'un handler est appliqué avant que RenderCache ne
   stocke.** Un handler qui faisait varier son corps selon un en-tête de
   requête à lui et le déclarait par `Vary` était stocké sous une clé

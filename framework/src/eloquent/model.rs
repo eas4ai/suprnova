@@ -465,18 +465,23 @@ where
         // honours per-model `connection = "..."`, and skips
         // `__read_replica__` (writes always go to primary unless the
         // model explicitly opts elsewhere).
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            None,
-            None,
-            Self::default_connection_name(),
-        )
-        .await?;
-        let inserted = exec
-            .insert_active(am)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        let row = Self::try_from_storage(inserted)?;
-        crate::render_cache::orm::after_model_write(&row).await?;
+        let row =
+            crate::render_cache::orm::atomic(Self::default_connection_name(), || async move {
+                let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                    None,
+                    None,
+                    Self::default_connection_name(),
+                )
+                .await?;
+                let inserted = exec
+                    .insert_active(am)
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                let row = Self::try_from_storage(inserted)?;
+                crate::render_cache::orm::after_model_write(&row).await?;
+                Ok(row)
+            })
+            .await?;
 
         Self::__dispatch_created(&row).await?;
         Self::__dispatch_saved(&row).await?;
@@ -521,18 +526,23 @@ where
         let mut am = self.clone().into_active_model_for_update()?;
         Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
         // T11/T12: route through resolve_write.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            None,
-            None,
-            Self::default_connection_name(),
-        )
-        .await?;
-        let updated = exec
-            .update_active(am)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        let current = Self::try_from_storage(updated)?;
-        crate::render_cache::orm::after_model_write(&current).await?;
+        let current =
+            crate::render_cache::orm::atomic(Self::default_connection_name(), || async move {
+                let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                    None,
+                    None,
+                    Self::default_connection_name(),
+                )
+                .await?;
+                let updated = exec
+                    .update_active(am)
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                let current = Self::try_from_storage(updated)?;
+                crate::render_cache::orm::after_model_write(&current).await?;
+                Ok(current)
+            })
+            .await?;
 
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -561,18 +571,23 @@ where
         let mut am = row.into_active_model();
         Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
         // T11/T12: route through resolve_write.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            None,
-            None,
-            Self::default_connection_name(),
-        )
-        .await?;
-        let updated = exec
-            .update_active(am)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        let current = Self::try_from_storage(updated)?;
-        crate::render_cache::orm::after_model_write(&current).await?;
+        let current =
+            crate::render_cache::orm::atomic(Self::default_connection_name(), || async move {
+                let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                    None,
+                    None,
+                    Self::default_connection_name(),
+                )
+                .await?;
+                let updated = exec
+                    .update_active(am)
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                let current = Self::try_from_storage(updated)?;
+                crate::render_cache::orm::after_model_write(&current).await?;
+                Ok(current)
+            })
+            .await?;
 
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -600,16 +615,19 @@ where
         let row = self.try_into_storage()?;
         let am = row.into_active_model();
         // T11/T12: route through resolve_write.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            None,
-            None,
-            Self::default_connection_name(),
-        )
+        crate::render_cache::orm::atomic(Self::default_connection_name(), || async {
+            let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                None,
+                None,
+                Self::default_connection_name(),
+            )
+            .await?;
+            exec.delete_active(am)
+                .await
+                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            crate::render_cache::orm::after_model_write(&snapshot).await
+        })
         .await?;
-        exec.delete_active(am)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        crate::render_cache::orm::after_model_write(&snapshot).await?;
 
         Self::__dispatch_deleted(&snapshot, false).await?;
         snapshot.touch_owners().await?;
@@ -630,16 +648,19 @@ where
         let row = self.try_into_storage()?;
         let am = row.into_active_model();
         // T11/T12: route through resolve_write.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            None,
-            None,
-            Self::default_connection_name(),
-        )
+        crate::render_cache::orm::atomic(Self::default_connection_name(), || async {
+            let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                None,
+                None,
+                Self::default_connection_name(),
+            )
+            .await?;
+            exec.delete_active(am)
+                .await
+                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            crate::render_cache::orm::after_model_write(&snapshot).await
+        })
         .await?;
-        exec.delete_active(am)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        crate::render_cache::orm::after_model_write(&snapshot).await?;
 
         Self::__dispatch_force_deleted(&snapshot).await?;
         Self::__dispatch_deleted(&snapshot, true).await?;
@@ -663,13 +684,16 @@ where
         if Self::TOUCHES.is_empty() {
             return Ok(());
         }
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            None,
-            None,
-            Self::default_connection_name(),
-        )
-        .await?;
-        self.__touch_owners_via(&exec, None).await
+        crate::render_cache::orm::atomic(Self::default_connection_name(), || async {
+            let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                None,
+                None,
+                Self::default_connection_name(),
+            )
+            .await?;
+            self.__touch_owners_via(&exec, None).await
+        })
+        .await
     }
 
     /// [`Self::touch_owners`] pinned to an explicit transaction handle.
@@ -1705,29 +1729,40 @@ where
     let snapshot = model.clone();
     let row = model.try_into_storage()?;
     let am = row.into_active_model();
-    let exec = match tx {
-        Some(t) => crate::database::transaction::ExecutorChoice::from_tx(t),
-        None => {
-            crate::database::transaction::ExecutorChoice::resolve_write(
-                None,
-                None,
-                M::default_connection_name(),
-            )
-            .await?
+    // CACHE-009: with an explicit handle the write and its advance already
+    // share that transaction, so the write runs as is; without one,
+    // `atomic` opens the transaction they share.
+    let snapshot_ref = &snapshot;
+    let write = || async move {
+        let exec = match tx {
+            Some(t) => crate::database::transaction::ExecutorChoice::from_tx(t),
+            None => {
+                crate::database::transaction::ExecutorChoice::resolve_write(
+                    None,
+                    None,
+                    M::default_connection_name(),
+                )
+                .await?
+            }
+        };
+        let result = exec
+            .delete_active(am)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        if result.rows_affected == 0 {
+            return Err(FrameworkError::not_found(
+                "delete_or_fail: row no longer exists",
+            ));
         }
+        match tx {
+            Some(t) => crate::render_cache::orm::after_model_write_with_tx(t, snapshot_ref).await?,
+            None => crate::render_cache::orm::after_model_write(snapshot_ref).await?,
+        }
+        Ok(())
     };
-    let result = exec
-        .delete_active(am)
-        .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
-    if result.rows_affected == 0 {
-        return Err(FrameworkError::not_found(
-            "delete_or_fail: row no longer exists",
-        ));
-    }
     match tx {
-        Some(t) => crate::render_cache::orm::after_model_write_with_tx(t, &snapshot).await?,
-        None => crate::render_cache::orm::after_model_write(&snapshot).await?,
+        Some(_) => write().await?,
+        None => crate::render_cache::orm::atomic(M::default_connection_name(), write).await?,
     }
 
     M::__dispatch_deleted(&snapshot, false).await?;

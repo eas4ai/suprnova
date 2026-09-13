@@ -409,15 +409,18 @@ where
     /// # Ok(()) }
     /// ```
     async fn insert_one(model: Self::ActiveModel) -> Result<Self::Model, FrameworkError> {
-        let inserted = with_write_executor(|exec| async move {
-            match exec {
-                ExecutorChoice::Tx(t, _) => model.insert(t.as_ref()).await,
-                ExecutorChoice::Pool(c, _) => model.insert(c.inner()).await,
-            }
+        crate::render_cache::orm::atomic(None, || async move {
+            let inserted = with_write_executor(|exec| async move {
+                match exec {
+                    ExecutorChoice::Tx(t, _) => model.insert(t.as_ref()).await,
+                    ExecutorChoice::Pool(c, _) => model.insert(c.inner()).await,
+                }
+            })
+            .await?;
+            crate::render_cache::orm::after_table_write(entity_table_name::<Self>()).await?;
+            Ok(inserted)
         })
-        .await?;
-        crate::render_cache::orm::after_table_write(entity_table_name::<Self>()).await?;
-        Ok(inserted)
+        .await
     }
 
     /// Update an existing record
@@ -451,15 +454,18 @@ where
     /// # Ok(()) }
     /// ```
     async fn update_one(model: Self::ActiveModel) -> Result<Self::Model, FrameworkError> {
-        let updated = with_write_executor(|exec| async move {
-            match exec {
-                ExecutorChoice::Tx(t, _) => model.update(t.as_ref()).await,
-                ExecutorChoice::Pool(c, _) => model.update(c.inner()).await,
-            }
+        crate::render_cache::orm::atomic(None, || async move {
+            let updated = with_write_executor(|exec| async move {
+                match exec {
+                    ExecutorChoice::Tx(t, _) => model.update(t.as_ref()).await,
+                    ExecutorChoice::Pool(c, _) => model.update(c.inner()).await,
+                }
+            })
+            .await?;
+            crate::render_cache::orm::after_table_write(entity_table_name::<Self>()).await?;
+            Ok(updated)
         })
-        .await?;
-        crate::render_cache::orm::after_table_write(entity_table_name::<Self>()).await?;
-        Ok(updated)
+        .await
     }
 
     /// Delete a record by primary key
@@ -493,14 +499,17 @@ where
         K: Into<<Self::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,
     {
         let stmt = Self::delete_by_id(id);
-        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
-        let result = match exec {
-            ExecutorChoice::Tx(t, _) => stmt.exec(t.as_ref()).await,
-            ExecutorChoice::Pool(c, _) => stmt.exec(c.inner()).await,
-        }
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
-        crate::render_cache::orm::after_table_write(entity_table_name::<Self>()).await?;
-        Ok(result.rows_affected)
+        crate::render_cache::orm::atomic(None, || async move {
+            let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+            let result = match exec {
+                ExecutorChoice::Tx(t, _) => stmt.exec(t.as_ref()).await,
+                ExecutorChoice::Pool(c, _) => stmt.exec(c.inner()).await,
+            }
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+            crate::render_cache::orm::after_table_write(entity_table_name::<Self>()).await?;
+            Ok(result.rows_affected)
+        })
+        .await
     }
 
     /// Save a model (insert or update based on whether primary key is set)
@@ -538,15 +547,18 @@ where
     where
         Self::ActiveModel: TryIntoModel<Self::Model>,
     {
-        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
-        let saved = match exec {
-            ExecutorChoice::Tx(t, _) => model.save(t.as_ref()).await,
-            ExecutorChoice::Pool(c, _) => model.save(c.inner()).await,
-        }
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
-        crate::render_cache::orm::after_table_write(entity_table_name::<Self>()).await?;
-        saved
-            .try_into_model()
-            .map_err(|e| FrameworkError::database(e.to_string()))
+        crate::render_cache::orm::atomic(None, || async move {
+            let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+            let saved = match exec {
+                ExecutorChoice::Tx(t, _) => model.save(t.as_ref()).await,
+                ExecutorChoice::Pool(c, _) => model.save(c.inner()).await,
+            }
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+            crate::render_cache::orm::after_table_write(entity_table_name::<Self>()).await?;
+            saved
+                .try_into_model()
+                .map_err(|e| FrameworkError::database(e.to_string()))
+        })
+        .await
     }
 }

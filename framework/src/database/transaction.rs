@@ -1283,6 +1283,43 @@ impl DB {
         >,
         T: Send,
     {
+        Self::transaction_scoped(isolation_level, |transaction| async move {
+            f(&transaction).await
+        })
+        .await
+    }
+
+    /// CACHE-009: like [`DB::transaction`], but the closure takes no handle
+    /// and returns any `Send` future. Every write path already routes
+    /// through the ambient `CURRENT_TX`, so a caller that only needs the
+    /// transaction to exist, such as [`crate::render_cache::orm::atomic`],
+    /// can pass a future that borrows from its own frame instead of boxing
+    /// one tied to the handle's lifetime. Crate-internal on purpose: the
+    /// public surface stays the one shape the manual documents.
+    pub(crate) async fn transaction_ambient<F, Fut, T>(f: F) -> Result<T, FrameworkError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, FrameworkError>>,
+        T: Send,
+    {
+        Self::transaction_scoped(None, |_transaction| f())
+            .await
+            .map_err(TransactionFailure::into_error)
+    }
+
+    /// The one transaction body: begin on the primary, install the
+    /// ambient `CURRENT_TX` for the future `make` builds from the handle,
+    /// and commit or roll back through the scope finalizer. Both public
+    /// shapes above are adapters over it.
+    async fn transaction_scoped<G, Fut, T>(
+        isolation_level: Option<IsolationLevel>,
+        make: G,
+    ) -> Result<T, TransactionFailure>
+    where
+        G: FnOnce(Transaction) -> Fut,
+        Fut: std::future::Future<Output = Result<T, FrameworkError>>,
+        T: Send,
+    {
         // Reject nested calls before doing any work. Without this
         // guard, `conn.inner().begin()` below would start a brand-new
         // top-level transaction on a pooled connection that's
@@ -1327,16 +1364,12 @@ impl DB {
         // Keep every temporary handle inside the scoped future. On abort,
         // they drop before ScopeFinalizer, so its owned rollback task can
         // unwrap the transaction without racing framework-owned references.
-        let result = CURRENT_TX
-            .scope(Some(tx_state.clone()), async move {
-                let transaction = Transaction {
-                    inner: tx_state.tx.clone(),
-                    connection_name: tx_state.connection_name.clone(),
-                    registry: Some(tx_state),
-                };
-                f(&transaction).await
-            })
-            .await;
+        let transaction = Transaction {
+            inner: tx_state.tx.clone(),
+            connection_name: tx_state.connection_name.clone(),
+            registry: Some(tx_state.clone()),
+        };
+        let result = CURRENT_TX.scope(Some(tx_state), make(transaction)).await;
 
         // Transfer state before the next await. Dropping the caller now only
         // stops waiting: the physical outcome, listeners, and callbacks remain

@@ -140,3 +140,34 @@ set, decline reason `vary_undeclared`,
 `framework/src/render_cache/middleware.rs`) the same test passes with
 each variant rendered and carrying its own `Vary`, and the full
 `render_cache` binary (369 tests) passes.
+
+### CACHE-009, `cache-write-atomicity`, 2026-09-13 15:40
+
+Violating example: the test `write_and_generation_commit_together` on the
+tree at `24feffc4`, with only the test and its `/write-atomicity/{id}`
+support route added. Result:
+
+    FAIL hardening::write_and_generation_commit_together
+    assertion `left == right` failed: the row write rolled back with its
+    failed advancement
+      left: "after"
+     right: "before"
+
+That is ASTRA-10 as the audit reproduced it: the `UPDATE` reported an
+error and the row was durable anyway. After the fix (every write terminal
+runs under `render_cache::orm::atomic`, which opens one transaction the
+row write and the advancement share; the ledger's missing-table swallow
+is gone; a failed dedicated advancement suspends serving) the same test
+passes with the row rolled back and the cache and database agreeing. The
+full `render_cache` binary (370 tests), the `eloquent` binary (601), and
+the `database` binary (121) pass. Two fixtures in `operations.rs` that
+dropped a ledger table through the `DB` facade now drop it through the
+raw connection, because the facade's own write hook would roll the drop
+back: the behavior the requirement asks for, and the same reason the
+hardening test drops its table that way.
+
+The fallback sentence of CACHE-009 (serving stops while an advancement
+that could not share a transaction is unconfirmed) is implemented
+(`write_side::suspend_serving`) but not yet under its own test: it needs
+a named-connection fixture, which CACHE-008's mechanism introduces. That
+test lands with CACHE-008 and is recorded there.

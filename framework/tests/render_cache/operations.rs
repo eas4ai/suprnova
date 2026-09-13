@@ -19,6 +19,7 @@ use crate::render_cache_privacy_support;
 use render_cache_operations_support::{
     NOT_FOUND_ROUTE, boot_with_file_l1, boot_with_render_cache, clock, counting_route, dispatch_get,
 };
+use suprnova::ConnectionTrait;
 use suprnova::Model;
 use suprnova::StatusCode;
 use suprnova::attrs;
@@ -375,7 +376,13 @@ async fn console_inspect_reports_the_epoch_as_unavailable_when_the_ledger_read_f
     dispatch_get(&harness, "/private/1", &[("x-test-login", "user-7")]).await;
     let key = RenderCache::key_for_route_for_test("/private/{id}", &[("id", "1")], Some("user-7"));
 
-    suprnova::DB::unprepared("DROP TABLE suprnova_render_epochs")
+    // Through the raw connection, not the `DB` facade: since CACHE-009 the
+    // facade's own write hook advances generations inside the statement's
+    // transaction, and a drop of a ledger table would roll itself back.
+    suprnova::DB::connection()
+        .expect("the harness connected the primary database")
+        .inner()
+        .execute_unprepared("DROP TABLE suprnova_render_epochs")
         .await
         .expect("drop the epoch table to force the ledger read to fail");
 
@@ -412,7 +419,13 @@ async fn console_inspect_reports_the_epoch_as_unavailable_when_the_ledger_read_f
 async fn console_epoch_advance_propagates_when_the_ledger_is_unavailable() {
     let _harness = boot_with_render_cache().await;
 
-    suprnova::DB::unprepared("DROP TABLE suprnova_render_epochs")
+    // Through the raw connection, not the `DB` facade: since CACHE-009 the
+    // facade's own write hook advances generations inside the statement's
+    // transaction, and a drop of a ledger table would roll itself back.
+    suprnova::DB::connection()
+        .expect("the harness connected the primary database")
+        .inner()
+        .execute_unprepared("DROP TABLE suprnova_render_epochs")
         .await
         .expect("drop the epoch table to force the ledger to be unavailable");
 

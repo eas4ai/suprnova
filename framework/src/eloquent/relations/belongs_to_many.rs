@@ -342,6 +342,20 @@ where
     ) -> Result<(), FrameworkError> {
         self.pivot_filters.reject_mutation()?;
         self.validate_meta()?;
+        let id = related_id.into();
+        crate::render_cache::orm::atomic(L::default_connection_name(), || {
+            self.attach_with_inner(id, extra)
+        })
+        .await
+    }
+
+    /// The pivot insert and its advance, run under [`Self::attach_with`]'s
+    /// atomic wrapper (CACHE-009).
+    async fn attach_with_inner(
+        self,
+        id: serde_json::Value,
+        extra: Attrs,
+    ) -> Result<(), FrameworkError> {
         // Resolve through ExecutorChoice so the pivot INSERT lands on
         // the ambient transaction connection when CURRENT_TX is active,
         // and so the parent model's `#[model(connection = "...")]`
@@ -349,7 +363,6 @@ where
         // conventionally live on the parent's database.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
-        let id = related_id.into();
         match &exec {
             ExecutorChoice::Tx(t, _) => {
                 attach_one(
@@ -400,13 +413,20 @@ where
     ) -> Result<(), FrameworkError> {
         self.pivot_filters.reject_mutation()?;
         self.validate_meta()?;
+        let id = related_id.into();
+        crate::render_cache::orm::atomic(L::default_connection_name(), || self.detach_inner(id))
+            .await
+    }
+
+    /// The pivot delete and its advance, run under [`Self::detach`]'s
+    /// atomic wrapper (CACHE-009).
+    async fn detach_inner(self, id: serde_json::Value) -> Result<(), FrameworkError> {
         // Resolve through ExecutorChoice so the pivot DELETE lands on
         // the ambient transaction connection when CURRENT_TX is active,
         // and honours the parent model's `#[model(connection = "...")]`
         // default outside a tx.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
-        let id = related_id.into();
         match &exec {
             ExecutorChoice::Tx(t, _) => {
                 detach_one(
@@ -458,18 +478,7 @@ where
     {
         self.pivot_filters.reject_mutation()?;
         self.validate_meta()?;
-        use std::collections::{HashMap, HashSet};
-
-        // Resolve through ExecutorChoice so the SELECT + INSERTs +
-        // DELETEs all run on the ambient transaction connection when
-        // CURRENT_TX is active, and honour the parent model's
-        // `#[model(connection = "...")]` default outside a tx. Outside
-        // a tx we still open an inner SeaORM transaction (below) for
-        // atomicity of the attach/detach loop; that inner tx is
-        // unnecessary when we already inherit one from the closure
-        // form.
-        let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
-        let backend = exec.backend();
+        use std::collections::HashSet;
 
         // De-duplicate target IDs by JSON-string canonicalisation.
         // Preserves the first occurrence for a deterministic insert
@@ -483,6 +492,28 @@ where
                 target_ids.push(v);
             }
         }
+        crate::render_cache::orm::atomic(L::default_connection_name(), || {
+            self.sync_inner(target_ids)
+        })
+        .await
+    }
+
+    /// The pivot reconciliation and its advance, run under [`Self::sync`]'s
+    /// atomic wrapper (CACHE-009): inside the ambient transaction the
+    /// writes route through it and the advance joins it.
+    async fn sync_inner(self, target_ids: Vec<serde_json::Value>) -> Result<(), FrameworkError> {
+        use std::collections::{HashMap, HashSet};
+
+        // Resolve through ExecutorChoice so the SELECT + INSERTs +
+        // DELETEs all run on the ambient transaction connection when
+        // CURRENT_TX is active, and honour the parent model's
+        // `#[model(connection = "...")]` default outside a tx. Outside
+        // a tx we still open an inner SeaORM transaction (below) for
+        // atomicity of the attach/detach loop; that inner tx is
+        // unnecessary when we already inherit one from the closure
+        // form.
+        let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
+        let backend = exec.backend();
 
         // SELECT current pivot rows: only the related-key column is
         // needed for the diff. Backend-aware placeholder for the

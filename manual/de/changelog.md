@@ -103,6 +103,25 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Sicherheit
 
+- **Ein Datenschreibvorgang und seine RenderCache-Invalidierung werden
+  gemeinsam committet.** Auf dem Autocommit-Pfad landete ein Modell-Save, ein
+  Query-Builder-Schreibvorgang oder eine Raw-Anweisung zuerst die Zeile und
+  rückte die Abhängigkeitsgenerationen danach in einer zweiten Transaktion
+  vor. Schlug diese zweite Transaktion fehl, war die Zeile dauerhaft, die API
+  gab einen Fehler zurück, und jede zwischengespeicherte Seite, die von der
+  Zeile abhing, bestand weiterhin ihre Kohärenzprüfung und lieferte den Inhalt
+  von vor dem Schreibvorgang aus: Eine Änderung an Sichtbarkeit, Berechtigung
+  oder Löschung konnte bis zur nächsten erfolgreichen Invalidierung unsichtbar
+  bleiben. Jedes Schreibterminal führt den Zeilenschreibvorgang und sein
+  Vorrücken jetzt innerhalb einer dafür geöffneten Transaktion aus, sodass
+  beides committet wird oder nichts davon. Eine Ledger-Tabelle, die
+  verschwindet, nachdem RenderCache sie als vorhanden festgestellt hat, lässt
+  den Schreibvorgang jetzt fehlschlagen, statt mit einer Warnung übersprungen
+  zu werden. Ein Schreibvorgang, der an eine benannte Verbindung gebunden ist
+  und dessen Ledger auf der primären liegt, behält sein getrenntes Vorrücken;
+  schlägt dieses fehl, stellt der Prozess das Ausliefern gespeicherter
+  Einträge ein, bis eines gelingt. Gefunden durch das adversariale Audit vom
+  2026-09-13 (ASTRA-10); nach dem Tag `v2.0.1` auf main gelandet.
 - **Der `Vary`-Vertrag eines Handlers wird durchgesetzt, bevor RenderCache
   speichert.** Ein Handler, der seinen Body anhand eines eigenen
   Request-Headers variierte und das per `Vary` mitteilte, wurde unter einem

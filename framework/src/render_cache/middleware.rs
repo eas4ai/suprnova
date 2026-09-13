@@ -1276,6 +1276,11 @@ async fn lookup(
     policy: &RenderCachePolicy,
     key: &RenderKey,
 ) -> Result<Option<FoundEntry>, ()> {
+    // CACHE-009: while an advancement that could not share its row write's
+    // transaction is unconfirmed, nothing stored is trusted.
+    if super::write_side::serving_suspended() {
+        return Ok(None);
+    }
     if let Some(hot) = runtime.l0.hot_get(key) {
         if hot.entry().header().key == *key {
             return Ok(Some(FoundEntry::Hot(hot)));

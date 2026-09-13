@@ -72,10 +72,57 @@ pub(crate) async fn advance(identities: Vec<DependencyIdentity>) -> Result<(), F
     if !DB::is_connected() {
         return Ok(());
     }
-    DB::transaction(move |_tx| {
+    let outcome = DB::transaction(move |_tx| {
         Box::pin(async move { super::ledger::advance_in_dedicated_transaction(&identities).await })
     })
-    .await
+    .await;
+    // CACHE-009: this branch is the one where the advance could not share
+    // the row write's transaction, so a failure here leaves a committed row
+    // whose dependents may still be served. Serving stops until an
+    // advancement lands; see `super::write_side::suspend_serving`.
+    match &outcome {
+        Ok(()) => super::write_side::confirm_advancement(),
+        Err(_) => super::write_side::suspend_serving(),
+    }
+    outcome
+}
+
+/// CACHE-009: runs a row write together with the generation advancement it
+/// triggers as one atomic unit.
+///
+/// With an ambient transaction the write and its advance already share it,
+/// so `write` runs as is. With none, and the write bound for the primary
+/// connection with the write side open, one transaction is opened around
+/// `write`: the row write inside it routes through `CURRENT_TX`, the
+/// advance joins that same transaction through [`advance`]'s first branch,
+/// and both commit or roll back together. A write bound for a named
+/// connection cannot share a transaction with the ledger, which lives on
+/// the primary; it runs as is, and a failed advance then suspends serving
+/// (see [`advance`]). The audit of 2026-09-13 (finding ASTRA-10) showed the
+/// split commit this closes: a row durable, its advance rolled back, and
+/// the old representation still current.
+///
+/// `write` is a closure returning a future rather than a future, because
+/// whether to open a transaction is decided here, before the future is
+/// built inside it.
+pub(crate) async fn atomic<T, F, Fut>(
+    connection: Option<&str>,
+    write: F,
+) -> Result<T, FrameworkError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, FrameworkError>>,
+    T: Send,
+{
+    let on_primary = connection.is_none_or(|name| name == crate::database::PRIMARY_CONNECTION_NAME);
+    let shareable = !in_transaction()
+        && on_primary
+        && DB::is_connected()
+        && super::write_side_open(false).await?;
+    if !shareable {
+        return write().await;
+    }
+    DB::transaction_ambient(write).await
 }
 
 /// The `Table` and `Record` identities a model write advances: every row

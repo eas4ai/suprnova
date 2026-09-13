@@ -332,12 +332,25 @@ where
     ) -> Result<(), FrameworkError> {
         self.pivot_filters.reject_mutation()?;
         self.validate_meta()?;
+        let id = related_id.into();
+        crate::render_cache::orm::atomic(L::default_connection_name(), || {
+            self.attach_with_inner(id, extra)
+        })
+        .await
+    }
+
+    /// The pivot insert and its advance, run under [`Self::attach_with`]'s
+    /// atomic wrapper (CACHE-009).
+    async fn attach_with_inner(
+        self,
+        id: serde_json::Value,
+        extra: Attrs,
+    ) -> Result<(), FrameworkError> {
         // Phase 10C audit-fix AF2 - resolve through ExecutorChoice so the
         // pivot INSERT lands on the ambient transaction when CURRENT_TX
         // is active.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
-        let id = related_id.into();
         match &exec {
             ExecutorChoice::Tx(t, _) => {
                 morph_attach_one(
@@ -384,10 +397,17 @@ where
     ) -> Result<(), FrameworkError> {
         self.pivot_filters.reject_mutation()?;
         self.validate_meta()?;
+        let id = related_id.into();
+        crate::render_cache::orm::atomic(L::default_connection_name(), || self.detach_inner(id))
+            .await
+    }
+
+    /// The pivot delete and its advance, run under [`Self::detach`]'s
+    /// atomic wrapper (CACHE-009).
+    async fn detach_inner(self, id: serde_json::Value) -> Result<(), FrameworkError> {
         // Phase 10C audit-fix AF2 - see attach_with above.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
-        let id = related_id.into();
         match &exec {
             ExecutorChoice::Tx(t, _) => {
                 morph_detach_one(
@@ -428,13 +448,7 @@ where
     {
         self.pivot_filters.reject_mutation()?;
         self.validate_meta()?;
-        use std::collections::{HashMap, HashSet};
-
-        // Phase 10C audit-fix AF2 - same shape as BelongsToMany::sync -
-        // route through ExecutorChoice so the SELECT + inner writes
-        // honor CURRENT_TX.
-        let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
-        let backend = exec.backend();
+        use std::collections::HashSet;
 
         let mut seen_target: HashSet<String> = HashSet::new();
         let mut target_ids: Vec<serde_json::Value> = Vec::new();
@@ -445,6 +459,23 @@ where
                 target_ids.push(v);
             }
         }
+        crate::render_cache::orm::atomic(L::default_connection_name(), || {
+            self.sync_inner(target_ids)
+        })
+        .await
+    }
+
+    /// The pivot reconciliation and its advance, run under [`Self::sync`]'s
+    /// atomic wrapper (CACHE-009): inside the ambient transaction the
+    /// writes route through it and the advance joins it.
+    async fn sync_inner(self, target_ids: Vec<serde_json::Value>) -> Result<(), FrameworkError> {
+        use std::collections::{HashMap, HashSet};
+
+        // Phase 10C audit-fix AF2 - same shape as BelongsToMany::sync -
+        // route through ExecutorChoice so the SELECT + inner writes
+        // honor CURRENT_TX.
+        let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
+        let backend = exec.backend();
 
         let id_col = format!("{}_id", self.morph_name);
         let type_col = format!("{}_type", self.morph_name);

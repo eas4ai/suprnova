@@ -1,7 +1,7 @@
 # Suprnova Live -- 17 Dependency Tracking and Generations
 
 Status: Normative design specification
-Last revised: 2026-09-08
+Last revised: 2026-09-13
 
 ## Scope
 
@@ -240,6 +240,31 @@ UX flow:
 - Custom sources can join the same authority model without exposing content.
 
 ## Decisions and revisions
+
+- 2026-09-13 -- Made the data write and its generation advancement one
+  transaction on the autocommit path. Every framework write terminal (the
+  raw statement facade, the query builder, the SeaORM entity helpers, the
+  Eloquent model methods, owner touches, and the pivot relations) now runs
+  through an atomic wrapper: with no ambient transaction and the write
+  bound for the primary connection, the wrapper opens one, the row write
+  routes through it, and the advancement joins it, so both commit or roll
+  back together. The adversarial audit of the same day (finding ASTRA-10)
+  showed the split this closes: a raw `UPDATE` committed, its advancement
+  rolled back, the API returned an error, and the cached page kept
+  serving the pre-write body under the old generation. Two consequences
+  are deliberate. A missing ledger table is no longer swallowed on any
+  path, so a write on a primary whose RenderCache tables vanished fails
+  rather than committing without invalidation; the once-per-process
+  warning that used to mark that case is gone with the skip it announced.
+  And a write bound for a named connection, whose advancement cannot share
+  a transaction with the ledger on the primary, still advances in a
+  dedicated transaction after the row lands; when that advancement fails,
+  the process suspends serving every stored entry until an advancement
+  succeeds. That suspension is process-local: another node learns nothing
+  from it, which is the recorded limit of the fallback. Recorded under
+  Write-side generation advancement; the framework's requirement is
+  CACHE-009 in `docs/spec/render-cache.md`, decided by the owner on
+  2026-09-13 (one transaction rather than a transactional outbox).
 
 - 2026-09-08 -- Delivered the promoted point-read and feature-flag
   requirements. A primary-key point read that returns a row observes that
