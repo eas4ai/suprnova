@@ -251,6 +251,19 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-13 -- Made a handler's `Cache-Control: no-store` a storage veto:
+  the eligibility check reads the concrete response's `Cache-Control` and
+  declines storage when it carries the `no-store` token, under the new
+  eligibility decline reason `no_store_directive`, and a declined response
+  is served exactly as the handler built it, directive included. The
+  adversarial audit of the same day (finding ASTRA-02) rendered a public
+  cached route once and replayed it with the policy's own
+  `public, max-age=60, s-maxage=60`, so a handler's "do not store" was
+  both ignored and rewritten. Only the `no-store` token vetoes; `private`,
+  `max-age`, and the rest remain the route policy's business, since the
+  policy is where the application declares its cache class. Recorded
+  under HTTP cache metadata; the framework's requirement is CACHE-001 in
+  `docs/spec/render-cache.md`.
 - 2026-09-13 -- Widened the replayable header set to the six isolation and
   execution headers (`Content-Disposition`, `Cross-Origin-Opener-Policy`,
   `Cross-Origin-Embedder-Policy`, `Cross-Origin-Resource-Policy`,

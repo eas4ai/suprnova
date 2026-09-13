@@ -856,6 +856,11 @@ async fn boot(
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("csp nonce policy");
+    // CACHE-001: the plain public shape on a route whose handler says no-store.
+    let no_store_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("no store policy");
     let stale_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(60_000, 60_000, 120_000).expect("freshness"))
         .build()
@@ -1201,6 +1206,7 @@ async fn boot(
         .get("/security-headers", security_headers_handler)
         .into();
     let router: Router = router.get("/csp-nonce", csp_nonce_handler).into();
+    let router: Router = router.get("/no-store", no_store_handler).into();
     let router: Router = router.get("/overflow", overflow_handler).into();
     let router: Router = router
         .get("/stitched-gate-only", stitched_gate_only_handler)
@@ -1424,6 +1430,8 @@ async fn boot(
         .expect("attach security headers policy")
         .try_render_cache("/csp-nonce", GroupPolicy::from(csp_nonce_policy))
         .expect("attach csp nonce policy")
+        .try_render_cache("/no-store", GroupPolicy::from(no_store_policy))
+        .expect("attach no store policy")
         .try_render_cache("/overflow", GroupPolicy::from(overflow_policy))
         .expect("attach overflow policy")
         .try_render_cache(
@@ -2000,6 +2008,16 @@ async fn csp_nonce_handler(_request: Request) -> Response {
         "Content-Security-Policy",
         format!("script-src 'nonce-{nonce}'"),
     ))
+}
+
+/// Renders a public page whose handler says `Cache-Control: no-store`
+/// (CACHE-001, from audit finding ASTRA-02). The body carries the render
+/// count, so a replayed body is visible.
+async fn no_store_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("private render {n}")).header("Cache-Control", "no-store"))
 }
 
 /// Renders with a replayable header whose value the wire cannot carry.

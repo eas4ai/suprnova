@@ -28,6 +28,8 @@ pub(crate) enum LookupDeclineReason {
     SetsCookie,
     /// A hop-by-hop, connection, or per-request header is present.
     UnsafeHeaderName,
+    /// The handler's own `Cache-Control` says `no-store` (CACHE-001).
+    NoStoreDirective,
     // Observation.
     /// The collector's report overflowed, or an observed identity could
     /// not fit the observation window.
@@ -124,6 +126,7 @@ impl LookupDeclineReason {
             Self::Streaming => "streaming",
             Self::SetsCookie => "sets_cookie",
             Self::UnsafeHeaderName => "unsafe_header_name",
+            Self::NoStoreDirective => "no_store_directive",
             Self::ObservationOverflowed => "observation_overflowed",
             Self::LedgerReadFailed => "ledger_read_failed",
             Self::HandlerNotBegun => "handler_not_begun",
@@ -169,6 +172,7 @@ impl LookupDeclineReason {
         Self::Streaming,
         Self::SetsCookie,
         Self::UnsafeHeaderName,
+        Self::NoStoreDirective,
         Self::ObservationOverflowed,
         Self::LedgerReadFailed,
         Self::HandlerNotBegun,
@@ -206,7 +210,7 @@ impl LookupDeclineReason {
 }
 
 impl From<DeclineReason> for LookupDeclineReason {
-    /// The eligibility check's six reasons map one to one; only the header
+    /// The eligibility check's seven reasons map one to one; only the header
     /// name is spelled differently, to distinguish it from
     /// [`LookupDeclineReason::UnsafeHeaderValue`] (a replayable header whose
     /// *value* cannot be stored, decided later, at publication).
@@ -218,6 +222,7 @@ impl From<DeclineReason> for LookupDeclineReason {
             DeclineReason::Streaming => Self::Streaming,
             DeclineReason::SetsCookie => Self::SetsCookie,
             DeclineReason::UnsafeHeader => Self::UnsafeHeaderName,
+            DeclineReason::NoStore => Self::NoStoreDirective,
         }
     }
 }

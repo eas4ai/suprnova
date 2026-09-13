@@ -104,6 +104,16 @@ recientes primero.
 
 ### Seguridad
 
+- **RenderCache respeta el `Cache-Control: no-store` de un handler.** Una ruta
+  incorporada a la caché almacenaba una respuesta cuyo handler decía
+  `no-store` y la reproducía bajo el `public, max-age=60, s-maxage=60` de la
+  política, así que el "no almacenar" del handler se ignoraba en el servidor y
+  se reescribía para cada navegador y proxy aguas abajo. La comprobación de
+  elegibilidad ahora lee el `Cache-Control` de la respuesta y rehúsa almacenar
+  ante el token `no-store` (motivo de rechazo `no_store_directive`), y la
+  respuesta rechazada sale exactamente como la construyó el handler. Detectado
+  por la auditoría adversarial del 2026-09-13 (ASTRA-02); aterrizó en main
+  después de la etiqueta `v2.0.1`.
 - **Un nonce de CSP por respuesta nunca se reproduce desde la caché.** Una
   página pública que generaba un nonce en cada renderizado y lo nombraba en
   `Content-Security-Policy` se almacenaba como una entrada completa ordinaria,

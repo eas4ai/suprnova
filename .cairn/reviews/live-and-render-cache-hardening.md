@@ -98,3 +98,25 @@ source, decline reason `nonce_source_policy`,
 second request served by a fresh render, and the full `render_cache`
 binary (367 tests, including the one that pins every decline label to the
 operations chapter) passes with it.
+
+### CACHE-001, `cache-no-store`, 2026-09-13 14:10
+
+Violating example: the test `no_store_is_a_storage_veto` on the tree at
+`a5a035ae`, with only the test and its `/no-store` support route added.
+Result:
+
+    FAIL hardening::no_store_is_a_storage_veto
+    assertion `left == right` failed: the render keeps the handler's own
+    directive
+      left: Some("private, max-age=60")
+     right: Some("no-store")
+
+That is ASTRA-02 as the audit reproduced it, and one step worse than the
+report described: the very first response already carried the policy's
+directive in place of the handler's. After the fix (the engine's
+eligibility check reads the response's `Cache-Control` and declines on
+the `no-store` token, decline reason `no_store_directive`,
+`crates/suprnova-live/src/render_cache/policy.rs`) the same test passes
+with both requests rendered and both carrying `no-store`; the engine's
+policy tests gain a unit test for the token rule, and the full
+`render_cache` binary (368 tests) passes.

@@ -141,7 +141,7 @@ um provedor ou um backend:
 
   - Elegibilidade (`policy.eligibility`, espelhando o próprio
     `DeclineReason` do motor): `policy_uncacheable`, `method`, `status`,
-    `streaming`, `sets_cookie`, `unsafe_header_name`.
+    `streaming`, `sets_cookie`, `unsafe_header_name`, `no_store_directive`.
   - Observação (o relatório do coletor e a leitura do ledger dentro da
     transação): `observation_overflowed`, `ledger_read_failed`,
     `handler_not_begun`.

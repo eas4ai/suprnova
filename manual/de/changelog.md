@@ -103,6 +103,16 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Sicherheit
 
+- **Das `Cache-Control: no-store` eines Handlers wird von RenderCache
+  respektiert.** Eine in den Cache aufgenommene Route speicherte eine Antwort,
+  deren Handler `no-store` sagte, und gab sie unter dem `public, max-age=60,
+  s-maxage=60` der Richtlinie wieder, sodass das "nicht speichern" des
+  Handlers serverseitig ignoriert und für jeden Browser und Proxy dahinter
+  umgeschrieben wurde. Die Eignungsprüfung liest jetzt das `Cache-Control` der
+  Antwort und lehnt das Speichern beim Token `no-store` ab (Ablehnungsgrund
+  `no_store_directive`); die abgelehnte Antwort geht genau so hinaus, wie der
+  Handler sie gebaut hat. Gefunden durch das adversariale Audit vom 2026-09-13
+  (ASTRA-02); nach dem Tag `v2.0.1` auf main gelandet.
 - **Ein Nonce-Wert aus der CSP wird nie aus dem Cache wiedergegeben.** Eine
   öffentliche Seite, die bei jedem Rendern eine Nonce erzeugte und sie in
   `Content-Security-Policy` nannte, wurde als gewöhnlicher vollständiger

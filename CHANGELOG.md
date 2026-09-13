@@ -91,6 +91,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **A handler's `Cache-Control: no-store` is honored by RenderCache.** A
+  route opted into the cache stored a response whose handler said
+  `no-store` and replayed it under the policy's own
+  `public, max-age=60, s-maxage=60`, so a handler's "do not store" was
+  ignored on the server and rewritten for every browser and proxy
+  downstream. The eligibility check now reads the response's
+  `Cache-Control` and declines storage on the `no-store` token (decline
+  reason `no_store_directive`), and the declined response goes out exactly
+  as the handler built it. Found by the 2026-09-13 adversarial audit
+  (ASTRA-02); landed on main after the `v2.0.1` tag.
 - **A per-response CSP nonce is never replayed from the cache.** A public
   page that minted a nonce on every render and named it in
   `Content-Security-Policy` was stored as an ordinary complete entry, so

@@ -23,6 +23,8 @@
 
 ### 安全
 
+- **RenderCache 现在会尊重处理器的 `Cache-Control: no-store`。** 一个加入缓存的路由之前会存储处理器声明了 `no-store` 的响应，并以策略自身的 `public, max-age=60, s-maxage=60` 重放它，因此处理器的“不要存储”在服务端被忽略，并且对下游的每个浏览器和代理都被改写。资格检查现在会读取响应的 `Cache-Control`，遇到 `no-store` 令牌即拒绝存储 (拒绝原因 `no_store_directive`)，被拒绝的响应会按处理器构建的原样发出。由 2026-09-13 的对抗性审计发现 (ASTRA-02)；在 `v2.0.1` 标签之后合入 main。
+
 - **每个响应独有的 CSP nonce 不会再从缓存中重放。** 一个在每次渲染时生成 nonce 并在 `Content-Security-Policy` 中声明它的公开页面，之前会被作为普通的完整条目存储，因此之后的每次命中都会在头部和内联脚本中携带首次渲染的 nonce。nonce 是单个响应中内联脚本的授权令牌；重放它意味着任何能获取该页面的人都能读到这个令牌。RenderCache 现在会拒绝存储这样的响应 (拒绝原因 `nonce_source_policy`)；基于哈希的策略照常缓存，拼接的 Live 文档也继续在每次命中时签发新的 nonce。由 2026-09-13 的对抗性审计发现 (ASTRA-12)；在 `v2.0.1` 标签之后合入 main。
 
 - **缓存的响应会保留其隔离与执行相关的头部。** RenderCache 之前不会存储响应的 `Content-Disposition`、`Cross-Origin-Opener-Policy`、`Cross-Origin-Embedder-Policy`、`Cross-Origin-Resource-Policy`、`Permissions-Policy` 和 `X-Frame-Options`，因此缓存命中会返回同样的字节却不带这些头部。一次在首个请求中作为附件下载的 HTML 导出，在第二次请求时会在应用的源之下内联渲染，其中携带的任何标记都会以同源权限执行。这六个头部现在会从存储的表示中逐字节重放。由 2026-09-13 的对抗性审计发现 (ASTRA-11)；在 `v2.0.1` 标签之后合入 main。

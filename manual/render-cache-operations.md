@@ -133,7 +133,7 @@ provider, or a backend:
 
   - Eligibility (`policy.eligibility`, mirroring the engine's own
     `DeclineReason`): `policy_uncacheable`, `method`, `status`,
-    `streaming`, `sets_cookie`, `unsafe_header_name`.
+    `streaming`, `sets_cookie`, `unsafe_header_name`, `no_store_directive`.
   - Observation (the collector's report and the in-transaction ledger
     read): `observation_overflowed`, `ledger_read_failed`,
     `handler_not_begun`.

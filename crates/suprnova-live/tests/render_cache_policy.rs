@@ -29,6 +29,7 @@ fn get_html() -> ResponseSignals {
         sets_cookie: false,
         content_type: Some("text/html; charset=utf-8".to_owned()),
         header_names: vec!["cache-control".to_owned(), "content-type".to_owned()],
+        cache_control: None,
         private_observed: false,
     }
 }
@@ -83,6 +84,34 @@ fn state_changing_streaming_cookie_setting_and_error_responses_decline() {
     assert_eq!(
         policy.eligibility(&hop),
         Eligibility::Decline(DeclineReason::UnsafeHeader)
+    );
+}
+
+/// CACHE-001: a handler's own `no-store` is a storage veto, whatever the
+/// route policy declares, and only that token: a `private` or `max-age`
+/// directive is the route's business, not a veto.
+#[test]
+fn a_no_store_directive_declines_storage_and_other_directives_do_not() {
+    let policy = public_policy();
+    let mut vetoed = get_html();
+    vetoed.cache_control = Some("private, no-store, max-age=0".to_owned());
+    assert_eq!(
+        policy.eligibility(&vetoed),
+        Eligibility::Decline(DeclineReason::NoStore)
+    );
+    let mut spaced = get_html();
+    spaced.cache_control = Some("NO-STORE".to_owned());
+    assert_eq!(
+        policy.eligibility(&spaced),
+        Eligibility::Decline(DeclineReason::NoStore),
+        "the token is case-insensitive"
+    );
+    let mut allowed = get_html();
+    allowed.cache_control = Some("private, max-age=60, no-store-but-not-really".to_owned());
+    assert_eq!(
+        policy.eligibility(&allowed),
+        Eligibility::Store(RepresentationClass::PublicShared),
+        "only the whole token counts"
     );
 }
 

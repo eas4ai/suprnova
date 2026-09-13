@@ -69,7 +69,7 @@ L0，它会在下一次权威读取时跟上 - 在 `CoherenceMode::Authority` �
 
   - 资格审查（`policy.eligibility`，映照引擎自身的 `DeclineReason`）：
     `policy_uncacheable`、`method`、`status`、`streaming`、`sets_cookie`、
-    `unsafe_header_name`。
+    `unsafe_header_name`、`no_store_directive`。
   - 观察（收集器的报告以及事务内部的账本读取）：`observation_overflowed`、
     `ledger_read_failed`、`handler_not_begun`。
   - 被收窄为 `Uncacheable` 的分类：`session_value_read`、

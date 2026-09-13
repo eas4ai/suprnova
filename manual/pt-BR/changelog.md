@@ -100,6 +100,16 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ### Segurança
 
+- **O `Cache-Control: no-store` de um handler é respeitado pelo RenderCache.**
+  Uma rota incluída no cache armazenava uma resposta cujo handler dizia
+  `no-store` e a reproduzia sob o `public, max-age=60, s-maxage=60` da
+  política, então o "não armazenar" do handler era ignorado no servidor e
+  reescrito para cada navegador e proxy a jusante. A verificação de
+  elegibilidade agora lê o `Cache-Control` da resposta e recusa o
+  armazenamento no token `no-store` (motivo de recusa `no_store_directive`), e
+  a resposta recusada sai exatamente como o handler a construiu. Encontrado
+  pela auditoria adversarial de 2026-09-13 (ASTRA-02); chegou à main depois da
+  tag `v2.0.1`.
 - **Um nonce de CSP por resposta nunca é reproduzido a partir do cache.** Uma
   página pública que gerava um nonce a cada renderização e o nomeava em
   `Content-Security-Policy` era armazenada como uma entrada completa comum,

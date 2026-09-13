@@ -114,3 +114,38 @@ async fn csp_nonce_is_never_replayed() {
         "the body nonce was reused across requests (second served {served})"
     );
 }
+/// CACHE-001: a handler's `Cache-Control: no-store` is a storage veto, and
+/// the route policy never replaces it. The audit (ASTRA-02) rendered a
+/// public cached route once and replayed it with
+/// `public, max-age=60, s-maxage=60`, so a handler's own "do not store"
+/// was both ignored and rewritten.
+#[tokio::test]
+#[serial_test::serial]
+async fn no_store_is_a_storage_veto() {
+    let harness = boot_with_render_cache().await;
+
+    let first = dispatch_get(&harness, "/no-store", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(
+        first.header("cache-control"),
+        Some("no-store"),
+        "the render keeps the handler's own directive"
+    );
+
+    let second = dispatch_get(&harness, "/no-store", &[]).await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "a no-store response was stored and replayed"
+    );
+    assert_eq!(
+        second.header("cache-control"),
+        Some("no-store"),
+        "the second render keeps the handler's own directive too"
+    );
+    assert_ne!(
+        first.body, second.body,
+        "each request rendered its own body"
+    );
+}

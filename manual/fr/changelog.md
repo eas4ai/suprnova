@@ -105,6 +105,16 @@ en premier.
 
 ### Sécurité
 
+- **Le `Cache-Control: no-store` d'un handler est respecté par RenderCache.**
+  Une route inscrite dans le cache stockait une réponse dont le handler disait
+  `no-store` et la rejouait sous le `public, max-age=60, s-maxage=60` de la
+  politique, si bien que le « ne pas stocker » du handler était ignoré côté
+  serveur et réécrit pour chaque navigateur et proxy en aval. Le contrôle
+  d'éligibilité lit désormais le `Cache-Control` de la réponse et refuse le
+  stockage sur le jeton `no-store` (motif de refus `no_store_directive`), et
+  la réponse refusée part exactement telle que le handler l'a construite.
+  Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-02) ; arrivé sur main
+  après le tag `v2.0.1`.
 - **Un nonce CSP par réponse n'est jamais rejoué depuis le cache.** Une page
   publique qui générait un nonce à chaque rendu et le nommait dans
   `Content-Security-Policy` était stockée comme une entrée complète ordinaire,

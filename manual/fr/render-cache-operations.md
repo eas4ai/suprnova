@@ -145,7 +145,7 @@ un fournisseur, ou un backend :
 
   - Éligibilité (`policy.eligibility`, qui reflète le propre
     `DeclineReason` du moteur) : `policy_uncacheable`, `method`, `status`,
-    `streaming`, `sets_cookie`, `unsafe_header_name`.
+    `streaming`, `sets_cookie`, `unsafe_header_name`, `no_store_directive`.
   - Observation (le rapport du collecteur et la lecture du registre à
     l'intérieur de la transaction) : `observation_overflowed`,
     `ledger_read_failed`, `handler_not_begun`.

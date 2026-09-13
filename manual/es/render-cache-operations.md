@@ -141,7 +141,7 @@ nivel, un proveedor o un backend:
 
   - Elegibilidad (`policy.eligibility`, que refleja el propio
     `DeclineReason` del motor): `policy_uncacheable`, `method`, `status`,
-    `streaming`, `sets_cookie`, `unsafe_header_name`.
+    `streaming`, `sets_cookie`, `unsafe_header_name`, `no_store_directive`.
   - Observación (el informe del colector y la lectura del ledger dentro de
     la transacción): `observation_overflowed`, `ledger_read_failed`,
     `handler_not_begun`.

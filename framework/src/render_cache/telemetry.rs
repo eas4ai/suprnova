@@ -102,7 +102,7 @@ pub const OUTCOME: &str = "outcome";
 /// The closed value set, grouped as the reason's own definition groups it:
 ///
 /// - Eligibility: `policy_uncacheable`, `method`, `status`, `streaming`,
-///   `sets_cookie`, `unsafe_header_name`.
+///   `sets_cookie`, `unsafe_header_name`, `no_store_directive`.
 /// - Observation: `observation_overflowed`, `ledger_read_failed`,
 ///   `handler_not_begun`.
 /// - Classification narrowed to `Uncacheable`: `session_value_read`,

@@ -70,7 +70,7 @@ cargo run --bin console -- render-cache:epoch-advance
   `reason` が出るのは `outcome="declined"` のときだけで、それ以外の結果には一切運ばれません。この理由は、実際に却下したその分岐において型付きの値から計算されるのであって、あとからレスポンスを見て再構成されるのではありません。つまり、実際にレンダリングを拒んだ契約の名前がそのまま出ます:
 
   - 適格性（`policy.eligibility`。エンジン自身の `DeclineReason` を映し取ります）: `policy_uncacheable`、`method`、`status`、
-    `streaming`、`sets_cookie`、`unsafe_header_name`。
+    `streaming`、`sets_cookie`、`unsafe_header_name`、`no_store_directive`。
   - 観測（コレクターのレポートとトランザクション内でのレジャー読み取り）:
     `observation_overflowed`、`ledger_read_failed`、`handler_not_begun`。
   - `Uncacheable` へ絞り込まれた分類: `session_value_read`、

@@ -614,6 +614,17 @@ impl RenderCachePolicy {
         {
             return Eligibility::Decline(DeclineReason::UnsafeHeader);
         }
+        // CACHE-001: a handler that says "do not store" means this cache
+        // too. The directive list is comma-separated and case-insensitive,
+        // and only the whole token counts, so `no-store=...` or a prefix
+        // match of another token is not a veto.
+        if signals.cache_control.as_deref().is_some_and(|value| {
+            value
+                .split(',')
+                .any(|directive| directive.trim().eq_ignore_ascii_case("no-store"))
+        }) {
+            return Eligibility::Decline(DeclineReason::NoStore);
+        }
         let class = if signals.private_observed {
             self.class.narrowest(RepresentationClass::PrivateCached)
         } else {
@@ -837,6 +848,10 @@ pub struct ResponseSignals {
     pub sets_cookie: bool,
     /// The content type, if any.
     pub content_type: Option<String>,
+    /// The handler's own `Cache-Control` value, if any. Only its `no-store`
+    /// token is a storage veto (CACHE-001); every other directive is the
+    /// route policy's business.
+    pub cache_control: Option<String>,
     /// Lower-case response header names.
     pub header_names: Vec<String>,
     /// Whether rendering observed principal, session, authorization, or
@@ -868,4 +883,6 @@ pub enum DeclineReason {
     SetsCookie,
     /// A hop-by-hop, connection, or per-request header is present.
     UnsafeHeader,
+    /// The handler's own `Cache-Control` carries the `no-store` token.
+    NoStore,
 }

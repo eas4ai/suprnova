@@ -3425,6 +3425,10 @@ fn response_signals(http: &HttpResponse, method: &str) -> ResponseSignals {
             .headers()
             .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
             .map(|(_, value)| value.to_owned()),
+        cache_control: http
+            .headers()
+            .find(|(name, _)| name.eq_ignore_ascii_case("cache-control"))
+            .map(|(_, value)| value.to_owned()),
         header_names,
         private_observed: false,
     }

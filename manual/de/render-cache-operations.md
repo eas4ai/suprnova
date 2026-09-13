@@ -147,7 +147,7 @@ Provider oder ein Backend benannt:
 
   - Eignung (`policy.eligibility`, spiegelt die eigene `DeclineReason` der
     Engine): `policy_uncacheable`, `method`, `status`, `streaming`,
-    `sets_cookie`, `unsafe_header_name`.
+    `sets_cookie`, `unsafe_header_name`, `no_store_directive`.
   - Beobachtung (der Bericht des Collectors und das Ledger-Lesen innerhalb
     der Transaktion): `observation_overflowed`, `ledger_read_failed`,
     `handler_not_begun`.
