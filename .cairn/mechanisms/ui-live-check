@@ -10,3 +10,7 @@ requirements:
   - LIVE-009
   - UI-005
   - UI-010
+  - UI-012
+  - FORM-001
+  - FORM-002
+  - FORM-003

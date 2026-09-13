@@ -92,7 +92,12 @@ rather than duplicates.
 | Domain | Prefix | File | State |
 |---|---|---|---|
 | Live (engine, facade, browser runtime, tooling) | LIVE | `live.md` | Observed; reference: `crates/suprnova-live/docs/specs/suprnova-live/` (26 numbered specs, glossary, conventions, iteration contracts 001-006) and `manual/live.md` |
-| Live component library | UI | `component-library.md` | Draft; the first commitment; reference: Live specs 20-25 |
+| Component library - foundations (inherited by every commitment) | UI | `component-library-foundations.md` | Draft; refines Live spec 20 |
+| Component library - form and input | FORM | `component-library-forms.md` | Draft; refines Live spec 21; the first commitment with foundations |
+| Component library - navigation | NAV | `component-library-navigation.md` | Draft; refines Live spec 22 |
+| Component library - overlay and disclosure | OVL | `component-library-overlays.md` | Draft; refines Live spec 23 |
+| Component library - feedback and status | FDB | `component-library-feedback.md` | Draft; refines Live spec 24 |
+| Component library - data display and layout | DATA | `component-library-data-display.md` | Draft; refines Live spec 25 |
 | Application boot, config, container, console | - | none yet | `manual/lifecycle.md`, `manual/configuration.md`, `manual/container.md`, `manual/artisan.md` |
 | HTTP: routing, middleware, requests, responses, sessions, CSRF, CORS | - | none yet | `manual/routing.md`, `manual/middleware.md`, `manual/requests.md`, `manual/responses.md`, `manual/session.md` |
 | Views and Inertia frontends | - | none yet | `manual/views.md`, `manual/inertia.md`, `manual/frontend.md` |
@@ -130,7 +135,7 @@ index wins.
   library, with the Live runtime itself CSS-agnostic: decided 2026-08-21 in
   `crates/suprnova-live/docs/specs/suprnova-live/20-component-library-foundations.md`
   (Decisions and revisions). The developer reopened the styling question on
-  2026-09-13; see `component-library.md`.
+  2026-09-13; see `component-library-foundations.md`.
 
 ## Status of this specification
 

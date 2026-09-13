@@ -2,13 +2,17 @@
 
 ## Specification review, 2026-09-13 (before agreement)
 
-Reviewed `docs/spec/live.md` (LIVE-001 to LIVE-015, Observed) and
-`docs/spec/component-library.md` (UI-001 to UI-011, Draft) as the
-specification phase requires: contradictions between requirements,
-falsifiers that would not catch their requirement's violation, and
-requirements no mechanism can check. The spec lint ran clean after twelve
-form findings were fixed (two obligations in one sentence; an actor hidden
-inside a code span).
+Reviewed `docs/spec/live.md` (LIVE-001 to LIVE-015, Observed),
+`docs/spec/component-library-foundations.md` (UI-001 to UI-015, Draft),
+and `docs/spec/component-library-forms.md` (FORM-001 to FORM-008, Draft)
+as the specification phase requires: contradictions between
+requirements, falsifiers that would not catch their requirement's
+violation, and requirements no mechanism can check. The family files for
+navigation, overlays, feedback, and data display were reviewed for form
+only; their content review happens when their commitment is drafted. The
+spec lint ran clean after twenty-eight form findings were fixed across the
+two rounds (two obligations in one sentence; an actor hidden inside a code
+span).
 
 ### Attacked: contradictions
 
@@ -20,11 +24,16 @@ inside a code span).
   exists at all.
 - UI-006 and UI-007 (light-DOM custom elements) against Live spec 20
   lines 110-111 (component JavaScript through local primitives or Stimulus
-  controllers). A real contradiction, not a reading; listed as ruling 6 in
-  the spec and blocking those two requirements.
-- UI-010 (native controls) against Live spec 21's combobox and date
-  capabilities: no contradiction, those controls belong to a later
+  controllers). A real contradiction, not a reading; listed as ruling 3 in
+  the foundations spec and blocking UI-006, UI-007, and UI-014.
+- FORM-001 (native controls) against Live spec 21's combobox and date
+  capabilities: no contradiction, those controls are the family's
+  custom-element tier (FORM-006 to FORM-008) and belong to a later
   commitment.
+- UI-010 to UI-015 (explicit registration, reserved namespaces) against
+  LIVE-005 and LIVE-006: consistent; they restate the engine's existing
+  registry model and add reservations the engine does not enforce today
+  (the `suprnova.` prefix rejection in UI-011 is new behavior).
 
 ### Attacked: falsifiers that would not catch a violation
 

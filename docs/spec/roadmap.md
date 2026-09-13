@@ -12,21 +12,26 @@ The order below follows the developer's sequencing rulings: platform-first
 components in waves, the advanced components last, the datatable closing.
 
 1. component-library-foundations - tokens, base layer, state-attribute
-   styling, asset delivery, the checker and baseline mechanisms, and the
-   form and input family (UI-001 to UI-011).
-2. component-library-overlay-and-disclosure - dialog, sheet, drawer,
+   styling, asset delivery, explicit registration and reserved
+   namespaces, the checker and baseline mechanisms, and the form
+   family's presentational tier (`component-library-foundations.md`,
+   `component-library-forms.md`).
+2. component-library-overlays - dialog, sheet, drawer,
    single-level dropdown menu, popover, tooltip, tabs, collapsible and
    accordion; opens with the anchor-positioning and popover-continuity
-   spike in the qualification host.
+   spike in the qualification host (`component-library-overlays.md`).
 3. component-library-feedback-and-navigation - alert, toast and flash
    region, skeleton, progress, spinner, empty state; header bar, footer,
-   sidebar, breadcrumbs, pagination, load more.
+   sidebar, breadcrumbs, pagination, load more (`component-library-feedback.md`,
+   `component-library-navigation.md`).
 4. component-library-data-display - card, image and aspect ratio, scroll
    area, separator, badge, avatar, list group, description list, stat
-   card; the datatable last.
+   card; the datatable last (`component-library-data-display.md`).
 5. component-library-live-native - upload widget, live feed, notification
    bell, account menu, server-rendered chart, input OTP, date picker,
-   combobox; the custom-element enhancement layer lands here.
+   combobox; the custom-element enhancement layer lands here
+   (`component-library-forms.md` custom-element tier, `-feedback.md`,
+   `-navigation.md`, `-data-display.md` behavioral tiers).
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

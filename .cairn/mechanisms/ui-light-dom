@@ -4,3 +4,4 @@ inputs:
   - app/templates/
 requirements:
   - UI-006
+  - UI-014
