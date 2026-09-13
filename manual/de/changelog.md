@@ -103,6 +103,20 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Sicherheit
 
+- **Die Lesezugriffe einer zwischengespeicherten Route über benannte
+  Verbindungen bleiben auf ihrer Verbindung.** Ein RenderCache-Miss rendert
+  innerhalb einer Snapshot-Transaktion auf der primären Datenbank, und das
+  Query-Routing bevorzugte diese Transaktion gegenüber dem `on("name")` einer
+  Abfrage oder der deklarierten Verbindung eines Modells, sodass die Aufnahme
+  einer Route in den Cache änderte, aus welcher Datenbank ihr Code las. Ein
+  Lesezugriff auf eine Mandanten- oder Hilfsdatenbank konnte die Zeile der
+  primären zurückgeben, an einer Tabelle scheitern, die der primären fehlt,
+  oder falschen Inhalt unter einem gültigen Schlüssel veröffentlichen.
+  Lesezugriffe, die an eine andere Verbindung gebunden sind, laufen jetzt auch
+  innerhalb einer Umgebungstransaktion dort, und ein Rendern, das außerhalb
+  seines Snapshots gelesen hat, wird ausgeliefert, aber nicht gespeichert
+  (Ablehnungsgrund `foreign_connection_read`). Gefunden durch das adversariale
+  Audit vom 2026-09-13 (ASTRA-06); nach dem Tag `v2.0.1` auf main gelandet.
 - **Ein Datenschreibvorgang und seine RenderCache-Invalidierung werden
   gemeinsam committet.** Auf dem Autocommit-Pfad landete ein Modell-Save, ein
   Query-Builder-Schreibvorgang oder eine Raw-Anweisung zuerst die Zeile und

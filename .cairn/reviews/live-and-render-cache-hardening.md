@@ -168,6 +168,48 @@ hardening test drops its table that way.
 
 The fallback sentence of CACHE-009 (serving stops while an advancement
 that could not share a transaction is unconfirmed) is implemented
-(`write_side::suspend_serving`) but not yet under its own test: it needs
-a named-connection fixture, which CACHE-008's mechanism introduces. That
-test lands with CACHE-008 and is recorded there.
+(`write_side::suspend_serving`) and tested under CACHE-008's
+named-connection fixture; see the next entry.
+
+### CACHE-008, `cache-named-connection`, 2026-09-13 16:30
+
+Violating example: the test `named_connection_is_preserved` on the tree at
+`89d94ea8`, with only the test, the `hardening_aux` connection fixture, and
+the `/named-connection` support route added. Result:
+
+    FAIL hardening::named_connection_is_preserved
+    assertion `left == right` failed: the render read the row from the
+    connection the query named
+      left: "primary"
+     right: "auxiliary"
+
+That is ASTRA-06 as the audit reproduced it. After the fix (both read
+resolvers in `framework/src/database/transaction.rs` route a read bound
+for another connection to that connection even inside an ambient
+transaction and tell the collector; the report's gate bucket folds the
+flag into the content bucket; `lead_render` declines publication under
+`foreign_connection_read`) the same test passes with the auxiliary row
+served twice and rendered twice. The full `render_cache` binary (372
+tests) passes. One diagnosis on the way: a plain handler's reads land in
+the collector's gate bucket, because only the stitched path marks the
+handler begun, and the fold into the content bucket copies each flag by
+name; the new flag had to join that fold.
+
+The same fixture carries CACHE-009's fallback test,
+`serving_stops_while_a_named_connection_advance_is_unconfirmed`: a write
+on the named connection whose dedicated advancement fails (the log table
+removed through the raw connection) makes the next lookup miss, and a
+later successful advancement (a write to a table the watched entry does
+not depend on) makes stored entries servable again. It passes; the
+successful shared-transaction path now confirms serving too, which the
+first draft of `atomic` had left to the dedicated path alone.
+
+One existing test pinned the old rule: `multiconnection::
+transaction_ignores_on_name_routing` asserted that a read naming another
+connection inside `DB::transaction` was rerouted to the primary. That is
+the defect as the audit described it, so the test now asserts the agreed
+behavior under the name `transaction_routes_named_reads_to_their_connection`,
+and the manual's routing precedence list (Eloquent chapter, mirrored in
+six locales) states the read exception. Writes keep routing through the
+transaction. The `database` binary (121 tests), `eloquent` (601), and the
+dogfood app (117) pass.

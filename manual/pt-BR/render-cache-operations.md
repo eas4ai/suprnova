@@ -131,8 +131,8 @@ um provedor ou um backend:
   esgotada.
 - `moved` - a releitura depois de renderizar encontrou uma dependência ou o
   epoch alterados; o candidato foi descartado, nunca publicado.
-- `declined` - a renderização não era armazenável, por uma de trinta e
-  oito razões abaixo, carregada no atributo `reason` ao lado de `outcome`.
+- `declined` - a renderização não era armazenável, por uma de quarenta e
+  duas razões abaixo, carregada no atributo `reason` ao lado de `outcome`.
   `reason` só é emitido junto de `outcome="declined"`; qualquer outro
   desfecho não carrega nenhum. A razão é calculada a partir de um valor
   tipado no ramo exato que recusou, nunca reconstruída depois a partir da
@@ -144,7 +144,7 @@ um provedor ou um backend:
     `streaming`, `sets_cookie`, `unsafe_header_name`, `no_store_directive`.
   - Observação (o relatório do coletor e a leitura do ledger dentro da
     transação): `observation_overflowed`, `ledger_read_failed`,
-    `handler_not_begun`.
+    `handler_not_begun`, `foreign_connection_read`.
   - Classificação reduzida a `Uncacheable`: `session_value_read`,
     `secret_context_read`, `undeclared_context`.
   - Fatos do documento Live: `identity_bound_without_stitching`,

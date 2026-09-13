@@ -122,7 +122,13 @@ where
     if !shareable {
         return write().await;
     }
-    DB::transaction_ambient(write).await
+    let outcome = DB::transaction_ambient(write).await;
+    if outcome.is_ok() {
+        // The advancement committed with the row it describes, which is the
+        // confirmation a suspended process is waiting for.
+        super::write_side::confirm_advancement();
+    }
+    outcome
 }
 
 /// The `Table` and `Record` identities a model write advances: every row

@@ -14,7 +14,7 @@
 
 use crate::render_cache_middleware_support;
 use render_cache_middleware_support::{
-    Post, SECURITY_HEADERS, boot_with_render_cache, counting_route, dispatch_get,
+    Post, SECURITY_HEADERS, User, boot_with_render_cache, counting_route, dispatch_get,
 };
 use suprnova::{ConnectionTrait, DB, Model, StatusCode, attrs};
 
@@ -235,5 +235,158 @@ async fn write_and_generation_commit_together() {
         &second.body[..],
         b"before",
         "the cache and the database agree after the failed write"
+    );
+}
+
+/// The named connection the CACHE-008 and CACHE-009 fallback tests read
+/// and write through. Registered once per process and backed by a SQLite
+/// file whose directory lives as long as the process, because the
+/// connection registry is process-global and outlives any one harness.
+async fn hardening_aux_connection() -> &'static str {
+    use suprnova::ConnectionRegistry;
+    const NAME: &str = "hardening_aux";
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    if !ConnectionRegistry::has(NAME).await {
+        let dir =
+            DIR.get_or_init(|| tempfile::tempdir().expect("a directory for the aux database"));
+        let config = suprnova::database::DatabaseConfig::builder()
+            .url(format!(
+                "sqlite://{}",
+                dir.path().join("aux.sqlite").display()
+            ))
+            .max_connections(4)
+            .min_connections(1)
+            .logging(false)
+            .build();
+        let conn = suprnova::database::DbConnection::connect(&config)
+            .await
+            .expect("connect the aux database");
+        ConnectionRegistry::register_existing(NAME, conn)
+            .await
+            .expect("register the aux connection once");
+    }
+    DB::statement_on(NAME, "DROP TABLE IF EXISTS markers", Vec::new())
+        .await
+        .expect("reset the aux markers table");
+    DB::statement_on(
+        NAME,
+        "CREATE TABLE markers (id INTEGER PRIMARY KEY, marker TEXT NOT NULL)",
+        Vec::new(),
+    )
+    .await
+    .expect("create the aux markers table");
+    DB::statement_on(
+        NAME,
+        "INSERT INTO markers (id, marker) VALUES (1, 'auxiliary')",
+        Vec::new(),
+    )
+    .await
+    .expect("seed the aux marker");
+    NAME
+}
+
+/// CACHE-008: a miss render runs each query on the connection it
+/// selected, and a render whose query selected a connection other than
+/// the snapshot's is not published. The audit (ASTRA-06) had a handler
+/// read `DB::table_on("audit_aux", ...)` under a cached route and get the
+/// primary's row, because the snapshot transaction on the primary was
+/// preferred over the query's own connection.
+#[tokio::test]
+#[serial_test::serial]
+async fn named_connection_is_preserved() {
+    let harness = boot_with_render_cache().await;
+    let _ = hardening_aux_connection().await;
+    DB::statement(
+        "CREATE TABLE IF NOT EXISTS markers (id INTEGER PRIMARY KEY, marker TEXT NOT NULL)",
+        Vec::new(),
+    )
+    .await
+    .expect("a same-named table on the primary, with a different row");
+    DB::statement(
+        "INSERT INTO markers (id, marker) VALUES (1, 'primary')",
+        Vec::new(),
+    )
+    .await
+    .expect("seed the primary marker");
+
+    let first = dispatch_get(&harness, "/named-connection", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(
+        &first.body[..],
+        b"auxiliary",
+        "the render read the row from the connection the query named"
+    );
+
+    let second = dispatch_get(&harness, "/named-connection", &[]).await;
+    assert_eq!(&second.body[..], b"auxiliary");
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "a render that read outside the snapshot's connection was not published"
+    );
+}
+
+/// CACHE-009, second sentence: when a write's advancement cannot share
+/// the row write's transaction (a write on a named connection, whose
+/// ledger lives on the primary) and then fails, this process stops
+/// serving stored entries until an advancement succeeds.
+#[tokio::test]
+#[serial_test::serial]
+async fn serving_stops_while_a_named_connection_advance_is_unconfirmed() {
+    let harness = boot_with_render_cache().await;
+    let aux = hardening_aux_connection().await;
+
+    let warm = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(warm.status, StatusCode::OK);
+    let hit = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(hit.body, warm.body);
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "precondition: the entry is served"
+    );
+
+    let primary = DB::connection().expect("the harness connected the primary database");
+    primary
+        .inner()
+        .execute_unprepared("DROP TABLE suprnova_render_generation_log")
+        .await
+        .expect("remove the generation log so the dedicated advancement fails");
+    let write = DB::statement_on(
+        aux,
+        "UPDATE markers SET marker = 'changed' WHERE id = 1",
+        Vec::new(),
+    )
+    .await;
+    assert!(write.is_err(), "the failed advancement is reported");
+
+    let after = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(after.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "with an advancement unconfirmed, the stored entry is not served"
+    );
+
+    primary
+        .inner()
+        .execute_unprepared(
+            "CREATE TABLE suprnova_render_generation_log (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, identity TEXT NOT NULL, generation INTEGER NOT NULL, epoch INTEGER NOT NULL, committed_at TIMESTAMP NOT NULL)",
+        )
+        .await
+        .expect("restore the generation log");
+    // A write the `/cached/1` entry does not depend on: `users`, not
+    // `posts`, so the successful advancement confirms serving without
+    // invalidating the entry this test watches.
+    User::create(attrs! { name: "confirms" })
+        .await
+        .expect("a primary write whose advancement succeeds");
+    let renders_before = counting_route::renders();
+    let served = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(served.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        renders_before,
+        "once an advancement lands, stored entries are served again"
     );
 }

@@ -91,6 +91,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **A cached route's named-connection reads stay on their connection.**
+  A RenderCache miss renders inside a snapshot transaction on the primary
+  database, and query routing preferred that transaction over a query's
+  own `on("name")` or a model's declared connection, so opting a route
+  into the cache changed which database its code read from. A tenant or
+  auxiliary database read could return the primary's row, fail on a table
+  the primary lacks, or publish the wrong content under a valid key. Reads
+  bound for another connection now run there even inside an ambient
+  transaction, and a render that read outside its snapshot is served but
+  not stored (decline reason `foreign_connection_read`). Found by the
+  2026-09-13 adversarial audit (ASTRA-06); landed on main after the
+  `v2.0.1` tag.
 - **A data write and its RenderCache invalidation commit together.** On
   the autocommit path, a model save, a query-builder write, or a raw
   statement landed its row first and advanced the dependency generations

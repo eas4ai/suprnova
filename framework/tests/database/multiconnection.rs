@@ -370,12 +370,16 @@ async fn per_model_connection_attribute_routes_default() {
     );
 }
 
-/// Step 5 - inside a transaction, `on(name)` is silently ignored.
-/// Every operation runs through the tx's connection because
-/// atomicity must not split across connections.
+/// Step 5, revised for CACHE-008 (audit finding ASTRA-06, 2026-09-13):
+/// inside a transaction, a read that names another connection runs on
+/// that connection. The transaction is pinned to the primary, so routing
+/// the read through it silently changed which database the code read
+/// from; a read cannot join a transaction on another database, but it can
+/// still go where it was bound. Writes keep routing through the
+/// transaction, since atomicity must not split across connections.
 #[tokio::test]
 #[serial]
-async fn transaction_ignores_on_name_routing() {
+async fn transaction_routes_named_reads_to_their_connection() {
     let primary = TestDatabase::sqlite_memory().await.unwrap();
     fresh_users_table(&primary).await;
 
@@ -411,9 +415,9 @@ async fn transaction_ignores_on_name_routing() {
         .await
         .unwrap();
 
-    // Inside DB::transaction, `on("isolated_alt")` is silently
-    // ignored - the read runs through the transaction's connection
-    // (which is on the primary), so it sees an empty table.
+    // Inside DB::transaction, `on("isolated_alt")` still routes the read
+    // to isolated_alt: the transaction is on the primary, whose table is
+    // empty, and the read must not be rerouted there.
     let result = DB::transaction(|_tx| {
         Box::pin(async move {
             let users = T12User::on("isolated_alt").get().await?;
@@ -423,8 +427,8 @@ async fn transaction_ignores_on_name_routing() {
     .await
     .unwrap();
     assert_eq!(
-        result, 0,
-        "transaction body sees primary (empty), not isolated_alt"
+        result, 1,
+        "a named read inside the transaction runs on isolated_alt, not on the primary"
     );
 
     // Outside the transaction, `on("isolated_alt")` routes correctly.

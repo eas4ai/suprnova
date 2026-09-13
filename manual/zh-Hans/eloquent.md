@@ -944,6 +944,7 @@ tx.commit().await?;  // 或者 tx.rollback().await?;
    `Model::*_with_tx(&tx, ...)` 薄封装。显式胜过环境式。
 2. **环境式的 `CURRENT_TX`** - 由 `DB::transaction` /
    `DB::transaction_with_attempts` 为这个闭包的任务作用域安装。
+   通过 `on(name)` 或模型声明的连接指名了另一个连接的读取，仍会在那个连接上执行：事务被固定在一个数据库上，读取无法在那里加入它，而改道会改变代码从哪个数据库读取（审计发现 ASTRA-06，2026-09-13）。写入仍留在事务上，因为原子性不得跨连接拆分。
 3. **连接池兜底** - `DB::connection()` 会返回那个全局的
    `DbConnection` 单例。
 

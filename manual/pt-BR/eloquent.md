@@ -1185,6 +1185,12 @@ conexão:
    ambiente.
 2. **`CURRENT_TX` ambiente** - instalado por `DB::transaction` /
    `DB::transaction_with_attempts` para o scope de task da closure.
+   Uma leitura que nomeia outra conexão, por `on(name)` ou pela conexão
+   declarada de um model, continua rodando nessa conexão: a transação
+   está presa a um banco de dados, então uma leitura não pode se juntar a
+   ela lá, e redirecioná-la mudaria de qual banco o código lê (achado de
+   auditoria ASTRA-06, 2026-09-13). As escritas permanecem na transação,
+   porque a atomicidade não deve se dividir entre conexões.
 3. **Fallback do pool** - `DB::connection()` retorna o singleton
    global `DbConnection`.
 

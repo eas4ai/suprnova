@@ -1208,6 +1208,13 @@ Connection:
    ein `Model::*_with_tx(&tx, ...)`-Shim. Explizit schlägt umgebend.
 2. **Umgebendes `CURRENT_TX`** - installiert von `DB::transaction` /
    `DB::transaction_with_attempts` für den Task-Scope der Closure.
+   Ein Lesezugriff, der über `on(name)` oder die deklarierte Verbindung
+   eines Modells eine andere Verbindung nennt, läuft weiterhin auf dieser
+   Verbindung: Die Transaktion ist an eine Datenbank gebunden, ein
+   Lesezugriff kann ihr dort nicht beitreten, und ihn umzuleiten würde
+   ändern, aus welcher Datenbank der Code liest (Audit-Befund ASTRA-06,
+   2026-09-13). Schreibvorgänge bleiben auf der Transaktion, weil
+   Atomarität sich nicht über Verbindungen hinweg aufteilen darf.
 3. **Pool-Fallback** - `DB::connection()` gibt das globale
    `DbConnection`-Singleton zurück.
 

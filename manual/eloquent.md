@@ -1146,6 +1146,12 @@ Three-way precedence for routing an operation through a connection:
    `Model::*_with_tx(&tx, ...)` shim. Explicit beats ambient.
 2. **Ambient `CURRENT_TX`** - installed by `DB::transaction` /
    `DB::transaction_with_attempts` for the closure's task scope.
+   A read that names another connection, through `on(name)` or a
+   model's declared connection, still runs on that connection: the
+   transaction is pinned to one database, so a read cannot join it
+   there, and rerouting it would change which database the code reads
+   from (audit finding ASTRA-06, 2026-09-13). Writes stay on the
+   transaction, since atomicity must not split across connections.
 3. **Pool fallback** - `DB::connection()` returns the global
    `DbConnection` singleton.
 

@@ -1216,6 +1216,13 @@ travers une connexion :
 2. **`CURRENT_TX` ambiant** - installé par `DB::transaction` /
    `DB::transaction_with_attempts` pour la portée de tâche de la
    closure.
+   Une lecture qui nomme une autre connexion, via `on(name)` ou la
+   connexion déclarée d'un modèle, s'exécute toujours sur cette
+   connexion : la transaction est épinglée à une seule base, une lecture
+   ne peut pas la rejoindre là-bas, et la rediriger changerait la base de
+   données que le code lit (constat d'audit ASTRA-06, 2026-09-13). Les
+   écritures restent sur la transaction, car l'atomicité ne doit pas se
+   scinder entre connexions.
 3. **Repli sur le pool** - `DB::connection()` retourne le singleton
    `DbConnection` global.
 

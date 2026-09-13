@@ -104,6 +104,20 @@ recientes primero.
 
 ### Seguridad
 
+- **Las lecturas de una ruta en caché sobre conexiones con nombre permanecen
+  en su conexión.** Un fallo de RenderCache renderiza dentro de una
+  transacción de instantánea sobre la base de datos primaria, y el
+  enrutamiento de consultas prefería esa transacción al `on("name")` propio de
+  una consulta o a la conexión declarada de un modelo, así que incorporar una
+  ruta a la caché cambiaba de qué base de datos leía su código. Una lectura de
+  una base de datos de inquilino o auxiliar podía devolver la fila de la
+  primaria, fallar en una tabla que la primaria no tiene o publicar el
+  contenido equivocado bajo una clave válida. Las lecturas destinadas a otra
+  conexión ahora se ejecutan allí incluso dentro de una transacción ambiental,
+  y un renderizado que leyó fuera de su instantánea se sirve pero no se
+  almacena (motivo de rechazo `foreign_connection_read`). Detectado por la
+  auditoría adversarial del 2026-09-13 (ASTRA-06); aterrizó en main después de
+  la etiqueta `v2.0.1`.
 - **Una escritura de datos y su invalidación de RenderCache se confirman
   juntas.** En la ruta de autocommit, un guardado de modelo, una escritura del
   query builder o una sentencia cruda dejaba primero la fila y avanzaba las

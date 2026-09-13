@@ -466,6 +466,19 @@ impl ExecutorChoice {
         }
         // Step 2: ambient closure-form transaction.
         if let Ok(Some(state)) = CURRENT_TX.try_with(|t| t.clone()) {
+            // CACHE-008: a read bound for another connection runs there,
+            // not on the ambient transaction, which is pinned to one
+            // database. Under a RenderCache snapshot the collector is told,
+            // so the render is not published as if the snapshot covered it
+            // (audit finding ASTRA-06).
+            if let Some(name) = connection_override
+                .or(model_default_conn)
+                .filter(|name| *name != crate::database::PRIMARY_CONNECTION_NAME)
+                .filter(|name| state.connection_name.as_ref() != *name)
+            {
+                crate::render_cache::collector::observe_foreign_connection_read();
+                return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
+            }
             return Ok(ExecutorChoice::Tx(
                 state.tx.clone(),
                 state.connection_name.clone(),
@@ -531,6 +544,19 @@ impl ExecutorChoice {
             ));
         }
         if let Ok(Some(state)) = CURRENT_TX.try_with(|t| t.clone()) {
+            // CACHE-008: a read bound for another connection runs there,
+            // not on the ambient transaction, which is pinned to one
+            // database. Under a RenderCache snapshot the collector is told,
+            // so the render is not published as if the snapshot covered it
+            // (audit finding ASTRA-06).
+            if let Some(name) = connection_override
+                .or(model_default_conn)
+                .filter(|name| *name != crate::database::PRIMARY_CONNECTION_NAME)
+                .filter(|name| state.connection_name.as_ref() != *name)
+            {
+                crate::render_cache::collector::observe_foreign_connection_read();
+                return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
+            }
             return Ok(ExecutorChoice::Tx(
                 state.tx.clone(),
                 state.connection_name.clone(),

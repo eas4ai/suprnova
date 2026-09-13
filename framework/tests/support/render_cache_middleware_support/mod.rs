@@ -872,6 +872,12 @@ async fn boot(
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("write atomicity policy");
+    // CACHE-008: the plain public shape on a route whose one read names a
+    // connection other than the snapshot's.
+    let named_connection_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("named connection policy");
     let stale_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(60_000, 60_000, 120_000).expect("freshness"))
         .build()
@@ -1224,6 +1230,9 @@ async fn boot(
     let router: Router = router
         .get("/write-atomicity/{id}", write_atomicity_handler)
         .into();
+    let router: Router = router
+        .get("/named-connection", named_connection_handler)
+        .into();
     let router: Router = router.get("/overflow", overflow_handler).into();
     let router: Router = router
         .get("/stitched-gate-only", stitched_gate_only_handler)
@@ -1459,6 +1468,11 @@ async fn boot(
             GroupPolicy::from(write_atomicity_policy),
         )
         .expect("attach write atomicity policy")
+        .try_render_cache(
+            "/named-connection",
+            GroupPolicy::from(named_connection_policy),
+        )
+        .expect("attach named connection policy")
         .try_render_cache("/overflow", GroupPolicy::from(overflow_policy))
         .expect("attach overflow policy")
         .try_render_cache(
@@ -2073,6 +2087,18 @@ async fn write_atomicity_handler(request: Request) -> Response {
         .map(|post| post.title)
         .unwrap_or_default();
     Ok(HttpResponse::text(title))
+}
+
+/// Renders the marker row of the `hardening_aux` named connection and
+/// nothing else (CACHE-008, from audit finding ASTRA-06), so a read that
+/// was rerouted to the primary shows up as the primary's row.
+async fn named_connection_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let marker = match DB::table_on("hardening_aux", "markers").first().await? {
+        Some(row) => row.get_string("marker")?,
+        None => String::new(),
+    };
+    Ok(HttpResponse::text(marker))
 }
 
 /// Renders with a replayable header whose value the wire cannot carry.

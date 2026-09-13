@@ -216,6 +216,10 @@ pub struct CollectedContext {
     pub authorization: suprnova_live::render_cache::AuthorizationConsult,
     /// Secret configuration was read.
     pub secret_context_read: bool,
+    /// A read ran on a connection other than the ambient transaction's,
+    /// so the render's snapshot did not cover it (CACHE-008). Set by the
+    /// executor routing in `database::transaction`.
+    pub foreign_connection_read: bool,
     /// Observation bound exceeded, or a dependency could not be encoded
     /// into an identity at all; the report is incomplete either way and
     /// the response it describes must not be stored.
@@ -330,6 +334,7 @@ impl CollectorReport {
         content.locale_reads += gate.context.locale_reads;
         content.authorization = content.authorization.join(gate.context.authorization);
         content.secret_context_read |= gate.context.secret_context_read;
+        content.foreign_connection_read |= gate.context.foreign_connection_read;
         // No `overflowed` fold: the gate context has no overflow state to
         // carry. Both producers - `mark_incomplete` and `observe`'s bound
         // check - write `report.context.overflowed` whatever bucket the
@@ -735,6 +740,13 @@ pub fn observe_locale_value(locale: &str) {
 /// A session value was read.
 pub fn observe_session_read() {
     with_context(|context| context.session_read = true);
+}
+
+/// Records that a read ran on a connection other than the ambient
+/// transaction's (CACHE-008): the render's snapshot did not cover it, and
+/// `lead_render` declines publication on the report.
+pub fn observe_foreign_connection_read() {
+    with_context(|context| context.foreign_connection_read = true);
 }
 /// The counters at the start of a consult window. Opaque: only
 /// [`end_authorization_decision`] can read it, so no caller can invent a

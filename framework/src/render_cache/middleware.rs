@@ -2203,6 +2203,16 @@ async fn lead_render(
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
     }
+    // CACHE-008: a read that ran on another connection ran outside the
+    // snapshot transaction, so no single read view covered this render and
+    // its generations cannot vouch for it (audit finding ASTRA-06). The
+    // query itself went where it was bound, so the response is right; only
+    // publication is declined.
+    if report.context.foreign_connection_read || report.gate.context.foreign_connection_read {
+        LookupOutcome::Declined(LookupDeclineReason::ForeignConnectionRead).record();
+        let _ = runtime.coordinator.release(lease).await;
+        return Ok(response);
+    }
     // Fix round 4, Leak B: classification is driven by what the collector
     // observed, never by re-reading an accessor - the previous version
     // re-read `Auth::id()` here, which is the *default guard's* slot

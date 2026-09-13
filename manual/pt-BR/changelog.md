@@ -100,6 +100,18 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ### Segurança
 
+- **As leituras de uma rota em cache em conexões nomeadas permanecem em sua
+  conexão.** Um miss do RenderCache renderiza dentro de uma transação de
+  snapshot no banco primário, e o roteamento de consultas preferia essa
+  transação ao `on("name")` próprio de uma consulta ou à conexão declarada de
+  um modelo, então incluir uma rota no cache mudava de qual banco de dados seu
+  código lia. Uma leitura de um banco de inquilino ou auxiliar podia retornar
+  a linha do primário, falhar em uma tabela que o primário não tem ou publicar
+  o conteúdo errado sob uma chave válida. Leituras destinadas a outra conexão
+  agora rodam lá mesmo dentro de uma transação ambiente, e uma renderização
+  que leu fora do seu snapshot é servida, mas não armazenada (motivo de recusa
+  `foreign_connection_read`). Encontrado pela auditoria adversarial de
+  2026-09-13 (ASTRA-06); chegou à main depois da tag `v2.0.1`.
 - **Uma escrita de dados e sua invalidação no RenderCache são confirmadas
   juntas.** No caminho de autocommit, um save de modelo, uma escrita do query
   builder ou uma instrução crua gravava primeiro a linha e avançava as

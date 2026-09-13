@@ -105,6 +105,19 @@ en premier.
 
 ### Sécurité
 
+- **Les lectures d'une route en cache sur des connexions nommées restent sur
+  leur connexion.** Un miss de RenderCache rend à l'intérieur d'une
+  transaction d'instantané sur la base primaire, et le routage des requêtes
+  préférait cette transaction au `on("name")` d'une requête ou à la connexion
+  déclarée d'un modèle, si bien qu'inscrire une route dans le cache changeait
+  la base de données que son code lisait. Une lecture d'une base tenant ou
+  auxiliaire pouvait renvoyer la ligne de la primaire, échouer sur une table
+  que la primaire n'a pas, ou publier le mauvais contenu sous une clé valide.
+  Les lectures destinées à une autre connexion s'exécutent désormais là même à
+  l'intérieur d'une transaction ambiante, et un rendu qui a lu hors de son
+  instantané est servi mais non stocké (motif de refus
+  `foreign_connection_read`). Trouvé par l'audit adversarial du 2026-09-13
+  (ASTRA-06) ; arrivé sur main après le tag `v2.0.1`.
 - **Une écriture de données et son invalidation RenderCache sont validées
   ensemble.** Sur le chemin autocommit, une sauvegarde de modèle, une écriture
   du query builder ou une instruction brute posait d'abord la ligne, puis

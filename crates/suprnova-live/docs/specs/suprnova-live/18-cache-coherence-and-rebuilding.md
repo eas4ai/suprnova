@@ -1,7 +1,7 @@
 # Suprnova Live -- 18 Cache Coherence and Rebuilding
 
 Status: Normative design specification
-Last revised: 2026-09-10
+Last revised: 2026-09-13
 
 ## Scope
 
@@ -336,6 +336,22 @@ UX flow:
   observable across nodes.
 
 ## Decisions and revisions
+
+- 2026-09-13 -- Kept a miss render's queries on the connections they name.
+  The executor routing preferred the ambient transaction over an explicit
+  or model-declared connection, and a RenderCache miss opens its snapshot
+  transaction on the primary, so opting a route into the cache silently
+  rerouted its named-connection reads to the primary (audit finding
+  ASTRA-06: the same handler returned the auxiliary row uncached and the
+  primary row cached, and published the latter). A read bound for another
+  connection now runs on that connection even inside an ambient
+  transaction, and the collector records that the render's snapshot did
+  not cover it; the framework then declines publication under the new
+  reason `foreign_connection_read`, since one consistent read view never
+  covered the render and its generations cannot vouch for it. The response
+  itself is served as rendered. Recorded under Consistent read view for
+  rebuilds; the framework's requirement is CACHE-008 in
+  `docs/spec/render-cache.md`.
 
 - 2026-09-10 -- Widened the hint telemetry outcome set from four values to
   five. The set recorded on 2026-09-09 had no publish-side value, so a

@@ -138,7 +138,7 @@ Provider oder ein Backend benannt:
   eine Abhängigkeit oder die Epoche geändert hatte; der Kandidat wurde
   verworfen und nie veröffentlicht.
 - `declined` - das Rendering war nicht speicherbar, aus einem von
-  achtunddreißig Gründen unten, mitgeführt im Attribut `reason` neben
+  zweiundvierzig Gründen unten, mitgeführt im Attribut `reason` neben
   `outcome`. `reason` wird nur zusammen mit `outcome="declined"`
   ausgegeben; jedes andere Ergebnis führt keinen. Der Grund wird aus einem
   typisierten Wert an genau der Verzweigung berechnet, die abgelehnt hat,
@@ -150,7 +150,7 @@ Provider oder ein Backend benannt:
     `sets_cookie`, `unsafe_header_name`, `no_store_directive`.
   - Beobachtung (der Bericht des Collectors und das Ledger-Lesen innerhalb
     der Transaktion): `observation_overflowed`, `ledger_read_failed`,
-    `handler_not_begun`.
+    `handler_not_begun`, `foreign_connection_read`.
   - Klassifizierung, die zu `Uncacheable` eingeengt wurde:
     `session_value_read`, `secret_context_read`, `undeclared_context`.
   - Fakten des Live-Dokuments: `identity_bound_without_stitching`,

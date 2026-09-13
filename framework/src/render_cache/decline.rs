@@ -39,6 +39,9 @@ pub(crate) enum LookupDeclineReason {
     /// A stitched route's handler never began, so its content bucket is
     /// empty.
     HandlerNotBegun,
+    /// A read ran on a connection other than the snapshot's, so one
+    /// consistent read view never covered the render (CACHE-008).
+    ForeignConnectionRead,
     // Classification narrowed to Uncacheable.
     /// A session value was read (not merely a session id).
     SessionValueRead,
@@ -133,6 +136,7 @@ impl LookupDeclineReason {
             Self::ObservationOverflowed => "observation_overflowed",
             Self::LedgerReadFailed => "ledger_read_failed",
             Self::HandlerNotBegun => "handler_not_begun",
+            Self::ForeignConnectionRead => "foreign_connection_read",
             Self::SessionValueRead => "session_value_read",
             Self::SecretContextRead => "secret_context_read",
             Self::UndeclaredContext => "undeclared_context",
@@ -180,6 +184,7 @@ impl LookupDeclineReason {
         Self::ObservationOverflowed,
         Self::LedgerReadFailed,
         Self::HandlerNotBegun,
+        Self::ForeignConnectionRead,
         Self::SessionValueRead,
         Self::SecretContextRead,
         Self::UndeclaredContext,

@@ -124,7 +124,7 @@ provider, or a backend:
   variance dimension, or an exhausted waiter list.
 - `moved` - the reread after rendering found a dependency or the epoch had
   changed; the candidate was discarded, never published.
-- `declined` - the render was not storable, for one of the thirty-eight
+- `declined` - the render was not storable, for one of the forty-two
   reasons below, carried in the `reason` attribute beside `outcome`.
   `reason` is emitted only alongside `outcome="declined"`; every other
   outcome carries none. The reason is computed from a typed value at the
@@ -136,7 +136,7 @@ provider, or a backend:
     `streaming`, `sets_cookie`, `unsafe_header_name`, `no_store_directive`.
   - Observation (the collector's report and the in-transaction ledger
     read): `observation_overflowed`, `ledger_read_failed`,
-    `handler_not_begun`.
+    `handler_not_begun`, `foreign_connection_read`.
   - Classification narrowed to `Uncacheable`: `session_value_read`,
     `secret_context_read`, `undeclared_context`.
   - Live document facts: `identity_bound_without_stitching`,
