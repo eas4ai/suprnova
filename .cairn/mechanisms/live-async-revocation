@@ -9,5 +9,7 @@ inputs:
   - framework/tests/support/
   - crates/suprnova-live/docs/specs/suprnova-live/
   - CHANGELOG.md
+  - manual/
+  - .manual-translations.lock
 requirements:
   - LIVE-016
