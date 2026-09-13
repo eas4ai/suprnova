@@ -91,6 +91,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **A per-response CSP nonce is never replayed from the cache.** A public
+  page that minted a nonce on every render and named it in
+  `Content-Security-Policy` was stored as an ordinary complete entry, so
+  every later hit carried the first render's nonce in both the header and
+  the inline script. A nonce is the authorization token for inline script
+  in one response; replaying it made that token readable to anyone who
+  could fetch the page. RenderCache now declines to store such a response
+  (decline reason `nonce_source_policy`); a hash-based policy caches as
+  before, and stitched Live documents keep issuing a fresh nonce per hit.
+  Found by the 2026-09-13 adversarial audit (ASTRA-12); landed on main
+  after the `v2.0.1` tag.
 - **A cached response keeps its isolation and execution headers.**
   RenderCache stored a response's `Content-Disposition`,
   `Cross-Origin-Opener-Policy`, `Cross-Origin-Embedder-Policy`,

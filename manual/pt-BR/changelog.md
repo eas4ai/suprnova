@@ -100,6 +100,17 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ### Segurança
 
+- **Um nonce de CSP por resposta nunca é reproduzido a partir do cache.** Uma
+  página pública que gerava um nonce a cada renderização e o nomeava em
+  `Content-Security-Policy` era armazenada como uma entrada completa comum,
+  então cada acerto posterior carregava o nonce da primeira renderização tanto
+  no cabeçalho quanto no script inline. Um nonce é o token de autorização para
+  script inline em uma única resposta; reproduzi-lo tornava esse token legível
+  para qualquer um que pudesse buscar a página. O RenderCache agora se recusa
+  a armazenar tal resposta (motivo de recusa `nonce_source_policy`); uma
+  política baseada em hash é cacheada como antes, e documentos Live costurados
+  continuam emitindo um nonce novo por acerto. Encontrado pela auditoria
+  adversarial de 2026-09-13 (ASTRA-12); chegou à main depois da tag `v2.0.1`.
 - **Uma resposta em cache mantém seus cabeçalhos de isolamento e execução.** O
   RenderCache não armazenava em lugar nenhum os cabeçalhos
   `Content-Disposition`, `Cross-Origin-Opener-Policy`,

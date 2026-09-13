@@ -75,6 +75,10 @@ pub(crate) enum LookupDeclineReason {
     SeedDeadlineElapsed,
     /// A response header could not be safely replayed.
     UnsafeHeaderValue,
+    /// The response's `Content-Security-Policy` carries a nonce source, and
+    /// a Complete entry would replay that per-response secret to every
+    /// later hit (CACHE-004). Only the stitched publisher can re-nonce.
+    NonceSourcePolicy,
     /// A stitched capture was marked invalid.
     CompositeCaptureInvalid,
     /// A stitched capture's slot count did not match the mounted islands.
@@ -139,6 +143,7 @@ impl LookupDeclineReason {
             Self::LocaleDivergent => "locale_divergent",
             Self::SeedDeadlineElapsed => "seed_deadline_elapsed",
             Self::UnsafeHeaderValue => "unsafe_header_value",
+            Self::NonceSourcePolicy => "nonce_source_policy",
             Self::CompositeCaptureInvalid => "composite_capture_invalid",
             Self::CompositeSlotCountMismatch => "composite_slot_count_mismatch",
             Self::CompositeTooManySlots => "composite_too_many_slots",
@@ -183,6 +188,7 @@ impl LookupDeclineReason {
         Self::LocaleDivergent,
         Self::SeedDeadlineElapsed,
         Self::UnsafeHeaderValue,
+        Self::NonceSourcePolicy,
         Self::CompositeCaptureInvalid,
         Self::CompositeSlotCountMismatch,
         Self::CompositeTooManySlots,

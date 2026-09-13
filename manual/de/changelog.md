@@ -103,6 +103,19 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Sicherheit
 
+- **Ein Nonce-Wert aus der CSP wird nie aus dem Cache wiedergegeben.** Eine
+  öffentliche Seite, die bei jedem Rendern eine Nonce erzeugte und sie in
+  `Content-Security-Policy` nannte, wurde als gewöhnlicher vollständiger
+  Eintrag gespeichert, sodass jeder spätere Treffer die Nonce des ersten
+  Renderns sowohl im Header als auch im Inline-Skript trug. Eine Nonce ist das
+  Autorisierungstoken für Inline-Skripte in genau einer Antwort; ihre
+  Wiedergabe machte dieses Token für jeden lesbar, der die Seite abrufen
+  konnte. RenderCache lehnt das Speichern einer solchen Antwort jetzt ab
+  (Ablehnungsgrund `nonce_source_policy`); eine hashbasierte Richtlinie wird
+  wie bisher zwischengespeichert, und gestitchte Live-Dokumente erzeugen
+  weiterhin bei jedem Treffer eine frische Nonce. Gefunden durch das
+  adversariale Audit vom 2026-09-13 (ASTRA-12); nach dem Tag `v2.0.1` auf main
+  gelandet.
 - **Eine zwischengespeicherte Antwort behält ihre Isolations- und
   Ausführungsheader.** RenderCache speicherte `Content-Disposition`,
   `Cross-Origin-Opener-Policy`, `Cross-Origin-Embedder-Policy`,

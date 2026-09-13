@@ -851,6 +851,11 @@ async fn boot(
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("security headers policy");
+    // CACHE-004: the plain public shape on a route that mints a CSP nonce.
+    let csp_nonce_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("csp nonce policy");
     let stale_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(60_000, 60_000, 120_000).expect("freshness"))
         .build()
@@ -1195,6 +1200,7 @@ async fn boot(
     let router: Router = router
         .get("/security-headers", security_headers_handler)
         .into();
+    let router: Router = router.get("/csp-nonce", csp_nonce_handler).into();
     let router: Router = router.get("/overflow", overflow_handler).into();
     let router: Router = router
         .get("/stitched-gate-only", stitched_gate_only_handler)
@@ -1416,6 +1422,8 @@ async fn boot(
             GroupPolicy::from(security_headers_policy),
         )
         .expect("attach security headers policy")
+        .try_render_cache("/csp-nonce", GroupPolicy::from(csp_nonce_policy))
+        .expect("attach csp nonce policy")
         .try_render_cache("/overflow", GroupPolicy::from(overflow_policy))
         .expect("attach overflow policy")
         .try_render_cache(
@@ -1975,6 +1983,23 @@ async fn security_headers_handler(_request: Request) -> Response {
         response = response.header(*name, *value);
     }
     Ok(response)
+}
+
+/// Renders a public page that mints a fresh CSP nonce per render and
+/// declares it in both the `Content-Security-Policy` header and an inline
+/// script (CACHE-004, from audit finding ASTRA-12). The nonce is the render
+/// count, so two renders never share one and a replayed one is visible.
+async fn csp_nonce_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    let nonce = format!("hardening-nonce-{}", counting_route::renders());
+    Ok(HttpResponse::html(format!(
+        "<script nonce=\"{nonce}\">globalThis.nonceExecuted = true</script>"
+    ))
+    .header(
+        "Content-Security-Policy",
+        format!("script-src 'nonce-{nonce}'"),
+    ))
 }
 
 /// Renders with a replayable header whose value the wire cannot carry.

@@ -67,3 +67,50 @@ async fn security_headers_replay_or_decline() {
         );
     }
 }
+/// CACHE-004: a `Content-Security-Policy` that carries a nonce source is
+/// never replayed from a complete entry. The audit (ASTRA-12) served the
+/// same `script-src 'nonce-...'` header and the same body nonce on a cache
+/// hit, so a public page's per-response secret became predictable for the
+/// life of the entry.
+///
+/// The property asserted is the requirement's own: two requests never
+/// share a nonce, in the header or in the body. The decision recorded for
+/// this requirement declines storage rather than re-noncing, so the second
+/// request is a fresh render; that is reported in the failure message, not
+/// asserted, because re-noncing would satisfy the requirement too.
+#[tokio::test]
+#[serial_test::serial]
+async fn csp_nonce_is_never_replayed() {
+    let harness = boot_with_render_cache().await;
+
+    let first = dispatch_get(&harness, "/csp-nonce", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    let first_csp = first
+        .header("content-security-policy")
+        .expect("the render declares its nonce in the CSP")
+        .to_owned();
+    assert!(
+        first_csp.contains("'nonce-"),
+        "precondition: the route mints a nonce source, saw {first_csp}"
+    );
+
+    let second = dispatch_get(&harness, "/csp-nonce", &[]).await;
+    assert_eq!(second.status, StatusCode::OK);
+    let second_csp = second
+        .header("content-security-policy")
+        .expect("the second response declares its own nonce")
+        .to_owned();
+    let served = if counting_route::renders() == 1 {
+        "from storage"
+    } else {
+        "by a fresh render"
+    };
+    assert_ne!(
+        first_csp, second_csp,
+        "the CSP nonce was reused across requests (second served {served})"
+    );
+    assert_ne!(
+        first.body, second.body,
+        "the body nonce was reused across requests (second served {served})"
+    );
+}

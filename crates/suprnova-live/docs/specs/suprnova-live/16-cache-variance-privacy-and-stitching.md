@@ -1,7 +1,7 @@
 # Suprnova Live -- 16 Cache Variance, Privacy, and Stitching
 
 Status: Normative design specification
-Last revised: 2026-09-10
+Last revised: 2026-09-13
 
 ## Scope
 
@@ -352,6 +352,20 @@ prose.
 
 ## Decisions and revisions
 
+- 2026-09-13 -- Closed the nonce gap for Complete entries: a response whose
+  `Content-Security-Policy` names a nonce source is declined storage as a
+  Complete representation, with the new publication decline reason
+  `nonce_source_policy`. The adversarial audit of the same day (finding
+  ASTRA-12) showed that the per-request nonce templating existed only on
+  the stitched publisher, so an ordinary public page that minted a nonce
+  per render replayed the same header and body nonce to every hit, making
+  the token predictable for the life of the entry. The stitched path keeps
+  re-noncing every assembly; a hash-based policy carries no per-response
+  secret and stores as before. Rejected generalizing the re-nonce
+  templating to every Complete entry: it would widen the body-templating
+  surface for a case a fail-closed decline handles. Recorded under
+  Stitching and assembly; the framework's requirement is CACHE-004 in
+  `docs/spec/render-cache.md`, decided by the owner on 2026-09-13.
 - 2026-09-10 -- Recorded the length-stability constraint on a shared
   identity-bound nested segment: its re-mount binds the including
   document's own resolved path, embedded in the signed snapshot, so its

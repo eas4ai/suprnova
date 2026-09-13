@@ -78,3 +78,23 @@ hit and carried no disposition. After the fix (the six headers join
 `REPLAYABLE_HEADERS`, `crates/suprnova-live/src/render_cache/entry.rs`)
 the same test passes, and the full `render_cache` binary (366 tests) and
 the engine's render_cache tests (57) pass with it.
+
+### CACHE-004, `cache-csp-nonce`, 2026-09-13 13:35
+
+Violating example: the test `csp_nonce_is_never_replayed` on the tree at
+`50f37943`, with only the test and its `/csp-nonce` support route added.
+Result:
+
+    FAIL hardening::csp_nonce_is_never_replayed
+    assertion `left != right` failed: the CSP nonce was reused across
+    requests (second served from storage)
+      left: "script-src 'nonce-hardening-nonce-1'"
+     right: "script-src 'nonce-hardening-nonce-1'"
+
+That is ASTRA-12 as the audit reproduced it. After the fix (the lead
+render declines Complete publication when the stored CSP names a nonce
+source, decline reason `nonce_source_policy`,
+`framework/src/render_cache/middleware.rs`) the same test passes with the
+second request served by a fresh render, and the full `render_cache`
+binary (367 tests, including the one that pins every decline label to the
+operations chapter) passes with it.

@@ -83,7 +83,7 @@ cargo run --bin console -- render-cache:epoch-advance
     `principal_divergent`、`tenant_undeclared`、`tenant_divergent`、
     `locale_undeclared`、`locale_divergent`。
   - 公開: `seed_deadline_elapsed`、`unsafe_header_value`、
-    `composite_capture_invalid`、`composite_slot_count_mismatch`、
+    `nonce_source_policy`、`composite_capture_invalid`、`composite_slot_count_mismatch`、
     `composite_too_many_slots`、`composite_digest_mismatch`、
     `composite_empty_slot`、`composite_slot_not_found`、
     `composite_slot_ambiguous`、`composite_nested_unauthorizable`、

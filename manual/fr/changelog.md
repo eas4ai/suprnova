@@ -105,6 +105,18 @@ en premier.
 
 ### Sécurité
 
+- **Un nonce CSP par réponse n'est jamais rejoué depuis le cache.** Une page
+  publique qui générait un nonce à chaque rendu et le nommait dans
+  `Content-Security-Policy` était stockée comme une entrée complète ordinaire,
+  si bien que chaque hit ultérieur portait le nonce du premier rendu, dans
+  l'en-tête comme dans le script inline. Un nonce est le jeton d'autorisation
+  du script inline pour une seule réponse ; le rejouer rendait ce jeton
+  lisible par quiconque pouvait récupérer la page. RenderCache refuse
+  désormais de stocker une telle réponse (motif de refus
+  `nonce_source_policy`) ; une politique fondée sur des hachages est mise en
+  cache comme avant, et les documents Live assemblés continuent d'émettre un
+  nonce neuf à chaque hit. Trouvé par l'audit adversarial du 2026-09-13
+  (ASTRA-12) ; arrivé sur main après le tag `v2.0.1`.
 - **Une réponse en cache conserve ses en-têtes d'isolation et d'exécution.**
   RenderCache ne stockait nulle part les en-têtes `Content-Disposition`,
   `Cross-Origin-Opener-Policy`, `Cross-Origin-Embedder-Policy`,

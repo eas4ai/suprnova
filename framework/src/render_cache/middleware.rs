@@ -2384,6 +2384,17 @@ async fn lead_render(
         (true, Some(facts)) => {
             stitch::build_composite_entry(runtime, header, response.body(), facts).await
         }
+        // CACHE-004: a Complete entry replays its stored CSP and body to
+        // every hit, so a per-response nonce in either would become a
+        // predictable authorization token for the life of the entry (audit
+        // finding ASTRA-12). Only the stitched publisher above can issue a
+        // fresh nonce per hit; everything else declines. A hash-based CSP
+        // carries no per-response secret and stores as before.
+        _ if csp_carries_nonce_source(&header.headers) => {
+            LookupOutcome::Declined(LookupDeclineReason::NonceSourcePolicy).record();
+            let _ = runtime.coordinator.release(lease).await;
+            return Ok(response);
+        }
         _ => Ok(DecodedEntry::Complete(CompleteEntry::new(
             header,
             Bytes::copy_from_slice(response.body()),
@@ -3386,6 +3397,17 @@ async fn store_entry(
             .publish(job.key(), encoded, fence, now, retention_ms)
             .await;
     }
+}
+
+/// Whether the stored `Content-Security-Policy` names a nonce source
+/// (`'nonce-...'`, in any directive). Matched case-insensitively because the
+/// keyword is, per the CSP grammar; the nonce value itself is never
+/// inspected.
+fn csp_carries_nonce_source(headers: &SafeHeaders) -> bool {
+    headers
+        .iter()
+        .filter(|(name, _)| *name == "content-security-policy")
+        .any(|(_, value)| value.to_ascii_lowercase().contains("'nonce-"))
 }
 
 /// Builds the safety signals `RenderCachePolicy::eligibility` reads from a
