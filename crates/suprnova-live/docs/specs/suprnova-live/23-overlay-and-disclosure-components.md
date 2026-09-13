@@ -1,7 +1,7 @@
 # Suprnova Live -- 23 Overlay and Disclosure Components
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-09-13
 
 ## Scope
 
@@ -160,6 +160,9 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-13 -- Official menus are single level; nested submenus are not in the
+  built-in set. The submenu behavior in this specification remains available to
+  a separate project.
 - 2026-08-21 -- Overlay state is browser-local by default; server actions own
   only authoritative effects invoked from overlays.
 - 2026-08-21 -- Layering and teleportation preserve Live island ownership rather

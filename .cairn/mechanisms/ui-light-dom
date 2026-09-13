@@ -3,5 +3,5 @@ inputs:
   - crates/suprnova-live/browser/src/
   - app/templates/
 requirements:
-  - UI-006
-  - UI-014
+  - UI-010
+  - UI-018

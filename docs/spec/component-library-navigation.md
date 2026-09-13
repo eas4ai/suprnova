@@ -14,10 +14,9 @@ sidebar with collapsible groups, breadcrumbs, tabs, pagination.
 Behavioral: load more, account menu. No custom-element tier in this
 family.
 
-Out of the built-in set by the developer's 2026-09-12 ruling: the
-stepper (a complete block) and the command palette (specialty). Live spec
-22 lists both as capabilities; a dated revision there, or a withdrawal of
-the ruling, precedes any requirement for them.
+Out of the built-in set: the stepper (a complete block) and the command
+palette (specialty), recorded in Live spec 22's revision of 2026-09-13;
+the capabilities remain specified there for the separate project.
 
 ## Presentational tier
 

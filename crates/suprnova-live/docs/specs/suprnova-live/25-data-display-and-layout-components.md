@@ -1,7 +1,7 @@
 # Suprnova Live -- 25 Data Display and Layout Components
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-09-13
 
 ## Scope
 
@@ -194,6 +194,12 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-13 -- The library ships one built-in chart component rendered on the
+  server as SVG through `charts-rs` (Apache-2.0), with a textual alternative in
+  the canonical document and updates through normal re-render or streams. No
+  client charting runtime enters the reviewed artifacts; the visualization
+  container contract stands for bring-your-own libraries, documented with one
+  example in the manual.
 - 2026-08-21 -- Semantic table/list/layout primitives are the default; complex
   client-like data grids require a separate explicit pattern and justification.
 - 2026-08-21 -- The library supplies visualization containers and integration

@@ -1,7 +1,7 @@
 # Suprnova Live -- 20 Component Library Foundations
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-09-13
 
 ## Scope
 
@@ -178,6 +178,28 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-13 -- Registration is explicit and namespaced: an application names
+  every library component in its `LiveRegistry` builder, nothing registers
+  itself, `suprnova.` names, the `suprnova-ui/` template root, the
+  `suprnova-ui` cascade layer, and `sn-` tags are reserved, and library
+  assets load only when a document opts in through `LiveBootstrapOptions`.
+- 2026-09-13 -- The enhancement tier (combobox, one-time code, date strips)
+  ships as light-DOM, form-associated custom elements with `sn-` tags, each
+  defined by the component's own vendored JavaScript on a small reviewed helper
+  artifact; Live local primitives remain the first choice and Stimulus remains
+  an application-supplied role. Supersedes "local primitives or supported
+  Stimulus controllers" as the only JavaScript paths.
+- 2026-09-13 -- Distribution: behavioral components' Rust lives in the in-tree
+  library crate and moves with the framework tag; views, presentational macros,
+  and per-component CSS and JavaScript are vendored into the application under
+  the reserved `suprnova-ui/` template root by `live:add`, which reads a JSON
+  manifest per component and never overwrites an edited file. Third-party
+  components use the same manifest format.
+- 2026-09-13 -- Component styles ship as token-driven rules under the
+  `suprnova-ui` cascade layer with `--sn-` tokens, headless by construction:
+  no inline styles, no literal visual values, tokens only. Tailwind CSS 4 is
+  supported through a documented `@theme` preset mapping to the tokens rather
+  than required in component markup; the Play CDN is a development path only.
 - 2026-08-21 -- Official components use Tailwind CSS 4 and semantic theme tokens;
   the Live runtime remains CSS agnostic.
 - 2026-08-21 -- Theme Studio is intentionally excluded from Suprnova Live's

@@ -1,7 +1,7 @@
 # Suprnova Live -- 21 Form and Input Components
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-09-13
 
 ## Scope
 
@@ -189,6 +189,14 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-13 -- The official date picker accepts only a date in its input and
+  presents year, month, and day as native radio groups inside horizontal CSS
+  scroll-snap strips beneath the input; locale, timezone, parsing, constraints,
+  and keyboard behavior remain defined as this specification requires, and the
+  keyboard behavior is the radio group's own.
+- 2026-09-13 -- Tag/token input is not in the official built-in set; the
+  combobox ships without multi-value tokens. A tag input may come from a
+  separate project on the same combobox.
 - 2026-08-21 -- Native semantic controls are the baseline; custom widgets must
   justify themselves with complete keyboard, focus, and validation behavior.
 - 2026-08-21 -- The component library presents Live state but does not create a

@@ -5,13 +5,15 @@ Prefix: UI
 Scope: every commitment
 
 The cross-cutting rules every component family inherits: tokens, the
-base layer, state styling, asset delivery, light DOM, the qualified
-engines, RenderCache classification, and explicit registration with
-reserved namespaces. Live spec 20
+base layer, headless styling, asset delivery, light DOM, the qualified
+engines, RenderCache classification, explicit registration with reserved
+namespaces, and the component unit `live:add` installs. Live spec 20
 (`crates/suprnova-live/docs/specs/suprnova-live/20-component-library-foundations.md`)
 holds the agreed capability text this file refines into requirements
-with falsifiers. Nothing here is Agreed yet; the rulings the developer
-still owes are listed at the end, and a requirement they block waits.
+with falsifiers; its "Decisions and revisions" section carries the four
+dated entries of 2026-09-13 that record the developer's rulings below.
+Nothing here is Agreed yet: the developer confirms the requirement texts
+and falsifiers as one set.
 
 The family specs (`component-library-forms.md`, `-navigation.md`,
 `-overlays.md`, `-feedback.md`, `-data-display.md`) inherit every
@@ -29,21 +31,41 @@ element upgrades, never with a client application that owns the page
 (developer, 2026-09-13: "no SPA for Live"; Live spec 20: no Inertia,
 Turbo, React, Vue, Svelte, Alpine, or other state authority).
 
-## Tokens, base layer, and state styling
+## The rulings this file rests on (developer, 2026-09-13)
+
+- Styling (10:22): token-driven rules under the `suprnova-ui` cascade
+  layer; Tailwind CSS 4 supported through a `@theme` preset, never
+  required in component markup.
+- Distribution (10:23): behavioral components' Rust in the in-tree crate;
+  views, macros, per-component CSS and JavaScript vendored by `live:add`
+  from a JSON manifest.
+- Custom elements (10:36): the enhancement tier is light-DOM,
+  form-associated custom elements, each defined by its component's own
+  vendored JavaScript on a small reviewed helper.
+- Headless (10:36-10:37): a component as built is structure, behavior,
+  and state; every visual value comes from a token; no inline styles,
+  tokens only; the skin ships on and is removable with nothing breaking.
+- Registration (09:57): explicit, through the existing registry;
+  reserved names, template root, cascade layer, tags, and asset role.
+
+## Tokens, base layer, and headless styling
 
 [UI-001] The library MUST ship one versioned token stylesheet that defines
-semantic custom properties for color, typography, spacing, radius, shadow,
-motion, density, and interaction state, with light and dark values.
-Falsifier: a token role named in Live spec 20 (color, typography, spacing,
-radius, shadow, motion, density, state) has no custom property in the
-shipped token stylesheet, or the stylesheet defines a role for light only.
+semantic custom properties, prefixed `--sn-`, for color, typography,
+spacing, radius, shadow, motion, density, and interaction state, with
+light and dark values.
+Falsifier: a token role named in Live spec 20 has no `--sn-` custom
+property in the shipped token stylesheet, or the stylesheet defines a
+role for light only.
 Mechanism: `.cairn/mechanisms/ui-tokens`.
 
-[UI-002] The library MUST ship a base layer that styles bare semantic HTML
-(`button`, `input`, `select`, `textarea`, `fieldset`, `table`, `details`,
-`dialog`, `a`, headings, lists) from the tokens, so a scaffolded document
-renders coherently with zero components.
-Falsifier: one of the listed elements has no rule in the base layer.
+[UI-002] The library MUST ship a base layer, inside the `suprnova-ui`
+cascade layer, that styles bare semantic HTML (`button`, `input`,
+`select`, `textarea`, `fieldset`, `table`, `details`, `dialog`, `a`,
+headings, lists) and every shipped component from the tokens, so a
+scaffolded document renders coherently with zero components.
+Falsifier: one of the listed elements has no rule in the base layer, or a
+base-layer rule sits outside the `suprnova-ui` cascade layer.
 Mechanism: `.cairn/mechanisms/ui-tokens`.
 Reading: the developer named Pico CSS (2026-09-12) as the reference to
 expand on; its ~10KB footprint is the baseline-size bar.
@@ -58,31 +80,63 @@ selected presentation is selected by a class with no corresponding
 attribute selector.
 Mechanism: `.cairn/mechanisms/ui-tokens`.
 
+[UI-004] A component stylesheet MUST take every visual value (color, font
+family, radius, shadow, duration, easing) from a `--sn-` token. A
+component stylesheet MUST NOT contain a literal visual value.
+Falsifier: a hex or named color, a font-family name, a length on
+`border-radius`, a `box-shadow` value, or a duration appears in a
+component stylesheet outside a `var(--sn-...)` reference.
+Mechanism: `.cairn/mechanisms/ui-tokens`.
+Reading: structural rules (display, position, grid, overflow, scroll
+snap) may be literal; they are behavior, not appearance.
+
+[UI-005] A shipped view MUST NOT carry a `style` attribute.
+Falsifier: `style=` appears in a shipped view.
+Mechanism: `.cairn/mechanisms/ui-tokens` (a grep over the vendored views)
+and `.cairn/mechanisms/ui-live-check`.
+
+[UI-006] Every shipped component MUST keep its behavior, semantics, and
+state with the base layer removed.
+Falsifier: with the `suprnova-ui` layer absent, a component loses a
+behavior, an accessible name, or a state attribute.
+Mechanism: one browserless harness run with the base layer stripped.
+Reading: this is what "headless by default" proves; the skin ships on.
+
+[UI-007] The library MUST ship a Tailwind CSS 4 `@theme` preset that maps
+Tailwind's theme namespaces to the `--sn-` tokens, documented and tested
+against a pinned Tailwind range.
+Falsifier: a `--sn-` color, spacing, radius, or font token has no
+counterpart in the preset, or the preset fails against the pinned range.
+Mechanism: a node check over the preset against the token stylesheet
+(`.cairn/mechanisms/ui-tokens`, second input).
+
 ## Delivery, DOM, and engines
 
-[UI-004] The framework MUST serve every library asset as a runtime feature
-artifact under the same identity, caching, and integrity contract as the
-runtime. Every library asset MUST carry its own row in the reviewed
-artifact-size baseline.
-Falsifier: a library stylesheet or script is served outside the
-`__live/assets` namespace, or lands without a baseline row.
+[UI-008] The framework MUST serve the shared library bases - the token
+stylesheet, the base layer, and the element helper - as runtime feature
+artifacts under the runtime's identity, caching, and integrity contract.
+Each shared base MUST carry its own row in the reviewed artifact-size
+baseline.
+Falsifier: a shared base is served outside the `__live/assets` namespace,
+or lands without a baseline row.
 Mechanism: `.cairn/mechanisms/live-gate` (tracked artifact parity).
+Reading: per-component CSS and JavaScript are vendored into the
+application (UI-017) and served by the application; the artifact
+contract binds only what Suprnova ships.
 
-[UI-005] Every shipped component view MUST pass `suprnova live:check`
+[UI-009] Every shipped component view MUST pass `suprnova live:check`
 without `--allow-unproved`.
 Falsifier: a shipped view needs the flag to pass.
 Mechanism: `.cairn/mechanisms/ui-live-check`.
 
-[UI-006] The library MUST render every shipped component's content in
+[UI-010] The library MUST render every shipped component's content in
 light DOM. A custom-element enhancement MUST NOT attach a shadow root.
 Falsifier: `attachShadow` appears in library source, or a fetched document
 lacks content that a component displays.
 Mechanism: `.cairn/mechanisms/ui-light-dom`; the fetchability half is
 asserted by the dogfood document tests.
-Reading: the developer's rulings, 2026-09-13 ("Light DOM is what I want";
-"I want an llm to be able to fetch the page").
 
-[UI-007] A custom-element enhancement that stands in for a form control
+[UI-011] A custom-element enhancement that stands in for a form control
 MUST be form-associated through `ElementInternals` so `live:model` and
 validation see a real control.
 Falsifier: a library custom element that carries a value is not
@@ -91,7 +145,7 @@ Mechanism: the browserless component harness
 (`crates/suprnova-live/docs/implementation/component-harness.md`) plus one
 Playwright case per enhancement.
 
-[UI-008] The library MUST target the qualified engines only. A component
+[UI-012] The library MUST target the qualified engines only. A component
 that uses a platform feature the three engines disagree on MUST degrade
 on the engine that lacks it, as the Playwright matrix decides.
 Falsifier: a component relies on a feature one qualified engine lacks and
@@ -99,7 +153,7 @@ no Playwright case exercises that component on that engine.
 Mechanism: `.cairn/mechanisms/live-gate`, with one Playwright case per
 shipped component that uses a platform feature beyond plain HTML and CSS.
 
-[UI-009] Every behavioral component MUST document its RenderCache
+[UI-013] Every behavioral component MUST document its RenderCache
 classification (shell bytes, stitch slot, or varies). A behavioral
 component MUST mount as one island per widget, never one island per row
 or cell.
@@ -109,14 +163,7 @@ Mechanism: review against the dogfood stitched-dashboard test
 
 ## Registration and namespaces
 
-Confirmed by the developer on 2026-09-13 09:57: the library rides Live's
-existing explicit registry (`LiveRegistry::builder().register::<T>()`,
-immutable after `build()`, duplicate names and views rejected with a typed
-error); no default set registers itself, and each namespace a default
-library could share with an application's or a third party's components
-is reserved.
-
-[UI-010] An application MUST register each library behavioral component
+[UI-014] An application MUST register each library behavioral component
 it uses explicitly through `LiveRegistry::builder().register::<T>()`. The
 library MUST NOT register any component on its own.
 Falsifier: a library component is reachable through a Live route in an
@@ -125,14 +172,14 @@ Mechanism: `.cairn/mechanisms/ui-live-check` (the checker reports the
 bound registry) and a source grep for `inventory::submit!` under the
 library crate.
 
-[UI-011] Every library component name MUST carry the reserved prefix
+[UI-015] Every library component name MUST carry the reserved prefix
 `suprnova.`. The registry MUST reject that prefix on a component from any
 other crate.
 Falsifier: a component outside the library registers under `suprnova.`
 and the registry builds.
 Mechanism: a registry unit test in the library crate.
 
-[UI-012] Every library view MUST live under the reserved template root
+[UI-016] Every library view MUST live under the reserved template root
 `suprnova-ui/`. A library view MUST NOT shadow a path under the
 application's own template roots.
 Falsifier: a library template resolves at a path an application template
@@ -140,48 +187,30 @@ can also occupy.
 Mechanism: `.cairn/mechanisms/ui-live-check` with both template roots
 declared; a duplicate view fails registration.
 
-[UI-013] The library stylesheet MUST declare every rule inside the cascade
-layer `suprnova-ui` and every token with the `--sn-` prefix.
-Falsifier: a library rule outside the layer, or a token without the
-prefix, is found in the shipped stylesheet.
-Mechanism: `.cairn/mechanisms/ui-tokens`.
-Reading: an application's or a third party's unlayered CSS then wins over
-the library's by cascade-layer order, never by specificity.
+[UI-017] A library component MUST be one directory under the reserved
+template root holding its view, its stylesheet when it has one, and its
+JavaScript when it has one, described by one JSON manifest that names
+those files. The `live:add` command MUST install a component from its
+manifest without overwriting a file the application has edited. The
+`live:add` command MUST accept a third-party manifest in the same format.
+Falsifier: a shipped component's files are scattered across roots, a
+manifest omits a file the component needs, or `live:add` overwrites an
+edited file without the developer asking for it.
+Mechanism: a CLI test in `suprnova-cli/tests/` that installs a component
+twice, edits it between runs, and asserts the edit survives.
 
-[UI-014] Every custom-element enhancement tag MUST carry the `sn-`
-prefix. The element helper MUST define only the tags whose components the
-application registered.
-Falsifier: a document that registers no library component defines a
-library custom element, or a library tag lacks the prefix.
+[UI-018] Every custom-element enhancement tag MUST carry the `sn-`
+prefix. A library custom element MUST be defined only by its own
+component's vendored JavaScript, so a document that never added the
+component never defines the tag.
+Falsifier: a library-free document defines an `sn-` element, or a library
+tag lacks the prefix.
 Mechanism: `.cairn/mechanisms/ui-light-dom` and one Playwright case that
-boots a document without library components and asserts no `sn-`
-definition.
+boots a library-free document and asserts no `sn-` definition.
 
-[UI-015] The framework MUST load library assets only when a document opts
-in through `LiveBootstrapOptions`, in the same way the Stimulus role loads
-only through `with_stimulus`.
-Falsifier: a document that never opted in serves a library asset in its
+[UI-019] The framework MUST load the shared library bases only when a
+document opts in through `LiveBootstrapOptions`, in the same way the
+Stimulus role loads only through `with_stimulus`.
+Falsifier: a document that never opted in serves a library base in its
 bootstrap markup.
 Mechanism: a framework test beside `framework/tests/live/assets.rs`.
-
-## Rulings the developer still owes
-
-Each row blocks the requirements it names from Agreed. Both sides are
-cited in `docs/recon.md`, Contradicted.
-
-1. Styling system: Live spec 20 (agreed 2026-08-21) says Tailwind CSS 4
-   utilities plus theme tokens; the developer reopened this on 2026-09-13
-   and linked the Tailwind v4 Play CDN. Blocks the build path behind
-   UI-001 and UI-013 (a token stylesheet stands either way; whether
-   component styles are utilities or token rules is the ruling).
-2. Distribution: vendored macros into the application versus an in-tree
-   crate re-exported behind a framework feature. Blocks UI-012's root and
-   every family's presentational tier.
-3. Custom-element enhancements: spec 20 says component JavaScript is Live
-   local primitives or Stimulus controllers; the developer's 2026-09-13
-   direction is light-DOM custom elements on an Elena-class helper. Blocks
-   UI-006, UI-007, UI-014 until spec 20 carries a dated revision.
-4. Family-level disagreements between the 2026-09-12 rulings and specs
-   21, 22, 23, 25 (tag input, command palette, stepper, nested submenus,
-   custom chart, date picker) are listed in each family file and block
-   only that family's requirement.

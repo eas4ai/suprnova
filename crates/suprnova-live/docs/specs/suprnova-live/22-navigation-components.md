@@ -1,7 +1,7 @@
 # Suprnova Live -- 22 Navigation Components
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-09-13
 
 ## Scope
 
@@ -180,6 +180,10 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-13 -- Steps/progress navigation and command/navigation discovery are
+  not in the official built-in set; the stepper belongs to the separate blocks
+  project and the command palette is a specialty component. The capabilities
+  remain specified for that project.
 - 2026-08-21 -- Official navigation components reinforce canonical routes;
   rejected client-router abstractions for stylistic convenience.
 - 2026-08-21 -- Local and route-backed tabs are separate explicit modes because

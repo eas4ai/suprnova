@@ -76,9 +76,9 @@ Falsifier: a strip selection requires script, or the input accepts a
 non-date value.
 Mechanism: one browserless harness case with the helper disabled and one
 Playwright case per qualified engine.
-Ruling pending: Live spec 21 prefers native date semantics where adequate;
-the developer's 2026-09-12 design is this horizontal strip. A dated
-revision in spec 21 precedes agreement.
+Reading: Live spec 21 carries the 2026-09-13 revision recording this
+design; its locale, timezone, parsing, and constraint requirements still
+apply.
 
 [FORM-008] The combobox MUST implement the accessible combobox pattern
 (input, popup, listbox, option identity, active descendant, expanded
@@ -88,5 +88,5 @@ Falsifier: an older response's options render after a newer query's, or
 the popup lacks listbox semantics.
 Mechanism: browserless harness cases for the keyboard map and stale
 suppression; Playwright per engine.
-Ruling pending: Live spec 21 includes tag/token input in this capability;
-the developer ruled tag input out of the built-in set on 2026-09-12.
+Reading: tag/token input is out of the built-in set (Live spec 21,
+revision of 2026-09-13); the combobox ships single-value.

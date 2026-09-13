@@ -2,7 +2,7 @@
 
 Level: Consequential
 Decided by: Shawn
-Rests on: UI-010, UI-011, UI-012, UI-013, UI-014, UI-015, LIVE-005, LIVE-006
+Rests on: UI-014, UI-015, UI-016, UI-018, UI-019, LIVE-005, LIVE-006
 Would be wrong if: an application cannot mix the default library with its own or a third party's components without a name, template, style, or tag collision, or a library component becomes reachable without the application naming it in its registry builder
 
 ## Decision

@@ -1,5 +1,16 @@
 # Review - component-library-foundations
 
+Identifier note: the foundations spec was renumbered at 10:55 on
+2026-09-13 when the developer's rulings added four requirements. The
+review below uses the identifiers as they were when it was written; the
+map is UI-004 -> UI-008, UI-005 -> UI-009, UI-006 -> UI-010, UI-007 ->
+UI-011, UI-008 -> UI-012, UI-009 -> UI-013, UI-010 -> UI-014, UI-011 ->
+UI-015, UI-012 -> UI-016, UI-013 -> merged into UI-002 and UI-004, UI-014
+-> UI-018, UI-015 -> UI-019. New: UI-004 (no literal visual values),
+UI-005 (no style attributes), UI-006 (headless with the base layer
+stripped), UI-007 (Tailwind preset), UI-017 (component directory and
+manifest).
+
 ## Specification review, 2026-09-13 (before agreement)
 
 Reviewed `docs/spec/live.md` (LIVE-001 to LIVE-015, Observed),
@@ -83,6 +94,22 @@ span).
   and state-class checks are regular expressions over the stylesheet
   text, not a CSS parse; a selector split across lines or nested inside
   an at-rule with unusual spacing could evade them.
+- `ui-tokens`, extended 2026-09-13 10:58 for the headless ruling
+  (UI-002 layer membership, UI-004 no literal visual values, UI-005 no
+  style attributes, UI-007 Tailwind preset). Demonstrated (SPEC-022) on a
+  second fixture set: the violating stylesheet (a `border-radius: 6px`,
+  a `#06c` color, a stray rule after the layer), a view with a `style`
+  attribute, and a preset missing one token failed UI-002 ("a rule sits
+  outside @layer suprnova-ui"), UI-004 ("border-radius literal; color
+  literal; border-color literal"), UI-005, and UI-007 ("preset does not
+  map --sn-color-accent"); the corrected set passed all six. Two false
+  positives found and fixed before recording: the radius guard could be
+  backtracked past (now declarations are parsed and each value judged),
+  and a `:root` block stripped from inside `@media` left an empty media
+  block that read as a stray rule. Limit: `@layer` detection assumes the
+  layer block closes with a `}` at line start, which is how the shipped
+  stylesheet will be formatted; a minified stylesheet would need the
+  check to parse braces properly.
 
 ### For the developer
 

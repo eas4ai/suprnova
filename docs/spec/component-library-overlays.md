@@ -16,9 +16,9 @@ and confirm, sheet, drawer. No custom-element tier in this family; the
 anchor-positioning and popover-open-continuity spike in the qualification
 host opens this family's commitment.
 
-Out of the built-in set by the developer's 2026-09-12 ruling: nested
-submenus. Live spec 23 names submenu behavior; a dated revision there, or
-a withdrawal of the ruling, precedes any requirement for it.
+Out of the built-in set: nested submenus, recorded in Live spec 23's
+revision of 2026-09-13; the submenu behavior remains specified there for
+a separate project.
 
 ## Presentational tier
 

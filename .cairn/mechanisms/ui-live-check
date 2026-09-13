@@ -8,9 +8,9 @@ inputs:
 requirements:
   - LIVE-008
   - LIVE-009
-  - UI-005
-  - UI-010
-  - UI-012
+  - UI-009
+  - UI-014
+  - UI-016
   - FORM-001
   - FORM-002
   - FORM-003
