@@ -15,23 +15,24 @@ authorization and transaction contracts, then the rest.
 Drafted 2026-09-13 from the audit report (Astra, thirteen findings, eight
 High and five Medium; ten reproduced over loopback HTTP, three confirmed
 from source). The owner ruled at 11:13 that remediation precedes the
-component library. Not Agreed until the developer confirms the thirteen
-requirements and falsifiers as one set.
+component library. The developer agreed the thirteen requirements and
+falsifiers as one set at 11:40 on 2026-09-13.
 
-## Decisions to record before code
+## Decisions recorded
 
-- CACHE-004, nonce handling (Consequential): decline complete-entry
-  storage for nonce-bearing responses, or generalize the stitched
-  template mechanism to re-nonce every hit. The audit recommends either;
-  the developer rules.
-- CACHE-009, write atomicity (Consequential): one transaction for data
-  and generation on the autocommit path, or a transactional outbox with
-  fail-closed serving while invalidation is uncertain.
-- LIVE-017, action transactions (Consequential): implement the ambient
-  transaction, or refuse registration of Required actions until it
-  exists. The audit recommends refusing until real; the connection-pool
-  deadlock history in `framework/src/live/ports/transaction.rs` is the
-  reason it was left a no-op.
+Agreed by the developer at 11:40 on 2026-09-13, taking the recommended
+option in each case:
+
+- CACHE-004, nonce handling: decline complete-entry storage of a response
+  whose CSP carries a nonce source; hash-based CSP still caches
+  (`docs/decisions/decline-storage-of-nonce-bearing-csp-responses-hash-based-csp-still-caches.md`).
+- CACHE-009, write atomicity: the data write and its generation
+  advancement share one transaction on the autocommit path
+  (`docs/decisions/data-write-and-generation-advancement-share-one-transaction-on-the-autocommit-path.md`).
+- LIVE-017, action transactions: the registry refuses a component whose
+  action declares `transaction = "required"` until the ambient
+  transaction exists
+  (`docs/decisions/refuse-registration-of-required-transaction-actions-until-the-ambient-transaction-exists.md`).
 
 ## Deliverables
 

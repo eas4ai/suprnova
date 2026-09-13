@@ -1,6 +1,6 @@
 # RenderCache
 
-Status: Draft
+Status: Agreed 2026-09-13
 Prefix: CACHE
 
 Requirements drawn from the adversarial audit of 2026-09-13 (Astra,
@@ -9,7 +9,8 @@ report outside the repository; findings ASTRA-02, 03, 04, 06, 08, 09, 10,
 requirement refines a sentence already agreed in Live specs 15-18 and
 names the falsifier the audit demonstrated; the mechanism for each is
 that probe ported into `framework/tests/render_cache/hardening.rs` and
-run by name. Nothing here is Agreed until the developer confirms the set.
+run by name. The developer agreed the ten requirements and their
+falsifiers as one set on 2026-09-13, with LIVE-016 to LIVE-018.
 The framework is the actor throughout: `framework/src/render_cache/`
 over the engine in `crates/suprnova-live/src/render_cache/`.
 
@@ -24,6 +25,7 @@ renders once and the second request replays it with
 Mechanism: `.cairn/mechanisms/cache-no-store`.
 Refines: Live spec 15, "Cache-Control, Vary, surrogate directives, age,
 and private/public markers agree with variance and coherence policy".
+Status: Agreed 2026-09-13
 
 [CACHE-002] The framework MUST parse the final response's `Vary` header
 before publication. The framework MUST decline storage when `Vary` names
@@ -36,6 +38,7 @@ Mechanism: `.cairn/mechanisms/cache-vary`.
 Refines: Live spec 16, "Vary headers and server-side key dimensions
 remain consistent" and "the key, the Vary header, and the stored
 representation SHALL agree".
+Status: Agreed 2026-09-13
 
 [CACHE-003] The framework MUST decline storage of a response that carries
 `Content-Disposition`, `Cross-Origin-Opener-Policy`,
@@ -48,6 +51,7 @@ served from storage without it, so the same bytes render inline
 Mechanism: `.cairn/mechanisms/cache-security-headers`.
 Refines: Live spec 15, "unsafe per-request headers are never replayed
 from storage" and the entry-codec rule at its 2026-09-06 revision.
+Status: Agreed 2026-09-13
 
 [CACHE-004] The framework MUST NOT replay a `Content-Security-Policy`
 that carries a nonce source from a complete entry. The framework MUST
@@ -59,6 +63,7 @@ Mechanism: `.cairn/mechanisms/cache-csp-nonce`.
 Refines: Live spec 16, "Per-response CSP nonces, CSRF data, and other
 request-specific metadata are generated at assembly time where
 required".
+Status: Agreed 2026-09-13
 
 [CACHE-005] The framework MUST store a response's content coding with its
 body. The framework MUST replay `Content-Encoding` on every hit.
@@ -66,6 +71,7 @@ Falsifier: a gzip-encoded response replays its encoded bytes without
 `Content-Encoding` (ASTRA-04).
 Mechanism: `.cairn/mechanisms/cache-content-encoding`.
 Refines: Live spec 16, Media and Encoding negotiation.
+Status: Agreed 2026-09-13
 
 [CACHE-006] The framework MUST NOT publish a representation under the GET
 key from a HEAD render unless the handler rendered the complete GET body.
@@ -74,6 +80,7 @@ leaves later GET requests answering zero bytes (ASTRA-03).
 Mechanism: `.cairn/mechanisms/cache-head-first`.
 Refines: Live spec 15, replayable representation = body bytes and
 metadata of the represented variant.
+Status: Agreed 2026-09-13
 
 [CACHE-007] The framework MUST honor a request's `Cache-Control: no-cache`
 by revalidating or rendering fresh. The framework MUST honor a request's
@@ -85,6 +92,7 @@ a cold `no-store` request populates the cache for the next request
 Mechanism: `.cairn/mechanisms/cache-request-directives`.
 Refines: Live spec 15, HTTP cache metadata so browsers and proxies "can
 participate".
+Status: Agreed 2026-09-13
 
 ## Database and coherence contract
 
@@ -96,6 +104,7 @@ uncached and the primary row under a cached route (ASTRA-06).
 Mechanism: `.cairn/mechanisms/cache-named-connection`.
 Refines: Live spec 18, rebuild data and generations share one consistent
 read view.
+Status: Agreed 2026-09-13
 
 [CACHE-009] The framework MUST advance dependency generations in the same
 database transaction as the data write it observes, for ORM, query
@@ -108,6 +117,7 @@ pre-write body (ASTRA-10).
 Mechanism: `.cairn/mechanisms/cache-write-atomicity`.
 Refines: Live spec 17, "generation events are written as part of the
 successful data transaction and become observable only after commit".
+Status: Agreed 2026-09-13
 
 [CACHE-010] When the framework cannot open the snapshot transaction for a
 render, it MUST serve that render uncacheable and release the rebuild
@@ -117,3 +127,4 @@ generation reread agrees (ASTRA-08).
 Mechanism: `.cairn/mechanisms/cache-snapshot-failure`.
 Refines: Live spec 18, "failed rebuild preserves the prior atomic entry
 and releases/times out its singleflight ownership safely".
+Status: Agreed 2026-09-13
