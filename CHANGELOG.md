@@ -91,6 +91,25 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **A Live subscription stops receiving events once its Gate denies.** An
+  existing asynchronous membership kept receiving newly published events
+  after the stream's authorization Gate was redefined to deny the
+  principal, because delivery compared the subscription's own retained
+  authorization memo with itself. New subscriptions were correctly
+  refused; the old stream was not. The runtime now records the principal
+  a subscription was issued to, asks the Gate again before every
+  delivery, and retires a membership the Gate no longer allows. Found by
+  the 2026-09-13 adversarial audit (ASTRA-01); landed on main after the
+  `v2.0.1` tag.
+- **A Live action declaring `transaction = "required"` is refused at
+  registration.** The host's transaction port is a documented no-op, so
+  the policy promised atomicity it never provided: each write committed
+  on its own and nothing rolled back when a later stage failed.
+  `LiveRegistry` now fails with `RegistryErrorKind::RequiredTransactionUnsupported`
+  for such a component until the port installs a real ambient
+  transaction; actions without the policy register as before. Found by
+  the 2026-09-13 adversarial audit (ASTRA-05); landed on main after the
+  `v2.0.1` tag.
 - **A cached route's named-connection reads stay on their connection.**
   A RenderCache miss renders inside a snapshot transaction on the primary
   database, and query routing preferred that transaction over a query's

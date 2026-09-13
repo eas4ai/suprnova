@@ -1,7 +1,7 @@
 # Suprnova Live -- 14 Events and Asynchronous Updates
 
 Status: Normative design specification
-Last revised: 2026-09-09
+Last revised: 2026-09-13
 
 ## Scope
 
@@ -625,6 +625,23 @@ UX flow:
 - Ordinary HTTP actions remain functional without real-time transport.
 
 ## Decisions and revisions
+
+- 2026-09-13 -- Re-evaluated authorization at delivery. The host now
+  records the principal a subscription was issued to and, before appending
+  a published event to any membership, asks the framework Gate again
+  whether that principal may still consume the stream; a membership the
+  Gate now denies is retired through the same path a client unsubscribe
+  takes, and the event never reaches it. The adversarial audit of the same
+  day (finding ASTRA-01) redefined a stream's Gate to deny, saw a new
+  subscription refused, and still received an event published afterwards
+  on the existing stream, because transport and membership validation
+  compared the retained descriptor's own memo with itself. The framework's
+  requirement is LIVE-016 in `docs/spec/live.md`. Recorded under Admission
+  and current authority. The session and revocation-state clauses of that
+  requirement have no host substrate yet: the host carries a session
+  fingerprint at issuance and no per-membership revocation version, so a
+  membership outlives a destroyed session until its lifetime ends; this is
+  reported to the owner rather than narrowed silently.
 
 - 2026-09-09 -- Delivered the descriptor casing rename: the registered-event
   fields are `maximum_hops`, `maximum_fanout` and `payload_contract`,

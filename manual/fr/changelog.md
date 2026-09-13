@@ -105,6 +105,25 @@ en premier.
 
 ### Sécurité
 
+- **Un abonnement Live cesse de recevoir des événements dès que son Gate
+  refuse.** Une adhésion asynchrone existante continuait de recevoir les
+  événements nouvellement publiés après que le Gate d'autorisation du flux eut
+  été redéfini pour refuser le principal, parce que la livraison comparait le
+  mémo d'autorisation retenu de l'abonnement avec lui-même. Les nouveaux
+  abonnements étaient correctement refusés ; l'ancien flux ne l'était pas. Le
+  runtime enregistre désormais le principal auquel un abonnement a été émis,
+  interroge à nouveau le Gate avant chaque livraison et retire une adhésion
+  que le Gate n'autorise plus. Trouvé par l'audit adversarial du 2026-09-13
+  (ASTRA-01) ; arrivé sur main après le tag `v2.0.1`.
+- **Une action Live déclarant `transaction = "required"` est refusée à
+  l'enregistrement.** Le port de transaction de l'hôte est un no-op documenté,
+  si bien que la politique promettait une atomicité qu'elle n'a jamais fournie
+  : chaque écriture était validée seule et rien n'était annulé quand une étape
+  ultérieure échouait. `LiveRegistry` échoue désormais avec
+  `RegistryErrorKind::RequiredTransactionUnsupported` pour un tel composant,
+  jusqu'à ce que le port installe une vraie transaction ambiante ; les actions
+  sans la politique s'enregistrent comme avant. Trouvé par l'audit adversarial
+  du 2026-09-13 (ASTRA-05) ; arrivé sur main après le tag `v2.0.1`.
 - **Les lectures d'une route en cache sur des connexions nommées restent sur
   leur connexion.** Un miss de RenderCache rend à l'intérieur d'une
   transaction d'instantané sur la base primaire, et le routage des requêtes

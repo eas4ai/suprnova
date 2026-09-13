@@ -65,6 +65,13 @@
 //! This was already true before this fix (see the ruling above); this fix
 //! only stops that fact from also corrupting the transaction event stream.
 //!
+//! Since 2026-09-13 (LIVE-017, audit finding ASTRA-05) the framework's
+//! `LiveRegistry` refuses to register a component whose action declares the
+//! Required policy, with `RegistryErrorKind::RequiredTransactionUnsupported`,
+//! so no application can rely on the promise this port cannot keep. The
+//! refusal lifts when `begin` installs a real ambient transaction, as the
+//! next section describes.
+//!
 //! The real fix, for whoever picks this up, is for `begin` to open a real
 //! transaction and install it as the ambient `CURRENT_TX` task-local (the
 //! same mechanism `DB::transaction` uses), so that the ordinary

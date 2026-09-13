@@ -146,6 +146,17 @@ impl LiveRegistryBuilder {
         if requires_validation && validation.is_none() {
             return Err(RegistryError::new(RegistryErrorKind::InvalidComponent));
         }
+        // LIVE-017 (decided 2026-09-13): the host's transaction port is a
+        // documented no-op, so a Required policy would promise atomicity it
+        // does not provide (audit finding ASTRA-05). A refused contract is
+        // honest; a successful no-op is not.
+        if descriptor.metadata().actions().iter().any(|action| {
+            action.transaction() == suprnova_live::action::TransactionPolicy::Required
+        }) {
+            return Err(RegistryError::new(
+                RegistryErrorKind::RequiredTransactionUnsupported,
+            ));
+        }
         self.inner = self.inner.register(descriptor).map_err(|error| {
             let kind = match error.kind() {
                 suprnova_live::registry::RegistryErrorKind::DuplicateComponent => {
@@ -210,6 +221,11 @@ pub enum RegistryErrorKind {
     DuplicateView,
     /// Startup registration exceeded the hard component-count bound.
     CapacityExceeded,
+    /// An action declares `transaction = "required"`, which the host cannot
+    /// yet honor with a real ambient transaction; refusing at registration
+    /// keeps the policy from promising atomicity it does not provide
+    /// (LIVE-017, decided 2026-09-13).
+    RequiredTransactionUnsupported,
 }
 
 impl RegistryErrorKind {
@@ -221,6 +237,7 @@ impl RegistryErrorKind {
             Self::DuplicateComponent => "duplicate_live_component",
             Self::DuplicateView => "duplicate_live_component_view",
             Self::CapacityExceeded => "live_component_capacity_exceeded",
+            Self::RequiredTransactionUnsupported => "live_required_transaction_unsupported",
         }
     }
 }

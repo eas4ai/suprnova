@@ -60,6 +60,20 @@ impl SubscriptionRegistryPort for SuprnovaSubscriptionRegistry {
 }
 
 /// Suprnova Gate adaptation for registered component streams.
+/// The Gate ability and resource a stream subscription is authorized
+/// against: `live:{component}.stream.{stream}` over `{component}::{stream}`.
+/// One definition for issuance and for delivery (LIVE-016), so the two can
+/// never drift apart.
+pub(crate) fn stream_ability(
+    component: &suprnova_live::identity::ComponentName,
+    stream: &suprnova_live::async_updates::StreamName,
+) -> (String, String) {
+    (
+        format!("live:{}.stream.{}", component.as_str(), stream.as_str()),
+        format!("{}::{}", component.as_str(), stream.as_str()),
+    )
+}
+
 pub(crate) struct SuprnovaSubscriptionAuthorization;
 
 impl SubscriptionAuthorizationPort for SuprnovaSubscriptionAuthorization {
@@ -67,16 +81,7 @@ impl SubscriptionAuthorizationPort for SuprnovaSubscriptionAuthorization {
         &'a self,
         request: SubscriptionAuthorizationRequest<'a>,
     ) -> SubscriptionFuture<'a, Result<SubscriptionAuthorizationDecision, SubscriptionError>> {
-        let ability = format!(
-            "live:{}.stream.{}",
-            request.component().as_str(),
-            request.stream().as_str()
-        );
-        let resource = format!(
-            "{}::{}",
-            request.component().as_str(),
-            request.stream().as_str()
-        );
+        let (ability, resource) = stream_ability(request.component(), request.stream());
         Box::pin(async move {
             let Some(principal) = crate::auth::guard::Auth::id() else {
                 return Ok(SubscriptionAuthorizationDecision::Deny);

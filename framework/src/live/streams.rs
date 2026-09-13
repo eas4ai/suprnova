@@ -97,21 +97,14 @@ impl LiveStreams {
     }
 
     /// Tells every subscriber of `topic` to refresh from the server.
-    #[allow(
-        clippy::unused_async,
-        reason = "publication is asynchronous in the public contract so durable fan-out can join later"
-    )]
     pub async fn refresh(&self, topic: &str) -> Result<(), LiveStreamError> {
         self.state
             .publish(topic, &StreamPayloadSpec::Refresh)
+            .await
             .map_err(publish_error)
     }
 
     /// Delivers one typed browser event to every subscriber of `topic`.
-    #[allow(
-        clippy::unused_async,
-        reason = "publication is asynchronous in the public contract so durable fan-out can join later"
-    )]
     pub async fn event<T: EventPayloadMetadata>(
         &self,
         topic: &str,
@@ -128,6 +121,7 @@ impl LiveStreams {
                     payload,
                 },
             )
+            .await
             .map_err(publish_error)
     }
 }

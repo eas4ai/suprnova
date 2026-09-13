@@ -1,4 +1,4 @@
-command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E 'test(hardening::required_transaction_rolls_back)'
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E 'test(hardening::required_transaction_is_refused_until_real)'
 inputs:
   - framework/src/render_cache/
   - framework/src/live/
@@ -8,6 +8,7 @@ inputs:
   - crates/suprnova-live/src/
   - Cargo.lock
   - framework/tests/support/
+  - framework/tests/templates/
   - framework/tests/database/
   - crates/suprnova-live/docs/specs/suprnova-live/
   - CHANGELOG.md

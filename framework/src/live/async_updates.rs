@@ -430,6 +430,18 @@ impl AsyncEventSession for LogSession {
 }
 
 /// One issued logical subscription with its retained authority and log.
+/// One membership of a published topic, captured under the tables lock so
+/// its authorization can be re-evaluated outside it (LIVE-016).
+struct DeliveryCandidate {
+    id: String,
+    principal: Option<String>,
+    ability: String,
+    resource: String,
+    transport: TransportKey,
+    socket: bool,
+    member: bool,
+}
+
 pub(crate) struct IssuedRecord {
     subscription: SubscriptionId,
     pub(crate) descriptor: SubscriptionDescriptor,
@@ -437,6 +449,11 @@ pub(crate) struct IssuedRecord {
     pub(crate) binding_text: String,
     previous_binding: Option<SubscriptionBinding>,
     authorized: Arc<AuthorizedSubscription>,
+    /// The principal the subscription was issued to, re-authorized against
+    /// the stream's Gate before every delivery (LIVE-016). `None` when no
+    /// principal was signed in at issuance, which the subscription port
+    /// already denies.
+    principal: Option<String>,
     context: Option<AsyncEnvelopeContext>,
     pub(crate) component: ComponentName,
     contract: ContentDigest,
@@ -790,6 +807,7 @@ impl AsyncState {
                 binding_text,
                 previous_binding: None,
                 authorized: Arc::new(authorized),
+                principal: crate::auth::guard::Auth::id(),
                 context: Some(envelope_context),
                 component,
                 contract,
@@ -1486,21 +1504,71 @@ impl AsyncState {
     }
 
     /// Publishes one typed payload to every subscription of `topic`.
-    pub(crate) fn publish(
-        &self,
+    /// Appends `spec` to every membership of `topic` whose authorization
+    /// still holds, and retires the ones whose authorization no longer does.
+    ///
+    /// LIVE-016 (audit finding ASTRA-01, 2026-09-13): admission proved the
+    /// principal could consume the stream once, at issuance; a Gate
+    /// redefined to deny afterwards left the existing stream receiving
+    /// events, because delivery only compared the retained descriptor's
+    /// memo with itself. The framework Gate is asked again here, per
+    /// membership, outside the tables lock, and a membership it denies is
+    /// retired through the same path a client unsubscribe takes.
+    pub(crate) async fn publish(
+        self: &Arc<Self>,
         topic: &str,
         spec: &StreamPayloadSpec,
     ) -> Result<(), PublishError> {
         TopicName::parse(topic).map_err(|_| PublishError::InvalidTopic)?;
         let now = self.now().map_err(|_| PublishError::InvalidPayload)?;
-        let mut tables = self.tables();
-        self.prune(&mut tables, now);
-        let Some(ids) = tables.topics.get(topic).cloned() else {
-            return Ok(());
+        let candidates = {
+            let mut tables = self.tables();
+            self.prune(&mut tables, now);
+            let Some(ids) = tables.topics.get(topic).cloned() else {
+                return Ok(());
+            };
+            ids.into_iter()
+                .filter_map(|id| {
+                    let record = tables.issued.get(&id)?;
+                    let (ability, resource) = super::ports::subscription::stream_ability(
+                        &record.component,
+                        &record.stream,
+                    );
+                    Some(DeliveryCandidate {
+                        id,
+                        principal: record.principal.clone(),
+                        ability,
+                        resource,
+                        transport: record.transport.clone(),
+                        socket: record.kind == TransportKind::WebSocket,
+                        member: record.membership.is_some(),
+                    })
+                })
+                .collect::<Vec<_>>()
         };
+        let mut allowed = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let permitted = match &candidate.principal {
+                Some(principal) => {
+                    crate::authorization::Gate::allows_async(
+                        &candidate.ability,
+                        principal,
+                        &candidate.resource,
+                    )
+                    .await
+                }
+                None => false,
+            };
+            if permitted {
+                allowed.push(candidate.id);
+            } else {
+                self.retire_denied(candidate, now).await;
+            }
+        }
+        let tables = self.tables();
         let mut accepted = 0_usize;
         let mut rejected = 0_usize;
-        for id in ids {
+        for id in allowed {
             let Some(record) = tables.issued.get(&id) else {
                 continue;
             };
@@ -1550,7 +1618,24 @@ impl AsyncState {
         Ok(())
     }
 
-    /// Appends heartbeat continuity to idle memberships of one transport.
+    /// Retires a membership whose authorization no longer holds (LIVE-016):
+    /// a committed membership leaves through the unsubscribe path, so its
+    /// transport learns of it; an issued-but-unjoined subscription simply
+    /// expires now and is pruned.
+    async fn retire_denied(self: &Arc<Self>, candidate: DeliveryCandidate, now: UnixMillis) {
+        if candidate.member {
+            let _ = self
+                .remove_membership(&candidate.transport, &candidate.id, None, candidate.socket)
+                .await;
+            return;
+        }
+        let mut tables = self.tables();
+        if let Some(record) = tables.issued.get_mut(&candidate.id) {
+            record.expires_at = now;
+        }
+        self.prune(&mut tables, now);
+    }
+
     fn heartbeat(&self, key: &TransportKey) {
         let Ok(now) = self.now() else {
             return;

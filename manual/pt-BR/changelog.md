@@ -100,6 +100,25 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ### Segurança
 
+- **Uma assinatura Live para de receber eventos assim que seu Gate nega.** Uma
+  associação assíncrona existente continuava recebendo eventos
+  recém-publicados depois que o Gate de autorização do stream foi redefinido
+  para negar o principal, porque a entrega comparava o memo de autorização
+  retido da própria assinatura consigo mesmo. Novas assinaturas eram recusadas
+  corretamente; o stream antigo não. O runtime agora registra o principal para
+  quem uma assinatura foi emitida, consulta o Gate novamente antes de cada
+  entrega e encerra uma associação que o Gate não permite mais. Encontrado
+  pela auditoria adversarial de 2026-09-13 (ASTRA-01); chegou à main depois da
+  tag `v2.0.1`.
+- **Uma action Live que declara `transaction = "required"` é recusada no
+  registro.** A porta de transação do host é um no-op documentado, então a
+  política prometia uma atomicidade que nunca forneceu: cada escrita era
+  confirmada por conta própria e nada era revertido quando uma etapa posterior
+  falhava. `LiveRegistry` agora falha com
+  `RegistryErrorKind::RequiredTransactionUnsupported` para tal componente até
+  que a porta instale uma transação ambiente real; actions sem a política
+  registram como antes. Encontrado pela auditoria adversarial de 2026-09-13
+  (ASTRA-05); chegou à main depois da tag `v2.0.1`.
 - **As leituras de uma rota em cache em conexões nomeadas permanecem em sua
   conexão.** Um miss do RenderCache renderiza dentro de uma transação de
   snapshot no banco primário, e o roteamento de consultas preferia essa

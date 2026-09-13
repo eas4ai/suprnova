@@ -213,3 +213,46 @@ and the manual's routing precedence list (Eloquent chapter, mirrored in
 six locales) states the read exception. Writes keep routing through the
 transaction. The `database` binary (121 tests), `eloquent` (601), and the
 dogfood app (117) pass.
+
+### LIVE-016, `live-async-revocation`, 2026-09-13 17:05
+
+Violating example: the test `revoked_gate_ends_delivery` on the tree at
+`905c0ce4`, with only the test added (Astra's probe with its last
+assertion inverted). Result:
+
+    FAIL hardening::revoked_gate_ends_delivery
+    an event published after the Gate denied reached the old stream
+
+That is ASTRA-01 as the audit reproduced it. After the fix (the issued
+record carries the principal captured at issuance; `publish` is async,
+asks the Gate again per membership outside the tables lock through the
+same ability strings issuance uses, and retires a denied membership
+through the unsubscribe path) the same test passes: the new subscription
+is refused and the old stream never carries the marker within its
+window. The full `live` binary passes (107 of 108; the one failure is
+LIVE-018's test, not yet fixed).
+
+Recorded limit, reported to the owner in the session summary: LIVE-016
+also names the session and revocation state. The host carries a session
+fingerprint at issuance and no per-membership revocation version, so a
+membership outlives a destroyed session until its lifetime ends. The
+Live spec 14 revision says the same; the requirement's session clause is
+not narrowed here, it is left visibly open for the owner's ruling.
+
+### LIVE-017, `live-action-transaction`, 2026-09-13 17:05
+
+Under the recorded decision the mechanism's test is
+`required_transaction_is_refused_until_real` (the mechanism's filter was
+renamed from the draft's `required_transaction_rolls_back`, which named
+the rejected option). Violating example on the tree at `905c0ce4`, with
+only the test and the new error variant declared:
+
+    FAIL hardening::required_transaction_is_refused_until_real
+    a Required-transaction action is refused at registration:
+    <LiveRegistryBuilder:redacted>
+
+That is ASTRA-05 as the audit described it: a component declaring the
+policy registered and served. After the fix (`LiveRegistryBuilder`
+refuses any component whose action declares `transaction = "required"`
+with `RegistryErrorKind::RequiredTransactionUnsupported`) the same test
+passes, and a component without the policy still registers.

@@ -1,7 +1,7 @@
 # Suprnova Live -- 04 Actions and Validation
 
 Status: Normative design specification
-Last revised: 2026-08-31
+Last revised: 2026-09-13
 
 ## Scope
 
@@ -222,6 +222,21 @@ facility rather than relying on a fallible reporting hook.
 - Live does not generate no-JavaScript action parity.
 
 ## Decisions and revisions
+
+- 2026-09-13 -- Refused the Required transaction policy at registration
+  until the host honors it. The framework's transaction port opens a
+  transaction only to roll it back and answers commit and rollback with
+  success, so an action declared `transaction = "required"` committed each
+  write on its own and rolled nothing back when a later stage failed
+  (audit finding ASTRA-05). The framework's `LiveRegistry` now fails with
+  `RegistryErrorKind::RequiredTransactionUnsupported` for any component
+  whose action declares the policy; actions without it register as before.
+  A refused contract is honest; a successful no-op is not. The refusal
+  lifts when the port installs a real ambient transaction the action's
+  writes join, which is the work the owner declined to carry inside the
+  hardening commitment. Recorded under Action hooks and transactional
+  ordering; the framework's requirement is LIVE-017 in `docs/spec/live.md`,
+  decided by the owner on 2026-09-13.
 
 - 2026-08-31 -- Integrated the Task 4 Suprnova action host graph. Validation
   requests now bind the exact component identity and request-owned typed target,

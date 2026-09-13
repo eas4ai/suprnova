@@ -104,6 +104,25 @@ recientes primero.
 
 ### Seguridad
 
+- **Una suscripción Live deja de recibir eventos en cuanto su Gate deniega.**
+  Una membresía asíncrona existente seguía recibiendo eventos recién
+  publicados después de redefinir el Gate de autorización del stream para
+  denegar al principal, porque la entrega comparaba el memo de autorización
+  retenido de la propia suscripción consigo mismo. Las suscripciones nuevas se
+  rechazaban correctamente; el stream antiguo no. El runtime ahora registra el
+  principal al que se emitió una suscripción, vuelve a consultar el Gate antes
+  de cada entrega y retira una membresía que el Gate ya no permite. Detectado
+  por la auditoría adversarial del 2026-09-13 (ASTRA-01); aterrizó en main
+  después de la etiqueta `v2.0.1`.
+- **Una acción Live que declara `transaction = "required"` se rechaza en el
+  registro.** El puerto de transacciones del host es un no-op documentado, así
+  que la política prometía una atomicidad que nunca proporcionó: cada
+  escritura se confirmaba por su cuenta y nada se revertía cuando fallaba una
+  etapa posterior. `LiveRegistry` ahora falla con
+  `RegistryErrorKind::RequiredTransactionUnsupported` para tal componente
+  hasta que el puerto instale una transacción ambiental real; las acciones sin
+  la política se registran como antes. Detectado por la auditoría adversarial
+  del 2026-09-13 (ASTRA-05); aterrizó en main después de la etiqueta `v2.0.1`.
 - **Las lecturas de una ruta en caché sobre conexiones con nombre permanecen
   en su conexión.** Un fallo de RenderCache renderiza dentro de una
   transacción de instantánea sobre la base de datos primaria, y el

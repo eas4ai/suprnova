@@ -103,6 +103,27 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Sicherheit
 
+- **Ein Live-Abonnement erhält keine Ereignisse mehr, sobald sein Gate
+  ablehnt.** Eine bestehende asynchrone Mitgliedschaft erhielt weiterhin neu
+  veröffentlichte Ereignisse, nachdem das Autorisierungs-Gate des Streams neu
+  definiert worden war, um den Principal abzulehnen, weil die Zustellung das
+  eigene zurückbehaltene Autorisierungsmemo des Abonnements mit sich selbst
+  verglich. Neue Abonnements wurden korrekt abgelehnt; der alte Stream nicht.
+  Die Laufzeit merkt sich jetzt den Principal, für den ein Abonnement
+  ausgestellt wurde, fragt das Gate vor jeder Zustellung erneut und beendet
+  eine Mitgliedschaft, die das Gate nicht mehr erlaubt. Gefunden durch das
+  adversariale Audit vom 2026-09-13 (ASTRA-01); nach dem Tag `v2.0.1` auf main
+  gelandet.
+- **Eine Live-Aktion, die `transaction = "required"` deklariert, wird bei der
+  Registrierung abgelehnt.** Der Transaktionsport des Hosts ist ein
+  dokumentiertes No-op, sodass die Richtlinie eine Atomarität versprach, die
+  sie nie lieferte: Jeder Schreibvorgang wurde für sich committet, und nichts
+  wurde zurückgerollt, wenn eine spätere Stufe fehlschlug. `LiveRegistry`
+  schlägt für eine solche Komponente jetzt mit
+  `RegistryErrorKind::RequiredTransactionUnsupported` fehl, bis der Port eine
+  echte umgebende Transaktion installiert; Aktionen ohne die Richtlinie
+  registrieren sich wie bisher. Gefunden durch das adversariale Audit vom
+  2026-09-13 (ASTRA-05); nach dem Tag `v2.0.1` auf main gelandet.
 - **Die Lesezugriffe einer zwischengespeicherten Route über benannte
   Verbindungen bleiben auf ihrer Verbindung.** Ein RenderCache-Miss rendert
   innerhalb einer Snapshot-Transaktion auf der primären Datenbank, und das
