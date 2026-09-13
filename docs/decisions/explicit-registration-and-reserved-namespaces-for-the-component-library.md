@@ -11,4 +11,4 @@ The library rides Live's existing explicit registry: an application registers ea
 
 ## Realized by
 
-(none yet: recorded, not built)
+- d56fb7ce  docs(cairn): split the library specification by component family and record the registration ruling
