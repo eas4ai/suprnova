@@ -19,7 +19,15 @@ Cargo.lock
 .env.*.local
 
 reference/
-docs/
+# docs/ is the Cairn record: docs/spec/, docs/commitments/, docs/decisions/
+# and docs/recon.md are tracked - Cairn is tooling under the owner's rule.
+# Planning archives (plans, design docs, reviews) are development
+# artifacts and stay out at any level, including the Live crate's.
+**/docs/superpowers/
+# Magnetar's pre-monorepo spec notes stay local, as they were under the old docs/ rule.
+/crates/suprnova-magnetar/docs/
+# Cairn's evidence history is tracked; the agent's in-progress marker is not.
+/.cairn/in-progress
 .claude/
 .codex
 .agents/
