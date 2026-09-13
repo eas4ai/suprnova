@@ -20,3 +20,4 @@ will accept your recommendations".
 ## Realized by
 
 - 3995878c  docs(cairn): agree the hardening requirements as one set and record the review
+- 15ba2924  fix(render-cache): never replay a CSP nonce from a complete entry (CACHE-004)

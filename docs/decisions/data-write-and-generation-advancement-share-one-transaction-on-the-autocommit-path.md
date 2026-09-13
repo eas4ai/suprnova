@@ -21,3 +21,4 @@ will accept your recommendations".
 ## Realized by
 
 - 3995878c  docs(cairn): agree the hardening requirements as one set and record the review
+- 56f524cd  fix(render-cache): commit a data write and its generation advancement together (CACHE-009)

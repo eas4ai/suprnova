@@ -21,3 +21,4 @@ words: "I will accept your recommendations".
 ## Realized by
 
 - 3995878c  docs(cairn): agree the hardening requirements as one set and record the review
+- cecb87df  fix(live): re-authorize each async delivery and refuse Required-transaction actions (LIVE-016, LIVE-017)
