@@ -100,6 +100,16 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ### Segurança
 
+- **Um stream do Live termina com a sessão que o abriu.** Uma associação
+  assíncrona era reautorizada contra o seu Gate antes de cada entrega, mas
+  nunca contra a sua sessão: um navegador que saía da conta, ou cuja sessão
+  era revogada, continuava recebendo eventos até o próprio stream fechar.
+  Destruir uma sessão em um nó agora encerra de imediato toda associação que
+  ela abriu ali, seja por invalidação da sessão, regeneração do id ou "sair de
+  todos os lugares", e a entrega volta a conferir a sessão de cada associação
+  no armazenamento de sessões no máximo uma vez a cada dez segundos, de modo
+  que uma sessão destruída em outro nó deixa de receber eventos dentro desse
+  intervalo.
 - **As diretivas `Cache-Control` de uma requisição são respeitadas pelo
   RenderCache.** Uma requisição com `no-cache` era respondida do armazenamento
   com `Age`, e uma requisição fria com `no-store` semeava o cache para a

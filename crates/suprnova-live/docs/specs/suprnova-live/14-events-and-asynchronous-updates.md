@@ -1,7 +1,7 @@
 # Suprnova Live -- 14 Events and Asynchronous Updates
 
 Status: Normative design specification
-Last revised: 2026-09-13
+Last revised: 2026-09-14
 
 ## Scope
 
@@ -625,6 +625,21 @@ UX flow:
 - Ordinary HTTP actions remain functional without real-time transport.
 
 ## Decisions and revisions
+
+- 2026-09-14 -- Closed the session and revocation-state clauses of LIVE-016
+  under LIVE-019 and LIVE-020 in `docs/spec/live.md`. Each issued record
+  now carries the session fingerprint and the attested session store id;
+  the session middleware retires every membership of a session whose store
+  row it destroys, and the "log out everywhere" path retires every
+  membership of the user, both on the node that acts. Delivery re-checks a
+  membership's session against the shared store at most once per ten
+  seconds and retires one the store no longer holds, so a session destroyed
+  on another node stops receiving events within that interval. A store
+  that cannot answer leaves the membership in place until it can, the same
+  degradation an ordinary request gets; a session fact that is not a store
+  id, as test fixtures record, is never re-checked. Recorded under Admission
+  and current authority; this closes the 2026-09-13 note below that these
+  clauses had no host substrate.
 
 - 2026-09-13 -- Reserved the per-scope issuance slot before authorization.
   Issuance counted the scope's records under the tables lock, released the

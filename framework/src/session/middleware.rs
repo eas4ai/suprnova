@@ -1811,6 +1811,9 @@ impl Middleware for SessionMiddleware {
                             new_session_id = %session.id,
                             "session id rotated; destroyed old store row"
                         );
+                        // The old session is gone: every Live membership it
+                        // opened ends with it on this node (LIVE-019).
+                        crate::live::revocation::session_destroyed(old_id.as_bytes()).await;
                     }
                     Err(e) => {
                         retire_unpersisted_opaque_session(

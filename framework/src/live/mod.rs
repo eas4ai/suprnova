@@ -17,6 +17,7 @@ mod events;
 pub(crate) mod ports;
 mod registry;
 mod response;
+pub(crate) mod revocation;
 mod routes;
 mod runtime;
 pub(crate) use runtime::LiveMountRegistration;

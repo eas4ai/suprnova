@@ -45,7 +45,7 @@ use suprnova_live::async_updates::{
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::clock::Clock;
 use suprnova_live::crypto::SnapshotKeyRing;
-use suprnova_live::host::{HostScopeFacts, TrustedLiveRequestContext};
+use suprnova_live::host::{HostScopeFacts, SessionFingerprint, TrustedLiveRequestContext};
 use suprnova_live::identity::{
     BrowserOperationName, ComponentName, ContentDigest, IslandSlot, UnixMillis,
 };
@@ -66,6 +66,12 @@ pub(crate) const LIVE_ASYNC_EVENTS_PATH: &str = "/__live/async/events";
 pub(crate) const LIVE_ASYNC_SOCKET_PATH: &str = "/__live/async/socket";
 
 pub(crate) const SUBSCRIPTION_LIFETIME_MS: u64 = 120_000;
+/// How long a membership's session is trusted before delivery asks the
+/// session store again whether it still exists (LIVE-020, decided
+/// 2026-09-13): a session destroyed on another node stops receiving events
+/// within this interval, and the store is read at most this often per
+/// membership.
+pub(crate) const SESSION_REVERIFY_INTERVAL_MS: u64 = 10_000;
 pub(crate) const HEARTBEAT_TIMEOUT_MS: u64 = 15_000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// Delay after a productive SSE batch before a non-authoritative comment
@@ -485,6 +491,28 @@ struct DeliveryCandidate {
     transport: TransportKey,
     socket: bool,
     member: bool,
+    /// The session store id to re-verify, when the session was last
+    /// confirmed longer ago than [`SESSION_REVERIFY_INTERVAL_MS`].
+    stale_session: Option<String>,
+}
+
+impl DeliveryCandidate {
+    fn new(id: &str, record: &IssuedRecord, now: UnixMillis) -> Self {
+        let (ability, resource) =
+            super::ports::subscription::stream_ability(&record.component, &record.stream);
+        let stale = now.get().saturating_sub(record.session_verified_at.get())
+            >= SESSION_REVERIFY_INTERVAL_MS;
+        Self {
+            id: id.to_owned(),
+            principal: record.principal.clone(),
+            ability,
+            resource,
+            transport: record.transport.clone(),
+            socket: record.kind == TransportKind::WebSocket,
+            member: record.membership.is_some(),
+            stale_session: record.session_id.clone().filter(|_| stale),
+        }
+    }
 }
 
 pub(crate) struct IssuedRecord {
@@ -499,6 +527,16 @@ pub(crate) struct IssuedRecord {
     /// principal was signed in at issuance, which the subscription port
     /// already denies.
     principal: Option<String>,
+    /// The session the subscription was issued under, so destroying that
+    /// session on this node retires the membership (LIVE-019).
+    session: Option<SessionFingerprint>,
+    /// The attested session store id, when it is one the store can be
+    /// asked about; `None` leaves the membership to the Gate and to the
+    /// in-process revocation alone.
+    session_id: Option<String>,
+    /// When the session was last known to exist: issuance, renewal, or the
+    /// latest successful store re-check (LIVE-020).
+    session_verified_at: UnixMillis,
     context: Option<AsyncEnvelopeContext>,
     pub(crate) component: ComponentName,
     contract: ContentDigest,
@@ -685,6 +723,7 @@ impl AsyncState {
         document_instance: &str,
         origin: VerifiedOrigin,
         baseline: StreamPosition,
+        session_id: Option<String>,
     ) -> Result<IssuedView, AsyncErrorKind> {
         let now = self.now()?;
         let expires_at = UnixMillis::new(now.get().saturating_add(SUBSCRIPTION_LIFETIME_MS));
@@ -867,6 +906,10 @@ impl AsyncState {
                 previous_binding: None,
                 authorized: Arc::new(authorized),
                 principal: crate::auth::guard::Auth::id(),
+                session: context.host_scope_facts().session().cloned(),
+                session_id: session_id
+                    .filter(|candidate| crate::session::is_valid_session_id(candidate)),
+                session_verified_at: now,
                 context: Some(envelope_context),
                 component,
                 contract,
@@ -997,6 +1040,9 @@ impl AsyncState {
         record.authorized = Arc::new(authorized);
         record.context = Some(envelope_context);
         record.expires_at = expires_at;
+        // The renewal request itself passed the session middleware, so the
+        // session is known to exist now.
+        record.session_verified_at = now;
         record.resume_position = position.1;
         let claims = record.authorized.verified().claims();
         let credential = tables
@@ -1589,35 +1635,32 @@ impl AsyncState {
             ids.into_iter()
                 .filter_map(|id| {
                     let record = tables.issued.get(&id)?;
-                    let (ability, resource) = super::ports::subscription::stream_ability(
-                        &record.component,
-                        &record.stream,
-                    );
-                    Some(DeliveryCandidate {
-                        id,
-                        principal: record.principal.clone(),
-                        ability,
-                        resource,
-                        transport: record.transport.clone(),
-                        socket: record.kind == TransportKind::WebSocket,
-                        member: record.membership.is_some(),
-                    })
+                    Some(DeliveryCandidate::new(&id, record, now))
                 })
                 .collect::<Vec<_>>()
         };
+        let store = crate::container::App::make::<dyn crate::session::SessionStore>();
         let mut allowed = Vec::with_capacity(candidates.len());
         for candidate in candidates {
-            let permitted = match &candidate.principal {
-                Some(principal) => {
-                    crate::authorization::Gate::allows_async(
-                        &candidate.ability,
-                        principal,
-                        &candidate.resource,
-                    )
-                    .await
+            let session_holds = match (&candidate.stale_session, &store) {
+                (Some(session_id), Some(store)) => {
+                    self.session_still_exists(store.as_ref(), &candidate.id, session_id, now)
+                        .await
                 }
-                None => false,
+                _ => true,
             };
+            let permitted = session_holds
+                && match &candidate.principal {
+                    Some(principal) => {
+                        crate::authorization::Gate::allows_async(
+                            &candidate.ability,
+                            principal,
+                            &candidate.resource,
+                        )
+                        .await
+                    }
+                    None => false,
+                };
             if permitted {
                 allowed.push(candidate.id);
             } else {
@@ -1675,6 +1718,73 @@ impl AsyncState {
             return Err(PublishError::InvalidPayload);
         }
         Ok(())
+    }
+
+    /// Asks the session store whether a membership's session still exists
+    /// (LIVE-020) and remembers a confirmation so the store is read at most
+    /// once per [`SESSION_REVERIFY_INTERVAL_MS`] per membership.
+    ///
+    /// A store that cannot answer leaves the membership in place and the
+    /// question open for the next delivery, the same graceful degradation
+    /// an ordinary request gets from a session store outage; only a store
+    /// that answers "no such session" retires the membership.
+    async fn session_still_exists(
+        &self,
+        store: &dyn crate::session::SessionStore,
+        id: &str,
+        session_id: &str,
+        now: UnixMillis,
+    ) -> bool {
+        match store.read(session_id).await {
+            Ok(Some(_)) => {
+                let mut tables = self.tables();
+                if let Some(record) = tables.issued.get_mut(id) {
+                    record.session_verified_at = now;
+                }
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "session store could not confirm a Live membership's session; delivery continues until it answers"
+                );
+                true
+            }
+        }
+    }
+
+    /// Retires every membership issued under `session` (LIVE-019): the
+    /// session middleware calls this when it destroys a session's store
+    /// row, so a logged-out browser's streams end on this node at once.
+    pub(crate) async fn revoke_session(self: &Arc<Self>, session: &SessionFingerprint) {
+        self.revoke_where(|record| record.session.as_ref() == Some(session))
+            .await;
+    }
+
+    /// Retires every membership issued to `principal` (LIVE-019), for a
+    /// "log out everywhere" that destroys all of a user's sessions.
+    pub(crate) async fn revoke_principal(self: &Arc<Self>, principal: &str) {
+        self.revoke_where(|record| record.principal.as_deref() == Some(principal))
+            .await;
+    }
+
+    async fn revoke_where(self: &Arc<Self>, matches: impl Fn(&IssuedRecord) -> bool) {
+        let Ok(now) = self.now() else {
+            return;
+        };
+        let revoked = {
+            let tables = self.tables();
+            tables
+                .issued
+                .iter()
+                .filter(|(_, record)| matches(record))
+                .map(|(id, record)| DeliveryCandidate::new(id, record, now))
+                .collect::<Vec<_>>()
+        };
+        for candidate in revoked {
+            self.retire_denied(candidate, now).await;
+        }
     }
 
     /// Retires a membership whose authorization no longer holds (LIVE-016):

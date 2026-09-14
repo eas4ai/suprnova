@@ -105,6 +105,10 @@ struct Evidence {
     disposition: CheckDisposition,
     binding: [u8; 32],
     fact_fingerprint: Option<[u8; 32]>,
+    /// The session id itself, kept only for the Session check so an
+    /// issued membership can be re-verified against the session store
+    /// (LIVE-020). Every other check keeps its fingerprint alone.
+    session_value: Option<Box<[u8]>>,
 }
 
 #[derive(Clone, Copy)]
@@ -166,11 +170,16 @@ impl LiveSecurityAttestation {
         check: SecurityCheck,
         fact: Option<&[u8]>,
     ) -> bool {
+        let session_value = match check {
+            SecurityCheck::Session => fact.map(Box::from),
+            _ => None,
+        };
         self.record(
             request,
             check,
             CheckDisposition::Passed,
             fact.map(|value| purpose_fingerprint(check, value)),
+            session_value,
             true,
         )
     }
@@ -184,7 +193,7 @@ impl LiveSecurityAttestation {
         request: LiveRequestIdentity,
         check: SecurityCheck,
     ) -> bool {
-        self.record(request, check, CheckDisposition::Passed, None, false)
+        self.record(request, check, CheckDisposition::Passed, None, None, false)
     }
 
     pub(crate) fn record_not_required(
@@ -202,6 +211,7 @@ impl LiveSecurityAttestation {
             check,
             CheckDisposition::NotRequired(reason),
             None,
+            None,
             false,
         )
     }
@@ -212,6 +222,7 @@ impl LiveSecurityAttestation {
         check: SecurityCheck,
         disposition: CheckDisposition,
         fact_fingerprint: Option<[u8; 32]>,
+        session_value: Option<Box<[u8]>>,
         enforce_execution_order: bool,
     ) -> bool {
         let Some(binding) = self.binding.as_ref() else {
@@ -237,8 +248,23 @@ impl LiveSecurityAttestation {
             disposition,
             binding: binding.digest,
             fact_fingerprint,
+            session_value,
         });
         self.order_valid
+    }
+
+    /// Returns the attested session id of `request`, when its Session
+    /// check passed with a value, so a membership can later be checked
+    /// against the session store (LIVE-020).
+    pub(crate) fn session_value(&self, request: LiveRequestIdentity) -> Option<&[u8]> {
+        let binding = self
+            .binding
+            .as_ref()
+            .filter(|binding| binding.request == request)?;
+        self.evidence[SecurityCheck::Session.index()]
+            .as_ref()
+            .filter(|evidence| evidence.binding == binding.digest)
+            .and_then(|evidence| evidence.session_value.as_deref())
     }
 
     pub(crate) fn present(&self) -> u8 {

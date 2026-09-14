@@ -104,6 +104,16 @@ recientes primero.
 
 ### Seguridad
 
+- **Un stream de Live termina con la sesión que lo abrió.** Una membresía
+  asíncrona se volvía a autorizar contra su Gate antes de cada entrega, pero
+  nunca contra su sesión: un navegador que cerraba sesión, o cuya sesión era
+  revocada, seguía recibiendo eventos hasta que el propio stream se cerraba.
+  Destruir una sesión en un nodo ahora retira de inmediato toda membresía que
+  abrió allí, tanto por invalidación de sesión como por regeneración del id o
+  por "cerrar sesión en todas partes", y la entrega vuelve a comprobar la
+  sesión de cada membresía contra el almacén de sesiones como mucho una vez
+  cada diez segundos, de modo que una sesión destruida en otro nodo deja de
+  recibir eventos dentro de ese intervalo.
 - **RenderCache respeta las directivas `Cache-Control` de una petición.** Una
   petición con `no-cache` se respondía desde el almacenamiento con `Age`, y
   una petición fría con `no-store` sembraba la caché para la siguiente.

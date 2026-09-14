@@ -83,11 +83,17 @@ pub use store::{SessionData, SessionMigrationError, SessionStore, is_valid_sessi
 /// state without ever constructing a `SessionMiddleware` - preserving
 /// the original default-driver behaviour for that case.
 pub async fn destroy_all_for_user(user_id: &str) -> Result<u64, crate::error::FrameworkError> {
-    if let Some(store) = crate::container::App::make::<dyn SessionStore>() {
-        return store.destroy_for_user(user_id).await;
-    }
-    let driver = driver::DatabaseSessionDriver::new(std::time::Duration::from_secs(0));
-    driver.destroy_for_user(user_id).await
+    let destroyed = match crate::container::App::make::<dyn SessionStore>() {
+        Some(store) => store.destroy_for_user(user_id).await?,
+        None => {
+            let driver = driver::DatabaseSessionDriver::new(std::time::Duration::from_secs(0));
+            driver.destroy_for_user(user_id).await?
+        }
+    };
+    // Every Live membership the user's sessions opened ends with them on
+    // this node (LIVE-019).
+    crate::live::revocation::principal_sessions_destroyed(user_id).await;
+    Ok(destroyed)
 }
 
 // Test helpers - these mirror the per-request session scope that

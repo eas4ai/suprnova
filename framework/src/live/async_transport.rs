@@ -176,6 +176,11 @@ async fn subscription_control(
                 &control.island.document_key,
                 baseline,
             )?;
+            let session_id = request
+                .live_security_attestation()
+                .session_value(request.live_request_identity())
+                .and_then(|value| std::str::from_utf8(value).ok())
+                .map(str::to_owned);
             let view = state
                 .issue(
                     &context,
@@ -185,6 +190,7 @@ async fn subscription_control(
                     &control.document_instance,
                     origin,
                     baseline,
+                    session_id,
                 )
                 .await?;
             Ok(json_response(201, view.value))

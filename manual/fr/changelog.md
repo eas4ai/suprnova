@@ -105,6 +105,17 @@ en premier.
 
 ### Sécurité
 
+- **Un flux Live se termine avec la session qui l'a ouvert.** Une adhésion
+  asynchrone était réautorisée contre son Gate avant chaque livraison, mais
+  jamais contre sa session : un navigateur déconnecté, ou dont la session
+  avait été révoquée, continuait de recevoir des événements jusqu'à la
+  fermeture du flux lui-même. Détruire une session sur un nœud retire
+  désormais aussitôt chaque adhésion qu'elle y a ouverte, aussi bien à
+  l'invalidation de la session qu'à la régénération de l'identifiant ou à une
+  "déconnexion partout", et la livraison revérifie la session de chaque
+  adhésion auprès du magasin de sessions au plus une fois toutes les dix
+  secondes, si bien qu'une session détruite sur un autre nœud cesse de
+  recevoir des événements dans cet intervalle.
 - **Les directives `Cache-Control` d'une requête sont respectées par
   RenderCache.** Une requête portant `no-cache` était servie depuis le
   stockage avec `Age`, et une requête froide portant `no-store` amorçait le

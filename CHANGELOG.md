@@ -91,6 +91,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **A Live stream ends with the session that opened it.** An asynchronous
+  membership was re-authorized against its Gate before every delivery but
+  never against its session: a browser that logged out, or whose session was
+  revoked, kept receiving events until the stream itself closed. Destroying a
+  session on a node now retires every membership it opened there at once, for
+  session invalidation, id regeneration, and "log out everywhere" alike, and
+  delivery re-checks each membership's session against the session store at
+  most once per ten seconds, so a session destroyed on another node stops
+  receiving events within that interval.
 - **A request's `Cache-Control` directives are honored by RenderCache.**
   A request carrying `no-cache` was answered from storage with `Age`, and
   a cold request carrying `no-store` seeded the cache for the next
