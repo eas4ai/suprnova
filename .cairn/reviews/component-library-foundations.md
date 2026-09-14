@@ -1,12 +1,29 @@
 # Review - component-library-foundations
 
 commitment: component-library-foundations
-commit: 275ad5ad5908fbe1c5b33e25fbc4e7445ef3e7b2
+commit: 4a0c4e57f471ddffb74927a635429beb13df04fa
 examined:
   - UI-001 to UI-019 and FORM-001 to FORM-004 against the closing tree, their mechanisms and the receipts recorded on it.
   - The 79 retained paths of escalation loop-035 (the v2.0.2 release history), against the library's declared inputs.
   - The five library decisions under docs/decisions/ and Live iteration 007.
-findings: []
+findings:
+  - resolved: The repository gate found two tests the library left behind (the curated help screen had no live:add line; the tooling protocol assets export still counted eight artifacts and one script content type). Fixed in 2b6e6cae, receipts refreshed.
+
+## Gate review, 2026-09-14 (after the repository gate)
+
+The default repository gate on `38908dc7` failed its workspace-tests step
+on two tests none of the library's mechanisms run: the CLI's curated help
+screen test (`suprnova-cli/src/main.rs`, `the_curated_help_screen_lists_every_subcommand`),
+because `live:add` had no line in `suprnova-cli/src/ui.rs`, and the
+tooling protocol export test (`framework/tests/live/tooling_protocol.rs`,
+`assets_exports_exactly_the_reviewed_bytes`), which pinned twelve exported
+files and a JavaScript content type for every artifact. The stylesheet
+artifact makes thirteen files and the test now takes each artifact's
+content type from the catalog, so a role with the wrong type still fails.
+Both are fixed in `2b6e6cae`; the dogfood and live:add mechanisms were
+rerun on it. The first gate run also died in a compiler segfault under
+sccache while checking the CLI's test target; the rerun passed clippy, so
+that was the toolchain, not the tree. No code changed during this review.
 
 ## Retention review, 2026-09-14 (after escalation loop-035)
 
