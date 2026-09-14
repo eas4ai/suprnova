@@ -1,0 +1,7 @@
+  ✗ live/avatar-uploader.html:2:1: invalid_modifier [error] in app.avatar-uploader
+  ⚠ live/form-gallery.html:20:4: dynamic_structure_unproved [unproved] in app.form-gallery
+  ⚠ live/form-gallery.html:21:4: dynamic_structure_unproved [unproved] in app.form-gallery
+  ⚠ live/form-gallery.html:26:4: dynamic_structure_unproved [unproved] in app.form-gallery
+  ⚠ live/form-gallery.html:37:4: dynamic_structure_unproved [unproved] in app.form-gallery
+  ⚠ live/form-gallery.html:39:4: dynamic_structure_unproved [unproved] in app.form-gallery
+  ✗ Live check failed with 1 error(s)
