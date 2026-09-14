@@ -616,7 +616,6 @@ pub(crate) struct AsyncTables {
 }
 
 struct ConstructingClaims {
-    subscription: String,
     stream: StreamName,
     events: suprnova_live::async_updates::BoundedEventContracts,
 }
@@ -624,7 +623,7 @@ struct ConstructingClaims {
 /// Shared asynchronous-update state behind the immutable runtime graph.
 pub(crate) struct AsyncState {
     tables: Mutex<AsyncTables>,
-    constructing: Mutex<Option<ConstructingClaims>>,
+    constructing: Mutex<HashMap<String, ConstructingClaims>>,
     service: SubscriptionService,
     clock: Arc<dyn Clock>,
     engine_registry: Arc<ComponentRegistry>,
@@ -645,7 +644,7 @@ impl AsyncState {
             .map_err(|_| FrameworkError::internal("Live async signal contracts were rejected"))?;
         Ok(Arc::new_cyclic(|weak: &Weak<Self>| Self {
             tables: Mutex::new(AsyncTables::default()),
-            constructing: Mutex::new(None),
+            constructing: Mutex::new(HashMap::new()),
             service: SubscriptionService::new(keys),
             clock,
             engine_registry,
@@ -1079,14 +1078,19 @@ impl AsyncState {
         id: &str,
     ) -> Result<AsyncEnvelopeContext, AsyncErrorKind> {
         let claims = authorized.verified().claims();
-        *self
-            .constructing
+        // Keyed by the subscription id, not one shared slot: concurrent
+        // issuances of one scope each construct at the same time, and each
+        // must read back its own claims (LIVE-023).
+        self.constructing
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ConstructingClaims {
-            subscription: id.to_owned(),
-            stream: claims.stream().clone(),
-            events: claims.events().clone(),
-        });
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                id.to_owned(),
+                ConstructingClaims {
+                    stream: claims.stream().clone(),
+                    events: claims.events().clone(),
+                },
+            );
         let context = AsyncEnvelopeContext::from_authorized(
             authorized,
             subscription,
@@ -1095,7 +1099,7 @@ impl AsyncState {
         self.constructing
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+            .remove(id);
         context.map_err(|_| AsyncErrorKind::Unavailable)
     }
 
@@ -2261,8 +2265,7 @@ impl AsyncMembershipRegistryPort for MembershipRegistryPort {
                 .constructing
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(claims) = constructing.as_ref()
-                && claims.subscription == id
+            if let Some(claims) = constructing.get(&id)
                 && request.envelope().is_none()
                 && request.binding().is_none()
             {
