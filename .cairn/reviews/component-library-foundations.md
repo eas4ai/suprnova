@@ -1,5 +1,44 @@
 # Review - component-library-foundations
 
+commitment: component-library-foundations
+commit: 275ad5ad5908fbe1c5b33e25fbc4e7445ef3e7b2
+examined:
+  - UI-001 to UI-019 and FORM-001 to FORM-004 against the closing tree, their mechanisms and the receipts recorded on it.
+  - The 79 retained paths of escalation loop-035 (the v2.0.2 release history), against the library's declared inputs.
+  - The five library decisions under docs/decisions/ and Live iteration 007.
+findings: []
+
+## Retention review, 2026-09-14 (after escalation loop-035)
+
+The developer answered `ok` on escalation `loop-035` (committed as
+`6e2af36c`), keeping the 79 paths that changed on main between the
+commitment's activation (`2b526ada`) and the resumed base (`8a4b0c82`):
+the workspace version bumps and READMEs of v2.0.2, CHANGELOG and its six
+mirrors, the translation lock, the rustls lock update in the testing-off
+probe fixture, the fanout module touched by the Astra remediation, and the
+mirror typography fixes. Examined against the library:
+
+- None of the retained paths is a library artifact. The stylesheet,
+  components, checker expansion, `live:add`, the reserved namespace and
+  the dogfood gallery all landed after `6e2af36c` (`781b63c1` to
+  `44e7bed7`), so no library work rode in under the approval.
+- Three retained paths are now declared inputs of `ui-tokens` for UI-007
+  (`CHANGELOG.md`, `manual/cli.md`, `.manual-translations.lock`) because
+  the library's own documentation edits landed in them later
+  (`34193bc6`). Their receipts (`.cairn/evidence/UI-007/20260914T222502259Z`)
+  were recorded after the approval and after those edits.
+- The approval widened nothing: every mechanism's inputs are the ones
+  declared for the library, and every receipt cited below postdates
+  `6e2af36c`. The fresh receipts on the closing tree are UI-001 to UI-005
+  and UI-007 (`20260914T222502Z`), UI-006, UI-015 and FORM-004
+  (`20260914T222520Z`), UI-009, UI-014, UI-016 and FORM-001 to FORM-003
+  (`20260914T222703Z`), and UI-008 and UI-012 with LIVE-010 to LIVE-012
+  (`20260914T222344Z`); UI-010, UI-011, UI-013, UI-017, UI-018 and UI-019
+  keep their receipts from the build, whose inputs have not changed since.
+
+Nothing in the retained history contradicts an agreed requirement, and no
+finding is open.
+
 Identifier note: the foundations spec was renumbered at 10:55 on
 2026-09-13 when the developer's rulings added four requirements. The
 review below uses the identifiers as they were when it was written; the
