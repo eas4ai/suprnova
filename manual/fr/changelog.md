@@ -24,6 +24,18 @@ en premier.
 
 ### Corrigé
 
+- **Chaque émission que la limite par scope de Live admet répond avec un
+  abonnement qui se connecte.** Des émissions concurrentes d'un même scope
+  dans la même milliseconde frappent des descripteurs identiques, et le
+  magasin de credentials de l'hôte ne conservait que le dernier secret frappé
+  pour un descripteur, si bien que les requêtes antérieures répondaient 403
+  `async_authority_invalid` depuis le connect que l'émission effectue. Environ
+  une émission sur cinq cents répondait aussi 503 `async_unavailable`, parce
+  que les claims qu'elle publiait pendant la construction de son contexte
+  d'enveloppe partageaient un seul emplacement avec toutes les émissions
+  concurrentes. Un descripteur conserve désormais chaque secret non consommé
+  jusqu'à ce qu'il soit consommé ou expire, et les claims en construction sont
+  indexés par identifiant d'abonnement.
 - **Une URL `redis://` avec un index de base de données sélectionne cette
   base de données partout.** Le driver de files d'attente et le hub de
   diffusion fanout portent chacun un producteur sea-streamer à côté de

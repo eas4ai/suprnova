@@ -24,6 +24,18 @@ recientes primero.
 
 ### Corregido
 
+- **Cada emisión que admite el límite por scope de Live responde con una
+  suscripción que conecta.** Las emisiones concurrentes de un scope en el
+  mismo milisegundo acuñan descriptores idénticos, y el almacén de
+  credenciales del host conservaba solo el último secreto acuñado para un
+  descriptor, así que las peticiones anteriores respondían 403
+  `async_authority_invalid` desde el connect que realiza la emisión. Además,
+  alrededor de una emisión de cada quinientas respondía 503
+  `async_unavailable`, porque los claims que publicaba mientras se construía
+  su contexto de sobre compartían una sola ranura con todas las emisiones
+  concurrentes. Un descriptor ahora conserva cada secreto no consumido hasta
+  que se consume o expira, y los claims en construcción se indexan por id de
+  suscripción.
 - **Una URL `redis://` con índice de base de datos selecciona esa base de
   datos en todas partes.** El driver de colas y el hub de difusión fanout
   llevan cada uno un productor de sea-streamer junto a sus conexiones

@@ -626,6 +626,18 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-14 -- Closed the issuance credential and context races under
+  LIVE-022 and LIVE-023 in `docs/spec/live.md`. The host's credential store
+  keeps every unconsumed secret issued for a binding until each is consumed or
+  expires, so the identical descriptors that concurrent issuances of one scope
+  mint in one millisecond each connect once with their own secret (the
+  alternative, a per-issuance nonce in the signed claims, was refused for the
+  descriptor-schema churn it would cost). The claims an issuance publishes
+  while its envelope context is constructed are keyed by subscription id
+  rather than held in one slot a concurrent issuance could overwrite. Both
+  were exposed by the LIVE-018 probe of 2026-09-13 (39 of 512 admitted
+  requests answered 403, about one in five hundred 503) and are checked by
+  `hardening::concurrent_issuance_keeps_every_credential`.
 - 2026-09-14 -- Closed the session and revocation-state clauses of LIVE-016
   under LIVE-019 and LIVE-020 in `docs/spec/live.md`. Each issued record
   now carries the session fingerprint and the attested session store id;

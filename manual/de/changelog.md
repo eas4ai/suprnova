@@ -23,6 +23,18 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Behoben
 
+- **Jede Ausgabe, die das Live-Limit pro Scope zulässt, antwortet mit einer
+  Subscription, die sich verbinden lässt.** Gleichzeitige Ausgaben eines
+  Scopes in derselben Millisekunde prägen identische Deskriptoren, und der
+  Credential-Speicher des Hosts behielt nur das zuletzt für einen Deskriptor
+  erzeugte Secret, sodass die früheren Anfragen aus dem Connect, den die
+  Ausgabe durchführt, mit 403 `async_authority_invalid` antworteten. Etwa eine
+  Ausgabe von fünfhundert antwortete außerdem mit 503 `async_unavailable`,
+  weil die Claims, die sie während des Aufbaus ihres Envelope-Kontexts
+  veröffentlichte, sich einen Platz mit jeder gleichzeitigen Ausgabe teilten.
+  Ein Deskriptor behält jetzt jedes nicht verbrauchte Secret, bis es
+  verbraucht wird oder abläuft, und die Claims im Aufbau sind nach
+  Subscription-Id abgelegt.
 - **Eine `redis://`-URL mit Datenbankindex wählt diese Datenbank überall
   aus.** Der Queue-Treiber und der Fanout-Broadcast-Hub führen neben ihren
   direkten Redis-Verbindungen je einen sea-streamer-Producer, und

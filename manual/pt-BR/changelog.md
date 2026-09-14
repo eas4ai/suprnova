@@ -23,6 +23,17 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ### Corrigido
 
+- **Toda emissão que o limite por escopo do Live admite responde com uma
+  assinatura que conecta.** Emissões concorrentes de um escopo no mesmo
+  milissegundo cunham descritores idênticos, e o armazenamento de credenciais
+  do host guardava apenas o último segredo cunhado para um descritor, de modo
+  que as requisições anteriores respondiam 403 `async_authority_invalid` a
+  partir do connect que a emissão realiza. Cerca de uma emissão em quinhentas
+  também respondia 503 `async_unavailable`, porque os claims que ela publicava
+  enquanto seu contexto de envelope era construído compartilhavam um único
+  slot com todas as emissões concorrentes. Um descritor agora guarda cada
+  segredo não consumido até que seja consumido ou expire, e os claims em
+  construção são indexados por id de assinatura.
 - **Uma URL `redis://` com índice de banco de dados seleciona esse banco
   em todo lugar.** O driver de filas e o hub de broadcast fanout carregam
   cada qual um produtor sea-streamer ao lado de suas conexões redis

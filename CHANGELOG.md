@@ -21,6 +21,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Every issuance the Live per-scope limit admits answers with a subscription
+  that connects.** Concurrent issuances of one scope in the same millisecond
+  mint identical descriptors, and the host's credential store kept only the
+  last secret minted for a descriptor, so the earlier requests answered 403
+  `async_authority_invalid` from the connect that issuance performs. About one
+  issuance in five hundred also answered 503 `async_unavailable`, because the
+  claims it published while its envelope context was built shared one slot
+  with every concurrent issuance. A descriptor now keeps every unconsumed
+  secret until each is consumed or expires, and the claims under construction
+  are keyed by subscription id.
 - **A `redis://` URL with a database index selects that database everywhere.**
   The queue driver and the fanout broadcast hub each carry a sea-streamer
   producer beside their direct redis connections, and sea-streamer does not
