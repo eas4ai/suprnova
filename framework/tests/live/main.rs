@@ -22,6 +22,7 @@ pub mod external_authoring;
 pub mod facade_contract;
 pub mod hardening;
 pub mod hostile_adapter;
+pub mod library_namespace;
 pub mod macro_expansion;
 pub mod multi_stream_root;
 pub mod public_api;

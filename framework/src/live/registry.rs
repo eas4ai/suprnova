@@ -37,7 +37,9 @@ where
     fn __live_registration() -> Result<ComponentRegistration, RegistryError> {
         let descriptor = <T as suprnova_live::metadata::LiveComponentContract>::descriptor()
             .map_err(|_| RegistryError::new(RegistryErrorKind::InvalidComponent))?;
-        let mut registration = ComponentRegistration::new(descriptor);
+        let mut registration = ComponentRegistration::new(descriptor).with_origin_crate(
+            <T as suprnova_live::metadata::LiveComponentContract>::origin_crate(),
+        );
         if let Some(validation) =
             <T as suprnova_live::metadata::LiveComponentContract>::validation_port()
         {
@@ -46,6 +48,11 @@ where
         Ok(registration)
     }
 }
+
+/// The component-name prefix reserved for the shipped library (UI-015).
+pub const LIBRARY_COMPONENT_PREFIX: &str = "suprnova.";
+/// The crates that may register a component under the reserved prefix.
+const LIBRARY_CRATES: [&str; 2] = ["suprnova", "suprnova-live"];
 
 /// Immutable process-local component registry built before the server accepts traffic.
 #[derive(Clone)]
@@ -135,6 +142,18 @@ impl LiveRegistryBuilder {
         mut self,
         registration: ComponentRegistration,
     ) -> Result<Self, RegistryError> {
+        // UI-015: the `suprnova.` namespace belongs to the shipped component
+        // library. A component from any other crate that claims it is refused
+        // at registration, so an application cannot shadow a library name.
+        let reserved = registration
+            .descriptor()
+            .metadata()
+            .identity()
+            .as_str()
+            .starts_with(LIBRARY_COMPONENT_PREFIX);
+        if reserved && !LIBRARY_CRATES.contains(&registration.origin_crate()) {
+            return Err(RegistryError::new(RegistryErrorKind::ReservedName));
+        }
         let (descriptor, validation) = registration.into_parts();
         let component = descriptor.metadata().identity().clone();
         let requires_validation = descriptor.metadata().actions().iter().any(|action| {
@@ -226,6 +245,9 @@ pub enum RegistryErrorKind {
     /// keeps the policy from promising atomicity it does not provide
     /// (LIVE-017, decided 2026-09-13).
     RequiredTransactionUnsupported,
+    /// The component claims the reserved `suprnova.` namespace from a crate
+    /// that is not the shipped library (UI-015).
+    ReservedName,
 }
 
 impl RegistryErrorKind {
@@ -238,6 +260,7 @@ impl RegistryErrorKind {
             Self::DuplicateView => "duplicate_live_component_view",
             Self::CapacityExceeded => "live_component_capacity_exceeded",
             Self::RequiredTransactionUnsupported => "live_required_transaction_unsupported",
+            Self::ReservedName => "live_reserved_component_name",
         }
     }
 }

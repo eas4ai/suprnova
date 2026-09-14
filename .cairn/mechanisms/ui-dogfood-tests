@@ -1,0 +1,13 @@
+command: sh -c 'env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p app --test live_dogfood && env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E "test(library_namespace::)"'
+inputs:
+  - app/
+  - framework/src/live/
+  - framework/tests/live/
+  - framework/tests/support/
+  - suprnova-macros/src/live/
+  - crates/suprnova-live/src/
+  - crates/suprnova-live/components/
+requirements:
+  - UI-006
+  - UI-015
+  - FORM-004

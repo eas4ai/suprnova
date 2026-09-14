@@ -1,0 +1,8 @@
+command: node .cairn/tools/ui-elements.mjs crates/suprnova-live/components
+results: per-requirement
+inputs:
+  - .cairn/tools/ui-elements.mjs
+  - crates/suprnova-live/components/
+requirements:
+  - UI-011
+  - UI-018

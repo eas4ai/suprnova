@@ -484,6 +484,10 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
         }
 
         impl ::suprnova::live::__private::metadata::LiveComponentContract for #self_ty {
+            fn origin_crate() -> &'static str {
+                ::std::env!("CARGO_PKG_NAME")
+            }
+
             fn descriptor() -> ::std::result::Result<
                 ::suprnova::live::__private::registry::ComponentDescriptor,
                 ::suprnova::live::__private::metadata::MetadataError,

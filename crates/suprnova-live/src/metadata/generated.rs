@@ -25,4 +25,12 @@ pub trait LiveComponentContract {
     fn validation_port() -> Option<std::sync::Arc<dyn crate::validation::ValidationPort>> {
         None
     }
+
+    /// The name of the crate the component was compiled in, as the derive
+    /// records it. A host uses it to keep reserved component namespaces to
+    /// the crates that own them; a contract written by hand reports no crate
+    /// and is treated as foreign to every reserved namespace.
+    fn origin_crate() -> &'static str {
+        ""
+    }
 }

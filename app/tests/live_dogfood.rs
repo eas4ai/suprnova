@@ -11,6 +11,7 @@ use live_support::{
     idempotency, invoke, island_tag, request, seed_session, send, setup_app, snapshot_revision,
 };
 use serde_json::Value;
+use suprnova::live::{LiveComponent, LiveRegistry, RegistryErrorKind, live};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_public_page_renders_for_anonymous_visitors_and_the_dashboard_requires_sign_in() {
@@ -332,5 +333,113 @@ async fn the_form_gallery_renders_every_presentational_component_with_the_librar
     assert!(
         !html.contains(" style="),
         "no shipped view carries a style attribute"
+    );
+}
+
+/// UI-015: the `suprnova.` namespace belongs to the shipped library; a
+/// component from the application that claims it is refused at
+/// registration, before any route can reach it.
+#[derive(LiveComponent)]
+#[live(name = "suprnova.probe", view = "live/counter.html")]
+pub struct ReservedProbe {
+    #[public]
+    count: u64,
+}
+
+#[live]
+impl ReservedProbe {
+    #[action]
+    pub fn touch(&mut self) {
+        self.count += 1;
+    }
+}
+
+#[test]
+fn the_registry_refuses_the_reserved_namespace_from_the_application() {
+    let refused = LiveRegistry::builder()
+        .register::<ReservedProbe>()
+        .expect_err("an application component under suprnova. is refused");
+    assert_eq!(refused.kind(), RegistryErrorKind::ReservedName);
+}
+
+/// UI-006: every gallery control keeps its accessible name and its state
+/// attributes in the markup itself, so nothing depends on the base layer.
+#[tokio::test]
+async fn the_gallery_keeps_names_and_state_without_the_base_layer() {
+    let app = setup_app(8).await;
+    let session = seed_session(&app).await;
+    let html = get(&app, "/live/forms", Some(&session)).await.text();
+    let gallery = island_tag(&html, "forms-gallery");
+    let island_start = html.find(gallery).expect("gallery island");
+    let island = &html[island_start..];
+    for id in [
+        "email", "secret", "bio", "quantity", "volume", "query", "country", "nickname", "avatar",
+    ] {
+        assert!(
+            island.contains(&format!("for=\"{id}\"")),
+            "control {id} has an explicit label"
+        );
+        assert!(
+            island.contains(&format!("id=\"{id}\"")),
+            "control {id} carries its id"
+        );
+    }
+    for wrapped in [
+        "<label class=\"sn-checkbox\"><input class=\"sn-checkbox-input\" id=\"agree\"",
+        "<label class=\"sn-switch\"><input class=\"sn-switch-input\" id=\"newsletter\"",
+    ] {
+        assert!(
+            island.contains(wrapped),
+            "control wrapped by its label: {wrapped}"
+        );
+    }
+    for legend in [
+        "<legend>Plan</legend>",
+        "<legend>Topics</legend>",
+        "<legend>Account</legend>",
+    ] {
+        assert!(island.contains(legend), "group named by {legend}");
+    }
+    for state in [
+        "role=\"switch\"",
+        "aria-pressed=\"false\"",
+        "aria-controls=\"secret\"",
+        "aria-describedby=\"email-hint email-error\"",
+        "aria-labelledby=\"save-summary-title\"",
+        "live:error.live.polite=\"email\"",
+        "live:loading.disabled=\"save\"",
+    ] {
+        assert!(
+            island.contains(state),
+            "state and naming attribute {state} present"
+        );
+    }
+    assert!(
+        !island.contains("class=\"is-") && !island.contains(" is-"),
+        "no visual-only state class"
+    );
+}
+
+/// FORM-004: the password binds through a transient field, so the gallery's
+/// snapshot carries no password value and the control renders without one.
+#[tokio::test]
+async fn the_gallery_snapshot_never_carries_the_password() {
+    let app = setup_app(9).await;
+    let session = seed_session(&app).await;
+    let html = get(&app, "/live/forms", Some(&session)).await.text();
+    let gallery = island_tag(&html, "forms-gallery");
+    let snapshot = decoded_snapshot(gallery);
+    let serialized = serde_json::to_string(&snapshot).expect("snapshot serializes");
+    assert!(
+        !serialized.contains("\"secret\""),
+        "the transient password field is not dehydrated: {serialized}"
+    );
+    let password_start = html.find("type=\"password\"").expect("password control");
+    let password_tag_end = html[password_start..].find('>').expect("tag end") + password_start;
+    let tag_start = html[..password_start].rfind('<').expect("tag start");
+    let password_tag = &html[tag_start..password_tag_end];
+    assert!(
+        !password_tag.contains("value="),
+        "no password value in markup: {password_tag}"
     );
 }

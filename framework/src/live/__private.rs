@@ -14,6 +14,7 @@ pub use askama;
 pub struct ComponentRegistration {
     descriptor: suprnova_live::registry::ComponentDescriptor,
     validation: Option<std::sync::Arc<dyn suprnova_live::validation::ValidationPort>>,
+    origin_crate: &'static str,
 }
 
 impl ComponentRegistration {
@@ -21,7 +22,23 @@ impl ComponentRegistration {
         Self {
             descriptor,
             validation: None,
+            origin_crate: "",
         }
+    }
+
+    pub(crate) const fn with_origin_crate(mut self, origin_crate: &'static str) -> Self {
+        self.origin_crate = origin_crate;
+        self
+    }
+
+    /// The crate the component was compiled in, as its derive recorded it.
+    pub(crate) const fn origin_crate(&self) -> &'static str {
+        self.origin_crate
+    }
+
+    /// The generated descriptor, before registration consumes it.
+    pub(crate) const fn descriptor(&self) -> &suprnova_live::registry::ComponentDescriptor {
+        &self.descriptor
     }
 
     pub(crate) fn with_validation(

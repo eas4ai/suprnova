@@ -1,0 +1,7 @@
+command: node .cairn/tools/ui-islands.mjs crates/suprnova-live/components app/templates/suprnova-ui
+inputs:
+  - .cairn/tools/ui-islands.mjs
+  - crates/suprnova-live/components/
+  - app/templates/
+requirements:
+  - UI-013
