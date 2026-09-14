@@ -177,6 +177,21 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Install a Live component library component from its manifest
+    #[command(name = "live:add")]
+    LiveAdd {
+        /// Shipped component to install (e.g., field, password-input)
+        name: Option<String>,
+        /// Install a third-party component from this manifest instead
+        #[arg(long)]
+        manifest: Option<std::path::PathBuf>,
+        /// Replace a file the application has edited
+        #[arg(long)]
+        force: bool,
+        /// Report what would be written without touching the project
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Check every registered Live view with the integrated checker
     #[command(name = "live:check")]
     LiveCheck {
@@ -429,6 +444,14 @@ fn main() {
         }
         Commands::LiveMake { name, dry_run } => {
             commands::live_make::run(name, dry_run);
+        }
+        Commands::LiveAdd {
+            name,
+            manifest,
+            force,
+            dry_run,
+        } => {
+            commands::live_add::run(name, manifest, force, dry_run);
         }
         Commands::LiveCheck {
             templates,

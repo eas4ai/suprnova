@@ -20,6 +20,7 @@ mod response;
 pub(crate) mod revocation;
 mod routes;
 mod runtime;
+mod ui_assets;
 pub(crate) use runtime::LiveMountRegistration;
 // `render_cache::RenderCache::install` derives its own `SnapshotKeyRing`
 // from the same root key material Live uses (purpose separation keeps the
@@ -64,6 +65,7 @@ pub use runtime::{
 pub use streams::{LiveEventTarget, LiveStreamError, LiveStreamErrorKind, LiveStreams};
 pub use suprnova_macros::{LiveComponent, live};
 pub use tenant::{LiveTenantMiddleware, LiveTenantResolver, current_tenant};
+pub use ui_assets::{LIVE_UI_ASSET_PATH_PREFIX, LIVE_UI_TEMPLATE_ROOT};
 
 /// Versioned browser event and effect contracts declared by Live components.
 pub mod metadata {

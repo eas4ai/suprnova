@@ -804,3 +804,97 @@ async fn the_suprnova_ui_base_loads_only_when_a_document_opts_in() {
     let core_link = format!("/__live/assets/{identity}/suprnova-live.esm.js");
     tag_order(&opted, &["suprnova-live-config", &link, &core_link]);
 }
+
+/// UI-017: a vendored component's stylesheet and script are served from its
+/// directory under the reserved template root with validators, and nothing
+/// else in that directory is reachable.
+#[tokio::test]
+async fn vendored_component_assets_are_served_from_the_reserved_root_only() {
+    ensure_crypt();
+    let _container = TestContainer::fake();
+    App::init();
+    let root = tempfile::tempdir().expect("tempdir");
+    let component = root.path().join("field");
+    std::fs::create_dir_all(&component).expect("component dir");
+    std::fs::write(
+        component.join("field.css"),
+        ".sn-field { display: grid; }\n",
+    )
+    .expect("css");
+    std::fs::write(component.join("field.js"), "export {};\n").expect("js");
+    std::fs::write(
+        component.join("field.html"),
+        "{% macro field() %}{% endmacro %}\n",
+    )
+    .expect("view");
+    std::fs::write(component.join("manifest.json"), "{}\n").expect("manifest");
+    let router = Arc::new(
+        Router::new()
+            .try_live_ui_assets_from(root.path().to_path_buf())
+            .expect("install the vendored asset route"),
+    );
+
+    let css = dispatch(
+        Arc::clone(&router),
+        Method::GET,
+        "/suprnova-ui/field/field.css",
+        &[],
+    )
+    .await;
+    assert_eq!(css.status, StatusCode::OK);
+    assert_eq!(css.header("content-type"), Some("text/css; charset=utf-8"));
+    assert_eq!(
+        css.header("cache-control"),
+        Some("public, max-age=0, must-revalidate")
+    );
+    assert_eq!(css.header("x-content-type-options"), Some("nosniff"));
+    let etag = css.header("etag").expect("etag").to_owned();
+    assert_eq!(&css.body[..], b".sn-field { display: grid; }\n");
+    let conditional = dispatch(
+        Arc::clone(&router),
+        Method::GET,
+        "/suprnova-ui/field/field.css",
+        &[("if-none-match", etag.as_str())],
+    )
+    .await;
+    assert_eq!(conditional.status, StatusCode::NOT_MODIFIED);
+    let js = dispatch(
+        Arc::clone(&router),
+        Method::GET,
+        "/suprnova-ui/field/field.js",
+        &[],
+    )
+    .await;
+    assert_eq!(js.status, StatusCode::OK);
+    assert_eq!(
+        js.header("content-type"),
+        Some("text/javascript; charset=utf-8")
+    );
+    let head = dispatch(
+        Arc::clone(&router),
+        Method::HEAD,
+        "/suprnova-ui/field/field.js",
+        &[],
+    )
+    .await;
+    assert_eq!(head.status, StatusCode::OK);
+    assert!(head.body.is_empty());
+    for closed in [
+        "/suprnova-ui/field/field.html",
+        "/suprnova-ui/field/manifest.json",
+        "/suprnova-ui/field/field.css?v=1",
+        "/suprnova-ui/Field/field.css",
+        "/suprnova-ui/field/missing.css",
+    ] {
+        let reply = dispatch(Arc::clone(&router), Method::GET, closed, &[]).await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{closed}");
+    }
+    let post = dispatch(
+        Arc::clone(&router),
+        Method::POST,
+        "/suprnova-ui/field/field.css",
+        &[],
+    )
+    .await;
+    assert_eq!(post.status, StatusCode::METHOD_NOT_ALLOWED);
+}

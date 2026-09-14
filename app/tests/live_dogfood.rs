@@ -334,6 +334,38 @@ async fn the_form_gallery_renders_every_presentational_component_with_the_librar
         !html.contains(" style="),
         "no shipped view carries a style attribute"
     );
+    for asset in [
+        "<link rel=\"stylesheet\" href=\"/suprnova-ui/field/field.css\">",
+        "<script type=\"module\" src=\"/suprnova-ui/password-input/password-input.js\"></script>",
+    ] {
+        assert!(
+            html.contains(asset),
+            "the page links its vendored component assets: {asset}"
+        );
+    }
+
+    // UI-017: the vendored stylesheet and script are served from the
+    // component's own directory under the reserved template root, and
+    // nothing else in it is reachable.
+    let css = get(&app, "/suprnova-ui/field/field.css", None).await;
+    assert_eq!(css.status, StatusCode::OK);
+    assert_eq!(css.header("content-type"), Some("text/css; charset=utf-8"));
+    assert!(css.text().contains(".sn-field"));
+    let js = get(&app, "/suprnova-ui/password-input/password-input.js", None).await;
+    assert_eq!(js.status, StatusCode::OK);
+    assert_eq!(
+        js.header("content-type"),
+        Some("text/javascript; charset=utf-8")
+    );
+    assert!(js.text().contains("sn-password-reveal"));
+    for closed in [
+        "/suprnova-ui/field/field.html",
+        "/suprnova-ui/field/manifest.json",
+        "/suprnova-ui/Field/field.css",
+    ] {
+        let reply = get(&app, closed, None).await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{closed}");
+    }
 }
 
 /// UI-015: the `suprnova.` namespace belongs to the shipped library; a

@@ -169,6 +169,8 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
 
     // Reacquisition stays outside the reserved namespace and carries the same
     // strict policy: a signed-in principal, a tenant decision, and a rate fact.
+    // UI-017: the stylesheet and script beside each vendored library view.
+    let router = router.try_live_ui_assets()?;
     let router: Router = router
         .try_live_upload_reacquisition(REACQUIRE_PATH)?
         .middleware(AuthMiddleware::new())

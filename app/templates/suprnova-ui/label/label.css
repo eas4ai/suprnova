@@ -1,0 +1,9 @@
+.sn-label {
+  display: block;
+  margin-block-end: var(--sn-space-1);
+  font-weight: var(--sn-font-weight-medium);
+}
+
+.sn-label-mark {
+  color: var(--sn-color-danger);
+}

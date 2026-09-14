@@ -1,0 +1,25 @@
+.sn-field {
+  display: grid;
+  gap: var(--sn-space-1);
+  margin-block-end: var(--sn-density-stack);
+}
+
+.sn-hint {
+  margin: 0;
+  font-size: var(--sn-font-size-sm);
+  color: var(--sn-color-text-muted);
+}
+
+.sn-hint:empty {
+  display: none;
+}
+
+.sn-error {
+  display: block;
+  font-size: var(--sn-font-size-sm);
+  color: var(--sn-color-danger);
+}
+
+.sn-error:empty {
+  display: none;
+}

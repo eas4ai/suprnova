@@ -1,0 +1,8 @@
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova-cli --test live_add
+inputs:
+  - suprnova-cli/build.rs
+  - suprnova-cli/src/
+  - suprnova-cli/tests/live_add.rs
+  - crates/suprnova-live/components/
+requirements:
+  - UI-017

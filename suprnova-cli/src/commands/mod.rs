@@ -6,6 +6,7 @@ pub mod docker_init;
 pub mod generate_routes;
 pub mod generate_types;
 pub mod key_generate;
+pub mod live_add;
 pub mod live_assets;
 pub mod live_check;
 pub mod live_inspect;

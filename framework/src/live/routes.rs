@@ -84,6 +84,36 @@ impl Router {
         self.try_live_with(|guard| guard)
     }
 
+    /// Serves the stylesheet and script of every vendored library component
+    /// from `templates/suprnova-ui/<component>/` at
+    /// `/suprnova-ui/<component>/<file>` (UI-017). Only `.css` and `.js`
+    /// files with a closed component name are reachable.
+    pub fn try_live_ui_assets(self) -> Result<Self, FrameworkError> {
+        self.try_live_ui_assets_from(
+            crate::app::paths::base_path("templates").join(super::ui_assets::LIVE_UI_TEMPLATE_ROOT),
+        )
+    }
+
+    /// The same route over an explicit component directory, for hosts whose
+    /// template root is not the process base path.
+    pub fn try_live_ui_assets_from(
+        self,
+        root: impl Into<std::path::PathBuf>,
+    ) -> Result<Self, FrameworkError> {
+        let assets = std::sync::Arc::new(super::ui_assets::LiveUiAssets::from_root(root.into()));
+        let router: Router = self
+            .try_methods(
+                &LIVE_HTTP_METHODS,
+                super::ui_assets::LIVE_UI_ASSET_ROUTE,
+                move |request: crate::Request| {
+                    let assets = std::sync::Arc::clone(&assets);
+                    async move { assets.serve(request).await }
+                },
+            )?
+            .into();
+        Ok(router)
+    }
+
     /// Installs the reserved namespace with application middleware on every
     /// Live request route.
     ///
