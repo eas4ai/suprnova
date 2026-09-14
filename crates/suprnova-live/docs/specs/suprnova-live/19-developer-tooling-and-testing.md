@@ -1,7 +1,7 @@
 # Suprnova Live -- 19 Developer Tooling and Testing
 
 Status: Normative design specification
-Last revised: 2026-09-07
+Last revised: 2026-09-14
 
 ## Scope
 
@@ -468,6 +468,15 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-09-14 -- The checker expands `{% call %}`: a macro defined in the view
+  or in a template the view imports is walked at each call with its string,
+  number, and boolean literal arguments substituted, the caller content
+  spliced at `{{ caller() }}`, and the defining template's own imports in
+  scope, under the include depth and node limits. A call to a macro the
+  catalog cannot resolve, or one that passes caller arguments, stays an
+  explicit unproved result. The library's presentational components are
+  macros, so this is what lets a shipped view pass without
+  `--allow-unproved` (Cairn UI-009).
 - 2026-09-07 -- Decision ID: render-cache-budget-harness-placement. The
   RenderCache budget harness shipped as two benchmarks rather than one.
   `crates/suprnova-live/benches/render_cache_budget.rs` keeps the counting

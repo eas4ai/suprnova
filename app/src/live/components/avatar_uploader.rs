@@ -18,7 +18,11 @@ fn avatar_policy() -> UploadPolicy {
 
 /// An avatar picker rendered by `live/avatar-uploader.html`.
 #[derive(LiveComponent)]
-#[live(name = "app.avatar-uploader", view = "live/avatar-uploader.html")]
+#[live(
+    name = "app.avatar-uploader",
+    view = "live/avatar-uploader.html",
+    checker_contract_version = 2
+)]
 pub struct AvatarUploader {
     /// The pending upload handle the browser proposes; finalized by `save_avatar`.
     #[model]

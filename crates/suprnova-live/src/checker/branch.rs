@@ -5,8 +5,8 @@ use std::collections::btree_map::Entry;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use askama_parser::node::Node;
-use askama_parser::{Ast, LetValueOrBlock, PathOrIdentifier, Span, Syntax};
+use askama_parser::node::{Call, Macro, Node};
+use askama_parser::{Ast, Expr, LetValueOrBlock, PathOrIdentifier, Span, Syntax};
 
 use crate::identity::{ComponentName, ViewName};
 
@@ -37,6 +37,64 @@ impl RenderedBranch {
 }
 
 type Overrides = BTreeMap<String, Vec<RenderedBranch>>;
+
+/// What a macro argument is bound to during one expansion. A string, number,
+/// or boolean literal at the call site is substituted into the macro body, so
+/// `live:model="{{ name }}"` inside a macro called with `"query"` is checked
+/// as the literal binding it becomes at compile time; anything else stays
+/// dynamic, exactly like a template expression outside a macro.
+#[derive(Clone, Debug)]
+enum Binding {
+    Literal(String),
+    Dynamic,
+}
+
+type Bindings = BTreeMap<String, Binding>;
+
+/// A parsed template with the templates it imports, so a macro body can call
+/// the macros its own template can see, whichever template it was called from.
+struct TemplateEnv<'a> {
+    view: ViewName,
+    source: &'a str,
+    ast: Ast<'a>,
+    imports: Vec<(String, TemplateEnv<'a>)>,
+}
+
+impl<'a> TemplateEnv<'a> {
+    fn find_macro(
+        &self,
+        scope: Option<&str>,
+        name: &str,
+    ) -> Option<(&Macro<'a>, &TemplateEnv<'a>)> {
+        match scope {
+            None => self
+                .ast
+                .nodes()
+                .iter()
+                .find_map(|node| match node.as_ref() {
+                    Node::Macro(definition) if *definition.name == name => {
+                        Some((&**definition, self))
+                    }
+                    _ => None,
+                }),
+            Some(scope) => self
+                .imports
+                .iter()
+                .find(|(imported, _)| imported == scope)
+                .and_then(|(_, env)| env.find_macro(None, name)),
+        }
+    }
+}
+
+/// The expansion scope handed down the node walk: the template whose macros
+/// are visible, the argument bindings of the macro being expanded, and the
+/// caller content a `{{ caller() }}` splices in.
+struct Scope<'s, 'a> {
+    template: &'s TemplateEnv<'a>,
+    bindings: &'s Bindings,
+    caller: Option<&'s [RenderedBranch]>,
+    macro_depth: usize,
+}
 
 pub(crate) struct BranchRenderer<'checker, 'diagnostics> {
     catalog: &'checker TemplateCatalog,
@@ -136,13 +194,27 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         }
 
         stack.push(view.clone());
-        let parent = ast.nodes().iter().find_map(|node| match node.as_ref() {
+        let imports = self.load_imports(&ast, view, stack);
+        let env = TemplateEnv {
+            view: view.clone(),
+            source,
+            ast,
+            imports,
+        };
+        let root_bindings = Bindings::new();
+        let scope = Scope {
+            template: &env,
+            bindings: &root_bindings,
+            caller: None,
+            macro_depth: 0,
+        };
+        let parent = env.ast.nodes().iter().find_map(|node| match node.as_ref() {
             Node::Extends(parent) => Some(parent.path),
             _ => None,
         });
         let rendered = if let Some(parent) = parent {
             let mut overrides = incoming_overrides.clone();
-            for node in ast.nodes() {
+            for node in env.ast.nodes() {
                 if let Node::BlockDef(block) = node.as_ref() {
                     let name = (*block.name).to_owned();
                     if let Entry::Vacant(entry) = overrides.entry(name) {
@@ -153,6 +225,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             view,
                             source,
                             stack,
+                            &scope,
                         );
                         entry.insert(branches);
                     }
@@ -173,16 +246,123 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             }
         } else {
             self.expand_nodes(
-                ast.nodes(),
+                env.ast.nodes(),
                 vec![RenderedBranch::empty(view)],
                 incoming_overrides,
                 view,
                 source,
                 stack,
+                &scope,
             )
         };
         stack.pop();
         rendered
+    }
+
+    /// Parses every template a `{% import %}` names so its macros can be
+    /// called, under the same depth and cycle limits as includes. An import
+    /// that names no template in the catalog is reported where the import
+    /// stands and yields no macros.
+    fn load_imports<'a>(
+        &mut self,
+        ast: &Ast<'a>,
+        view: &ViewName,
+        stack: &mut Vec<ViewName>,
+    ) -> Vec<(String, TemplateEnv<'a>)>
+    where
+        'checker: 'a,
+    {
+        let mut imports = Vec::new();
+        for node in ast.nodes() {
+            let Node::Import(import) = node.as_ref() else {
+                continue;
+            };
+            let Some(env) = self.load_template(import.path, view, stack) else {
+                continue;
+            };
+            imports.push((import.scope.to_owned(), env));
+        }
+        imports
+    }
+
+    fn load_template<'a>(
+        &mut self,
+        path: &str,
+        importer: &ViewName,
+        stack: &mut Vec<ViewName>,
+    ) -> Option<TemplateEnv<'a>>
+    where
+        'checker: 'a,
+    {
+        let Ok(imported) = ViewName::parse(path) else {
+            self.push(
+                DiagnosticCode::MissingTemplate,
+                DiagnosticSeverity::Error,
+                importer,
+                1,
+                1,
+            );
+            return None;
+        };
+        if stack.len() >= self.limits.max_include_depth() || stack.contains(&imported) {
+            self.push(
+                DiagnosticCode::IncludeDepthLimit,
+                DiagnosticSeverity::Error,
+                importer,
+                1,
+                1,
+            );
+            return None;
+        }
+        let Some(source) = self.catalog.source(&imported) else {
+            self.push(
+                DiagnosticCode::MissingTemplate,
+                DiagnosticSeverity::Error,
+                importer,
+                1,
+                1,
+            );
+            return None;
+        };
+        if source.len() > self.limits.max_source_bytes() {
+            self.report_source_limit(&imported);
+            return None;
+        }
+        let file: Arc<std::path::Path> = Arc::from(PathBuf::from(imported.as_str()));
+        let ast = match Ast::from_str(source, Some(file), &Syntax::default()) {
+            Ok(ast) => ast,
+            Err(error) => {
+                let (line, column) = location(source, error.offset);
+                self.push(
+                    DiagnosticCode::AskamaSyntax,
+                    DiagnosticSeverity::Error,
+                    &imported,
+                    line,
+                    column,
+                );
+                return None;
+            }
+        };
+        self.node_count = self.node_count.saturating_add(count_nodes(ast.nodes()));
+        if self.node_count > self.limits.max_template_nodes() {
+            self.push(
+                DiagnosticCode::NodeLimit,
+                DiagnosticSeverity::Error,
+                &imported,
+                1,
+                1,
+            );
+            return None;
+        }
+        stack.push(imported.clone());
+        let imports = self.load_imports(&ast, &imported, stack);
+        stack.pop();
+        Some(TemplateEnv {
+            view: imported,
+            source,
+            ast,
+            imports,
+        })
     }
 
     #[allow(
@@ -197,6 +377,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         view: &ViewName,
         source: &str,
         stack: &mut Vec<ViewName>,
+        scope: &Scope<'_, '_>,
     ) -> Vec<RenderedBranch> {
         for node in nodes {
             if branches.is_empty() {
@@ -214,6 +395,27 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     self.append_text(branches, *raw.lit.rws, view)
                 }
                 Node::Expr(_, expression) => {
+                    if is_caller_call(expression) {
+                        let Some(caller) = scope.caller else {
+                            let (line, column) = span_location(source, expression.span());
+                            self.push(
+                                DiagnosticCode::DynamicStructureUnproved,
+                                DiagnosticSeverity::Unproved,
+                                view,
+                                line,
+                                column,
+                            );
+                            continue;
+                        };
+                        branches = self.combine(branches, caller, false, view);
+                        continue;
+                    }
+                    if let Some(Binding::Literal(literal)) =
+                        bound_variable(expression, scope.bindings)
+                    {
+                        branches = self.append_text(branches, &escape_html(literal), view);
+                        continue;
+                    }
                     if expression_uses_raw_safe(source, expression.span()) {
                         let (line, column) = span_location(source, expression.span());
                         self.push(
@@ -243,12 +445,12 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     if node.branches.iter().all(|branch| branch.cond.is_some()) {
                         choices.push(&[]);
                     }
-                    self.expand_choices(branches, &choices, overrides, view, source, stack)
+                    self.expand_choices(branches, &choices, overrides, view, source, stack, scope)
                 }
                 Node::Match(node) => {
                     let choices: Vec<&[Box<Node<'_>>]> =
                         node.arms.iter().map(|arm| arm.nodes.as_slice()).collect();
-                    self.expand_choices(branches, &choices, overrides, view, source, stack)
+                    self.expand_choices(branches, &choices, overrides, view, source, stack, scope)
                 }
                 Node::Loop(node) => self.expand_loop(
                     branches,
@@ -258,6 +460,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     view,
                     source,
                     stack,
+                    scope,
                 ),
                 Node::Include(include) => match ViewName::parse(include.path) {
                     Ok(include) => {
@@ -279,7 +482,15 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     if let Some(fragments) = overrides.get(*block.name) {
                         self.combine(branches, fragments, true, view)
                     } else {
-                        self.expand_nodes(&block.nodes, branches, overrides, view, source, stack)
+                        self.expand_nodes(
+                            &block.nodes,
+                            branches,
+                            overrides,
+                            view,
+                            source,
+                            stack,
+                            scope,
+                        )
                     }
                 }
                 Node::FilterBlock(block) => {
@@ -300,19 +511,92 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             column,
                         );
                     }
-                    self.expand_nodes(&block.nodes, branches, overrides, view, source, stack)
-                }
-                Node::Call(_) | Node::Macro(_) => {
-                    let (line, column) = span_location(source, node.span());
-                    self.push(
-                        DiagnosticCode::DynamicStructureUnproved,
-                        DiagnosticSeverity::Unproved,
+                    self.expand_nodes(
+                        &block.nodes,
+                        branches,
+                        overrides,
                         view,
-                        line,
-                        column,
-                    );
-                    branches
+                        source,
+                        stack,
+                        scope,
+                    )
                 }
+                // A macro call: the body is walked with the call's literal
+                // arguments bound, the caller content rendered first for
+                // `{{ caller() }}`, and the defining template's macros in
+                // scope. A call the checker cannot resolve, or one passing
+                // caller arguments, stays an explicit unproved result.
+                Node::Call(call) => {
+                    let scope_name = call.scope.as_ref().map(|scope| **scope);
+                    let resolved = scope.template.find_macro(scope_name, *call.name);
+                    let Some((definition, template)) = resolved else {
+                        let (line, column) = span_location(source, node.span());
+                        self.push(
+                            DiagnosticCode::DynamicStructureUnproved,
+                            DiagnosticSeverity::Unproved,
+                            view,
+                            line,
+                            column,
+                        );
+                        continue;
+                    };
+                    if !call.caller_args.is_empty() {
+                        let (line, column) = span_location(source, node.span());
+                        self.push(
+                            DiagnosticCode::DynamicStructureUnproved,
+                            DiagnosticSeverity::Unproved,
+                            view,
+                            line,
+                            column,
+                        );
+                        continue;
+                    }
+                    if scope.macro_depth >= self.limits.max_include_depth() {
+                        let (line, column) = span_location(source, node.span());
+                        self.push(
+                            DiagnosticCode::IncludeDepthLimit,
+                            DiagnosticSeverity::Error,
+                            view,
+                            line,
+                            column,
+                        );
+                        return Vec::new();
+                    }
+                    let bindings = bind_arguments(definition, call, scope.bindings);
+                    let caller = if call.nodes.is_empty() {
+                        Vec::new()
+                    } else {
+                        self.expand_nodes(
+                            &call.nodes,
+                            vec![RenderedBranch::empty(view)],
+                            overrides,
+                            view,
+                            source,
+                            stack,
+                            scope,
+                        )
+                    };
+                    let inner = Scope {
+                        template,
+                        bindings: &bindings,
+                        caller: Some(&caller),
+                        macro_depth: scope.macro_depth + 1,
+                    };
+                    let body_view = template.view.clone();
+                    let fragments = self.expand_nodes(
+                        &definition.nodes,
+                        vec![RenderedBranch::empty(&body_view)],
+                        &Overrides::new(),
+                        &body_view,
+                        template.source,
+                        stack,
+                        &inner,
+                    );
+                    self.combine(branches, &fragments, false, view)
+                }
+                // A definition renders nothing where it stands; its body is
+                // walked at each call.
+                Node::Macro(_) => branches,
                 Node::Let(node) => {
                     if let LetValueOrBlock::Block { .. } = &node.val {
                         branches
@@ -344,6 +628,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         view: &ViewName,
         source: &str,
         stack: &mut Vec<ViewName>,
+        scope: &Scope<'_, '_>,
     ) -> Vec<RenderedBranch> {
         let mut expanded = Vec::new();
         for branch in branches {
@@ -351,7 +636,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 let mut seed = branch.clone();
                 seed.branched = true;
                 let choice_branches =
-                    self.expand_nodes(choice, vec![seed], overrides, view, source, stack);
+                    self.expand_nodes(choice, vec![seed], overrides, view, source, stack, scope);
                 for choice_branch in choice_branches {
                     if !self.admit_branch(&mut expanded, choice_branch, view) {
                         return expanded;
@@ -404,6 +689,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         view: &ViewName,
         source: &str,
         stack: &mut Vec<ViewName>,
+        scope: &Scope<'_, '_>,
     ) -> Vec<RenderedBranch> {
         let mut expanded = Vec::new();
         for branch in branches {
@@ -414,7 +700,8 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 "<!--suprnova-checker-loop-start-7f3e-->",
                 view,
             );
-            let body_branches = self.expand_nodes(body, body_seeds, overrides, view, source, stack);
+            let body_branches =
+                self.expand_nodes(body, body_seeds, overrides, view, source, stack, scope);
             for body_branch in body_branches {
                 let completed = self.append_text(
                     vec![body_branch],
@@ -430,8 +717,15 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
 
             let mut empty_seed = branch;
             empty_seed.branched = true;
-            let empty_branches =
-                self.expand_nodes(else_nodes, vec![empty_seed], overrides, view, source, stack);
+            let empty_branches = self.expand_nodes(
+                else_nodes,
+                vec![empty_seed],
+                overrides,
+                view,
+                source,
+                stack,
+                scope,
+            );
             for empty_branch in empty_branches {
                 if !self.admit_branch(&mut expanded, empty_branch, view) {
                     return expanded;
@@ -547,6 +841,81 @@ fn filter_is_safe(filter: &askama_parser::Filter<'_>) -> bool {
     }
 }
 
+/// Binds a macro's parameters for one call: positional arguments first, then
+/// named ones, then each parameter's default. A literal binds as its text; a
+/// variable that is itself bound in the calling scope carries that binding
+/// through; anything else is dynamic.
+fn bind_arguments(definition: &Macro<'_>, call: &Call<'_>, outer: &Bindings) -> Bindings {
+    let mut bindings = Bindings::new();
+    let supplied: &[_] = call.args.as_deref().unwrap_or(&[]);
+    let mut positional = supplied
+        .iter()
+        .filter(|argument| !matches!(&****argument, Expr::NamedArgument(_, _)));
+    for parameter in &definition.args {
+        let name = (*parameter.name).to_owned();
+        let named = supplied.iter().find_map(|argument| match &***argument {
+            Expr::NamedArgument(argument_name, value) if **argument_name == *parameter.name => {
+                Some(&***value)
+            }
+            _ => None,
+        });
+        let value = named.or_else(|| positional.next().map(|argument| &***argument));
+        let binding = match value {
+            Some(expression) => binding_for(expression, outer),
+            None => parameter
+                .default
+                .as_ref()
+                .map_or(Binding::Dynamic, |default| binding_for(default, outer)),
+        };
+        bindings.insert(name, binding);
+    }
+    bindings
+}
+
+fn binding_for(expression: &Expr<'_>, outer: &Bindings) -> Binding {
+    match expression {
+        Expr::StrLit(literal) => Binding::Literal(literal.content.to_owned()),
+        Expr::NumLit(text, _) => Binding::Literal((*text).to_owned()),
+        Expr::BoolLit(value) => Binding::Literal(value.to_string()),
+        Expr::Var(name) => outer.get(*name).cloned().unwrap_or(Binding::Dynamic),
+        Expr::Group(inner) => binding_for(inner, outer),
+        _ => Binding::Dynamic,
+    }
+}
+
+/// The binding of a bare variable expression, when the expression is one.
+fn bound_variable<'b>(expression: &Expr<'_>, bindings: &'b Bindings) -> Option<&'b Binding> {
+    match expression {
+        Expr::Var(name) => bindings.get(*name),
+        Expr::Group(inner) => bound_variable(inner, bindings),
+        _ => None,
+    }
+}
+
+fn is_caller_call(expression: &Expr<'_>) -> bool {
+    match expression {
+        Expr::Call(call) => call.args.is_empty() && matches!(&**call.path, Expr::Var("caller")),
+        _ => false,
+    }
+}
+
+/// Escapes a substituted literal the way Askama escapes `{{ }}` output, so
+/// the checked HTML is the HTML the browser receives.
+fn escape_html(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#x27;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
 fn count_nodes(nodes: &[Box<Node<'_>>]) -> usize {
     nodes.iter().fold(0usize, |count, node| {
         let nested = match node.as_ref() {
@@ -559,6 +928,7 @@ fn count_nodes(nodes: &[Box<Node<'_>>]) -> usize {
             Node::Loop(node) => count_nodes(&node.body) + count_nodes(&node.else_nodes),
             Node::BlockDef(node) => count_nodes(&node.nodes),
             Node::Macro(node) => count_nodes(&node.nodes),
+            Node::Call(node) => count_nodes(&node.nodes),
             Node::FilterBlock(node) => count_nodes(&node.nodes),
             Node::Let(node) => match &node.val {
                 LetValueOrBlock::Block { nodes, .. } => count_nodes(nodes),

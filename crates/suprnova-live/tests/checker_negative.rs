@@ -479,3 +479,57 @@ fn check(source: impl Into<String>) -> suprnova_live::checker::CheckReport {
     TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
         .check_component(&root_name())
 }
+
+#[test]
+fn a_macro_call_is_checked_as_the_markup_it_expands_to() {
+    let registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            include_str!("fixtures/checker/fail/macro-unknown-model.html"),
+        ),
+        (
+            view("tests/macros.html"),
+            include_str!("fixtures/checker/pass/macros.html"),
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html"),
+        ),
+    ])
+    .expect("template catalog");
+    let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name());
+    assert!(!report.is_proved());
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DiagnosticCode::UnknownModel),
+        "a literal argument reaches the directive check: {:?}",
+        report.diagnostics()
+    );
+}
+
+#[test]
+fn a_call_to_a_macro_the_catalog_cannot_resolve_stays_unproved() {
+    let registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            include_str!("fixtures/checker/fail/macro-missing.html"),
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html"),
+        ),
+    ])
+    .expect("template catalog");
+    let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name());
+    assert!(!report.is_proved());
+    assert!(report.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code() == DiagnosticCode::DynamicStructureUnproved
+            && diagnostic.severity() == DiagnosticSeverity::Unproved
+    }));
+}

@@ -487,3 +487,27 @@ fn signal_names_use_the_canonical_byte_grammar_without_narrowing_class_keys() {
         assert!(report.is_proved(), "{:?}", report.diagnostics());
     }
 }
+
+#[test]
+fn macro_calls_are_expanded_with_their_literal_arguments() {
+    let registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            include_str!("fixtures/checker/pass/macro-forms.html"),
+        ),
+        (
+            view("tests/macros.html"),
+            include_str!("fixtures/checker/pass/macros.html"),
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html"),
+        ),
+    ])
+    .expect("template catalog");
+    let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name());
+    assert!(report.is_proved(), "{:?}", report.diagnostics());
+    assert!(report.diagnostics().is_empty());
+}

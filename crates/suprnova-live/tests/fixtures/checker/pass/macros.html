@@ -1,0 +1,9 @@
+{% macro field(name, label, hint="") %}
+<div class="sn-field"><label for="{{ name }}">{{ label }}</label>{{ caller() }}<p id="{{ name }}-hint">{{ hint }}</p><output live:error.live.polite="{{ name }}"></output></div>
+{% endmacro %}
+{% macro input(name, required=false) %}
+<input id="{{ name }}" name="{{ name }}"{% if required %} required{% endif %} live:model.blur="{{ name }}">
+{% endmacro %}
+{% macro submit(text, action) %}
+<button type="submit" live:loading.disabled="{{ action }}">{{ text }}</button>
+{% endmacro %}
