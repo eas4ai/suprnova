@@ -186,3 +186,14 @@ Mechanism: `.cairn/mechanisms/live-session-reverification`.
 Refines: Live spec 14, admission "rechecks ... registry and revocation
 state"; LIVE-016 session and revocation-state clauses.
 Status: Agreed 2026-09-13
+
+[LIVE-021] The framework MUST retire every async membership that a
+session opened for its default-guard user when that session loses that
+user on the same node, before any event published afterwards is appended,
+whether or not the session row itself is destroyed.
+Falsifier: a subscriber logs out with plain `Auth::logout`, which keeps
+the session row, and still receives an event published after the logout.
+Mechanism: `.cairn/mechanisms/live-session-deauthentication`.
+Refines: LIVE-019, for the logout that clears the user without destroying
+the session; the developer's answer on escalation `live-019`.
+Status: Draft

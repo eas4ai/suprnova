@@ -1,7 +1,7 @@
 # Live session revocation
 
 Slug: live-session-revocation
-Requirements: LIVE-019, LIVE-020
+Requirements: LIVE-019, LIVE-020, LIVE-021
 Rests on: LIVE-016, LIVE-001, LIVE-002
 
 ## Goal
@@ -29,7 +29,15 @@ recommendations"), taking the recommended option in each case:
 - Re-verification interval: ten seconds per membership
   (`docs/decisions/a-membership-re-verifies-its-session-against-the-store-at-most-every-ten-seconds.md`).
 
+Reopened 2026-09-14 08:44 for LIVE-021 after the developer's `ok` on
+escalation `live-019`: the review found that plain `Auth::logout` keeps
+the session row, so the scaffold's logout left streams delivering.
+
 ## Deliverables
+
+- `framework/tests/live/hardening.rs`: `plain_logout_ends_delivery`
+  (LIVE-021), failing on the tree of `cf7332d1`; the default guard's
+  logout retires the memberships its session opened for that user.
 
 - `framework/tests/live/hardening.rs`: `revoked_session_ends_delivery`
   (LIVE-019) and `stale_store_session_ends_delivery` (LIVE-020), each
@@ -48,9 +56,10 @@ recommendations"), taking the recommended option in each case:
 
 ## Records
 
-- Requirements: `docs/spec/live.md` (LIVE-019, LIVE-020).
+- Requirements: `docs/spec/live.md` (LIVE-019 to LIVE-021).
 - Mechanisms: `.cairn/mechanisms/live-session-revocation`,
-  `.cairn/mechanisms/live-session-reverification`.
+  `.cairn/mechanisms/live-session-reverification`,
+  `.cairn/mechanisms/live-session-deauthentication`.
 - Evidence: `.cairn/evidence/`, committed after each `cairn check`.
 - Review: `.cairn/reviews/live-session-revocation.md`.
 
