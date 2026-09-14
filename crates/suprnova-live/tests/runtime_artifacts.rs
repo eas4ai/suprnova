@@ -19,7 +19,7 @@ fn hex(digest: &[u8]) -> String {
 fn embedded_artifacts_match_the_tracked_manifest_byte_for_byte() {
     let manifest = runtime_artifacts().expect("embedded artifacts validate");
     assert_eq!(manifest.manifest_bytes(), TRACKED_MANIFEST);
-    assert_eq!(manifest.schema_version(), 2);
+    assert_eq!(manifest.schema_version(), 3);
     assert_eq!(manifest.engine_version(), BROWSER_RUNTIME_VERSION);
     assert_eq!(
         manifest.runtime_contract_version(),
@@ -51,7 +51,14 @@ fn embedded_artifacts_match_the_tracked_manifest_byte_for_byte() {
         assert_eq!(artifact.sha256_hex(), hex(&digest));
         assert_eq!(artifact.sri(), format!("sha256-{}", BASE64.encode(digest)));
         assert_eq!(artifact.sri(), recorded["sri"].as_str().expect("sri"));
-        assert_eq!(artifact.content_type(), "text/javascript; charset=utf-8");
+        assert_eq!(
+            artifact.content_type(),
+            if role.is_stylesheet() {
+                "text/css; charset=utf-8"
+            } else {
+                "text/javascript; charset=utf-8"
+            }
+        );
         assert_eq!(
             artifact.cache_control(),
             "public, max-age=31536000, immutable"
@@ -68,8 +75,17 @@ fn embedded_artifacts_match_the_tracked_manifest_byte_for_byte() {
 
 #[test]
 fn roles_are_a_closed_typed_set() {
-    assert_eq!(ArtifactRole::ALL.len(), 8);
+    assert_eq!(ArtifactRole::ALL.len(), 9);
     assert_eq!(ArtifactRole::CoreEsm.file(), "suprnova-live.esm.js");
+    assert_eq!(ArtifactRole::UiStyles.file(), "suprnova-ui.css");
+    assert_eq!(ArtifactRole::UiStyles.script_kind(), ScriptKind::Stylesheet);
+    assert_eq!(
+        ArtifactRole::UiStyles.preload_relation(),
+        PreloadRelation::Preload
+    );
+    assert_eq!(ArtifactRole::UiStyles.capability(), "ui@1");
+    assert!(ArtifactRole::UiStyles.is_stylesheet());
+    assert!(!ArtifactRole::CoreEsm.is_stylesheet());
     assert_eq!(ArtifactRole::CoreClassic.file(), "suprnova-live.classic.js");
     assert_eq!(
         ArtifactRole::UploadsEsm.file(),
@@ -92,7 +108,10 @@ fn roles_are_a_closed_typed_set() {
     assert_eq!(ArtifactRole::CoreClassic.capability(), "core@1");
     for role in ArtifactRole::ALL {
         assert_eq!(ArtifactRole::parse(role.as_str()), Some(role));
-        assert!(role.file().ends_with(".js"));
+        assert!(
+            role.file()
+                .ends_with(if role.is_stylesheet() { ".css" } else { ".js" })
+        );
         assert!(!role.file().contains('/'));
     }
     assert_eq!(ArtifactRole::parse("core"), None);
