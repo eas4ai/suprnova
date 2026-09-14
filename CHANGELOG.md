@@ -33,6 +33,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **The lockfile takes the rustls TLS 1.3 handshake fix.** `rustls` 0.23.45
+  replaces 0.23.40, which accepted TLS 1.3 handshake messages across
+  encryption level boundaries (RUSTSEC-2026-0285, published on the release
+  day); `aws-lc-rs` and `rustls-webpki` move with it. Every HTTPS client in
+  the framework, from the HTTP facade to the Qdrant and payment adapters,
+  resolves the fixed release.
 - **A Live stream ends with the session that opened it.** An asynchronous
   membership was re-authorized against its Gate before every delivery but
   never against its session: a browser that logged out, or whose session was

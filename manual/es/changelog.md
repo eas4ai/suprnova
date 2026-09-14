@@ -38,6 +38,12 @@ recientes primero.
 
 ### Seguridad
 
+- **El lockfile incorpora la corrección del handshake TLS 1.3 de rustls.**
+  `rustls` 0.23.45 sustituye a 0.23.40, que aceptaba mensajes del handshake
+  TLS 1.3 a través de los límites entre niveles de cifrado (RUSTSEC-2026-0285,
+  publicado el día del lanzamiento); `aws-lc-rs` y `rustls-webpki` se
+  actualizan con él. Todo cliente HTTPS del framework, desde la fachada HTTP
+  hasta los adaptadores de Qdrant y de pagos, resuelve la versión corregida.
 - **Un stream de Live termina con la sesión que lo abrió.** Una membresía
   asíncrona se volvía a autorizar contra su Gate antes de cada entrega, pero
   nunca contra su sesión: un navegador que cerraba sesión, o cuya sesión era

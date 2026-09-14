@@ -72,8 +72,8 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | atomic | 0.6.1 | Workspace resolved | Apache-2.0/MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | autocfg | 1.5.1 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | aws-credential-types | 1.2.14 | Workspace resolved | Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
-| Cargo | aws-lc-rs | 1.17.0 | Workspace resolved | ISC AND (Apache-2.0 OR ISC) | registry+https://github.com/rust-lang/crates.io-index |
-| Cargo | aws-lc-sys | 0.41.0 | Workspace resolved | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | aws-lc-rs | 1.18.1 | Workspace resolved | ISC AND (Apache-2.0 OR ISC) | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | aws-lc-sys | 0.45.0 | Workspace resolved | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | aws-sigv4 | 1.4.4 | Workspace resolved | Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | aws-smithy-async | 1.2.14 | Workspace resolved | Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | aws-smithy-http | 0.63.6 | Workspace resolved | Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -573,8 +573,8 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | rustls-pki-types | 1.14.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | rustls-platform-verifier-android | 0.1.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | rustls-platform-verifier | 0.7.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
-| Cargo | rustls-webpki | 0.103.13 | Workspace resolved | ISC | registry+https://github.com/rust-lang/crates.io-index |
-| Cargo | rustls | 0.23.40 | Workspace resolved | Apache-2.0 OR ISC OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | rustls-webpki | 0.103.15 | Workspace resolved | ISC | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | rustls | 0.23.45 | Workspace resolved | Apache-2.0 OR ISC OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | rustversion | 1.0.22 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | rustversion | 1.0.23 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | rusty-fork | 0.3.1 | Workspace resolved | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |

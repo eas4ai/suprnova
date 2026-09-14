@@ -36,6 +36,12 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Sicherheit
 
+- **Die Lockdatei übernimmt den rustls-Fix für den TLS-1.3-Handshake.**
+  `rustls` 0.23.45 ersetzt 0.23.40, das TLS-1.3-Handshake-Nachrichten über die
+  Grenzen der Verschlüsselungsstufen hinweg akzeptierte (RUSTSEC-2026-0285, am
+  Tag der Veröffentlichung gemeldet); `aws-lc-rs` und `rustls-webpki` ziehen
+  mit. Jeder HTTPS-Client des Frameworks, von der HTTP-Fassade bis zu den
+  Qdrant- und Zahlungsadaptern, löst die korrigierte Version auf.
 - **Ein Live-Stream endet mit der Session, die ihn geöffnet hat.** Eine
   asynchrone Mitgliedschaft wurde vor jeder Zustellung erneut gegen ihr Gate
   autorisiert, aber nie gegen ihre Session: ein Browser, der sich abgemeldet
