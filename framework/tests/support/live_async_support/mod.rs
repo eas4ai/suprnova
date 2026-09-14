@@ -188,6 +188,15 @@ async fn session_touch_handler(_request: Request) -> Response {
     Ok(HttpResponse::json(json!({ "ok": true })))
 }
 
+/// Logs the user out the way the scaffold's logout route does: the
+/// session row and id survive, only the signed-in user is cleared.
+async fn session_plain_logout_handler(_request: Request) -> Response {
+    match Auth::logout().await {
+        Ok(()) => Ok(HttpResponse::json(json!({ "ok": true }))),
+        Err(error) => Err(HttpResponse::json(json!({ "error": error.to_string() }))),
+    }
+}
+
 /// Ends the browser's session the way an application's logout route does.
 async fn session_logout_handler(_request: Request) -> Response {
     match Auth::logout_and_invalidate().await {
@@ -229,6 +238,9 @@ fn build_router() -> Router {
         .into();
     let router: Router = router
         .post("/session/logout", session_logout_handler)
+        .into();
+    let router: Router = router
+        .post("/session/logout-plain", session_plain_logout_handler)
         .into();
     router
         .try_live()

@@ -180,6 +180,78 @@ async fn revoked_session_ends_delivery() {
     );
 }
 
+/// LIVE-021: the logout the scaffold ships, plain `Auth::logout`, keeps the
+/// session row and id and only clears the signed-in user; the memberships
+/// that session opened for that user must still end with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plain_logout_ends_delivery() {
+    let (router, _runtime) = router_and_runtime();
+    let store = Arc::new(MemorySessionStore::default());
+    let server = spawn_server_with_sessions(router, Arc::clone(&store)).await;
+    let bootstrap = send(
+        server.port,
+        &Identity::alice(),
+        Method::GET,
+        "/session/touch",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(bootstrap.status.as_u16(), 200);
+    let cookie = session_cookie(&bootstrap).expect("the session middleware set its cookie");
+    let alice = Identity::alice().with_cookie(&cookie);
+    let issued = issue(
+        server.port,
+        &alice,
+        orders_issue_body("sse", "doc-instance-0001"),
+    )
+    .await;
+    let credential = issued.credential.clone().expect("an SSE credential");
+    let mut stream = SseClient::open(server.port, &alice, &credential, 1, &[]).await;
+    assert_eq!(stream.status.as_u16(), 200);
+    let ack = subscribe(
+        server.port,
+        &alice,
+        &credential,
+        &issued,
+        "nonce-subscribe-0001",
+        1,
+    )
+    .await;
+    assert_eq!(ack.status.as_u16(), 200);
+
+    let logout = send(
+        server.port,
+        &alice,
+        Method::POST,
+        "/session/logout-plain",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(
+        logout.status.as_u16(),
+        200,
+        "logout failed: {}",
+        String::from_utf8_lossy(&logout.body)
+    );
+
+    LiveStreams::resolve()
+        .expect("the Live streams facade resolves")
+        .event::<OrdersUpdated>(
+            "orders",
+            LiveEventTarget::Island,
+            CanonicalValue::String("post-plain-logout".into()),
+        )
+        .await
+        .expect("publishing to a topic with no live member is not an error");
+
+    assert!(
+        !stream_carries(&mut stream, "post-plain-logout").await,
+        "an event published after a plain logout reached the old stream"
+    );
+}
+
 /// LIVE-020: a session destroyed behind the runtime, as another node's
 /// logout does, stops delivery within the re-verification interval. The
 /// session row is removed from the shared store directly, the clock passes
