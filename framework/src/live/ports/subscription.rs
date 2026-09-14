@@ -121,17 +121,25 @@ struct CredentialEntry {
     expires_at: UnixMillis,
 }
 
+/// Every unconsumed secret issued for one descriptor binding, oldest first.
+///
+/// Concurrent issuances of one scope in the same millisecond mint identical
+/// descriptors and therefore one binding; each needs its own secret kept
+/// until it is consumed or expires, or the earlier issuances cannot connect
+/// (LIVE-022).
+type CredentialTable = HashMap<String, Vec<CredentialEntry>>;
+
 /// In-process descriptor-scoped credential store with atomic rotation.
 ///
 /// Credentials never leave this process, so a restart invalidates every
 /// outstanding subscription and browsers issue afresh.
 #[derive(Default)]
 pub(crate) struct SuprnovaSubscriptionCredentials {
-    entries: Mutex<HashMap<String, CredentialEntry>>,
+    entries: Mutex<CredentialTable>,
 }
 
 impl SuprnovaSubscriptionCredentials {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, CredentialEntry>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, CredentialTable> {
         self.entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -149,18 +157,15 @@ impl SubscriptionCredentialPort for SuprnovaSubscriptionCredentials {
             let credential = TransportCredential::from_host_authority_bearer(secret.clone())?;
             let mut entries = self.lock();
             prune(&mut entries, request.now());
-            if entries.len() >= MAX_CREDENTIAL_ENTRIES && !entries.contains_key(&key) {
+            if secrets_held(&entries) >= MAX_CREDENTIAL_ENTRIES {
                 return Err(SubscriptionError::new(
                     SubscriptionErrorKind::CredentialUnavailable,
                 ));
             }
-            entries.insert(
-                key,
-                CredentialEntry {
-                    secret,
-                    expires_at: request.expires_at(),
-                },
-            );
+            entries.entry(key).or_default().push(CredentialEntry {
+                secret,
+                expires_at: request.expires_at(),
+            });
             Ok(credential)
         })
     }
@@ -184,28 +189,57 @@ impl SubscriptionCredentialPort for SuprnovaSubscriptionCredentials {
             };
             let mut entries = self.lock();
             prune(&mut entries, predecessor.now());
-            let valid = entries.get(&predecessor_key).is_some_and(|entry| {
-                entry.expires_at > predecessor.now()
-                    && same_secret(&entry.secret, presented.expose_authorization_bearer())
-            });
-            if !valid {
+            if !consume(
+                &mut entries,
+                &predecessor_key,
+                presented.expose_authorization_bearer(),
+            ) {
                 return SubscriptionCredentialRotationOutcome::Reject;
             }
-            entries.remove(&predecessor_key);
-            entries.insert(
-                successor_key,
-                CredentialEntry {
+            entries
+                .entry(successor_key)
+                .or_default()
+                .push(CredentialEntry {
                     secret,
                     expires_at: successor.expires_at(),
-                },
-            );
+                });
             SubscriptionCredentialRotationOutcome::Rotated(credential)
         })
     }
 }
 
-fn prune(entries: &mut HashMap<String, CredentialEntry>, now: UnixMillis) {
-    entries.retain(|_, entry| entry.expires_at > now);
+/// Removes the one secret under `key` that matches `presented`, reporting
+/// whether there was one. Every secret is compared, so the time taken does
+/// not depend on which of a binding's secrets matched.
+fn consume(entries: &mut CredentialTable, key: &str, presented: &[u8]) -> bool {
+    let Some(secrets) = entries.get_mut(key) else {
+        return false;
+    };
+    let matched = secrets
+        .iter()
+        .map(|entry| same_secret(&entry.secret, presented))
+        .collect::<Vec<_>>();
+    let Some(index) = matched.iter().position(|hit| *hit) else {
+        return false;
+    };
+    secrets.remove(index);
+    if secrets.is_empty() {
+        entries.remove(key);
+    }
+    true
+}
+
+fn prune(entries: &mut CredentialTable, now: UnixMillis) {
+    entries.retain(|_, secrets| {
+        secrets.retain(|entry| entry.expires_at > now);
+        !secrets.is_empty()
+    });
+}
+
+/// The number of unconsumed secrets across every binding, which the entry
+/// cap bounds.
+fn secrets_held(entries: &CredentialTable) -> usize {
+    entries.values().map(Vec::len).sum()
 }
 
 fn mint_secret() -> Vec<u8> {
