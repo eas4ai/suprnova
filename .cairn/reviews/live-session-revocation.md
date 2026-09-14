@@ -121,4 +121,6 @@ logout route, on the tree of `cf7332d1`. Baseline receipt
 After the fix the same probe passes: `Auth::clear_authentication`
 captures the signed-in user and the session id before clearing either,
 and `live::revocation::session_deauthenticated` retires the memberships
-that session opened for that user through the unsubscribe path.
+that session opened for that user through the unsubscribe path. Receipt
+`.cairn/evidence/LIVE-021/20260914T125559794Z` (pass) on `3700c117`,
+alongside fresh LIVE-019 and LIVE-020 receipts on the same tree.

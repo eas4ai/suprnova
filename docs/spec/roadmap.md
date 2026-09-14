@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: live-session-revocation
+Current: component-library-foundations
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -21,10 +21,10 @@ components in waves, the advanced components last, the datatable closing.
    Live authorization and transaction contracts (LIVE-016, LIVE-017),
    then CACHE-006, CACHE-005, LIVE-018, CACHE-010, CACHE-007. The owner
    ruled at 11:13 that this precedes the library.
-1. live-session-revocation - LIVE-019 and LIVE-020 done 2026-09-14
-   (`cf7332d1`, receipts `3c0e4c05`); reopened the same day for LIVE-021
-   after the developer's `ok` on escalation `live-019` (plain
-   `Auth::logout` keeps the session row) - the session and revocation-state clauses
+1. live-session-revocation - DONE 2026-09-14 (`cf7332d1` and `3700c117`,
+   receipts on `3700c117`; reopened once for LIVE-021 after the developer's
+   `ok` on escalation `live-019`, plain `Auth::logout` keeping the session
+   row) - the session and revocation-state clauses
    of LIVE-016 that the hardening left open: a membership whose session
    is destroyed on this node or another stops receiving events
    (LIVE-019, LIVE-020). The developer answered `ok` on escalation
