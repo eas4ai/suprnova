@@ -22,7 +22,7 @@ components in waves, the advanced components last, the datatable closing.
    then CACHE-006, CACHE-005, LIVE-018, CACHE-010, CACHE-007. The owner
    ruled at 11:13 that this precedes the library.
 1. live-session-revocation - DONE 2026-09-14 (`cf7332d1`, receipts
-   `3c0e4c05`; plain `Auth::logout` raised as escalation `live-019-plain-logout`)
+   `3c0e4c05`; plain `Auth::logout` raised as escalation `live-019`)
    - the session and revocation-state clauses
    of LIVE-016 that the hardening left open: a membership whose session
    is destroyed on this node or another stops receiving events
