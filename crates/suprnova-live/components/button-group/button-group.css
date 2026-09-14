@@ -1,0 +1,15 @@
+.sn-button-group {
+  display: inline-flex;
+  gap: var(--sn-space-0);
+}
+
+.sn-button-group > .sn-button:not(:first-child) {
+  border-start-start-radius: var(--sn-radius-none);
+  border-end-start-radius: var(--sn-radius-none);
+  margin-inline-start: calc(var(--sn-state-border-width) * -1);
+}
+
+.sn-button-group > .sn-button:not(:last-child) {
+  border-start-end-radius: var(--sn-radius-none);
+  border-end-end-radius: var(--sn-radius-none);
+}

@@ -1,0 +1,12 @@
+{#
+  suprnova.select - a native select over (value, label) pairs bound to one
+  model path; an empty placeholder option keeps "nothing chosen" explicit.
+#}
+{% macro select(name, options, placeholder="", required=false) %}
+<select class="sn-select" id="{{ name }}" name="{{ name }}" aria-describedby="{{ name }}-hint {{ name }}-error"{% if required %} required{% endif %} live:model="{{ name }}">
+{% if placeholder != "" %}<option value="">{{ placeholder }}</option>{% endif %}
+{% for option in options %}
+<option value="{{ option.0 }}">{{ option.1 }}</option>
+{% endfor %}
+</select>
+{% endmacro %}

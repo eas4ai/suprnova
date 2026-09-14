@@ -1,0 +1,11 @@
+.sn-checkbox {
+  display: flex;
+  align-items: center;
+  gap: var(--sn-space-2);
+  font-weight: var(--sn-font-weight-normal);
+}
+
+.sn-checkbox-group {
+  display: grid;
+  gap: var(--sn-space-2);
+}

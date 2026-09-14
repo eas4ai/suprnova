@@ -1,0 +1,6 @@
+{#
+  suprnova.textarea - a native textarea bound to a model path.
+#}
+{% macro textarea(name, rows=4, placeholder="", required=false) %}
+<textarea class="sn-textarea" id="{{ name }}" name="{{ name }}" rows="{{ rows }}" placeholder="{{ placeholder }}" aria-describedby="{{ name }}-hint {{ name }}-error"{% if required %} required{% endif %} live:model="{{ name }}"></textarea>
+{% endmacro %}

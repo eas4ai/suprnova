@@ -1,0 +1,7 @@
+{#
+  suprnova.search-input - a search input whose model binding is debounced
+  (FORM-003): the server sees a settled query, not every keystroke.
+#}
+{% macro search_input(name, placeholder="Search") %}
+<input class="sn-input sn-search-input" id="{{ name }}" name="{{ name }}" type="search" placeholder="{{ placeholder }}" autocomplete="off" aria-describedby="{{ name }}-hint {{ name }}-error" live:model.debounce.300ms="{{ name }}">
+{% endmacro %}

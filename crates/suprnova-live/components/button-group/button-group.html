@@ -1,0 +1,9 @@
+{#
+  suprnova.button-group - a labelled group of related buttons; the caller
+  renders the buttons.
+#}
+{% macro button_group(label) %}
+<div class="sn-button-group" role="group" aria-label="{{ label }}">
+{{ caller() }}
+</div>
+{% endmacro %}

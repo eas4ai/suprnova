@@ -3,7 +3,10 @@
 // library's token stylesheet, base layer, headless styling, and the
 // Tailwind preset.
 //
-//   node .cairn/tools/ui-tokens.mjs <stylesheet.css> [<views-root>] [<preset.css>]
+//   node .cairn/tools/ui-tokens.mjs <stylesheet.css> [<views-root>] [<preset.css>] [<components-root>]
+//
+// The components root holds one directory per shipped component; every
+// stylesheet under it is held to UI-003 and UI-004 like the base layer.
 //
 // Prints one `cairn: UI-nnn: pass|fail` line per requirement. A missing
 // input fails its requirements with the reason; that is the honest state
@@ -12,11 +15,11 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-const [stylesheet, viewsRoot, preset] = process.argv.slice(2);
+const [stylesheet, viewsRoot, preset, componentsRoot] = process.argv.slice(2);
 const results = new Map();
 const fail = (id, why) => {
   const prior = results.get(id);
-  results.set(id, prior ? `${prior}; ${why}` : `fail (${why}`);
+  results.set(id, prior && prior.startsWith("fail") ? `${prior}; ${why}` : `fail (${why}`);
 };
 const pass = (id) => results.has(id) || results.set(id, "pass");
 const walk = (dir, out = []) => {
@@ -56,12 +59,19 @@ if (!stylesheet || !existsSync(stylesheet)) {
   if (/[a-z\[.#][^{}]*\{[^}]*\}/i.test(outsideLayer)) fail("UI-002", "a rule sits outside @layer suprnova-ui");
   pass("UI-002");
 
+  judgeStateAndLiterals(css, true);
+}
+
+// UI-003 and UI-004 over one stylesheet. The base layer must also carry the
+// attribute selectors; a component stylesheet only must not select state by
+// class or carry a literal visual value.
+function judgeStateAndLiterals(css, isBase) {
   // UI-003: state presentation keyed to attributes, never to a state class alone.
   const stateClasses = /\.(is-|has-)?(invalid|busy|loading|expanded|open|pressed|active|current|selected|disabled)\b/g;
   const hits = [...css.matchAll(stateClasses)].map((m) => m[0]);
   if (hits.length) fail("UI-003", `state selected by class: ${[...new Set(hits)].join(" ")}`);
   const attrs = ["aria-invalid", "aria-busy", "aria-expanded", "aria-pressed", "aria-current", "aria-selected", ":disabled"];
-  for (const attr of attrs) if (!css.includes(attr)) fail("UI-003", `no selector on ${attr}`);
+  if (isBase) for (const attr of attrs) if (!css.includes(attr)) fail("UI-003", `no selector on ${attr}`);
   pass("UI-003");
 
   // UI-004: no literal visual value outside the token definitions themselves.
@@ -79,6 +89,12 @@ if (!stylesheet || !existsSync(stylesheet)) {
   }
   for (const why of seen) fail("UI-004", why);
   pass("UI-004");
+}
+
+if (componentsRoot && existsSync(componentsRoot)) {
+  for (const file of walk(componentsRoot)) {
+    if (file.endsWith(".css")) judgeStateAndLiterals(readFileSync(file, "utf8"), false);
+  }
 }
 
 // UI-005: no style attribute in any shipped view.

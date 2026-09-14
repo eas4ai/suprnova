@@ -1,9 +1,10 @@
-command: node .cairn/tools/ui-tokens.mjs crates/suprnova-live/browser/src/styles/suprnova-ui.css app/templates/suprnova-ui crates/suprnova-live/browser/src/styles/suprnova-ui.tailwind.css
+command: node .cairn/tools/ui-tokens.mjs crates/suprnova-live/browser/src/styles/suprnova-ui.css app/templates/suprnova-ui crates/suprnova-live/browser/src/styles/suprnova-ui.tailwind.css crates/suprnova-live/components
 results: per-requirement
 inputs:
   - .cairn/tools/ui-tokens.mjs
   - crates/suprnova-live/browser/src/
   - app/templates/
+  - crates/suprnova-live/components/
 requirements:
   - UI-001
   - UI-002

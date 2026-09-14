@@ -1,0 +1,17 @@
+{#
+  suprnova.checkbox - one native checkbox with its label. checkbox_group
+  renders a fieldset of checkboxes over (value, label) pairs bound to a
+  collection model path.
+#}
+{% macro checkbox(name, label, required=false) %}
+<label class="sn-checkbox"><input class="sn-checkbox-input" id="{{ name }}" name="{{ name }}" type="checkbox" aria-describedby="{{ name }}-hint {{ name }}-error"{% if required %} required{% endif %} live:model="{{ name }}"> <span>{{ label }}</span></label>
+{% endmacro %}
+
+{% macro checkbox_group(name, legend, options) %}
+<fieldset class="sn-checkbox-group" id="{{ name }}" aria-describedby="{{ name }}-hint {{ name }}-error">
+<legend>{{ legend }}</legend>
+{% for option in options %}
+<label class="sn-checkbox"><input class="sn-checkbox-input" name="{{ name }}" type="checkbox" value="{{ option.0 }}" live:model="{{ name }}"> <span>{{ option.1 }}</span></label>
+{% endfor %}
+</fieldset>
+{% endmacro %}

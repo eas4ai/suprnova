@@ -1,0 +1,7 @@
+{#
+  suprnova.input - a native text-like input bound to a model path. kind is
+  the HTML type (text, email, url, tel); the value comes from the model.
+#}
+{% macro input(name, kind="text", placeholder="", required=false, autocomplete="off") %}
+<input class="sn-input" id="{{ name }}" name="{{ name }}" type="{{ kind }}" placeholder="{{ placeholder }}" autocomplete="{{ autocomplete }}" aria-describedby="{{ name }}-hint {{ name }}-error"{% if required %} required{% endif %} live:model="{{ name }}">
+{% endmacro %}

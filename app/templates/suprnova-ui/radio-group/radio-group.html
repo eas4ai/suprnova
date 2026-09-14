@@ -1,0 +1,12 @@
+{#
+  suprnova.radio-group - a fieldset of native radios over (value, label)
+  pairs bound to one model path; the legend is the group's accessible name.
+#}
+{% macro radio_group(name, legend, options, required=false) %}
+<fieldset class="sn-radio-group" id="{{ name }}" aria-describedby="{{ name }}-hint {{ name }}-error">
+<legend>{{ legend }}</legend>
+{% for option in options %}
+<label class="sn-radio"><input class="sn-radio-input" name="{{ name }}" type="radio" value="{{ option.0 }}"{% if required %} required{% endif %} live:model="{{ name }}"> <span>{{ option.1 }}</span></label>
+{% endfor %}
+</fieldset>
+{% endmacro %}

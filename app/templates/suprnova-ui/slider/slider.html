@@ -1,0 +1,11 @@
+{#
+  suprnova.slider - a native range input; the current value is shown in an
+  output the browser keeps in sync, so the number is readable without
+  script.
+#}
+{% macro slider(name, min="0", max="100", step="1") %}
+<div class="sn-slider">
+<input class="sn-slider-input" id="{{ name }}" name="{{ name }}" type="range" min="{{ min }}" max="{{ max }}" step="{{ step }}" aria-describedby="{{ name }}-hint {{ name }}-error" live:model="{{ name }}">
+<output class="sn-slider-value" for="{{ name }}"></output>
+</div>
+{% endmacro %}

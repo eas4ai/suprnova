@@ -1,0 +1,7 @@
+{#
+  suprnova.number-input - a native number input with inputmode, min, max
+  and step declared on the control (Live spec 21, textual and numeric).
+#}
+{% macro number_input(name, min="", max="", step="1", required=false) %}
+<input class="sn-input sn-number-input" id="{{ name }}" name="{{ name }}" type="number" inputmode="decimal" min="{{ min }}" max="{{ max }}" step="{{ step }}" aria-describedby="{{ name }}-hint {{ name }}-error"{% if required %} required{% endif %} live:model="{{ name }}">
+{% endmacro %}

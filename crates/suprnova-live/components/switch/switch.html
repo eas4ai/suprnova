@@ -1,0 +1,7 @@
+{#
+  suprnova.switch - a checkbox with the switch role for a real binary
+  setting (Live spec 21, choice and toggle); the base layer draws it.
+#}
+{% macro switch(name, label) %}
+<label class="sn-switch"><input class="sn-switch-input" id="{{ name }}" name="{{ name }}" type="checkbox" role="switch" aria-describedby="{{ name }}-hint {{ name }}-error" live:model="{{ name }}"> <span>{{ label }}</span></label>
+{% endmacro %}

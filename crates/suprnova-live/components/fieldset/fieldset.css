@@ -1,0 +1,4 @@
+.sn-fieldset {
+  display: grid;
+  gap: var(--sn-space-2);
+}

@@ -1,0 +1,13 @@
+{
+  "name": "suprnova.password-input",
+  "version": 1,
+  "root": "suprnova-ui/password-input",
+  "files": [
+    "password-input.html",
+    "password-input.css",
+    "password-input.js"
+  ],
+  "elements": [
+    "sn-password-reveal"
+  ]
+}

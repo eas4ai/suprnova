@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.field",
+  "version": 1,
+  "root": "suprnova-ui/field",
+  "files": [
+    "field.html",
+    "field.css"
+  ],
+  "elements": []
+}
