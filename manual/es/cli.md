@@ -99,6 +99,7 @@ andamiaje y el aspecto de cada archivo generado.
 | Comando | Descripción |
 |---|---|
 | `suprnova live:make <name>` | Genera un componente Live en `src/live/`, su vista en `templates/live/` y su registro en `src/live/mod.rs`. Nunca sobrescribe; `--dry-run` muestra el plan. |
+| `suprnova live:add <name>` | Instala un componente incluido de la biblioteca de componentes Live, o uno de terceros con `--manifest <path>`, como un directorio bajo `templates/<root>/`: vista, hoja de estilos, JavaScript y manifiesto. Conserva los archivos que editaste; `--force` los reemplaza; `--dry-run` muestra el plan. |
 | `suprnova live:check` | Comprueba cada vista Live registrada con el comprobador integrado. Lee `dirs` de `askama.toml` o `templates/`; `--templates <dir>` lo anula, `--allow-unproved` acepta estructuras dinámicas no probadas. |
 | `suprnova live:inspect` | Informa del estado seguro de runtime, registro, proveedores y artefactos de Live (`--json` para un único documento JSON). |
 | `suprnova live:assets --out <dir>` | Publica atómicamente los artefactos de runtime Live revisados en `<dir>/<identity>/`; `--replace` reemplaza una publicación cuyos bytes difieren. |

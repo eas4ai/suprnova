@@ -178,6 +178,18 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-14 -- Built the foundations: the token stylesheet and base layer
+  (`crates/suprnova-live/browser/src/styles/suprnova-ui.css`, the `ui-styles`
+  artifact) with a Tailwind CSS 4 `@theme` preset; the form family's
+  presentational components as Askama macros, one directory each under
+  `crates/suprnova-live/components/` with a JSON manifest; `live:add`
+  installing a component under `templates/suprnova-ui/` without replacing an
+  edited file and accepting a third-party manifest under its own root; the
+  framework route `/suprnova-ui/<component>/<file>` serving a vendored
+  component's stylesheet and script; the checker expanding macro calls
+  (spec 19); and the registry refusing the `suprnova.` namespace from any
+  crate but the framework and the engine (Cairn UI-001 to UI-019, FORM-001 to
+  FORM-004).
 - 2026-09-14 -- The token stylesheet and base layer are delivered as the
   runtime artifact `ui-styles` (spec 09, manifest schema 3), so the shared
   base carries the runtime's identity, integrity, and immutable cache policy

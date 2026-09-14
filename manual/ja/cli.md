@@ -70,6 +70,7 @@ Laravelはこれを、プロジェクトごとの単一のスクリプト - `php
 | コマンド | 説明 |
 |---|---|
 | `suprnova live:make <name>` | `src/live/` に Live コンポーネントを、`templates/live/` にそのビューを、`src/live/mod.rs` にその登録を生成します。決して上書きしません。`--dry-run` は計画を表示します。 |
+| `suprnova live:add <name>` | 同梱の Live コンポーネントライブラリのコンポーネント、または `--manifest <path>` でサードパーティのコンポーネントを、`templates/<root>/` の下のひとつのディレクトリ（ビュー、スタイルシート、JavaScript、マニフェスト）としてインストールします。編集済みのファイルは保持され、`--force` で置き換え、`--dry-run` で計画だけを表示します。 |
 | `suprnova live:check` | 登録済みのすべての Live ビューを統合チェッカーで検査します。`askama.toml` の `dirs` または `templates/` を読みます。`--templates <dir>` で上書きし、`--allow-unproved` は未証明の動的構造を受け入れます。 |
 | `suprnova live:inspect` | Live のランタイム、レジストリ、プロバイダー、成果物の安全な状態を報告します（`--json` で単一の JSON ドキュメント）。 |
 | `suprnova live:assets --out <dir>` | 精査済みの Live ランタイム成果物を `<dir>/<identity>/` にアトミックに公開します。`--replace` はバイト列が異なる公開物を置き換えます。 |

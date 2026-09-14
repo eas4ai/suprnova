@@ -6,6 +6,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## 2.0.2 - 2026-09-14
 
+### Added
+
+- **Live ships the foundations of its component library.** A token stylesheet
+  with a base layer arrives as the `ui-styles` runtime artifact when a
+  document opts in with `with_suprnova_ui()`; every rule sits in the
+  `suprnova-ui` cascade layer and every visual value is a `--sn-` token with
+  light and dark values, so the skin is removable with nothing breaking.
+  `live:add` installs a component as one directory under
+  `templates/suprnova-ui/` from its manifest, keeps files you edited, and
+  accepts a third-party manifest under its own root; the framework serves the
+  vendored stylesheet and script at `/suprnova-ui/<component>/<file>`. The
+  form family ships as Askama macros the checker now expands, so a library
+  view passes `live:check` like any other. The `suprnova.` namespace is
+  reserved to the library and the registry refuses it from any other crate.
+
 ### Changed
 
 - **The Live endpoints carry no version segment.** `/__live/v1/action`,

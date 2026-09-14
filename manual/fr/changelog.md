@@ -8,6 +8,23 @@ en premier.
 
 ## 2.0.2 - 2026-09-14
 
+### Ajouté
+
+- **Live livre les fondations de sa bibliothèque de composants.** Une feuille
+  de style de tokens avec couche de base arrive comme artefact du runtime
+  `ui-styles` quand un document y souscrit avec `with_suprnova_ui()` ; chaque
+  règle vit dans la couche de cascade `suprnova-ui` et chaque valeur visuelle
+  est un token `--sn-` avec des valeurs claires et sombres, si bien que
+  l'habillage se retire sans rien casser. `live:add` installe un composant
+  depuis son manifeste comme un répertoire sous `templates/suprnova-ui/`,
+  conserve les fichiers que vous avez modifiés et accepte un manifeste tiers
+  sous sa propre racine ; le framework sert la feuille de style et le script
+  sous `/suprnova-ui/<component>/<file>`. La famille de formulaires arrive
+  sous forme de macros Askama que le vérificateur développe désormais, si bien
+  qu'une vue de la bibliothèque passe `live:check` comme n'importe quelle
+  autre. L'espace de noms `suprnova.` est réservé à la bibliothèque et le
+  registre le refuse à toute autre crate.
+
 ### Modifié
 
 - **Les endpoints Live ne portent aucun segment de version.**

@@ -7,6 +7,23 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ## 2.0.2 - 2026-09-14
 
+### Hinzugefügt
+
+- **Live liefert die Grundlagen seiner Komponentenbibliothek.** Ein
+  Token-Stylesheet mit Basisschicht kommt als Runtime-Artefakt `ui-styles`,
+  sobald ein Dokument sich mit `with_suprnova_ui()` anmeldet; jede Regel liegt
+  in der Cascade-Layer `suprnova-ui`, und jeder visuelle Wert ist ein
+  `--sn-`-Token mit hellen und dunklen Werten, sodass sich die Optik entfernen
+  lässt, ohne dass etwas bricht. `live:add` installiert eine Komponente aus
+  ihrem Manifest als ein Verzeichnis unter `templates/suprnova-ui/`, behält
+  bearbeitete Dateien und nimmt ein Manifest eines Drittanbieters unter dessen
+  eigener Wurzel an; das Framework liefert Stylesheet und Skript unter
+  `/suprnova-ui/<component>/<file>` aus. Die Formularfamilie kommt als
+  Askama-Makros, die der Checker jetzt expandiert, sodass eine
+  Bibliotheks-View `live:check` wie jede andere besteht. Der Namensraum
+  `suprnova.` ist der Bibliothek vorbehalten, und die Registry weist ihn aus
+  jeder anderen Crate zurück.
+
 ### Geändert
 
 - **Die Live-Endpunkte tragen kein Versionssegment.** `/__live/v1/action`,

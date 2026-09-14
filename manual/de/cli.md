@@ -98,6 +98,7 @@ Scaffold-Details und wie jede generierte Datei aussieht.
 | Befehl | Beschreibung |
 |---|---|
 | `suprnova live:make <name>` | Erzeugt eine Live-Komponente in `src/live/`, ihre View in `templates/live/` und ihre Registrierung in `src/live/mod.rs`. Überschreibt nie; `--dry-run` zeigt den Plan. |
+| `suprnova live:add <name>` | Installiert eine mitgelieferte Komponente der Live-Komponentenbibliothek, oder mit `--manifest <path>` eine Komponente eines Drittanbieters, als ein Verzeichnis unter `templates/<root>/`: View, Stylesheet, JavaScript und Manifest. Bearbeitete Dateien bleiben erhalten; `--force` ersetzt sie; `--dry-run` zeigt den Plan. |
 | `suprnova live:check` | Prüft jede registrierte Live-View mit dem integrierten Checker. Liest die `dirs` aus `askama.toml` oder `templates/`; `--templates <dir>` überschreibt, `--allow-unproved` akzeptiert unbewiesene dynamische Strukturen. |
 | `suprnova live:inspect` | Meldet sicheren Live-Laufzeit-, Registry-, Provider- und Artefaktzustand (`--json` für ein einzelnes JSON-Dokument). |
 | `suprnova live:assets --out <dir>` | Veröffentlicht die geprüften Live-Laufzeit-Artefakte atomar nach `<dir>/<identity>/`; `--replace` ersetzt eine Veröffentlichung, deren Bytes abweichen. |

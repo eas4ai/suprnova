@@ -410,6 +410,65 @@ suprnova live:assets --out public/__live
 The publication is atomic and refuses to replace a directory whose bytes
 differ unless you pass `--replace`.
 
+## Component library
+
+Suprnova ships the foundations of a component library for Live: a token
+stylesheet with a base layer, and a form family of presentational components
+built on native controls and the `live:model`, `live:error`, and
+`live:loading` vocabulary. The base is a runtime artifact. Opt a document in
+and it arrives as one stylesheet link under the same identity, integrity, and
+cache contract as the runtime scripts:
+
+```rust
+let bootstrap = document.bootstrap(LiveBootstrapOptions::esm().with_suprnova_ui())?;
+```
+
+Every rule in it sits inside the `suprnova-ui` cascade layer, so your own
+unlayered styles win without a specificity fight. Every visual value is a
+`--sn-` custom property for color, font, space, radius, shadow, motion,
+density, and state, with light and dark values: override a token on `:root` to
+retheme, or drop the layer and keep every behavior, name, and state attribute,
+because a component styles its states from the attributes the checker proves
+(`aria-invalid`, `aria-busy`, `aria-expanded`, `aria-pressed`, `aria-current`,
+`aria-selected`, `:disabled`), never from a class. A Tailwind CSS 4 `@theme`
+preset maps the tokens onto Tailwind's namespaces; Tailwind is never required.
+Components install with `live:add`, one directory each under the reserved
+`templates/suprnova-ui/` root: the Askama macro view, the stylesheet, the
+JavaScript when the component has one, and the manifest that names them:
+
+```bash
+suprnova live:add field
+suprnova live:add password-input
+```
+
+A file you have edited is kept on a later run; `--force` replaces it. A
+third-party component installs from its own manifest with `--manifest`, under
+its own root. Call the macros from your views, serve the vendored stylesheet
+and script with `try_live_ui_assets()`, and link them from the document:
+
+```html
+{% import "suprnova-ui/field/field.html" as field %}
+{% import "suprnova-ui/input/input.html" as input %}
+{% call field::field("email", "Email", required=true) %}
+{% call input::input("email", kind="email", required=true) %}{% endcall %}
+{% endcall %}
+```
+
+The checker expands the macros, so `live:check` proves a library view like any
+other. The form family today: field, label, input, textarea, number input,
+slider, search input, password input with reveal, checkbox and checkbox group,
+radio group, switch, select, button and link button, button group, fieldset,
+form actions, validation summary, and file input. Library components are named
+`suprnova.*` and the registry refuses that prefix from any other crate; custom
+elements are light DOM and carry the `sn-` prefix.
+
+### Why Suprnova diverges
+
+Laravel ships Blade components and a starter kit's markup; Suprnova ships the
+library through the framework itself, on Live's own vocabulary, with no client
+application owning the page. The skin is on by default and removable with
+nothing breaking, which is what headless means here.
+
 ## Testing
 
 `suprnova::live::testing` prepares a router's runtime and mount catalog for

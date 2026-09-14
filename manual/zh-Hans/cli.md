@@ -70,6 +70,7 @@ Laravel 用一个逐项目的单一脚本解决了这个问题 - `php artisan` -
 | 命令 | 描述 |
 |---|---|
 | `suprnova live:make <name>` | 在 `src/live/` 生成一个 Live 组件，在 `templates/live/` 生成其视图，并在 `src/live/mod.rs` 中注册。从不覆盖；`--dry-run` 报告计划。 |
+| `suprnova live:add <name>` | 安装随附的 Live 组件库组件，或用 `--manifest <path>` 安装第三方组件，作为 `templates/<root>/` 下的一个目录：视图、样式表、JavaScript 与清单。你编辑过的文件会被保留；`--force` 会替换它；`--dry-run` 只显示计划。 |
 | `suprnova live:check` | 用集成检查器检查每一个已注册的 Live 视图。读取 `askama.toml` 的 `dirs` 或 `templates/`；`--templates <dir>` 覆盖，`--allow-unproved` 接受未证明的动态结构。 |
 | `suprnova live:inspect` | 报告 Live 运行时、注册表、提供者和工件的安全状态（`--json` 输出单个 JSON 文档）。 |
 | `suprnova live:assets --out <dir>` | 把经过审阅的 Live 运行时工件原子地发布到 `<dir>/<identity>/`；`--replace` 替换字节不同的发布。 |

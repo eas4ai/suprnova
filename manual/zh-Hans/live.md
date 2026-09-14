@@ -332,6 +332,37 @@ suprnova live:assets --out public/__live
 
 发布是原子的，除非传入 `--replace`，否则拒绝替换字节不同的目录。
 
+## 组件库
+
+Suprnova 随附了面向 Live 的组件库基础：一份带基础层的令牌样式表，以及一组建立在原生控件和 `live:model`、`live:error`、`live:loading` 词汇之上的表单类展示型组件。基础层是一个运行时产物。文档一旦选择加入，它就会作为一个样式表链接送达，与运行时脚本处于同一套标识、完整性与缓存契约之下：
+
+```rust
+let bootstrap = document.bootstrap(LiveBootstrapOptions::esm().with_suprnova_ui())?;
+```
+
+其中的每一条规则都位于级联层 `suprnova-ui` 之内，因此你自己未分层的样式无需争夺优先级就能胜出。每一个视觉值都是一个 `--sn-` 自定义属性，覆盖颜色、字体、间距、圆角、阴影、动效、密度与状态，并同时具有浅色与深色取值：在 `:root` 上覆盖一个令牌即可换肤，或者去掉整个层而保留每一种行为、名称与状态属性，因为组件是根据检查器所证明的属性（`aria-invalid`、`aria-busy`、`aria-expanded`、`aria-pressed`、`aria-current`、`aria-selected`、`:disabled`）来呈现状态的，从不依赖类名。一份 Tailwind CSS 4 的 `@theme` 预设把这些令牌映射到 Tailwind 的命名空间；Tailwind 从来不是必需的。组件通过 `live:add` 安装，每个组件在保留根目录 `templates/suprnova-ui/` 下占一个目录：Askama 宏视图、样式表、组件若有则包含的 JavaScript，以及为它们命名的清单：
+
+```bash
+suprnova live:add field
+suprnova live:add password-input
+```
+
+你编辑过的文件在后续运行中会被保留；`--force` 会替换它。第三方组件通过 `--manifest` 从自己的清单安装到自己的根目录下。在视图中调用这些宏，用 `try_live_ui_assets()` 提供打包进来的样式表与脚本，并在文档中链接它们：
+
+```html
+{% import "suprnova-ui/field/field.html" as field %}
+{% import "suprnova-ui/input/input.html" as input %}
+{% call field::field("email", "Email", required=true) %}
+{% call input::input("email", kind="email", required=true) %}{% endcall %}
+{% endcall %}
+```
+
+检查器会展开这些宏，所以 `live:check` 能像证明任何其他视图一样证明库视图。目前的表单家族包括：字段、标签、输入框、文本域、数字输入、滑块、搜索输入、带显示切换的密码输入、复选框与复选框组、单选组、开关、下拉选择、按钮与链接按钮、按钮组、fieldset、表单操作栏、校验摘要以及文件输入。库组件命名为 `suprnova.*`，注册表会拒绝来自任何其他 crate 的该前缀；自定义元素位于 light DOM 并带有 `sn-` 前缀。
+
+### 为什么 Suprnova 与众不同
+
+Laravel 随附 Blade 组件和入门套件的标记；Suprnova 则通过框架本身、基于 Live 自己的词汇来提供这个库，不让任何客户端应用拥有页面。皮肤默认开启，去掉它也不会破坏任何东西，这正是这里“无头”的含义。
+
 ## 测试
 
 `suprnova::live::testing` 为进程内测试准备路由器的运行时和挂载目录。

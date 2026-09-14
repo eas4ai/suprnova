@@ -91,6 +91,7 @@ each generated file looks like.
 | Command | Description |
 |---|---|
 | `suprnova live:make <name>` | Scaffold a Live component in `src/live/`, its view in `templates/live/`, and its registration in `src/live/mod.rs`. Never overwrites; `--dry-run` reports the plan. |
+| `suprnova live:add <name>` | Install a shipped Live component library component, or a third-party one with `--manifest <path>`, as one directory under `templates/<root>/`: view, stylesheet, JavaScript, and manifest. Keeps a file you edited; `--force` replaces it; `--dry-run` reports the plan. |
 | `suprnova live:check` | Check every registered Live view with the integrated checker. Reads `askama.toml` `dirs` or `templates/`; `--templates <dir>` overrides, `--allow-unproved` accepts unproved dynamic structures. |
 | `suprnova live:inspect` | Report safe Live runtime, registry, provider, and artifact state (`--json` for one JSON document). |
 | `suprnova live:assets --out <dir>` | Publish the reviewed Live runtime artifacts to `<dir>/<identity>/`, atomically; `--replace` replaces a publication whose bytes differ. |

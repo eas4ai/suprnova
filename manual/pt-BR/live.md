@@ -419,6 +419,72 @@ suprnova live:assets --out public/__live
 A publicação é atômica e se recusa a substituir um diretório cujos bytes
 diferem, a menos que você passe `--replace`.
 
+## Biblioteca de componentes
+
+O Suprnova traz as fundações de uma biblioteca de componentes para o Live: uma
+folha de estilos de tokens com uma camada base e uma família de formulários de
+componentes de apresentação construídos sobre controles nativos e o
+vocabulário `live:model`, `live:error` e `live:loading`. A base é um artefato
+do runtime. Se um documento optar por ela, chega como um único link de folha
+de estilos sob o mesmo contrato de identidade, integridade e cache dos scripts
+do runtime:
+
+```rust
+let bootstrap = document.bootstrap(LiveBootstrapOptions::esm().with_suprnova_ui())?;
+```
+
+Toda regra nela fica dentro da camada de cascata `suprnova-ui`, de modo que
+seus próprios estilos sem camada vencem sem disputa de especificidade. Todo
+valor visual é uma propriedade personalizada `--sn-` para cor, fonte, espaço,
+raio, sombra, movimento, densidade e estado, com valores claros e escuros:
+sobrescreva um token em `:root` para mudar o tema, ou remova a camada e
+mantenha todo comportamento, nome e atributo de estado, porque um componente
+estiliza seus estados a partir dos atributos que o verificador prova
+(`aria-invalid`, `aria-busy`, `aria-expanded`, `aria-pressed`, `aria-current`,
+`aria-selected`, `:disabled`), nunca a partir de uma classe. Um preset
+`@theme` do Tailwind CSS 4 mapeia os tokens para os namespaces do Tailwind; o
+Tailwind nunca é obrigatório. Os componentes são instalados com `live:add`, um
+diretório cada sob a raiz reservada `templates/suprnova-ui/`: a view com
+macros do Askama, a folha de estilos, o JavaScript quando o componente o tem e
+o manifesto que os nomeia:
+
+```bash
+suprnova live:add field
+suprnova live:add password-input
+```
+
+Um arquivo que você editou é mantido em uma execução posterior; `--force` o
+substitui. Um componente de terceiros é instalado a partir do seu próprio
+manifesto com `--manifest`, sob a sua própria raiz. Chame as macros nas suas
+views, sirva a folha de estilos e o script com `try_live_ui_assets()` e faça o
+link a partir do documento:
+
+```html
+{% import "suprnova-ui/field/field.html" as field %}
+{% import "suprnova-ui/input/input.html" as input %}
+{% call field::field("email", "Email", required=true) %}
+{% call input::input("email", kind="email", required=true) %}{% endcall %}
+{% endcall %}
+```
+
+O verificador expande as macros, então o `live:check` prova uma view da
+biblioteca como qualquer outra. A família de formulários hoje: campo, rótulo,
+entrada, área de texto, entrada numérica, controle deslizante, entrada de
+busca, entrada de senha com revelação, caixa de seleção e grupo de caixas,
+grupo de rádios, interruptor, seletor, botão e botão de link, grupo de botões,
+fieldset, ações do formulário, resumo de validação e entrada de arquivo. Os
+componentes da biblioteca chamam-se `suprnova.*` e o registro recusa esse
+prefixo vindo de qualquer outro crate; os elementos personalizados são light
+DOM e levam o prefixo `sn-`.
+
+### Por que o Suprnova diverge
+
+O Laravel traz componentes Blade e a marcação de um kit inicial; o Suprnova
+entrega a biblioteca pelo próprio framework, no vocabulário do Live, sem que
+nenhuma aplicação cliente seja dona da página. A aparência vem ligada por
+padrão e pode ser removida sem que nada quebre, que é o que headless significa
+aqui.
+
 ## Testes
 
 `suprnova::live::testing` prepara o runtime e o catálogo de montagens de um
