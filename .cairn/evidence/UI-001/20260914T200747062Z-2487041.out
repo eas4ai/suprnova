@@ -1,0 +1,7 @@
+cairn: UI-001: pass
+cairn: UI-002: pass
+cairn: UI-003: pass
+cairn: UI-004: pass
+cairn: UI-005: fail
+  reason: no views root at app/templates/suprnova-ui
+cairn: UI-007: pass
