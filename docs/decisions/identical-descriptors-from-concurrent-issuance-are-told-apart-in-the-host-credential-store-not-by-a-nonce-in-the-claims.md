@@ -11,4 +11,4 @@ The host's SuprnovaSubscriptionCredentials keeps every secret issued for a bindi
 
 ## Realized by
 
-(none yet: recorded, not built)
+- 6546bb31  fix(live): the credential store keeps every unconsumed secret per binding (LIVE-022)

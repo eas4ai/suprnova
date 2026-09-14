@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: live-issuance-credentials
+Current: component-library-foundations
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -29,12 +29,15 @@ components in waves, the advanced components last, the datatable closing.
    is destroyed on this node or another stops receiving events
    (LIVE-019, LIVE-020). The developer answered `ok` on escalation
    `live-016` at 21:21 on 2026-09-13: this precedes the library.
-2. live-issuance-credentials - the backlog observation from the LIVE-018
-   probe: concurrent issuances of one scope in the same millisecond mint
-   identical descriptors and the later one's credential replaces the
-   earlier one's, so 39 of 512 admitted requests answered 403
-   (LIVE-022). The developer named it the next commitment at 09:05 on
-   2026-09-14, ahead of the library.
+2. live-issuance-credentials - DONE 2026-09-14 (`6546bb31` and `a62136ab`,
+   receipts on `a62136ab`; widened once for LIVE-023 after the developer's
+   `ok` on escalation `live-022`, the issuance context race the baseline
+   exposed) - the backlog observation from the LIVE-018 probe: concurrent
+   issuances of one scope in the same millisecond mint identical
+   descriptors and the later one's credential replaced the earlier one's,
+   so 39 of 512 admitted requests answered 403 (LIVE-022). The developer
+   named it the next commitment at 09:05 on 2026-09-14, ahead of the
+   library.
 3. component-library-foundations - tokens, base layer, state-attribute
    styling, asset delivery, explicit registration and reserved
    namespaces, the checker and baseline mechanisms, and the form
