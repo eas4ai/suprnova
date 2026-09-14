@@ -1,0 +1,72 @@
+   Compiling tokio v1.53.1
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling tokio-rustls v0.26.4
+   Compiling opendal-core v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling aws-smithy-async v1.2.14
+   Compiling sea-streamer-runtime v0.5.0
+   Compiling backon v1.6.0
+   Compiling reqsign-file-read-tokio v3.0.2 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling tokio-tungstenite v0.29.0
+   Compiling sea-orm-cli v2.0.2
+   Compiling sea-streamer-stdio v0.5.0
+   Compiling aws-smithy-runtime-api v1.12.1
+   Compiling lettre v0.11.22
+   Compiling tokio-stream v0.1.18
+   Compiling h2 v0.4.16
+   Compiling combine v4.6.7
+   Compiling tower v0.4.13
+   Compiling tower-http v0.6.11
+   Compiling axum v0.7.9
+   Compiling opendal-layer-observe-metrics-common v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling opendal-service-fs v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling opendal-layer-logging v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling opendal-layer-tracing v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling opendal-layer-timeout v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling sqlx-core v0.9.0
+   Compiling opendal-service-s3 v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling redis v0.25.5
+   Compiling hyper v1.9.0
+   Compiling aws-credential-types v1.2.14
+   Compiling aws-smithy-http v0.63.6
+   Compiling opendal-layer-retry v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling redis v1.2.1
+   Compiling opendal-layer-prometheus-client v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling hyper-util v0.1.20
+   Compiling sea-streamer-redis v0.5.2
+   Compiling aws-sigv4 v1.4.4
+   Compiling sqlx-sqlite v0.9.0
+   Compiling sqlx-mysql v0.9.0
+   Compiling sqlx-postgres v0.9.0
+   Compiling opendal v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling hyper-rustls v0.27.9
+   Compiling hyper-timeout v0.5.2
+   Compiling hyper-tungstenite v0.20.0
+   Compiling sea-streamer-socket v0.5.2
+   Compiling sqlx v0.9.0
+   Compiling reqwest v0.12.28
+   Compiling reqwest v0.13.4
+   Compiling sea-streamer v0.5.0
+   Compiling tonic v0.12.3
+   Compiling sea-query-sqlx v0.9.1
+   Compiling suprnova-web-push v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+   Compiling apple v0.3.1 (https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97)
+   Compiling qdrant-client v1.18.0
+   Compiling sea-schema v0.18.1
+   Compiling sea-orm v2.0.2
+   Compiling sea-orm-migration v2.0.2
+   Compiling suprnova-magnetar v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+   Compiling app v2.0.2 (/home/shawn/workspace2/suprnova/app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 17s
+────────────
+[32;1m Nextest run[0m ID [1m5d3fbf21-789f-48ab-a413-12ee7d87a124[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m8[0m tests across [1m1[0m binary
+────────────
+[32;1m     Summary[0m [   0.053s] [1m8[0m tests run: [1m8[0m [32;1mpassed[0m, [1m0[0m [33;1mskipped[0m
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
+────────────
+[32;1m Nextest run[0m ID [1m9f2724ed-708e-4912-9a49-65a33e4576ce[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m1[0m test across [1m1[0m binary ([1m112[0m tests [33;1mskipped[0m)
+────────────
+[32;1m     Summary[0m [   0.006s] [1m1[0m test run: [1m1[0m [32;1mpassed[0m, [1m112[0m [33;1mskipped[0m
