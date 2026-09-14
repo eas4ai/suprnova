@@ -1,0 +1,4 @@
+  → Checking Live views under templates
+  Building and running the application's Live tooling helper...
+  → Checked 4 component(s) against 27 template file(s): 4 proved, 0 error(s), 0 unproved
+  ✓ Every Live view is proved
