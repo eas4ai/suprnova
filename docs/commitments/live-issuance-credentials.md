@@ -1,7 +1,7 @@
 # Live issuance credentials
 
 Slug: live-issuance-credentials
-Requirements: LIVE-022
+Requirements: LIVE-022, LIVE-023
 Rests on: LIVE-018, LIVE-001, LIVE-002
 
 ## Goal
@@ -17,6 +17,13 @@ requests fail this way.
 Drafted 2026-09-14 from the backlog entry
 `concurrent-sse-issuance-on-one-document-instance-answers-some-requests-403-async-authority-invalid`
 after the developer named it the next commitment at 09:05.
+
+Widened 2026-09-14 by the developer's answer on escalation `live-022`
+(10:06, `ok`): the LIVE-022 baseline also showed one admitted issuance in
+512 answering 503 `async_unavailable`, because the claims an issuance
+publishes while its envelope context is constructed live in one shared
+slot that a concurrent issuance overwrites. That is LIVE-023, checked by
+the same probe.
 
 ## Decisions recorded
 
@@ -41,6 +48,8 @@ recommended option; recorded in
   current tree.
 - `framework/src/live/ports/subscription.rs`: the credential store holds
   every unconsumed secret per binding, bounded by the existing entry cap.
+- `framework/src/live/async_updates.rs`: the claims under construction
+  are keyed by subscription id instead of held in one slot (LIVE-023).
 - The backlog entry closed with the realizing commit named.
 - Dated "Decisions and revisions" entry in Live spec 14.
 - `CHANGELOG.md` Fixed entry under the current version's section and the
@@ -48,7 +57,7 @@ recommended option; recorded in
 
 ## Records
 
-- Requirements: `docs/spec/live.md` (LIVE-022).
+- Requirements: `docs/spec/live.md` (LIVE-022, LIVE-023).
 - Mechanism: `.cairn/mechanisms/live-issuance-credentials`.
 - Evidence: `.cairn/evidence/`, committed after each `cairn check`.
 - Review: `.cairn/reviews/live-issuance-credentials.md`.

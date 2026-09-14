@@ -209,3 +209,15 @@ Mechanism: `.cairn/mechanisms/live-issuance-credentials`.
 Refines: Live spec 14, issuance and connect; LIVE-018, whose probe
 observed it.
 Status: Agreed 2026-09-14
+
+[LIVE-023] The framework MUST construct the envelope context of each
+issuance it admits from that issuance's own claims, when issuances of one
+scope run concurrently.
+Falsifier: the LIVE-022 probe answers an admitted request 503 with
+`async_unavailable` (the baseline receipt
+`.cairn/evidence/LIVE-022/20260914T132842262Z`: 1 of 512), because the
+claims of one issuance were read back while another's had replaced them.
+Mechanism: `.cairn/mechanisms/live-issuance-credentials`.
+Refines: LIVE-022, whose probe exposed it; the developer's answer on
+escalation `live-022`.
+Status: Agreed 2026-09-14
