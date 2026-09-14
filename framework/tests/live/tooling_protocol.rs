@@ -344,8 +344,8 @@ fn assets_exports_exactly_the_reviewed_bytes() {
         .collect();
     assert_eq!(
         assets.len(),
-        12,
-        "manifest, eight artifacts, three boot scripts"
+        13,
+        "manifest, nine artifacts, three boot scripts"
     );
     for asset in &assets {
         let decoded = BASE64.decode(&asset.content).expect("standard base64");
@@ -362,13 +362,17 @@ fn assets_exports_exactly_the_reviewed_bytes() {
                 catalog.manifest_bytes()
             }
             AssetKind::Artifact => {
-                assert_eq!(asset.content_type, "text/javascript; charset=utf-8");
-                catalog
+                let artifact = catalog
                     .artifacts()
                     .iter()
                     .find(|a| a.file() == asset.file)
-                    .expect("artifact exists")
-                    .bytes()
+                    .expect("artifact exists");
+                assert_eq!(asset.content_type, artifact.content_type());
+                assert!(
+                    asset.content_type == "text/javascript; charset=utf-8"
+                        || asset.content_type == "text/css; charset=utf-8"
+                );
+                artifact.bytes()
             }
             AssetKind::Boot => {
                 assert_eq!(asset.content_type, "text/javascript; charset=utf-8");
@@ -383,7 +387,7 @@ fn assets_exports_exactly_the_reviewed_bytes() {
         assert_eq!(decoded, expected);
     }
     let files: std::collections::BTreeSet<&str> = assets.iter().map(|a| a.file.as_str()).collect();
-    assert_eq!(files.len(), 12, "every file is exported once");
+    assert_eq!(files.len(), 13, "every file is exported once");
 }
 
 #[test]
