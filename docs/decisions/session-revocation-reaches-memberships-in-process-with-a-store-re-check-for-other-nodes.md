@@ -11,5 +11,4 @@ Ruled 2026-09-13 23:22, accepting the recommendation: session invalidation, sess
 
 ## Realized by
 
-(none yet: recorded, not built)
 - cf7332d1  fix(live): end a membership with the session that opened it (LIVE-019, LIVE-020)
