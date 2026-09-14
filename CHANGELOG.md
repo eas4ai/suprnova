@@ -4,20 +4,19 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
-## 2.0.1 - 2026-09-12
+## 2.0.2 - 2026-09-14
 
 ### Changed
 
 - **The Live endpoints carry no version segment.** `/__live/v1/action`,
   `/__live/v1/upload`, `/__live/v1/assets/*`, and the `/__live/v1/async/*`
   family now live at the same paths without `/v1`: `/__live/action`,
-  `/__live/upload`, `/__live/assets/*`, `/__live/async/*`. Suprnova's
-  version is the git tag and the browser runtime ships in lockstep with
-  the framework, so a second version inside the URL space promised an
-  evolution path that would never be used. Applications are unaffected:
-  the framework registers these routes and the runtime builds every URL,
-  and hand-written references to `/__live/` paths were never supported.
-  This landed on main after the `v2.0.1` tag.
+  `/__live/upload`, `/__live/assets/*`, `/__live/async/*`. Suprnova's version
+  is the git tag and the browser runtime ships in lockstep with the framework,
+  so a second version inside the URL space promised an evolution path that
+  would never be used. Applications are unaffected: the framework registers
+  these routes and the runtime builds every URL, and hand-written references
+  to `/__live/` paths were never supported.
 
 ### Fixed
 
@@ -31,6 +30,138 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   with every concurrent issuance. A descriptor now keeps every unconsumed
   secret until each is consumed or expires, and the claims under construction
   are keyed by subscription id.
+
+### Security
+
+- **A Live stream ends with the session that opened it.** An asynchronous
+  membership was re-authorized against its Gate before every delivery but
+  never against its session: a browser that logged out, or whose session was
+  revoked, kept receiving events until the stream itself closed. Destroying a
+  session on a node now retires every membership it opened there at once, for
+  a plain logout, session invalidation, id regeneration, and "log out
+  everywhere" alike, and delivery re-checks each membership's session against
+  the session store at most once per ten seconds, so a session destroyed on
+  another node stops receiving events within that interval.
+- **A request's `Cache-Control` directives are honored by RenderCache.** A
+  request carrying `no-cache` was answered from storage with `Age`, and a cold
+  request carrying `no-store` seeded the cache for the next request.
+  `no-store` now bypasses lookup and publication alike, and `no-cache` skips
+  the lookup so the request is answered by a fresh render. Found by the
+  2026-09-13 adversarial audit (ASTRA-13).
+- **A render without a snapshot is never published.** When the snapshot
+  transaction could not open, RenderCache rendered without a read view and
+  still published if the generation reread agreed, so a render that
+  interleaved with a concurrent multi-row write could store a mix of two
+  database states. Such a render is now served but not stored (decline reason
+  `snapshot_unavailable`), and its rebuild lease is released. Found by the
+  2026-09-13 adversarial audit (ASTRA-08).
+- **A cached response replays its `Content-Encoding`.** A pre-compressed body
+  was stored without its content coding, so a hit served gzip bytes as plain
+  text. The coding is stored with the body and replayed on every hit. Found by
+  the 2026-09-13 adversarial audit (ASTRA-04).
+- **A HEAD request never seeds the GET representation.** A cold HEAD on a
+  route that renders nothing for HEAD stored an empty body under the key every
+  GET shares, so later GETs answered zero bytes. A HEAD miss is now served as
+  rendered and not stored (decline reason `head_render`). Found by the
+  2026-09-13 adversarial audit (ASTRA-03).
+- **The Live per-scope subscription limit holds under concurrency.** Issuance
+  counted a scope's subscriptions, released the lock, awaited the authorizer,
+  and inserted afterwards, so a burst of concurrent requests could all pass
+  the count and all be admitted once authorization returned, well past the
+  advertised limit of 512 per scope. The slot is now reserved under the same
+  lock as the count, released on every error path, and handed to the record
+  when it lands. Found by the 2026-09-13 adversarial audit (ASTRA-07).
+- **A Live subscription stops receiving events once its Gate denies.** An
+  existing asynchronous membership kept receiving newly published events after
+  the stream's authorization Gate was redefined to deny the principal, because
+  delivery compared the subscription's own retained authorization memo with
+  itself. New subscriptions were correctly refused; the old stream was not.
+  The runtime now records the principal a subscription was issued to, asks the
+  Gate again before every delivery, and retires a membership the Gate no
+  longer allows. Found by the 2026-09-13 adversarial audit (ASTRA-01).
+- **A Live action declaring `transaction = "required"` is refused at
+  registration.** The host's transaction port is a documented no-op, so the
+  policy promised atomicity it never provided: each write committed on its own
+  and nothing rolled back when a later stage failed. `LiveRegistry` now fails
+  with `RegistryErrorKind::RequiredTransactionUnsupported` for such a
+  component until the port installs a real ambient transaction; actions
+  without the policy register as before. Found by the 2026-09-13 adversarial
+  audit (ASTRA-05).
+- **A cached route's named-connection reads stay on their connection.** A
+  RenderCache miss renders inside a snapshot transaction on the primary
+  database, and query routing preferred that transaction over a query's own
+  `on("name")` or a model's declared connection, so opting a route into the
+  cache changed which database its code read from. A tenant or auxiliary
+  database read could return the primary's row, fail on a table the primary
+  lacks, or publish the wrong content under a valid key. Reads bound for
+  another connection now run there even inside an ambient transaction, and a
+  render that read outside its snapshot is served but not stored (decline
+  reason `foreign_connection_read`). Found by the 2026-09-13 adversarial audit
+  (ASTRA-06).
+- **A data write and its RenderCache invalidation commit together.** On the
+  autocommit path, a model save, a query-builder write, or a raw statement
+  landed its row first and advanced the dependency generations in a second
+  transaction afterwards. When that second transaction failed, the row was
+  durable, the API returned an error, and every cached page that depended on
+  the row kept passing its coherence check and serving the pre-write content:
+  a visibility, entitlement, or deletion change could stay invisible until the
+  next successful invalidation. Every write terminal now runs the row write
+  and its advancement inside one transaction opened for the purpose, so both
+  commit or neither does. A ledger table that vanishes after RenderCache
+  decided it was present now fails the write instead of being skipped with a
+  warning. A write bound for a named connection, whose ledger lives on the
+  primary, keeps its separate advancement; if that advancement fails, the
+  process stops serving stored entries until one succeeds. Found by the
+  2026-09-13 adversarial audit (ASTRA-10).
+- **A handler's `Vary` contract is enforced before RenderCache stores.** A
+  handler that varied its body on a request header of its own and said so with
+  `Vary` was stored under a key built from the route policy alone, so the
+  first variant's body was served to every other variant, with the `Vary`
+  header missing from the hit. Wherever that header selected user, device, or
+  experiment-specific content, one request's content reached another's.
+  RenderCache now parses the response's `Vary` before publication and declines
+  to store when it names `*` or a field the policy does not declare as a key
+  dimension (decline reason `vary_undeclared`). Found by the 2026-09-13
+  adversarial audit (ASTRA-09).
+- **A handler's `Cache-Control: no-store` is honored by RenderCache.** A route
+  opted into the cache stored a response whose handler said `no-store` and
+  replayed it under the policy's own `public, max-age=60, s-maxage=60`, so a
+  handler's "do not store" was ignored on the server and rewritten for every
+  browser and proxy downstream. The eligibility check now reads the response's
+  `Cache-Control` and declines storage on the `no-store` token (decline reason
+  `no_store_directive`), and the declined response goes out exactly as the
+  handler built it. Found by the 2026-09-13 adversarial audit (ASTRA-02).
+- **A per-response CSP nonce is never replayed from the cache.** A public page
+  that minted a nonce on every render and named it in
+  `Content-Security-Policy` was stored as an ordinary complete entry, so every
+  later hit carried the first render's nonce in both the header and the inline
+  script. A nonce is the authorization token for inline script in one
+  response; replaying it made that token readable to anyone who could fetch
+  the page. RenderCache now declines to store such a response (decline reason
+  `nonce_source_policy`); a hash-based policy caches as before, and stitched
+  Live documents keep issuing a fresh nonce per hit. Found by the 2026-09-13
+  adversarial audit (ASTRA-12).
+- **A cached response keeps its isolation and execution headers.** RenderCache
+  stored a response's `Content-Disposition`, `Cross-Origin-Opener-Policy`,
+  `Cross-Origin-Embedder-Policy`, `Cross-Origin-Resource-Policy`,
+  `Permissions-Policy`, and `X-Frame-Options` nowhere, so a cache hit served
+  the same bytes without them. An HTML export that downloaded as an attachment
+  on the first request rendered inline under the application's origin on the
+  second, where any markup it carried ran with same-origin authority. The six
+  headers now replay byte for byte from the stored representation. Found by
+  the 2026-09-13 adversarial audit (ASTRA-11).
+- **The lockfile sheds one unsound and three yanked dependency releases.**
+  `event-listener` 5.4.2 replaces 5.4.1, whose stack-allocated listener was
+  unconditionally `Send`/`Sync` and let a `!Send` tag cross threads in safe
+  code (RUSTSEC-2026-0221); Suprnova's dependencies only use untagged events,
+  so the unsound path was never exercised here. `spin` 0.9.9 and 0.10.1 and
+  `chacha20` 0.10.2 replace releases their publishers had yanked, and
+  `concurrent-queue` leaves the tree entirely.
+
+## 2.0.1 - 2026-09-12
+
+### Fixed
+
 - **A `redis://` URL with a database index selects that database everywhere.**
   The queue driver and the fanout broadcast hub each carry a sea-streamer
   producer beside their direct redis connections, and sea-streamer does not
@@ -98,151 +229,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   had been written. `setup` is synchronous now and chains the translation
   catalog load onto the mount, so the ordering the template describes is
   unchanged.
-
-### Security
-
-- **A Live stream ends with the session that opened it.** An asynchronous
-  membership was re-authorized against its Gate before every delivery but
-  never against its session: a browser that logged out, or whose session was
-  revoked, kept receiving events until the stream itself closed. Destroying a
-  session on a node now retires every membership it opened there at once, for
-  a plain logout, session invalidation, id regeneration, and "log out
-  everywhere" alike, and delivery re-checks each membership's session against
-  the session store at most once per ten seconds, so a session destroyed on
-  another node stops receiving events within that interval.
-- **A request's `Cache-Control` directives are honored by RenderCache.**
-  A request carrying `no-cache` was answered from storage with `Age`, and
-  a cold request carrying `no-store` seeded the cache for the next
-  request. `no-store` now bypasses lookup and publication alike, and
-  `no-cache` skips the lookup so the request is answered by a fresh
-  render. Found by the 2026-09-13 adversarial audit (ASTRA-13); landed on
-  main after the `v2.0.1` tag.
-- **A render without a snapshot is never published.** When the snapshot
-  transaction could not open, RenderCache rendered without a read view and
-  still published if the generation reread agreed, so a render that
-  interleaved with a concurrent multi-row write could store a mix of two
-  database states. Such a render is now served but not stored (decline
-  reason `snapshot_unavailable`), and its rebuild lease is released. Found
-  by the 2026-09-13 adversarial audit (ASTRA-08); landed on main after the
-  `v2.0.1` tag.
-- **A cached response replays its `Content-Encoding`.** A pre-compressed
-  body was stored without its content coding, so a hit served gzip bytes
-  as plain text. The coding is stored with the body and replayed on every
-  hit. Found by the 2026-09-13 adversarial audit (ASTRA-04); landed on
-  main after the `v2.0.1` tag.
-- **A HEAD request never seeds the GET representation.** A cold HEAD on a
-  route that renders nothing for HEAD stored an empty body under the key
-  every GET shares, so later GETs answered zero bytes. A HEAD miss is now
-  served as rendered and not stored (decline reason `head_render`). Found
-  by the 2026-09-13 adversarial audit (ASTRA-03); landed on main after the
-  `v2.0.1` tag.
-- **The Live per-scope subscription limit holds under concurrency.**
-  Issuance counted a scope's subscriptions, released the lock, awaited the
-  authorizer, and inserted afterwards, so a burst of concurrent requests
-  could all pass the count and all be admitted once authorization
-  returned, well past the advertised limit of 512 per scope. The slot is
-  now reserved under the same lock as the count, released on every error
-  path, and handed to the record when it lands. Found by the 2026-09-13
-  adversarial audit (ASTRA-07); landed on main after the `v2.0.1` tag.
-- **A Live subscription stops receiving events once its Gate denies.** An
-  existing asynchronous membership kept receiving newly published events
-  after the stream's authorization Gate was redefined to deny the
-  principal, because delivery compared the subscription's own retained
-  authorization memo with itself. New subscriptions were correctly
-  refused; the old stream was not. The runtime now records the principal
-  a subscription was issued to, asks the Gate again before every
-  delivery, and retires a membership the Gate no longer allows. Found by
-  the 2026-09-13 adversarial audit (ASTRA-01); landed on main after the
-  `v2.0.1` tag.
-- **A Live action declaring `transaction = "required"` is refused at
-  registration.** The host's transaction port is a documented no-op, so
-  the policy promised atomicity it never provided: each write committed
-  on its own and nothing rolled back when a later stage failed.
-  `LiveRegistry` now fails with `RegistryErrorKind::RequiredTransactionUnsupported`
-  for such a component until the port installs a real ambient
-  transaction; actions without the policy register as before. Found by
-  the 2026-09-13 adversarial audit (ASTRA-05); landed on main after the
-  `v2.0.1` tag.
-- **A cached route's named-connection reads stay on their connection.**
-  A RenderCache miss renders inside a snapshot transaction on the primary
-  database, and query routing preferred that transaction over a query's
-  own `on("name")` or a model's declared connection, so opting a route
-  into the cache changed which database its code read from. A tenant or
-  auxiliary database read could return the primary's row, fail on a table
-  the primary lacks, or publish the wrong content under a valid key. Reads
-  bound for another connection now run there even inside an ambient
-  transaction, and a render that read outside its snapshot is served but
-  not stored (decline reason `foreign_connection_read`). Found by the
-  2026-09-13 adversarial audit (ASTRA-06); landed on main after the
-  `v2.0.1` tag.
-- **A data write and its RenderCache invalidation commit together.** On
-  the autocommit path, a model save, a query-builder write, or a raw
-  statement landed its row first and advanced the dependency generations
-  in a second transaction afterwards. When that second transaction failed,
-  the row was durable, the API returned an error, and every cached page
-  that depended on the row kept passing its coherence check and serving
-  the pre-write content: a visibility, entitlement, or deletion change
-  could stay invisible until the next successful invalidation. Every write
-  terminal now runs the row write and its advancement inside one
-  transaction opened for the purpose, so both commit or neither does. A
-  ledger table that vanishes after RenderCache decided it was present now
-  fails the write instead of being skipped with a warning. A write bound
-  for a named connection, whose ledger lives on the primary, keeps its
-  separate advancement; if that advancement fails, the process stops
-  serving stored entries until one succeeds. Found by the 2026-09-13
-  adversarial audit (ASTRA-10); landed on main after the `v2.0.1` tag.
-- **A handler's `Vary` contract is enforced before RenderCache stores.**
-  A handler that varied its body on a request header of its own and said
-  so with `Vary` was stored under a key built from the route policy alone,
-  so the first variant's body was served to every other variant, with the
-  `Vary` header missing from the hit. Wherever that header selected user,
-  device, or experiment-specific content, one request's content reached
-  another's. RenderCache now parses the response's `Vary` before
-  publication and declines to store when it names `*` or a field the
-  policy does not declare as a key dimension (decline reason
-  `vary_undeclared`). Found by the 2026-09-13 adversarial audit
-  (ASTRA-09); landed on main after the `v2.0.1` tag.
-- **A handler's `Cache-Control: no-store` is honored by RenderCache.** A
-  route opted into the cache stored a response whose handler said
-  `no-store` and replayed it under the policy's own
-  `public, max-age=60, s-maxage=60`, so a handler's "do not store" was
-  ignored on the server and rewritten for every browser and proxy
-  downstream. The eligibility check now reads the response's
-  `Cache-Control` and declines storage on the `no-store` token (decline
-  reason `no_store_directive`), and the declined response goes out exactly
-  as the handler built it. Found by the 2026-09-13 adversarial audit
-  (ASTRA-02); landed on main after the `v2.0.1` tag.
-- **A per-response CSP nonce is never replayed from the cache.** A public
-  page that minted a nonce on every render and named it in
-  `Content-Security-Policy` was stored as an ordinary complete entry, so
-  every later hit carried the first render's nonce in both the header and
-  the inline script. A nonce is the authorization token for inline script
-  in one response; replaying it made that token readable to anyone who
-  could fetch the page. RenderCache now declines to store such a response
-  (decline reason `nonce_source_policy`); a hash-based policy caches as
-  before, and stitched Live documents keep issuing a fresh nonce per hit.
-  Found by the 2026-09-13 adversarial audit (ASTRA-12); landed on main
-  after the `v2.0.1` tag.
-- **A cached response keeps its isolation and execution headers.**
-  RenderCache stored a response's `Content-Disposition`,
-  `Cross-Origin-Opener-Policy`, `Cross-Origin-Embedder-Policy`,
-  `Cross-Origin-Resource-Policy`, `Permissions-Policy`, and
-  `X-Frame-Options` nowhere, so a cache hit served the same bytes without
-  them. An HTML export that downloaded as an attachment on the first
-  request rendered inline under the application's origin on the second,
-  where any markup it carried ran with same-origin authority. The six
-  headers now replay byte for byte from the stored representation. Found
-  by the 2026-09-13 adversarial audit (ASTRA-11); landed on main after the
-  `v2.0.1` tag.
-- **The lockfile sheds one unsound and three yanked dependency releases.**
-  `event-listener` 5.4.2 replaces 5.4.1, whose stack-allocated listener was
-  unconditionally `Send`/`Sync` and let a `!Send` tag cross threads in safe
-  code (RUSTSEC-2026-0221); Suprnova's dependencies only use untagged
-  events, so the unsound path was never exercised here. `spin` 0.9.9 and
-  0.10.1 and `chacha20` 0.10.2 replace releases their publishers had
-  yanked, and `concurrent-queue` leaves the tree entirely. This landed on
-  main after the `v2.0.1` tag; the tagged `Cargo.lock` still resolves the
-  earlier versions.
 
 ### Documentation
 

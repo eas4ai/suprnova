@@ -6,21 +6,20 @@ versión se lanza cuando su commit de versión y la etiqueta
 `v<version>` correspondiente se publican de forma atómica. Las más
 recientes primero.
 
-## 2.0.1 - 2026-09-12
+## 2.0.2 - 2026-09-14
 
 ### Cambiado
 
 - **Los endpoints de Live no llevan segmento de versión.**
-  `/__live/v1/action`, `/__live/v1/upload`, `/__live/v1/assets/*` y la
-  familia `/__live/v1/async/*` viven ahora en las mismas rutas sin `/v1`:
-  `/__live/action`, `/__live/upload`, `/__live/assets/*`,
-  `/__live/async/*`. La versión de Suprnova es el tag de git y el runtime
-  del navegador se publica al mismo paso que el framework, así que una
-  segunda versión dentro del espacio de URLs prometía un camino de
-  evolución que nunca se usaría. Las aplicaciones no se ven afectadas: el
-  framework registra estas rutas y el runtime construye cada URL; las
-  referencias escritas a mano a rutas `/__live/` nunca estuvieron
-  soportadas. Esto llegó a main después del tag `v2.0.1`.
+  `/__live/v1/action`, `/__live/v1/upload`, `/__live/v1/assets/*` y la familia
+  `/__live/v1/async/*` viven ahora en las mismas rutas sin `/v1`:
+  `/__live/action`, `/__live/upload`, `/__live/assets/*`, `/__live/async/*`.
+  La versión de Suprnova es el tag de git y el runtime del navegador se
+  publica al mismo paso que el framework, así que una segunda versión dentro
+  del espacio de URLs prometía un camino de evolución que nunca se usaría. Las
+  aplicaciones no se ven afectadas: el framework registra estas rutas y el
+  runtime construye cada URL; las referencias escritas a mano a rutas
+  `/__live/` nunca estuvieron soportadas.
 
 ### Corregido
 
@@ -36,6 +35,156 @@ recientes primero.
   concurrentes. Un descriptor ahora conserva cada secreto no consumido hasta
   que se consume o expira, y los claims en construcción se indexan por id de
   suscripción.
+
+### Seguridad
+
+- **Un stream de Live termina con la sesión que lo abrió.** Una membresía
+  asíncrona se volvía a autorizar contra su Gate antes de cada entrega, pero
+  nunca contra su sesión: un navegador que cerraba sesión, o cuya sesión era
+  revocada, seguía recibiendo eventos hasta que el propio stream se cerraba.
+  Destruir una sesión en un nodo ahora retira de inmediato toda membresía que
+  abrió allí, tanto por un cierre de sesión simple como por invalidación de
+  sesión, regeneración del id o "cerrar sesión en todas partes", y la entrega
+  vuelve a comprobar la sesión de cada membresía contra el almacén de sesiones
+  como mucho una vez cada diez segundos, de modo que una sesión destruida en
+  otro nodo deja de recibir eventos dentro de ese intervalo.
+- **RenderCache respeta las directivas `Cache-Control` de una petición.** Una
+  petición con `no-cache` se respondía desde el almacenamiento con `Age`, y
+  una petición fría con `no-store` sembraba la caché para la siguiente.
+  `no-store` ahora omite por igual la búsqueda y la publicación, y `no-cache`
+  salta la búsqueda para que la petición se responda con un renderizado
+  fresco. Detectado por la auditoría adversarial del 2026-09-13 (ASTRA-13).
+- **Un renderizado sin instantánea nunca se publica.** Cuando la transacción
+  de instantánea no podía abrirse, RenderCache renderizaba sin vista de
+  lectura y aun así publicaba si la relectura de generaciones coincidía, así
+  que un renderizado intercalado con una escritura concurrente de varias filas
+  podía almacenar una mezcla de dos estados de la base de datos. Tal
+  renderizado ahora se sirve pero no se almacena (motivo de rechazo
+  `snapshot_unavailable`), y su arrendamiento de reconstrucción se libera.
+  Detectado por la auditoría adversarial del 2026-09-13 (ASTRA-08).
+- **Una respuesta en caché reproduce su `Content-Encoding`.** Un cuerpo
+  precomprimido se almacenaba sin su codificación de contenido, así que un
+  acierto servía bytes gzip como texto plano. La codificación se almacena con
+  el cuerpo y se reproduce en cada acierto. Detectado por la auditoría
+  adversarial del 2026-09-13 (ASTRA-04).
+- **Una petición HEAD nunca siembra la representación GET.** Un HEAD frío
+  sobre una ruta que no renderiza nada para HEAD almacenaba un cuerpo vacío
+  bajo la clave que comparte cada GET, así que los GET posteriores respondían
+  cero bytes. Un fallo de HEAD ahora se sirve tal como se renderizó y no se
+  almacena (motivo de rechazo `head_render`). Detectado por la auditoría
+  adversarial del 2026-09-13 (ASTRA-03).
+- **El límite de suscripciones Live por ámbito se mantiene bajo
+  concurrencia.** La emisión contaba las suscripciones de un ámbito, soltaba
+  el bloqueo, esperaba al autorizador e insertaba después, así que una ráfaga
+  de peticiones concurrentes podía pasar toda la cuenta y ser admitida por
+  completo cuando la autorización regresaba, mucho más allá del límite
+  anunciado de 512 por ámbito. Ahora la plaza se reserva bajo el mismo bloqueo
+  que la cuenta, se libera en cada ruta de error y se entrega al registro
+  cuando este aterriza. Detectado por la auditoría adversarial del 2026-09-13
+  (ASTRA-07).
+- **Una suscripción Live deja de recibir eventos en cuanto su Gate deniega.**
+  Una membresía asíncrona existente seguía recibiendo eventos recién
+  publicados después de redefinir el Gate de autorización del stream para
+  denegar al principal, porque la entrega comparaba el memo de autorización
+  retenido de la propia suscripción consigo mismo. Las suscripciones nuevas se
+  rechazaban correctamente; el stream antiguo no. El runtime ahora registra el
+  principal al que se emitió una suscripción, vuelve a consultar el Gate antes
+  de cada entrega y retira una membresía que el Gate ya no permite. Detectado
+  por la auditoría adversarial del 2026-09-13 (ASTRA-01).
+- **Una acción Live que declara `transaction = "required"` se rechaza en el
+  registro.** El puerto de transacciones del host es un no-op documentado, así
+  que la política prometía una atomicidad que nunca proporcionó: cada
+  escritura se confirmaba por su cuenta y nada se revertía cuando fallaba una
+  etapa posterior. `LiveRegistry` ahora falla con
+  `RegistryErrorKind::RequiredTransactionUnsupported` para tal componente
+  hasta que el puerto instale una transacción ambiental real; las acciones sin
+  la política se registran como antes. Detectado por la auditoría adversarial
+  del 2026-09-13 (ASTRA-05).
+- **Las lecturas de una ruta en caché sobre conexiones con nombre permanecen
+  en su conexión.** Un fallo de RenderCache renderiza dentro de una
+  transacción de instantánea sobre la base de datos primaria, y el
+  enrutamiento de consultas prefería esa transacción al `on("name")` propio de
+  una consulta o a la conexión declarada de un modelo, así que incorporar una
+  ruta a la caché cambiaba de qué base de datos leía su código. Una lectura de
+  una base de datos de inquilino o auxiliar podía devolver la fila de la
+  primaria, fallar en una tabla que la primaria no tiene o publicar el
+  contenido equivocado bajo una clave válida. Las lecturas destinadas a otra
+  conexión ahora se ejecutan allí incluso dentro de una transacción ambiental,
+  y un renderizado que leyó fuera de su instantánea se sirve pero no se
+  almacena (motivo de rechazo `foreign_connection_read`). Detectado por la
+  auditoría adversarial del 2026-09-13 (ASTRA-06).
+- **Una escritura de datos y su invalidación de RenderCache se confirman
+  juntas.** En la ruta de autocommit, un guardado de modelo, una escritura del
+  query builder o una sentencia cruda dejaba primero la fila y avanzaba las
+  generaciones de dependencia después, en una segunda transacción. Cuando esa
+  segunda transacción fallaba, la fila era durable, la API devolvía un error y
+  cada página en caché que dependía de la fila seguía pasando su comprobación
+  de coherencia y sirviendo el contenido previo a la escritura: un cambio de
+  visibilidad, de permisos o un borrado podía quedar invisible hasta la
+  siguiente invalidación exitosa. Cada terminal de escritura ahora ejecuta la
+  escritura de la fila y su avance dentro de una transacción abierta para
+  ello, así que ambos se confirman o ninguno lo hace. Una tabla del ledger que
+  desaparece después de que RenderCache decidió que estaba presente ahora hace
+  fallar la escritura en lugar de omitirse con una advertencia. Una escritura
+  destinada a una conexión con nombre, cuyo ledger vive en la primaria,
+  conserva su avance separado; si ese avance falla, el proceso deja de servir
+  entradas almacenadas hasta que uno tenga éxito. Detectado por la auditoría
+  adversarial del 2026-09-13 (ASTRA-10).
+- **El contrato `Vary` de un handler se aplica antes de que RenderCache
+  almacene.** Un handler que variaba su cuerpo según una cabecera de petición
+  propia y lo declaraba con `Vary` se almacenaba bajo una clave construida
+  solo a partir de la política de la ruta, así que el cuerpo de la primera
+  variante se servía a todas las demás, con la cabecera `Vary` ausente en el
+  acierto. Allí donde esa cabecera seleccionaba contenido específico de
+  usuario, dispositivo o experimento, el contenido de una petición llegaba a
+  otra. RenderCache ahora analiza el `Vary` de la respuesta antes de publicar
+  y rehúsa almacenar cuando nombra `*` o un campo que la política no declara
+  como dimensión de clave (motivo de rechazo `vary_undeclared`). Detectado por
+  la auditoría adversarial del 2026-09-13 (ASTRA-09).
+- **RenderCache respeta el `Cache-Control: no-store` de un handler.** Una ruta
+  incorporada a la caché almacenaba una respuesta cuyo handler decía
+  `no-store` y la reproducía bajo el `public, max-age=60, s-maxage=60` de la
+  política, así que el "no almacenar" del handler se ignoraba en el servidor y
+  se reescribía para cada navegador y proxy aguas abajo. La comprobación de
+  elegibilidad ahora lee el `Cache-Control` de la respuesta y rehúsa almacenar
+  ante el token `no-store` (motivo de rechazo `no_store_directive`), y la
+  respuesta rechazada sale exactamente como la construyó el handler. Detectado
+  por la auditoría adversarial del 2026-09-13 (ASTRA-02).
+- **Un nonce de CSP por respuesta nunca se reproduce desde la caché.** Una
+  página pública que generaba un nonce en cada renderizado y lo nombraba en
+  `Content-Security-Policy` se almacenaba como una entrada completa ordinaria,
+  así que cada acierto posterior llevaba el nonce del primer renderizado tanto
+  en la cabecera como en el script inline. Un nonce es el token de
+  autorización para script inline en una sola respuesta; reproducirlo hacía
+  ese token legible para cualquiera que pudiera descargar la página.
+  RenderCache ahora rehúsa almacenar tal respuesta (motivo de rechazo
+  `nonce_source_policy`); una política basada en hash se cachea como antes, y
+  los documentos Live cosidos siguen emitiendo un nonce nuevo por acierto.
+  Detectado por la auditoría adversarial del 2026-09-13 (ASTRA-12).
+- **Una respuesta en caché conserva sus cabeceras de aislamiento y
+  ejecución.** RenderCache no almacenaba en ningún sitio las cabeceras
+  `Content-Disposition`, `Cross-Origin-Opener-Policy`,
+  `Cross-Origin-Embedder-Policy`, `Cross-Origin-Resource-Policy`,
+  `Permissions-Policy` y `X-Frame-Options` de una respuesta, así que un
+  acierto de caché servía los mismos bytes sin ellas. Una exportación HTML que
+  se descargaba como adjunto en la primera petición se renderizaba inline bajo
+  el origen de la aplicación en la segunda, donde cualquier marcado que
+  contuviera se ejecutaba con autoridad del mismo origen. Las seis cabeceras
+  ahora se reproducen byte a byte desde la representación almacenada.
+  Detectado por la auditoría adversarial del 2026-09-13 (ASTRA-11).
+- **El lockfile se desprende de una versión insegura y tres retiradas de
+  dependencias.** `event-listener` 5.4.2 reemplaza a 5.4.1, cuyo listener
+  asignado en la pila era incondicionalmente `Send`/`Sync` y dejaba que una
+  etiqueta `!Send` cruzara hilos en código seguro (RUSTSEC-2026-0221); las
+  dependencias de Suprnova solo usan eventos sin etiqueta, así que la ruta
+  insegura nunca se ejercitó aquí. `spin` 0.9.9 y 0.10.1 y `chacha20` 0.10.2
+  reemplazan versiones que sus editores habían retirado, y `concurrent-queue`
+  sale del árbol por completo.
+
+## 2.0.1 - 2026-09-12
+
+### Corregido
+
 - **Una URL `redis://` con índice de base de datos selecciona esa base de
   datos en todas partes.** El driver de colas y el hub de difusión fanout
   llevan cada uno un productor de sea-streamer junto a sus conexiones
@@ -113,164 +262,6 @@ recientes primero.
   `npm run build` antes de escribir una sola página. `setup` ahora es
   síncrono y encadena la carga del catálogo de traducciones al montaje, de
   modo que el orden que describe la plantilla no cambia.
-
-### Seguridad
-
-- **Un stream de Live termina con la sesión que lo abrió.** Una membresía
-  asíncrona se volvía a autorizar contra su Gate antes de cada entrega, pero
-  nunca contra su sesión: un navegador que cerraba sesión, o cuya sesión era
-  revocada, seguía recibiendo eventos hasta que el propio stream se cerraba.
-  Destruir una sesión en un nodo ahora retira de inmediato toda membresía que
-  abrió allí, tanto por un cierre de sesión simple como por invalidación de
-  sesión, regeneración del id o "cerrar sesión en todas partes", y la entrega
-  vuelve a comprobar la sesión de cada membresía contra el almacén de sesiones
-  como mucho una vez cada diez segundos, de modo que una sesión destruida en
-  otro nodo deja de recibir eventos dentro de ese intervalo.
-- **RenderCache respeta las directivas `Cache-Control` de una petición.** Una
-  petición con `no-cache` se respondía desde el almacenamiento con `Age`, y
-  una petición fría con `no-store` sembraba la caché para la siguiente.
-  `no-store` ahora omite por igual la búsqueda y la publicación, y `no-cache`
-  salta la búsqueda para que la petición se responda con un renderizado
-  fresco. Detectado por la auditoría adversarial del 2026-09-13 (ASTRA-13);
-  aterrizó en main después de la etiqueta `v2.0.1`.
-- **Un renderizado sin instantánea nunca se publica.** Cuando la transacción
-  de instantánea no podía abrirse, RenderCache renderizaba sin vista de
-  lectura y aun así publicaba si la relectura de generaciones coincidía, así
-  que un renderizado intercalado con una escritura concurrente de varias filas
-  podía almacenar una mezcla de dos estados de la base de datos. Tal
-  renderizado ahora se sirve pero no se almacena (motivo de rechazo
-  `snapshot_unavailable`), y su arrendamiento de reconstrucción se libera.
-  Detectado por la auditoría adversarial del 2026-09-13 (ASTRA-08); aterrizó
-  en main después de la etiqueta `v2.0.1`.
-- **Una respuesta en caché reproduce su `Content-Encoding`.** Un cuerpo
-  precomprimido se almacenaba sin su codificación de contenido, así que un
-  acierto servía bytes gzip como texto plano. La codificación se almacena con
-  el cuerpo y se reproduce en cada acierto. Detectado por la auditoría
-  adversarial del 2026-09-13 (ASTRA-04); aterrizó en main después de la
-  etiqueta `v2.0.1`.
-- **Una petición HEAD nunca siembra la representación GET.** Un HEAD frío
-  sobre una ruta que no renderiza nada para HEAD almacenaba un cuerpo vacío
-  bajo la clave que comparte cada GET, así que los GET posteriores respondían
-  cero bytes. Un fallo de HEAD ahora se sirve tal como se renderizó y no se
-  almacena (motivo de rechazo `head_render`). Detectado por la auditoría
-  adversarial del 2026-09-13 (ASTRA-03); aterrizó en main después de la
-  etiqueta `v2.0.1`.
-- **El límite de suscripciones Live por ámbito se mantiene bajo
-  concurrencia.** La emisión contaba las suscripciones de un ámbito, soltaba
-  el bloqueo, esperaba al autorizador e insertaba después, así que una ráfaga
-  de peticiones concurrentes podía pasar toda la cuenta y ser admitida por
-  completo cuando la autorización regresaba, mucho más allá del límite
-  anunciado de 512 por ámbito. Ahora la plaza se reserva bajo el mismo bloqueo
-  que la cuenta, se libera en cada ruta de error y se entrega al registro
-  cuando este aterriza. Detectado por la auditoría adversarial del 2026-09-13
-  (ASTRA-07); aterrizó en main después de la etiqueta `v2.0.1`.
-- **Una suscripción Live deja de recibir eventos en cuanto su Gate deniega.**
-  Una membresía asíncrona existente seguía recibiendo eventos recién
-  publicados después de redefinir el Gate de autorización del stream para
-  denegar al principal, porque la entrega comparaba el memo de autorización
-  retenido de la propia suscripción consigo mismo. Las suscripciones nuevas se
-  rechazaban correctamente; el stream antiguo no. El runtime ahora registra el
-  principal al que se emitió una suscripción, vuelve a consultar el Gate antes
-  de cada entrega y retira una membresía que el Gate ya no permite. Detectado
-  por la auditoría adversarial del 2026-09-13 (ASTRA-01); aterrizó en main
-  después de la etiqueta `v2.0.1`.
-- **Una acción Live que declara `transaction = "required"` se rechaza en el
-  registro.** El puerto de transacciones del host es un no-op documentado, así
-  que la política prometía una atomicidad que nunca proporcionó: cada
-  escritura se confirmaba por su cuenta y nada se revertía cuando fallaba una
-  etapa posterior. `LiveRegistry` ahora falla con
-  `RegistryErrorKind::RequiredTransactionUnsupported` para tal componente
-  hasta que el puerto instale una transacción ambiental real; las acciones sin
-  la política se registran como antes. Detectado por la auditoría adversarial
-  del 2026-09-13 (ASTRA-05); aterrizó en main después de la etiqueta `v2.0.1`.
-- **Las lecturas de una ruta en caché sobre conexiones con nombre permanecen
-  en su conexión.** Un fallo de RenderCache renderiza dentro de una
-  transacción de instantánea sobre la base de datos primaria, y el
-  enrutamiento de consultas prefería esa transacción al `on("name")` propio de
-  una consulta o a la conexión declarada de un modelo, así que incorporar una
-  ruta a la caché cambiaba de qué base de datos leía su código. Una lectura de
-  una base de datos de inquilino o auxiliar podía devolver la fila de la
-  primaria, fallar en una tabla que la primaria no tiene o publicar el
-  contenido equivocado bajo una clave válida. Las lecturas destinadas a otra
-  conexión ahora se ejecutan allí incluso dentro de una transacción ambiental,
-  y un renderizado que leyó fuera de su instantánea se sirve pero no se
-  almacena (motivo de rechazo `foreign_connection_read`). Detectado por la
-  auditoría adversarial del 2026-09-13 (ASTRA-06); aterrizó en main después de
-  la etiqueta `v2.0.1`.
-- **Una escritura de datos y su invalidación de RenderCache se confirman
-  juntas.** En la ruta de autocommit, un guardado de modelo, una escritura del
-  query builder o una sentencia cruda dejaba primero la fila y avanzaba las
-  generaciones de dependencia después, en una segunda transacción. Cuando esa
-  segunda transacción fallaba, la fila era durable, la API devolvía un error y
-  cada página en caché que dependía de la fila seguía pasando su comprobación
-  de coherencia y sirviendo el contenido previo a la escritura: un cambio de
-  visibilidad, de permisos o un borrado podía quedar invisible hasta la
-  siguiente invalidación exitosa. Cada terminal de escritura ahora ejecuta la
-  escritura de la fila y su avance dentro de una transacción abierta para
-  ello, así que ambos se confirman o ninguno lo hace. Una tabla del ledger que
-  desaparece después de que RenderCache decidió que estaba presente ahora hace
-  fallar la escritura en lugar de omitirse con una advertencia. Una escritura
-  destinada a una conexión con nombre, cuyo ledger vive en la primaria,
-  conserva su avance separado; si ese avance falla, el proceso deja de servir
-  entradas almacenadas hasta que uno tenga éxito. Detectado por la auditoría
-  adversarial del 2026-09-13 (ASTRA-10); aterrizó en main después de la
-  etiqueta `v2.0.1`.
-- **El contrato `Vary` de un handler se aplica antes de que RenderCache
-  almacene.** Un handler que variaba su cuerpo según una cabecera de petición
-  propia y lo declaraba con `Vary` se almacenaba bajo una clave construida
-  solo a partir de la política de la ruta, así que el cuerpo de la primera
-  variante se servía a todas las demás, con la cabecera `Vary` ausente en el
-  acierto. Allí donde esa cabecera seleccionaba contenido específico de
-  usuario, dispositivo o experimento, el contenido de una petición llegaba a
-  otra. RenderCache ahora analiza el `Vary` de la respuesta antes de publicar
-  y rehúsa almacenar cuando nombra `*` o un campo que la política no declara
-  como dimensión de clave (motivo de rechazo `vary_undeclared`). Detectado por
-  la auditoría adversarial del 2026-09-13 (ASTRA-09); aterrizó en main después
-  de la etiqueta `v2.0.1`.
-- **RenderCache respeta el `Cache-Control: no-store` de un handler.** Una ruta
-  incorporada a la caché almacenaba una respuesta cuyo handler decía
-  `no-store` y la reproducía bajo el `public, max-age=60, s-maxage=60` de la
-  política, así que el "no almacenar" del handler se ignoraba en el servidor y
-  se reescribía para cada navegador y proxy aguas abajo. La comprobación de
-  elegibilidad ahora lee el `Cache-Control` de la respuesta y rehúsa almacenar
-  ante el token `no-store` (motivo de rechazo `no_store_directive`), y la
-  respuesta rechazada sale exactamente como la construyó el handler. Detectado
-  por la auditoría adversarial del 2026-09-13 (ASTRA-02); aterrizó en main
-  después de la etiqueta `v2.0.1`.
-- **Un nonce de CSP por respuesta nunca se reproduce desde la caché.** Una
-  página pública que generaba un nonce en cada renderizado y lo nombraba en
-  `Content-Security-Policy` se almacenaba como una entrada completa ordinaria,
-  así que cada acierto posterior llevaba el nonce del primer renderizado tanto
-  en la cabecera como en el script inline. Un nonce es el token de
-  autorización para script inline en una sola respuesta; reproducirlo hacía
-  ese token legible para cualquiera que pudiera descargar la página.
-  RenderCache ahora rehúsa almacenar tal respuesta (motivo de rechazo
-  `nonce_source_policy`); una política basada en hash se cachea como antes, y
-  los documentos Live cosidos siguen emitiendo un nonce nuevo por acierto.
-  Detectado por la auditoría adversarial del 2026-09-13 (ASTRA-12); aterrizó
-  en main después de la etiqueta `v2.0.1`.
-- **Una respuesta en caché conserva sus cabeceras de aislamiento y
-  ejecución.** RenderCache no almacenaba en ningún sitio las cabeceras
-  `Content-Disposition`, `Cross-Origin-Opener-Policy`,
-  `Cross-Origin-Embedder-Policy`, `Cross-Origin-Resource-Policy`,
-  `Permissions-Policy` y `X-Frame-Options` de una respuesta, así que un
-  acierto de caché servía los mismos bytes sin ellas. Una exportación HTML que
-  se descargaba como adjunto en la primera petición se renderizaba inline bajo
-  el origen de la aplicación en la segunda, donde cualquier marcado que
-  contuviera se ejecutaba con autoridad del mismo origen. Las seis cabeceras
-  ahora se reproducen byte a byte desde la representación almacenada.
-  Detectado por la auditoría adversarial del 2026-09-13 (ASTRA-11); aterrizó
-  en main después de la etiqueta `v2.0.1`.
-- **El lockfile se desprende de una versión insegura y tres retiradas de
-  dependencias.** `event-listener` 5.4.2 reemplaza a 5.4.1, cuyo listener
-  asignado en la pila era incondicionalmente `Send`/`Sync` y dejaba que una
-  etiqueta `!Send` cruzara hilos en código seguro (RUSTSEC-2026-0221); las
-  dependencias de Suprnova solo usan eventos sin etiqueta, así que la ruta
-  insegura nunca se ejercitó aquí. `spin` 0.9.9 y 0.10.1 y `chacha20`
-  0.10.2 reemplazan versiones que sus editores habían retirado, y
-  `concurrent-queue` sale del árbol por completo. Esto llegó a main después
-  del tag `v2.0.1`; el `Cargo.lock` del tag sigue resolviendo las versiones
-  anteriores.
 
 ### Documentación
 

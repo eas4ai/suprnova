@@ -6,21 +6,20 @@ Une version est publiée quand son commit de version et le tag
 `v<version>` correspondant sont poussés atomiquement. Les plus récentes
 en premier.
 
-## 2.0.1 - 2026-09-12
+## 2.0.2 - 2026-09-14
 
 ### Modifié
 
 - **Les endpoints Live ne portent aucun segment de version.**
   `/__live/v1/action`, `/__live/v1/upload`, `/__live/v1/assets/*` et la
-  famille `/__live/v1/async/*` vivent désormais aux mêmes chemins sans
-  `/v1` : `/__live/action`, `/__live/upload`, `/__live/assets/*`,
-  `/__live/async/*`. La version de Suprnova est le tag git, et le runtime
-  navigateur paraît au même rythme que le framework - une seconde version
-  dans l'espace d'URL promettait un chemin d'évolution qui n'aurait
-  jamais servi. Les applications ne sont pas concernées : le framework
-  enregistre ces routes et le runtime construit chaque URL ; les
-  références écrites à la main vers des chemins `/__live/` n'ont jamais
-  été prises en charge. Ceci a atterri sur main après le tag `v2.0.1`.
+  famille `/__live/v1/async/*` vivent désormais aux mêmes chemins sans `/v1` :
+  `/__live/action`, `/__live/upload`, `/__live/assets/*`, `/__live/async/*`.
+  La version de Suprnova est le tag git, et le runtime navigateur paraît au
+  même rythme que le framework - une seconde version dans l'espace d'URL
+  promettait un chemin d'évolution qui n'aurait jamais servi. Les applications
+  ne sont pas concernées : le framework enregistre ces routes et le runtime
+  construit chaque URL ; les références écrites à la main vers des chemins
+  `/__live/` n'ont jamais été prises en charge.
 
 ### Corrigé
 
@@ -36,6 +35,159 @@ en premier.
   concurrentes. Un descripteur conserve désormais chaque secret non consommé
   jusqu'à ce qu'il soit consommé ou expire, et les claims en construction sont
   indexés par identifiant d'abonnement.
+
+### Sécurité
+
+- **Un flux Live se termine avec la session qui l'a ouvert.** Une adhésion
+  asynchrone était réautorisée contre son Gate avant chaque livraison, mais
+  jamais contre sa session : un navigateur déconnecté, ou dont la session
+  avait été révoquée, continuait de recevoir des événements jusqu'à la
+  fermeture du flux lui-même. Détruire une session sur un nœud retire
+  désormais aussitôt chaque adhésion qu'elle y a ouverte, aussi bien à une
+  simple déconnexion qu'à l'invalidation de la session, à la régénération de
+  l'identifiant ou à une "déconnexion partout", et la livraison revérifie la
+  session de chaque adhésion auprès du magasin de sessions au plus une fois
+  toutes les dix secondes, si bien qu'une session détruite sur un autre nœud
+  cesse de recevoir des événements dans cet intervalle.
+- **Les directives `Cache-Control` d'une requête sont respectées par
+  RenderCache.** Une requête portant `no-cache` était servie depuis le
+  stockage avec `Age`, et une requête froide portant `no-store` amorçait le
+  cache pour la requête suivante. `no-store` contourne désormais la recherche
+  comme la publication, et `no-cache` saute la recherche pour que la requête
+  soit servie par un rendu frais. Trouvé par l'audit adversarial du 2026-09-13
+  (ASTRA-13) .
+- **Un rendu sans instantané n'est jamais publié.** Quand la transaction
+  d'instantané ne pouvait pas s'ouvrir, RenderCache rendait sans vue de
+  lecture et publiait quand même si la relecture des générations concordait,
+  si bien qu'un rendu entrelacé avec une écriture concurrente multi-lignes
+  pouvait stocker un mélange de deux états de la base. Un tel rendu est
+  désormais servi mais non stocké (motif de refus `snapshot_unavailable`), et
+  son bail de reconstruction est libéré. Trouvé par l'audit adversarial du
+  2026-09-13 (ASTRA-08) .
+- **Une réponse en cache rejoue son `Content-Encoding`.** Un corps
+  précompressé était stocké sans son codage de contenu, si bien qu'un hit
+  servait des octets gzip comme du texte brut. Le codage est stocké avec le
+  corps et rejoué à chaque hit. Trouvé par l'audit adversarial du 2026-09-13
+  (ASTRA-04) .
+- **Une requête HEAD n'amorce jamais la représentation GET.** Un HEAD froid
+  sur une route qui ne rend rien pour HEAD stockait un corps vide sous la clé
+  que chaque GET partage, si bien que les GET suivants répondaient zéro octet.
+  Un miss HEAD est désormais servi tel que rendu et non stocké (motif de refus
+  `head_render`). Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-03) .
+- **La limite d'abonnements Live par portée tient sous concurrence.**
+  L'émission comptait les abonnements d'une portée, relâchait le verrou,
+  attendait l'autorisateur puis insérait, si bien qu'une rafale de requêtes
+  concurrentes pouvait toutes passer le comptage et toutes être admises une
+  fois l'autorisation revenue, bien au-delà de la limite annoncée de 512 par
+  portée. La place est désormais réservée sous le même verrou que le comptage,
+  libérée sur chaque chemin d'erreur et remise à l'enregistrement quand il se
+  pose. Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-07) .
+- **Un abonnement Live cesse de recevoir des événements dès que son Gate
+  refuse.** Une adhésion asynchrone existante continuait de recevoir les
+  événements nouvellement publiés après que le Gate d'autorisation du flux eut
+  été redéfini pour refuser le principal, parce que la livraison comparait le
+  mémo d'autorisation retenu de l'abonnement avec lui-même. Les nouveaux
+  abonnements étaient correctement refusés ; l'ancien flux ne l'était pas. Le
+  runtime enregistre désormais le principal auquel un abonnement a été émis,
+  interroge à nouveau le Gate avant chaque livraison et retire une adhésion
+  que le Gate n'autorise plus. Trouvé par l'audit adversarial du 2026-09-13
+  (ASTRA-01) .
+- **Une action Live déclarant `transaction = "required"` est refusée à
+  l'enregistrement.** Le port de transaction de l'hôte est un no-op documenté,
+  si bien que la politique promettait une atomicité qu'elle n'a jamais fournie
+  : chaque écriture était validée seule et rien n'était annulé quand une étape
+  ultérieure échouait. `LiveRegistry` échoue désormais avec
+  `RegistryErrorKind::RequiredTransactionUnsupported` pour un tel composant,
+  jusqu'à ce que le port installe une vraie transaction ambiante ; les actions
+  sans la politique s'enregistrent comme avant. Trouvé par l'audit adversarial
+  du 2026-09-13 (ASTRA-05) .
+- **Les lectures d'une route en cache sur des connexions nommées restent sur
+  leur connexion.** Un miss de RenderCache rend à l'intérieur d'une
+  transaction d'instantané sur la base primaire, et le routage des requêtes
+  préférait cette transaction au `on("name")` d'une requête ou à la connexion
+  déclarée d'un modèle, si bien qu'inscrire une route dans le cache changeait
+  la base de données que son code lisait. Une lecture d'une base tenant ou
+  auxiliaire pouvait renvoyer la ligne de la primaire, échouer sur une table
+  que la primaire n'a pas, ou publier le mauvais contenu sous une clé valide.
+  Les lectures destinées à une autre connexion s'exécutent désormais là même à
+  l'intérieur d'une transaction ambiante, et un rendu qui a lu hors de son
+  instantané est servi mais non stocké (motif de refus
+  `foreign_connection_read`). Trouvé par l'audit adversarial du 2026-09-13
+  (ASTRA-06) .
+- **Une écriture de données et son invalidation RenderCache sont validées
+  ensemble.** Sur le chemin autocommit, une sauvegarde de modèle, une écriture
+  du query builder ou une instruction brute posait d'abord la ligne, puis
+  faisait avancer les générations de dépendance dans une seconde transaction.
+  Quand cette seconde transaction échouait, la ligne était durable, l'API
+  renvoyait une erreur, et chaque page en cache dépendant de la ligne
+  continuait de passer son contrôle de cohérence et de servir le contenu
+  d'avant l'écriture : un changement de visibilité, de droits ou une
+  suppression pouvait rester invisible jusqu'à la prochaine invalidation
+  réussie. Chaque terminal d'écriture exécute désormais l'écriture de la ligne
+  et son avancement dans une transaction ouverte à cet effet, si bien que les
+  deux sont validés ou aucun ne l'est. Une table du registre qui disparaît
+  après que RenderCache l'a jugée présente fait désormais échouer l'écriture
+  au lieu d'être ignorée avec un avertissement. Une écriture destinée à une
+  connexion nommée, dont le registre vit sur la connexion primaire, garde son
+  avancement séparé ; si cet avancement échoue, le processus cesse de servir
+  les entrées stockées jusqu'à ce qu'un avancement réussisse. Trouvé par
+  l'audit adversarial du 2026-09-13 (ASTRA-10) .
+- **Le contrat `Vary` d'un handler est appliqué avant que RenderCache ne
+  stocke.** Un handler qui faisait varier son corps selon un en-tête de
+  requête à lui et le déclarait par `Vary` était stocké sous une clé
+  construite à partir de la seule politique de la route, si bien que le corps
+  de la première variante était servi à toutes les autres, l'en-tête `Vary`
+  manquant au hit. Partout où cet en-tête sélectionnait un contenu propre à un
+  utilisateur, un appareil ou une expérimentation, le contenu d'une requête
+  parvenait à une autre. RenderCache analyse désormais le `Vary` de la réponse
+  avant publication et refuse le stockage quand il nomme `*` ou un champ que
+  la politique ne déclare pas comme dimension de clé (motif de refus
+  `vary_undeclared`). Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-09)
+  .
+- **Le `Cache-Control: no-store` d'un handler est respecté par RenderCache.**
+  Une route inscrite dans le cache stockait une réponse dont le handler disait
+  `no-store` et la rejouait sous le `public, max-age=60, s-maxage=60` de la
+  politique, si bien que le « ne pas stocker » du handler était ignoré côté
+  serveur et réécrit pour chaque navigateur et proxy en aval. Le contrôle
+  d'éligibilité lit désormais le `Cache-Control` de la réponse et refuse le
+  stockage sur le jeton `no-store` (motif de refus `no_store_directive`), et
+  la réponse refusée part exactement telle que le handler l'a construite.
+  Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-02) .
+- **Un nonce CSP par réponse n'est jamais rejoué depuis le cache.** Une page
+  publique qui générait un nonce à chaque rendu et le nommait dans
+  `Content-Security-Policy` était stockée comme une entrée complète ordinaire,
+  si bien que chaque hit ultérieur portait le nonce du premier rendu, dans
+  l'en-tête comme dans le script inline. Un nonce est le jeton d'autorisation
+  du script inline pour une seule réponse ; le rejouer rendait ce jeton
+  lisible par quiconque pouvait récupérer la page. RenderCache refuse
+  désormais de stocker une telle réponse (motif de refus
+  `nonce_source_policy`) ; une politique fondée sur des hachages est mise en
+  cache comme avant, et les documents Live assemblés continuent d'émettre un
+  nonce neuf à chaque hit. Trouvé par l'audit adversarial du 2026-09-13
+  (ASTRA-12) .
+- **Une réponse en cache conserve ses en-têtes d'isolation et d'exécution.**
+  RenderCache ne stockait nulle part les en-têtes `Content-Disposition`,
+  `Cross-Origin-Opener-Policy`, `Cross-Origin-Embedder-Policy`,
+  `Cross-Origin-Resource-Policy`, `Permissions-Policy` et `X-Frame-Options`
+  d'une réponse, si bien qu'un hit de cache servait les mêmes octets sans eux.
+  Un export HTML téléchargé comme pièce jointe à la première requête était
+  rendu inline sous l'origine de l'application à la seconde, où tout balisage
+  qu'il contenait s'exécutait avec l'autorité de la même origine. Les six
+  en-têtes sont désormais rejoués octet pour octet depuis la représentation
+  stockée. Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-11) .
+- **Le fichier de verrouillage se défait d'une version non sûre et de trois
+  versions retirées.** `event-listener` 5.4.2 remplace 5.4.1, dont le listener
+  alloué sur la pile était inconditionnellement `Send`/`Sync` et laissait un
+  tag `!Send` traverser les threads en code sûr (RUSTSEC-2026-0221) ; les
+  dépendances de Suprnova n'utilisent que des événements sans tag, le chemin
+  non sûr n'a donc jamais été exercé ici. `spin` 0.9.9 et 0.10.1 et `chacha20`
+  0.10.2 remplacent des versions que leurs éditeurs avaient retirées, et
+  `concurrent-queue` quitte l'arbre entièrement.
+
+## 2.0.1 - 2026-09-12
+
+### Corrigé
+
 - **Une URL `redis://` avec un index de base de données sélectionne cette
   base de données partout.** Le driver de files d'attente et le hub de
   diffusion fanout portent chacun un producteur sea-streamer à côté de
@@ -114,161 +266,6 @@ en premier.
   qu'une seule page ait été écrite. `setup` est désormais synchrone et
   enchaîne le chargement du catalogue de traductions au montage, si bien
   que l'ordre décrit par le template est inchangé.
-
-### Sécurité
-
-- **Un flux Live se termine avec la session qui l'a ouvert.** Une adhésion
-  asynchrone était réautorisée contre son Gate avant chaque livraison, mais
-  jamais contre sa session : un navigateur déconnecté, ou dont la session
-  avait été révoquée, continuait de recevoir des événements jusqu'à la
-  fermeture du flux lui-même. Détruire une session sur un nœud retire
-  désormais aussitôt chaque adhésion qu'elle y a ouverte, aussi bien à une
-  simple déconnexion qu'à l'invalidation de la session, à la régénération de
-  l'identifiant ou à une "déconnexion partout", et la livraison revérifie la
-  session de chaque adhésion auprès du magasin de sessions au plus une fois
-  toutes les dix secondes, si bien qu'une session détruite sur un autre nœud
-  cesse de recevoir des événements dans cet intervalle.
-- **Les directives `Cache-Control` d'une requête sont respectées par
-  RenderCache.** Une requête portant `no-cache` était servie depuis le
-  stockage avec `Age`, et une requête froide portant `no-store` amorçait le
-  cache pour la requête suivante. `no-store` contourne désormais la recherche
-  comme la publication, et `no-cache` saute la recherche pour que la requête
-  soit servie par un rendu frais. Trouvé par l'audit adversarial du 2026-09-13
-  (ASTRA-13) ; arrivé sur main après le tag `v2.0.1`.
-- **Un rendu sans instantané n'est jamais publié.** Quand la transaction
-  d'instantané ne pouvait pas s'ouvrir, RenderCache rendait sans vue de
-  lecture et publiait quand même si la relecture des générations concordait,
-  si bien qu'un rendu entrelacé avec une écriture concurrente multi-lignes
-  pouvait stocker un mélange de deux états de la base. Un tel rendu est
-  désormais servi mais non stocké (motif de refus `snapshot_unavailable`), et
-  son bail de reconstruction est libéré. Trouvé par l'audit adversarial du
-  2026-09-13 (ASTRA-08) ; arrivé sur main après le tag `v2.0.1`.
-- **Une réponse en cache rejoue son `Content-Encoding`.** Un corps
-  précompressé était stocké sans son codage de contenu, si bien qu'un hit
-  servait des octets gzip comme du texte brut. Le codage est stocké avec le
-  corps et rejoué à chaque hit. Trouvé par l'audit adversarial du 2026-09-13
-  (ASTRA-04) ; arrivé sur main après le tag `v2.0.1`.
-- **Une requête HEAD n'amorce jamais la représentation GET.** Un HEAD froid
-  sur une route qui ne rend rien pour HEAD stockait un corps vide sous la clé
-  que chaque GET partage, si bien que les GET suivants répondaient zéro octet.
-  Un miss HEAD est désormais servi tel que rendu et non stocké (motif de refus
-  `head_render`). Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-03) ;
-  arrivé sur main après le tag `v2.0.1`.
-- **La limite d'abonnements Live par portée tient sous concurrence.**
-  L'émission comptait les abonnements d'une portée, relâchait le verrou,
-  attendait l'autorisateur puis insérait, si bien qu'une rafale de requêtes
-  concurrentes pouvait toutes passer le comptage et toutes être admises une
-  fois l'autorisation revenue, bien au-delà de la limite annoncée de 512 par
-  portée. La place est désormais réservée sous le même verrou que le comptage,
-  libérée sur chaque chemin d'erreur et remise à l'enregistrement quand il se
-  pose. Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-07) ; arrivé sur
-  main après le tag `v2.0.1`.
-- **Un abonnement Live cesse de recevoir des événements dès que son Gate
-  refuse.** Une adhésion asynchrone existante continuait de recevoir les
-  événements nouvellement publiés après que le Gate d'autorisation du flux eut
-  été redéfini pour refuser le principal, parce que la livraison comparait le
-  mémo d'autorisation retenu de l'abonnement avec lui-même. Les nouveaux
-  abonnements étaient correctement refusés ; l'ancien flux ne l'était pas. Le
-  runtime enregistre désormais le principal auquel un abonnement a été émis,
-  interroge à nouveau le Gate avant chaque livraison et retire une adhésion
-  que le Gate n'autorise plus. Trouvé par l'audit adversarial du 2026-09-13
-  (ASTRA-01) ; arrivé sur main après le tag `v2.0.1`.
-- **Une action Live déclarant `transaction = "required"` est refusée à
-  l'enregistrement.** Le port de transaction de l'hôte est un no-op documenté,
-  si bien que la politique promettait une atomicité qu'elle n'a jamais fournie
-  : chaque écriture était validée seule et rien n'était annulé quand une étape
-  ultérieure échouait. `LiveRegistry` échoue désormais avec
-  `RegistryErrorKind::RequiredTransactionUnsupported` pour un tel composant,
-  jusqu'à ce que le port installe une vraie transaction ambiante ; les actions
-  sans la politique s'enregistrent comme avant. Trouvé par l'audit adversarial
-  du 2026-09-13 (ASTRA-05) ; arrivé sur main après le tag `v2.0.1`.
-- **Les lectures d'une route en cache sur des connexions nommées restent sur
-  leur connexion.** Un miss de RenderCache rend à l'intérieur d'une
-  transaction d'instantané sur la base primaire, et le routage des requêtes
-  préférait cette transaction au `on("name")` d'une requête ou à la connexion
-  déclarée d'un modèle, si bien qu'inscrire une route dans le cache changeait
-  la base de données que son code lisait. Une lecture d'une base tenant ou
-  auxiliaire pouvait renvoyer la ligne de la primaire, échouer sur une table
-  que la primaire n'a pas, ou publier le mauvais contenu sous une clé valide.
-  Les lectures destinées à une autre connexion s'exécutent désormais là même à
-  l'intérieur d'une transaction ambiante, et un rendu qui a lu hors de son
-  instantané est servi mais non stocké (motif de refus
-  `foreign_connection_read`). Trouvé par l'audit adversarial du 2026-09-13
-  (ASTRA-06) ; arrivé sur main après le tag `v2.0.1`.
-- **Une écriture de données et son invalidation RenderCache sont validées
-  ensemble.** Sur le chemin autocommit, une sauvegarde de modèle, une écriture
-  du query builder ou une instruction brute posait d'abord la ligne, puis
-  faisait avancer les générations de dépendance dans une seconde transaction.
-  Quand cette seconde transaction échouait, la ligne était durable, l'API
-  renvoyait une erreur, et chaque page en cache dépendant de la ligne
-  continuait de passer son contrôle de cohérence et de servir le contenu
-  d'avant l'écriture : un changement de visibilité, de droits ou une
-  suppression pouvait rester invisible jusqu'à la prochaine invalidation
-  réussie. Chaque terminal d'écriture exécute désormais l'écriture de la ligne
-  et son avancement dans une transaction ouverte à cet effet, si bien que les
-  deux sont validés ou aucun ne l'est. Une table du registre qui disparaît
-  après que RenderCache l'a jugée présente fait désormais échouer l'écriture
-  au lieu d'être ignorée avec un avertissement. Une écriture destinée à une
-  connexion nommée, dont le registre vit sur la connexion primaire, garde son
-  avancement séparé ; si cet avancement échoue, le processus cesse de servir
-  les entrées stockées jusqu'à ce qu'un avancement réussisse. Trouvé par
-  l'audit adversarial du 2026-09-13 (ASTRA-10) ; arrivé sur main après le tag
-  `v2.0.1`.
-- **Le contrat `Vary` d'un handler est appliqué avant que RenderCache ne
-  stocke.** Un handler qui faisait varier son corps selon un en-tête de
-  requête à lui et le déclarait par `Vary` était stocké sous une clé
-  construite à partir de la seule politique de la route, si bien que le corps
-  de la première variante était servi à toutes les autres, l'en-tête `Vary`
-  manquant au hit. Partout où cet en-tête sélectionnait un contenu propre à un
-  utilisateur, un appareil ou une expérimentation, le contenu d'une requête
-  parvenait à une autre. RenderCache analyse désormais le `Vary` de la réponse
-  avant publication et refuse le stockage quand il nomme `*` ou un champ que
-  la politique ne déclare pas comme dimension de clé (motif de refus
-  `vary_undeclared`). Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-09)
-  ; arrivé sur main après le tag `v2.0.1`.
-- **Le `Cache-Control: no-store` d'un handler est respecté par RenderCache.**
-  Une route inscrite dans le cache stockait une réponse dont le handler disait
-  `no-store` et la rejouait sous le `public, max-age=60, s-maxage=60` de la
-  politique, si bien que le « ne pas stocker » du handler était ignoré côté
-  serveur et réécrit pour chaque navigateur et proxy en aval. Le contrôle
-  d'éligibilité lit désormais le `Cache-Control` de la réponse et refuse le
-  stockage sur le jeton `no-store` (motif de refus `no_store_directive`), et
-  la réponse refusée part exactement telle que le handler l'a construite.
-  Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-02) ; arrivé sur main
-  après le tag `v2.0.1`.
-- **Un nonce CSP par réponse n'est jamais rejoué depuis le cache.** Une page
-  publique qui générait un nonce à chaque rendu et le nommait dans
-  `Content-Security-Policy` était stockée comme une entrée complète ordinaire,
-  si bien que chaque hit ultérieur portait le nonce du premier rendu, dans
-  l'en-tête comme dans le script inline. Un nonce est le jeton d'autorisation
-  du script inline pour une seule réponse ; le rejouer rendait ce jeton
-  lisible par quiconque pouvait récupérer la page. RenderCache refuse
-  désormais de stocker une telle réponse (motif de refus
-  `nonce_source_policy`) ; une politique fondée sur des hachages est mise en
-  cache comme avant, et les documents Live assemblés continuent d'émettre un
-  nonce neuf à chaque hit. Trouvé par l'audit adversarial du 2026-09-13
-  (ASTRA-12) ; arrivé sur main après le tag `v2.0.1`.
-- **Une réponse en cache conserve ses en-têtes d'isolation et d'exécution.**
-  RenderCache ne stockait nulle part les en-têtes `Content-Disposition`,
-  `Cross-Origin-Opener-Policy`, `Cross-Origin-Embedder-Policy`,
-  `Cross-Origin-Resource-Policy`, `Permissions-Policy` et `X-Frame-Options`
-  d'une réponse, si bien qu'un hit de cache servait les mêmes octets sans eux.
-  Un export HTML téléchargé comme pièce jointe à la première requête était
-  rendu inline sous l'origine de l'application à la seconde, où tout balisage
-  qu'il contenait s'exécutait avec l'autorité de la même origine. Les six
-  en-têtes sont désormais rejoués octet pour octet depuis la représentation
-  stockée. Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-11) ; arrivé
-  sur main après le tag `v2.0.1`.
-- **Le fichier de verrouillage se défait d'une version non sûre et de trois
-  versions retirées.** `event-listener` 5.4.2 remplace 5.4.1, dont le
-  listener alloué sur la pile était inconditionnellement `Send`/`Sync` et
-  laissait un tag `!Send` traverser les threads en code sûr
-  (RUSTSEC-2026-0221) ; les dépendances de Suprnova n'utilisent que des
-  événements sans tag, le chemin non sûr n'a donc jamais été exercé ici.
-  `spin` 0.9.9 et 0.10.1 et `chacha20` 0.10.2 remplacent des versions que
-  leurs éditeurs avaient retirées, et `concurrent-queue` quitte l'arbre
-  entièrement. Ceci a atterri sur main après le tag `v2.0.1` ; le
-  `Cargo.lock` du tag résout toujours les versions antérieures.
 
 ### Documentation
 
