@@ -276,3 +276,61 @@ async fn polling_recovery_and_assets_work_through_the_real_stack() {
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
     assert!(reply.body.is_empty());
 }
+
+/// FORM-001, UI-019: the form gallery mounts every presentational library
+/// component through the vendored macros, opts the suprnova-ui base in, and
+/// renders the controls the checker proves.
+#[tokio::test]
+async fn the_form_gallery_renders_every_presentational_component_with_the_library_base() {
+    let app = setup_app(7).await;
+    let session = seed_session(&app).await;
+
+    let reply = get(&app, "/live/forms", Some(&session)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let html = reply.text();
+    assert!(html.contains("<h1>Form gallery</h1>"), "{html}");
+    assert_eq!(
+        html.matches("suprnova-ui.css").count(),
+        1,
+        "the opted-in document loads the base once: {html}"
+    );
+    let gallery = island_tag(&html, "forms-gallery");
+    assert_eq!(
+        attribute(gallery, "data-suprnova-live-snapshot-kind"),
+        "instance"
+    );
+    for needle in [
+        "class=\"sn-field\" data-sn-field=\"email\"",
+        "<label class=\"sn-label\" for=\"email\">",
+        "type=\"email\"",
+        "live:model=\"email\"",
+        "<textarea class=\"sn-textarea\" id=\"bio\"",
+        "class=\"sn-input sn-number-input\" id=\"quantity\"",
+        "type=\"range\"",
+        "live:model.debounce.300ms=\"query\"",
+        "<sn-password-reveal class=\"sn-password\">",
+        "type=\"password\"",
+        "class=\"sn-checkbox-input\" id=\"agree\"",
+        "<fieldset class=\"sn-radio-group\" id=\"plan\"",
+        "value=\"starter\"",
+        "role=\"switch\"",
+        "<select class=\"sn-select\" id=\"country\"",
+        "<option value=\"ca\">Canada</option>",
+        "<fieldset class=\"sn-checkbox-group\" id=\"topics\"",
+        "type=\"file\"",
+        "<fieldset class=\"sn-fieldset\">",
+        "class=\"sn-form-actions\"",
+        "role=\"group\" aria-label=\"Secondary actions\"",
+        "live:click=\"reset\"",
+        "<a class=\"sn-button\" role=\"button\" href=\"/live\"",
+        "type=\"submit\" data-sn-variant=\"primary\" live:loading.disabled=\"save\"",
+        "class=\"sn-validation-summary\"",
+        "live:error.live.polite=\"email\"",
+    ] {
+        assert!(html.contains(needle), "missing {needle} in {html}");
+    }
+    assert!(
+        !html.contains(" style="),
+        "no shipped view carries a style attribute"
+    );
+}

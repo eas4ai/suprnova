@@ -28,10 +28,13 @@ use suprnova::{
 use components::activity_feed::ActivityFeed;
 use components::avatar_uploader::AvatarUploader;
 use components::counter::Counter;
+use components::form_gallery::FormGallery;
 use providers::tenant::SingleTenant;
 
 /// The authenticated dashboard document.
 pub const DASHBOARD_PATH: &str = "/live";
+/// The form gallery: every presentational library component on one page.
+pub const FORMS_PATH: &str = "/live/forms";
 /// The public document with one public seed.
 pub const PUBLIC_PATH: &str = "/live/public";
 /// The public todo listing, rendered from the ORM.
@@ -47,6 +50,7 @@ pub fn registry() -> Result<LiveRegistry, RegistryError> {
         .register::<Counter>()?
         .register::<AvatarUploader>()?
         .register::<ActivityFeed>()?
+        .register::<FormGallery>()?
         .build();
     Ok(registry)
 }
@@ -86,6 +90,24 @@ impl DashboardMounts {
 }
 
 /// The public page's single seed.
+/// The mount behind the form gallery page.
+#[derive(Clone)]
+pub struct FormsMounts {
+    pub gallery: LiveMount<FormGallery>,
+}
+
+impl FormsMounts {
+    pub fn declare() -> Result<Self, FrameworkError> {
+        Ok(Self {
+            gallery: LiveMount::<FormGallery>::identity_bound(
+                FORMS_PATH,
+                "gallery",
+                "forms-gallery",
+            )?,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct PublicMounts {
     /// The public counter island.
@@ -132,6 +154,7 @@ fn tenant() -> LiveTenantMiddleware {
 /// document routes with their islands.
 pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     let dashboard = DashboardMounts::declare()?;
+    let forms = FormsMounts::declare()?;
     let public = PublicMounts::declare()?;
 
     // Optional authentication: a signed-in principal is recorded, an
@@ -166,6 +189,16 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
         .try_live_mount(&dashboard.counter)?
         .try_live_mount(&dashboard.uploader)?
         .try_live_mount(&dashboard.feed)?;
+    let handler_mounts = forms.clone();
+    let router: Router = router
+        .get(FORMS_PATH, move |request: Request| {
+            let mounts = handler_mounts.clone();
+            async move { pages::forms(request, &mounts).await }
+        })
+        .middleware(AuthMiddleware::redirect_to("/login"))
+        .middleware(tenant())
+        .into();
+    let router = router.try_live_mount(&forms.gallery)?;
 
     let handler_mounts = public.clone();
     let router: Router = router

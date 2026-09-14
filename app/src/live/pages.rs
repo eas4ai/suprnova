@@ -14,7 +14,7 @@ use suprnova::live::{CanonicalValue, LiveBootstrapOptions, LiveDocument, MountFl
 use suprnova::view::{AssetSet, DocumentResponseIntent, TrustedHtml, ViewName, ViewTemplate};
 use suprnova::{Auth, FrameworkError, HttpResponse, Model, Request, Response, StatusCode};
 
-use super::{DashboardMounts, PublicMounts};
+use super::{DashboardMounts, FormsMounts, PublicMounts};
 use crate::models::todos::Todo;
 use crate::models::users::User;
 
@@ -28,6 +28,12 @@ struct DashboardView<'a> {
     counter: &'a TrustedHtml,
     uploader: &'a TrustedHtml,
     feed: &'a TrustedHtml,
+}
+
+#[suprnova::view(path = "live/forms.html")]
+struct FormsView<'a> {
+    bootstrap: &'a TrustedHtml,
+    gallery: &'a TrustedHtml,
 }
 
 #[suprnova::view(path = "live/public.html")]
@@ -80,6 +86,31 @@ fn failed(error: FrameworkError) -> HttpResponse {
 }
 
 /// `GET /live`: identity-bound counter, avatar uploader, and activity feed.
+/// The form gallery: the suprnova-ui base is opted in and every
+/// presentational form component is mounted once (Cairn FORM-001).
+pub async fn forms(request: Request, mounts: &FormsMounts) -> Response {
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let mut document = LiveDocument::from_request(&request)?;
+        let gallery = document
+            .mount(&mounts.gallery, parameters(), MountFlags::empty())
+            .await?;
+        let bootstrap = document.bootstrap(LiveBootstrapOptions::esm().with_suprnova_ui())?;
+        document
+            .render(
+                view("live/forms.html")?,
+                &FormsView {
+                    bootstrap: bootstrap.html(),
+                    gallery: gallery.html(),
+                },
+                intent()?,
+                AssetSet::empty(),
+            )
+            .map_err(FrameworkError::from)
+    }
+    .await;
+    result.map_err(failed)
+}
+
 pub async fn dashboard(request: Request, mounts: &DashboardMounts) -> Response {
     let result: Result<HttpResponse, FrameworkError> = async {
         let mut document = LiveDocument::from_request(&request)?;
