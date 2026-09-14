@@ -38,7 +38,10 @@ components in waves, the advanced components last, the datatable closing.
    so 39 of 512 admitted requests answered 403 (LIVE-022). The developer
    named it the next commitment at 09:05 on 2026-09-14, ahead of the
    library.
-3. component-library-foundations - tokens, base layer, state-attribute
+3. component-library-foundations - DONE 2026-09-14 (built between
+   `781b63c1` and `44e7bed7`; receipts on the closing tree; resumed after
+   the developer's `ok` on escalation `loop-035`, keeping the v2.0.2
+   release history as the base) - tokens, base layer, state-attribute
    styling, asset delivery, explicit registration and reserved
    namespaces, the checker and baseline mechanisms, and the form
    family's presentational tier (`component-library-foundations.md`,

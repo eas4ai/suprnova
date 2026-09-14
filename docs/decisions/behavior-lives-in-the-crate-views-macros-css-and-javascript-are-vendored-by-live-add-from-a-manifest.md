@@ -12,3 +12,5 @@ Option (c) of three, chosen 2026-09-13 10:23, refined at 10:36 with the componen
 ## Realized by
 
 - f241aba8  docs(cairn,live): apply the owner's component-library rulings to the specs
+- 8772f8b9  feat(live): ship the form family's presentational views (UI-005)
+- 44e7bed7  feat(cli): live:add installs a library component from its manifest (UI-017)

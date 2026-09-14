@@ -12,3 +12,5 @@ Option (c) of three, chosen 2026-09-13 10:22. Component styles ship as token-dri
 ## Realized by
 
 - f241aba8  docs(cairn,live): apply the owner's component-library rulings to the specs
+- 781b63c1  feat(live): ship the suprnova-ui token stylesheet, base layer and Tailwind preset (UI-001)
+- 43f70aa0  feat(live): deliver the suprnova-ui base as the ui-styles runtime artifact (UI-008, UI-019)

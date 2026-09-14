@@ -12,3 +12,5 @@ Ruled 2026-09-13 10:36-10:37: a component as built is structure, behavior, and s
 ## Realized by
 
 - f241aba8  docs(cairn,live): apply the owner's component-library rulings to the specs
+- 781b63c1  feat(live): ship the suprnova-ui token stylesheet, base layer and Tailwind preset (UI-001)
+- 8772f8b9  feat(live): ship the form family's presentational views (UI-005)

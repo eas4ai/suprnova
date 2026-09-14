@@ -12,3 +12,4 @@ The library rides Live's existing explicit registry: an application registers ea
 ## Realized by
 
 - d56fb7ce  docs(cairn): split the library specification by component family and record the registration ruling
+- 09e7d6d8  feat(live): reserve the suprnova. component namespace for the library (UI-015)
