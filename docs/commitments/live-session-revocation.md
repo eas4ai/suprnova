@@ -16,18 +16,18 @@ Drafted 2026-09-13 from the developer's `ok` on escalation `live-016`
 at 21:21: build session binding as one follow-up commitment before the
 component library resumes.
 
-## Decisions to record
+## Decisions recorded
 
-- Revocation substrate: an in-process revocation of memberships keyed by
-  session fingerprint and principal, driven from the session lifecycle
-  (invalidate, regenerate, `destroy_for_user`), plus a store-backed
-  re-verification per membership on a bounded interval for the other
-  nodes of a deployment. The alternative, a store read on every delivery
-  for every membership, costs one store round trip per membership per
-  event and is refused.
-- Re-verification interval: ten seconds per membership. The alternative,
-  re-verifying only at subscription renewal, bounds the cross-node leak at
-  the subscription lifetime (120 s) instead.
+Agreed by the developer at 23:22 on 2026-09-13 ("I will accept your
+recommendations"), taking the recommended option in each case:
+
+- Revocation substrate: session invalidation, regeneration, and
+  `destroy_for_user` revoke this node's memberships in process, keyed by
+  session fingerprint and user id; other nodes learn through a bounded
+  store re-check before delivery
+  (`docs/decisions/session-revocation-reaches-memberships-in-process-with-a-store-re-check-for-other-nodes.md`).
+- Re-verification interval: ten seconds per membership
+  (`docs/decisions/a-membership-re-verifies-its-session-against-the-store-at-most-every-ten-seconds.md`).
 
 ## Deliverables
 

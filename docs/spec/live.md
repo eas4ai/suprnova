@@ -173,7 +173,7 @@ LIVE-016).
 Mechanism: `.cairn/mechanisms/live-session-revocation`.
 Refines: Live spec 14, admission "rechecks ... registry and revocation
 state"; LIVE-016 session and revocation-state clauses.
-Status: Draft
+Status: Agreed 2026-09-13
 
 [LIVE-020] The framework MUST re-verify a membership's session against
 the shared session store before delivery, at most once per membership per
@@ -185,4 +185,4 @@ advances past ten seconds, and a publish still reaches the membership.
 Mechanism: `.cairn/mechanisms/live-session-reverification`.
 Refines: Live spec 14, admission "rechecks ... registry and revocation
 state"; LIVE-016 session and revocation-state clauses.
-Status: Draft
+Status: Agreed 2026-09-13
