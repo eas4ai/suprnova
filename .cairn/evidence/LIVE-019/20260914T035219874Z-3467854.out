@@ -1,0 +1,28 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+────────────
+ Nextest run ID f1bf9e44-3470-4bf4-a175-8467dce366d7 with nextest profile: default
+    Starting 1 test across 1 binary (109 tests skipped)
+        FAIL [   0.013s] (1/1) suprnova::live hardening::revoked_session_ends_delivery
+  stdout ───
+
+    running 1 test
+    test hardening::revoked_session_ends_delivery ... FAILED
+
+    failures:
+
+    failures:
+        hardening::revoked_session_ends_delivery
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 109 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'hardening::revoked_session_ends_delivery' (3468246) panicked at framework/tests/live/hardening.rs:177:5:
+    an event published after the session was destroyed reached the old stream
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.014s] 1 test run: 0 passed, 1 failed, 109 skipped
+        FAIL [   0.013s] (1/1) suprnova::live hardening::revoked_session_ends_delivery
+error: test run failed

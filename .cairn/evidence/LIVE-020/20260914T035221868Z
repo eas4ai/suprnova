@@ -1,0 +1,21 @@
+requirement: LIVE-020
+requirement_digest: sha256:d3d79b7358993a21935da32a0ac27e727b88034a119755bfc875823cc3f95423
+sequence: 1
+history_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+mechanism: live-session-reverification
+commit: 5266d761
+inputs_digest: sha256:5d473397e6bf97d647e84b45488a6feaf48e22e2d7843864bd375f301ced3d77
+mechanism_digest: sha256:870b77b55775e66e9c800f1dbe2c077a07962ccf154990d31296dadfce5773d1
+inputs_detail: .cairn/evidence/LIVE-020/20260914T035221015Z-3467854.inputs.json
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E 'test(hardening::stale_store_session_ends_delivery)'
+cwd: .
+exit: 100
+output_digest: sha256:981134d7dfeb0fa77654c468bc10bb2a6016bcffb0949077bfe88b03fbb359da
+output: .cairn/evidence/LIVE-020/20260914T035221015Z-3467854.out
+stderr_output: .cairn/evidence/LIVE-020/20260914T035221015Z-3467854.err
+stderr_digest: sha256:981134d7dfeb0fa77654c468bc10bb2a6016bcffb0949077bfe88b03fbb359da
+signal: none
+execution_error: null
+result: fail
+source: exit
+recorded: 2026-09-14T03:52:21.868Z
