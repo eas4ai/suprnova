@@ -30,6 +30,23 @@ pub(crate) async fn session_destroyed(session_id: &[u8]) {
     runtime.async_state().revoke_session(&session).await;
 }
 
+/// Retires every membership that the session `session_id` opened for
+/// `principal`, on this node, when that session loses its signed-in user
+/// while the session row itself survives (LIVE-021, plain `Auth::logout`).
+pub(crate) async fn session_deauthenticated(session_id: &[u8], principal: &str) {
+    let Ok(runtime) = App::resolve::<LiveRuntime>() else {
+        return;
+    };
+    let digest = purpose_fingerprint(SecurityCheck::Session, session_id);
+    let Ok(session) = SessionFingerprint::from_bytes(&digest) else {
+        return;
+    };
+    runtime
+        .async_state()
+        .revoke_session_principal(&session, principal)
+        .await;
+}
+
 /// Retires every membership issued to `user_id`, on this node, when all of
 /// that user's sessions are destroyed at once.
 pub(crate) async fn principal_sessions_destroyed(user_id: &str) {

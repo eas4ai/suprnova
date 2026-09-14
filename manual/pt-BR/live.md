@@ -395,14 +395,14 @@ inscrita nele; um componente com vários streams inscreve cada um pelas
 chamadas registradas do runtime.
 
 Um stream termina com a sessão que o abriu. Quando uma sessão é destruída no
-nó que mantém o stream, por invalidação, regeneração do id ou um "sair de
-todos os lugares", toda associação que ela abriu ali é encerrada de imediato e
-nenhum evento posterior a alcança. Uma sessão destruída em outro nó é apanhada
-pela própria entrega: a sessão de cada associação é conferida de novo no
-armazenamento de sessões no máximo uma vez a cada dez segundos, então os
-eventos param dentro desse intervalo. O gate do stream é consultado de novo
-antes de cada entrega de qualquer forma, de modo que uma mudança de política
-encerra a entrega imediatamente em todos os nós.
+nó que mantém o stream, por um logout simples, invalidação, regeneração do id
+ou um "sair de todos os lugares", toda associação que ela abriu ali é
+encerrada de imediato e nenhum evento posterior a alcança. Uma sessão
+destruída em outro nó é apanhada pela própria entrega: a sessão de cada
+associação é conferida de novo no armazenamento de sessões no máximo uma vez a
+cada dez segundos, então os eventos param dentro desse intervalo. O gate do
+stream é consultado de novo antes de cada entrega de qualquer forma, de modo
+que uma mudança de política encerra a entrega imediatamente em todos os nós.
 
 ## Assets e uso sem build
 

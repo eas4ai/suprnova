@@ -1762,6 +1762,21 @@ impl AsyncState {
             .await;
     }
 
+    /// Retires every membership that `session` opened for `principal`
+    /// (LIVE-021): a plain logout clears the signed-in user and keeps the
+    /// session, so only that user's memberships on that session end.
+    pub(crate) async fn revoke_session_principal(
+        self: &Arc<Self>,
+        session: &SessionFingerprint,
+        principal: &str,
+    ) {
+        self.revoke_where(|record| {
+            record.session.as_ref() == Some(session)
+                && record.principal.as_deref() == Some(principal)
+        })
+        .await;
+    }
+
     /// Retires every membership issued to `principal` (LIVE-019), for a
     /// "log out everywhere" that destroys all of a user's sessions.
     pub(crate) async fn revoke_principal(self: &Arc<Self>, principal: &str) {

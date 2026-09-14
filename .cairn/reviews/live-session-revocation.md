@@ -101,12 +101,24 @@ on `9a7ec88d`.
   (`is_valid_session_id`). The test fixture's `x-test-session` values are
   not, so the existing async suite is unaffected by a store another test
   bound; a production session id always is.
-- **Plain `Auth::logout`.** `Auth::logout` clears authentication but keeps
-  the session row and id, so no row is destroyed and LIVE-019's hook does
-  not fire; the Gate re-check then still admits the principal recorded at
-  issuance. The scaffold's logout controller
-  (`suprnova-cli/src/templates/files/backend/controllers/auth.rs.tpl`)
-  calls plain `Auth::logout`, so a scaffolded application's logout does
-  not end its Live streams. This is outside LIVE-019's text (invalidation,
-  regeneration, destroy-for-user) and is raised to the developer as an
-  escalation rather than narrowed or widened silently.
+- **Plain `Auth::logout`.** Found here on 2026-09-14: `Auth::logout` keeps
+  the session row and id, so LIVE-019's hook did not fire and the
+  scaffold's logout controller left streams delivering. Raised as
+  escalation `live-019`, answered `ok` at 08:44, and closed by LIVE-021
+  below rather than narrowed.
+- **Named guards.** LIVE-021 acts on the default guard's user, the
+  principal a membership records at issuance; a named guard logging out
+  leaves the default user's memberships in place.
+
+### LIVE-021, `live-session-deauthentication`
+
+Safe violating example: the LIVE-019 probe with the scaffold's plain
+logout route, on the tree of `cf7332d1`. Baseline receipt
+`.cairn/evidence/LIVE-021/20260914T124955920Z` (fail):
+
+    an event published after a plain logout reached the old stream
+
+After the fix the same probe passes: `Auth::clear_authentication`
+captures the signed-in user and the session id before clearing either,
+and `live::revocation::session_deauthenticated` retires the memberships
+that session opened for that user through the unsubscribe path.

@@ -109,11 +109,11 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   hatte oder dessen Session widerrufen wurde, erhielt weiter Ereignisse, bis
   der Stream selbst geschlossen wurde. Wird eine Session auf einem Knoten
   zerstört, beendet das nun sofort jede Mitgliedschaft, die sie dort geöffnet
-  hat, gleichermaßen bei Session-Invalidierung, Id-Regenerierung und "überall
-  abmelden"; die Zustellung prüft außerdem die Session jeder Mitgliedschaft
-  höchstens alle zehn Sekunden erneut gegen den Session-Store, sodass eine auf
-  einem anderen Knoten zerstörte Session innerhalb dieses Intervalls keine
-  Ereignisse mehr erhält.
+  hat, gleichermaßen bei einfacher Abmeldung, Session-Invalidierung,
+  Id-Regenerierung und "überall abmelden"; die Zustellung prüft außerdem die
+  Session jeder Mitgliedschaft höchstens alle zehn Sekunden erneut gegen den
+  Session-Store, sodass eine auf einem anderen Knoten zerstörte Session
+  innerhalb dieses Intervalls keine Ereignisse mehr erhält.
 - **Die `Cache-Control`-Direktiven einer Anfrage werden von RenderCache
   respektiert.** Eine Anfrage mit `no-cache` wurde aus dem Speicher mit `Age`
   beantwortet, und eine kalte Anfrage mit `no-store` befüllte den Cache für

@@ -395,14 +395,15 @@ obtiene su raíz de isla suscrita a él; un componente con varios streams se
 suscribe a cada uno mediante las llamadas registradas del runtime.
 
 Un stream termina con la sesión que lo abrió. Cuando una sesión se destruye en
-el nodo que sostiene el stream, por invalidación, regeneración del id o un
-"cerrar sesión en todas partes", toda membresía que abrió allí se retira de
-inmediato y ningún evento posterior la alcanza. Una sesión destruida en otro
-nodo la detecta la propia entrega: la sesión de cada membresía se vuelve a
-comprobar contra el almacén de sesiones como mucho una vez cada diez segundos,
-así que los eventos cesan dentro de ese intervalo. El gate del stream se
-consulta de nuevo antes de cada entrega en cualquier caso, de modo que un
-cambio de política termina la entrega de inmediato en todos los nodos.
+el nodo que sostiene el stream, por un cierre de sesión simple, invalidación,
+regeneración del id o un "cerrar sesión en todas partes", toda membresía que
+abrió allí se retira de inmediato y ningún evento posterior la alcanza. Una
+sesión destruida en otro nodo la detecta la propia entrega: la sesión de cada
+membresía se vuelve a comprobar contra el almacén de sesiones como mucho una
+vez cada diez segundos, así que los eventos cesan dentro de ese intervalo. El
+gate del stream se consulta de nuevo antes de cada entrega en cualquier caso,
+de modo que un cambio de política termina la entrega de inmediato en todos los
+nodos.
 
 ## Assets y uso sin build
 

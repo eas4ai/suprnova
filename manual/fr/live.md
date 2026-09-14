@@ -397,15 +397,15 @@ d'îlot abonnée à celui-ci ; un composant avec plusieurs flux s'abonne à chac
 par les appels enregistrés du runtime.
 
 Un flux se termine avec la session qui l'a ouvert. Quand une session est
-détruite sur le nœud qui tient le flux, par invalidation, régénération de
-l'identifiant ou une "déconnexion partout", chaque adhésion qu'elle y a
-ouverte est retirée aussitôt et aucun événement ultérieur ne l'atteint. Une
-session détruite sur un autre nœud est rattrapée par la livraison elle-même :
-la session de chaque adhésion est revérifiée auprès du magasin de sessions au
-plus une fois toutes les dix secondes, si bien que les événements cessent dans
-cet intervalle. Le gate du flux est de toute façon interrogé à nouveau avant
-chaque livraison, de sorte qu'un changement de politique arrête la livraison
-immédiatement sur chaque nœud.
+détruite sur le nœud qui tient le flux, par une simple déconnexion,
+invalidation, régénération de l'identifiant ou une "déconnexion partout",
+chaque adhésion qu'elle y a ouverte est retirée aussitôt et aucun événement
+ultérieur ne l'atteint. Une session détruite sur un autre nœud est rattrapée
+par la livraison elle-même : la session de chaque adhésion est revérifiée
+auprès du magasin de sessions au plus une fois toutes les dix secondes, si
+bien que les événements cessent dans cet intervalle. Le gate du flux est de
+toute façon interrogé à nouveau avant chaque livraison, de sorte qu'un
+changement de politique arrête la livraison immédiatement sur chaque nœud.
 
 ## Assets et usage sans build
 

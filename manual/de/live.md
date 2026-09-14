@@ -400,15 +400,15 @@ deklariert, bekommt ihre Inselwurzel dafür abonniert; eine Komponente mit
 mehreren Streams abonniert jeden über die registrierten Aufrufe der Laufzeit.
 
 Ein Stream endet mit der Session, die ihn geöffnet hat. Wird eine Session auf
-dem Knoten zerstört, der den Stream hält, ob durch Invalidierung, Id-
-Regenerierung oder ein "überall abmelden", wird jede Mitgliedschaft, die sie
-dort geöffnet hat, sofort beendet, und kein späteres Ereignis erreicht sie
-mehr. Eine auf einem anderen Knoten zerstörte Session fängt die Zustellung
-selbst ab: die Session jeder Mitgliedschaft wird höchstens alle zehn Sekunden
-erneut gegen den Session-Store geprüft, sodass Ereignisse innerhalb dieses
-Intervalls ausbleiben. Das Gate des Streams wird ohnehin vor jeder Zustellung
-erneut befragt, sodass eine Richtlinienänderung die Zustellung auf jedem
-Knoten sofort beendet.
+dem Knoten zerstört, der den Stream hält, ob durch einfache Abmeldung,
+Invalidierung, Id-Regenerierung oder ein "überall abmelden", wird jede
+Mitgliedschaft, die sie dort geöffnet hat, sofort beendet, und kein späteres
+Ereignis erreicht sie mehr. Eine auf einem anderen Knoten zerstörte Session
+fängt die Zustellung selbst ab: die Session jeder Mitgliedschaft wird
+höchstens alle zehn Sekunden erneut gegen den Session-Store geprüft, sodass
+Ereignisse innerhalb dieses Intervalls ausbleiben. Das Gate des Streams wird
+ohnehin vor jeder Zustellung erneut befragt, sodass eine Richtlinienänderung
+die Zustellung auf jedem Knoten sofort beendet.
 
 ## Assets und Nutzung ohne Build
 

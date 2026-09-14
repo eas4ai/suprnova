@@ -631,7 +631,11 @@ UX flow:
   now carries the session fingerprint and the attested session store id;
   the session middleware retires every membership of a session whose store
   row it destroys, and the "log out everywhere" path retires every
-  membership of the user, both on the node that acts. Delivery re-checks a
+  membership of the user, both on the node that acts; a plain logout,
+  which clears the signed-in user and keeps the session, retires the
+  memberships that session opened for that user (LIVE-021, agreed the same
+  day after the developer's ruling on the plain-logout question). Delivery
+  re-checks a
   membership's session against the shared store at most once per ten
   seconds and retires one the store no longer holds, so a session destroyed
   on another node stops receiving events within that interval. A store

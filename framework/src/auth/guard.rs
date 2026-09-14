@@ -503,6 +503,10 @@ impl Auth {
         // event attribution, but never owns the retained remember state.
         let saved_id =
             crate::session::middleware::persisted_guard_auth_user_id(&Self::default_guard_name());
+        // The identity and session the Live memberships were issued under,
+        // captured before either is cleared (LIVE-021).
+        let live_principal = Self::id();
+        let live_session_id = session().map(|session| session.id);
 
         // STEP 1: Clear session auth + request-scoped cache + 2FA
         // pending state, and rotate the CSRF token. Clearing
@@ -519,6 +523,12 @@ impl Auth {
         session_mut(|session| {
             session.csrf_token = generate_csrf_token();
         });
+        // The session survives a plain logout, so the Live memberships it
+        // opened for this user end here rather than with the row (LIVE-021).
+        if let (Some(session_id), Some(principal)) = (live_session_id, live_principal) {
+            crate::live::revocation::session_deauthenticated(session_id.as_bytes(), &principal)
+                .await;
+        }
 
         // STEP 2: Revoke remember-me using the saved id. A failure
         // here propagates as `Err` to the caller, but the session is

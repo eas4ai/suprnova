@@ -387,13 +387,13 @@ component with several streams subscribes each through the runtime's
 registered calls.
 
 A stream ends with the session that opened it. When a session is destroyed on
-the node holding the stream, through invalidation, id regeneration, or a "log
-out everywhere", every membership it opened there is retired at once and no
-later event reaches it. A session destroyed on another node is caught by
-delivery itself: each membership's session is re-checked against the session
-store at most once per ten seconds, so events stop within that interval. The
-stream's gate is asked again before every delivery regardless, so a policy
-change ends delivery immediately on every node.
+the node holding the stream, through a plain logout, invalidation, id
+regeneration, or a "log out everywhere", every membership it opened there is
+retired at once and no later event reaches it. A session destroyed on another
+node is caught by delivery itself: each membership's session is re-checked
+against the session store at most once per ten seconds, so events stop within
+that interval. The stream's gate is asked again before every delivery
+regardless, so a policy change ends delivery immediately on every node.
 
 ## Assets and no-build use
 
