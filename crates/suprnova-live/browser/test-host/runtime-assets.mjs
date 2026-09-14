@@ -84,6 +84,14 @@ const EXPECTED_ASSETS = Object.freeze([
     role: "async-esm",
     scriptKind: "module",
   }),
+  Object.freeze({
+    capability: "ui@1",
+    contentType: "text/css; charset=utf-8",
+    file: "suprnova-ui.css",
+    preloadRel: "preload",
+    role: "ui-styles",
+    scriptKind: "stylesheet",
+  }),
 ]);
 const SHA256 = /^[0-9a-f]{64}$/u;
 
@@ -131,7 +139,7 @@ async function regularFile(path, reason) {
 function validateManifest(manifest) {
   if (
     !exactKeys(manifest, MANIFEST_FIELDS) ||
-    manifest.schema_version !== 2 ||
+    manifest.schema_version !== 3 ||
     manifest.engine_version !== "0.1.0" ||
     manifest.runtime_contract_version !== 1 ||
     !exactArray(manifest.protocol_versions, [1, 2]) ||
@@ -155,7 +163,7 @@ function validateAssetRecord(asset, expected) {
     asset.capability !== expected.capability ||
     asset.capability_version !== 1 ||
     asset.compatible_core !== ">=0.1.0 <0.2.0" ||
-    asset.content_type !== "text/javascript; charset=utf-8" ||
+    asset.content_type !== (expected.contentType ?? "text/javascript; charset=utf-8") ||
     asset.script_kind !== expected.scriptKind ||
     asset.preload_rel !== expected.preloadRel ||
     asset.cache_control !== "public, max-age=31536000, immutable" ||

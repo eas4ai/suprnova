@@ -231,7 +231,8 @@ async fn artifact_routes_serve_exact_reviewed_bytes_with_validators() {
         assert_eq!(&reply.body[..], artifact.bytes(), "{path} bytes");
         assert_eq!(
             reply.header("content-type"),
-            Some("text/javascript; charset=utf-8")
+            Some(artifact.content_type()),
+            "{path} content type"
         );
         assert_eq!(
             reply.header("content-length"),
@@ -254,10 +255,7 @@ async fn artifact_routes_serve_exact_reviewed_bytes_with_validators() {
             head.header("content-length"),
             Some(artifact.bytes().len().to_string().as_str())
         );
-        assert_eq!(
-            head.header("content-type"),
-            Some("text/javascript; charset=utf-8")
-        );
+        assert_eq!(head.header("content-type"), Some(artifact.content_type()));
 
         let unchanged = dispatch(
             Arc::clone(&router),
@@ -772,4 +770,37 @@ async fn a_document_without_islands_still_boots_only_the_core() {
     let reply = dispatch(Arc::new(router), Method::GET, "/empty", &[]).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
     assert_eq!(reply.text(), "core-esm");
+}
+
+/// UI-008 and UI-019: the suprnova-ui base is a runtime artifact served under
+/// the asset identity with its own integrity, and a document loads it only
+/// when it opts in through the bootstrap options.
+#[tokio::test]
+async fn the_suprnova_ui_base_loads_only_when_a_document_opts_in() {
+    let catalog = catalog();
+    let styles = catalog.artifact(ArtifactRole::UiStyles);
+    assert_eq!(styles.file(), "suprnova-ui.css");
+    assert_eq!(styles.content_type(), "text/css; charset=utf-8");
+    assert!(
+        std::str::from_utf8(styles.bytes())
+            .expect("the stylesheet is UTF-8")
+            .contains("@layer suprnova-ui"),
+        "the served base carries the suprnova-ui cascade layer"
+    );
+
+    let plain = render_shop(false, LiveBootstrapOptions::esm()).await;
+    assert!(
+        !plain.contains("suprnova-ui.css"),
+        "a document that never opted in serves no library base: {plain}"
+    );
+
+    let opted = render_shop(false, LiveBootstrapOptions::esm().with_suprnova_ui()).await;
+    let identity = catalog.identity();
+    let link = format!(
+        "<link rel=\"stylesheet\" href=\"/__live/assets/{identity}/suprnova-ui.css\" integrity=\"{}\" crossorigin=\"anonymous\">",
+        styles.sri()
+    );
+    assert_eq!(opted.matches("suprnova-ui.css").count(), 1);
+    let core_link = format!("/__live/assets/{identity}/suprnova-live.esm.js");
+    tag_order(&opted, &["suprnova-live-config", &link, &core_link]);
 }

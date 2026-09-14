@@ -317,8 +317,8 @@ export interface RuntimeAsset {
   readonly capability: RuntimeAssetCapability;
   readonly capability_version: 1;
   readonly compatible_core: ">=0.1.0 <0.2.0";
-  readonly content_type: "text/javascript; charset=utf-8";
-  readonly script_kind: "module" | "classic";
+  readonly content_type: "text/javascript; charset=utf-8" | "text/css; charset=utf-8";
+  readonly script_kind: "module" | "classic" | "stylesheet";
   readonly preload_rel: "modulepreload" | "preload";
   readonly cache_control: "public, max-age=31536000, immutable";
 }
@@ -330,10 +330,11 @@ export type RuntimeAssetRole =
   | "uploads-esm"
   | "uploads-classic"
   | "async-esm"
-  | "async-classic";
-export type RuntimeAssetCapability = "core@1" | "stimulus@1" | "uploads@1" | "async@1";
+  | "async-classic"
+  | "ui-styles";
+export type RuntimeAssetCapability = "core@1" | "stimulus@1" | "uploads@1" | "async@1" | "ui@1";
 export interface RuntimeAssetManifest {
-  readonly schema_version: 2;
+  readonly schema_version: 3;
   readonly engine_version: "0.1.0";
   readonly runtime_contract_version: 1;
   readonly protocol_versions: readonly [1, 2];

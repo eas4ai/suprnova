@@ -1,7 +1,7 @@
 # Suprnova Live -- 09 Runtime Bootstrap and Directives
 
 Status: Normative design specification
-Last revised: 2026-08-25
+Last revised: 2026-09-14
 
 ## Scope
 
@@ -225,6 +225,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-14 -- Manifest schema 3 adds a stylesheet artifact: the suprnova-ui
+  token stylesheet and base layer ships as role `ui-styles` (`suprnova-ui.css`,
+  `text/css`, script kind `stylesheet`, preload relation `preload`) under the
+  same identity, integrity, and cache contract as the scripts, and the
+  bootstrap emits it as a `<link rel="stylesheet">` only when a document opts
+  in through `LiveBootstrapOptions::with_suprnova_ui()` (Cairn UI-008,
+  UI-019).
 - 2026-08-25 -- Made optional island morph callbacks an explicit stable
   production-artifact boundary. Their public names are excluded from property
   mangling and the generated package declarations expose the same lifecycle.

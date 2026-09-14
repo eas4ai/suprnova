@@ -15,6 +15,7 @@ const EXPECTED_ASSETS = [
   ["suprnova-live.uploads.esm.js", "uploads-esm", "uploads@1", "module", "modulepreload"],
   ["suprnova-live.async.classic.js", "async-classic", "async@1", "classic", "preload"],
   ["suprnova-live.async.esm.js", "async-esm", "async@1", "module", "modulepreload"],
+  ["suprnova-ui.css", "ui-styles", "ui@1", "stylesheet", "preload"],
 ] as const;
 
 interface ManifestAsset {
@@ -53,7 +54,8 @@ function assetRecord(definition: (typeof EXPECTED_ASSETS)[number], content: Buff
     capability,
     capability_version: 1,
     compatible_core: ">=0.1.0 <0.2.0",
-    content_type: "text/javascript; charset=utf-8",
+    content_type:
+      scriptKind === "stylesheet" ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8",
     file,
     preload_rel: preloadRel,
     role,
@@ -81,7 +83,7 @@ async function preparedArtifacts(root: string): Promise<ReadonlyMap<string, Buff
       idiomorph: { bundled: true, license: "0BSD", name: "idiomorph", version: "0.7.4" },
     },
     runtime_contract_version: 1,
-    schema_version: 2,
+    schema_version: 3,
     snapshot_versions: [1],
   };
   await writeManifest(root, manifest);
@@ -139,7 +141,7 @@ describe("Playwright host startup artifact ownership", () => {
     });
   });
 
-  it("fails before startup when one of the eight production roles is missing", async () => {
+  it("fails before startup when one of the nine production roles is missing", async () => {
     await withArtifacts("host-startup-missing", async (root) => {
       const manifest = await readManifest(root);
       manifest.assets.pop();

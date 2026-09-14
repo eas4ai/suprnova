@@ -102,6 +102,7 @@ impl LiveBootstrapStrategy {
 pub struct LiveBootstrapOptions {
     strategy: LiveBootstrapStrategy,
     stimulus: bool,
+    suprnova_ui: bool,
     nonce: Option<String>,
 }
 
@@ -112,6 +113,7 @@ impl LiveBootstrapOptions {
         Self {
             strategy: LiveBootstrapStrategy::Esm,
             stimulus: false,
+            suprnova_ui: false,
             nonce: None,
         }
     }
@@ -122,6 +124,7 @@ impl LiveBootstrapOptions {
         Self {
             strategy: LiveBootstrapStrategy::Classic,
             stimulus: false,
+            suprnova_ui: false,
             nonce: None,
         }
     }
@@ -130,6 +133,16 @@ impl LiveBootstrapOptions {
     #[must_use]
     pub const fn with_stimulus(mut self) -> Self {
         self.stimulus = true;
+        self
+    }
+
+    /// Loads the suprnova-ui token stylesheet and base layer with the
+    /// document, as a `<link rel="stylesheet">` under the runtime's asset
+    /// identity and integrity contract. Off by default: a document that never
+    /// opts in serves no library base (Cairn UI-019).
+    #[must_use]
+    pub const fn with_suprnova_ui(mut self) -> Self {
+        self.suprnova_ui = true;
         self
     }
 
@@ -290,7 +303,7 @@ impl LiveAssetCatalog {
         if let Some(artifact) = self.manifest.artifact_by_file(file) {
             return Some(ServedAsset {
                 bytes: artifact.bytes(),
-                content_type: ARTIFACT_CONTENT_TYPE,
+                content_type: artifact.content_type(),
                 cache_control: ARTIFACT_CACHE_CONTROL,
                 etag: format!("\"{}\"", artifact.sha256_hex()),
             });
@@ -493,11 +506,19 @@ pub(crate) fn render_bootstrap(
         optional.push(strategy.async_updates());
     }
     let core = strategy.core();
-    let mut roles = optional.clone();
+    let mut roles = Vec::new();
+    if options.suprnova_ui {
+        roles.push(ArtifactRole::UiStyles);
+    }
+    roles.extend(optional.iter().copied());
     roles.push(core);
 
     let mut html = String::new();
     html.push_str(&config_element(catalog.identity(), config, protocol));
+    if options.suprnova_ui {
+        let styles = catalog.artifact(ArtifactRole::UiStyles);
+        html.push_str(&stylesheet_link(&catalog.url(styles.file()), styles.sri()));
+    }
     let core_artifact = catalog.artifact(core);
     let core_url = catalog.url(core_artifact.file());
     match strategy {
@@ -553,6 +574,12 @@ pub(crate) fn render_bootstrap(
         roles,
         strategy,
     })
+}
+
+fn stylesheet_link(url: &str, sri: &str) -> String {
+    format!(
+        "<link rel=\"stylesheet\" href=\"{url}\" integrity=\"{sri}\" crossorigin=\"anonymous\">"
+    )
 }
 
 fn module_script(url: &str, sri: &str, nonce: Option<&str>) -> String {

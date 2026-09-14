@@ -16,6 +16,7 @@ const SNAPSHOT_VERSIONS = [1];
 const IDIOMORPH_VERSION = "0.7.4";
 const BUILD_TIMESTAMP = "1970-01-01T00:00:00.000Z";
 const CONTENT_TYPE = "text/javascript; charset=utf-8";
+const STYLESHEET_CONTENT_TYPE = "text/css; charset=utf-8";
 const CACHE_CONTROL = "public, max-age=31536000, immutable";
 const COMPATIBLE_CORE = ">=0.1.0 <0.2.0";
 const OUTPUTS = Object.freeze([
@@ -75,6 +76,13 @@ const OUTPUTS = Object.freeze([
     format: "esm",
     role: "async-esm",
   },
+  {
+    capability: "ui@1",
+    entryPoint: "src/styles/suprnova-ui.css",
+    file: "suprnova-ui.css",
+    format: "css",
+    role: "ui-styles",
+  },
 ]);
 const OUTPUT_NAMES = Object.freeze([
   "index.d.ts",
@@ -83,7 +91,7 @@ const OUTPUT_NAMES = Object.freeze([
 ]);
 const CLEANABLE_NAMES = Object.freeze([
   ...OUTPUT_NAMES,
-  ...OUTPUTS.map(({ file }) => `${file}.map`),
+  ...OUTPUTS.filter(({ format }) => format !== "css").map(({ file }) => `${file}.map`),
   "index.d.ts.map",
 ]);
 const CLEANABLE_NAME_SET = new Set(CLEANABLE_NAMES);
@@ -414,8 +422,8 @@ export interface RuntimeAsset {
   readonly capability: RuntimeAssetCapability;
   readonly capability_version: 1;
   readonly compatible_core: ">=0.1.0 <0.2.0";
-  readonly content_type: "text/javascript; charset=utf-8";
-  readonly script_kind: "module" | "classic";
+  readonly content_type: "text/javascript; charset=utf-8" | "text/css; charset=utf-8";
+  readonly script_kind: "module" | "classic" | "stylesheet";
   readonly preload_rel: "modulepreload" | "preload";
   readonly cache_control: "public, max-age=31536000, immutable";
 }
@@ -427,10 +435,11 @@ export type RuntimeAssetRole =
   | "uploads-esm"
   | "uploads-classic"
   | "async-esm"
-  | "async-classic";
-export type RuntimeAssetCapability = "core@1" | "stimulus@1" | "uploads@1" | "async@1";
+  | "async-classic"
+  | "ui-styles";
+export type RuntimeAssetCapability = "core@1" | "stimulus@1" | "uploads@1" | "async@1" | "ui@1";
 export interface RuntimeAssetManifest {
-  readonly schema_version: 2;
+  readonly schema_version: 3;
   readonly engine_version: "0.1.0";
   readonly runtime_contract_version: 1;
   readonly protocol_versions: readonly [1, 2];
@@ -834,8 +843,9 @@ function assetRecord(output, content) {
     capability: output.capability,
     capability_version: 1,
     compatible_core: COMPATIBLE_CORE,
-    content_type: CONTENT_TYPE,
-    script_kind: output.format === "esm" ? "module" : "classic",
+    content_type: output.format === "css" ? STYLESHEET_CONTENT_TYPE : CONTENT_TYPE,
+    script_kind:
+      output.format === "css" ? "stylesheet" : output.format === "esm" ? "module" : "classic",
     preload_rel: output.format === "esm" ? "modulepreload" : "preload",
     cache_control: CACHE_CONTROL,
   };
@@ -882,7 +892,31 @@ function verifyBundleInputs(output, metafile) {
   }
 }
 
+// The stylesheet artifact is the suprnova-ui token stylesheet and base layer,
+// minified by esbuild's CSS pipeline. It bundles nothing: an @import would be
+// a second source of visual truth, so the build refuses one.
+async function bundleStylesheet(definition, outfile) {
+  const result = await build({
+    absWorkingDir: browserRoot,
+    bundle: false,
+    charset: "utf8",
+    entryPoints: [definition.entryPoint],
+    legalComments: "none",
+    minify: true,
+    outfile,
+    sourcemap: false,
+    target: TARGETS,
+    write: false,
+  });
+  const outputFile = result.outputFiles.find((file) => file.path === outfile);
+  if (outputFile === undefined) throw new Error("bundle_output_missing");
+  if (/@import\b/u.test(outputFile.text))
+    throw new Error(`stylesheet_import_forbidden:${definition.role}`);
+  return Buffer.from(`${OPTIONAL_BANNER}\n${outputFile.text.trimEnd()}\n`, "utf8");
+}
+
 async function bundle(definition, outfile) {
+  if (definition.format === "css") return bundleStylesheet(definition, outfile);
   const result = await build({
     absWorkingDir: browserRoot,
     bundle: true,
@@ -952,7 +986,7 @@ export async function buildRuntimeAssets(outdir = DEFAULT_OUTDIR) {
   await writeFile(join(destination, "index.d.ts"), DECLARATIONS, "utf8");
 
   const manifest = {
-    schema_version: 2,
+    schema_version: 3,
     engine_version: ENGINE_VERSION,
     runtime_contract_version: RUNTIME_CONTRACT_VERSION,
     protocol_versions: PROTOCOL_VERSIONS,

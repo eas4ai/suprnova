@@ -1,7 +1,7 @@
 # Suprnova Live -- 20 Component Library Foundations
 
 Status: Normative design specification
-Last revised: 2026-09-13
+Last revised: 2026-09-14
 
 ## Scope
 
@@ -178,6 +178,14 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-14 -- The token stylesheet and base layer are delivered as the
+  runtime artifact `ui-styles` (spec 09, manifest schema 3), so the shared
+  base carries the runtime's identity, integrity, and immutable cache policy
+  and its exact bytes are reported by the build alongside every other
+  artifact; a document opts in with `with_suprnova_ui()` and a document that
+  never opts in serves no library base (Cairn UI-008, UI-019). Artifact size
+  stays reported, not budgeted, as the operations document records; the
+  reviewed artifact table is the row the requirement asks for.
 - 2026-09-13 -- Registration is explicit and namespaced: an application names
   every library component in its `LiveRegistry` builder, nothing registers
   itself, `suprnova.` names, the `suprnova-ui/` template root, the

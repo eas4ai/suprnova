@@ -5,6 +5,10 @@ Cargo.lock
 # Node
 **/node_modules/
 **/dist/
+# The Live browser runtime's built artifacts are tracked on purpose: the
+# engine embeds them and the Live gate checks a rebuild is byte-identical.
+!crates/suprnova-live/browser/dist/
+!crates/suprnova-live/browser/dist/**
 
 # Build outputs
 /public/assets

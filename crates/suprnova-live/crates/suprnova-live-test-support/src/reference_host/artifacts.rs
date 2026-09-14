@@ -11,7 +11,7 @@ use sha2::{Digest as _, Sha256};
 use tokio::fs;
 
 const MANIFEST_FILE: &str = "suprnova-live.assets.json";
-const EXPECTED_ROLES: [&str; 8] = [
+const EXPECTED_ROLES: [&str; 9] = [
     "core-classic",
     "core-esm",
     "stimulus-classic",
@@ -20,6 +20,7 @@ const EXPECTED_ROLES: [&str; 8] = [
     "uploads-esm",
     "async-classic",
     "async-esm",
+    "ui-styles",
 ];
 
 #[derive(Clone, Copy)]
@@ -29,15 +30,17 @@ struct ExpectedAsset {
     capability: &'static str,
     script_kind: &'static str,
     preload_rel: &'static str,
+    content_type: &'static str,
 }
 
-const EXPECTED_ASSETS: [ExpectedAsset; 8] = [
+const EXPECTED_ASSETS: [ExpectedAsset; 9] = [
     ExpectedAsset {
         role: "core-classic",
         file: "suprnova-live.classic.js",
         capability: "core@1",
         script_kind: "classic",
         preload_rel: "preload",
+        content_type: "text/javascript; charset=utf-8",
     },
     ExpectedAsset {
         role: "core-esm",
@@ -45,6 +48,7 @@ const EXPECTED_ASSETS: [ExpectedAsset; 8] = [
         capability: "core@1",
         script_kind: "module",
         preload_rel: "modulepreload",
+        content_type: "text/javascript; charset=utf-8",
     },
     ExpectedAsset {
         role: "stimulus-classic",
@@ -52,6 +56,7 @@ const EXPECTED_ASSETS: [ExpectedAsset; 8] = [
         capability: "stimulus@1",
         script_kind: "classic",
         preload_rel: "preload",
+        content_type: "text/javascript; charset=utf-8",
     },
     ExpectedAsset {
         role: "stimulus-esm",
@@ -59,6 +64,7 @@ const EXPECTED_ASSETS: [ExpectedAsset; 8] = [
         capability: "stimulus@1",
         script_kind: "module",
         preload_rel: "modulepreload",
+        content_type: "text/javascript; charset=utf-8",
     },
     ExpectedAsset {
         role: "uploads-classic",
@@ -66,6 +72,7 @@ const EXPECTED_ASSETS: [ExpectedAsset; 8] = [
         capability: "uploads@1",
         script_kind: "classic",
         preload_rel: "preload",
+        content_type: "text/javascript; charset=utf-8",
     },
     ExpectedAsset {
         role: "uploads-esm",
@@ -73,6 +80,7 @@ const EXPECTED_ASSETS: [ExpectedAsset; 8] = [
         capability: "uploads@1",
         script_kind: "module",
         preload_rel: "modulepreload",
+        content_type: "text/javascript; charset=utf-8",
     },
     ExpectedAsset {
         role: "async-classic",
@@ -80,6 +88,7 @@ const EXPECTED_ASSETS: [ExpectedAsset; 8] = [
         capability: "async@1",
         script_kind: "classic",
         preload_rel: "preload",
+        content_type: "text/javascript; charset=utf-8",
     },
     ExpectedAsset {
         role: "async-esm",
@@ -87,6 +96,15 @@ const EXPECTED_ASSETS: [ExpectedAsset; 8] = [
         capability: "async@1",
         script_kind: "module",
         preload_rel: "modulepreload",
+        content_type: "text/javascript; charset=utf-8",
+    },
+    ExpectedAsset {
+        role: "ui-styles",
+        file: "suprnova-ui.css",
+        capability: "ui@1",
+        script_kind: "stylesheet",
+        preload_rel: "preload",
+        content_type: "text/css; charset=utf-8",
     },
 ];
 
@@ -142,7 +160,7 @@ impl ValidatedArtifacts {
             .map_err(|error| format!("asset manifest: {error}"))?;
         let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
             .map_err(|error| format!("asset manifest JSON: {error}"))?;
-        if manifest.schema_version != 2
+        if manifest.schema_version != 3
             || manifest.engine_version != "0.1.0"
             || manifest.runtime_contract_version != 1
             || manifest.protocol_versions != [1, 2]
@@ -161,7 +179,7 @@ impl ValidatedArtifacts {
                 .ok_or_else(|| {
                     "asset manifest does not contain the exact production roles".to_owned()
                 })?;
-            if selected.content_type != "text/javascript; charset=utf-8"
+            if selected.content_type != expected.content_type
                 || selected.cache_control != "public, max-age=31536000, immutable"
                 || selected.file != expected.file
                 || selected.capability != expected.capability
@@ -233,9 +251,11 @@ fn validate_file_name(file: &str) -> Result<(), String> {
         || file.len() > 255
         || !matches!(components.next(), Some(Component::Normal(_)))
         || components.next().is_some()
-        || !file.ends_with(".js")
+        || !(file.ends_with(".js") || file.ends_with(".css"))
     {
-        return Err("manifest asset file is not a single JavaScript path segment".to_owned());
+        return Err(
+            "manifest asset file is not a single script or stylesheet path segment".to_owned(),
+        );
     }
     Ok(())
 }

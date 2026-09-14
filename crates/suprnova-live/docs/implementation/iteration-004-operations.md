@@ -7,7 +7,7 @@ a production Suprnova deployment guide.
 
 ## Artifacts
 
-`rtk npm --prefix browser run build` creates a deterministic manifest-schema-v2
+`rtk npm --prefix browser run build` creates a deterministic manifest-schema-v3
 asset set. The manifest records engine version `0.1.0`, runtime contract version
 1, Live protocol versions 1 and 2, snapshot version 1, exact bytes, SHA-256, SRI,
 content type, script kind, preload relation, compatibility range, and immutable
@@ -23,8 +23,11 @@ cache policy.
 | `uploads-classic`  | `suprnova-live.uploads.classic.js`  | `uploads@1`  | Optional upload feature      |
 | `async-esm`        | `suprnova-live.async.esm.js`        | `async@1`    | Optional async feature       |
 | `async-classic`    | `suprnova-live.async.classic.js`    | `async@1`    | Optional async feature       |
+| `ui-styles`        | `suprnova-ui.css`                   | `ui@1`       | Optional stylesheet, opt-in  |
 
-Choose ESM or classic for a document, not both. Trusted checked render metadata
+The `ui-styles` role is the suprnova-ui token stylesheet and base layer,
+served as `text/css` with script kind `stylesheet`; a document loads it only
+through `with_suprnova_ui()`. Choose ESM or classic for a document, not both. Trusted checked render metadata
 selects optional roles; element attributes cannot supply an artifact URL. An
 optional artifact registers with the singleton core lifecycle and never starts
 a second runtime. A bundler can use the equivalent `@suprnova/live/runtime`,

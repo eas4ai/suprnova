@@ -55,7 +55,7 @@ against a real Suprnova server.
 
 ## Suprnova delivery
 
-The ten build outputs are tracked under `browser/dist/` and embedded into the
+The eleven build outputs are tracked under `browser/dist/` and embedded into the
 engine crate by `suprnova_live::artifacts`. On first use the engine validates
 the manifest against the embedded bytes: exact schema, runtime, protocol, and
 snapshot versions; every role recorded once with its contracted file name,
@@ -97,7 +97,11 @@ carries its manifest integrity value and `crossorigin="anonymous"`; an
 optional nonce is stamped on script elements. The upload role is emitted when
 a mounted component declares an upload policy, the asynchronous role when a
 component declares streams, and the Stimulus bridge only with
-`with_stimulus()`. Roles are a set, so repeated islands never duplicate a
+`with_stimulus()`. The suprnova-ui token stylesheet and base layer (role
+`ui-styles`, file `suprnova-ui.css`, served as `text/css`) is emitted as a
+`<link rel="stylesheet">` carrying its integrity value directly after the
+configuration element, and only with `with_suprnova_ui()`; a document that
+never opts in serves no library base. Roles are a set, so repeated islands never duplicate a
 tag; a second `bootstrap()` call or a mount after bootstrap fails closed.
 
 ### Publication through the CLI

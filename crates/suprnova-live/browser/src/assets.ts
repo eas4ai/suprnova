@@ -7,6 +7,7 @@ import {
 
 export const PRODUCTION_CACHE_CONTROL = "public, max-age=31536000, immutable" as const;
 export const PRODUCTION_CONTENT_TYPE = "text/javascript; charset=utf-8" as const;
+export const STYLESHEET_CONTENT_TYPE = "text/css; charset=utf-8" as const;
 export const REPRODUCIBLE_BUILD_TIMESTAMP = "1970-01-01T00:00:00.000Z" as const;
 
 export type RuntimeAssetRole =
@@ -17,9 +18,10 @@ export type RuntimeAssetRole =
   | "uploads-esm"
   | "uploads-classic"
   | "async-esm"
-  | "async-classic";
+  | "async-classic"
+  | "ui-styles";
 
-export type RuntimeAssetCapability = "core@1" | "stimulus@1" | "uploads@1" | "async@1";
+export type RuntimeAssetCapability = "core@1" | "stimulus@1" | "uploads@1" | "async@1" | "ui@1";
 
 export interface RuntimeAsset {
   readonly file: string;
@@ -30,14 +32,14 @@ export interface RuntimeAsset {
   readonly capability: RuntimeAssetCapability;
   readonly capability_version: 1;
   readonly compatible_core: ">=0.1.0 <0.2.0";
-  readonly content_type: typeof PRODUCTION_CONTENT_TYPE;
-  readonly script_kind: "module" | "classic";
+  readonly content_type: typeof PRODUCTION_CONTENT_TYPE | typeof STYLESHEET_CONTENT_TYPE;
+  readonly script_kind: "module" | "classic" | "stylesheet";
   readonly preload_rel: "modulepreload" | "preload";
   readonly cache_control: typeof PRODUCTION_CACHE_CONTROL;
 }
 
 export interface RuntimeAssetManifest {
-  readonly schema_version: 2;
+  readonly schema_version: 3;
   readonly engine_version: typeof ENGINE_VERSION;
   readonly runtime_contract_version: typeof RUNTIME_CONTRACT_VERSION;
   readonly protocol_versions: typeof SUPPORTED_PROTOCOL_VERSIONS;

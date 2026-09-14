@@ -266,6 +266,7 @@ async fn serves_only_validated_manifest_owned_production_assets() {
             "core-esm",
             "stimulus-classic",
             "stimulus-esm",
+            "ui-styles",
             "uploads-classic",
             "uploads-esm",
         ])

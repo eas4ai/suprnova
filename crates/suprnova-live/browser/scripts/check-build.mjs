@@ -15,6 +15,7 @@ const EXPECTED_OUTPUTS = Object.freeze([
   "suprnova-live.stimulus.esm.js",
   "suprnova-live.uploads.classic.js",
   "suprnova-live.uploads.esm.js",
+  "suprnova-ui.css",
 ]);
 
 const root = await mkdtemp(join(tmpdir(), "suprnova-live-build-check-"));

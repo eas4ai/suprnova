@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "engine_version": "0.1.0",
   "runtime_contract_version": 1,
   "protocol_versions": [
@@ -121,6 +121,20 @@
       "content_type": "text/javascript; charset=utf-8",
       "script_kind": "module",
       "preload_rel": "modulepreload",
+      "cache_control": "public, max-age=31536000, immutable"
+    },
+    {
+      "file": "suprnova-ui.css",
+      "role": "ui-styles",
+      "bytes": 16642,
+      "sha256": "a13b67c8b20b11d0c315a040b9249235b0c59cc5d145466ecd6990344c7b9642",
+      "sri": "sha256-oTtnyLILEdDDFaBAuSSSNbDFnMXRRUZuzWmQNEx7lkI=",
+      "capability": "ui@1",
+      "capability_version": 1,
+      "compatible_core": ">=0.1.0 <0.2.0",
+      "content_type": "text/css; charset=utf-8",
+      "script_kind": "stylesheet",
+      "preload_rel": "preload",
       "cache_control": "public, max-age=31536000, immutable"
     }
   ],

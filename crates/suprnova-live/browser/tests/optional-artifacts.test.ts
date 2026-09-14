@@ -30,6 +30,7 @@ const OUTPUT_NAMES = Object.freeze([
   "suprnova-live.stimulus.esm.js",
   "suprnova-live.uploads.classic.js",
   "suprnova-live.uploads.esm.js",
+  "suprnova-ui.css",
 ] as const);
 
 const ROLES = Object.freeze([
@@ -39,6 +40,7 @@ const ROLES = Object.freeze([
   "core-esm",
   "stimulus-classic",
   "stimulus-esm",
+  "ui-styles",
   "uploads-classic",
   "uploads-esm",
 ] as const);
@@ -51,14 +53,14 @@ interface OptionalAsset {
   readonly bytes: number;
   readonly sha256: string;
   readonly sri: string;
-  readonly capability: "async@1" | "core@1" | "stimulus@1" | "uploads@1";
+  readonly capability: "async@1" | "core@1" | "stimulus@1" | "uploads@1" | "ui@1";
   readonly capability_version: 1;
   readonly compatible_core: ">=0.1.0 <0.2.0";
-  readonly script_kind: "module" | "classic";
+  readonly script_kind: "module" | "classic" | "stylesheet";
 }
 
 interface OptionalManifest {
-  readonly schema_version: 2;
+  readonly schema_version: 3;
   readonly protocol_versions: readonly [1, 2];
   readonly assets: readonly OptionalAsset[];
 }
@@ -104,12 +106,12 @@ afterAll(async () => {
 });
 
 describe("role-typed optional production artifacts", () => {
-  it("emits exactly eight scripts, one declaration, and one schema-2 manifest", async () => {
+  it("emits exactly eight scripts, one stylesheet, one declaration, and one schema-3 manifest", async () => {
     expect((await readdir(outputDirectory)).sort()).toEqual(OUTPUT_NAMES);
     const manifest = JSON.parse(
       await readFile(join(outputDirectory, "suprnova-live.assets.json"), "utf8"),
     ) as OptionalManifest;
-    expect(manifest.schema_version).toBe(2);
+    expect(manifest.schema_version).toBe(3);
     expect(manifest.protocol_versions).toEqual([1, 2]);
     expect(manifest.assets.map(({ role }) => role).sort()).toEqual(ROLES);
   });
@@ -125,10 +127,11 @@ describe("role-typed optional production artifacts", () => {
       "core-esm": "core@1",
       "stimulus-classic": "stimulus@1",
       "stimulus-esm": "stimulus@1",
+      "ui-styles": "ui@1",
       "uploads-classic": "uploads@1",
       "uploads-esm": "uploads@1",
     };
-    expect(new Set(manifest.assets.map(({ sha256 }) => sha256))).toHaveLength(8);
+    expect(new Set(manifest.assets.map(({ sha256 }) => sha256))).toHaveLength(9);
     for (const asset of manifest.assets) {
       const content = await readFile(join(outputDirectory, asset.file));
       const digest = createHash("sha256").update(content).digest();
@@ -138,7 +141,13 @@ describe("role-typed optional production artifacts", () => {
       expect(asset.capability).toBe(capabilities[asset.role]);
       expect(asset.capability_version).toBe(1);
       expect(asset.compatible_core).toBe(">=0.1.0 <0.2.0");
-      expect(asset.script_kind).toBe(asset.role.endsWith("-esm") ? "module" : "classic");
+      expect(asset.script_kind).toBe(
+        asset.role === "ui-styles"
+          ? "stylesheet"
+          : asset.role.endsWith("-esm")
+            ? "module"
+            : "classic",
+      );
     }
   });
 

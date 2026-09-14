@@ -25,13 +25,16 @@ pub const BROWSER_RUNTIME_VERSION: &str = "0.1.0";
 pub const RUNTIME_CONTRACT_VERSION: u16 = 1;
 
 /// Manifest schema version this engine understands.
-pub const MANIFEST_SCHEMA_VERSION: u16 = 2;
+pub const MANIFEST_SCHEMA_VERSION: u16 = 3;
 
 /// Fixed timestamp the reproducible build records.
 pub const REPRODUCIBLE_BUILD_TIMESTAMP: &str = "1970-01-01T00:00:00.000Z";
 
 /// Exact media type of every JavaScript artifact.
 pub const ARTIFACT_CONTENT_TYPE: &str = "text/javascript; charset=utf-8";
+/// Content type of the stylesheet artifact (the suprnova-ui token stylesheet
+/// and base layer).
+pub const STYLESHEET_CONTENT_TYPE: &str = "text/css; charset=utf-8";
 
 /// Cache policy the manifest records for immutable, identity-addressed artifacts.
 pub const ARTIFACT_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
@@ -80,6 +83,10 @@ const EMBEDDED_FILES: &[(&str, &[u8])] = &[
         "suprnova-live.async.esm.js",
         include_bytes!("../browser/dist/suprnova-live.async.esm.js"),
     ),
+    (
+        "suprnova-ui.css",
+        include_bytes!("../browser/dist/suprnova-ui.css"),
+    ),
 ];
 
 /// Closed set of production artifact roles.
@@ -101,11 +108,14 @@ pub enum ArtifactRole {
     AsyncEsm,
     /// Optional asynchronous-update feature as a classic script.
     AsyncClassic,
+    /// The suprnova-ui token stylesheet and base layer, loaded only when a
+    /// document opts in (Cairn UI-008, UI-019).
+    UiStyles,
 }
 
 impl ArtifactRole {
     /// Every role, in the order the manifest is validated and served.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::CoreClassic,
         Self::CoreEsm,
         Self::StimulusClassic,
@@ -114,6 +124,7 @@ impl ArtifactRole {
         Self::UploadsEsm,
         Self::AsyncClassic,
         Self::AsyncEsm,
+        Self::UiStyles,
     ];
 
     /// Returns the manifest role name.
@@ -128,6 +139,7 @@ impl ArtifactRole {
             Self::UploadsClassic => "uploads-classic",
             Self::AsyncEsm => "async-esm",
             Self::AsyncClassic => "async-classic",
+            Self::UiStyles => "ui-styles",
         }
     }
 
@@ -149,6 +161,7 @@ impl ArtifactRole {
             Self::UploadsClassic => "suprnova-live.uploads.classic.js",
             Self::AsyncEsm => "suprnova-live.async.esm.js",
             Self::AsyncClassic => "suprnova-live.async.classic.js",
+            Self::UiStyles => "suprnova-ui.css",
         }
     }
 
@@ -160,6 +173,7 @@ impl ArtifactRole {
             Self::StimulusEsm | Self::StimulusClassic => "stimulus@1",
             Self::UploadsEsm | Self::UploadsClassic => "uploads@1",
             Self::AsyncEsm | Self::AsyncClassic => "async@1",
+            Self::UiStyles => "ui@1",
         }
     }
 
@@ -174,6 +188,7 @@ impl ArtifactRole {
             | Self::StimulusClassic
             | Self::UploadsClassic
             | Self::AsyncClassic => ScriptKind::Classic,
+            Self::UiStyles => ScriptKind::Stylesheet,
         }
     }
 
@@ -182,7 +197,7 @@ impl ArtifactRole {
     pub const fn preload_relation(self) -> PreloadRelation {
         match self.script_kind() {
             ScriptKind::Module => PreloadRelation::ModulePreload,
-            ScriptKind::Classic => PreloadRelation::Preload,
+            ScriptKind::Classic | ScriptKind::Stylesheet => PreloadRelation::Preload,
         }
     }
 
@@ -190,6 +205,29 @@ impl ArtifactRole {
     #[must_use]
     pub const fn is_core(self) -> bool {
         matches!(self, Self::CoreEsm | Self::CoreClassic)
+    }
+
+    /// Returns whether the role is a stylesheet rather than a script.
+    #[must_use]
+    pub const fn is_stylesheet(self) -> bool {
+        matches!(self, Self::UiStyles)
+    }
+
+    /// Returns the content type the artifact is served with.
+    #[must_use]
+    pub const fn content_type(self) -> &'static str {
+        match self {
+            Self::UiStyles => STYLESHEET_CONTENT_TYPE,
+            _ => ARTIFACT_CONTENT_TYPE,
+        }
+    }
+
+    /// Returns the file extension the role's artifact name must end with.
+    const fn extension(self) -> &'static str {
+        match self {
+            Self::UiStyles => ".css",
+            _ => ".js",
+        }
     }
 
     /// Returns the role's position in [`Self::ALL`], which is also its artifact index.
@@ -203,6 +241,7 @@ impl ArtifactRole {
             Self::UploadsEsm => 5,
             Self::AsyncClassic => 6,
             Self::AsyncEsm => 7,
+            Self::UiStyles => 8,
         }
     }
 }
@@ -214,6 +253,8 @@ pub enum ScriptKind {
     Module,
     /// Classic `<script>`.
     Classic,
+    /// `<link rel="stylesheet">`.
+    Stylesheet,
 }
 
 impl ScriptKind {
@@ -223,6 +264,7 @@ impl ScriptKind {
         match self {
             Self::Module => "module",
             Self::Classic => "classic",
+            Self::Stylesheet => "stylesheet",
         }
     }
 }
@@ -334,7 +376,7 @@ impl RuntimeArtifact {
     /// Returns the exact media type to serve.
     #[must_use]
     pub const fn content_type(&self) -> &'static str {
-        ARTIFACT_CONTENT_TYPE
+        self.role.content_type()
     }
 
     /// Returns the immutable cache policy to serve.
@@ -382,7 +424,7 @@ pub struct RuntimeArtifactManifest {
     protocol_versions: Vec<u16>,
     snapshot_versions: Vec<u16>,
     built_at: String,
-    artifacts: Box<[RuntimeArtifact; 8]>,
+    artifacts: Box<[RuntimeArtifact; 9]>,
     identity: String,
 }
 
@@ -473,12 +515,12 @@ impl RuntimeArtifactManifest {
             if recorded.next().is_some() {
                 return Err(ArtifactError::new(ArtifactErrorKind::ManifestInvalid));
             }
-            if !single_segment_javascript(&asset.file)
+            if !single_segment_file(&asset.file, role)
                 || asset.file != role.file()
                 || asset.capability != role.capability()
                 || asset.capability_version != CAPABILITY_VERSION
                 || asset.compatible_core != COMPATIBLE_CORE
-                || asset.content_type != ARTIFACT_CONTENT_TYPE
+                || asset.content_type != role.content_type()
                 || asset.script_kind != role.script_kind().as_str()
                 || asset.preload_rel != role.preload_relation().as_str()
                 || asset.cache_control != ARTIFACT_CACHE_CONTROL
@@ -507,7 +549,7 @@ impl RuntimeArtifactManifest {
                 sri,
             });
         }
-        let artifacts: Box<[RuntimeArtifact; 8]> = artifacts
+        let artifacts: Box<[RuntimeArtifact; 9]> = artifacts
             .into_boxed_slice()
             .try_into()
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::ManifestInvalid))?;
@@ -616,7 +658,7 @@ pub fn runtime_artifacts() -> Result<&'static RuntimeArtifactManifest, ArtifactE
         .map_err(|error| *error)
 }
 
-fn single_segment_javascript(file: &str) -> bool {
+fn single_segment_file(file: &str, role: ArtifactRole) -> bool {
     let path = Path::new(file);
     let mut components = path.components();
     !file.is_empty()
@@ -625,7 +667,7 @@ fn single_segment_javascript(file: &str) -> bool {
         && !file.bytes().any(|byte| byte.is_ascii_control())
         && matches!(components.next(), Some(Component::Normal(_)))
         && components.next().is_none()
-        && file.ends_with(".js")
+        && file.ends_with(role.extension())
 }
 
 fn hex(digest: &[u8]) -> String {
@@ -640,11 +682,26 @@ fn hex(digest: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::single_segment_javascript;
+    use super::{ArtifactRole, single_segment_file};
 
     #[test]
     fn artifact_file_names_are_single_closed_segments() {
-        assert!(single_segment_javascript("suprnova-live.esm.js"));
+        assert!(single_segment_file(
+            "suprnova-live.esm.js",
+            ArtifactRole::CoreEsm
+        ));
+        assert!(single_segment_file(
+            "suprnova-ui.css",
+            ArtifactRole::UiStyles
+        ));
+        assert!(!single_segment_file(
+            "suprnova-ui.css",
+            ArtifactRole::CoreEsm
+        ));
+        assert!(!single_segment_file(
+            "suprnova-live.esm.js",
+            ArtifactRole::UiStyles
+        ));
         for hostile in [
             "",
             "../runtime.js",
@@ -653,7 +710,10 @@ mod tests {
             "runtime.ts",
             "run\ntime.js",
         ] {
-            assert!(!single_segment_javascript(hostile), "{hostile}");
+            assert!(
+                !single_segment_file(hostile, ArtifactRole::CoreEsm),
+                "{hostile}"
+            );
         }
     }
 }

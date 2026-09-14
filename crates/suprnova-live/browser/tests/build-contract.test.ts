@@ -16,7 +16,7 @@ interface AssetEntry {
   readonly sha256: string;
   readonly sri: string;
   readonly content_type: string;
-  readonly script_kind: "module" | "classic";
+  readonly script_kind: "module" | "classic" | "stylesheet";
   readonly preload_rel: "modulepreload" | "preload";
   readonly cache_control: string;
   readonly capability: string;
@@ -25,7 +25,7 @@ interface AssetEntry {
 }
 
 interface AssetManifest {
-  readonly schema_version: 2;
+  readonly schema_version: 3;
   readonly engine_version: string;
   readonly runtime_contract_version: 1;
   readonly protocol_versions: readonly number[];
@@ -81,6 +81,7 @@ describe("deterministic production assets", () => {
       "suprnova-live.stimulus.esm.js",
       "suprnova-live.uploads.classic.js",
       "suprnova-live.uploads.esm.js",
+      "suprnova-ui.css",
     ]);
   });
 
@@ -109,7 +110,7 @@ describe("deterministic production assets", () => {
     ) as AssetManifest;
 
     expect(manifest).toMatchObject({
-      schema_version: 2,
+      schema_version: 3,
       engine_version: "0.1.0",
       runtime_contract_version: 1,
       protocol_versions: [1, 2],
@@ -133,6 +134,7 @@ describe("deterministic production assets", () => {
       "suprnova-live.uploads.esm.js",
       "suprnova-live.async.classic.js",
       "suprnova-live.async.esm.js",
+      "suprnova-ui.css",
     ]);
     for (const asset of manifest.assets) {
       const content = await bytes(asset.file);
@@ -140,7 +142,11 @@ describe("deterministic production assets", () => {
       expect(asset.bytes).toBe(content.byteLength);
       expect(asset.sha256).toBe(digest.toString("hex"));
       expect(asset.sri).toBe(`sha256-${digest.toString("base64")}`);
-      expect(asset.content_type).toBe("text/javascript; charset=utf-8");
+      expect(asset.content_type).toBe(
+        asset.script_kind === "stylesheet"
+          ? "text/css; charset=utf-8"
+          : "text/javascript; charset=utf-8",
+      );
       expect(asset.cache_control).toBe("public, max-age=31536000, immutable");
       expect(asset.preload_rel).toBe(asset.script_kind === "module" ? "modulepreload" : "preload");
       expect(asset.capability_version).toBe(1);

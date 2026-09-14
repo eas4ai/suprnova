@@ -1,0 +1,9 @@
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live_assets
+inputs:
+  - framework/src/live/
+  - framework/tests/live/assets.rs
+  - framework/tests/support/
+  - crates/suprnova-live/src/artifacts.rs
+  - crates/suprnova-live/browser/dist/
+requirements:
+  - UI-019
