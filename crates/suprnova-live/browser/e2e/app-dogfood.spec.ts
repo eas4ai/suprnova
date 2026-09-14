@@ -108,3 +108,73 @@ test("the activity feed subscribes over the asynchronous transport and refreshes
   await expect(page.getByText(`Posted ${expected}`, { exact: true })).toBeVisible();
   await expectConnected(page, 3);
 });
+
+test("the form gallery loads the suprnova-ui base and its vendored assets, and the password reveal upgrades", async ({
+  page,
+}) => {
+  await page.goto(`${APP_ORIGIN}/live/demo-login`);
+  await expect(page).toHaveURL(`${APP_ORIGIN}/live`);
+  await page.goto(`${APP_ORIGIN}/live/forms`);
+  await expect(page.getByRole("heading", { name: "Form gallery" })).toBeVisible();
+  await expectConnected(page, 1);
+
+  const stylesheets = await page.evaluate(() =>
+    [...document.querySelectorAll('link[rel="stylesheet"]')].map(
+      (link) => (link as HTMLLinkElement).href,
+    ),
+  );
+  expect(
+    stylesheets.some(
+      (href) => href.includes("/__live/assets/") && href.endsWith("/suprnova-ui.css"),
+    ),
+  ).toBe(true);
+  expect(stylesheets.some((href) => href.endsWith("/suprnova-ui/field/field.css"))).toBe(true);
+  const layered = await page.evaluate(() =>
+    [...document.styleSheets].some((sheet) => {
+      try {
+        return [...sheet.cssRules].some(
+          (rule) => rule instanceof CSSLayerBlockRule && rule.name === "suprnova-ui",
+        );
+      } catch {
+        return false;
+      }
+    }),
+  );
+  expect(layered).toBe(true);
+
+  // UI-012, UI-018: the password reveal is a light-DOM element defined only
+  // by its own vendored script, upgraded on this engine.
+  await expect
+    .poll(() => page.evaluate(() => customElements.get("sn-password-reveal") !== undefined))
+    .toBe(true);
+  const password = page.locator("#secret");
+  await expect(password).toHaveAttribute("type", "password");
+  const reveal = page.getByRole("button", { name: "Show" });
+  await expect(reveal).toBeVisible();
+  await reveal.click();
+  await expect(password).toHaveAttribute("type", "text");
+  await expect(page.getByRole("button", { name: "Hide" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Hide" }).click();
+  await expect(password).toHaveAttribute("type", "password");
+  const shadowRoots = await page.evaluate(
+    () =>
+      [...document.querySelectorAll("*")].filter((element) => element.shadowRoot !== null).length,
+  );
+  expect(shadowRoots).toBe(0);
+});
+
+test("a document that never added a library component defines no sn- element", async ({ page }) => {
+  await page.goto(`${APP_ORIGIN}/live/demo-login`);
+  await expect(page).toHaveURL(`${APP_ORIGIN}/live`);
+  await expectConnected(page, 3);
+  const defined = await page.evaluate(() => customElements.get("sn-password-reveal") !== undefined);
+  expect(defined).toBe(false);
+  const prefixed = await page.evaluate(() =>
+    [...document.querySelectorAll("*")].some((element) =>
+      element.tagName.toLowerCase().startsWith("sn-"),
+    ),
+  );
+  expect(prefixed).toBe(false);
+  const html = await page.content();
+  expect(html).not.toContain("suprnova-ui.css");
+});

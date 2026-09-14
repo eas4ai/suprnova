@@ -30,6 +30,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .unwrap_or(4178);
     Crypt::init(EncryptionKey::generate());
     App::init();
+    // The vendored library assets live under this crate's templates/, not the
+    // directory the browser suite starts the host from.
+    suprnova::app::paths::set_base_path(env!("CARGO_MANIFEST_DIR"));
 
     let connection = sea_orm::Database::connect("sqlite::memory:").await?;
     Migrator::up(&connection, None).await?;
