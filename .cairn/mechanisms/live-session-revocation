@@ -1,0 +1,19 @@
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E 'test(hardening::revoked_session_ends_delivery)'
+inputs:
+  - framework/src/render_cache/
+  - framework/src/live/
+  - framework/src/database/
+  - framework/src/eloquent/
+  - framework/tests/live/
+  - crates/suprnova-live/src/
+  - crates/suprnova-live/tests/
+  - Cargo.lock
+  - framework/tests/support/
+  - framework/tests/templates/
+  - framework/tests/database/
+  - crates/suprnova-live/docs/specs/suprnova-live/
+  - CHANGELOG.md
+  - manual/
+  - .manual-translations.lock
+requirements:
+  - LIVE-019

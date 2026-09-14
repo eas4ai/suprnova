@@ -162,3 +162,27 @@ authorizer all succeed (ASTRA-07).
 Mechanism: `.cairn/mechanisms/live-async-issuance-cap`.
 Refines: Live spec 14, bounded per-scope issuance.
 Status: Agreed 2026-09-13
+[LIVE-019] The framework MUST retire every async membership issued to a
+session when that session is destroyed on the same node, before any
+event published afterwards is appended: session invalidation, session id
+regeneration, and `destroy_for_user` each revoke the memberships that
+carry the destroyed session's fingerprint or the affected principal.
+Falsifier: a subscriber logs out with `Auth::logout_and_invalidate` and
+still receives an event published after the logout (the open clause of
+LIVE-016).
+Mechanism: `.cairn/mechanisms/live-session-revocation`.
+Refines: Live spec 14, admission "rechecks ... registry and revocation
+state"; LIVE-016 session and revocation-state clauses.
+Status: Draft
+
+[LIVE-020] The framework MUST re-verify a membership's session against
+the shared session store before delivery, at most once per membership per
+ten seconds, and MUST retire a membership whose session the store no
+longer holds, so a session destroyed on another node stops receiving
+events within that interval.
+Falsifier: a session row is removed from the store directly, the clock
+advances past ten seconds, and a publish still reaches the membership.
+Mechanism: `.cairn/mechanisms/live-session-reverification`.
+Refines: Live spec 14, admission "rechecks ... registry and revocation
+state"; LIVE-016 session and revocation-state clauses.
+Status: Draft
