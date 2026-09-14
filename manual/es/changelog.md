@@ -179,7 +179,7 @@ recientes primero.
   ahora se reproducen byte a byte desde la representación almacenada.
   Detectado por la auditoría adversarial del 2026-09-13 (ASTRA-11).
 - **El lockfile se desprende de una versión insegura y tres retiradas de
-  dependencias.** `event-listener` 5.4.2 reemplaza a 5.4.1, cuyo listener
+  dependencias.** `event-listener` 5.4.2 reemplaza a 5.4.1, cuyo oyente
   asignado en la pila era incondicionalmente `Send`/`Sync` y dejaba que una
   etiqueta `!Send` cruzara hilos en código seguro (RUSTSEC-2026-0221); las
   dependencias de Suprnova solo usan eventos sin etiqueta, así que la ruta

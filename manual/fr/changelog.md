@@ -182,7 +182,7 @@ en premier.
   en-têtes sont désormais rejoués octet pour octet depuis la représentation
   stockée. Trouvé par l'audit adversarial du 2026-09-13 (ASTRA-11) .
 - **Le fichier de verrouillage se défait d'une version non sûre et de trois
-  versions retirées.** `event-listener` 5.4.2 remplace 5.4.1, dont le listener
+  versions retirées.** `event-listener` 5.4.2 remplace 5.4.1, dont l'écouteur
   alloué sur la pile était inconditionnellement `Send`/`Sync` et laissait un
   tag `!Send` traverser les threads en code sûr (RUSTSEC-2026-0221) ; les
   dépendances de Suprnova n'utilisent que des événements sans tag, le chemin
