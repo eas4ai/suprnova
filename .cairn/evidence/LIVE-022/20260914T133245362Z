@@ -1,0 +1,21 @@
+requirement: LIVE-022
+requirement_digest: sha256:e7ef0005fd76037ccfce7458973a0275dca9bb8c8cd344856c59ee36b75e0df3
+sequence: 2
+history_digest: sha256:0453ae083ba245d4aa850e9b3463cb419581b96c88346f65f5994b1a643fcda9
+mechanism: live-issuance-credentials
+commit: 6546bb31
+inputs_digest: sha256:be4b54ed2377d3ea814188a2f02c21b4e975bd3757c580a25869e3d9529b8b89
+mechanism_digest: sha256:bcaea3f76f2e450ed97a66dca6868e9157cf3fdf58d350613d83578633f208b7
+inputs_detail: .cairn/evidence/LIVE-022/20260914T133150812Z-3076038.inputs.json
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E 'test(hardening::concurrent_issuance_keeps_every_credential)'
+cwd: .
+exit: 0
+output_digest: sha256:c0bc7611d8e7d89479b1aea80d3c50b9066c53e6dd1a938f52c0cf009b3098f3
+output: .cairn/evidence/LIVE-022/20260914T133150812Z-3076038.out
+stderr_output: .cairn/evidence/LIVE-022/20260914T133150812Z-3076038.err
+stderr_digest: sha256:c0bc7611d8e7d89479b1aea80d3c50b9066c53e6dd1a938f52c0cf009b3098f3
+signal: none
+execution_error: null
+result: pass
+source: exit
+recorded: 2026-09-14T13:32:45.362Z
