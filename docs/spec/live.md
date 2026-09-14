@@ -197,3 +197,15 @@ Mechanism: `.cairn/mechanisms/live-session-deauthentication`.
 Refines: LIVE-019, for the logout that clears the user without destroying
 the session; the developer's answer on escalation `live-019`.
 Status: Agreed 2026-09-14
+[LIVE-022] The framework MUST answer every issuance it admits under the
+per-scope limit with a subscription whose transport credential the
+connect step accepts, when the concurrent issuances of one scope produce
+identical descriptors.
+Falsifier: 512 concurrent issuances for one scope and one SSE document
+instance, released together from a delayed authorizer, answer any
+request 403 with `async_authority_invalid` (the observation captured in
+the backlog on 2026-09-13 from the LIVE-018 probe: 39 of 512).
+Mechanism: `.cairn/mechanisms/live-issuance-credentials`.
+Refines: Live spec 14, issuance and connect; LIVE-018, whose probe
+observed it.
+Status: Agreed 2026-09-14

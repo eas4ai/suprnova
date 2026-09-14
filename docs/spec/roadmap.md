@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: component-library-foundations
+Current: live-issuance-credentials
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -29,23 +29,29 @@ components in waves, the advanced components last, the datatable closing.
    is destroyed on this node or another stops receiving events
    (LIVE-019, LIVE-020). The developer answered `ok` on escalation
    `live-016` at 21:21 on 2026-09-13: this precedes the library.
-2. component-library-foundations - tokens, base layer, state-attribute
+2. live-issuance-credentials - the backlog observation from the LIVE-018
+   probe: concurrent issuances of one scope in the same millisecond mint
+   identical descriptors and the later one's credential replaces the
+   earlier one's, so 39 of 512 admitted requests answered 403
+   (LIVE-022). The developer named it the next commitment at 09:05 on
+   2026-09-14, ahead of the library.
+3. component-library-foundations - tokens, base layer, state-attribute
    styling, asset delivery, explicit registration and reserved
    namespaces, the checker and baseline mechanisms, and the form
    family's presentational tier (`component-library-foundations.md`,
    `component-library-forms.md`).
-3. component-library-overlays - dialog, sheet, drawer,
+4. component-library-overlays - dialog, sheet, drawer,
    single-level dropdown menu, popover, tooltip, tabs, collapsible and
    accordion; opens with the anchor-positioning and popover-continuity
    spike in the qualification host (`component-library-overlays.md`).
-4. component-library-feedback-and-navigation - alert, toast and flash
+5. component-library-feedback-and-navigation - alert, toast and flash
    region, skeleton, progress, spinner, empty state; header bar, footer,
    sidebar, breadcrumbs, pagination, load more (`component-library-feedback.md`,
    `component-library-navigation.md`).
-5. component-library-data-display - card, image and aspect ratio, scroll
+6. component-library-data-display - card, image and aspect ratio, scroll
    area, separator, badge, avatar, list group, description list, stat
    card; the datatable last (`component-library-data-display.md`).
-6. component-library-live-native - upload widget, live feed, notification
+7. component-library-live-native - upload widget, live feed, notification
    bell, account menu, server-rendered chart, input OTP, date picker,
    combobox; the custom-element enhancement layer lands here
    (`component-library-forms.md` custom-element tier, `-feedback.md`,
