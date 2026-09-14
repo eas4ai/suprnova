@@ -3,7 +3,12 @@
 // library's token stylesheet, base layer, headless styling, and the
 // Tailwind preset.
 //
-//   node .cairn/tools/ui-tokens.mjs <stylesheet.css> [<views-root>] [<preset.css>] [<components-root>]
+//   node .cairn/tools/ui-tokens.mjs <stylesheet.css> [<views-root>] [<preset.css>] [<components-root>] [<manual-root>]
+//
+// The manual root is the published manual: UI-007 asks for the preset to be
+// documented, so the Live chapter must describe the tokens, the preset, the
+// opt-in and the install command, and the six mirrors must be current under
+// the translation lock and the structure check.
 //
 // The components root holds one directory per shipped component; every
 // stylesheet under it is held to UI-003 and UI-004 like the base layer.
@@ -13,9 +18,10 @@
 // until the first commitment ships the files.
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
-const [stylesheet, viewsRoot, preset, componentsRoot] = process.argv.slice(2);
+const [stylesheet, viewsRoot, preset, componentsRoot, manualRoot] = process.argv.slice(2);
 const results = new Map();
 const fail = (id, why) => {
   const prior = results.get(id);
@@ -116,6 +122,23 @@ if (!preset || !existsSync(preset)) {
   const tokens = [...css.matchAll(/--sn-(color|space|radius|font)-[a-z0-9-]+/g)].map((m) => m[0]);
   for (const t of new Set(tokens)) if (!pre.includes(t)) fail("UI-007", `preset does not map ${t}`);
   if (!/@theme\b/.test(pre)) fail("UI-007", "preset has no @theme block");
+  if (manualRoot) {
+    const chapter = join(manualRoot, "live.md");
+    if (!existsSync(chapter)) fail("UI-007", `no Live chapter at ${chapter}`);
+    else {
+      const manual = readFileSync(chapter, "utf8");
+      for (const needle of ["@theme", "--sn-", "with_suprnova_ui()", "live:add", "suprnova-ui"]) {
+        if (!manual.includes(needle)) fail("UI-007", `the Live chapter does not document ${needle}`);
+      }
+    }
+    for (const [label, command, args] of [
+      ["translation lock", "scripts/check-manual-translations.sh", []],
+      ["manual structure", "python3", ["scripts/check-manual-structure.py"]],
+    ]) {
+      const run = spawnSync(command, args, { encoding: "utf8" });
+      if (run.status !== 0) fail("UI-007", `${label} check failed: ${(run.stdout + run.stderr).trim().split("\n").pop()}`);
+    }
+  }
   pass("UI-007");
 } else {
   fail("UI-007", "no stylesheet to compare the preset against");
