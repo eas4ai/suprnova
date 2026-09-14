@@ -12,3 +12,4 @@ Ruled 2026-09-13 23:22, accepting the recommendation: the re-check interval is t
 ## Realized by
 
 (none yet: recorded, not built)
+- cf7332d1  fix(live): end a membership with the session that opened it (LIVE-019, LIVE-020)

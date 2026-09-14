@@ -65,7 +65,8 @@ Baseline receipt `.cairn/evidence/LIVE-019/20260914T035220755Z` (fail):
 After the fix the same probe passes: the session middleware destroys the
 rotated-away row, `live::revocation::session_destroyed` retires every
 membership carrying that session's fingerprint through the unsubscribe
-path, and the publish that follows finds no member.
+path, and the publish that follows finds no member. Receipt
+`.cairn/evidence/LIVE-019/20260914T040450351Z` (pass) on `9a7ec88d`.
 
 ### LIVE-020, `live-session-reverification`
 
@@ -79,7 +80,8 @@ After the fix the same probe passes: `publish` builds each candidate with
 its attested session store id and the time the session was last known to
 exist, asks the bound `SessionStore` when that is ten seconds or older,
 and retires a membership the store no longer holds before the Gate is
-consulted.
+consulted. Receipt `.cairn/evidence/LIVE-020/20260914T040454535Z` (pass)
+on `9a7ec88d`.
 
 ## Limits recorded
 
