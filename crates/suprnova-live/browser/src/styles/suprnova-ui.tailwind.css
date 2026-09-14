@@ -1,0 +1,102 @@
+/*
+ * suprnova-ui - Tailwind CSS 4 theme preset, version 1.
+ *
+ * Maps Tailwind's theme namespaces onto the `--sn-` tokens so utilities
+ * such as `bg-primary`, `text-muted`, `rounded-md`, `shadow-md`,
+ * `p-sn-4`, `text-lg`, `font-semibold` and `ease-standard` resolve to
+ * the same values the base layer uses. The block is `@theme inline` so a
+ * utility carries the token reference itself and follows the light, dark
+ * and density values of the document it lands in.
+ *
+ * Use: `@import "tailwindcss"; @import "./suprnova-ui.tailwind.css";`
+ * Tailwind is never required in component markup (UI-007); this file only
+ * lets an application that already uses it speak in the same tokens.
+ */
+
+@theme inline {
+  /* color: every --sn-color-* role under Tailwind's color namespace */
+  --color-bg: var(--sn-color-bg);
+  --color-surface: var(--sn-color-surface);
+  --color-surface-raised: var(--sn-color-surface-raised);
+  --color-surface-sunken: var(--sn-color-surface-sunken);
+  --color-text: var(--sn-color-text);
+  --color-text-muted: var(--sn-color-text-muted);
+  --color-text-inverse: var(--sn-color-text-inverse);
+  --color-border: var(--sn-color-border);
+  --color-border-strong: var(--sn-color-border-strong);
+  --color-primary: var(--sn-color-primary);
+  --color-primary-hover: var(--sn-color-primary-hover);
+  --color-primary-active: var(--sn-color-primary-active);
+  --color-primary-contrast: var(--sn-color-primary-contrast);
+  --color-primary-soft: var(--sn-color-primary-soft);
+  --color-success: var(--sn-color-success);
+  --color-success-soft: var(--sn-color-success-soft);
+  --color-warning: var(--sn-color-warning);
+  --color-warning-soft: var(--sn-color-warning-soft);
+  --color-danger: var(--sn-color-danger);
+  --color-danger-soft: var(--sn-color-danger-soft);
+  --color-info: var(--sn-color-info);
+  --color-info-soft: var(--sn-color-info-soft);
+  --color-link: var(--sn-color-link);
+  --color-link-hover: var(--sn-color-link-hover);
+  --color-focus-ring: var(--sn-color-focus-ring);
+  --color-selection: var(--sn-color-selection);
+  --color-backdrop: var(--sn-color-backdrop);
+  --color-disabled-bg: var(--sn-color-disabled-bg);
+  --color-disabled-text: var(--sn-color-disabled-text);
+  --color-mark: var(--sn-color-mark);
+
+  /* font families, sizes, weights and line heights */
+  --font-sans: var(--sn-font-sans);
+  --font-mono: var(--sn-font-mono);
+  --text-xs: var(--sn-font-size-xs);
+  --text-sm: var(--sn-font-size-sm);
+  --text-base: var(--sn-font-size-base);
+  --text-lg: var(--sn-font-size-lg);
+  --text-xl: var(--sn-font-size-xl);
+  --text-2xl: var(--sn-font-size-2xl);
+  --text-3xl: var(--sn-font-size-3xl);
+  --text-4xl: var(--sn-font-size-4xl);
+  --font-weight-normal: var(--sn-font-weight-normal);
+  --font-weight-medium: var(--sn-font-weight-medium);
+  --font-weight-semibold: var(--sn-font-weight-semibold);
+  --font-weight-bold: var(--sn-font-weight-bold);
+  --leading-tight: var(--sn-font-leading-tight);
+  --leading-base: var(--sn-font-leading-base);
+  --leading-relaxed: var(--sn-font-leading-relaxed);
+
+  /* spacing: the 4px scale, namespaced so the default numeric scale stands */
+  --spacing-sn-0: var(--sn-space-0);
+  --spacing-sn-1: var(--sn-space-1);
+  --spacing-sn-2: var(--sn-space-2);
+  --spacing-sn-3: var(--sn-space-3);
+  --spacing-sn-4: var(--sn-space-4);
+  --spacing-sn-5: var(--sn-space-5);
+  --spacing-sn-6: var(--sn-space-6);
+  --spacing-sn-8: var(--sn-space-8);
+  --spacing-sn-10: var(--sn-space-10);
+  --spacing-sn-12: var(--sn-space-12);
+  --spacing-sn-16: var(--sn-space-16);
+  --spacing-sn-gutter: var(--sn-space-gutter);
+  --spacing-sn-measure: var(--sn-space-measure);
+
+  /* radius and shadow under Tailwind's own names */
+  --radius-none: var(--sn-radius-none);
+  --radius-sm: var(--sn-radius-sm);
+  --radius-md: var(--sn-radius-md);
+  --radius-lg: var(--sn-radius-lg);
+  --radius-xl: var(--sn-radius-xl);
+  --radius-full: var(--sn-radius-full);
+  --shadow-sm: var(--sn-shadow-sm);
+  --shadow-md: var(--sn-shadow-md);
+  --shadow-lg: var(--sn-shadow-lg);
+  --shadow-focus: var(--sn-shadow-focus);
+
+  /* motion */
+  --duration-fast: var(--sn-motion-duration-fast);
+  --duration-base: var(--sn-motion-duration-base);
+  --duration-slow: var(--sn-motion-duration-slow);
+  --ease-standard: var(--sn-motion-easing-standard);
+  --ease-enter: var(--sn-motion-easing-enter);
+  --ease-exit: var(--sn-motion-easing-exit);
+}
