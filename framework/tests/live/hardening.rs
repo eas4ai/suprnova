@@ -1,5 +1,5 @@
 //! Regression tests for the 2026-09-13 adversarial audit, one per agreed
-//! requirement in `docs/spec/live.md` (LIVE-016 to LIVE-018).
+//! requirement in `docs/spec/live.md` (LIVE-016 to LIVE-020).
 //!
 //! Each test is the audit's own probe with its assertion inverted to the
 //! agreed behavior, so each fails on the tree the audit examined and passes
@@ -11,11 +11,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::live_async_support;
+use bytes::Bytes;
 use futures_util::future::join_all;
+use hyper::Method;
 use live_async_support::*;
 use suprnova::live::{
     CanonicalValue, LiveEventTarget, LiveRegistry, LiveStreams, RegistryErrorKind,
 };
+use suprnova::session::{SessionData, SessionStore};
+use suprnova::testing::TestContainer;
 use suprnova::{Gate, LiveComponent, live};
 
 /// LIVE-016: authorization is re-evaluated before each asynchronous
@@ -85,6 +89,166 @@ async fn revoked_gate_ends_delivery() {
         !leaked,
         "an event published after the Gate denied reached the old stream"
     );
+}
+
+/// Reads the stream for up to three seconds and reports whether `marker`
+/// arrived in any data record.
+async fn stream_carries(stream: &mut SseClient, marker: &str) -> bool {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(data) = stream.next_data().await {
+            if data.to_string().contains(marker) {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// LIVE-019: a membership does not outlive the session that opened it on
+/// the node that destroys the session. The stream is issued under the real
+/// session middleware, the browser logs out through
+/// `Auth::logout_and_invalidate`, and an event published afterwards must
+/// never reach the old stream (the open clause of LIVE-016).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoked_session_ends_delivery() {
+    let (router, _runtime) = router_and_runtime();
+    let store = Arc::new(MemorySessionStore::default());
+    let server = spawn_server_with_sessions(router, Arc::clone(&store)).await;
+    let bootstrap = send(
+        server.port,
+        &Identity::alice(),
+        Method::GET,
+        "/session/touch",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(bootstrap.status.as_u16(), 200);
+    let cookie = session_cookie(&bootstrap).expect("the session middleware set its cookie");
+    let alice = Identity::alice().with_cookie(&cookie);
+    let issued = issue(
+        server.port,
+        &alice,
+        orders_issue_body("sse", "doc-instance-0001"),
+    )
+    .await;
+    let credential = issued.credential.clone().expect("an SSE credential");
+    let mut stream = SseClient::open(server.port, &alice, &credential, 1, &[]).await;
+    assert_eq!(stream.status.as_u16(), 200);
+    let ack = subscribe(
+        server.port,
+        &alice,
+        &credential,
+        &issued,
+        "nonce-subscribe-0001",
+        1,
+    )
+    .await;
+    assert_eq!(ack.status.as_u16(), 200);
+
+    let logout = send(
+        server.port,
+        &alice,
+        Method::POST,
+        "/session/logout",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(
+        logout.status.as_u16(),
+        200,
+        "logout failed: {}",
+        String::from_utf8_lossy(&logout.body)
+    );
+
+    LiveStreams::resolve()
+        .expect("the Live streams facade resolves")
+        .event::<OrdersUpdated>(
+            "orders",
+            LiveEventTarget::Island,
+            CanonicalValue::String("post-logout".into()),
+        )
+        .await
+        .expect("publishing to a topic with no live member is not an error");
+
+    assert!(
+        !stream_carries(&mut stream, "post-logout").await,
+        "an event published after the session was destroyed reached the old stream"
+    );
+}
+
+/// LIVE-020: a session destroyed behind the runtime, as another node's
+/// logout does, stops delivery within the re-verification interval. The
+/// session row is removed from the shared store directly, the clock passes
+/// ten seconds, and a publish must not reach the membership.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_store_session_ends_delivery() {
+    let (router, _runtime, clock) = router_and_runtime_with_clock();
+    let server = spawn_server(router).await;
+    let session_id = "livesessionstale00000000000000000000000a".to_owned();
+    assert_eq!(session_id.len(), 40, "a store-shaped session id");
+    let store = Arc::new(MemorySessionStore::default());
+    store.seed(SessionData::new(
+        session_id.clone(),
+        "csrf-token".to_owned(),
+    ));
+    let shared: Arc<dyn SessionStore> = Arc::clone(&store) as Arc<dyn SessionStore>;
+    TestContainer::scope(async move {
+        TestContainer::bind::<dyn SessionStore>(shared);
+        let alice = Identity::alice().with_session(&session_id);
+        let issued = issue(
+            server.port,
+            &alice,
+            orders_issue_body("sse", "doc-instance-0001"),
+        )
+        .await;
+        let credential = issued.credential.clone().expect("an SSE credential");
+        let mut stream = SseClient::open(server.port, &alice, &credential, 1, &[]).await;
+        assert_eq!(stream.status.as_u16(), 200);
+        let ack = subscribe(
+            server.port,
+            &alice,
+            &credential,
+            &issued,
+            "nonce-subscribe-0001",
+            1,
+        )
+        .await;
+        assert_eq!(ack.status.as_u16(), 200);
+        let streams = LiveStreams::resolve().expect("the Live streams facade resolves");
+
+        streams
+            .event::<OrdersUpdated>(
+                "orders",
+                LiveEventTarget::Island,
+                CanonicalValue::String("before-removal".into()),
+            )
+            .await
+            .expect("publish to a live member");
+        assert!(
+            stream_carries(&mut stream, "before-removal").await,
+            "a member whose session the store holds receives events"
+        );
+
+        store.remove(&session_id);
+        clock.advance_ms(10_001);
+        streams
+            .event::<OrdersUpdated>(
+                "orders",
+                LiveEventTarget::Island,
+                CanonicalValue::String("post-removal".into()),
+            )
+            .await
+            .expect("publishing to a topic with no live member is not an error");
+        assert!(
+            !stream_carries(&mut stream, "post-removal").await,
+            "an event published after the store dropped the session reached the stream"
+        );
+    })
+    .await;
 }
 
 #[derive(LiveComponent)]

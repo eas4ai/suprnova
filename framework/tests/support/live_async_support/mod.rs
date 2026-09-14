@@ -2,8 +2,9 @@
 #![allow(dead_code)]
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::{Bytes, BytesMut};
 use futures_util::{SinkExt, StreamExt};
@@ -22,9 +23,10 @@ use suprnova::live::testing::{
 use suprnova::live::{
     EventPayloadMetadata, LiveComponent, LiveMount, LiveRegistry, LiveRuntime, live,
 };
+use suprnova::session::{SessionConfig, SessionData, SessionMiddleware, SessionStore, session_mut};
 use suprnova::{
-    App, Auth, Crypt, EncryptionKey, Gate, Middleware, MiddlewareRegistry, Next, Request, Response,
-    Router, async_trait, handle_request,
+    App, Auth, Crypt, EncryptionKey, FrameworkError, Gate, HttpResponse, Middleware,
+    MiddlewareRegistry, Next, Request, Response, Router, async_trait, handle_request,
 };
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
@@ -179,6 +181,21 @@ pub fn ensure_crypt() {
     INIT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
 }
 
+/// Writes one value so the session middleware persists the session and
+/// sets its cookie; a document load does the same in a real application.
+async fn session_touch_handler(_request: Request) -> Response {
+    session_mut(|session| session.put("live", true));
+    Ok(HttpResponse::json(json!({ "ok": true })))
+}
+
+/// Ends the browser's session the way an application's logout route does.
+async fn session_logout_handler(_request: Request) -> Response {
+    match Auth::logout_and_invalidate().await {
+        Ok(()) => Ok(HttpResponse::json(json!({ "ok": true }))),
+        Err(error) => Err(HttpResponse::json(json!({ "error": error.to_string() }))),
+    }
+}
+
 fn define_gates() {
     Gate::define::<String, String>("live:tests.async-orders.stream.orders", |_, _| true);
     Gate::define::<String, String>(
@@ -207,7 +224,13 @@ fn build_router() -> Router {
         "inventory-document",
     )
     .expect("declare inventory mount");
-    Router::new()
+    let router: Router = Router::new()
+        .get("/session/touch", session_touch_handler)
+        .into();
+    let router: Router = router
+        .post("/session/logout", session_logout_handler)
+        .into();
+    router
         .try_live()
         .expect("install Live routes")
         .try_live_mount(&orders)
@@ -252,8 +275,28 @@ impl TestServer {
 }
 
 pub async fn spawn_server(router: Arc<Router>) -> TestServer {
+    spawn_server_with(router, MiddlewareRegistry::new().append(StrictAsyncFacts)).await
+}
+
+/// A running test server with the framework's session middleware ahead of
+/// the fixture facts, so the Session fact is the real session id and the
+/// session lifecycle (rotation, invalidation, logout) runs for real.
+pub async fn spawn_server_with_sessions(
+    router: Arc<Router>,
+    store: Arc<MemorySessionStore>,
+) -> TestServer {
+    let registry = MiddlewareRegistry::new()
+        .append(SessionMiddleware::with_store(
+            SessionConfig::default(),
+            store,
+        ))
+        .append(StrictAsyncFacts);
+    spawn_server_with(router, registry).await
+}
+
+pub async fn spawn_server_with(router: Arc<Router>, middleware: MiddlewareRegistry) -> TestServer {
     ensure_crypt();
-    let middleware = Arc::new(MiddlewareRegistry::new().append(StrictAsyncFacts));
+    let middleware = Arc::new(middleware);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind async test listener");
@@ -296,6 +339,9 @@ pub struct Identity {
     pub principal: String,
     pub tenant: String,
     pub authenticated: bool,
+    /// A real session cookie, sent verbatim when a server runs the
+    /// framework's `SessionMiddleware` ahead of the fixture facts.
+    pub cookie: Option<String>,
 }
 
 impl Identity {
@@ -305,11 +351,17 @@ impl Identity {
             principal: "alice".to_owned(),
             tenant: "async-tenant".to_owned(),
             authenticated: true,
+            cookie: None,
         }
     }
 
     pub fn with_session(mut self, session: &str) -> Self {
         self.session = session.to_owned();
+        self
+    }
+
+    pub fn with_cookie(mut self, cookie: &str) -> Self {
+        self.cookie = Some(cookie.to_owned());
         self
     }
 
@@ -329,15 +381,86 @@ impl Identity {
     }
 
     fn apply(&self, builder: hyper::http::request::Builder) -> hyper::http::request::Builder {
-        let builder = builder
+        let mut builder = builder
             .header("x-test-session", &self.session)
             .header("x-test-principal", &self.principal)
             .header("x-test-tenant", &self.tenant);
+        if let Some(cookie) = &self.cookie {
+            builder = builder.header("cookie", cookie);
+        }
         if self.authenticated {
             builder
         } else {
             builder.header("x-test-no-auth", "1")
         }
+    }
+}
+
+/// Returns the framework session cookie a reply set, as a `Cookie` header value.
+pub fn session_cookie(reply: &HttpReply) -> Option<String> {
+    reply
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|value| value.split(';').next())
+        .find(|pair| pair.starts_with("suprnova_session="))
+        .map(str::to_owned)
+}
+
+/// A session store in memory, for servers that run the real session
+/// middleware and for tests that remove a session row behind the runtime.
+#[derive(Default)]
+pub struct MemorySessionStore {
+    sessions: Mutex<HashMap<String, SessionData>>,
+}
+
+impl MemorySessionStore {
+    pub fn seed(&self, mut session: SessionData) {
+        session.loaded_from_store = true;
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session.id.clone(), session);
+    }
+
+    pub fn remove(&self, id: &str) {
+        self.sessions.lock().unwrap().remove(id);
+    }
+
+    pub fn contains(&self, id: &str) -> bool {
+        self.sessions.lock().unwrap().contains_key(id)
+    }
+}
+
+#[async_trait]
+impl SessionStore for MemorySessionStore {
+    async fn read(&self, id: &str) -> Result<Option<SessionData>, FrameworkError> {
+        Ok(self.sessions.lock().unwrap().get(id).cloned())
+    }
+
+    async fn write(&self, session: &SessionData) -> Result<(), FrameworkError> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session.id.clone(), session.clone());
+        Ok(())
+    }
+
+    async fn destroy(&self, id: &str) -> Result<(), FrameworkError> {
+        self.sessions.lock().unwrap().remove(id);
+        Ok(())
+    }
+
+    async fn destroy_for_user(&self, user_id: &str) -> Result<u64, FrameworkError> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let before = sessions.len();
+        sessions.retain(|_, session| session.user_id.as_deref() != Some(user_id));
+        Ok((before - sessions.len()) as u64)
+    }
+
+    async fn gc(&self) -> Result<u64, FrameworkError> {
+        Ok(0)
     }
 }
 
@@ -730,6 +853,9 @@ pub async fn connect_ws(
         identity.principal.parse().expect("header"),
     );
     headers.insert("x-test-tenant", identity.tenant.parse().expect("header"));
+    if let Some(cookie) = &identity.cookie {
+        headers.insert("cookie", cookie.parse().expect("cookie header"));
+    }
     if !identity.authenticated {
         headers.insert("x-test-no-auth", "1".parse().expect("header"));
     }
