@@ -399,6 +399,61 @@ async fn required_transaction_is_refused_until_real() {
 async fn issuance_cap_holds_under_concurrency() {
     const BURST: usize = 513;
     const LIMIT: usize = 512;
+    let replies = delayed_issuance_burst(BURST, LIMIT, "doc-instance-limit").await;
+    let successes = replies
+        .iter()
+        .filter(|reply| reply.status.as_u16() == 201)
+        .count();
+    let limited = replies
+        .iter()
+        .filter(|reply| reply.status.as_u16() == 409)
+        .count();
+    // The cap is the contract: the limit refuses exactly the overflow, and no
+    // more than LIMIT requests are ever admitted to authorization, whatever
+    // else those admitted requests then meet.
+    let histogram = status_histogram(&replies);
+    let admitted = replies.len() - limited;
+    assert!(
+        admitted <= LIMIT,
+        "the per-scope limit admitted {admitted} concurrent issuances (limit {LIMIT}); \
+         statuses seen: {histogram:?}"
+    );
+    assert!(
+        successes <= LIMIT,
+        "more issuances succeeded than the limit allows: {successes}"
+    );
+    assert_eq!(
+        limited,
+        BURST - LIMIT,
+        "exactly the overflow was refused by the limit; statuses seen: {histogram:?}"
+    );
+}
+
+/// LIVE-022: every issuance the per-scope limit admits answers with a
+/// subscription the connect step accepts. Concurrent issuances of one scope
+/// released in the same millisecond mint identical descriptors; the host's
+/// credential store must keep each one's secret rather than the last one
+/// minted, or the earlier requests answer 403 `async_authority_invalid` from
+/// the connect that issuance performs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_issuance_keeps_every_credential() {
+    const BURST: usize = 512;
+    let replies = delayed_issuance_burst(BURST, BURST, "doc-instance-credentials").await;
+    let histogram = status_histogram(&replies);
+    let refused = replies
+        .iter()
+        .filter(|reply| reply.status.as_u16() != 201)
+        .count();
+    assert_eq!(
+        refused, 0,
+        "{refused} of {BURST} admitted issuances did not answer 201; statuses seen: {histogram:?}"
+    );
+}
+
+/// Holds `burst` concurrent issuances of the orders stream at a delayed
+/// authorizer until `admitted` of them have reached it, then releases them
+/// together so they complete in the same instant.
+async fn delayed_issuance_burst(burst: usize, admitted: usize, document: &str) -> Vec<HttpReply> {
     let (router, _runtime) = router_and_runtime();
     let server = spawn_server(router).await;
     let gate_calls = Arc::new(AtomicUsize::new(0));
@@ -419,25 +474,29 @@ async fn issuance_cap_holds_under_concurrency() {
         },
     );
     let port = server.port;
+    let document = document.to_owned();
     let requests = tokio::spawn(async move {
-        join_all((0..BURST).map(|_| async move {
-            let identity = Identity::alice();
-            post_control(
-                port,
-                &identity,
-                SUBSCRIPTION_PATH,
-                None,
-                orders_issue_body("sse", "doc-instance-limit"),
-            )
-            .await
+        join_all((0..burst).map(|_| {
+            let document = document.clone();
+            async move {
+                let identity = Identity::alice();
+                post_control(
+                    port,
+                    &identity,
+                    SUBSCRIPTION_PATH,
+                    None,
+                    orders_issue_body("sse", &document),
+                )
+                .await
+            }
         }))
         .await
     });
-    // With slots reserved before authorization, at most LIMIT requests ever
-    // reach the authorizer; the rest are refused first.
+    // With slots reserved before authorization, at most `admitted` requests
+    // ever reach the authorizer; the rest are refused first.
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            if gate_calls.load(Ordering::SeqCst) >= LIMIT {
+            if gate_calls.load(Ordering::SeqCst) >= admitted {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -446,23 +505,17 @@ async fn issuance_cap_holds_under_concurrency() {
     .await
     .expect("the admitted requests reached authorization");
     release_tx.send(true).expect("release the authorizer");
-    let replies = tokio::time::timeout(Duration::from_secs(30), requests)
+    tokio::time::timeout(Duration::from_secs(30), requests)
         .await
         .expect("the burst completed")
-        .expect("the burst task did not panic");
-    let successes = replies
-        .iter()
-        .filter(|reply| reply.status.as_u16() == 201)
-        .count();
-    let limited = replies
-        .iter()
-        .filter(|reply| reply.status.as_u16() == 409)
-        .count();
-    // The cap is the contract: the limit refuses exactly the overflow, and no
-    // more than LIMIT requests are ever admitted to authorization, whatever
-    // else those admitted requests then meet.
+        .expect("the burst task did not panic")
+}
+
+/// Counts replies by status, keeping the error body of every non-201 reply
+/// so a failure names what the admitted requests met.
+fn status_histogram(replies: &[HttpReply]) -> std::collections::BTreeMap<String, usize> {
     let mut histogram = std::collections::BTreeMap::new();
-    for reply in &replies {
+    for reply in replies {
         let key = if reply.status.as_u16() == 201 {
             "201".to_owned()
         } else {
@@ -470,19 +523,5 @@ async fn issuance_cap_holds_under_concurrency() {
         };
         *histogram.entry(key).or_insert(0_usize) += 1;
     }
-    let admitted = replies.len() - limited;
-    assert!(
-        admitted <= LIMIT,
-        "the per-scope limit admitted {admitted} concurrent issuances (limit {LIMIT}); \
-         statuses seen: {histogram:?}"
-    );
-    assert!(
-        successes <= LIMIT,
-        "more issuances succeeded than the limit allows: {successes}"
-    );
-    assert_eq!(
-        limited,
-        BURST - LIMIT,
-        "exactly the overflow was refused by the limit; statuses seen: {histogram:?}"
-    );
+    histogram
 }
