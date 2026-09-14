@@ -1,0 +1,21 @@
+requirement: UI-011
+requirement_digest: sha256:3c92493b988cd3d858a5eb67923d40746ef2249623b42cb0fbced32d3020dc58
+sequence: 2
+history_digest: sha256:6795c4e5fe46b6361ca84e5fe13b20a2e941f092149ac52fa3356725faaf7f86
+mechanism: ui-elements
+commit: 44e7bed7
+inputs_digest: sha256:a35d83d1a8567a785b72ec8950718451c92c41b017a830dde8dfc06838364feb
+mechanism_digest: sha256:22e5a5bac82f45e4047ee840358d3f046a8b03330448ed803df541258ebfd4d3
+inputs_detail: .cairn/evidence/UI-011/20260914T214445722Z-3394617.inputs.json
+command: node .cairn/tools/ui-elements.mjs crates/suprnova-live/components
+cwd: .
+exit: 0
+output_digest: sha256:cd710a9ade710b9486b2fff9c1abd86d87212077d43dbb2432f37715ce3781bc
+output: .cairn/evidence/UI-011/20260914T214445722Z-3394617.out
+stderr_output: .cairn/evidence/UI-011/20260914T214445722Z-3394617.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+result: pass
+source: line
+recorded: 2026-09-14T21:44:45.831Z
