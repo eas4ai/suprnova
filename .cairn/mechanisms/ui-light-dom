@@ -5,4 +5,3 @@ inputs:
   - crates/suprnova-live/components/
 requirements:
   - UI-010
-  - UI-018
