@@ -196,4 +196,4 @@ the session row, and still receives an event published after the logout.
 Mechanism: `.cairn/mechanisms/live-session-deauthentication`.
 Refines: LIVE-019, for the logout that clears the user without destroying
 the session; the developer's answer on escalation `live-019`.
-Status: Draft
+Status: Agreed 2026-09-14

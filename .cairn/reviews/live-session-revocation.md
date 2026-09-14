@@ -52,6 +52,12 @@ your recommendations", then "ok confimed". Recorded as `Status: Agreed
 2026-09-13` on both blocks, the two decisions under `docs/decisions/`,
 and the commitment's decisions section.
 
+## Agreement record, LIVE-021
+
+Presented at 08:46 on 2026-09-14 after the developer's `ok` on escalation
+`live-019` (08:44). The developer at 08:48: "agreed". Recorded as
+`Status: Agreed 2026-09-14` on the block.
+
 ## Mechanism demonstrations
 
 ### LIVE-019, `live-session-revocation`
