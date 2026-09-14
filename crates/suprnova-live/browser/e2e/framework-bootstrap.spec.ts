@@ -13,6 +13,7 @@ interface AssetManifest {
     readonly file: string;
     readonly role: string;
     readonly sri: string;
+    readonly content_type: string;
   }[];
 }
 
@@ -183,7 +184,7 @@ test("artifacts are immutable, validated, and exactly the reviewed bytes", async
     );
     expect(response.status()).toBe(200);
     expect(response.headers()["cache-control"]).toBe("public, max-age=31536000, immutable");
-    expect(response.headers()["content-type"]).toBe("text/javascript; charset=utf-8");
+    expect(response.headers()["content-type"]).toBe(asset.content_type);
     const body = await response.body();
     const digest = createHash("sha256").update(body).digest("base64");
     expect(`sha256-${digest}`).toBe(asset.sri);
