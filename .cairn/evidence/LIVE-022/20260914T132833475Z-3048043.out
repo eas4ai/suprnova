@@ -1,0 +1,33 @@
+   Compiling suprnova-live v2.0.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova v2.0.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-live-test-support v2.0.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.80s
+────────────
+ Nextest run ID 6dc2406e-81a3-4e7c-b245-c363ea61d735 with nextest profile: default
+    Starting 1 test across 1 binary (111 tests skipped)
+        FAIL [   0.299s] (1/1) suprnova::live hardening::concurrent_issuance_keeps_every_credential
+  stdout ───
+
+    running 1 test
+    test hardening::concurrent_issuance_keeps_every_credential ... FAILED
+
+    failures:
+
+    failures:
+        hardening::concurrent_issuance_keeps_every_credential
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 111 filtered out; finished in 0.29s
+
+  stderr ───
+
+    thread 'hardening::concurrent_issuance_keeps_every_credential' (3049089) panicked at framework/tests/live/hardening.rs:447:5:
+    assertion `left == right` failed: 62 of 512 admitted issuances did not answer 201; statuses seen: {"201": 450, "403 {\"error\":\"async_authority_invalid\"}": 61, "503 {\"error\":\"async_unavailable\"}": 1}
+      left: 62
+     right: 0
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.300s] 1 test run: 0 passed, 1 failed, 111 skipped
+        FAIL [   0.299s] (1/1) suprnova::live hardening::concurrent_issuance_keeps_every_credential
+error: test run failed
