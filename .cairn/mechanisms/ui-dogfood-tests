@@ -2,6 +2,7 @@ command: sh -c 'env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12
 inputs:
   - app/
   - framework/src/live/
+  - framework/src/view/
   - framework/tests/live/
   - framework/tests/support/
   - suprnova-macros/src/live/
