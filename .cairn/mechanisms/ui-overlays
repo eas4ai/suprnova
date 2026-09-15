@@ -3,7 +3,7 @@ results: per-requirement
 inputs:
   - .cairn/tools/ui-overlays.mjs
   - crates/suprnova-live/components/
-  - app/templates/live/overlay-gallery.html
+  - app/templates/live/
 requirements:
   - OVL-001
   - OVL-002
