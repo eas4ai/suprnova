@@ -1,0 +1,21 @@
+requirement: FORM-008
+requirement_digest: sha256:acca7becaf4855f94c9cc3d4bfc09bf17c63020fa517e94856819e2016a33a82
+sequence: 6
+history_digest: sha256:42fc07eb5842b2648e20146517c1f970cfc7ef4688e850fa18c41eea99451623
+mechanism: ui-combobox-stale
+commit: 2dc59f5a
+inputs_digest: sha256:1cba2aea9e84d0926838206348c6efc580a6d36b03a11ca18b0a88d5f5884eac
+mechanism_digest: sha256:0886f3638a3cedd72d09438e13af49ea4562d23a4eff064863fcbf7017aad555
+inputs_detail: .cairn/evidence/FORM-008/20260915T195450250Z-2434501.inputs.json
+command: sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/combobox-stale-results.test.ts'
+cwd: .
+exit: 0
+output_digest: sha256:e151745a4b464dd43cfbe7617c787dbad5c04c6595fba6e98a164cce7cdb62d0
+output: .cairn/evidence/FORM-008/20260915T195450250Z-2434501.out
+stderr_output: .cairn/evidence/FORM-008/20260915T195450250Z-2434501.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+result: pass
+source: exit
+recorded: 2026-09-15T19:54:50.761Z
