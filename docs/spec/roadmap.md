@@ -76,6 +76,10 @@ components in waves, the advanced components last, the datatable closing.
    combobox; the custom-element enhancement layer lands here
    (`component-library-forms.md` custom-element tier, `-feedback.md`,
    `-navigation.md`, `-data-display.md` behavioral tiers).
+8. session-request-serialization - session blocking through the cache lock
+   driver, the session write race the live-native review recorded as an
+   open finding and the developer routed here on escalation `form-008`
+   (`sessions.md`, `docs/commitments/session-request-serialization.md`).
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

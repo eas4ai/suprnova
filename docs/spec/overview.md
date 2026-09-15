@@ -100,7 +100,8 @@ rather than duplicates.
 | Component library - feedback and status | FDB | `component-library-feedback.md` | Draft; refines Live spec 24 |
 | Component library - data display and layout | DATA | `component-library-data-display.md` | Draft; refines Live spec 25 |
 | Application boot, config, container, console | - | none yet | `manual/lifecycle.md`, `manual/configuration.md`, `manual/container.md`, `manual/artisan.md` |
-| HTTP: routing, middleware, requests, responses, sessions, CSRF, CORS | - | none yet | `manual/routing.md`, `manual/middleware.md`, `manual/requests.md`, `manual/responses.md`, `manual/session.md` |
+| Sessions (concurrent requests on one session) | SESS | `sessions.md` | Draft; SESS-001 Agreed 2026-09-15 on escalation `form-008` |
+| HTTP: routing, middleware, requests, responses, CSRF, CORS | - | none yet | `manual/routing.md`, `manual/middleware.md`, `manual/requests.md`, `manual/responses.md`, `manual/session.md` |
 | Views and Inertia frontends | - | none yet | `manual/views.md`, `manual/inertia.md`, `manual/frontend.md` |
 | Authentication, authorization, Magnetar | - | none yet | `manual/authentication.md`, `manual/authorization.md`, `manual/magnetar.md` |
 | Eloquent ORM, migrations, seeding | - | none yet | `manual/eloquent.md`, `manual/migrations.md`, `manual/seeding.md` |
