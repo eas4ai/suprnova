@@ -10,8 +10,12 @@ fn series(values: Vec<f32>) -> Vec<ChartSeries> {
 #[test]
 fn a_bar_chart_and_a_line_chart_render_as_svg_with_the_labels_and_the_series_name() {
     for kind in [ChartKind::Bar, ChartKind::Line] {
-        let chart = render_chart(kind, &["Apr", "May", "Jun"], &series(vec![42.0, 47.0, 51.0]))
-            .expect("a bounded series renders");
+        let chart = render_chart(
+            kind,
+            &["Apr", "May", "Jun"],
+            &series(vec![42.0, 47.0, 51.0]),
+        )
+        .expect("a bounded series renders");
         let svg = chart.as_str();
         assert!(svg.starts_with("<svg"), "{svg}");
         for needle in ["Apr", "Jun", "Revenue"] {
@@ -47,7 +51,8 @@ fn markup_in_a_label_or_a_name_and_a_non_finite_value_are_input_errors() {
     let error = render_chart(ChartKind::Line, &["Apr"], &series(vec![f32::NAN]))
         .expect_err("a non-finite value");
     assert_eq!(error.kind(), ChartErrorKind::Input);
-    let error = render_chart(ChartKind::Line, &[""], &series(vec![1.0])).expect_err("an empty label");
+    let error =
+        render_chart(ChartKind::Line, &[""], &series(vec![1.0])).expect_err("an empty label");
     assert_eq!(error.kind(), ChartErrorKind::Input);
 }
 
@@ -55,8 +60,8 @@ fn markup_in_a_label_or_a_name_and_a_non_finite_value_are_input_errors() {
 fn too_many_points_or_series_are_rejected_before_rendering() {
     let labels: Vec<String> = (0..513).map(|i| format!("l{i}")).collect();
     let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let error = render_chart(ChartKind::Bar, &refs, &series(vec![1.0; 513]))
-        .expect_err("513 points");
+    let error =
+        render_chart(ChartKind::Bar, &refs, &series(vec![1.0; 513])).expect_err("513 points");
     assert_eq!(error.kind(), ChartErrorKind::TooLarge);
     let many: Vec<ChartSeries> = (0..13)
         .map(|i| ChartSeries::new(format!("s{i}"), vec![1.0]))
