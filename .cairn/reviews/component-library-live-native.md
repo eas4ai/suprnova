@@ -15,8 +15,12 @@ findings:
   - resolved: The strip radios are visually hidden, so the browser case clicks their labels; a strip selection is proved with the script blocked before the date input is filled, because the model round-trip re-renders the strips.
   - resolved: The Live gate's first run over the family failed 28 browser cases. The dogfood host's pooled sqlite::memory: connection was replaced when a browser closed a connection mid-request and came back without tables; the host now keeps a file in a temporary directory on one connection. The dashboard's cases expected three islands and the "no library component" case ran against a document that now mounts the account menu; they expect four and the public page.
   - resolved: An action's morph copied the server's disconnected default over the status the runtime had announced and stripped the root's stream state, so the feed and bell read disconnected over a current stream until the next tick (FDB-005). The morph now keeps the root state and the status text while a stream is projected; spec 14 records the rule, the fixture proves the preserve decisions, the browser case asserts the status after an action, and the rebuilt bundles carry reviewed integrity pins.
-  - noted: Two races outside the commitment went to the backlog with their evidence: a model proposal queued behind an in-flight action is sent with the authority captured when it was queued (the combobox case now selects from its query's results, the FORM-008 flow), and concurrent requests on one session write back last-writer-wins (the flash case waits for the dashboard's islands).
-  - noted: The three enhancements never call ElementInternals: every one wraps a native control that carries the value, so UI-011 does not apply to them and the escalation's "with ElementInternals" phrasing was stricter than the build needed; the spec 21 revision records the actual rule.
+  - open: A model proposal queued behind an in-flight action is sent with the revision and snapshot captured when it was queued, so the server answers 409 and the runtime reloads the document; the runtime's scheduler is outside this commitment and the defect is in the backlog with its evidence, and the combobox case selects from its query's results, the FORM-008 flow.
+  - open: Concurrent requests on one session write back last-writer-wins, so a flash set by a redirect can be overwritten by a request that started earlier; the session middleware is outside this commitment and the defect is in the backlog with its evidence, and the flash case waits for the dashboard's islands to connect.
+
+### Observed, no finding
+
+The three enhancements never call ElementInternals: every one wraps a native control that carries the value, so UI-011 does not apply to them and the escalation's "with ElementInternals" phrasing was stricter than the build needed; the spec 21 revision records the actual rule.
 
 ## Build review, 2026-09-15
 
