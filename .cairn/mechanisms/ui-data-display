@@ -1,0 +1,11 @@
+command: node .cairn/tools/ui-data-display.mjs crates/suprnova-live/components app/templates/live/data-display-gallery.html crates/suprnova-live/browser/src
+results: per-requirement
+inputs:
+  - .cairn/tools/ui-data-display.mjs
+  - crates/suprnova-live/components/
+  - crates/suprnova-live/browser/src/
+  - app/templates/live/
+requirements:
+  - DATA-001
+  - DATA-002
+  - DATA-004
