@@ -59,3 +59,14 @@ The account menu MUST document that classification.
 Falsifier: the account menu's markup appears in a shared cached shell.
 Mechanism: the dogfood stitched-dashboard test extended with the account
 menu.
+
+[NAV-006] The load-more control MUST be a button bound to a registered
+action that appends to a keyed list. Every item already present MUST keep
+its identity across the append. The control MUST expose its loading state
+through `live:loading`. The control MUST leave the view when the server
+reports no further page.
+Falsifier: a shipped load-more control is an anchor, an existing item is
+replaced by the append morph, or the control stays active after the last
+page.
+Mechanism: the navigation tool over the shipped views; a morph fixture
+under `crates/suprnova-live/browser/tests/`.

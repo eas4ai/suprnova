@@ -24,12 +24,16 @@ tokens.
 Mechanism: `.cairn/mechanisms/ui-live-check` (role and text presence) and
 the token stylesheet check for a non-color cue per variant.
 
-[FDB-002] Loading presentation MUST represent real queued or loading work
-through the `live:loading` vocabulary, with an anti-flicker threshold.
-Falsifier: a spinner or skeleton renders with no bound loading target, or
-appears before the configured threshold.
-Mechanism: `.cairn/mechanisms/ui-live-check`; a browserless harness case
-for the threshold.
+[FDB-002] Loading presentation MUST represent real queued or loading work.
+A spinner or skeleton MUST be bound through the `live:loading` state
+directives to an action the checker proves, or stand as the placeholder
+of a lazy island. A bound spinner or skeleton MUST take its anti-flicker
+threshold from the runtime's loading timing (150 ms delay, 200 ms minimum
+visible) rather than a timer of its own.
+Falsifier: a spinner or skeleton renders with no bound loading target and
+no lazy island, or appears before the runtime's delay.
+Mechanism: the feedback tool over the shipped views; a browserless
+harness case for the threshold.
 
 [FDB-003] The empty state MUST take its reason (empty, no results, no
 permission, disconnected) from server-rendered state. The empty state
@@ -54,3 +58,14 @@ Falsifier: a retired transport leaves the feed presenting itself as live.
 Mechanism: the async-updates fixtures under
 `crates/suprnova-live/browser/tests/` extended with the feed component;
 an `app/tests/` end-to-end case.
+
+[FDB-006] The progress component MUST render a native `progress` element
+with `max` and `value` for determinate work and no `value` for
+indeterminate work. The progress component MUST carry a visible or
+accessible text label. The progress component MUST NOT signal completion
+by color alone.
+Falsifier: a shipped progress view draws its bar from a width value on
+an element other than `progress`, an indeterminate instance carries a
+`value`, or an instance renders without a label.
+Mechanism: the feedback tool over the shipped views;
+`.cairn/mechanisms/ui-live-check`.

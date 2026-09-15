@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: component-library-overlays
+Current: component-library-feedback-and-navigation
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -51,13 +51,16 @@ components in waves, the advanced components last, the datatable closing.
    `ovl-001`, which agreed OVL-001 to OVL-006 and raised the browser
    baseline to the `popover` floor; receipts and review on `0ed49968`) -
    dialog, sheet, drawer,
-   single-level dropdown menu, popover, tooltip, tabs, collapsible and
-   accordion; opens with the anchor-positioning and popover-continuity
+   single-level dropdown menu, popover, tooltip, collapsible and
+   accordion; opened with the anchor-positioning and popover-continuity
    spike in the qualification host (`component-library-overlays.md`).
-5. component-library-feedback-and-navigation - alert, toast and flash
-   region, skeleton, progress, spinner, empty state; header bar, footer,
-   sidebar, breadcrumbs, pagination, load more (`component-library-feedback.md`,
-   `component-library-navigation.md`).
+   Tabs, listed here at first, was never in OVL-001 to OVL-006 and moves
+   to item 5, where NAV-002 specifies it.
+5. component-library-feedback-and-navigation - named by the developer
+   at 23:02 on 2026-09-14 - alert, toast and flash region, skeleton,
+   progress, spinner, empty state; header bar, footer, sidebar,
+   breadcrumbs, tabs, pagination, load more
+   (`component-library-feedback.md`, `component-library-navigation.md`).
 6. component-library-data-display - card, image and aspect ratio, scroll
    area, separator, badge, avatar, list group, description list, stat
    card; the datatable last (`component-library-data-display.md`).
