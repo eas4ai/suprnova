@@ -59,14 +59,14 @@ prose and media containers, which the roadmap does not name.
 
 - Requirements: `docs/spec/component-library-data-display.md` (DATA), on
   the Agreed foundations, overlays, feedback and navigation records.
-- Mechanisms, declared after the agreement: a data-display tool under
-  `.cairn/tools/` reporting per requirement over the shipped views and
-  the gallery (DATA-001, DATA-002, DATA-004), `ui-live-check` (DATA-001,
-  DATA-002, DATA-005), `live-gate` (DATA-001 through the Playwright
-  matrix), a morph fixture mechanism over the collection markup
-  (DATA-003), `ui-dogfood-tests` (DATA-004, DATA-005), and the inherited
-  `ui-light-dom`, `ui-elements`, `ui-islands`, `ui-tokens`, `ui-live-add`
-  and `ui-framework-tests` runs over the new directories.
+- Mechanisms, declared after the agreement, one owner per requirement
+  (LOOP-056): a data-display tool under `.cairn/tools/` reporting per
+  requirement over the shipped views and the gallery (DATA-001,
+  DATA-002, DATA-004), a morph fixture mechanism over the collection
+  markup (DATA-003), `ui-dogfood-tests` (DATA-005), and the inherited
+  `ui-live-check`, `live-gate`, `ui-light-dom`, `ui-elements`,
+  `ui-islands`, `ui-tokens`, `ui-live-add` and `ui-framework-tests` runs
+  over the new directories.
 - Evidence: `.cairn/evidence/`, committed after each `cairn check`.
 - Review: `.cairn/reviews/component-library-data-display.md`.
 
