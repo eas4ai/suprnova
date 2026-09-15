@@ -12,10 +12,25 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { FeedbackRuntime } from "../src/feedback/targets.js";
+import { DEFAULT_MORPH_LIMITS } from "../src/morph/limits.js";
+import {
+  preservesStreamStatus,
+  skipsNodeAddition,
+  skipsNodeMorph,
+  skipsNodeRemoval,
+} from "../src/morph/preserve.js";
+import type { MorphPlan } from "../src/morph/types.js";
 import type { IslandMetadata } from "../src/islands/metadata.js";
 import { IslandRecord } from "../src/islands/record.js";
 import type { RuntimeClock, RuntimeScheduler } from "../src/runtime/ports.js";
 import type { SubscriptionState } from "../src/async-updates/types.js";
+import {
+  asElement,
+  element as fakeElement,
+  type FakeElement as MorphFakeElement,
+  morphFixture,
+  text as fakeText,
+} from "./support/morph-dom.js";
 
 const COMPONENTS = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "components");
 
@@ -187,5 +202,85 @@ describe("live feed stream status", () => {
       expect(text).not.toContain("live");
       expect(text).not.toContain("current");
     }
+  });
+});
+
+// A morph re-renders the view from the server, which carries the disconnected
+// default and no root state; the runtime's projection must survive it.
+describe("FDB-005: a morph keeps the runtime's stream status", () => {
+  function plan(currentRoot: MorphFakeElement, replacementRoot: MorphFakeElement): MorphPlan {
+    return {
+      controls: { byKey: new Map() },
+      currentRoot: asElement(currentRoot),
+      identity: { nestedCurrentRoots: new Set() },
+      limits: DEFAULT_MORPH_LIMITS,
+      replacementRoot: asElement(replacementRoot),
+    } as unknown as MorphPlan;
+  }
+
+  function statusPair(projected: boolean) {
+    const fixture = morphFixture(
+      projected
+        ? { currentOverrides: { "aria-busy": "false", "data-live-stream-state": "current" } }
+        : {},
+    );
+    const current = fakeElement(
+      fixture.currentDocument,
+      "p",
+      {
+        "aria-atomic": "true",
+        "aria-live": "polite",
+        "data-live-stream-status": "",
+        role: "status",
+      },
+      [fakeText(fixture.currentDocument, "Updates current")],
+    );
+    const replacement = fakeElement(
+      fixture.replacementDocument,
+      "p",
+      { "aria-live": "polite", "data-live-stream-status": "", role: "status" },
+      [fakeText(fixture.replacementDocument, "Updates disconnected")],
+    );
+    fixture.currentRoot.append(current);
+    fixture.replacementRoot.append(replacement);
+    return {
+      current,
+      fixture,
+      plan: plan(fixture.currentRoot, fixture.replacementRoot),
+      replacement,
+    };
+  }
+
+  it("keeps the root state and the announced text while a stream is projected", () => {
+    const { current, fixture, plan: morphPlan, replacement } = statusPair(true);
+    const root = asElement(fixture.currentRoot);
+    expect(preservesStreamStatus(morphPlan, "data-live-stream-state", root)).toBe(true);
+    expect(preservesStreamStatus(morphPlan, "aria-busy", root)).toBe(true);
+    expect(preservesStreamStatus(morphPlan, "data-live-stream-motion", root)).toBe(true);
+    expect(preservesStreamStatus(morphPlan, "class", root)).toBe(false);
+    expect(preservesStreamStatus(morphPlan, "role", asElement(current))).toBe(true);
+    expect(preservesStreamStatus(morphPlan, "aria-live", asElement(current))).toBe(true);
+    expect(preservesStreamStatus(morphPlan, "class", asElement(current))).toBe(false);
+    const currentText = current.childNodes[0] as unknown as Node;
+    const replacementText = replacement.childNodes[0] as unknown as Node;
+    expect(skipsNodeMorph(morphPlan, currentText, replacementText)).toBe(true);
+    expect(skipsNodeRemoval(morphPlan, currentText)).toBe(true);
+    expect(skipsNodeAddition(morphPlan, replacementText)).toBe(true);
+    // The status element itself still morphs, so a re-rendered class lands.
+    expect(
+      skipsNodeMorph(morphPlan, current as unknown as Node, replacement as unknown as Node),
+    ).toBe(false);
+  });
+
+  it("lets the server's text through when no stream is projected", () => {
+    const { current, fixture, plan: morphPlan, replacement } = statusPair(false);
+    const root = asElement(fixture.currentRoot);
+    expect(preservesStreamStatus(morphPlan, "data-live-stream-state", root)).toBe(false);
+    expect(preservesStreamStatus(morphPlan, "role", asElement(current))).toBe(false);
+    const currentText = current.childNodes[0] as unknown as Node;
+    const replacementText = replacement.childNodes[0] as unknown as Node;
+    expect(skipsNodeMorph(morphPlan, currentText, replacementText)).toBe(false);
+    expect(skipsNodeRemoval(morphPlan, currentText)).toBe(false);
+    expect(skipsNodeAddition(morphPlan, replacementText)).toBe(false);
   });
 });

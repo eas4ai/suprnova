@@ -631,7 +631,12 @@ UX flow:
   as the default in a polite status element, the runtime announces every
   state change into it, and the stylesheets color the degraded, reconnecting
   and closed states apart from current, so a retired or reconnecting stream
-  never presents itself as current. Cairn FDB-005 refines this spec.
+  never presents itself as current. A morph keeps what the runtime projected:
+  while the island root carries `data-live-stream-state`, the morph leaves
+  that attribute, `aria-busy` and `data-live-stream-motion` on the root and
+  the text and live-region attributes of every `data-live-stream-status`
+  element in place, so an action's re-render never shows the disconnected
+  default over a current stream. Cairn FDB-005 refines this spec.
 - 2026-09-14 -- Closed the issuance credential and context races under
   LIVE-022 and LIVE-023 in `docs/spec/live.md`. The host's credential store
   keeps every unconsumed secret issued for a binding until each is consumed or

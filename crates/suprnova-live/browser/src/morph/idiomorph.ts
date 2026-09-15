@@ -5,6 +5,7 @@ import { isValidatedMorphPlan } from "./preflight.js";
 import {
   forcesReplacement,
   preservesAttribute,
+  preservesStreamStatus,
   skipsNodeAddition,
   skipsNodeMorph,
   skipsNodeRemoval,
@@ -284,6 +285,7 @@ export class IdiomorphAdapter implements MorphAdapter {
             checkBudget();
             if (node === plan.currentRoot && name === "data-suprnova-live-status") return false;
             if (preservesAttribute(plan, node)) return false;
+            if (preservesStreamStatus(plan, name, node)) return false;
             return undefined;
           },
           afterNodeAdded: (node) => {

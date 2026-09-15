@@ -30,7 +30,7 @@ test("a signed-in user runs actions through the production middleware stack", as
   await page.goto(`${APP_ORIGIN}/live/demo-login`);
   await expect(page).toHaveURL(`${APP_ORIGIN}/live`);
   await expect(page.getByRole("heading", { name: "Live dashboard" })).toBeVisible();
-  await expectConnected(page, 3);
+  await expectConnected(page, 4);
 
   await page.getByRole("button", { name: "Increment" }).click();
   await expect(page.getByText("Count: 1", { exact: true })).toBeVisible();
@@ -76,7 +76,7 @@ test("the activity feed subscribes over the asynchronous transport and refreshes
     if (url.pathname === "/__live/action") renders.push(response.status());
   });
   await page.goto(`${APP_ORIGIN}/live/demo-login`);
-  await expectConnected(page, 3);
+  await expectConnected(page, 4);
   const issued = await expect
     .poll(() => transports.some((path) => path === "/__live/async/subscriptions"))
     .toBe(true)
@@ -106,7 +106,7 @@ test("the activity feed subscribes over the asynchronous transport and refreshes
   const expected = String(postedBefore + 1);
   await expect(page.locator("[data-posted]")).toHaveAttribute("data-posted", expected);
   await expect(page.getByText(`Posted ${expected}`, { exact: true })).toBeVisible();
-  await expectConnected(page, 3);
+  await expectConnected(page, 4);
 });
 
 test("the form gallery loads the suprnova-ui base and its vendored assets, and the password reveal upgrades", async ({
@@ -164,9 +164,11 @@ test("the form gallery loads the suprnova-ui base and its vendored assets, and t
 });
 
 test("a document that never added a library component defines no sn- element", async ({ page }) => {
-  await page.goto(`${APP_ORIGIN}/live/demo-login`);
-  await expect(page).toHaveURL(`${APP_ORIGIN}/live`);
-  await expectConnected(page, 3);
+  // The dashboard mounts the account menu now, so the public page is the
+  // document without a library component.
+  await page.goto(`${APP_ORIGIN}/live/public`);
+  await expect(page.getByRole("heading", { name: "Public counter" })).toBeVisible();
+  await expectConnected(page, 1);
   const defined = await page.evaluate(() => customElements.get("sn-password-reveal") !== undefined);
   expect(defined).toBe(false);
   const prefixed = await page.evaluate(() =>
@@ -310,6 +312,9 @@ test("the flash region shows an outcome once after a redirect and nothing on the
   page,
 }) => {
   await page.goto(`${APP_ORIGIN}/live/demo-login`);
+  // The dashboard's islands connect through requests that carry the session;
+  // the notice must not race a write from one of them.
+  await expectConnected(page, 4);
   await page.goto(`${APP_ORIGIN}/live/feedback/notice`);
   await expect(page).toHaveURL(`${APP_ORIGIN}/live/feedback`);
   await expect(page.locator("#flash .sn-flash")).toHaveText("Your changes were saved");
@@ -482,6 +487,11 @@ test("the live-native enhancements upgrade, and every control still submits with
   await page.goto(`${APP_ORIGIN}/live/live-native`);
   await expect(page.getByRole("heading", { name: "Live native gallery" })).toBeVisible();
   await expectConnected(page, 2);
+  const island = page.locator(
+    "[data-suprnova-live-island][data-suprnova-live-document-key='live-native-gallery']",
+  );
+  const status = page.locator("#activity [data-live-stream-status]");
+  await expect(island).toHaveAttribute("data-live-stream-state", /current|connecting|degraded/);
 
   // FORM-006: the element mirrors the code into the cells; the input holds it.
   await expect(page.locator("sn-input-otp")).toHaveAttribute("data-sn-upgraded", "");
@@ -490,6 +500,10 @@ test("the live-native enhancements upgrade, and every control still submits with
   await expect(page.locator(".sn-otp-cell[data-sn-index='5']")).toHaveText("0");
   await page.locator("#code-form button[type=submit]").click();
   await expect(page.locator("[data-verified='1']")).toBeVisible();
+  // FDB-005: the action's morph keeps the runtime's status; the server's
+  // disconnected default never shows over a projected stream state.
+  await expect(island).toHaveAttribute("data-live-stream-state", /current|connecting|degraded/);
+  await expect(status).not.toHaveText("Updates disconnected");
 
   // FORM-007: the strips are radios; choosing all three composes the input.
   await page.locator("#renewal-form summary").click();
@@ -510,6 +524,9 @@ test("the live-native enhancements upgrade, and every control still submits with
   await expect(page.locator("sn-combobox")).toHaveAttribute("data-sn-upgraded", "");
   await country.fill("ca");
   await expect(country).toHaveAttribute("aria-expanded", "true");
+  // The results for "ca" arrive through the model round-trip; the selection
+  // is made from them, as a user would, not from the seed list.
+  await expect(page.locator("#country-listbox")).toHaveAttribute("data-sn-query", "ca");
   await country.press("ArrowDown");
   await expect(country).toHaveAttribute("aria-activedescendant", "country-option-1");
   await country.press("Enter");
@@ -517,11 +534,7 @@ test("the live-native enhancements upgrade, and every control still submits with
   await expect(country).toHaveAttribute("aria-expanded", "false");
 
   // FDB-005: the stream connects and the status names the state honestly.
-  const island = page.locator(
-    "[data-suprnova-live-island][data-suprnova-live-document-key='live-native-gallery']",
-  );
   await expect(island).toHaveAttribute("data-live-stream-state", /current|connecting|degraded/);
-  const status = page.locator("#activity [data-live-stream-status]");
   await expect(status).not.toHaveText("");
   const state = await island.getAttribute("data-live-stream-state");
   if (state !== "current") {

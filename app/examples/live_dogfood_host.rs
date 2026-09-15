@@ -4,7 +4,7 @@
 //! and drives the dogfood routes exactly as a deployment would: the
 //! production global middleware stack from `bootstrap::register_http_stack`,
 //! the guarded reserved Live routes and the RenderCache middleware from
-//! `app::live::routes_with_render_cache`, an in-memory database with the
+//! `app::live::routes_with_render_cache`, a throwaway SQLite database with the
 //! application's migrations, and one demo user the browser signs in as
 //! through `/live/demo-login`.
 
@@ -34,9 +34,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // directory the browser suite starts the host from.
     suprnova::app::paths::set_base_path(env!("CARGO_MANIFEST_DIR"));
 
-    let connection = sea_orm::Database::connect("sqlite::memory:").await?;
-    Migrator::up(&connection, None).await?;
-    App::singleton(suprnova::DbConnection::from_raw(connection));
+    // A file-backed database in a directory that lives as long as the host.
+    // A pooled connection is replaced when a browser closes its connection
+    // mid-request, and every pooled connection to `sqlite::memory:` is its
+    // own empty database, so the replacement would come back without the
+    // migrated tables; a file survives the swap the way a deployment's
+    // database does.
+    let database_dir = tempfile::tempdir()?;
+    let database_path = database_dir.path().join("live-dogfood.sqlite");
+    let config = suprnova::DatabaseConfig::builder()
+        .url(format!("sqlite://{}", database_path.display()))
+        // One connection, as the in-memory host had: the suite's cases
+        // were written against requests that never overlap on the store.
+        .max_connections(1)
+        .logging(false)
+        .build();
+    let connection = suprnova::DbConnection::connect(&config).await?;
+    Migrator::up(connection.conn(), None).await?;
+    App::singleton(connection);
     bind!(dyn UserProvider, DatabaseUserProvider);
     App::singleton(AuthManager::new(AuthConfig::from_env()));
     Auth::register_provider("users", Arc::new(EloquentUserProvider::<User>::new()))?;
