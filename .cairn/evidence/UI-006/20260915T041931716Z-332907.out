@@ -1,0 +1,14 @@
+   Compiling app v2.0.2 (/home/shawn/workspace2/suprnova/app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.78s
+────────────
+[32;1m Nextest run[0m ID [1mcd0fd70e-f776-4833-9716-fb9891c67393[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m14[0m tests across [1m1[0m binary
+────────────
+[32;1m     Summary[0m [   0.100s] [1m14[0m tests run: [1m14[0m [32;1mpassed[0m, [1m0[0m [33;1mskipped[0m
+   Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.17s
+────────────
+[32;1m Nextest run[0m ID [1m11c9975e-cbe4-4080-b1c9-f0c4df368e82[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m1[0m test across [1m1[0m binary ([1m112[0m tests [33;1mskipped[0m)
+────────────
+[32;1m     Summary[0m [   0.006s] [1m1[0m test run: [1m1[0m [32;1mpassed[0m, [1m112[0m [33;1mskipped[0m
