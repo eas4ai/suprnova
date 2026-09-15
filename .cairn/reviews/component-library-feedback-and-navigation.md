@@ -12,7 +12,7 @@ findings:
   - resolved: A dismissed toast kept its hidden attribute but stayed visible, because the toast's flex display outranked the user agent's hidden rule; the stylesheet now gives a hidden toast display none. Fixed before the components were committed.
   - resolved: The load-more browser case first witnessed row identity with a browser-added attribute, which the morph removes by design when it syncs attributes from the server render; the case now witnesses with a property on the node, which only a kept node carries.
   - resolved: The navigation tool assumed each gallery import alias equals the macro name and reported three missing mounts; it now reads the alias from the import line.
-  - open: The three-engine browser run of the app dogfood spec timed out on page loads twice while the machine sat at sixty percent I/O stall under the desktop indexer; every engine passed the file alone and the failing cases carried no assertion, so the Live gate receipt on this tree is the evidence of record. The stall is machine state, not a defect in the tree.
+  - resolved: Two hand-run three-engine passes of the app dogfood spec timed out on page loads while the machine sat at sixty percent I/O stall under the desktop indexer; every engine passed the file alone, the failing cases carried no assertion, and the Live gate then ran the same three-engine matrix on this tree and passed (receipt 20260915T044033Z). The stall was machine state, not a defect in the tree; no code changed for it.
 
 ## Build review, 2026-09-15
 
