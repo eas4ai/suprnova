@@ -1,0 +1,9 @@
+{#
+  suprnova.tooltip - a CSS-only tooltip (OVL-002). The caller renders the
+  trigger and gives it aria-describedby="<id>"; the bubble is the element
+  with that id, appears on :hover and on :focus-visible inside the wrapper,
+  and never holds interactive content.
+#}
+{% macro tooltip(id, text) %}
+<span class="sn-tooltip">{{ caller() }}<span class="sn-tooltip-bubble" id="{{ id }}" role="tooltip">{{ text }}</span></span>
+{% endmacro %}

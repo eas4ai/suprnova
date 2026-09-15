@@ -14,7 +14,7 @@ use suprnova::live::{CanonicalValue, LiveBootstrapOptions, LiveDocument, MountFl
 use suprnova::view::{AssetSet, DocumentResponseIntent, TrustedHtml, ViewName, ViewTemplate};
 use suprnova::{Auth, FrameworkError, HttpResponse, Model, Request, Response, StatusCode};
 
-use super::{DashboardMounts, FormsMounts, PublicMounts};
+use super::{DashboardMounts, FormsMounts, OverlaysMounts, PublicMounts};
 use crate::models::todos::Todo;
 use crate::models::users::User;
 
@@ -32,6 +32,12 @@ struct DashboardView<'a> {
 
 #[suprnova::view(path = "live/forms.html")]
 struct FormsView<'a> {
+    bootstrap: &'a TrustedHtml,
+    gallery: &'a TrustedHtml,
+}
+
+#[suprnova::view(path = "live/overlays.html")]
+struct OverlaysView<'a> {
     bootstrap: &'a TrustedHtml,
     gallery: &'a TrustedHtml,
 }
@@ -99,6 +105,31 @@ pub async fn forms(request: Request, mounts: &FormsMounts) -> Response {
             .render(
                 view("live/forms.html")?,
                 &FormsView {
+                    bootstrap: bootstrap.html(),
+                    gallery: gallery.html(),
+                },
+                intent()?,
+                AssetSet::empty(),
+            )
+            .map_err(FrameworkError::from)
+    }
+    .await;
+    result.map_err(failed)
+}
+
+/// The overlay gallery: the suprnova-ui base is opted in and every overlay
+/// and disclosure component is mounted once (Cairn OVL-001).
+pub async fn overlays(request: Request, mounts: &OverlaysMounts) -> Response {
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let mut document = LiveDocument::from_request(&request)?;
+        let gallery = document
+            .mount(&mounts.gallery, parameters(), MountFlags::empty())
+            .await?;
+        let bootstrap = document.bootstrap(LiveBootstrapOptions::esm().with_suprnova_ui())?;
+        document
+            .render(
+                view("live/overlays.html")?,
+                &OverlaysView {
                     bootstrap: bootstrap.html(),
                     gallery: gallery.html(),
                 },

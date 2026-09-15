@@ -1,0 +1,24 @@
+{#
+  suprnova.drawer - a native modal drawer (OVL-001). drawer_trigger opens it
+  and drawer_close closes it through the sn-drawer element; the dialog
+  element owns the open state, focus containment and Escape, and focus
+  returns to the trigger on close (OVL-005). Keyed and preserved across a
+  compatible morph (OVL-006). The host carries tabindex="-1" so it can take
+  focus when the trigger has left the document.
+#}
+{% macro drawer_trigger(target, text, variant="primary") %}
+<button class="sn-button sn-drawer-trigger" type="button" data-sn-variant="{{ variant }}" data-sn-drawer-open="{{ target }}">{{ text }}</button>
+{% endmacro %}
+
+{% macro drawer(id, key, title, side="start") %}
+<sn-drawer class="sn-drawer-host" tabindex="-1">
+<dialog class="sn-drawer" id="{{ id }}" aria-labelledby="{{ id }}-title" closedby="any" data-sn-side="{{ side }}" live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self>
+<h2 class="sn-drawer-title" id="{{ id }}-title">{{ title }}</h2>
+<div class="sn-drawer-body">{{ caller() }}</div>
+</dialog>
+</sn-drawer>
+{% endmacro %}
+
+{% macro drawer_close(target, text="Close", variant="secondary") %}
+<button class="sn-button" type="button" data-sn-variant="{{ variant }}" data-sn-drawer-close="{{ target }}">{{ text }}</button>
+{% endmacro %}

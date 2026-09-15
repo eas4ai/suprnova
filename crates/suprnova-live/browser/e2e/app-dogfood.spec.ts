@@ -178,3 +178,94 @@ test("a document that never added a library component defines no sn- element", a
   const html = await page.content();
   expect(html).not.toContain("suprnova-ui.css");
 });
+
+test("the overlay gallery opens and closes every overlay without a Live request, and a dialog returns focus to its invoker", async ({
+  page,
+}) => {
+  const actions: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/__live/action") actions.push(request.method());
+  });
+  await page.goto(`${APP_ORIGIN}/live/demo-login`);
+  await expect(page).toHaveURL(`${APP_ORIGIN}/live`);
+  await page.goto(`${APP_ORIGIN}/live/overlays`);
+  await expect(page.getByRole("heading", { name: "Overlay gallery" })).toBeVisible();
+  await expectConnected(page, 1);
+  const defined = await page.evaluate(() =>
+    ["sn-dialog", "sn-sheet", "sn-drawer"].map((name) => customElements.get(name) !== undefined),
+  );
+  expect(defined).toEqual([true, true, true]);
+
+  // Popover and menu: native open state and light dismiss.
+  await page.getByRole("button", { name: "Hint" }).click();
+  await expect(page.locator("#hint")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#hint")).toBeHidden();
+  await page.getByRole("button", { name: "Actions" }).click();
+  await expect(page.locator("#actions")).toBeVisible();
+  await expect(page.locator("#actions a", { hasText: "Dashboard" })).toHaveAttribute(
+    "href",
+    "/live",
+  );
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#actions")).toBeHidden();
+
+  // Disclosure and accordion.
+  const notes = page.locator("details.sn-collapsible");
+  await notes.locator("summary").click();
+  await expect(notes).toHaveAttribute("open", "");
+  await expect(page.locator("details.sn-accordion-item").first()).toHaveAttribute("open", "");
+
+  // Dialog, sheet and drawer: focus containment and return.
+  for (const [trigger, dialogId] of [
+    ["Delete everything", "confirm"],
+    ["Details", "details-sheet"],
+    ["Navigate", "nav-drawer"],
+  ] as const) {
+    const button = page.getByRole("button", { name: trigger });
+    await button.click();
+    const dialog = page.locator(`dialog#${dialogId}`);
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAttribute("open", "");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(button).toBeFocused();
+  }
+  expect(actions).toEqual([]);
+
+  // The one server effect an overlay invokes owns only that effect.
+  await page.getByRole("button", { name: "Delete everything" }).click();
+  await page.locator("dialog#confirm").getByRole("button", { name: "Delete" }).click();
+  await expect(page.locator("[data-deleted]")).toHaveAttribute("data-deleted", "true");
+  await expect(page.locator("dialog#confirm")).toBeVisible();
+  await page.locator("dialog#confirm").getByRole("button", { name: "Cancel" }).click();
+  await expect(page.locator("dialog#confirm")).toBeHidden();
+  expect(actions).toEqual(["POST"]);
+});
+
+test("an open keyed overlay survives a morph that did not touch it, and focus falls back when the invoker left", async ({
+  page,
+}) => {
+  await page.goto(`${APP_ORIGIN}/live/demo-login`);
+  await page.goto(`${APP_ORIGIN}/live/overlays`);
+  await expectConnected(page, 1);
+  const notes = page.locator("details.sn-collapsible");
+  await notes.locator("summary").click();
+  await expect(notes).toHaveAttribute("open", "");
+  await expect(page.locator("[data-notes]")).toHaveAttribute("data-notes", "1");
+  await page.getByRole("button", { name: "Actions" }).click();
+  await page.locator("#actions").getByRole("button", { name: "Add a note" }).click();
+  await expect(page.locator("[data-notes]")).toHaveAttribute("data-notes", "2");
+  await expect(notes).toHaveAttribute("open", "");
+  await expect(notes.getByText("Note 2", { exact: true })).toBeVisible();
+  await expect(page.locator("#actions")).toBeHidden();
+
+  await page.getByRole("button", { name: "Details" }).click();
+  await expect(page.locator("dialog#details-sheet")).toBeVisible();
+  await page.evaluate(() => {
+    document.querySelector('[data-sn-sheet-open="details-sheet"]')?.remove();
+  });
+  await page.keyboard.press("Escape");
+  await expect(page.locator("dialog#details-sheet")).toBeHidden();
+  await expect(page.locator("sn-sheet")).toBeFocused();
+});

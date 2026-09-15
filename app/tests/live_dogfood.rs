@@ -475,3 +475,78 @@ async fn the_gallery_snapshot_never_carries_the_password() {
         "no password value in markup: {password_tag}"
     );
 }
+
+/// OVL-001 to OVL-004: the overlay gallery renders every overlay on its
+/// native primitive, keyed and preserved, with no Live directive on an open
+/// or close control, and the vendored assets beside them.
+#[tokio::test]
+async fn the_overlay_gallery_renders_every_overlay_on_its_native_primitive() {
+    let app = setup_app(6).await;
+    let session = seed_session(&app).await;
+
+    let reply = get(&app, "/live/overlays", Some(&session)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let html = reply.text();
+    assert!(html.contains("<h1>Overlay gallery</h1>"), "{html}");
+    assert_eq!(html.matches("suprnova-ui.css").count(), 1, "{html}");
+    let gallery = island_tag(&html, "overlays-gallery");
+    assert_eq!(
+        attribute(gallery, "data-suprnova-live-snapshot-kind"),
+        "instance"
+    );
+    for needle in [
+        "<span class=\"sn-tooltip-bubble\" id=\"save-tip\" role=\"tooltip\">",
+        "aria-describedby=\"save-tip\"",
+        "<details class=\"sn-collapsible\" live:key=\"notes\" data-suprnova-live-key=\"notes\" live:preserve.self>",
+        "<details class=\"sn-accordion-item\" name=\"faq\" live:key=\"faq-open\" data-suprnova-live-key=\"faq-open\" live:preserve.self open>",
+        "<div class=\"sn-popover\" id=\"hint\" popover aria-label=\"Hint\"",
+        "popovertarget=\"hint\"",
+        "<div class=\"sn-menu\" id=\"actions\" popover aria-label=\"Actions\"",
+        "<a class=\"sn-menu-link\" href=\"/live\">Dashboard</a>",
+        "<button class=\"sn-menu-action\" type=\"button\" live:click=\"add_note\" popovertarget=\"actions\" popovertargetaction=\"hide\">",
+        "<sn-dialog class=\"sn-dialog-host\" tabindex=\"-1\">",
+        "<dialog class=\"sn-dialog\" id=\"confirm\" aria-labelledby=\"confirm-title\" closedby=\"any\" live:key=\"confirm\" data-suprnova-live-key=\"confirm\" live:preserve.self>",
+        "data-sn-dialog-open=\"confirm\"",
+        "data-sn-dialog-close=\"confirm\"",
+        "live:click=\"confirm_delete\"",
+        "<dialog class=\"sn-sheet\" id=\"details-sheet\"",
+        "<dialog class=\"sn-drawer\" id=\"nav-drawer\"",
+        "data-sn-side=\"start\"",
+    ] {
+        assert!(html.contains(needle), "missing {needle} in {html}");
+    }
+    assert!(
+        !html.contains(" style="),
+        "no shipped view carries a style attribute"
+    );
+    // OVL-004: no open or close control carries a Live directive.
+    for tag in html.split('<').filter(|tag| {
+        tag.starts_with("summary")
+            || tag.contains("popovertarget=")
+            || tag.contains("data-sn-dialog-open=")
+            || tag.contains("data-sn-sheet-open=")
+            || tag.contains("data-sn-drawer-open=")
+            || tag.contains("-close=")
+    }) {
+        let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
+        assert!(
+            !tag.contains(" live:") || tag.contains("live:click=\"add_note\""),
+            "an open or close control carries a Live directive: <{tag}>"
+        );
+    }
+    for asset in [
+        "<link rel=\"stylesheet\" href=\"/suprnova-ui/dialog/dialog.css\">",
+        "<script type=\"module\" src=\"/suprnova-ui/dialog/dialog.js\"></script>",
+        "<script type=\"module\" src=\"/suprnova-ui/sheet/sheet.js\"></script>",
+        "<script type=\"module\" src=\"/suprnova-ui/drawer/drawer.js\"></script>",
+    ] {
+        assert!(html.contains(asset), "the page links {asset}");
+    }
+    let js = get(&app, "/suprnova-ui/dialog/dialog.js", None).await;
+    assert_eq!(js.status, StatusCode::OK);
+    assert!(js.text().contains("sn-dialog"));
+    assert!(
+        !js.text().contains("setAttribute(\"open\""),
+        "the script never owns the open attribute"
+    );
+}

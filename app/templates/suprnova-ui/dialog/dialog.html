@@ -1,0 +1,24 @@
+{#
+  suprnova.dialog - a native modal dialog (OVL-001). dialog_trigger opens it
+  and dialog_close closes it through the sn-dialog element; the dialog
+  element owns the open state, focus containment and Escape, and focus
+  returns to the trigger on close (OVL-005). Keyed and preserved across a
+  compatible morph (OVL-006). The host carries tabindex="-1" so it can take
+  focus when the trigger has left the document.
+#}
+{% macro dialog_trigger(target, text, variant="primary") %}
+<button class="sn-button sn-dialog-trigger" type="button" data-sn-variant="{{ variant }}" data-sn-dialog-open="{{ target }}">{{ text }}</button>
+{% endmacro %}
+
+{% macro dialog(id, key, title) %}
+<sn-dialog class="sn-dialog-host" tabindex="-1">
+<dialog class="sn-dialog" id="{{ id }}" aria-labelledby="{{ id }}-title" closedby="any" live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self>
+<h2 class="sn-dialog-title" id="{{ id }}-title">{{ title }}</h2>
+<div class="sn-dialog-body">{{ caller() }}</div>
+</dialog>
+</sn-dialog>
+{% endmacro %}
+
+{% macro dialog_close(target, text="Close", variant="secondary") %}
+<button class="sn-button" type="button" data-sn-variant="{{ variant }}" data-sn-dialog-close="{{ target }}">{{ text }}</button>
+{% endmacro %}

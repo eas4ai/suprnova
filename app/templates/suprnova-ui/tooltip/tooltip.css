@@ -1,0 +1,32 @@
+.sn-tooltip {
+  position: relative;
+  display: inline-block;
+}
+
+.sn-tooltip-bubble {
+  position: absolute;
+  inset-block-start: 100%;
+  inset-inline-start: 50%;
+  z-index: 1;
+  max-inline-size: 20rem;
+  padding: var(--sn-space-1) var(--sn-space-2);
+  translate: -50% var(--sn-space-1);
+  border-radius: var(--sn-radius-sm);
+  background: var(--sn-color-text);
+  color: var(--sn-color-text-inverse);
+  font-size: var(--sn-font-size-sm);
+  line-height: var(--sn-font-leading-tight);
+  white-space: nowrap;
+  pointer-events: none;
+  visibility: hidden;
+  opacity: 0;
+  transition-property: opacity, visibility;
+  transition-duration: var(--sn-motion-duration-fast);
+  transition-timing-function: var(--sn-motion-easing-standard);
+}
+
+.sn-tooltip:hover > .sn-tooltip-bubble,
+.sn-tooltip:has(:focus-visible) > .sn-tooltip-bubble {
+  visibility: visible;
+  opacity: 1;
+}

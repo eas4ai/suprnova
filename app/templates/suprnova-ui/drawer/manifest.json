@@ -1,0 +1,13 @@
+{
+  "name": "suprnova.drawer",
+  "version": 1,
+  "root": "suprnova-ui/drawer",
+  "files": [
+    "drawer.html",
+    "drawer.css",
+    "drawer.js"
+  ],
+  "elements": [
+    "sn-drawer"
+  ]
+}

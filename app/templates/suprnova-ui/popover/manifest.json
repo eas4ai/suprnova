@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.popover",
+  "version": 1,
+  "root": "suprnova-ui/popover",
+  "files": [
+    "popover.html",
+    "popover.css"
+  ],
+  "elements": []
+}

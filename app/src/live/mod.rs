@@ -29,12 +29,15 @@ use components::activity_feed::ActivityFeed;
 use components::avatar_uploader::AvatarUploader;
 use components::counter::Counter;
 use components::form_gallery::FormGallery;
+use components::overlay_gallery::OverlayGallery;
 use providers::tenant::SingleTenant;
 
 /// The authenticated dashboard document.
 pub const DASHBOARD_PATH: &str = "/live";
 /// The form gallery: every presentational library component on one page.
 pub const FORMS_PATH: &str = "/live/forms";
+/// The overlay gallery: every overlay and disclosure component on one page.
+pub const OVERLAYS_PATH: &str = "/live/overlays";
 /// The public document with one public seed.
 pub const PUBLIC_PATH: &str = "/live/public";
 /// The public todo listing, rendered from the ORM.
@@ -51,6 +54,7 @@ pub fn registry() -> Result<LiveRegistry, RegistryError> {
         .register::<AvatarUploader>()?
         .register::<ActivityFeed>()?
         .register::<FormGallery>()?
+        .register::<OverlayGallery>()?
         .build();
     Ok(registry)
 }
@@ -108,6 +112,24 @@ impl FormsMounts {
     }
 }
 
+/// The mount behind the overlay gallery page.
+#[derive(Clone)]
+pub struct OverlaysMounts {
+    pub gallery: LiveMount<OverlayGallery>,
+}
+
+impl OverlaysMounts {
+    pub fn declare() -> Result<Self, FrameworkError> {
+        Ok(Self {
+            gallery: LiveMount::<OverlayGallery>::identity_bound(
+                OVERLAYS_PATH,
+                "gallery",
+                "overlays-gallery",
+            )?,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct PublicMounts {
     /// The public counter island.
@@ -155,6 +177,7 @@ fn tenant() -> LiveTenantMiddleware {
 pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     let dashboard = DashboardMounts::declare()?;
     let forms = FormsMounts::declare()?;
+    let overlays = OverlaysMounts::declare()?;
     let public = PublicMounts::declare()?;
 
     // Optional authentication: a signed-in principal is recorded, an
@@ -201,6 +224,16 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
         .middleware(tenant())
         .into();
     let router = router.try_live_mount(&forms.gallery)?;
+    let handler_mounts = overlays.clone();
+    let router: Router = router
+        .get(OVERLAYS_PATH, move |request: Request| {
+            let mounts = handler_mounts.clone();
+            async move { pages::overlays(request, &mounts).await }
+        })
+        .middleware(AuthMiddleware::redirect_to("/login"))
+        .middleware(tenant())
+        .into();
+    let router = router.try_live_mount(&overlays.gallery)?;
 
     let handler_mounts = public.clone();
     let router: Router = router

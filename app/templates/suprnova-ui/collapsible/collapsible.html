@@ -1,0 +1,13 @@
+{#
+  suprnova.collapsible - one native disclosure (OVL-001). The details
+  element owns the open state; the key names a stable morph scope and
+  live:preserve.self keeps the browser's open state across a compatible
+  morph (OVL-006). The key is written twice on purpose: live:key is what
+  the checker validates, data-suprnova-live-key is what the runtime reads.
+#}
+{% macro collapsible(key, summary, open=false) %}
+<details class="sn-collapsible" live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self{% if open %} open{% endif %}>
+<summary class="sn-collapsible-summary">{{ summary }}</summary>
+<div class="sn-collapsible-panel">{{ caller() }}</div>
+</details>
+{% endmacro %}
