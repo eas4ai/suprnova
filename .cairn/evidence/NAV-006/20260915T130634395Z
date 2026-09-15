@@ -1,0 +1,21 @@
+requirement: NAV-006
+requirement_digest: sha256:6c8a2ffb32b4714a51aa517341250f03fef768849201ad026bf0050cb464e38d
+sequence: 3
+history_digest: sha256:be4c7a47add43ae70f35ff00e404c1b8e385b7943996d5228adb175c3f76845c
+mechanism: ui-load-more-morph
+commit: 4a5ff21f
+inputs_digest: sha256:4e5cc32ede550d4adeb432e3f91b5de27877770ad9c74333ffa6e6f4429dd7a3
+mechanism_digest: sha256:8a2628ffaa2aa5a718b41b4f3af2e67a52974cfecdf2599d6d53d08cd9630de6
+inputs_detail: .cairn/evidence/NAV-006/20260915T130633815Z-3723579.inputs.json
+command: sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/load-more-continuity.test.ts'
+cwd: .
+exit: 0
+output_digest: sha256:aa718ae87159d2a5f329ef91ce59239db57d2a5e618717af0448e5c68d366776
+output: .cairn/evidence/NAV-006/20260915T130633815Z-3723579.out
+stderr_output: .cairn/evidence/NAV-006/20260915T130633815Z-3723579.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+result: pass
+source: exit
+recorded: 2026-09-15T13:06:34.395Z
