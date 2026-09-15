@@ -1,7 +1,7 @@
 # Suprnova Live -- 25 Data Display and Layout Components
 
 Status: Normative design specification
-Last revised: 2026-09-13
+Last revised: 2026-09-15
 
 ## Scope
 
@@ -194,6 +194,16 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-15 -- The official data-display components (separator, scroll
+  area, aspect image, card, badge, avatar and group, list group, description
+  list, stat card, chart, datatable) keep document order and native
+  semantics, carry text for every status, key every repeated item through
+  `live_key`, render the chart on the server through `charts-rs` behind
+  bounded typed series with a summary and a data table beside the marks, and
+  bind the datatable's sort, direction, filter and page to `#[url]` fields
+  reflected through the action result's URL intent, one island per table.
+  Cairn DATA-001 to DATA-005 refine this spec; the interactive data grid
+  stays an opt-in pattern outside the built-in set.
 - 2026-09-13 -- The library ships one built-in chart component rendered on the
   server as SVG through `charts-rs` (Apache-2.0), with a textual alternative in
   the canonical document and updates through normal re-render or streams. No

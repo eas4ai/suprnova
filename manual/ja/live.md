@@ -396,6 +396,41 @@ suprnova live:add password-input
 {% endcall %}
 ```
 
+データ表示ファミリーで組み込みセットは完結します。プレゼンテーション系はセパレーター、スクロール領域、アスペクト画像、カード、バッジ、アバターとアバターグループ、リストグループ、説明リスト、統計カードです。それぞれが文書の順序とネイティブの意味論を保ちます。セパレーターは `hr` かラベル付きの separator ロール、スクロール領域はフォーカス可能でラベル付きの、ネイティブにスクロールする領域、アスペクト画像は名前付きの比率を持つ `img` そのもの、カードは自身の見出しでラベル付けされた article か section で、アクションはラベル付きのグループに置かれ、説明リストは `dl` です。バッジは常にテキストを持ち、アバターは `alt` かイニシャルのラベルで人物を名指しし、統計カードのトレンドは差分の前にテキストで "Up"、"Down"、"Flat" と述べるので、どの状態も色だけに頼りません。リストグループは各項目に `live_key` を通してキーを与えるため、並べ替えても各ノードが保たれます。チャートはサーバーで描画されます。アイランドが `suprnova::live::charts` の `render_chart` を呼び、それが範囲を限定した型付きの系列から `charts-rs` で棒または折れ線のマークを描いて信頼済みマークアップを返し、マクロがその SVG をテキスト要約と開閉可能なデータ表の横に描画するので、正規の文書は画像なしで読め、チャートのスクリプトがブラウザーに届くことはありません。
+
+```rust
+use suprnova::live::charts::{ChartKind, ChartSeries, render_chart};
+
+pub fn chart_svg(&self) -> TrustedHtml {
+    render_chart(
+        ChartKind::Bar,
+        &["Apr", "May", "Jun"],
+        &[ChartSeries::new("Revenue", vec![42.0, 47.0, 51.0])],
+    )
+    .expect("a bounded fixed series renders")
+}
+```
+
+データテーブルは最後のコンポーネントで、表ごとに 1 つのアイランドです。結果件数を示すキャプション、`scope` 付きの列見出し、並べ替えた列の `aria-sort` を持つネイティブの `table` です。並べ替えとフィルターはアイランドのモデルフィールドへの Live の送信、ページ移動は Live のボタンで、アイランドは適用中の並べ替え、方向、フィルター、ページを `#[url]` フィールドとして宣言し、各アクションの後に `url_intent` で反映するため、アドレスバーには常に共有可能な URL があり、文書はそこから同じビューをマウントします。
+
+```rust
+#[live(name = "app.invoices", view = "live/invoices.html", minimum_protocol_version = 2)]
+pub struct Invoices {
+    #[model]
+    pub sort: String,
+    #[url(key = "sort")]
+    pub sorted_by: String,
+    #[url(key = "dir")]
+    pub direction: String,
+    #[model]
+    #[url(key = "filter")]
+    pub filter: String,
+    #[url(key = "page")]
+    pub page: u64,
+    pub rows: Vec<Invoice>,
+}
+```
+
 ### Suprnova が異なる理由
 
 Laravel は Blade コンポーネントとスターターキットのマークアップを同梱しますが、Suprnova はライブラリをフレームワーク自身を通じて、Live 固有の語彙の上で提供し、クライアントアプリケーションがページを所有することはありません。スキンは既定で有効で、外しても何も壊れません。それがここでのヘッドレスの意味です。

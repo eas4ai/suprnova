@@ -397,6 +397,41 @@ suprnova live:add password-input
 {% endcall %}
 ```
 
+数据展示家族补齐了内置集合。展示型组件：分隔线、滚动区域、比例图片、卡片、徽章、头像与头像组、列表组、描述列表和统计卡片。它们都保持文档顺序和原生语义：分隔线是 `hr` 或带标签的 separator 角色，滚动区域是可聚焦、带标签、原生滚动的区域，比例图片就是带具名比例的 `img` 本身，卡片是由自身标题标记的 article 或 section，动作放在带标签的分组中，描述列表是 `dl`。徽章始终携带文本，头像在 `alt` 或首字母的标签中说出人名，统计卡片的趋势在差值之前用文本写出 "Up"、"Down" 或 "Flat"，因此没有任何状态只依赖颜色。列表组通过 `live_key` 为每一项赋键，所以重新排序会保留每个节点。图表在服务器上渲染：岛调用 `suprnova::live::charts` 中的 `render_chart`，它基于有界的类型化序列通过 `charts-rs` 绘制柱状或折线标记并返回受信任的标记，宏把 SVG 与文本摘要以及折叠区中的数据表并排渲染，因此规范文档无需图片也可阅读，也不会有任何图表脚本到达浏览器：
+
+```rust
+use suprnova::live::charts::{ChartKind, ChartSeries, render_chart};
+
+pub fn chart_svg(&self) -> TrustedHtml {
+    render_chart(
+        ChartKind::Bar,
+        &["Apr", "May", "Jun"],
+        &[ChartSeries::new("Revenue", vec![42.0, 47.0, 51.0])],
+    )
+    .expect("a bounded fixed series renders")
+}
+```
+
+数据表是最后一个组件，每张表一个岛。它是原生 `table`，标题说明结果数量，列标题带 `scope`，已排序列带 `aria-sort`。排序和筛选是对岛的模型字段的 Live 提交，翻页是 Live 按钮，岛把已应用的排序、方向、筛选和页码声明为 `#[url]` 字段，并在每个动作之后通过 `url_intent` 反映它们，因此地址栏始终持有可分享的 URL，文档也从中挂载同样的视图：
+
+```rust
+#[live(name = "app.invoices", view = "live/invoices.html", minimum_protocol_version = 2)]
+pub struct Invoices {
+    #[model]
+    pub sort: String,
+    #[url(key = "sort")]
+    pub sorted_by: String,
+    #[url(key = "dir")]
+    pub direction: String,
+    #[model]
+    #[url(key = "filter")]
+    pub filter: String,
+    #[url(key = "page")]
+    pub page: u64,
+    pub rows: Vec<Invoice>,
+}
+```
+
 ### 为什么 Suprnova 与众不同
 
 Laravel 随附 Blade 组件和入门套件的标记；Suprnova 则通过框架本身、基于 Live 自己的词汇来提供这个库，不让任何客户端应用拥有页面。皮肤默认开启，去掉它也不会破坏任何东西，这正是这里“无头”的含义。

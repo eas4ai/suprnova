@@ -43,6 +43,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `live_key` view filter lands with them: a `live:key` inside a `{% for %}`
   loop passes through it, and it enforces at render time the key rule the
   checker enforces on literal keys.
+- **The Live component library gains its data display family, and with it
+  the built-in set is complete.** Separator, scroll area, aspect image, card,
+  badge, avatar and avatar group, list group, description list and stat card
+  install with `live:add` beside the earlier families; every one keeps
+  document order and native semantics, and every status carries text. The
+  chart renders on the server through `charts-rs`: `render_chart` in
+  `suprnova::live::charts` draws bar or line marks from bounded typed series
+  as trusted SVG, and the macro places a summary and a data table beside it,
+  so no charting script reaches the browser. The datatable is a native table
+  with one island per table whose sort, filter and page are `#[url]` fields
+  reflected into a shareable URL after every action.
 
 ### Changed
 

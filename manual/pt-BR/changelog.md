@@ -45,6 +45,18 @@ são enviados atomicamente. Mais recentes primeiro.
   `aria-current` vindo do servidor, um modo local ou de rota explícito para
   tabs e paginação, paginação Live refletida com `history.replaceState` sem
   entrada de histórico, e load more como um acréscimo com chaves a partir de um botão. O filtro de view `live_key` chega com elas: um `live:key` dentro de um loop `{% for %}` passa por ele, e ele aplica na renderização a regra de chaves que o checker aplica às chaves literais.
+- **A biblioteca de componentes Live ganha sua família de exibição de dados,
+  e com ela o conjunto embutido fica completo.** Separator, scroll area,
+  aspect image, card, badge, avatar e grupo de avatares, list group,
+  description list e stat card instalam-se com `live:add` ao lado das famílias
+  anteriores; cada um preserva a ordem do documento e a semântica nativa, e
+  cada status carrega texto. O chart é renderizado no servidor por
+  `charts-rs`: `render_chart` em `suprnova::live::charts` desenha marcas de
+  barras ou linhas a partir de séries tipadas limitadas como SVG confiável, e
+  a macro coloca um resumo e uma tabela de dados ao lado, então nenhum script
+  de gráficos chega ao navegador. A datatable é uma tabela nativa com uma
+  island por tabela cujos ordenação, filtro e página são campos `#[url]`
+  refletidos em uma URL compartilhável após cada ação.
 
 ### Alterado
 

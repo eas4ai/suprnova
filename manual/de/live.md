@@ -567,6 +567,67 @@ der Morph jede bereits vorhandene Zeile behält, und das Steuerelement verschwin
 {% endcall %}
 ```
 
+Die Data-Display-Familie schließt den eingebauten Satz ab. Präsentational:
+Separator, Scroll-Bereich, Aspect-Image, Card, Badge, Avatar und
+Avatar-Gruppe, List Group, Description List und Stat Card. Jede bewahrt die
+Dokumentreihenfolge und native Semantik: der Separator ist ein `hr` oder eine
+beschriftete Separator-Rolle, der Scroll-Bereich eine fokussierbare,
+beschriftete Region, die nativ scrollt, das Aspect-Image das `img` selbst mit
+einem benannten Seitenverhältnis, die Card ein Article oder eine Section, die
+von ihrer eigenen Überschrift beschriftet wird, mit Aktionen in einer
+beschrifteten Gruppe, und die Description List ein `dl`. Ein Badge trägt
+immer seinen Text, ein Avatar nennt seine Person im `alt` oder im Label
+seiner Initialen, und der Trend einer Stat Card sagt "Up", "Down" oder "Flat"
+im Text vor dem Delta, sodass kein Status allein auf Farbe ruht. Die List
+Group verschlüsselt jedes Element über `live_key`, sodass eine Neuordnung
+jeden Knoten behält. Das Chart wird auf dem Server gerendert: die Island ruft
+`render_chart` aus `suprnova::live::charts` auf, das Balken- oder
+Linienmarken über `charts-rs` aus begrenzten typisierten Reihen zeichnet und
+vertrauenswürdiges Markup zurückgibt, und das Makro rendert das SVG neben
+einer Textzusammenfassung und einer Datentabelle in einem Disclosure, sodass
+das kanonische Dokument ohne das Bild lesbar ist und kein Chart-Skript je den
+Browser erreicht:
+
+```rust
+use suprnova::live::charts::{ChartKind, ChartSeries, render_chart};
+
+pub fn chart_svg(&self) -> TrustedHtml {
+    render_chart(
+        ChartKind::Bar,
+        &["Apr", "May", "Jun"],
+        &[ChartSeries::new("Revenue", vec![42.0, 47.0, 51.0])],
+    )
+    .expect("a bounded fixed series renders")
+}
+```
+
+Die Datatable ist die letzte Komponente, mit einer Island pro Tabelle. Sie
+ist eine native `table` mit einer Caption, die die Ergebniszahl nennt,
+Spaltenköpfen mit `scope` und `aria-sort` auf der sortierten Spalte. Sortieren
+und Filtern sind Live-Submits auf den Model-Feldern der Island, Seitenwechsel
+sind Live-Buttons, und die Island deklariert die angewandte Sortierung, die
+Richtung, den Filter und die Seite als `#[url]`-Felder und spiegelt sie nach
+jeder Aktion über `url_intent`, sodass die Adresszeile immer eine teilbare
+URL hält und das Dokument dieselbe Ansicht daraus mountet:
+
+```rust
+#[live(name = "app.invoices", view = "live/invoices.html", minimum_protocol_version = 2)]
+pub struct Invoices {
+    #[model]
+    pub sort: String,
+    #[url(key = "sort")]
+    pub sorted_by: String,
+    #[url(key = "dir")]
+    pub direction: String,
+    #[model]
+    #[url(key = "filter")]
+    pub filter: String,
+    #[url(key = "page")]
+    pub page: u64,
+    pub rows: Vec<Invoice>,
+}
+```
+
 ### Warum Suprnova abweicht
 
 Laravel liefert Blade-Komponenten und das Markup eines Starter-Kits; Suprnova

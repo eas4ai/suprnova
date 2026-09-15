@@ -46,6 +46,18 @@ en premier.
   des ancres avec de vraies URL, `aria-current` venu du serveur, un mode
   local ou route explicite pour les tabs et la pagination, une pagination
   Live reflétée par `history.replaceState` sans entrée d'historique, et load more comme un ajout à clés depuis un bouton. Le filtre de vue `live_key` arrive avec elles : un `live:key` dans une boucle `{% for %}` passe par lui, et il applique au rendu la règle de clés que le checker applique aux clés littérales.
+- **La bibliothèque de composants Live gagne sa famille d'affichage de
+  données, et avec elle l'ensemble intégré est complet.** Separator, scroll
+  area, aspect image, card, badge, avatar et groupe d'avatars, list group,
+  description list et stat card s'installent avec `live:add` à côté des
+  familles précédentes ; chacun conserve l'ordre du document et la sémantique
+  native, et chaque statut porte un texte. Le chart est rendu sur le serveur
+  via `charts-rs` : `render_chart` dans `suprnova::live::charts` trace des
+  barres ou des lignes à partir de séries typées bornées en SVG de confiance,
+  et la macro place un résumé et une table de données à côté, donc aucun
+  script de graphiques n'atteint le navigateur. La datatable est une table
+  native avec une island par table dont le tri, le filtre et la page sont des
+  champs `#[url]` reflétés dans une URL partageable après chaque action.
 
 ### Modifié
 

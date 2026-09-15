@@ -46,6 +46,19 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   Route-Modus für Tabs und Pagination, Live-Pagination über
   `history.replaceState` ohne History-Eintrag und Load more als
   schlüsselbasiertes Anfügen aus einem Button. Der View-Filter `live_key` landet mit ihnen: ein `live:key` in einer `{% for %}`-Schleife läuft durch ihn, und er erzwingt zur Renderzeit die Schlüsselregel, die der Checker für literale Schlüssel erzwingt.
+- **Die Live-Komponentenbibliothek erhält ihre Data-Display-Familie, und
+  damit ist der eingebaute Satz vollständig.** Separator, Scroll-Bereich,
+  Aspect-Image, Card, Badge, Avatar und Avatar-Gruppe, List Group,
+  Description List und Stat Card werden mit `live:add` neben den früheren
+  Familien installiert; jede bewahrt Dokumentreihenfolge und native
+  Semantik, und jeder Status trägt Text. Das Chart wird auf dem Server über
+  `charts-rs` gerendert: `render_chart` in `suprnova::live::charts` zeichnet
+  Balken- oder Linienmarken aus begrenzten typisierten Reihen als
+  vertrauenswürdiges SVG, und das Makro stellt eine Zusammenfassung und eine
+  Datentabelle daneben, sodass kein Chart-Skript den Browser erreicht. Die
+  Datatable ist eine native Tabelle mit einer Island pro Tabelle, deren
+  Sortierung, Filter und Seite `#[url]`-Felder sind, die nach jeder Aktion in
+  eine teilbare URL gespiegelt werden.
 
 ### Geändert
 

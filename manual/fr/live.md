@@ -564,6 +564,67 @@ ligne déjà présente, et le contrôle quitte la vue quand vous le rendez épui
 {% endcall %}
 ```
 
+La famille d'affichage de données clôt l'ensemble intégré. Présentationnels :
+separator, scroll area, aspect image, card, badge, avatar et groupe
+d'avatars, list group, description list et stat card. Chacun conserve l'ordre
+du document et la sémantique native : le separator est un `hr` ou un rôle
+separator étiqueté, la scroll area une région étiquetée focalisable qui
+défile nativement, l'aspect image l'`img` lui-même avec un ratio nommé, la
+card un article ou une section étiquetée par son propre titre avec ses
+actions dans un groupe étiqueté, et la description list un `dl`. Un badge
+porte toujours son texte, un avatar nomme sa personne dans `alt` ou dans
+l'étiquette de ses initiales, et la tendance d'une stat card dit "Up", "Down"
+ou "Flat" en texte avant le delta, si bien qu'aucun statut ne repose sur la
+seule couleur. La list group attribue une clé à chaque élément via
+`live_key`, donc un réordonnancement garde chaque nœud. Le chart est rendu
+sur le serveur : l'island appelle `render_chart` de `suprnova::live::charts`,
+qui trace des barres ou des lignes via `charts-rs` à partir de séries typées
+bornées et renvoie un balisage de confiance, et la macro rend le SVG à côté
+d'un résumé textuel et d'une table de données dans un disclosure, de sorte
+que le document canonique se lit sans l'image et qu'aucun script de
+graphiques n'atteint le navigateur :
+
+```rust
+use suprnova::live::charts::{ChartKind, ChartSeries, render_chart};
+
+pub fn chart_svg(&self) -> TrustedHtml {
+    render_chart(
+        ChartKind::Bar,
+        &["Apr", "May", "Jun"],
+        &[ChartSeries::new("Revenue", vec![42.0, 47.0, 51.0])],
+    )
+    .expect("a bounded fixed series renders")
+}
+```
+
+La datatable est le dernier composant, avec une island par table. C'est une
+`table` native avec une caption qui nomme le nombre de résultats, des
+en-têtes de colonne avec `scope` et `aria-sort` sur la colonne triée. Le tri
+et le filtre sont des submits Live sur les champs model de l'island, les
+changements de page sont des boutons Live, et l'island déclare le tri
+appliqué, la direction, le filtre et la page comme champs `#[url]` et les
+reflète via `url_intent` après chaque action, si bien que la barre d'adresse
+contient toujours une URL partageable et que le document monte la même vue à
+partir d'elle :
+
+```rust
+#[live(name = "app.invoices", view = "live/invoices.html", minimum_protocol_version = 2)]
+pub struct Invoices {
+    #[model]
+    pub sort: String,
+    #[url(key = "sort")]
+    pub sorted_by: String,
+    #[url(key = "dir")]
+    pub direction: String,
+    #[model]
+    #[url(key = "filter")]
+    pub filter: String,
+    #[url(key = "page")]
+    pub page: u64,
+    pub rows: Vec<Invoice>,
+}
+```
+
 ### Pourquoi Suprnova diverge
 
 Laravel livre des composants Blade et le balisage d'un kit de démarrage ;

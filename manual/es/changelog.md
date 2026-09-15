@@ -47,6 +47,18 @@ recientes primero.
   explícito para tabs y paginación, paginación Live reflejada con
   `history.replaceState` sin entrada de historial, y load more como un
   añadido con claves desde un botón. El filtro de vista `live_key` llega con ellas: un `live:key` dentro de un bucle `{% for %}` pasa por él, y aplica en tiempo de renderizado la regla de claves que el checker aplica a las claves literales.
+- **La biblioteca de componentes Live gana su familia de visualización de
+  datos, y con ella el conjunto integrado queda completo.** Separator, scroll
+  area, aspect image, card, badge, avatar y grupo de avatares, list group,
+  description list y stat card se instalan con `live:add` junto a las
+  familias anteriores; cada uno conserva el orden del documento y la
+  semántica nativa, y cada estado lleva texto. El chart se renderiza en el
+  servidor mediante `charts-rs`: `render_chart` en `suprnova::live::charts`
+  dibuja marcas de barras o líneas a partir de series tipadas acotadas como
+  SVG de confianza, y la macro coloca un resumen y una tabla de datos a su
+  lado, así que ningún script de gráficos llega al navegador. La datatable es
+  una tabla nativa con una island por tabla cuyo orden, filtro y página son
+  campos `#[url]` reflejados en una URL compartible tras cada acción.
 
 ### Cambiado
 

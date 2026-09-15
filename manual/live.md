@@ -546,6 +546,64 @@ its keyed rows pass through `live_key` like a toast does:
 {% endcall %}
 ```
 
+The data display family closes the built-in set. Presentational: separator,
+scroll area, aspect image, card, badge, avatar and avatar group, list group,
+description list and stat card. Each keeps document order and native
+semantics: the separator is an `hr` or a labeled separator role, the scroll
+area is a focusable labeled region that scrolls natively, the aspect image is
+the `img` itself with a named ratio, the card is an article or section
+labeled by its own heading with actions in a labeled group, and the
+description list is a `dl`. A badge always carries its text, an avatar names
+its person in `alt` or in the label of its initials, and a stat's trend says
+"Up", "Down" or "Flat" in text before the delta, so no status rests on color
+alone. The list group keys every item through `live_key`, so a reorder keeps
+each node. The chart is server-rendered: the island calls `render_chart`
+from `suprnova::live::charts`, which draws bar or line marks through
+`charts-rs` from bounded typed series and returns trusted markup, and the
+macro renders the SVG beside a text summary and a data table in a disclosure,
+so the canonical document reads without the picture and no charting script
+ever reaches the browser:
+
+```rust
+use suprnova::live::charts::{ChartKind, ChartSeries, render_chart};
+
+pub fn chart_svg(&self) -> TrustedHtml {
+    render_chart(
+        ChartKind::Bar,
+        &["Apr", "May", "Jun"],
+        &[ChartSeries::new("Revenue", vec![42.0, 47.0, 51.0])],
+    )
+    .expect("a bounded fixed series renders")
+}
+```
+
+The datatable is the last component, and one island per table. It is a
+native `table` with a caption naming the result count, column headers with
+`scope`, and `aria-sort` on the sorted column. Sort and filter are Live
+submits on the island's model fields, page changes are Live buttons, and the
+island declares the applied sort, direction, filter and page as `#[url]`
+fields and reflects them through `url_intent` after every action, so the
+address bar always holds a shareable URL and the document mounts the same
+view from it:
+
+```rust
+#[live(name = "app.invoices", view = "live/invoices.html", minimum_protocol_version = 2)]
+pub struct Invoices {
+    #[model]
+    pub sort: String,
+    #[url(key = "sort")]
+    pub sorted_by: String,
+    #[url(key = "dir")]
+    pub direction: String,
+    #[model]
+    #[url(key = "filter")]
+    pub filter: String,
+    #[url(key = "page")]
+    pub page: u64,
+    pub rows: Vec<Invoice>,
+}
+```
+
 ### Why Suprnova diverges
 
 Laravel ships Blade components and a starter kit's markup; Suprnova ships the
