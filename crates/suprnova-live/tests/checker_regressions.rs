@@ -7,7 +7,7 @@ use suprnova_live::checker::{
     CheckerLimits, DiagnosticCode, DiagnosticSeverity, TemplateCatalog, TemplateChecker,
 };
 
-use checker_support::{CHILD_VIEW, ROOT_VIEW, registry, root_name, view};
+use checker_support::{CHILD_VIEW, MODEL_CHILD_VIEW, ROOT_VIEW, registry, root_name, view};
 
 #[test]
 fn missing_view_include_and_parent_have_distinct_stable_diagnostics() {
@@ -210,6 +210,46 @@ proptest! {
         );
         prop_assert!(report.diagnostics().len() <= 8);
     }
+}
+
+// Spec 11 scopes targeted feedback to an action, a field or the island; the
+// checker once resolved every feedback target as an action.
+#[test]
+fn a_feedback_directive_targets_a_model_field_or_an_action() {
+    let registry = registry();
+    let nested = |feedback: &str| {
+        TemplateCatalog::new(vec![
+            (
+                view(ROOT_VIEW),
+                format!(
+                    r#"<section live:component="tests.model-child" live:key="model-child">
+                           <input live:model.change="avatar">
+                           <span hidden live:{feedback}></span>
+                       </section>"#
+                ),
+            ),
+            (
+                view(CHILD_VIEW),
+                include_str!("fixtures/checker/pass/child.html").to_owned(),
+            ),
+            (view(MODEL_CHILD_VIEW), "<div></div>".to_owned()),
+        ])
+        .expect("nested island template catalog")
+    };
+    let proved = TemplateChecker::new(
+        &registry,
+        &nested(r#"queued.show="avatar""#),
+        CheckerLimits::default(),
+    )
+    .check_component(&root_name());
+    assert!(proved.is_proved(), "{:?}", proved.diagnostics());
+    let unknown = TemplateChecker::new(
+        &registry,
+        &nested(r#"loading.show="nowhere""#),
+        CheckerLimits::default(),
+    )
+    .check_component(&root_name());
+    assert_code(unknown, DiagnosticCode::UnknownAction);
 }
 
 fn check(source: &str, limits: CheckerLimits) -> suprnova_live::checker::CheckReport {

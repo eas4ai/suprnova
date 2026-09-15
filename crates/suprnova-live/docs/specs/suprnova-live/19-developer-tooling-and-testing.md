@@ -1,7 +1,7 @@
 # Suprnova Live -- 19 Developer Tooling and Testing
 
 Status: Normative design specification
-Last revised: 2026-09-14
+Last revised: 2026-09-15
 
 ## Scope
 
@@ -468,6 +468,13 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-09-15 -- The checker resolves a feedback directive's target (`idle`,
+  `dirty`, `queued`, `loading`, `validating`, `success`, `interrupted`,
+  `offline`, `retrying`) as an action or as one of the owner's model-bound
+  fields, the scopes spec 11 names for targeted feedback; a name that is
+  neither still reports `unknown_action`. Before this the live-native
+  gallery's `live:queued.show="country"` failed `live:check` although the
+  runtime scoped it to the field.
 - 2026-09-14 -- The checker's macro expansion decides an `{% if %}` whose
   condition the call's literal arguments settle (a bound boolean, its
   negation, `==` and `!=` between literals, `&&` and `||` of those) and

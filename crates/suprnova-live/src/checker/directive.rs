@@ -136,7 +136,7 @@ pub(crate) fn validate_directive(name: &str, value: &str, context: &mut Directiv
         "idle" | "dirty" | "queued" | "loading" | "validating" | "success" | "interrupted"
         | "offline" | "retrying" => {
             if !value.is_empty() {
-                validate_action_identity(value, context);
+                validate_feedback_target(value, context);
             }
         }
         "url" => validate_url(value, &modifiers, context),
@@ -397,6 +397,23 @@ fn validate_action(directive: &str, value: &str, context: &mut DirectiveContext<
     if !accessible {
         push_error(context, DiagnosticCode::AccessibilityViolation);
     }
+}
+
+// A feedback directive scopes to an action, a bound model field, or the
+// island (spec 11, targeted feedback states). A field target names one of
+// the owner's model-bound fields; anything else resolves as an action, so
+// an unknown name still reports unknown_action.
+fn validate_feedback_target(value: &str, context: &mut DirectiveContext<'_, '_>) {
+    if let Ok(field_name) = ModelField::parse(value)
+        && context
+            .owner
+            .fields()
+            .iter()
+            .any(|field| field.name() == &field_name && field.model_codec().is_some())
+    {
+        return;
+    }
+    validate_action_identity(value, context);
 }
 
 fn validate_action_identity(value: &str, context: &mut DirectiveContext<'_, '_>) {
