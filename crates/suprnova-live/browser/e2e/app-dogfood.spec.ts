@@ -567,3 +567,47 @@ test("the live-native enhancements upgrade, and every control still submits with
   await expect(page.locator("[data-when='2026-06-15']")).toBeVisible();
   await page.unroute("**/suprnova-ui/**/*.js");
 });
+
+test("a proposal typed while its predecessor is in flight keeps the island's authority and never reloads", async ({
+  page,
+}) => {
+  await page.goto(`${APP_ORIGIN}/live/demo-login`);
+  await page.goto(`${APP_ORIGIN}/live/live-native`);
+  await expectConnected(page, 2);
+  const island = page.locator(
+    "[data-suprnova-live-island][data-suprnova-live-document-key='live-native-gallery']",
+  );
+  const statuses: number[] = [];
+  page.on("response", (response) => {
+    if (response.url().includes("/__live/action")) statuses.push(response.status());
+  });
+  let navigations = 0;
+  page.on("framenavigated", (frame) => {
+    if (frame === page.mainFrame()) navigations += 1;
+  });
+  // The first proposal is held in flight until the second one is queued
+  // behind it; the runtime must apply the first response's authority and
+  // send the second against it, never against the consumed snapshot.
+  const gate: { release: (() => void) | null; held: boolean } = { held: false, release: null };
+  await page.route("**/__live/action", async (route) => {
+    if (!gate.held) {
+      gate.held = true;
+      await new Promise<void>((resolve) => {
+        gate.release = resolve;
+      });
+    }
+    await route.continue();
+  });
+  const country = page.locator("#country");
+  await country.fill("ca");
+  await expect.poll(() => gate.held).toBe(true);
+  await country.fill("Canada");
+  await page.waitForTimeout(400);
+  gate.release?.();
+  await expect(island).toHaveAttribute("data-suprnova-live-revision", "2");
+  await expect(page.locator("#country-listbox")).toHaveAttribute("data-sn-query", "Canada");
+  await expect(country).toHaveValue("Canada");
+  expect(statuses).toEqual([200, 200]);
+  expect(navigations).toBe(0);
+  await page.unroute("**/__live/action");
+});

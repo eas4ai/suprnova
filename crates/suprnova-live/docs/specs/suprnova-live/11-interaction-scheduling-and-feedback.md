@@ -1,7 +1,7 @@
 # Suprnova Live -- 11 Interaction Scheduling and Feedback
 
 Status: Normative design specification
-Last revised: 2026-09-01
+Last revised: 2026-09-15
 
 ## Scope
 
@@ -199,6 +199,16 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-15 -- A latest-only model proposal that supersedes an in-flight
+  request no longer discards that request's accepted response. The runtime
+  applies the superseded response's snapshot and revision without a render,
+  so the island's authority follows the server and the superseding proposal
+  is sent against it rather than against the consumed snapshot, and a later
+  local edit stays in place because nothing is rendered over it. The
+  transport also restarts the island's queue after every settlement, not
+  only after an applied one, so a queued proposal never waits for the next
+  stream tick. Exposed by the live-native combobox under Cairn FORM-008; the
+  dogfood case types while a proposal is in flight.
 - 2026-09-01 -- Completed post-morph child pairing through the existing
   per-island scheduler. The accepted parent snapshot is paired at queue time,
   not duplicated in response deliveries; child coalescing, ordering, feedback,

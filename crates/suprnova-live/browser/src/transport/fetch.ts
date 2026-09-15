@@ -138,6 +138,8 @@ export interface CompletedLiveTransport {
 
 export type LiveResponseObserver = (record: IslandRecord, ticket: SchedulerTicket) => void;
 
+const SUPERSEDED_SETTLEMENTS: ReadonlySet<string> = new Set(["canceled", "stale", "superseded"]);
+
 export class LiveTransportCoordinator {
   readonly #config: RuntimeConfig;
   readonly #ports: RuntimePorts;
@@ -271,7 +273,11 @@ export class LiveTransportCoordinator {
         signal: controller.signal,
       });
       work.controllers.delete(ticket);
-      if (record.scheduler.settleTransport(ticket) === "accepted") {
+      const settled = record.scheduler.settleTransport(ticket);
+      // A superseded or canceled request the server may have accepted still
+      // carries the island's next authority; the observer applies it without
+      // a render, and the queue behind it moves on either way.
+      if (settled === "accepted" || SUPERSEDED_SETTLEMENTS.has(settled)) {
         work.responses.set(ticket, Object.freeze({ connectionEpoch, request, response: result }));
         try {
           this.#responseObserver(record, ticket);
@@ -285,6 +291,9 @@ export class LiveTransportCoordinator {
           });
           this.#pump(record);
         }
+        if (settled !== "accepted") this.#pump(record);
+      } else {
+        this.#pump(record);
       }
     } catch (error: unknown) {
       work.controllers.delete(ticket);

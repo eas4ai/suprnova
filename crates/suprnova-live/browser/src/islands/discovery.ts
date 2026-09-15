@@ -6,7 +6,11 @@ import { ChildParameterDeliveryState, queueChildDeliveries } from "../applicatio
 import { dispatchValidatedEvents, runValidatedEffects } from "../application/emissions.js";
 import { ResponseApplicationMachine, type ApplicationPorts } from "../application/machine.js";
 import { ApplicationRecovery, type RecoveryDecision } from "../application/recovery.js";
-import type { ValidatedCommittedResponse } from "../application/types.js";
+import type {
+  ValidatedCommittedResponse,
+  ValidatedRender,
+  ValidatedResponse,
+} from "../application/types.js";
 import { applyUrlReflection } from "../application/url.js";
 import { FeedbackRuntime } from "../feedback/targets.js";
 import type { RuntimeCallRegistry } from "../extensions/calls.js";
@@ -93,6 +97,9 @@ function base64UrlText(value: string): string {
   for (const byte of new TextEncoder().encode(value)) binary += String.fromCodePoint(byte);
   return btoa(binary).replace(/\+/gu, "-").replace(/\//gu, "_").replace(/=+$/u, "");
 }
+
+const SUPERSEDED_APPLICATIONS: ReadonlySet<string> = new Set(["canceled", "stale", "superseded"]);
+const NO_RENDER: ValidatedRender = Object.freeze({ kind: "no_render" });
 
 export class DocumentRuntime {
   readonly #document: Document;
@@ -349,8 +356,21 @@ export class DocumentRuntime {
       return;
     }
     try {
-      const response = parseUpdateResponse(completed.response.text);
-      const applicationDisposition = record.scheduler.beginApplication(ticket);
+      const parsed = parseUpdateResponse(completed.response.text);
+      const disposition = record.scheduler.beginApplication(ticket);
+      // The scheduler superseded this request while it was in flight, but the
+      // server may have accepted it: its snapshot and revision are the
+      // island's next authority, so they commit without a render, which
+      // keeps a later local edit in place.
+      const authorityOnly = disposition !== "accepted" && SUPERSEDED_APPLICATIONS.has(disposition);
+      if (authorityOnly && parsed.kind !== "committed") {
+        record.scheduler.finish(ticket, "rejected");
+        return;
+      }
+      const applicationDisposition = authorityOnly ? "accepted" : disposition;
+      const response: ValidatedResponse = authorityOnly
+        ? Object.freeze({ ...(parsed as ValidatedCommittedResponse), render: NO_RENDER })
+        : parsed;
       const machine = new ResponseApplicationMachine(
         this.#applicationPorts(record, completed.connectionEpoch),
       );
