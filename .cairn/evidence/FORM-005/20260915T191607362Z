@@ -1,0 +1,21 @@
+requirement: FORM-005
+requirement_digest: sha256:31ba2a8372a58cd021b4a586d403031d7b7716751637d24607817d38298ab8e0
+sequence: 6
+history_digest: sha256:5666deae2734725550088d09b0c021dfca945fee03e1386fc6431c7665368ec5
+mechanism: ui-dogfood-tests
+commit: 14efccaa
+inputs_digest: sha256:7e4386c8511b21445d11f28ee6101d96f39c5aa2eba2413152cdc921079a8f50
+mechanism_digest: sha256:5fc7489c76fd4b262f0bba01e6a9523a3409a30f7cac397add595e73edb89223
+inputs_detail: .cairn/evidence/UI-006/20260915T191559899Z-2239692.inputs.json
+command: sh -c 'env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p app --test live_dogfood && env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E "test(library_namespace::)"'
+cwd: .
+exit: 0
+output_digest: sha256:26ef7011f632b64270b976857da9a3d4384804888ee892221bd989a9d7eff81c
+output: .cairn/evidence/UI-006/20260915T191559899Z-2239692.out
+stderr_output: .cairn/evidence/UI-006/20260915T191559899Z-2239692.err
+stderr_digest: sha256:26ef7011f632b64270b976857da9a3d4384804888ee892221bd989a9d7eff81c
+signal: none
+execution_error: null
+result: pass
+source: exit
+recorded: 2026-09-15T19:16:07.362Z
