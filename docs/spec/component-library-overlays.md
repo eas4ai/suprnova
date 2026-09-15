@@ -70,5 +70,4 @@ Falsifier: a keyed open overlay closes on a morph that did not touch it,
 or an unkeyed one persists across a replaced region.
 Mechanism: the morph continuity fixtures under
 `crates/suprnova-live/browser/tests/` extended with overlay cases.
-
 Status: Agreed 2026-09-14
