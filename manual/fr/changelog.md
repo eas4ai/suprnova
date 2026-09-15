@@ -32,6 +32,20 @@ en premier.
   pour s'ouvrir ou se fermer, rend le focus à son déclencheur à la fermeture et
   garde son état ouvert à travers un morph sous une clé stable avec
   `live:preserve.self`.
+- **La bibliothèque de composants Live gagne ses familles feedback et navigation.**
+  Alert, skeleton, spinner, progress, empty state, région de toasts et région
+  de flash ; barre d'en-tête, footer, sidebar, fil d'Ariane, tabs, pagination
+  et load more s'installent avec `live:add` à côté des familles formulaires et
+  overlays. Le feedback présente un état que le serveur ou le runtime détient
+  déjà : le rôle d'un alert suit sa variante avec un repère qui n'est pas que
+  la couleur, la présentation de chargement est liée par `live:loading` et
+  apparaît selon le rythme du runtime, progress est l'élément natif avec
+  étiquette et lecture, la raison de l'empty state est un état serveur, et un
+  toast annonce une fois sans prendre le focus tandis qu'une erreur critique
+  s'affiche aussi en alert. La navigation garde la sémantique des routes :
+  des ancres avec de vraies URL, `aria-current` venu du serveur, un mode
+  local ou route explicite pour les tabs et la pagination, une pagination
+  Live reflétée par `history.replaceState` sans entrée d'historique, et load more comme un ajout à clés depuis un bouton. Le filtre de vue `live_key` arrive avec elles : un `live:key` dans une boucle `{% for %}` passe par lui, et il applique au rendu la règle de clés que le checker applique aux clés littérales.
 
 ### Modifié
 

@@ -1,7 +1,7 @@
 # Suprnova Live -- 22 Navigation Components
 
 Status: Normative design specification
-Last revised: 2026-09-13
+Last revised: 2026-09-14
 
 ## Scope
 
@@ -180,6 +180,18 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-14 -- The official navigation components (header bar, footer,
+  sidebar, breadcrumbs, tabs, pagination, load more) render every
+  destination as an anchor with a real route URL and every action as a
+  button, take `aria-current` from a server-bound value, and hold only
+  collapse and local tab state in the browser under stable keyed scopes.
+  Tabs and pagination require an explicit mode; Live pagination reflects
+  the page through the action result's URL intent (`history.replaceState`,
+  no history entry) and the document mounts the page from its query. Load
+  more is a keyed append from a button on a registered action, absent once
+  the server renders the last page. Cairn NAV-001 to NAV-004 and NAV-006
+  refine this spec; the account menu (NAV-005) waits for the live-native
+  commitment.
 - 2026-09-13 -- Steps/progress navigation and command/navigation discovery are
   not in the official built-in set; the stepper belongs to the separate blocks
   project and the command palette is a specialty component. The capabilities

@@ -504,6 +504,57 @@ ficam sob seu gatilho; caso contrário o navegador os centraliza. O modo de
 abertura única do accordion depende de `details name`, que versões suportadas
 mais antigas tratam como disclosures independentes.
 
+Seguem a família de feedback e a família de navegação. Feedback: alert,
+skeleton, spinner, progress, empty state e uma região de toasts com uma região
+de flash ao lado. Cada um apresenta um estado que o servidor ou o runtime já
+têm. Um alert escolhe seu papel pela variante e marca cada variante com um
+glifo e um rótulo oculto, nunca só com cor. Um spinner ou skeleton é vinculado
+por `live:loading.show` a uma ação registrada e entregue oculto, de modo que o
+runtime o revela após seu próprio atraso e o mantém além do mínimo, e uma
+ação rápida nunca o faz piscar. Progress é o elemento nativo `progress` com
+rótulo e leitura em texto, e só carrega um valor para trabalho determinado. O
+empty state toma seu motivo (vazio, sem resultados, sem permissão,
+desconectado) do estado renderizado no servidor e só oferece uma próxima ação
+onde quem chama a renderiza. Um toast anuncia uma vez a partir de uma região
+de status polida e nunca toma o foco; o elemento vendorizado `sn-toast-region`
+expira os toasts, pausa durante hover ou foco, limita quantos aparecem de uma
+vez e responde ao botão de fechar, com cada toast com chave e preservado para
+que um toast fechado continue fechado após um morph. Um erro crítico também pertence a um alert; um toast nunca é sua única superfície. Os toasts são renderizados dentro de um loop, então suas chaves passam pelo filtro `live_key`, e a island que os monta o expõe com `pub mod filters { pub use suprnova::view::filters::live_key; }`. A região de flash
+renderiza uma única vez o que a requisição anterior deixou na sessão:
+
+```html
+{% import "suprnova-ui/alert/alert.html" as alert %}
+{% import "suprnova-ui/spinner/spinner.html" as spinner %}
+{% call alert::alert("saved", variant="success") %}<p>Your changes are saved.</p>{% endcall %}
+{% call button::button("Save", action="save") %}{% endcall %}
+{% call spinner::spinner(action="save", label="Saving") %}{% endcall %}
+```
+
+Navegação: barra de cabeçalho, footer, sidebar com grupos recolhíveis,
+breadcrumbs, tabs, paginação e load more. Cada destino é uma âncora com uma
+URL de rota real e cada ação é um botão; o item atual carrega `aria-current`
+a partir do valor que você vincula, nunca da localização do navegador. Os
+grupos da sidebar são `details` nativos, com chave e preservados. As tabs
+exigem um modo: `local`, painéis com semântica de tablist, teclas de seta pelo
+elemento vendorizado `sn-tabs` e nenhuma requisição na troca, ou `route`, tabs
+como âncoras. A paginação também exige um modo: páginas de rota são links
+canônicos, e páginas Live são botões sobre suas ações cujo resultado reflete a
+nova query na entrada de histórico atual por `url_intent`, sem entrada por
+página. Load more é um botão sobre uma ação registrada que acrescenta a uma
+lista com chaves, de modo que o morph mantém cada linha já presente, e o controle sai da view quando você o renderiza esgotado. Uma reflexão de URL é um resultado do protocolo 2, então uma island que pagina por `url_intent` declara `minimum_protocol_version = 2`; suas linhas com chaves passam por `live_key` como um toast:
+
+```html
+{% import "suprnova-ui/tabs/tabs.html" as tabs %}
+{% call tabs::tabs("details", mode="local", label="Details") %}
+{% call tabs::tab_list("Details") %}
+{% call tabs::tab("tab-summary", "panel-summary", "Summary", selected=true) %}{% endcall %}
+{% call tabs::tab("tab-history", "panel-history", "History") %}{% endcall %}
+{% endcall %}
+{% call tabs::tab_panel("panel-summary", "tab-summary", selected=true) %}<p>Summary</p>{% endcall %}
+{% call tabs::tab_panel("panel-history", "tab-history") %}<p>History</p>{% endcall %}
+{% endcall %}
+```
+
 ### Por que o Suprnova diverge
 
 O Laravel traz componentes Blade e a marcação de um kit inicial; o Suprnova

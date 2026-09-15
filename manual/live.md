@@ -489,6 +489,63 @@ menu sit under their trigger; elsewhere the browser centres them. The
 accordion's single-open mode rests on `details name`, which older supported
 releases treat as independent disclosures.
 
+The feedback family and the navigation family follow. Feedback: alert,
+skeleton, spinner, progress, empty state, and a toast region with a flash
+region beside it. Each one presents a state the server or the runtime already
+holds. An alert chooses its role from its variant and marks every variant with
+a glyph and a hidden label, never color alone. A spinner or skeleton is bound
+with `live:loading.show` to a registered action and authored hidden, so the
+runtime reveals it after its own delay and keeps it past its minimum, and a
+fast action never flashes it. Progress is the native `progress` element with a
+label and a text readout, and carries a value only for determinate work. The
+empty state takes its reason (empty, no results, no permission, disconnected)
+from server-rendered state and offers a next action only where the caller
+renders one. A toast announces once from a polite status region and never
+takes focus; the vendored `sn-toast-region` element times toasts out, pauses
+while hovered or focused, bounds how many show at once, and answers the
+dismiss button, with each toast keyed and preserved so a dismissed toast stays
+dismissed across a morph. A critical error belongs in an alert as well; a
+toast is never its only surface. Toasts render inside a loop, so their keys
+pass through the `live_key` filter, and the island that mounts them exposes
+it with `pub mod filters { pub use suprnova::view::filters::live_key; }`.
+The flash region renders what the previous request left in the session, once:
+
+```html
+{% import "suprnova-ui/alert/alert.html" as alert %}
+{% import "suprnova-ui/spinner/spinner.html" as spinner %}
+{% call alert::alert("saved", variant="success") %}<p>Your changes are saved.</p>{% endcall %}
+{% call button::button("Save", action="save") %}{% endcall %}
+{% call spinner::spinner(action="save", label="Saving") %}{% endcall %}
+```
+
+Navigation: header bar, footer, sidebar with collapsible groups, breadcrumbs,
+tabs, pagination, and load more. Every destination is an anchor with a real
+route URL and every action is a button; the current item carries
+`aria-current` from the value you bind, never from the browser's location.
+The sidebar's groups are native `details`, keyed and preserved. Tabs require a
+mode: `local` panels with tablist semantics, arrow keys from the vendored
+`sn-tabs` element, and no request on a change, or `route` tabs as anchors.
+Pagination requires a mode too: route pages are canonical links, and Live
+pages are buttons on your actions whose result reflects the new query into the
+current history entry through `url_intent`, with no history entry per page.
+Load more is a button on a registered action that appends to a keyed list, so
+the morph keeps every row already there, and the control leaves the view when
+you render it exhausted. A URL reflection is a protocol 2 result, so an island
+that paginates through `url_intent` declares `minimum_protocol_version = 2`;
+its keyed rows pass through `live_key` like a toast does:
+
+```html
+{% import "suprnova-ui/tabs/tabs.html" as tabs %}
+{% call tabs::tabs("details", mode="local", label="Details") %}
+{% call tabs::tab_list("Details") %}
+{% call tabs::tab("tab-summary", "panel-summary", "Summary", selected=true) %}{% endcall %}
+{% call tabs::tab("tab-history", "panel-history", "History") %}{% endcall %}
+{% endcall %}
+{% call tabs::tab_panel("panel-summary", "tab-summary", selected=true) %}<p>Summary</p>{% endcall %}
+{% call tabs::tab_panel("panel-history", "tab-history") %}<p>History</p>{% endcall %}
+{% endcall %}
+```
+
 ### Why Suprnova diverges
 
 Laravel ships Blade components and a starter kit's markup; Suprnova ships the

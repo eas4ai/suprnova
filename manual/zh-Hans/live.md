@@ -373,6 +373,30 @@ suprnova live:add password-input
 
 `popover` 属性把支持的基线定在 Chrome 与 Edge 114、Firefox 128 和 Safari 17。在存在 CSS 锚点定位的地方，弹出层和菜单位于触发器之下；否则由浏览器居中显示。手风琴的单项展开模式依赖 `details name`，较旧的受支持版本会把它们当作彼此独立的折叠块。
 
+接下来是反馈家族和导航家族。反馈：提示框、骨架屏、加载指示器、进度条、空状态，以及旁边带有 flash 区域的 toast 区域。它们各自呈现服务器或运行时已经持有的状态。提示框根据变体选择角色，并用符号和隐藏标签标记每个变体，绝不只靠颜色。加载指示器或骨架屏通过 `live:loading.show` 绑定到已注册的动作，并以隐藏状态输出，运行时在自身的延迟之后显示它并保持超过最短时长，因此快速的动作永远不会让它闪烁。进度条是带标签和文字读数的原生 `progress` 元素，只在确定性工作时携带值。空状态从服务器渲染的状态中获取原因（空、无结果、无权限、已断开），且只在调用方渲染了下一步动作时才提供它。toast 从礼貌的状态区域只播报一次，绝不夺取焦点；供应的 `sn-toast-region` 元素让 toast 超时消失，在悬停或聚焦时暂停，限制同时显示的数量，并响应关闭按钮；每个 toast 都带键并被保留，因此关闭的 toast 在 morph 之后仍保持关闭。严重错误也应放进提示框；toast 绝不是它唯一的呈现面。toast 在循环中渲染，因此它们的键会经过 `live_key` 过滤器，挂载它们的岛通过 `pub mod filters { pub use suprnova::view::filters::live_key; }` 暴露该过滤器。flash 区域把上一个请求留在会话中的内容只渲染一次：
+
+```html
+{% import "suprnova-ui/alert/alert.html" as alert %}
+{% import "suprnova-ui/spinner/spinner.html" as spinner %}
+{% call alert::alert("saved", variant="success") %}<p>Your changes are saved.</p>{% endcall %}
+{% call button::button("Save", action="save") %}{% endcall %}
+{% call spinner::spinner(action="save", label="Saving") %}{% endcall %}
+```
+
+导航：页眉栏、页脚、带可折叠分组的侧边栏、面包屑、标签页、分页和加载更多。每个目的地都是带真实路由 URL 的锚点，每个动作都是按钮；当前项的 `aria-current` 来自你绑定的值，绝不来自浏览器的位置。侧边栏的分组是带键并被保留的原生 `details`。标签页必须指定模式：`local` 是带 tablist 语义的面板，方向键由供应的 `sn-tabs` 元素处理，切换时不发出请求；`route` 则是作为锚点的标签页。分页同样必须指定模式：路由分页是规范链接，Live 分页是针对你的动作的按钮，其结果通过 `url_intent` 把新的查询反映到当前历史条目，不为每页创建历史条目。加载更多是针对已注册动作的按钮，向带键的列表追加内容，因此 morph 保留已有的每一行，而当你把它渲染为已耗尽时，该控件会离开视图。URL 反映是协议 2 的结果，因此通过 `url_intent` 分页的岛要声明 `minimum_protocol_version = 2`；它带键的行像 toast 一样经过 `live_key`：
+
+```html
+{% import "suprnova-ui/tabs/tabs.html" as tabs %}
+{% call tabs::tabs("details", mode="local", label="Details") %}
+{% call tabs::tab_list("Details") %}
+{% call tabs::tab("tab-summary", "panel-summary", "Summary", selected=true) %}{% endcall %}
+{% call tabs::tab("tab-history", "panel-history", "History") %}{% endcall %}
+{% endcall %}
+{% call tabs::tab_panel("panel-summary", "tab-summary", selected=true) %}<p>Summary</p>{% endcall %}
+{% call tabs::tab_panel("panel-history", "tab-history") %}<p>History</p>{% endcall %}
+{% endcall %}
+```
+
 ### 为什么 Suprnova 与众不同
 
 Laravel 随附 Blade 组件和入门套件的标记；Suprnova 则通过框架本身、基于 Live 自己的词汇来提供这个库，不让任何客户端应用拥有页面。皮肤默认开启，去掉它也不会破坏任何东西，这正是这里“无头”的含义。

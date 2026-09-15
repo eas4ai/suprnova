@@ -1,7 +1,7 @@
 # Suprnova Live -- 24 Feedback and Status Components
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-09-14
 
 ## Scope
 
@@ -182,6 +182,20 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-14 -- The official feedback components (alert, skeleton, spinner,
+  progress, empty state, toast region, flash region) present state the
+  server or the runtime already holds: the alert's role follows its
+  variant with a glyph and a hidden label per variant; a spinner or
+  skeleton is bound through `live:loading` and shows on the runtime's own
+  delay and minimum (150 ms, 200 ms) rather than a timer of its own;
+  progress is the native element with a value only for determinate work,
+  a label and a readout; the empty state's reason is server-rendered and
+  its next action is the caller's; a toast announces once from a polite
+  status region without taking focus, a critical error also renders in a
+  persistent alert, and the flash region renders a consumed session flash
+  once. Cairn FDB-001 to FDB-004 and FDB-006 refine this spec; the
+  notification bell and live feed (FDB-005) wait for the live-native
+  commitment.
 - 2026-08-21 -- Feedback is truthful and proportional; rejected optimistic
   success language before server acceptance.
 - 2026-08-21 -- Critical errors and required decisions cannot live only in

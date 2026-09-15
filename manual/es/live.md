@@ -506,6 +506,59 @@ menú se sitúan bajo su disparador; en otro caso el navegador los centra. El
 modo de apertura única del accordion descansa en `details name`, que las
 versiones soportadas más antiguas tratan como disclosures independientes.
 
+Siguen la familia de feedback y la familia de navegación. Feedback: alert,
+skeleton, spinner, progress, empty state y una región de toasts con una región
+de flash a su lado. Cada uno presenta un estado que el servidor o el runtime
+ya tienen. Un alert elige su rol según su variante y marca cada variante con
+un glifo y una etiqueta oculta, nunca solo con color. Un spinner o skeleton se
+enlaza con `live:loading.show` a una acción registrada y se entrega oculto,
+de modo que el runtime lo revela tras su propio retardo y lo mantiene más allá
+de su mínimo, y una acción rápida nunca lo hace parpadear. Progress es el
+elemento nativo `progress` con etiqueta y lectura en texto, y lleva un valor
+solo para trabajo determinado. El empty state toma su motivo (vacío, sin
+resultados, sin permiso, desconectado) del estado renderizado en el servidor y
+ofrece una acción siguiente solo donde quien lo llama la renderiza. Un toast
+anuncia una vez desde una región de estado cortés y nunca toma el foco; el
+elemento vendorizado `sn-toast-region` expira los toasts, pausa mientras hay
+hover o foco, limita cuántos se muestran a la vez y responde al botón de
+cierre, con cada toast con clave y preservado para que uno cerrado siga
+cerrado tras un morph. Un error crítico también pertenece a un alert; un toast nunca es su única superficie. Los toasts se renderizan dentro de un bucle, así que sus claves pasan por el filtro `live_key`, y la island que los monta lo expone con `pub mod filters { pub use suprnova::view::filters::live_key; }`. La región de flash renderiza una sola vez lo que
+la petición anterior dejó en la sesión:
+
+```html
+{% import "suprnova-ui/alert/alert.html" as alert %}
+{% import "suprnova-ui/spinner/spinner.html" as spinner %}
+{% call alert::alert("saved", variant="success") %}<p>Your changes are saved.</p>{% endcall %}
+{% call button::button("Save", action="save") %}{% endcall %}
+{% call spinner::spinner(action="save", label="Saving") %}{% endcall %}
+```
+
+Navegación: barra de cabecera, footer, sidebar con grupos plegables,
+breadcrumbs, tabs, paginación y load more. Cada destino es un ancla con una
+URL de ruta real y cada acción es un botón; el elemento actual lleva
+`aria-current` desde el valor que usted enlaza, nunca desde la ubicación del
+navegador. Los grupos del sidebar son `details` nativos, con clave y
+preservados. Las tabs exigen un modo: `local`, con paneles con semántica de
+tablist, teclas de flecha desde el elemento vendorizado `sn-tabs` y ninguna
+petición al cambiar, o `route`, con tabs como anclas. La paginación también
+exige un modo: las páginas de ruta son enlaces canónicos y las páginas Live
+son botones sobre sus acciones cuyo resultado refleja la nueva query en la
+entrada de historial actual mediante `url_intent`, sin entrada por página.
+Load more es un botón sobre una acción registrada que añade a una lista con
+claves, de modo que el morph conserva cada fila ya presente, y el control desaparece cuando usted lo renderiza agotado. Una reflexión de URL es un resultado del protocolo 2, así que una island que pagina mediante `url_intent` declara `minimum_protocol_version = 2`; sus filas con claves pasan por `live_key` como lo hace un toast:
+
+```html
+{% import "suprnova-ui/tabs/tabs.html" as tabs %}
+{% call tabs::tabs("details", mode="local", label="Details") %}
+{% call tabs::tab_list("Details") %}
+{% call tabs::tab("tab-summary", "panel-summary", "Summary", selected=true) %}{% endcall %}
+{% call tabs::tab("tab-history", "panel-history", "History") %}{% endcall %}
+{% endcall %}
+{% call tabs::tab_panel("panel-summary", "tab-summary", selected=true) %}<p>Summary</p>{% endcall %}
+{% call tabs::tab_panel("panel-history", "tab-history") %}<p>History</p>{% endcall %}
+{% endcall %}
+```
+
 ### Por qué Suprnova diverge
 
 Laravel incluye componentes Blade y el marcado de un kit de inicio; Suprnova

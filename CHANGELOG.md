@@ -27,6 +27,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `dialog`) before any script, makes no Live request to open or close, returns
   focus to its trigger on close, and keeps its open state across a morph under
   a stable key with `live:preserve.self`.
+- **The Live component library gains its feedback and navigation families.**
+  Alert, skeleton, spinner, progress, empty state, toast region and flash
+  region; header bar, footer, sidebar, breadcrumbs, tabs, pagination and load
+  more install with `live:add` beside the form and overlay families. Feedback
+  presents state the server or runtime holds: an alert's role follows its
+  variant with a non-color cue, loading presentation is bound through
+  `live:loading` and shows on the runtime's own timing, progress is the native
+  element with a label and readout, the empty state's reason is server state,
+  and a toast announces once without taking focus while a critical error also
+  renders as an alert. Navigation keeps route semantics: anchors with real
+  URLs, `aria-current` from the server, an explicit local or route mode for
+  tabs and pagination, Live pagination reflected with `history.replaceState`
+  and no history entry, and load more as a keyed append from a button. The
+  `live_key` view filter lands with them: a `live:key` inside a `{% for %}`
+  loop passes through it, and it enforces at render time the key rule the
+  checker enforces on literal keys.
 
 ### Changed
 

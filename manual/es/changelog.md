@@ -32,6 +32,21 @@ recientes primero.
   script, no hace ninguna petición Live para abrirse o cerrarse, devuelve el
   foco a su disparador al cerrarse y conserva su estado abierto a través de un
   morph bajo una clave estable con `live:preserve.self`.
+- **La biblioteca de componentes de Live gana sus familias de feedback y navegación.**
+  Alert, skeleton, spinner, progress, empty state, región de toasts y región
+  de flash; barra de cabecera, footer, sidebar, breadcrumbs, tabs, paginación
+  y load more se instalan con `live:add` junto a las familias de formularios y
+  overlays. El feedback presenta estado que el servidor o el runtime ya tienen:
+  el rol de un alert sigue a su variante con una señal que no es solo color,
+  la presentación de carga se enlaza con `live:loading` y aparece con el
+  tiempo del propio runtime, progress es el elemento nativo con etiqueta y
+  lectura, el motivo del empty state es estado del servidor, y un toast
+  anuncia una vez sin tomar el foco mientras un error crítico también se
+  muestra como alert. La navegación conserva la semántica de rutas: anclas
+  con URL reales, `aria-current` desde el servidor, un modo local o de ruta
+  explícito para tabs y paginación, paginación Live reflejada con
+  `history.replaceState` sin entrada de historial, y load more como un
+  añadido con claves desde un botón. El filtro de vista `live_key` llega con ellas: un `live:key` dentro de un bucle `{% for %}` pasa por él, y aplica en tiempo de renderizado la regla de claves que el checker aplica a las claves literales.
 
 ### Cambiado
 

@@ -509,6 +509,61 @@ les centre. Le mode d'ouverture unique de l'accordion repose sur `details
 name`, que les versions prises en charge plus anciennes traitent comme des
 disclosures indépendants.
 
+La famille feedback et la famille navigation suivent. Feedback : alert,
+skeleton, spinner, progress, empty state et une région de toasts avec une
+région de flash à côté. Chacun présente un état que le serveur ou le runtime
+détient déjà. Un alert choisit son rôle selon sa variante et marque chaque
+variante d'un glyphe et d'une étiquette masquée, jamais de la couleur seule.
+Un spinner ou un skeleton est lié par `live:loading.show` à une action
+enregistrée et livré masqué, si bien que le runtime le révèle après son propre
+délai et le garde au-delà de son minimum ; une action rapide ne le fait jamais
+clignoter. Progress est l'élément natif `progress` avec une étiquette et une
+lecture en texte, et ne porte une valeur que pour un travail déterminé.
+L'empty state prend sa raison (vide, aucun résultat, aucune permission,
+déconnecté) de l'état rendu par le serveur et n'offre une action suivante que
+là où l'appelant en rend une. Un toast annonce une fois depuis une région
+d'état polie et ne prend jamais le focus ; l'élément vendorisé
+`sn-toast-region` fait expirer les toasts, se met en pause au survol ou au
+focus, borne le nombre affiché à la fois et répond au bouton de fermeture,
+chaque toast étant à clé et préservé pour qu'un toast fermé le reste après un
+morph. Une erreur critique appartient aussi à un alert ; un toast n'est jamais sa seule surface. Les toasts sont rendus dans une boucle, donc leurs clés passent par le filtre `live_key`, et l'island qui les monte l'expose avec `pub mod filters { pub use suprnova::view::filters::live_key; }`. La région de flash rend une seule fois ce que la requête
+précédente a laissé dans la session :
+
+```html
+{% import "suprnova-ui/alert/alert.html" as alert %}
+{% import "suprnova-ui/spinner/spinner.html" as spinner %}
+{% call alert::alert("saved", variant="success") %}<p>Your changes are saved.</p>{% endcall %}
+{% call button::button("Save", action="save") %}{% endcall %}
+{% call spinner::spinner(action="save", label="Saving") %}{% endcall %}
+```
+
+Navigation : barre d'en-tête, footer, sidebar à groupes repliables, fil
+d'Ariane, tabs, pagination et load more. Chaque destination est une ancre
+avec une vraie URL de route et chaque action un bouton ; l'élément courant
+porte `aria-current` depuis la valeur que vous liez, jamais depuis
+l'emplacement du navigateur. Les groupes de la sidebar sont des `details`
+natifs, à clé et préservés. Les tabs exigent un mode : `local`, des panneaux
+avec la sémantique tablist, les flèches du clavier via l'élément vendorisé
+`sn-tabs` et aucune requête au changement, ou `route`, des tabs sous forme
+d'ancres. La pagination exige aussi un mode : les pages de route sont des
+liens canoniques, les pages Live sont des boutons sur vos actions dont le
+résultat reflète la nouvelle query dans l'entrée d'historique courante via
+`url_intent`, sans entrée par page. Load more est un bouton sur une action
+enregistrée qui ajoute à une liste à clés, si bien que le morph garde chaque
+ligne déjà présente, et le contrôle quitte la vue quand vous le rendez épuisé. Une réflexion d'URL est un résultat du protocole 2, donc une island qui pagine via `url_intent` déclare `minimum_protocol_version = 2` ; ses lignes à clés passent par `live_key` comme un toast :
+
+```html
+{% import "suprnova-ui/tabs/tabs.html" as tabs %}
+{% call tabs::tabs("details", mode="local", label="Details") %}
+{% call tabs::tab_list("Details") %}
+{% call tabs::tab("tab-summary", "panel-summary", "Summary", selected=true) %}{% endcall %}
+{% call tabs::tab("tab-history", "panel-history", "History") %}{% endcall %}
+{% endcall %}
+{% call tabs::tab_panel("panel-summary", "tab-summary", selected=true) %}<p>Summary</p>{% endcall %}
+{% call tabs::tab_panel("panel-history", "tab-history") %}<p>History</p>{% endcall %}
+{% endcall %}
+```
+
 ### Pourquoi Suprnova diverge
 
 Laravel livre des composants Blade et le balisage d'un kit de démarrage ;

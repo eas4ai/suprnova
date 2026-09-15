@@ -31,6 +31,21 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   Schließen keine Live-Anfrage, gibt den Fokus beim Schließen an seinen
   Auslöser zurück und behält seinen Öffnungszustand über einen Morph hinweg
   unter einem stabilen Schlüssel mit `live:preserve.self`.
+- **Die Live-Komponentenbibliothek erhält ihre Feedback- und Navigationsfamilie.**
+  Alert, Skeleton, Spinner, Progress, Empty State, Toast-Region und
+  Flash-Region; Header-Leiste, Footer, Sidebar, Breadcrumbs, Tabs, Pagination
+  und Load more werden mit `live:add` neben der Formular- und Overlay-Familie
+  installiert. Feedback zeigt Zustand, den der Server oder die Laufzeit hält:
+  die Rolle eines Alerts folgt seiner Variante mit einem Hinweis jenseits der
+  Farbe, Ladeanzeigen sind über `live:loading` gebunden und erscheinen nach
+  dem Timing der Laufzeit, Progress ist das native Element mit Beschriftung
+  und Ablesung, der Grund des Empty State ist Serverzustand, und ein Toast
+  kündigt einmal an, ohne den Fokus zu nehmen, während ein kritischer Fehler
+  auch als Alert erscheint. Navigation behält Routensemantik: Anker mit
+  echten URLs, `aria-current` vom Server, ein expliziter Local- oder
+  Route-Modus für Tabs und Pagination, Live-Pagination über
+  `history.replaceState` ohne History-Eintrag und Load more als
+  schlüsselbasiertes Anfügen aus einem Button. Der View-Filter `live_key` landet mit ihnen: ein `live:key` in einer `{% for %}`-Schleife läuft durch ihn, und er erzwingt zur Renderzeit die Schlüsselregel, die der Checker für literale Schlüssel erzwingt.
 
 ### Geändert
 

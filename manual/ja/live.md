@@ -372,6 +372,30 @@ suprnova live:add password-input
 
 `popover` 属性により、サポートする基準は Chrome と Edge 114、Firefox 128、Safari 17 になります。CSS のアンカー配置があるところでは、ポップオーバーとメニューはトリガーの下に置かれ、それ以外ではブラウザーが中央に配置します。アコーディオンの単一オープンモードは `details name` に依存しており、古いサポート対象バージョンではそれぞれ独立したディスクロージャーとして扱われます。
 
+続いてフィードバックファミリーとナビゲーションファミリーです。フィードバックはアラート、スケルトン、スピナー、プログレス、空状態、そしてフラッシュ領域を隣に持つトースト領域です。それぞれはサーバーまたはランタイムがすでに持つ状態を表示します。アラートはバリアントからロールを選び、色だけでなく記号と非表示のラベルで各バリアントを示します。スピナーやスケルトンは `live:loading.show` で登録済みアクションに結び付けられ、非表示で出力されるため、ランタイムが自身の遅延の後に表示し最小時間を超えて保持し、速いアクションで点滅することはありません。プログレスはラベルとテキストの読み上げを持つネイティブの `progress` 要素で、確定的な作業のときだけ値を持ちます。空状態は理由（空、結果なし、権限なし、切断）をサーバーで描画された状態から取り、呼び出し側が描画する場合にだけ次のアクションを提示します。トーストは丁寧なステータス領域から一度だけ通知し、フォーカスを奪いません。ベンダリングされた `sn-toast-region` 要素はトーストをタイムアウトさせ、ホバーやフォーカス中は一時停止し、同時に表示する数を制限し、閉じるボタンに応答します。各トーストはキー付きで保持されるため、閉じたトーストはモーフをまたいでも閉じたままです。重大なエラーはアラートにも置くべきで、トーストがその唯一の表示面になることはありません。トーストはループの中で描画されるため、そのキーは `live_key` フィルターを通り、トーストをマウントするアイランドは `pub mod filters { pub use suprnova::view::filters::live_key; }` でこのフィルターを公開します。フラッシュ領域は前のリクエストがセッションに残したものを一度だけ描画します。
+
+```html
+{% import "suprnova-ui/alert/alert.html" as alert %}
+{% import "suprnova-ui/spinner/spinner.html" as spinner %}
+{% call alert::alert("saved", variant="success") %}<p>Your changes are saved.</p>{% endcall %}
+{% call button::button("Save", action="save") %}{% endcall %}
+{% call spinner::spinner(action="save", label="Saving") %}{% endcall %}
+```
+
+ナビゲーションはヘッダーバー、フッター、折りたたみグループを持つサイドバー、パンくずリスト、タブ、ページネーション、さらに読み込むです。すべての移動先は実ルート URL を持つアンカーで、すべてのアクションはボタンです。現在の項目はブラウザーの位置ではなく、あなたが結び付けた値から `aria-current` を持ちます。サイドバーのグループはキー付きで保持されるネイティブの `details` です。タブにはモードが必須です。`local` はタブリストの意味論を持つパネルで、ベンダリングされた `sn-tabs` 要素が矢印キーを扱い、切り替えでリクエストを発行しません。`route` はアンカーとしてのタブです。ページネーションにもモードが必須です。ルートページは正規リンクで、Live ページはあなたのアクションに対するボタンであり、その結果が `url_intent` を通じて新しいクエリを現在の履歴エントリに反映し、ページごとの履歴エントリは作りません。さらに読み込むは登録済みアクションに対するボタンでキー付きリストに追記するため、モーフはすでにある行をすべて保持し、使い切ったものとして描画するとコントロールはビューから消えます。URL の反映はプロトコル 2 の結果なので、`url_intent` でページ送りするアイランドは `minimum_protocol_version = 2` を宣言します。そのキー付きの行はトーストと同じように `live_key` を通ります。
+
+```html
+{% import "suprnova-ui/tabs/tabs.html" as tabs %}
+{% call tabs::tabs("details", mode="local", label="Details") %}
+{% call tabs::tab_list("Details") %}
+{% call tabs::tab("tab-summary", "panel-summary", "Summary", selected=true) %}{% endcall %}
+{% call tabs::tab("tab-history", "panel-history", "History") %}{% endcall %}
+{% endcall %}
+{% call tabs::tab_panel("panel-summary", "tab-summary", selected=true) %}<p>Summary</p>{% endcall %}
+{% call tabs::tab_panel("panel-history", "tab-history") %}<p>History</p>{% endcall %}
+{% endcall %}
+```
+
 ### Suprnova が異なる理由
 
 Laravel は Blade コンポーネントとスターターキットのマークアップを同梱しますが、Suprnova はライブラリをフレームワーク自身を通じて、Live 固有の語彙の上で提供し、クライアントアプリケーションがページを所有することはありません。スキンは既定で有効で、外しても何も壊れません。それがここでのヘッドレスの意味です。

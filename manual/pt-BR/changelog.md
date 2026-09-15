@@ -31,6 +31,20 @@ são enviados atomicamente. Mais recentes primeiro.
   nenhuma requisição Live para abrir ou fechar, devolve o foco ao seu gatilho
   ao fechar e preserva seu estado aberto através de um morph sob uma chave
   estável com `live:preserve.self`.
+- **A biblioteca de componentes do Live ganha suas famílias de feedback e navegação.**
+  Alert, skeleton, spinner, progress, empty state, região de toasts e região
+  de flash; barra de cabeçalho, footer, sidebar, breadcrumbs, tabs, paginação
+  e load more são instalados com `live:add` ao lado das famílias de
+  formulários e overlays. O feedback apresenta estado que o servidor ou o
+  runtime já têm: o papel de um alert segue sua variante com um sinal além da
+  cor, a apresentação de carregamento é vinculada por `live:loading` e aparece
+  no tempo do próprio runtime, progress é o elemento nativo com rótulo e
+  leitura, o motivo do empty state é estado do servidor, e um toast anuncia
+  uma vez sem tomar o foco enquanto um erro crítico também aparece como alert.
+  A navegação mantém a semântica de rotas: âncoras com URLs reais,
+  `aria-current` vindo do servidor, um modo local ou de rota explícito para
+  tabs e paginação, paginação Live refletida com `history.replaceState` sem
+  entrada de histórico, e load more como um acréscimo com chaves a partir de um botão. O filtro de view `live_key` chega com elas: um `live:key` dentro de um loop `{% for %}` passa por ele, e ele aplica na renderização a regra de chaves que o checker aplica às chaves literais.
 
 ### Alterado
 

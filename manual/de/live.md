@@ -512,6 +512,61 @@ Popover und Menü unter ihrem Auslöser; sonst zentriert der Browser sie. Der
 Einzelöffnungsmodus des Accordions beruht auf `details name`, das ältere
 unterstützte Versionen als unabhängige Disclosures behandeln.
 
+Die Feedback-Familie und die Navigationsfamilie folgen. Feedback: Alert,
+Skeleton, Spinner, Progress, Empty State und eine Toast-Region mit einer
+Flash-Region daneben. Jede zeigt einen Zustand, den der Server oder die
+Laufzeit bereits hält. Ein Alert wählt seine Rolle nach seiner Variante und
+kennzeichnet jede Variante mit einem Zeichen und einer verborgenen
+Beschriftung, nie nur mit Farbe. Ein Spinner oder Skeleton ist mit
+`live:loading.show` an eine registrierte Aktion gebunden und verborgen
+ausgeliefert, sodass die Laufzeit ihn nach ihrer eigenen Verzögerung zeigt und
+über ihr Minimum hinaus hält; eine schnelle Aktion lässt ihn nie aufblitzen.
+Progress ist das native `progress`-Element mit Beschriftung und Textablesung
+und trägt einen Wert nur bei bestimmbarer Arbeit. Der Empty State nimmt seinen
+Grund (leer, keine Treffer, keine Berechtigung, getrennt) aus servergerendertem
+Zustand und bietet eine nächste Aktion nur dort, wo der Aufrufer eine
+rendert. Ein Toast kündigt einmal aus einer höflichen Statusregion an und
+nimmt nie den Fokus; das vendorierte Element `sn-toast-region` lässt Toasts
+auslaufen, pausiert bei Hover oder Fokus, begrenzt, wie viele gleichzeitig
+sichtbar sind, und beantwortet den Schließen-Button; jeder Toast ist
+schlüsselbasiert und erhalten, sodass ein geschlossener Toast über einen Morph
+hinweg geschlossen bleibt. Ein kritischer Fehler gehört auch in einen Alert; ein Toast ist nie seine einzige Fläche. Toasts werden in einer Schleife gerendert, daher laufen ihre Schlüssel durch den Filter `live_key`, und die Island, die sie mountet, stellt ihn mit `pub mod filters { pub use suprnova::view::filters::live_key; }` bereit. Die Flash-Region rendert einmal, was
+die vorige Anfrage in der Session hinterlassen hat:
+
+```html
+{% import "suprnova-ui/alert/alert.html" as alert %}
+{% import "suprnova-ui/spinner/spinner.html" as spinner %}
+{% call alert::alert("saved", variant="success") %}<p>Your changes are saved.</p>{% endcall %}
+{% call button::button("Save", action="save") %}{% endcall %}
+{% call spinner::spinner(action="save", label="Saving") %}{% endcall %}
+```
+
+Navigation: Header-Leiste, Footer, Sidebar mit einklappbaren Gruppen,
+Breadcrumbs, Tabs, Pagination und Load more. Jedes Ziel ist ein Anker mit
+einer echten Routen-URL und jede Aktion ein Button; das aktuelle Element trägt
+`aria-current` aus dem Wert, den Sie binden, nie aus dem Standort des
+Browsers. Die Gruppen der Sidebar sind native `details`, schlüsselbasiert und
+erhalten. Tabs verlangen einen Modus: `local` mit Tablist-Semantik,
+Pfeiltasten aus dem vendorierten Element `sn-tabs` und keiner Anfrage beim
+Wechsel, oder `route` mit Tabs als Ankern. Pagination verlangt ebenfalls einen
+Modus: Routenseiten sind kanonische Links, Live-Seiten sind Buttons auf Ihren
+Aktionen, deren Ergebnis die neue Query über `url_intent` in den aktuellen
+History-Eintrag spiegelt, ohne Eintrag pro Seite. Load more ist ein Button auf
+einer registrierten Aktion, der an eine schlüsselbasierte Liste anfügt, sodass
+der Morph jede bereits vorhandene Zeile behält, und das Steuerelement verschwindet, sobald Sie es erschöpft rendern. Eine URL-Reflexion ist ein Ergebnis von Protokoll 2, daher deklariert eine Island, die über `url_intent` paginiert, `minimum_protocol_version = 2`; ihre Zeilen mit Schlüssel laufen wie ein Toast durch `live_key`:
+
+```html
+{% import "suprnova-ui/tabs/tabs.html" as tabs %}
+{% call tabs::tabs("details", mode="local", label="Details") %}
+{% call tabs::tab_list("Details") %}
+{% call tabs::tab("tab-summary", "panel-summary", "Summary", selected=true) %}{% endcall %}
+{% call tabs::tab("tab-history", "panel-history", "History") %}{% endcall %}
+{% endcall %}
+{% call tabs::tab_panel("panel-summary", "tab-summary", selected=true) %}<p>Summary</p>{% endcall %}
+{% call tabs::tab_panel("panel-history", "tab-history") %}<p>History</p>{% endcall %}
+{% endcall %}
+```
+
 ### Warum Suprnova abweicht
 
 Laravel liefert Blade-Komponenten und das Markup eines Starter-Kits; Suprnova
