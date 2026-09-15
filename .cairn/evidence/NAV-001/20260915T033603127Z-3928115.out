@@ -1,0 +1,6 @@
+cairn: NAV-001: fail
+  reason: no header-bar component; no footer component; no sidebar component; no breadcrumbs component; no tabs component; no pagination component; no load-more component; no gallery view at app/templates/live/navigation-gallery.html
+cairn: NAV-002: fail
+  reason: no tabs view; no gallery view at app/templates/live/navigation-gallery.html
+cairn: NAV-004: fail
+  reason: no header-bar component; no sidebar component; no gallery view at app/templates/live/navigation-gallery.html

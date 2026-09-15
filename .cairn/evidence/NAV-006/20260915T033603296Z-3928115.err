@@ -1,0 +1,6 @@
+No test files found, exiting with code 1
+
+filter: tests/load-more-continuity.test.ts
+include: **/*.{test,spec}.?(c|m)[jt]s?(x)
+exclude:  e2e/**, node_modules/**, dist/**
+

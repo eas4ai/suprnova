@@ -1,0 +1,6 @@
+cairn: FDB-001: fail
+  reason: no alert component; no gallery view at app/templates/live/feedback-gallery.html
+cairn: FDB-002: fail
+  reason: no spinner component; no skeleton component; no gallery view at app/templates/live/feedback-gallery.html
+cairn: FDB-006: fail
+  reason: no progress component; no gallery view at app/templates/live/feedback-gallery.html
