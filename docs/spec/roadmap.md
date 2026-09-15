@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: component-library-data-display
+Current: component-library-live-native
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -64,9 +64,13 @@ components in waves, the advanced components last, the datatable closing.
    state; header bar, footer, sidebar, breadcrumbs, tabs, pagination,
    load more; the `live_key` view filter landed with them
    (`component-library-feedback.md`, `component-library-navigation.md`).
-6. component-library-data-display - card, image and aspect ratio, scroll
-   area, separator, badge, avatar, list group, description list, stat
-   card; the datatable last (`component-library-data-display.md`).
+6. component-library-data-display - DONE 2026-09-15 (built between
+   `2d9bec74` and `41e6a04b`; DATA-001 to DATA-005 agreed on escalation
+   `data-001` under the developer's 2026-09-14 ruling that every
+   remaining commitment is agreed; receipts and review on `cea49611`) -
+   card, image and aspect ratio, scroll area, separator, badge, avatar,
+   list group, description list, stat card; the chart through
+   `charts-rs`; the datatable last (`component-library-data-display.md`).
 7. component-library-live-native - upload widget, live feed, notification
    bell, account menu, server-rendered chart, input OTP, date picker,
    combobox; the custom-element enhancement layer lands here
