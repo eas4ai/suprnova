@@ -1,0 +1,21 @@
+requirement: OVL-002
+requirement_digest: sha256:ffd1f5d70ec5fe6676610d863292fa8ccfd94f01ae705ad6a38ccefc770c3800
+sequence: 2
+history_digest: sha256:00b0b63a06d4bfba9aaeecb927fafa6815ad64c3c34c0d3dd554dc6beefebbeb
+mechanism: ui-overlays
+commit: 1efccb1d
+inputs_digest: sha256:e8adb07c023b5681d10ec799c622783ab80e049b1f3820e42ae3dba9deb0957f
+mechanism_digest: sha256:0d65dad61af959259ff53ce5374ffa212633743b5fa2ec75196381bf0f034ec0
+inputs_detail: .cairn/evidence/OVL-001/20260915T005218467Z-1965155.inputs.json
+command: node .cairn/tools/ui-overlays.mjs crates/suprnova-live/components app/templates/live/overlay-gallery.html
+cwd: .
+exit: 0
+output_digest: sha256:00542fbf378e3097ada5beeff1f21ae47eaab0abda24dcc40d0c448e4e6b6a4f
+output: .cairn/evidence/OVL-001/20260915T005218467Z-1965155.out
+stderr_output: .cairn/evidence/OVL-001/20260915T005218467Z-1965155.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+result: pass
+source: line
+recorded: 2026-09-15T00:52:18.558Z

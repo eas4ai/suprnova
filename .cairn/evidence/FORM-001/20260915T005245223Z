@@ -1,0 +1,21 @@
+requirement: FORM-001
+requirement_digest: sha256:9125a64ef2e5f24fd82899340df566ecf5c0155c492b30a0d130aea8da099265
+sequence: 4
+history_digest: sha256:ade7e682cbf074812f2d8a5c678eeafef21659080fa4fedb3dc7681e3ef34faf
+mechanism: ui-live-check
+commit: 1efccb1d
+inputs_digest: sha256:66f5f2b0420933ba488b77e4a91c583998edaf53c7712a68b21c17c5e8314072
+mechanism_digest: sha256:77ae1da67d52caaac3546c6a2523c188f56daab57007f09694150ca7f46ea1d4
+inputs_detail: .cairn/evidence/LIVE-008/20260915T005231453Z-1965155.inputs.json
+command: sh -c 'cd app && cargo run -q -p suprnova-cli -- live:check'
+cwd: .
+exit: 0
+output_digest: sha256:6f4d4799fcbc0ced78aa243d50b7d6891fbe559668c1d74f5c85c91557271411
+output: .cairn/evidence/LIVE-008/20260915T005231453Z-1965155.out
+stderr_output: .cairn/evidence/LIVE-008/20260915T005231453Z-1965155.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+result: pass
+source: exit
+recorded: 2026-09-15T00:52:45.223Z
