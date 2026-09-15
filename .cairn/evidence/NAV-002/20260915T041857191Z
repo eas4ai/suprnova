@@ -1,0 +1,21 @@
+requirement: NAV-002
+requirement_digest: sha256:bd9eeb28efd1eb109c998f789de2344f7bbdd9256541cc507ba71585421b3aaf
+sequence: 2
+history_digest: sha256:f34bbca437026010c6412608485c59ad20f71fea36a33e3ccaebfe15f0baaa01
+mechanism: ui-navigation
+commit: b66ee0f7
+inputs_digest: sha256:e30106e37c7b3771973719070e2f9d500dce3b39ad4b7352ba98799bc32f1b16
+mechanism_digest: sha256:060f28838e6b8e2ba5a4ba48c5d0dc7a515fa151ecf9cf5d18e5c81ab456f735
+inputs_detail: .cairn/evidence/NAV-001/20260915T041857106Z-324727.inputs.json
+command: node .cairn/tools/ui-navigation.mjs crates/suprnova-live/components app/templates/live/navigation-gallery.html
+cwd: .
+exit: 0
+output_digest: sha256:c9617522061cd710b91cbd1f8ae6b393df7b83a2e8f2bc3fc3074b65e596d816
+output: .cairn/evidence/NAV-001/20260915T041857106Z-324727.out
+stderr_output: .cairn/evidence/NAV-001/20260915T041857106Z-324727.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+result: pass
+source: line
+recorded: 2026-09-15T04:18:57.191Z
