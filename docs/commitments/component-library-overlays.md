@@ -43,13 +43,12 @@ as one set through escalation.
 
 - Requirements: `docs/spec/component-library-overlays.md` (OVL), on the
   Agreed foundations in `docs/spec/component-library-foundations.md`.
-- Mechanisms: `.cairn/mechanisms/ui-overlays-native` (OVL-001, OVL-002,
-  OVL-003: a grep and harness run over the shipped views),
-  `ui-overlays-harness` (OVL-004: the browserless harness asserts no
-  request on open and close), `live-gate` (OVL-005 through the Playwright
-  matrix), `ui-overlays-morph` (OVL-006: the morph continuity unit
-  fixtures), and the inherited `ui-live-check`, `ui-light-dom`,
-  `ui-islands`, `ui-tokens` runs over the new directories.
+- Mechanisms: `.cairn/mechanisms/ui-overlays` (OVL-001 to OVL-004: the
+  overlay tool over the shipped views, scripts and the gallery),
+  `live-gate` (OVL-005 through the Playwright matrix), `ui-overlays-morph`
+  (OVL-006: the morph continuity fixtures), and the inherited
+  `ui-live-check`, `ui-light-dom`, `ui-elements`, `ui-islands` and
+  `ui-tokens` runs over the new directories.
 - Evidence: `.cairn/evidence/`, committed after each `cairn check`.
 - Review: `.cairn/reviews/component-library-overlays.md`.
 

@@ -23,6 +23,14 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   Bibliotheks-View `live:check` wie jede andere besteht. Der Namensraum
   `suprnova.` ist der Bibliothek vorbehalten, und die Registry weist ihn aus
   jeder anderen Crate zurück.
+- **Die Live-Komponentenbibliothek erhält ihre Overlay-Familie.** Tooltip,
+  Collapsible und Accordion, Popover, ein einstufiges Dropdown-Menü, Dialog,
+  Sheet und Drawer werden mit `live:add` neben der Formularfamilie installiert.
+  Jedes hält seinen Öffnungszustand über das native Primitiv (`details`, das
+  `popover`-Attribut, `dialog`), bevor ein Skript läuft, stellt zum Öffnen oder
+  Schließen keine Live-Anfrage, gibt den Fokus beim Schließen an seinen
+  Auslöser zurück und behält seinen Öffnungszustand über einen Morph hinweg
+  unter einem stabilen Schlüssel mit `live:preserve.self`.
 
 ### Geändert
 

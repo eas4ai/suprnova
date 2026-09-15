@@ -20,6 +20,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   form family ships as Askama macros the checker now expands, so a library
   view passes `live:check` like any other. The `suprnova.` namespace is
   reserved to the library and the registry refuses it from any other crate.
+- **The Live component library gains its overlay family.** Tooltip, collapsible
+  and accordion, popover, a single-level dropdown menu, dialog, sheet, and
+  drawer install with `live:add` beside the form family. Each owns its open
+  state through the native primitive (`details`, the `popover` attribute,
+  `dialog`) before any script, makes no Live request to open or close, returns
+  focus to its trigger on close, and keeps its open state across a morph under
+  a stable key with `live:preserve.self`.
 
 ### Changed
 

@@ -24,6 +24,14 @@ en premier.
   qu'une vue de la bibliothèque passe `live:check` comme n'importe quelle
   autre. L'espace de noms `suprnova.` est réservé à la bibliothèque et le
   registre le refuse à toute autre crate.
+- **La bibliothèque de composants Live gagne sa famille d'overlays.** Tooltip,
+  collapsible et accordion, popover, un menu déroulant à un seul niveau,
+  dialog, sheet et drawer s'installent avec `live:add` à côté de la famille des
+  formulaires. Chacun tient son état ouvert par la primitive native (`details`,
+  l'attribut `popover`, `dialog`) avant tout script, n'émet aucune requête Live
+  pour s'ouvrir ou se fermer, rend le focus à son déclencheur à la fermeture et
+  garde son état ouvert à travers un morph sous une clé stable avec
+  `live:preserve.self`.
 
 ### Modifié
 

@@ -481,6 +481,34 @@ résumé de validation et saisie de fichier. Les composants de la bibliothèque
 se nomment `suprnova.*` et le registre refuse ce préfixe à toute autre crate ;
 les éléments personnalisés sont en light DOM et portent le préfixe `sn-`.
 
+La famille des overlays est livrée sur les mêmes fondations : tooltip,
+collapsible et accordion, popover, un menu déroulant à un seul niveau, dialog,
+sheet et drawer. Chacun tient son état ouvert par la primitive du navigateur
+avant tout script : `details` pour les disclosures, l'attribut `popover` pour
+les popovers et les menus, et `dialog` pour les trois modales, que les éléments
+embarqués `sn-dialog`, `sn-sheet` et `sn-drawer` ouvrent avec `showModal()` et
+ferment en rendant le focus au déclencheur. Ouvrir et fermer n'émet jamais de
+requête Live ; seule une action que vous placez dans un overlay le fait. Chaque
+racine d'overlay porte une clé stable et `live:preserve.self`, si bien qu'un
+overlay ouvert survit à un morph qui n'a pas remplacé sa région :
+
+```html
+{% import "suprnova-ui/dialog/dialog.html" as dialog %}
+{% call dialog::dialog_trigger("confirm", "Delete everything", variant="danger") %}{% endcall %}
+{% call dialog::dialog("confirm", "confirm", "Delete everything?") %}
+<p>This removes every note.</p>
+{% call button::button("Delete", action="confirm_delete", variant="danger") %}{% endcall %}
+{% call dialog::dialog_close("confirm", "Cancel") %}{% endcall %}
+{% endcall %}
+```
+
+L'attribut `popover` fixe le plancher pris en charge à Chrome et Edge 114,
+Firefox 128 et Safari 17. Là où le positionnement par ancre CSS existe, le
+popover et le menu se placent sous leur déclencheur ; ailleurs le navigateur
+les centre. Le mode d'ouverture unique de l'accordion repose sur `details
+name`, que les versions prises en charge plus anciennes traitent comme des
+disclosures indépendants.
+
 ### Pourquoi Suprnova diverge
 
 Laravel livre des composants Blade et le balisage d'un kit de démarrage ;

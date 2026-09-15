@@ -358,6 +358,20 @@ suprnova live:add password-input
 
 チェッカーはマクロを展開するため、`live:check` はライブラリのビューを他のビューと同じように証明します。現在のフォームファミリーは、フィールド、ラベル、入力、テキストエリア、数値入力、スライダー、検索入力、表示切替付きパスワード入力、チェックボックスとチェックボックスグループ、ラジオグループ、スイッチ、セレクト、ボタンとリンクボタン、ボタングループ、フィールドセット、フォームアクション、バリデーションサマリー、ファイル入力です。ライブラリのコンポーネントは `suprnova.*` と名付けられ、レジストリは他のクレートからのこの接頭辞を拒否します。カスタム要素はライト DOM で、`sn-` 接頭辞を持ちます。
 
+オーバーレイの一族も同じ基盤の上に出荷されます。ツールチップ、コラプシブルとアコーディオン、ポップオーバー、単一階層のドロップダウンメニュー、ダイアログ、シート、ドロワーです。それぞれはスクリプトが動く前に、ブラウザー自身のプリミティブで開閉状態を保持します。ディスクロージャーには `details`、ポップオーバーとメニューには `popover` 属性、三つのモーダルには `dialog` で、これらはベンダリングされた `sn-dialog`、`sn-sheet`、`sn-drawer` 要素が `showModal()` で開き、閉じるときにフォーカスをトリガーへ返します。開閉は決して Live リクエストを発行しません。発行するのは、オーバーレイの中に置いたアクションだけです。すべてのオーバーレイのルートは安定したキーと `live:preserve.self` を持つので、開いたオーバーレイは、その領域を置き換えなかったモーフを生き延びます。
+
+```html
+{% import "suprnova-ui/dialog/dialog.html" as dialog %}
+{% call dialog::dialog_trigger("confirm", "Delete everything", variant="danger") %}{% endcall %}
+{% call dialog::dialog("confirm", "confirm", "Delete everything?") %}
+<p>This removes every note.</p>
+{% call button::button("Delete", action="confirm_delete", variant="danger") %}{% endcall %}
+{% call dialog::dialog_close("confirm", "Cancel") %}{% endcall %}
+{% endcall %}
+```
+
+`popover` 属性により、サポートする基準は Chrome と Edge 114、Firefox 128、Safari 17 になります。CSS のアンカー配置があるところでは、ポップオーバーとメニューはトリガーの下に置かれ、それ以外ではブラウザーが中央に配置します。アコーディオンの単一オープンモードは `details name` に依存しており、古いサポート対象バージョンではそれぞれ独立したディスクロージャーとして扱われます。
+
 ### Suprnova が異なる理由
 
 Laravel は Blade コンポーネントとスターターキットのマークアップを同梱しますが、Suprnova はライブラリをフレームワーク自身を通じて、Live 固有の語彙の上で提供し、クライアントアプリケーションがページを所有することはありません。スキンは既定で有効で、外しても何も壊れません。それがここでのヘッドレスの意味です。

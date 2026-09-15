@@ -359,6 +359,20 @@ suprnova live:add password-input
 
 检查器会展开这些宏，所以 `live:check` 能像证明任何其他视图一样证明库视图。目前的表单家族包括：字段、标签、输入框、文本域、数字输入、滑块、搜索输入、带显示切换的密码输入、复选框与复选框组、单选组、开关、下拉选择、按钮与链接按钮、按钮组、fieldset、表单操作栏、校验摘要以及文件输入。库组件命名为 `suprnova.*`，注册表会拒绝来自任何其他 crate 的该前缀；自定义元素位于 light DOM 并带有 `sn-` 前缀。
 
+浮层一族建立在同样的基础之上：工具提示、可折叠块与手风琴、弹出层、单层下拉菜单、对话框、抽屉面板和侧边抽屉。每一个都在任何脚本运行之前，通过浏览器自身的原语保持打开状态：折叠内容用 `details`，弹出层和菜单用 `popover` 属性，三种模态用 `dialog`，由随组件安装的 `sn-dialog`、`sn-sheet` 和 `sn-drawer` 元素通过 `showModal()` 打开，关闭时把焦点交还给触发器。打开和关闭从不发出 Live 请求；只有你放进浮层里的动作才会。每个浮层根都带有稳定的键和 `live:preserve.self`，所以打开的浮层能够在没有替换其区域的 morph 之后继续保持打开：
+
+```html
+{% import "suprnova-ui/dialog/dialog.html" as dialog %}
+{% call dialog::dialog_trigger("confirm", "Delete everything", variant="danger") %}{% endcall %}
+{% call dialog::dialog("confirm", "confirm", "Delete everything?") %}
+<p>This removes every note.</p>
+{% call button::button("Delete", action="confirm_delete", variant="danger") %}{% endcall %}
+{% call dialog::dialog_close("confirm", "Cancel") %}{% endcall %}
+{% endcall %}
+```
+
+`popover` 属性把支持的基线定在 Chrome 与 Edge 114、Firefox 128 和 Safari 17。在存在 CSS 锚点定位的地方，弹出层和菜单位于触发器之下；否则由浏览器居中显示。手风琴的单项展开模式依赖 `details name`，较旧的受支持版本会把它们当作彼此独立的折叠块。
+
 ### 为什么 Suprnova 与众不同
 
 Laravel 随附 Blade 组件和入门套件的标记；Suprnova 则通过框架本身、基于 Live 自己的词汇来提供这个库，不让任何客户端应用拥有页面。皮肤默认开启，去掉它也不会破坏任何东西，这正是这里“无头”的含义。

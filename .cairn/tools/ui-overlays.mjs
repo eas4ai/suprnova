@@ -44,7 +44,11 @@ if (!root || !existsSync(root)) {
     drawer: /<dialog\b/,
   };
   for (const [name, pattern] of Object.entries(native)) {
-    if (!present.includes(name)) { fail("OVL-001", `no ${name} component`); continue; }
+    if (!present.includes(name)) {
+      fail("OVL-001", `no ${name} component`);
+      fail("OVL-004", `no ${name} component to prove browser-local open state on`);
+      continue;
+    }
     const html = read(name, `${name}.html`) ?? "";
     if (!pattern.test(html)) fail("OVL-001", `${name} does not open through its native primitive`);
     const js = read(name, `${name}.js`);
@@ -83,6 +87,7 @@ if (!root || !existsSync(root)) {
 if (!gallery || !existsSync(gallery)) {
   fail("OVL-002", gallery ? `no gallery view at ${gallery}` : "no gallery view given");
   fail("OVL-003", gallery ? `no gallery view at ${gallery}` : "no gallery view given");
+  fail("OVL-004", gallery ? `no gallery view at ${gallery}` : "no gallery view given");
 } else {
   const view = readFileSync(gallery, "utf8");
   for (const m of view.matchAll(/tooltip::tooltip\("([^"]+)"/g)) {
