@@ -874,3 +874,203 @@ async fn live_pagination_reflects_the_page_and_load_more_appends_keyed_rows() {
         snapshot = accepted["snapshot"].clone();
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_data_display_gallery_renders_every_component_with_text_and_server_rendered_marks() {
+    let app = setup_app(6).await;
+    let session = seed_session(&app).await;
+    let html = get(&app, "/live/data-display", Some(&session)).await.text();
+    // DATA-001: labeled regions and groups, no anonymous wrapper, native semantics.
+    for needle in [
+        "<hr class=\"sn-separator\">",
+        "id=\"activity-scroll\" role=\"region\" aria-label=\"Recent activity\" tabindex=\"0\"",
+        "<img class=\"sn-aspect-image\"",
+        "<article class=\"sn-card\" id=\"plan-card\" aria-labelledby=\"plan-card-title\"",
+        "<section class=\"sn-card\" id=\"team-card\" aria-labelledby=\"team-card-title\"",
+        "<h3 class=\"sn-card-title\" id=\"team-card-title\">Team</h3>",
+        "<dl class=\"sn-description-list\" id=\"plan-details\" aria-label=\"Plan details\">",
+        "<dt class=\"sn-description-term\">Owner</dt><dd class=\"sn-description-value\">Ada Lovelace</dd>",
+        "role=\"group\" aria-label=\"Actions\"",
+        // DATA-002: text for every status, a data element and a text direction.
+        "<span class=\"sn-badge\" data-sn-variant=\"success\">Active</span>",
+        "<span class=\"sn-avatar\" role=\"img\" aria-label=\"Ada Lovelace\" data-sn-size=\"lg\">AL</span>",
+        "<ul class=\"sn-avatar-group\" role=\"list\" aria-label=\"Team members\">",
+        "<data value=\"64\">64</data>",
+        "data-sn-trend=\"up\"><span class=\"sn-stat-direction\">Up</span> 12%",
+        "data-sn-trend=\"down\"><span class=\"sn-stat-direction\">Down</span> 0.4 pts",
+        // DATA-003: keyed items.
+        "<li class=\"sn-list-item\" live:key=\"act-1\" data-suprnova-live-key=\"act-1\">",
+        // DATA-004: SVG marks in the plain GET, a summary and a data table.
+        "<figure class=\"sn-chart\" id=\"revenue-chart\" aria-labelledby=\"revenue-chart-title\">",
+        "<div class=\"sn-chart-marks\" aria-hidden=\"true\"><svg",
+        "<p class=\"sn-chart-summary\">Revenue rose from 42k in Apr to 64k in Sep",
+        "<details class=\"sn-chart-data\"><summary>Data table</summary>",
+        "<table class=\"sn-chart-table\"><caption>Revenue by month</caption>",
+        "<th scope=\"row\">Sep</th><td>64</td>",
+    ] {
+        assert!(html.contains(needle), "missing {needle} in {html}");
+    }
+    assert!(
+        !html.contains(" style="),
+        "no shipped view carries a style attribute"
+    );
+    assert!(
+        !html.contains("<script src=\"/suprnova-ui/"),
+        "the data-display family ships no script"
+    );
+    assert_eq!(
+        html.matches("data-suprnova-live-island").count(),
+        2,
+        "two islands: the gallery and one table"
+    );
+
+    // DATA-003 through the document: a reorder keeps every key and reverses the order.
+    let gallery = island_tag(&html, "data-display-gallery");
+    let snapshot = decoded_snapshot(gallery);
+    let revision = snapshot_revision(&snapshot);
+    let reply = send(
+        app.addr,
+        action_request(
+            &app,
+            ActionSpec {
+                component: "app.data-display-gallery",
+                document_key: "data-display-gallery",
+                snapshot,
+                seed: false,
+                base_revision: &revision,
+                operations: invoke("reorder"),
+                model_proposals: Value::Object(Default::default()),
+                idempotency_key: &idempotency(1),
+            },
+            Some(&session),
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let accepted = reply.json();
+    let rendered = accepted["render"]["html"].as_str().unwrap_or_default();
+    let first = rendered
+        .find("data-suprnova-live-key=\"act-4\"")
+        .expect("act-4 rendered");
+    let last = rendered
+        .find("data-suprnova-live-key=\"act-1\"")
+        .expect("act-1 rendered");
+    assert!(first < last, "the reorder reversed the keyed list");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_datatable_mounts_from_the_query_and_reflects_sort_filter_and_page() {
+    let app = setup_app(8).await;
+    let session = seed_session(&app).await;
+
+    // DATA-005: native table semantics and one island per table.
+    let html = get(&app, "/live/data-display", Some(&session)).await.text();
+    for needle in [
+        "<table class=\"sn-datatable\" id=\"invoices\">",
+        "<caption class=\"sn-datatable-caption\">Invoices <span class=\"sn-datatable-count\">(14 rows)</span></caption>",
+        "<th scope=\"col\" class=\"sn-datatable-column\" aria-sort=\"ascending\">",
+        "<th scope=\"row\" class=\"sn-datatable-cell\">1031</th>",
+        "role=\"search\" aria-label=\"Filter invoices\" live:submit.prevent=\"filter\"",
+        "<tr class=\"sn-datatable-row\" live:key=\"inv-1\" data-suprnova-live-key=\"inv-1\">",
+    ] {
+        assert!(html.contains(needle), "missing {needle} in {html}");
+    }
+    let table_islands = html
+        .matches("data-suprnova-live-key=\"datatable-gallery\"")
+        .count();
+    assert!(table_islands <= 1, "one island per table");
+
+    // The shared URL mounts the same view: sorted by amount descending, filtered, on page 2.
+    let shared = get(
+        &app,
+        "/live/data-display?sort=customer&dir=desc&filter=open&page=2",
+        Some(&session),
+    )
+    .await
+    .text();
+    assert!(shared.contains("aria-sort=\"descending\""), "{shared}");
+    assert!(
+        shared.contains("value=\"open\""),
+        "the filter input carries the query's filter"
+    );
+    assert!(shared.contains("Page 2 of 2"), "{shared}");
+    let clamped = get(&app, "/live/data-display?page=99", Some(&session))
+        .await
+        .text();
+    assert!(clamped.contains("Page 4 of 4"), "{clamped}");
+
+    // A sort submit reflects the new query through the URL intent, and the same column again flips it.
+    let table = island_tag(&html, "datatable-gallery");
+    let mut snapshot = decoded_snapshot(table);
+    let mut sequence = 0;
+    let mut run = |action: &'static str, proposals: Value, snapshot: Value| {
+        sequence += 1;
+        let idempotency_key = idempotency(sequence);
+        let revision = snapshot_revision(&snapshot);
+        let app = &app;
+        let session = &session;
+        // A submit synchronizes each proposed model field before the action runs.
+        let mut operations: Vec<Value> = proposals
+            .as_object()
+            .map(|fields| {
+                fields
+                    .keys()
+                    .map(|field| serde_json::json!({"field": field, "kind": "sync_model"}))
+                    .collect()
+            })
+            .unwrap_or_default();
+        operations.extend(invoke(action).as_array().cloned().unwrap_or_default());
+        async move {
+            let reply = send(
+                app.addr,
+                action_request(
+                    app,
+                    ActionSpec {
+                        component: "app.datatable-gallery",
+                        document_key: "datatable-gallery",
+                        snapshot,
+                        seed: false,
+                        base_revision: &revision,
+                        operations: Value::Array(operations),
+                        model_proposals: proposals,
+                        idempotency_key: &idempotency_key,
+                    },
+                    Some(session),
+                    true,
+                ),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::OK, "{action}: {}", reply.text());
+            let accepted = reply.json();
+            assert_eq!(accepted["outcome"], "accepted", "{action}: {accepted}");
+            accepted
+        }
+    };
+    let accepted = run("sort", serde_json::json!({"sort": "amount"}), snapshot).await;
+    assert_eq!(
+        accepted["url_intent"],
+        serde_json::json!({"kind": "reflected", "target": "/live/data-display?sort=amount"})
+    );
+    snapshot = accepted["snapshot"].clone();
+    let accepted = run("sort", serde_json::json!({"sort": "amount"}), snapshot).await;
+    assert_eq!(
+        accepted["url_intent"],
+        serde_json::json!({"kind": "reflected", "target": "/live/data-display?dir=desc&sort=amount"})
+    );
+    snapshot = accepted["snapshot"].clone();
+    let accepted = run("filter", serde_json::json!({"filter": "acme"}), snapshot).await;
+    assert_eq!(
+        accepted["url_intent"],
+        serde_json::json!({"kind": "reflected", "target": "/live/data-display?dir=desc&filter=acme&sort=amount"})
+    );
+    let rendered = accepted["render"]["html"].as_str().unwrap_or_default();
+    assert!(rendered.contains("(2 rows)"), "{rendered}");
+    snapshot = accepted["snapshot"].clone();
+    let accepted = run("next_page", Value::Object(Default::default()), snapshot).await;
+    assert_eq!(
+        accepted["url_intent"],
+        serde_json::json!({"kind": "reflected", "target": "/live/data-display?dir=desc&filter=acme&sort=amount"}),
+        "one page of two rows has no next page to reflect"
+    );
+}

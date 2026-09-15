@@ -378,3 +378,98 @@ test("route pagination links canonical pages, and Live pagination reflects the p
   await expect(page.getByRole("button", { name: "Load more" })).toHaveCount(0);
   expect(requests).toEqual(["POST", "POST"]);
 });
+
+test("the data-display gallery keeps one focus order across viewports, and a reorder keeps every keyed item", async ({
+  page,
+}) => {
+  await page.goto(`${APP_ORIGIN}/live/demo-login`);
+  await page.goto(`${APP_ORIGIN}/live/data-display`);
+  await expect(page.getByRole("heading", { name: "Data display gallery" })).toBeVisible();
+  await expectConnected(page, 2);
+
+  // DATA-001: tabbing through the gallery visits the same controls in the same
+  // order at a phone width and at a desktop width; the layout never reorders.
+  const focusOrder = async () => {
+    await page.locator("body").click({ position: { x: 1, y: 1 } });
+    const seen: string[] = [];
+    for (let step = 0; step < 12; step += 1) {
+      await page.keyboard.press("Tab");
+      const label = await page.evaluate(() => {
+        const active = document.activeElement as HTMLElement | null;
+        if (active === null || active === document.body) return "body";
+        const name =
+          active.id !== ""
+            ? active.id
+            : (active.getAttribute("aria-label") ?? active.textContent.trim());
+        return `${active.tagName.toLowerCase()}:${name}`;
+      });
+      seen.push(label);
+    }
+    return seen;
+  };
+  await page.setViewportSize({ width: 400, height: 800 });
+  const narrow = await focusOrder();
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const wide = await focusOrder();
+  expect(wide).toEqual(narrow);
+  expect(narrow).toContain("div:activity-scroll");
+
+  // DATA-002: every badge and stat names its status in text.
+  await expect(page.locator("[data-sn-trend='up'] .sn-stat-direction")).toHaveText("Up");
+  await expect(page.locator("[data-sn-trend='down'] .sn-stat-direction")).toHaveText("Down");
+  await expect(page.locator(".sn-badge").first()).not.toBeEmpty();
+
+  // DATA-003: a reorder keeps the node of every keyed item.
+  const firstItem = page.locator("#activity li").first();
+  const before = await firstItem.evaluate((node) => {
+    (node as HTMLElement & { witness?: string }).witness = "kept";
+    return node.getAttribute("data-suprnova-live-key");
+  });
+  await page.getByRole("button", { name: "Reorder" }).click();
+  await expect(page.locator("#activity li").last()).toHaveAttribute(
+    "data-suprnova-live-key",
+    before ?? "",
+  );
+  expect(
+    await page
+      .locator("#activity li")
+      .last()
+      .evaluate((node) => (node as HTMLElement & { witness?: string }).witness),
+  ).toBe("kept");
+
+  // DATA-004: the chart marks are server-rendered SVG with a data table beside them.
+  await expect(page.locator("#revenue-chart svg")).toHaveCount(1);
+  await expect(page.locator("#revenue-chart details table")).toHaveCount(1);
+});
+
+test("the datatable sorts, filters and pages through the URL without a history entry", async ({
+  page,
+}) => {
+  await page.goto(`${APP_ORIGIN}/live/demo-login`);
+  await page.goto(`${APP_ORIGIN}/live/data-display`);
+  await expectConnected(page, 2);
+  const table = page.locator("#invoices");
+  await expect(table.locator("caption")).toContainText("Invoices");
+  await expect(table.locator("thead th[scope='col']")).toHaveCount(4);
+  await expect(table.locator("tbody tr")).toHaveCount(4);
+
+  const length = await page.evaluate(() => history.length);
+  await table.getByRole("button", { name: /Amount/ }).click();
+  await expect(page).toHaveURL(`${APP_ORIGIN}/live/data-display?sort=amount`);
+  await expect(table.locator("th[aria-sort='ascending']")).toHaveCount(1);
+  await table.getByRole("button", { name: /Amount/ }).click();
+  await expect(page).toHaveURL(`${APP_ORIGIN}/live/data-display?dir=desc&sort=amount`);
+  await expect(table.locator("th[aria-sort='descending']")).toHaveCount(1);
+  expect(await page.evaluate(() => history.length)).toBe(length);
+
+  await page.locator("#invoices-filter").fill("acme");
+  await page.getByRole("button", { name: "Apply" }).click();
+  await expect(page).toHaveURL(`${APP_ORIGIN}/live/data-display?dir=desc&filter=acme&sort=amount`);
+  await expect(table.locator("tbody tr")).toHaveCount(2);
+
+  // The shared URL renders the same view.
+  await page.reload();
+  await expect(table.locator("th[aria-sort='descending']")).toHaveCount(1);
+  await expect(page.locator("#invoices-filter")).toHaveValue("acme");
+  await expect(table.locator("tbody tr")).toHaveCount(2);
+});

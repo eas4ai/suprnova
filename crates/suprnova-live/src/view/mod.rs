@@ -1,5 +1,7 @@
 //! Checked deterministic rendering for canonical documents and Live islands.
 
+/// Server-rendered charts through `charts-rs`, bounded and trusted.
+pub mod charts;
 mod contract;
 mod document;
 mod error;

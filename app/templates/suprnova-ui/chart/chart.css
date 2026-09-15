@@ -1,0 +1,28 @@
+@layer suprnova-ui {
+  .sn-chart {
+    display: grid;
+    gap: var(--sn-space-2);
+    margin: 0;
+  }
+
+  .sn-chart-title {
+    font-weight: var(--sn-font-weight-semibold);
+  }
+
+  .sn-chart-marks {
+    inline-size: 100%;
+    overflow-x: auto;
+  }
+
+  .sn-chart-marks svg {
+    display: block;
+    max-inline-size: 100%;
+    block-size: auto;
+  }
+
+  .sn-chart-summary {
+    margin: 0;
+    color: var(--sn-color-text-muted);
+    font-size: var(--sn-font-size-sm);
+  }
+}

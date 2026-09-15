@@ -1,0 +1,51 @@
+{#
+  suprnova.datatable - a native table whose sort, filter and page state
+  the island reflects into the URL (DATA-005). The column macro takes the
+  applied sort key and the direction word (ascending or descending), which
+  the island holds, so the view stays under the checker's branch limit. The
+  sort and filter inputs bind the island's `sort` and `filter` model fields
+  through `live:model`, which the runtime proposes on submit; the submit
+  carries `prevent`, so the form never also submits natively. Sort and filter are Live
+  submits on the island's model fields; the reflected query is shareable
+  and the document mounts the table from it. Rows render inside a loop,
+  so keys pass through live_key; the island exposes
+  `pub mod filters { pub use suprnova::view::filters::live_key; }`.
+#}
+{% macro datatable(id, caption, count) %}
+<table class="sn-datatable" id="{{ id }}">
+<caption class="sn-datatable-caption">{{ caption }} <span class="sn-datatable-count">({{ count }} rows)</span></caption>
+{{ caller() }}
+</table>
+{% endmacro %}
+
+{% macro datatable_head() %}
+<thead><tr>{{ caller() }}</tr></thead>
+{% endmacro %}
+
+{% macro datatable_column(key, text, sort, direction, action="sort") %}
+<th scope="col" class="sn-datatable-column"{% if sort == key %} aria-sort="{{ direction }}"{% endif %}><form class="sn-datatable-sort" live:submit.prevent="{{ action }}"><input type="hidden" name="sort" value="{{ key }}" live:model="sort"><button class="sn-datatable-sort-button" type="submit" live:loading.disabled="{{ action }}">{{ text }}</button></form></th>
+{% endmacro %}
+
+{% macro datatable_heading(text) %}
+<th scope="col" class="sn-datatable-column">{{ text }}</th>
+{% endmacro %}
+
+{% macro datatable_body() %}
+<tbody>{{ caller() }}</tbody>
+{% endmacro %}
+
+{% macro datatable_row(key) %}
+<tr class="sn-datatable-row" live:key="{{ key|live_key }}" data-suprnova-live-key="{{ key }}">{{ caller() }}</tr>
+{% endmacro %}
+
+{% macro datatable_row_heading(text) %}
+<th scope="row" class="sn-datatable-cell">{{ text }}</th>
+{% endmacro %}
+
+{% macro datatable_cell(text, numeric=false) %}
+<td class="sn-datatable-cell"{% if numeric %} data-sn-numeric="true"{% endif %}>{{ text }}</td>
+{% endmacro %}
+
+{% macro datatable_filter(table, label, value, action="filter") %}
+<form class="sn-datatable-filter" role="search" aria-label="{{ label }}" live:submit.prevent="{{ action }}"><label class="sn-datatable-filter-label" for="{{ table }}-filter">{{ label }}</label><input class="sn-datatable-filter-input" id="{{ table }}-filter" name="filter" type="search" value="{{ value }}" live:model="filter"><button class="sn-datatable-filter-button" type="submit" live:loading.disabled="{{ action }}">Apply</button></form>
+{% endmacro %}

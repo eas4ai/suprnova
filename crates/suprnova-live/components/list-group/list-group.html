@@ -1,0 +1,12 @@
+{#
+  suprnova.list-group - a labeled list of keyed items (DATA-003).
+  Items render inside a loop, so each key passes through live_key and
+  the island exposes `pub mod filters { pub use suprnova::view::filters::live_key; }`.
+#}
+{% macro list_group(id, label, ordered=false) %}
+{% if ordered %}<ol class="sn-list-group" id="{{ id }}" aria-label="{{ label }}">{{ caller() }}</ol>{% else %}<ul class="sn-list-group" id="{{ id }}" aria-label="{{ label }}">{{ caller() }}</ul>{% endif %}
+{% endmacro %}
+
+{% macro list_item(key) %}
+<li class="sn-list-item" live:key="{{ key|live_key }}" data-suprnova-live-key="{{ key }}">{{ caller() }}</li>
+{% endmacro %}

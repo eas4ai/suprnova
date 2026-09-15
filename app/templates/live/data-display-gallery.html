@@ -1,0 +1,47 @@
+{% import "suprnova-ui/separator/separator.html" as separator %}
+{% import "suprnova-ui/scroll-area/scroll-area.html" as scroll %}
+{% import "suprnova-ui/aspect-image/aspect-image.html" as image %}
+{% import "suprnova-ui/card/card.html" as card %}
+{% import "suprnova-ui/badge/badge.html" as badge %}
+{% import "suprnova-ui/avatar/avatar.html" as avatar %}
+{% import "suprnova-ui/list-group/list-group.html" as list %}
+{% import "suprnova-ui/description-list/description-list.html" as dl %}
+{% import "suprnova-ui/stat-card/stat-card.html" as stat %}
+{% import "suprnova-ui/chart/chart.html" as chart %}
+{% import "suprnova-ui/datatable/datatable.html" as table %}
+{% import "suprnova-ui/button/button.html" as button %}
+<section aria-labelledby="stats-title">
+<h2 id="stats-title">Statistics</h2>
+{% call stat::stat_card("stat-revenue", "Revenue", revenue, unit="USD", trend="up", delta="12%", timeframe="vs last month") %}{% endcall %}
+{% call stat::stat_card("stat-churn", "Churn", churn, unit="%", trend="down", delta="0.4 pts", timeframe="vs last month") %}{% endcall %}
+{% call stat::stat_card("stat-seats", "Seats", seats) %}{% endcall %}
+</section>
+{% call separator::separator() %}{% endcall %}
+{% call card::card("plan-card", "Current plan") %}
+<p>Team plan, billed yearly. {% call badge::badge("Active", variant="success") %}{% endcall %} {% call badge::badge("Renews soon", variant="warning") %}{% endcall %}</p>
+{% call dl::description_list("plan-details", "Plan details") %}
+{% call dl::description("Owner", owner) %}{% endcall %}
+{% call dl::description("Members", members_text) %}{% endcall %}
+{% call dl::description("Region", "Frankfurt") %}{% endcall %}
+{% endcall %}
+{% call card::card_actions() %}
+{% call button::button("Refresh", action="refresh") %}{% endcall %}
+<a class="sn-link" href="/live/navigation">Manage members</a>
+{% endcall %}
+{% endcall %}
+{% call card::card("team-card", "Team", level=3, kind="section") %}
+{% call avatar::avatar_group("Team members") %}
+{% call avatar::avatar_member("Ada Lovelace", "AL") %}{% endcall %}
+{% call avatar::avatar_member("Grace Hopper", "GH") %}{% endcall %}
+{% call avatar::avatar_member("Linus Torvalds", "LT", size="sm") %}{% endcall %}
+{% endcall %}
+<p>Owner: {% call avatar::avatar(owner, owner_initials, size="lg") %}{% endcall %} {{ owner }}</p>
+{% call image::aspect_image("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 90'%3E%3Crect width='160' height='90' fill='%23dfe7ef'/%3E%3Ccircle cx='80' cy='38' r='18' fill='%23a9b8c8'/%3E%3Crect x='44' y='60' width='72' height='22' rx='11' fill='%23a9b8c8'/%3E%3C/svg%3E", "The team at the summit", ratio="wide") %}{% endcall %}
+{% endcall %}
+{% call scroll::scroll_area("activity-scroll", "Recent activity") %}
+{% call list::list_group("activity", "Recent activity") %}{% for entry in activity %}{% call list::list_item(entry.key) %}<span class="sn-activity-text">{{ entry.text }}</span> {% call badge::badge(entry.status, variant=entry.variant) %}{% endcall %}{% endcall %}{% endfor %}{% endcall %}
+{% endcall %}
+{% call button::button("Reorder", action="reorder") %}{% endcall %}
+{% call chart::chart("revenue-chart", "Revenue by month", self::chart_svg(revenue_series), self::chart_summary(revenue_series)) %}
+<table class="sn-chart-table"><caption>Revenue by month</caption><thead><tr><th scope="col">Month</th><th scope="col">Revenue</th></tr></thead><tbody>{% for point in self::chart_points(revenue_series) %}<tr><th scope="row">{{ point.label }}</th><td>{{ point.value }}</td></tr>{% endfor %}</tbody></table>
+{% endcall %}

@@ -1,0 +1,22 @@
+{% import "suprnova-ui/datatable/datatable.html" as table %}
+{% import "suprnova-ui/pagination/pagination.html" as pagination %}
+{% call table::datatable_filter("invoices", "Filter invoices", filter) %}{% endcall %}
+{% call table::datatable("invoices", "Invoices", count) %}
+{% call table::datatable_head() %}
+{% call table::datatable_column("number", "Number", sorted_by, direction_word) %}{% endcall %}
+{% call table::datatable_column("customer", "Customer", sorted_by, direction_word) %}{% endcall %}
+{% call table::datatable_column("amount", "Amount", sorted_by, direction_word) %}{% endcall %}
+{% call table::datatable_heading("Status") %}{% endcall %}
+{% endcall %}
+{% call table::datatable_body() %}{% for row in rows %}{% call table::datatable_row(row.key) %}
+{% call table::datatable_row_heading(row.number) %}{% endcall %}
+{% call table::datatable_cell(row.customer) %}{% endcall %}
+{% call table::datatable_cell(row.amount, numeric=true) %}{% endcall %}
+{% call table::datatable_cell(row.status) %}{% endcall %}
+{% endcall %}{% endfor %}{% endcall %}
+{% endcall %}
+{% call pagination::pagination("invoice-pages", label="Invoice pages") %}
+{% call pagination::page_action("previous_page", "Previous", disabled=first) %}{% endcall %}
+{% call pagination::page_position(page, pages) %}{% endcall %}
+{% call pagination::page_action("next_page", "Next", disabled=last) %}{% endcall %}
+{% endcall %}

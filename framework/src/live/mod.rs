@@ -67,6 +67,13 @@ pub use suprnova_macros::{LiveComponent, live};
 pub use tenant::{LiveTenantMiddleware, LiveTenantResolver, current_tenant};
 pub use ui_assets::{LIVE_UI_ASSET_PATH_PREFIX, LIVE_UI_TEMPLATE_ROOT};
 
+/// Server-rendered charts for the data-display component family.
+pub mod charts {
+    pub use suprnova_live::view::charts::{
+        ChartError, ChartErrorKind, ChartKind, ChartSeries, render_chart,
+    };
+}
+
 /// Versioned browser event and effect contracts declared by Live components.
 pub mod metadata {
     pub use suprnova_live::metadata::{EffectPayloadMetadata, EventPayloadMetadata};

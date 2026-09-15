@@ -17,8 +17,8 @@ use suprnova::view::{AssetSet, DocumentResponseIntent, TrustedHtml, ViewName, Vi
 use suprnova::{Auth, FrameworkError, HttpResponse, Model, Request, Response, StatusCode};
 
 use super::{
-    DashboardMounts, FEEDBACK_PATH, FeedbackMounts, FormsMounts, NavigationMounts, OverlaysMounts,
-    PublicMounts,
+    DashboardMounts, DataDisplayMounts, FEEDBACK_PATH, FeedbackMounts, FormsMounts,
+    NavigationMounts, OverlaysMounts, PublicMounts,
 };
 use crate::models::todos::Todo;
 use crate::models::users::User;
@@ -285,6 +285,58 @@ pub async fn navigation(request: Request, mounts: &NavigationMounts) -> Response
                 &NavigationView {
                     bootstrap: bootstrap.html(),
                     gallery: gallery.html(),
+                },
+                intent()?,
+                AssetSet::empty(),
+            )
+            .map_err(FrameworkError::from)
+    }
+    .await;
+    result.map_err(failed)
+}
+
+/// The data-display gallery page: the presentational island and the datatable island.
+#[suprnova::view(path = "live/data-display.html")]
+struct DataDisplayView<'a> {
+    bootstrap: &'a TrustedHtml,
+    gallery: &'a TrustedHtml,
+    table: &'a TrustedHtml,
+}
+
+/// `GET /live/data-display`: every data-display component, with the
+/// datatable mounted from the query so a shared URL renders the same view.
+pub async fn data_display(request: Request, mounts: &DataDisplayMounts) -> Response {
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let text = |name: &str| request.query_param(name).unwrap_or_default();
+        let page = request
+            .query_param("page")
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(1);
+        let mut document = LiveDocument::from_request(&request)?;
+        let gallery = document
+            .mount(&mounts.gallery, parameters(), MountFlags::empty())
+            .await?;
+        let parameters = CanonicalValue::Object(BTreeMap::from([
+            ("sort".to_owned(), CanonicalValue::String(text("sort"))),
+            ("direction".to_owned(), CanonicalValue::String(text("dir"))),
+            ("filter".to_owned(), CanonicalValue::String(text("filter"))),
+            (
+                "page".to_owned(),
+                CanonicalValue::number(f64::from(page))
+                    .map_err(|_| FrameworkError::internal("Live datatable page number"))?,
+            ),
+        ]));
+        let table = document
+            .mount(&mounts.table, parameters, MountFlags::empty())
+            .await?;
+        let bootstrap = document.bootstrap(LiveBootstrapOptions::esm().with_suprnova_ui())?;
+        document
+            .render(
+                view("live/data-display.html")?,
+                &DataDisplayView {
+                    bootstrap: bootstrap.html(),
+                    gallery: gallery.html(),
+                    table: table.html(),
                 },
                 intent()?,
                 AssetSet::empty(),

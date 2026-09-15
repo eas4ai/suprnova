@@ -17,6 +17,7 @@ askama_parser = "=0.16.0"
 async-trait = "=0.1.92"
 base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
 bytes = "=1.11.1"
+charts-rs = { version = "=1.0.0", default-features = false }
 getrandom = { version = "=0.4.3", features = ["std"] }
 hkdf = "=0.13.0"
 hmac = { version = "=0.13.0", features = ["zeroize"] }

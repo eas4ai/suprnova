@@ -1,0 +1,15 @@
+{#
+  suprnova.chart - server-rendered SVG with its data beside it (DATA-004).
+  The island renders the marks through charts-rs and passes them as
+  trusted markup; the figure carries a text summary and a data table in a
+  disclosure, so the canonical document reads without the picture. The
+  island exposes `pub mod filters { pub use suprnova::view::filters::trusted_html; }`.
+#}
+{% macro chart(id, title, svg, summary) %}
+<figure class="sn-chart" id="{{ id }}" aria-labelledby="{{ id }}-title">
+<figcaption class="sn-chart-title" id="{{ id }}-title">{{ title }}</figcaption>
+<div class="sn-chart-marks" aria-hidden="true">{{ svg|trusted_html }}</div>
+<p class="sn-chart-summary">{{ summary }}</p>
+<details class="sn-chart-data"><summary>Data table</summary>{{ caller() }}</details>
+</figure>
+{% endmacro %}

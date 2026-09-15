@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.scroll-area",
+  "version": 1,
+  "root": "suprnova-ui/scroll-area",
+  "files": [
+    "scroll-area.html",
+    "scroll-area.css"
+  ],
+  "elements": []
+}

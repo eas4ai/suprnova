@@ -1,0 +1,94 @@
+@layer suprnova-ui {
+  .sn-datatable {
+    inline-size: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .sn-datatable-caption {
+    padding-block: var(--sn-space-2);
+    text-align: start;
+    font-weight: var(--sn-font-weight-semibold);
+  }
+
+  .sn-datatable-count {
+    color: var(--sn-color-text-muted);
+    font-weight: var(--sn-font-weight-normal);
+  }
+
+  .sn-datatable-column,
+  .sn-datatable-cell {
+    padding-block: var(--sn-space-2);
+    padding-inline: var(--sn-space-3);
+    border-block-end: var(--sn-state-border-width) solid var(--sn-color-border);
+    text-align: start;
+    vertical-align: top;
+  }
+
+  .sn-datatable-column {
+    color: var(--sn-color-text-muted);
+    font-size: var(--sn-font-size-sm);
+  }
+
+  .sn-datatable-column[aria-sort] {
+    color: var(--sn-color-text);
+  }
+
+  .sn-datatable-column[aria-sort="ascending"] .sn-datatable-sort-button::after {
+    content: " (ascending)";
+  }
+
+  .sn-datatable-column[aria-sort="descending"] .sn-datatable-sort-button::after {
+    content: " (descending)";
+  }
+
+  .sn-datatable-cell[data-sn-numeric="true"] {
+    text-align: end;
+  }
+
+  .sn-datatable-sort {
+    display: contents;
+  }
+
+  .sn-datatable-sort-button {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .sn-datatable-sort-button:focus-visible {
+    outline: var(--sn-state-outline-width) solid var(--sn-color-focus-ring);
+    outline-offset: var(--sn-state-outline-width);
+  }
+
+  .sn-datatable-sort-button:disabled {
+    cursor: progress;
+  }
+
+  .sn-datatable-filter {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: var(--sn-space-2);
+    margin-block-end: var(--sn-space-3);
+  }
+
+  .sn-datatable-filter-input {
+    padding-block: var(--sn-space-1);
+    padding-inline: var(--sn-space-2);
+    border: var(--sn-state-border-width) solid var(--sn-color-border);
+    border-radius: var(--sn-radius-md);
+    background: var(--sn-color-surface);
+    color: var(--sn-color-text);
+    font: inherit;
+  }
+
+  .sn-datatable-filter-input:focus-visible,
+  .sn-datatable-filter-button:focus-visible {
+    outline: var(--sn-state-outline-width) solid var(--sn-color-focus-ring);
+    outline-offset: var(--sn-state-outline-width);
+  }
+}

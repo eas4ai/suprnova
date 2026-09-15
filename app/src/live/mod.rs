@@ -28,6 +28,8 @@ use suprnova::{
 use components::activity_feed::ActivityFeed;
 use components::avatar_uploader::AvatarUploader;
 use components::counter::Counter;
+use components::data_display_gallery::DataDisplayGallery;
+use components::datatable_gallery::DatatableGallery;
 use components::feedback_gallery::FeedbackGallery;
 use components::form_gallery::FormGallery;
 use components::navigation_gallery::NavigationGallery;
@@ -46,6 +48,8 @@ pub const FEEDBACK_PATH: &str = "/live/feedback";
 pub const FEEDBACK_NOTICE_PATH: &str = "/live/feedback/notice";
 /// The navigation gallery: every navigation component on one page.
 pub const NAVIGATION_PATH: &str = "/live/navigation";
+/// The data-display gallery: every data-display component and one datatable.
+pub const DATA_DISPLAY_PATH: &str = "/live/data-display";
 /// The public document with one public seed.
 pub const PUBLIC_PATH: &str = "/live/public";
 /// The public todo listing, rendered from the ORM.
@@ -65,6 +69,8 @@ pub fn registry() -> Result<LiveRegistry, RegistryError> {
         .register::<OverlayGallery>()?
         .register::<FeedbackGallery>()?
         .register::<NavigationGallery>()?
+        .register::<DataDisplayGallery>()?
+        .register::<DatatableGallery>()?
         .build();
     Ok(registry)
 }
@@ -176,6 +182,31 @@ impl NavigationMounts {
     }
 }
 
+/// The two mounts behind the data-display gallery page: the presentational
+/// island and the datatable island, one island per table.
+#[derive(Clone)]
+pub struct DataDisplayMounts {
+    pub gallery: LiveMount<DataDisplayGallery>,
+    pub table: LiveMount<DatatableGallery>,
+}
+
+impl DataDisplayMounts {
+    pub fn declare() -> Result<Self, FrameworkError> {
+        Ok(Self {
+            gallery: LiveMount::<DataDisplayGallery>::identity_bound(
+                DATA_DISPLAY_PATH,
+                "gallery",
+                "data-display-gallery",
+            )?,
+            table: LiveMount::<DatatableGallery>::identity_bound(
+                DATA_DISPLAY_PATH,
+                "table",
+                "datatable-gallery",
+            )?,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct PublicMounts {
     /// The public counter island.
@@ -226,6 +257,7 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     let overlays = OverlaysMounts::declare()?;
     let feedback = FeedbackMounts::declare()?;
     let navigation = NavigationMounts::declare()?;
+    let data_display = DataDisplayMounts::declare()?;
     let public = PublicMounts::declare()?;
 
     // Optional authentication: a signed-in principal is recorded, an
@@ -309,6 +341,17 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
         .middleware(tenant())
         .into();
     let router = router.try_live_mount(&navigation.gallery)?;
+    let handler_mounts = data_display.clone();
+    let router: Router = router
+        .get(DATA_DISPLAY_PATH, move |request: Request| {
+            let mounts = handler_mounts.clone();
+            async move { pages::data_display(request, &mounts).await }
+        })
+        .middleware(AuthMiddleware::redirect_to("/login"))
+        .middleware(tenant())
+        .into();
+    let router = router.try_live_mount(&data_display.gallery)?;
+    let router = router.try_live_mount(&data_display.table)?;
 
     let handler_mounts = public.clone();
     let router: Router = router
