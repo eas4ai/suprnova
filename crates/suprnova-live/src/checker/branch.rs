@@ -5,7 +5,7 @@ use std::collections::btree_map::Entry;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use askama_parser::node::{Call, Macro, Node};
+use askama_parser::node::{Call, If, Macro, Node};
 use askama_parser::{Ast, Expr, LetValueOrBlock, PathOrIdentifier, Span, Syntax};
 
 use crate::identity::{ComponentName, ViewName};
@@ -437,15 +437,30 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     )
                 }
                 Node::If(node) => {
-                    let mut choices: Vec<&[Box<Node<'_>>]> = node
-                        .branches
-                        .iter()
-                        .map(|branch| branch.nodes.as_slice())
-                        .collect();
-                    if node.branches.iter().all(|branch| branch.cond.is_some()) {
-                        choices.push(&[]);
+                    // A condition the macro's literal arguments decide is not
+                    // a branch: only the arm they select is rendered, so a
+                    // library macro called many times does not multiply the
+                    // branch states by every `{% if %}` it carries.
+                    if let Some(decided) = decided_branch(node, scope.bindings) {
+                        match decided {
+                            Some(nodes) => self.expand_nodes(
+                                nodes, branches, overrides, view, source, stack, scope,
+                            ),
+                            None => branches,
+                        }
+                    } else {
+                        let mut choices: Vec<&[Box<Node<'_>>]> = node
+                            .branches
+                            .iter()
+                            .map(|branch| branch.nodes.as_slice())
+                            .collect();
+                        if node.branches.iter().all(|branch| branch.cond.is_some()) {
+                            choices.push(&[]);
+                        }
+                        self.expand_choices(
+                            branches, &choices, overrides, view, source, stack, scope,
+                        )
                     }
-                    self.expand_choices(branches, &choices, overrides, view, source, stack, scope)
                 }
                 Node::Match(node) => {
                     let choices: Vec<&[Box<Node<'_>>]> =
@@ -880,6 +895,63 @@ fn binding_for(expression: &Expr<'_>, outer: &Bindings) -> Binding {
         Expr::Var(name) => outer.get(*name).cloned().unwrap_or(Binding::Dynamic),
         Expr::Group(inner) => binding_for(inner, outer),
         _ => Binding::Dynamic,
+    }
+}
+
+/// The arm an `{% if %}` takes when every condition before it is decided by
+/// the bindings: `Some(Some(nodes))` for the selected arm, `Some(None)` when
+/// every condition is false and there is no `{% else %}`, and `None` when a
+/// condition depends on something the bindings do not hold, which leaves the
+/// node a branch.
+fn decided_branch<'n>(
+    node: &'n If<'_>,
+    bindings: &Bindings,
+) -> Option<Option<&'n [Box<Node<'n>>]>> {
+    for branch in &node.branches {
+        let Some(cond) = &branch.cond else {
+            return Some(Some(branch.nodes.as_slice()));
+        };
+        if cond.target.is_some() {
+            return None;
+        }
+        if literal_truth(&cond.expr, bindings)? {
+            return Some(Some(branch.nodes.as_slice()));
+        }
+    }
+    Some(None)
+}
+
+/// The truth of an expression the bindings decide: a bound boolean, its
+/// negation, `==` and `!=` between literals, and `&&` and `||` of those. A
+/// string or number is compared by its literal text; anything else is
+/// undecided and stays a branch.
+fn literal_truth(expression: &Expr<'_>, bindings: &Bindings) -> Option<bool> {
+    match expression {
+        Expr::Group(inner) => literal_truth(inner, bindings),
+        Expr::Unary("!", inner) => literal_truth(inner, bindings).map(|value| !value),
+        Expr::BinOp(binary) if matches!(binary.op, "==" | "!=") => {
+            let (Binding::Literal(lhs), Binding::Literal(rhs)) = (
+                binding_for(&binary.lhs, bindings),
+                binding_for(&binary.rhs, bindings),
+            ) else {
+                return None;
+            };
+            Some((lhs == rhs) == (binary.op == "=="))
+        }
+        Expr::BinOp(binary) if matches!(binary.op, "&&" | "||") => {
+            let lhs = literal_truth(&binary.lhs, bindings)?;
+            let rhs = literal_truth(&binary.rhs, bindings)?;
+            Some(if binary.op == "&&" {
+                lhs && rhs
+            } else {
+                lhs || rhs
+            })
+        }
+        _ => match binding_for(expression, bindings) {
+            Binding::Literal(value) if value == "true" => Some(true),
+            Binding::Literal(value) if value == "false" => Some(false),
+            _ => None,
+        },
     }
 }
 

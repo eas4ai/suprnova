@@ -468,6 +468,13 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-09-14 -- The checker's macro expansion decides an `{% if %}` whose
+  condition the call's literal arguments settle (a bound boolean, its
+  negation, `==` and `!=` between literals, `&&` and `||` of those) and
+  renders only the selected arm; a condition the bindings do not decide
+  stays a branch. Without this, a library macro carrying three conditions
+  and called six times needed 8^6 branch states and the overlay gallery
+  failed on the branch cap although every condition was fixed at the call.
 - 2026-09-14 -- The checker expands `{% call %}`: a macro defined in the view
   or in a template the view imports is walked at each call with its string,
   number, and boolean literal arguments substituted, the caller content

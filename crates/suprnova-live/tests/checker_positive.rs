@@ -511,3 +511,30 @@ fn macro_calls_are_expanded_with_their_literal_arguments() {
     assert!(report.is_proved(), "{:?}", report.diagnostics());
     assert!(report.diagnostics().is_empty());
 }
+
+/// A condition a macro's literal arguments decide is not a branch: six
+/// calls of a macro with three conditions would need 8^6 branch states, far
+/// past the cap, and the view is proved with none of them.
+#[test]
+fn conditions_decided_by_literal_macro_arguments_are_not_branches() {
+    let registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            include_str!("fixtures/checker/pass/macro-branches.html"),
+        ),
+        (
+            view("tests/macros.html"),
+            include_str!("fixtures/checker/pass/macros.html"),
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html"),
+        ),
+    ])
+    .expect("template catalog");
+    let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name());
+    assert!(report.is_proved(), "{:?}", report.diagnostics());
+    assert!(report.diagnostics().is_empty());
+}

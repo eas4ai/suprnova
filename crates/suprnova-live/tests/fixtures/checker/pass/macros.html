@@ -7,3 +7,6 @@
 {% macro submit(text, action) %}
 <button type="submit" live:loading.disabled="{{ action }}">{{ text }}</button>
 {% endmacro %}
+{% macro toggle(name, kind="button", pressed=false, action="") %}
+{% if kind == "submit" %}<button type="submit" live:loading.disabled="{{ action }}">{{ name }}</button>{% else %}<button type="button"{% if pressed %} aria-pressed="true"{% endif %}{% if action != "" %} live:click="{{ action }}"{% endif %}>{{ name }}</button>{% endif %}
+{% endmacro %}
