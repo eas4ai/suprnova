@@ -1,0 +1,7 @@
+command: sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/overlay-continuity.test.ts'
+inputs:
+  - crates/suprnova-live/browser/src/morph/
+  - crates/suprnova-live/browser/tests/overlay-continuity.test.ts
+  - crates/suprnova-live/browser/tests/support/
+requirements:
+  - OVL-006

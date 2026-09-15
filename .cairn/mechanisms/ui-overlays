@@ -1,0 +1,11 @@
+command: node .cairn/tools/ui-overlays.mjs crates/suprnova-live/components app/templates/live/overlay-gallery.html
+results: per-requirement
+inputs:
+  - .cairn/tools/ui-overlays.mjs
+  - crates/suprnova-live/components/
+  - app/templates/live/overlay-gallery.html
+requirements:
+  - OVL-001
+  - OVL-002
+  - OVL-003
+  - OVL-004
