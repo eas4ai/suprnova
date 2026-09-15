@@ -54,6 +54,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   so no charting script reaches the browser. The datatable is a native table
   with one island per table whose sort, filter and page are `#[url]` fields
   reflected into a shareable URL after every action.
+- **The Live component library gains its live-native family, the last one.**
+  The upload widget renders the shipped upload protocol's states from the
+  runtime's progress root and claims nothing durable before the finalizing
+  action; the live feed and notification bell carry the runtime's stream
+  status announcements, so a degraded, reconnecting or closed stream says
+  so; the account menu is a details disclosure with a CSRF-protected
+  sign-out form and a documented stitch slot under RenderCache. The
+  custom-element tier, input OTP, date picker and combobox, enhances native
+  controls it never replaces: each `sn-` element is a light-DOM
+  `HTMLElement` defined by its own vendored file and holds no form value, so
+  the form submits the same value with the script blocked. The combobox
+  refuses a listbox rendered for an older query.
 
 ### Changed
 

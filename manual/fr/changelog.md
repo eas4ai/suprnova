@@ -58,6 +58,20 @@ en premier.
   script de graphiques n'atteint le navigateur. La datatable est une table
   native avec une island par table dont le tri, le filtre et la page sont des
   champs `#[url]` reflétés dans une URL partageable après chaque action.
+- **La bibliothèque de composants Live gagne sa famille live-native, la dernière.**
+  Le widget de téléversement rend les états du protocole de téléversement
+  fourni depuis la racine de progression du runtime et ne prétend rien de
+  durable avant l'action de finalisation ; le fil en direct et la cloche de
+  notifications portent les annonces d'état de flux du runtime, si bien qu'un
+  flux dégradé, en reconnexion ou fermé le dit ; le menu de compte est un
+  dépliant details avec un formulaire de déconnexion protégé par CSRF et un
+  slot de stitch documenté sous RenderCache. Le palier des éléments
+  personnalisés, saisie OTP, sélecteur de date et combobox, enrichit des
+  contrôles natifs qu'il ne remplace jamais : chaque élément `sn-` est un
+  `HTMLElement` en light DOM défini par son propre fichier vendorisé et ne
+  détient aucune valeur de formulaire, donc le formulaire envoie la même valeur
+  avec le script bloqué. La combobox refuse une listbox rendue pour une requête
+  plus ancienne.
 
 ### Modifié
 

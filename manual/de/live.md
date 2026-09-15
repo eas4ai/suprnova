@@ -628,6 +628,23 @@ pub struct Invoices {
 }
 ```
 
+Die Live-native-Familie ist die letzte: die Komponenten, die nur auf der laufenden Runtime Sinn ergeben. Das Upload-Widget stellt das mitgelieferte Upload-Protokoll dar: sein Dateifeld trägt `live:upload` für das Upload-Feld der Insel, sein `progress`-Element ist die Fortschrittswurzel der Runtime, und Abbrechen, Wiederholen und Entfernen wirken über `live:upload.cancel` und seine Geschwister auf die temporäre Referenz. Jeder Zustand, den die Domäne kennt, wird als Text gerendert und anhand von `data-live-upload-state` der Fortschrittswurzel angezeigt; "ready" liest sich als geprüft, aber nicht gespeichert, denn nichts ist dauerhaft, bevor die abschließende Aktion läuft:
+
+```html
+{% call upload::upload("attachment", "Attachment", accept="image/png") %}{% endcall %}
+<button type="submit" live:loading.disabled="save_attachment">Save attachment</button>
+```
+
+Der Live-Feed und die Benachrichtigungsglocke sitzen auf einer stream-gestützten Insel. Die Runtime schreibt `data-live-stream-state` auf die Inselwurzel und kündigt jede Änderung in dem `[data-live-stream-status]`-Element an, das die Makros rendern (Updates disconnected, Connecting to updates, Updates current, Updates degraded, Reconnecting to updates, Updates closed), sodass ein degradierter, sich wiederverbindender oder geschlossener Stream das auch sagt und nur der aktuelle Zustand als aktuell gilt. Feed-Einträge laufen durch `live_key`. Das Kontomenü ist eine `details`-Aufklappung aus Ankern und einem Abmeldeformular, das mit dem CSRF-Token der Sitzung sendet; es ist ein Stitch-Slot unter RenderCache, also bindet eine Anwendung es als eigene identitätsgebundene Insel ein, und die geteilte Hülle enthält nie den Namen des Prinzipals.
+
+Die Custom-Element-Stufe erweitert native Steuerelemente, die sie nie ersetzt. Jedes Element ist eine Light-DOM-Unterklasse von `HTMLElement`, die nur ihre eigene mitgelieferte Datei definiert, trägt das Präfix `sn-` und hält keinen Formularwert, denn das native Eingabefeld darin ist das Steuerelement: Blockiert man das Skript, sendet das Formular denselben Wert. Die Einmalcode-Eingabe ist ein einziges natives Eingabefeld (`inputmode="numeric"`, `autocomplete="one-time-code"`, ein Längenmuster) an einem transienten Modell, und `sn-input-otp` spiegelt die getippten Zeichen in `aria-hidden`-Zellen. Der Datumswähler ist ein `type="date"`-Eingabefeld, und seine Jahres-, Monats- und Tagesleisten sind Fieldsets aus nativen Radiobuttons in CSS-Scroll-Snap-Containern, sodass Tippen, Klicken und Pfeiltasten ohne Skript auswählen; `sn-date-picker` setzt eine vollständige Auswahl in das Eingabefeld zusammen. Die Combobox ist das barrierefreie Combobox-Muster (`role="combobox"`, `aria-expanded`, `aria-activedescendant`, eine `role="listbox"` mit Optionen) über einem nativen Eingabefeld mit einer `datalist` für den skriptfreien Fall; `sn-combobox` filtert, bewegt die aktive Option und wählt aus und verweigert eine Listbox, deren `data-sn-query` nicht der aktuelle Text des Eingabefelds ist, sodass ein veraltetes Ergebnis nie die Ergebnisse einer neueren Abfrage ersetzt:
+
+```html
+{% call otp::input_otp("code", "One-time code") %}{% for index in cells %}{% call otp::otp_cell(index) %}{% endcall %}{% endfor %}{% endcall %}
+{% call date::date_picker("when", "Renewal date", years, months, days, min="2026-01-01", max="2028-12-31") %}{% endcall %}
+{% call combo::combobox("country", "Country", countries, query=country, placeholder="Type a country") %}{% endcall %}
+```
+
 ### Warum Suprnova abweicht
 
 Laravel liefert Blade-Komponenten und das Markup eines Starter-Kits; Suprnova

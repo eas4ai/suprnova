@@ -431,6 +431,23 @@ pub struct Invoices {
 }
 ```
 
+live-native ファミリーは最後のファミリーで、動作中のランタイム上でのみ意味を持つコンポーネントです。アップロードウィジェットは同梱のアップロードプロトコルを表示します。ファイル入力はアイランドのアップロードフィールドに対する `live:upload` を持ち、`progress` 要素はランタイムの進捗ルートで、キャンセル、再試行、削除は `live:upload.cancel` とその兄弟を通じて一時参照に作用します。ドメインが知るすべての状態はテキストとしてレンダリングされ、進捗ルートの `data-live-upload-state` に応じて表示されます。「ready」は検証済みだが未保存と読めます。確定アクションが実行されるまで何も永続化されないからです:
+
+```html
+{% call upload::upload("attachment", "Attachment", accept="image/png") %}{% endcall %}
+<button type="submit" live:loading.disabled="save_attachment">Save attachment</button>
+```
+
+ライブフィードと通知ベルはストリームに支えられたアイランド上にあります。ランタイムはアイランドルートに `data-live-stream-state` を書き込み、マクロがレンダリングする `[data-live-stream-status]` 要素にすべての変化をアナウンスします (Updates disconnected, Connecting to updates, Updates current, Updates degraded, Reconnecting to updates, Updates closed)。そのため、劣化、再接続中、または閉じたストリームはそのように述べ、current 状態だけが最新と読めます。フィード項目は `live_key` を通ります。アカウントメニューはアンカーと、セッションの CSRF トークンで送信するサインアウトフォームからなる `details` 開閉要素です。RenderCache 配下のスティッチスロットなので、アプリケーションはこれを独自の ID 結合アイランドとしてマウントし、共有シェルがプリンシパルの名前を持つことはありません。
+
+カスタム要素層は、決して置き換えないネイティブコントロールを強化します。各要素は自身のベンダー化ファイルだけが定義する light DOM の `HTMLElement` サブクラスで、`sn-` 接頭辞を持ち、フォーム値を保持しません。内部のネイティブ入力がコントロールだからです。スクリプトをブロックしてもフォームは同じ値を送信します。OTP 入力は一時的なモデルに結び付いた単一のネイティブ入力 (`inputmode="numeric"`、`autocomplete="one-time-code"`、長さのパターン) で、`sn-input-otp` は入力された文字を `aria-hidden` のセルに映します。日付ピッカーは `type="date"` 入力で、年、月、日のストリップは CSS scroll-snap コンテナ内のネイティブラジオの fieldset なので、タップ、クリック、矢印キーはスクリプトなしで選択します。`sn-date-picker` は完全な選択を入力に合成します。コンボボックスは、スクリプトなしの場合のための `datalist` を持つネイティブ入力上のアクセシブルなコンボボックスパターン (`role="combobox"`、`aria-expanded`、`aria-activedescendant`、選択肢の `role="listbox"`) です。`sn-combobox` はフィルタし、アクティブな選択肢を移動し、選択します。そして `data-sn-query` が入力の現在のテキストでないリストボックスを拒否するため、古い結果が新しいクエリの結果を置き換えることはありません:
+
+```html
+{% call otp::input_otp("code", "One-time code") %}{% for index in cells %}{% call otp::otp_cell(index) %}{% endcall %}{% endfor %}{% endcall %}
+{% call date::date_picker("when", "Renewal date", years, months, days, min="2026-01-01", max="2028-12-31") %}{% endcall %}
+{% call combo::combobox("country", "Country", countries, query=country, placeholder="Type a country") %}{% endcall %}
+```
+
 ### Suprnova が異なる理由
 
 Laravel は Blade コンポーネントとスターターキットのマークアップを同梱しますが、Suprnova はライブラリをフレームワーク自身を通じて、Live 固有の語彙の上で提供し、クライアントアプリケーションがページを所有することはありません。スキンは既定で有効で、外しても何も壊れません。それがここでのヘッドレスの意味です。

@@ -59,6 +59,19 @@ recientes primero.
   lado, así que ningún script de gráficos llega al navegador. La datatable es
   una tabla nativa con una island por tabla cuyo orden, filtro y página son
   campos `#[url]` reflejados en una URL compartible tras cada acción.
+- **La biblioteca de componentes Live gana su familia live-native, la última.**
+  El widget de subida renderiza los estados del protocolo de subida incluido
+  desde la raíz de progreso del runtime y no reclama nada durable antes de la
+  acción finalizadora; el feed en vivo y la campana de notificaciones llevan
+  los anuncios de estado del stream del runtime, así que un stream degradado,
+  en reconexión o cerrado lo dice; el menú de cuenta es un desplegable details
+  con un formulario de cierre de sesión protegido por CSRF y un slot de stitch
+  documentado bajo RenderCache. El nivel de elementos personalizados, entrada
+  OTP, selector de fecha y combobox, mejora controles nativos que nunca
+  reemplaza: cada elemento `sn-` es un `HTMLElement` en light DOM definido por
+  su propio archivo vendorizado y no guarda ningún valor de formulario, así que
+  el formulario envía el mismo valor con el script bloqueado. El combobox
+  rechaza un listbox renderizado para una consulta más antigua.
 
 ### Cambiado
 

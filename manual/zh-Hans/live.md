@@ -432,6 +432,23 @@ pub struct Invoices {
 }
 ```
 
+live-native 家族是最后一个家族：只有在运行中的运行时之上才有意义的组件。上传组件呈现随附的上传协议：其文件输入为孤岛的上传字段携带 `live:upload`，其 `progress` 元素是运行时的进度根，取消、重试和移除通过 `live:upload.cancel` 及其同类作用于临时引用。领域已知的每个状态都渲染为文本，并根据进度根的 `data-live-upload-state` 显示；"ready" 读作已验证但未保存，因为在最终确定动作运行之前没有任何东西是持久的:
+
+```html
+{% call upload::upload("attachment", "Attachment", accept="image/png") %}{% endcall %}
+<button type="submit" live:loading.disabled="save_attachment">Save attachment</button>
+```
+
+实时信息流和通知铃铛位于由流支撑的孤岛上。运行时在孤岛根上写入 `data-live-stream-state`，并把每次变化播报到宏渲染的 `[data-live-stream-status]` 元素中 (Updates disconnected, Connecting to updates, Updates current, Updates degraded, Reconnecting to updates, Updates closed)，因此降级、重连中或已关闭的流会如实说明，只有 current 状态读作最新。信息流条目经过 `live_key`。账户菜单是一个由锚点和注销表单组成的 `details` 折叠元素，注销表单携带会话的 CSRF 令牌提交；它是 RenderCache 下的拼接槽，所以应用把它挂载为自己的身份绑定孤岛，共享外壳从不包含主体的名字。
+
+自定义元素层增强它从不替换的原生控件。每个元素都是仅由自身的 vendored 文件定义的 light DOM `HTMLElement` 子类，带有 `sn-` 前缀，且不持有表单值，因为其中的原生输入才是控件：阻止脚本后，表单仍提交相同的值。OTP 输入是绑定到临时模型的单个原生输入 (`inputmode="numeric"`、`autocomplete="one-time-code"`、长度模式)，`sn-input-otp` 把键入的字符镜像到 `aria-hidden` 的格子中。日期选择器是一个 `type="date"` 输入，其年、月、日条带是 CSS scroll-snap 容器内由原生单选按钮组成的 fieldset，因此点按、点击和方向键无需脚本即可选择；`sn-date-picker` 把完整的选择合成到输入中。组合框是建立在原生输入之上的无障碍组合框模式 (`role="combobox"`、`aria-expanded`、`aria-activedescendant`、由选项组成的 `role="listbox"`)，并为无脚本情形提供 `datalist`；`sn-combobox` 过滤、移动活动选项并选择，且拒绝 `data-sn-query` 不是输入当前文本的列表框，因此过期结果永远不会替换更新查询的结果:
+
+```html
+{% call otp::input_otp("code", "One-time code") %}{% for index in cells %}{% call otp::otp_cell(index) %}{% endcall %}{% endfor %}{% endcall %}
+{% call date::date_picker("when", "Renewal date", years, months, days, min="2026-01-01", max="2028-12-31") %}{% endcall %}
+{% call combo::combobox("country", "Country", countries, query=country, placeholder="Type a country") %}{% endcall %}
+```
+
 ### 为什么 Suprnova 与众不同
 
 Laravel 随附 Blade 组件和入门套件的标记；Suprnova 则通过框架本身、基于 Live 自己的词汇来提供这个库，不让任何客户端应用拥有页面。皮肤默认开启，去掉它也不会破坏任何东西，这正是这里“无头”的含义。

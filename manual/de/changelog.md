@@ -59,6 +59,20 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   Datatable ist eine native Tabelle mit einer Island pro Tabelle, deren
   Sortierung, Filter und Seite `#[url]`-Felder sind, die nach jeder Aktion in
   eine teilbare URL gespiegelt werden.
+- **Die Live-Komponentenbibliothek erhält ihre Live-native-Familie, die letzte.**
+  Das Upload-Widget rendert die Zustände des mitgelieferten Upload-Protokolls
+  aus der Fortschrittswurzel der Runtime und beansprucht vor der abschließenden
+  Aktion nichts als dauerhaft; der Live-Feed und die Benachrichtigungsglocke
+  tragen die Stream-Statusansagen der Runtime, sodass ein degradierter, sich
+  wiederverbindender oder geschlossener Stream das auch sagt; das Kontomenü ist
+  eine Details-Aufklappung mit CSRF-geschütztem Abmeldeformular und einem
+  dokumentierten Stitch-Slot unter RenderCache. Die Custom-Element-Stufe,
+  Einmalcode-Eingabe, Datumswähler und Combobox, erweitert native
+  Steuerelemente, die sie nie ersetzt: Jedes `sn-`-Element ist ein
+  Light-DOM-`HTMLElement`, das seine eigene mitgelieferte Datei definiert, und
+  hält keinen Formularwert, sodass das Formular mit blockiertem Skript
+  denselben Wert sendet. Die Combobox verweigert eine Listbox, die für eine
+  ältere Abfrage gerendert wurde.
 
 ### Geändert
 

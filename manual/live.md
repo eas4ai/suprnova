@@ -604,6 +604,57 @@ pub struct Invoices {
 }
 ```
 
+The live-native family is the last one, the components that only make sense
+on the running runtime. The upload widget renders the shipped upload
+protocol: its file input carries `live:upload` for the island's upload
+field, its `progress` element is the runtime's progress root, and cancel,
+retry and remove act on the temporary reference through `live:upload.cancel`
+and its siblings. Every state the domain knows is rendered as text and shown
+from the progress root's `data-live-upload-state`, and "ready" reads as
+verified but not saved, because nothing is durable until the finalizing
+action runs:
+
+```html
+{% call upload::upload("attachment", "Attachment", accept="image/png") %}{% endcall %}
+<button type="submit" live:loading.disabled="save_attachment">Save attachment</button>
+```
+
+The live feed and the notification bell sit on a stream-backed island. The
+runtime writes `data-live-stream-state` on the island root and announces
+every change into the `[data-live-stream-status]` element the macros render
+(Updates disconnected, Connecting to updates, Updates current, Updates
+degraded, Reconnecting to updates, Updates closed), so a degraded,
+reconnecting or closed stream says so and only the current state reads
+current. Feed items pass through `live_key`. The account menu is a `details`
+disclosure of anchors and a sign-out form that posts with the session's
+CSRF token; it is a stitch slot under RenderCache, so an application mounts
+it as its own identity-bound island and the shared shell never holds the
+principal's name.
+
+The custom-element tier enhances native controls it never replaces. Each
+element is a light-DOM `HTMLElement` subclass defined only by its own
+vendored file, carries the `sn-` prefix, and holds no form value, because
+the native input inside it is the control: block the script and the form
+still submits the same value. The input OTP is one native input
+(`inputmode="numeric"`, `autocomplete="one-time-code"`, a length pattern) on
+a transient model, and `sn-input-otp` mirrors the typed characters into
+`aria-hidden` cells. The date picker is a `type="date"` input, and its year,
+month and day strips are fieldsets of native radios inside CSS scroll-snap
+containers, so tap, click and arrow keys select with no script;
+`sn-date-picker` composes a complete selection into the input. The combobox
+is the accessible combobox pattern (`role="combobox"`, `aria-expanded`,
+`aria-activedescendant`, a `role="listbox"` of options) over a native input
+with a `datalist` for the script-free case; `sn-combobox` filters, moves the
+active option and selects, and refuses a listbox whose `data-sn-query` is
+not the input's current text, so a stale result never replaces results for
+a newer query:
+
+```html
+{% call otp::input_otp("code", "One-time code") %}{% for index in cells %}{% call otp::otp_cell(index) %}{% endcall %}{% endfor %}{% endcall %}
+{% call date::date_picker("when", "Renewal date", years, months, days, min="2026-01-01", max="2028-12-31") %}{% endcall %}
+{% call combo::combobox("country", "Country", countries, query=country, placeholder="Type a country") %}{% endcall %}
+```
+
 ### Why Suprnova diverges
 
 Laravel ships Blade components and a starter kit's markup; Suprnova ships the

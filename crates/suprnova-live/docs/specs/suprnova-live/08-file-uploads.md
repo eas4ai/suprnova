@@ -1,7 +1,7 @@
 # Suprnova Live -- 08 File Uploads
 
 Status: Normative design specification
-Last revised: 2026-09-01
+Last revised: 2026-09-15
 
 ## Scope
 
@@ -301,6 +301,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-15 -- The official upload widget presents the domain's states
+  (queued, transferring, verifying, ready, finalizing, finalized, rejected,
+  canceled, expired, failed) as rendered text selected from the runtime's
+  progress root, acts on the temporary reference only through the runtime's
+  cancel, retry and remove directives, and reads "ready" as verified but not
+  saved until the finalizing action runs. It introduces no second transfer
+  or trust model. Cairn FORM-005 refines this spec.
 - 2026-09-01 -- Integrated upload control and reverse-proxy data transfer through
   the fixed versioned `/__live/upload` route while keeping reacquisition an
   explicitly registered authenticated application route outside `/__live/`.

@@ -625,6 +625,23 @@ pub struct Invoices {
 }
 ```
 
+La famille live-native est la dernière : les composants qui n'ont de sens que sur le runtime en marche. Le widget de téléversement présente le protocole de téléversement fourni : son champ fichier porte `live:upload` pour le champ de téléversement de l'îlot, son élément `progress` est la racine de progression du runtime, et annuler, réessayer et retirer agissent sur la référence temporaire via `live:upload.cancel` et ses frères. Chaque état connu du domaine est rendu en texte et affiché d'après le `data-live-upload-state` de la racine de progression, et « ready » se lit comme vérifié mais non enregistré, car rien n'est durable avant l'action de finalisation :
+
+```html
+{% call upload::upload("attachment", "Attachment", accept="image/png") %}{% endcall %}
+<button type="submit" live:loading.disabled="save_attachment">Save attachment</button>
+```
+
+Le fil en direct et la cloche de notifications reposent sur un îlot adossé à un flux. Le runtime écrit `data-live-stream-state` sur la racine de l'îlot et annonce chaque changement dans l'élément `[data-live-stream-status]` que les macros rendent (Updates disconnected, Connecting to updates, Updates current, Updates degraded, Reconnecting to updates, Updates closed), de sorte qu'un flux dégradé, en reconnexion ou fermé le dit, et que seul l'état current se lit comme à jour. Les entrées du fil passent par `live_key`. Le menu de compte est un dépliant `details` d'ancres et d'un formulaire de déconnexion qui envoie avec le jeton CSRF de la session ; c'est un slot de stitch sous RenderCache, donc une application le monte comme son propre îlot lié à l'identité et la coquille partagée ne contient jamais le nom du principal.
+
+Le palier des éléments personnalisés enrichit des contrôles natifs qu'il ne remplace jamais. Chaque élément est une sous-classe de `HTMLElement` en light DOM définie uniquement par son propre fichier vendorisé, porte le préfixe `sn-` et ne détient aucune valeur de formulaire, car le champ natif qu'il contient est le contrôle : bloquez le script et le formulaire envoie toujours la même valeur. La saisie OTP est un seul champ natif (`inputmode="numeric"`, `autocomplete="one-time-code"`, un motif de longueur) sur un modèle transitoire, et `sn-input-otp` reflète les caractères saisis dans des cellules `aria-hidden`. Le sélecteur de date est un champ `type="date"`, et ses bandes d'année, de mois et de jour sont des fieldsets de radios natifs dans des conteneurs CSS scroll-snap, si bien que toucher, cliquer et les flèches sélectionnent sans script ; `sn-date-picker` compose une sélection complète dans le champ. La combobox est le motif accessible de combobox (`role="combobox"`, `aria-expanded`, `aria-activedescendant`, une `role="listbox"` d'options) sur un champ natif avec une `datalist` pour le cas sans script ; `sn-combobox` filtre, déplace l'option active et sélectionne, et refuse une listbox dont le `data-sn-query` n'est pas le texte courant du champ, de sorte qu'un résultat périmé ne remplace jamais les résultats d'une requête plus récente :
+
+```html
+{% call otp::input_otp("code", "One-time code") %}{% for index in cells %}{% call otp::otp_cell(index) %}{% endcall %}{% endfor %}{% endcall %}
+{% call date::date_picker("when", "Renewal date", years, months, days, min="2026-01-01", max="2028-12-31") %}{% endcall %}
+{% call combo::combobox("country", "Country", countries, query=country, placeholder="Type a country") %}{% endcall %}
+```
+
 ### Pourquoi Suprnova diverge
 
 Laravel livre des composants Blade et le balisage d'un kit de démarrage ;

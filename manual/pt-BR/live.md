@@ -614,6 +614,23 @@ pub struct Invoices {
 }
 ```
 
+A família live-native é a última: os componentes que só fazem sentido sobre o runtime em execução. O widget de upload apresenta o protocolo de upload incluído: seu campo de arquivo carrega `live:upload` para o campo de upload da ilha, seu elemento `progress` é a raiz de progresso do runtime, e cancelar, tentar de novo e remover agem sobre a referência temporária por meio de `live:upload.cancel` e seus irmãos. Cada estado que o domínio conhece é renderizado como texto e exibido a partir do `data-live-upload-state` da raiz de progresso, e "ready" se lê como verificado mas não salvo, porque nada é durável até a ação finalizadora rodar:
+
+```html
+{% call upload::upload("attachment", "Attachment", accept="image/png") %}{% endcall %}
+<button type="submit" live:loading.disabled="save_attachment">Save attachment</button>
+```
+
+O feed ao vivo e o sino de notificações ficam em uma ilha apoiada por um stream. O runtime escreve `data-live-stream-state` na raiz da ilha e anuncia cada mudança no elemento `[data-live-stream-status]` que as macros renderizam (Updates disconnected, Connecting to updates, Updates current, Updates degraded, Reconnecting to updates, Updates closed), de modo que um stream degradado, em reconexão ou fechado diz isso e só o estado current se lê como atual. Os itens do feed passam por `live_key`. O menu de conta é um `details` expansível com âncoras e um formulário de saída que envia com o token CSRF da sessão; ele é um slot de stitch sob o RenderCache, então uma aplicação o monta como sua própria ilha ligada à identidade e o shell compartilhado nunca contém o nome do principal.
+
+A camada de elementos personalizados aprimora controles nativos que nunca substitui. Cada elemento é uma subclasse de `HTMLElement` em light DOM definida apenas pelo seu próprio arquivo vendorizado, carrega o prefixo `sn-` e não guarda valor de formulário, porque a entrada nativa dentro dele é o controle: bloqueie o script e o formulário ainda envia o mesmo valor. A entrada OTP é uma única entrada nativa (`inputmode="numeric"`, `autocomplete="one-time-code"`, um padrão de comprimento) sobre um modelo transitório, e `sn-input-otp` espelha os caracteres digitados em células `aria-hidden`. O seletor de data é uma entrada `type="date"`, e suas faixas de ano, mês e dia são fieldsets de radios nativos dentro de contêineres CSS scroll-snap, então tocar, clicar e as setas selecionam sem script; `sn-date-picker` compõe uma seleção completa na entrada. O combobox é o padrão acessível de combobox (`role="combobox"`, `aria-expanded`, `aria-activedescendant`, um `role="listbox"` de opções) sobre uma entrada nativa com uma `datalist` para o caso sem script; `sn-combobox` filtra, move a opção ativa e seleciona, e recusa um listbox cujo `data-sn-query` não é o texto atual da entrada, de modo que um resultado obsoleto nunca substitui os resultados de uma consulta mais nova:
+
+```html
+{% call otp::input_otp("code", "One-time code") %}{% for index in cells %}{% call otp::otp_cell(index) %}{% endcall %}{% endfor %}{% endcall %}
+{% call date::date_picker("when", "Renewal date", years, months, days, min="2026-01-01", max="2028-12-31") %}{% endcall %}
+{% call combo::combobox("country", "Country", countries, query=country, placeholder="Type a country") %}{% endcall %}
+```
+
 ### Por que o Suprnova diverge
 
 O Laravel traz componentes Blade e a marcação de um kit inicial; o Suprnova

@@ -1,7 +1,7 @@
 # Suprnova Live -- 21 Form and Input Components
 
 Status: Normative design specification
-Last revised: 2026-09-13
+Last revised: 2026-09-15
 
 ## Scope
 
@@ -189,6 +189,15 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-15 -- The custom-element enhancements (input OTP, date picker,
+  combobox) are plain light-DOM `HTMLElement` subclasses, one per vendored
+  file, with the `sn-` prefix and no form value of their own: the native
+  input inside each is the control, so the form submits the same value with
+  the script blocked. No helper library is added; the earlier "Elena-class
+  helper" direction is closed by the 2026-09-15 escalation `form-005`. The
+  combobox ships single-value over a native input with a datalist for the
+  script-free case and refuses a listbox rendered for an older query. Cairn
+  FORM-006 to FORM-008 refine this spec.
 - 2026-09-13 -- The official date picker accepts only a date in its input and
   presents year, month, and day as native radio groups inside horizontal CSS
   scroll-snap strips beneath the input; locale, timezone, parsing, constraints,

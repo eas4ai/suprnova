@@ -1,7 +1,7 @@
 # Suprnova Live -- 14 Events and Asynchronous Updates
 
 Status: Normative design specification
-Last revised: 2026-09-14
+Last revised: 2026-09-15
 
 ## Scope
 
@@ -626,6 +626,12 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-15 -- The official live feed and notification bell render the
+  runtime's stream status: the server renders the disconnected announcement
+  as the default in a polite status element, the runtime announces every
+  state change into it, and the stylesheets color the degraded, reconnecting
+  and closed states apart from current, so a retired or reconnecting stream
+  never presents itself as current. Cairn FDB-005 refines this spec.
 - 2026-09-14 -- Closed the issuance credential and context races under
   LIVE-022 and LIVE-023 in `docs/spec/live.md`. The host's credential store
   keeps every unconsumed secret issued for a binding until each is consumed or
