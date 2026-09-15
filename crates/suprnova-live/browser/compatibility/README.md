@@ -5,8 +5,8 @@ Playwright provides deterministic Chromium, Firefox, and WebKit regression cover
 prove Chrome, Edge, Firefox, or Safari product compatibility, and Playwright WebKit must never be
 reported as Safari.
 
-`matrix.json` defines eight mandatory qualification slots: the documented minimum Chrome 111, Edge
-111, Firefox 128, and Safari 16.4 floors, plus the current stable channel for each product.
+`matrix.json` defines eight mandatory qualification slots: the documented minimum Chrome 114, Edge
+114, Firefox 128, and Safari 17 floors, plus the current stable channel for each product.
 `schema.json` defines the persisted evidence envelope. The checked-in `results/` directory is empty
 by design; this repository does not contain fabricated passing evidence.
 
@@ -37,7 +37,7 @@ runner neither accepts credential arguments nor copies environment values into e
 
 ```sh
 npm run compatibility:run -- \
-  --target safari-minimum-16-4 \
+  --target safari-minimum-17 \
   --adapter /secure/adapters/webdriver.mjs
 ```
 

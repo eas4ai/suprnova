@@ -47,10 +47,10 @@ const RESERVED_PROVIDERS = new Set([
 ]);
 const EXPECTED_TARGETS = Object.freeze([
   Object.freeze({
-    id: "chrome-minimum-111",
+    id: "chrome-minimum-114",
     browserProduct: "chrome",
     channel: "minimum",
-    version: "111",
+    version: "114",
   }),
   Object.freeze({
     id: "chrome-current-stable",
@@ -59,10 +59,10 @@ const EXPECTED_TARGETS = Object.freeze([
     version: "current",
   }),
   Object.freeze({
-    id: "edge-minimum-111",
+    id: "edge-minimum-114",
     browserProduct: "edge",
     channel: "minimum",
-    version: "111",
+    version: "114",
   }),
   Object.freeze({
     id: "edge-current-stable",
@@ -83,10 +83,10 @@ const EXPECTED_TARGETS = Object.freeze([
     version: "current",
   }),
   Object.freeze({
-    id: "safari-minimum-16-4",
+    id: "safari-minimum-17",
     browserProduct: "safari",
     channel: "minimum",
-    version: "16.4",
+    version: "17",
   }),
   Object.freeze({
     id: "safari-current-stable",

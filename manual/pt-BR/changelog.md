@@ -35,6 +35,11 @@ são enviados atomicamente. Mais recentes primeiro.
   um caminho de evolução que nunca seria usado. As aplicações não são
   afetadas: o framework registra essas rotas e o runtime constrói cada URL;
   referências escritas à mão a caminhos `/__live/` nunca foram suportadas.
+- **A base de navegadores suportada pelo Live é Chrome e Edge 114, Firefox 128
+  e Safari 17.** O piso sobe de Chrome e Edge 111 e Safari 16.4 para as
+  primeiras versões que trazem o atributo nativo `popover`, com o qual os
+  overlays da biblioteca de componentes mantêm seu estado aberto. Os slots
+  mínimos da matriz de compatibilidade acompanham; o Firefox continua em 128.
 
 ### Corrigido
 

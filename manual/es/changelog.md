@@ -37,6 +37,12 @@ recientes primero.
   aplicaciones no se ven afectadas: el framework registra estas rutas y el
   runtime construye cada URL; las referencias escritas a mano a rutas
   `/__live/` nunca estuvieron soportadas.
+- **La base de navegadores soportada por Live es Chrome y Edge 114, Firefox 128
+  y Safari 17.** El mínimo sube desde Chrome y Edge 111 y Safari 16.4 a las
+  primeras versiones que traen el atributo nativo `popover`, con el que los
+  overlays de la biblioteca de componentes mantienen su estado abierto. Los
+  slots mínimos de la matriz de compatibilidad se mueven con él; Firefox sigue
+  en 128.
 
 ### Corregido
 

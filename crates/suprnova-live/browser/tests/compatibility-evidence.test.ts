@@ -46,9 +46,9 @@ interface EvidenceFixture {
 }
 
 const EXPECTED_TARGETS = Object.freeze([
-  { id: "chrome-minimum-111", browserProduct: "chrome", channel: "minimum", version: "111" },
+  { id: "chrome-minimum-114", browserProduct: "chrome", channel: "minimum", version: "114" },
   { id: "chrome-current-stable", browserProduct: "chrome", channel: "stable", version: "current" },
-  { id: "edge-minimum-111", browserProduct: "edge", channel: "minimum", version: "111" },
+  { id: "edge-minimum-114", browserProduct: "edge", channel: "minimum", version: "114" },
   { id: "edge-current-stable", browserProduct: "edge", channel: "stable", version: "current" },
   { id: "firefox-minimum-128", browserProduct: "firefox", channel: "minimum", version: "128" },
   {
@@ -57,7 +57,7 @@ const EXPECTED_TARGETS = Object.freeze([
     channel: "stable",
     version: "current",
   },
-  { id: "safari-minimum-16-4", browserProduct: "safari", channel: "minimum", version: "16.4" },
+  { id: "safari-minimum-17", browserProduct: "safari", channel: "minimum", version: "17" },
   { id: "safari-current-stable", browserProduct: "safari", channel: "stable", version: "current" },
 ] satisfies readonly MatrixTarget[]);
 
@@ -203,31 +203,31 @@ describe("actual-browser compatibility evidence", () => {
     expect(qualified.process.status).toBe(0);
     expect(qualified.result).toMatchObject({ status: "qualified", qualified: 8, required: 8 });
 
-    await unlink(join(fixture.resultsPath, "safari-minimum-16-4.json"));
+    await unlink(join(fixture.resultsPath, "safari-minimum-17.json"));
     const unqualified = check(fixture);
     expect(unqualified.process.status).toBe(2);
     expect(unqualified.result.status).toBe("unqualified");
     expect(unqualified.result.details).toContainEqual({
-      target: "safari-minimum-16-4",
+      target: "safari-minimum-17",
       code: "evidence_missing",
     });
 
     await writeFile(
-      join(fixture.resultsPath, "safari-minimum-16-4.json"),
-      `${JSON.stringify(evidenceFor(requiredTarget("safari-minimum-16-4"), fixture, "fail"), null, 2)}\n`,
+      join(fixture.resultsPath, "safari-minimum-17.json"),
+      `${JSON.stringify(evidenceFor(requiredTarget("safari-minimum-17"), fixture, "fail"), null, 2)}\n`,
       "utf8",
     );
     const failed = check(fixture);
     expect(failed.process.status).toBe(1);
     expect(failed.result.status).toBe("failed");
     expect(failed.result.details).toContainEqual({
-      target: "safari-minimum-16-4",
+      target: "safari-minimum-17",
       code: "conformance_failed",
     });
 
     await writeFile(
-      join(fixture.resultsPath, "safari-minimum-16-4.json"),
-      `${JSON.stringify(evidenceFor(requiredTarget("safari-minimum-16-4"), fixture), null, 2)}\n`,
+      join(fixture.resultsPath, "safari-minimum-17.json"),
+      `${JSON.stringify(evidenceFor(requiredTarget("safari-minimum-17"), fixture), null, 2)}\n`,
       "utf8",
     );
     await writeFile(join(fixture.root, "runtime.js"), "new runtime bytes", "utf8");
@@ -240,9 +240,9 @@ describe("actual-browser compatibility evidence", () => {
   it("rejects WebKit, Chromium, user-agent, and simulated evidence claims", async () => {
     const fixture = await evidenceFixture();
     await writeCompleteEvidence(fixture);
-    const chrome = evidenceFor(requiredTarget("chrome-minimum-111"), fixture);
+    const chrome = evidenceFor(requiredTarget("chrome-minimum-114"), fixture);
     await writeFile(
-      join(fixture.resultsPath, "chrome-minimum-111.json"),
+      join(fixture.resultsPath, "chrome-minimum-114.json"),
       `${JSON.stringify({ ...chrome, browserProduct: "chromium" })}\n`,
       "utf8",
     );
@@ -251,26 +251,26 @@ describe("actual-browser compatibility evidence", () => {
     expect(rejected.result.status).toBe("failed");
 
     await writeFile(
-      join(fixture.resultsPath, "chrome-minimum-111.json"),
+      join(fixture.resultsPath, "chrome-minimum-114.json"),
       `${JSON.stringify({ ...chrome, provider: "simulated user-agent claim" })}\n`,
       "utf8",
     );
     rejected = check(fixture);
     expect(rejected.process.status).toBe(1);
     expect(rejected.result.details).toContainEqual({
-      target: "chrome-minimum-111",
+      target: "chrome-minimum-114",
       code: "evidence_provider_invalid",
     });
 
     await writeFile(
-      join(fixture.resultsPath, "chrome-minimum-111.json"),
+      join(fixture.resultsPath, "chrome-minimum-114.json"),
       `${JSON.stringify({ ...chrome, provider: "                  " })}\n`,
       "utf8",
     );
     rejected = check(fixture);
     expect(rejected.process.status).toBe(1);
     expect(rejected.result.details).toContainEqual({
-      target: "chrome-minimum-111",
+      target: "chrome-minimum-114",
       code: "evidence_provider_invalid",
     });
   });
@@ -302,7 +302,7 @@ describe("actual-browser compatibility evidence", () => {
       const execution = await withProductionBuildLock(() =>
         spawnSync(
           process.execPath,
-          [RUNNER, "--target", "chrome-minimum-111", "--adapter", adapter, "--results", results],
+          [RUNNER, "--target", "chrome-minimum-114", "--adapter", adapter, "--results", results],
           {
             encoding: "utf8",
             env: { ...process.env, BROWSER_PROVIDER_TOKEN: "SECRET_SENTINEL" },
@@ -311,9 +311,9 @@ describe("actual-browser compatibility evidence", () => {
         ),
       );
       expect(execution.status).toBe(0);
-      expect(execution.stdout).toContain("chrome-minimum-111");
+      expect(execution.stdout).toContain("chrome-minimum-114");
       expect(`${execution.stdout}${execution.stderr}`).not.toContain("SECRET_SENTINEL");
-      const evidence = await readFile(join(results, "chrome-minimum-111.json"), "utf8");
+      const evidence = await readFile(join(results, "chrome-minimum-114.json"), "utf8");
       expect(evidence).not.toContain("SECRET_SENTINEL");
       expect(Object.keys(JSON.parse(evidence) as object).sort()).toEqual([
         "attestation",
@@ -345,16 +345,16 @@ describe("actual-browser compatibility evidence", () => {
       }\n`,
         "utf8",
       );
-      await unlink(join(results, "chrome-minimum-111.json"));
+      await unlink(join(results, "chrome-minimum-114.json"));
       const incomplete = await withProductionBuildLock(() =>
         spawnSync(
           process.execPath,
-          [RUNNER, "--target", "chrome-minimum-111", "--adapter", adapter, "--results", results],
+          [RUNNER, "--target", "chrome-minimum-114", "--adapter", adapter, "--results", results],
           { encoding: "utf8", timeout: 30_000 },
         ),
       );
       expect(incomplete.status).toBe(1);
-      await expect(readFile(join(results, "chrome-minimum-111.json"), "utf8")).rejects.toThrow(
+      await expect(readFile(join(results, "chrome-minimum-114.json"), "utf8")).rejects.toThrow(
         /ENOENT/u,
       );
     },

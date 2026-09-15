@@ -1,7 +1,7 @@
 # Suprnova Live -- System Overview
 
 Status: Normative design specification
-Last revised: 2026-09-07
+Last revised: 2026-09-14
 
 ## Purpose
 
@@ -271,8 +271,9 @@ daemon.
   focus, labeling, error, contrast, target-size, and reduced-motion contracts.
   Automated checks supplement manual assistive-technology review of critical
   flows.
-- The supported baseline is the Tailwind CSS 4 browser floor: Safari 16.4,
-  Chrome and Edge 111, and Firefox 128 or newer. Optional capabilities such as
+- The supported baseline is Safari 17, Chrome and Edge 114, and Firefox 128
+  or newer: the Tailwind CSS 4 browser floor raised to the first releases
+  that ship the native `popover` attribute. Optional capabilities such as
   View Transitions and Speculation Rules are feature-detected and cannot change
   semantic outcomes.
 - Browser behavior is tested at the oldest supported floor and current stable
@@ -519,6 +520,14 @@ Suprnova Live is complete when all of the following are true:
 
 ## Decisions and revisions
 
+- 2026-09-14 -- Raised the supported baseline from Safari 16.4 and Chrome and
+  Edge 111 to Safari 17 and Chrome and Edge 114; Firefox stays at 128. The
+  official overlay components own their open state through the native
+  `popover` attribute and `dialog` element before any script (spec 23), and
+  `popover` shipped in Chrome and Edge 114, Firefox 125, and Safari 17. The
+  compatibility matrix's minimum slots move with it. Rejected keeping the
+  older floor with a script-toggled popover, which would put open state
+  back in script for every browser.
 - 2026-09-07 -- Fixed the measured-request scope of the Complete L0 hit row.
   The row's caps SHALL be read against engine work up to a formed
   `http::Response<Bytes>`; a host's conversion of that value into its own

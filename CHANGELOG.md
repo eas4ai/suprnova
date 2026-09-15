@@ -32,6 +32,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   would never be used. Applications are unaffected: the framework registers
   these routes and the runtime builds every URL, and hand-written references
   to `/__live/` paths were never supported.
+- **Live's supported browser baseline is Chrome and Edge 114, Firefox 128, and
+  Safari 17.** The floor rises from Chrome and Edge 111 and Safari 16.4 to the
+  first releases that ship the native `popover` attribute the component
+  library's overlays own their open state with. The compatibility matrix's
+  minimum slots move with it; Firefox stays at 128.
 
 ### Fixed
 

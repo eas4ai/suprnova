@@ -31,10 +31,10 @@
   ],
   "targets": [
     {
-      "id": "chrome-minimum-111",
+      "id": "chrome-minimum-114",
       "browserProduct": "chrome",
       "channel": "minimum",
-      "version": "111"
+      "version": "114"
     },
     {
       "id": "chrome-current-stable",
@@ -43,10 +43,10 @@
       "version": "current"
     },
     {
-      "id": "edge-minimum-111",
+      "id": "edge-minimum-114",
       "browserProduct": "edge",
       "channel": "minimum",
-      "version": "111"
+      "version": "114"
     },
     {
       "id": "edge-current-stable",
@@ -67,10 +67,10 @@
       "version": "current"
     },
     {
-      "id": "safari-minimum-16-4",
+      "id": "safari-minimum-17",
       "browserProduct": "safari",
       "channel": "minimum",
-      "version": "16.4"
+      "version": "17"
     },
     {
       "id": "safari-current-stable",

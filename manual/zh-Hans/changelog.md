@@ -11,6 +11,7 @@
 ### 变更
 
 - **Live 的端点不再携带版本段。** `/__live/v1/action`、`/__live/v1/upload`、`/__live/v1/assets/*` 以及 `/__live/v1/async/*` 这一族，现在都住在去掉 `/v1` 的同样路径上：`/__live/action`、`/__live/upload`、`/__live/assets/*`、`/__live/async/*`。Suprnova 的版本就是 git 标签，浏览器运行时与框架同步发布，所以 URL 空间里的第二个版本只是许诺了一条永远不会走的演进路径。应用不受影响：这些路由由框架注册，每个 URL 都由运行时构建；手写引用 `/__live/` 路径从来就不受支持。
+- **Live 支持的浏览器基线是 Chrome 与 Edge 114、Firefox 128 和 Safari 17。** 下限从 Chrome 与 Edge 111 和 Safari 16.4 提高到最早带有原生 `popover` 属性的版本，组件库的浮层用它来保持打开状态。兼容性矩阵的最低槽位随之移动；Firefox 仍为 128。
 
 ### 修复
 

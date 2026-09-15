@@ -1,7 +1,7 @@
 # Suprnova Live -- 23 Overlay and Disclosure Components
 
 Status: Normative design specification
-Last revised: 2026-09-13
+Last revised: 2026-09-14
 
 ## Scope
 
@@ -160,6 +160,16 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-14 -- The official disclosure, popover, and dialog components use
+  the native primitive (`details`, the `popover` attribute, `dialog`) for
+  open state, focus containment, and light dismiss before any script; the
+  tooltip is CSS only; open state stays browser-local and survives a
+  compatible morph only under a stable keyed scope. The supported baseline
+  rose to Safari 17 and Chrome and Edge 114 for the `popover` attribute
+  (spec 00). The accordion's single-open mode rests on `details name`,
+  which older supported releases (Chrome before 120, Firefox before 130,
+  Safari before 17.2) degrade to independent disclosures; that is a
+  recorded limit, not a further floor.
 - 2026-09-13 -- Official menus are single level; nested submenus are not in the
   built-in set. The submenu behavior in this specification remains available to
   a separate project.

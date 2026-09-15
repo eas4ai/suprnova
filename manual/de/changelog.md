@@ -35,6 +35,12 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   einen Entwicklungspfad, der nie benutzt worden wäre. Anwendungen sind nicht
   betroffen: das Framework registriert diese Routen und die Laufzeit baut jede
   URL; von Hand geschriebene `/__live/`-Pfade waren nie unterstützt.
+- **Die unterstützte Browser-Basis von Live ist Chrome und Edge 114, Firefox
+  128 und Safari 17.** Die Untergrenze steigt von Chrome und Edge 111 und
+  Safari 16.4 auf die ersten Versionen, die das native `popover`-Attribut
+  mitbringen, mit dem die Overlays der Komponentenbibliothek ihren
+  Öffnungszustand halten. Die Mindest-Slots der Kompatibilitätsmatrix ziehen
+  mit; Firefox bleibt bei 128.
 
 ### Behoben
 
