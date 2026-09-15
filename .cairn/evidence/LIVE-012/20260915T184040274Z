@@ -1,0 +1,21 @@
+requirement: LIVE-012
+requirement_digest: sha256:9e1c206920884ae5656b6b8ce5da73ea86166161ffd889122feefeac2418c76a
+sequence: 11
+history_digest: sha256:aa264f8217235cf7c53894daf1f15b089b9572bb993ba0f38708765b56ef6a2e
+mechanism: live-gate
+commit: 824c3919
+inputs_digest: sha256:01e2fd6074b0f63d89677c16c46dedb5263edd84d0d8e269839da688a5f756ba
+mechanism_digest: sha256:edfe7c2f034bb8abb17c3f0e8a172cfcbcb8d13ed3eb0442a35b9f5f8509945c
+inputs_detail: .cairn/evidence/LIVE-010/20260915T182031068Z-1287801.inputs.json
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 crates/suprnova-live/scripts/gate.sh
+cwd: .
+exit: 0
+output_digest: sha256:802ccab21654c40d22200a1f337b1f106f0092114a275c03bdae22155b5b9bf9
+output: .cairn/evidence/LIVE-010/20260915T182031068Z-1287801.out
+stderr_output: .cairn/evidence/LIVE-010/20260915T182031068Z-1287801.err
+stderr_digest: sha256:4336918ae3d87ec8fd2a19850d99d85f390488aee7dd6e1309ea50a952fa4b8b
+signal: none
+execution_error: null
+result: pass
+source: exit
+recorded: 2026-09-15T18:40:40.274Z

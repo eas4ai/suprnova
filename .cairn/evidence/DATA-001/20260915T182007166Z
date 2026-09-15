@@ -1,0 +1,21 @@
+requirement: DATA-001
+requirement_digest: sha256:07275b2523727bb6eefdd05a5228d05bcc5059f09000c2edd9dcb929c02208dc
+sequence: 4
+history_digest: sha256:9de18f85a6c12fe4d488fe7a47a650201c93b4ec3fda395d59120eddf3de36ca
+mechanism: ui-data-display
+commit: 824c3919
+inputs_digest: sha256:866c004130f4e798dcce6ab276603560b6fcd1781b8d45653f7bb081170f65b4
+mechanism_digest: sha256:dd59fba94dc37c299acfd9bf01ebed8839f151f6d7a6a82d2a3cf527028105a3
+inputs_detail: .cairn/evidence/DATA-001/20260915T182007041Z-1287801.inputs.json
+command: node .cairn/tools/ui-data-display.mjs crates/suprnova-live/components app/templates/live/data-display-gallery.html crates/suprnova-live/browser/src
+cwd: .
+exit: 0
+output_digest: sha256:eba3a5826dfcff46e6eadd034829a6a39dbfa0ad4290438aeb72a919dd1529c9
+output: .cairn/evidence/DATA-001/20260915T182007041Z-1287801.out
+stderr_output: .cairn/evidence/DATA-001/20260915T182007041Z-1287801.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+result: pass
+source: line
+recorded: 2026-09-15T18:20:07.166Z
