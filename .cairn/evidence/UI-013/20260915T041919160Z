@@ -1,0 +1,21 @@
+requirement: UI-013
+requirement_digest: sha256:b9bb2ca14a5edaf0377217a2e80cb82d21967785f7c21f99b812135cb27fd3d5
+sequence: 5
+history_digest: sha256:46a4d884da2aba802bb0207e1ba25d34b2470c39972d0e98fa10232284f0415a
+mechanism: ui-islands
+commit: 3bf476d7
+inputs_digest: sha256:de920c04c61cbd92eb80efecb817770160ab8c0de83f4a378b1350b5bf477217
+mechanism_digest: sha256:ab1c60df6edbc63d24bb8f31419e16d2eaff4b9eda80d7b51aee99d6f5c95934
+inputs_detail: .cairn/evidence/UI-013/20260915T041919015Z-327597.inputs.json
+command: node .cairn/tools/ui-islands.mjs crates/suprnova-live/components app/templates/suprnova-ui
+cwd: .
+exit: 0
+output_digest: sha256:6e6185a61cfd66b3d5e919fce4d4cc392d66e03f4b25befd7ad07f8486547e75
+output: .cairn/evidence/UI-013/20260915T041919015Z-327597.out
+stderr_output: .cairn/evidence/UI-013/20260915T041919015Z-327597.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+result: pass
+source: line
+recorded: 2026-09-15T04:19:19.160Z
