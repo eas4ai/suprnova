@@ -1,0 +1,21 @@
+requirement: FORM-007
+requirement_digest: sha256:dd94d65162522e0fec5fdc7e69e44a844b919adbeefad8eec6d43a8ba5273807
+sequence: 4
+history_digest: sha256:f9260e0565da511eb504b3c9d9637bcbb51b098c714785a980546019b32748a1
+mechanism: ui-live-native
+commit: 8a5c0f7a
+inputs_digest: sha256:729892b1b4c8878f58d1445302776846d6fc0d4c0180de5d1dfa936a51705333
+mechanism_digest: sha256:a9e46de153305810c5ec086df52f6478c82805f1d5fcb47fb655f7649f512d0b
+inputs_detail: .cairn/evidence/FORM-006/20260915T191010850Z-1909416.inputs.json
+command: node .cairn/tools/ui-live-native.mjs crates/suprnova-live/components app/templates/live/live-native-gallery.html
+cwd: .
+exit: 0
+output_digest: sha256:7a5c19e5bc725b673fe1b2c693649f5ea8d2fcaa5ed1f9c7e4e0b706f203d363
+output: .cairn/evidence/FORM-006/20260915T191010850Z-1909416.out
+stderr_output: .cairn/evidence/FORM-006/20260915T191010850Z-1909416.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+result: pass
+source: line
+recorded: 2026-09-15T19:10:10.994Z

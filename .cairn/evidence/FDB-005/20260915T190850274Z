@@ -1,0 +1,21 @@
+requirement: FDB-005
+requirement_digest: sha256:02b63ff819010db2e740dff9aef3a978e71fb0084ae01b45a780883cef2b27ff
+sequence: 5
+history_digest: sha256:2bc5f5d84a8287603162d985e42df39af2482b113ad0c4cd6c311659599eb2bc
+mechanism: ui-feed-status
+commit: 8a5c0f7a
+inputs_digest: sha256:00a0537c3f937a9f3e2a5c68e5a42fd6de139618916626e9a07303429011fc79
+mechanism_digest: sha256:7fe47dfaf4eb1e802e615f53b6fa32f89a85db451137d9aa8374778d95472018
+inputs_detail: .cairn/evidence/FDB-005/20260915T190849574Z-1909416.inputs.json
+command: sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/live-feed-status.test.ts'
+cwd: .
+exit: 0
+output_digest: sha256:c2177aacb6dbc77dcd37cf0090d7c01ad37c713d791fdee503f047b6a9e08087
+output: .cairn/evidence/FDB-005/20260915T190849574Z-1909416.out
+stderr_output: .cairn/evidence/FDB-005/20260915T190849574Z-1909416.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+result: pass
+source: exit
+recorded: 2026-09-15T19:08:50.274Z

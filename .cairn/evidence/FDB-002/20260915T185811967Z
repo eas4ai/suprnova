@@ -1,0 +1,21 @@
+requirement: FDB-002
+requirement_digest: sha256:013109e109a5888ff2235292e760eadf8497d73759fa9832c35bb346571d3871
+sequence: 7
+history_digest: sha256:9f6fa4768eadbc793115be4ca93d4adbaddce5c04b8e5e661e8d4fc6046ae4b4
+mechanism: ui-feedback
+commit: 8a5c0f7a
+inputs_digest: sha256:d2da22e87652d113d355424d1504eb00147435d6fdb6406071c6ada359c6da4d
+mechanism_digest: sha256:c46df8b1122f1560b308144ed51fe11d48bda54e1266b54eb1b3814736991f19
+inputs_detail: .cairn/evidence/FDB-001/20260915T185811856Z-1909416.inputs.json
+command: node .cairn/tools/ui-feedback.mjs crates/suprnova-live/components app/templates/live/feedback-gallery.html
+cwd: .
+exit: 0
+output_digest: sha256:946ec7aa6ef2845aad566e62294b397cf4a585260c834a4e110817f409988c5d
+output: .cairn/evidence/FDB-001/20260915T185811856Z-1909416.out
+stderr_output: .cairn/evidence/FDB-001/20260915T185811856Z-1909416.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+result: pass
+source: line
+recorded: 2026-09-15T18:58:11.967Z
