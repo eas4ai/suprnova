@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: component-library-feedback-and-navigation
+Current: component-library-data-display
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -56,10 +56,13 @@ components in waves, the advanced components last, the datatable closing.
    spike in the qualification host (`component-library-overlays.md`).
    Tabs, listed here at first, was never in OVL-001 to OVL-006 and moves
    to item 5, where NAV-002 specifies it.
-5. component-library-feedback-and-navigation - named by the developer
-   at 23:02 on 2026-09-14 - alert, toast and flash region, skeleton,
-   progress, spinner, empty state; header bar, footer, sidebar,
-   breadcrumbs, tabs, pagination, load more
+5. component-library-feedback-and-navigation - DONE 2026-09-15 (built
+   between `7aef377a` and `cdc648b5` after the developer's `ok` on
+   escalation `fdb-001`, which agreed FDB-001 to FDB-004, FDB-006,
+   NAV-001 to NAV-004 and NAV-006; receipts and review on `344ff655`) -
+   alert, toast and flash region, skeleton, progress, spinner, empty
+   state; header bar, footer, sidebar, breadcrumbs, tabs, pagination,
+   load more; the `live_key` view filter landed with them
    (`component-library-feedback.md`, `component-library-navigation.md`).
 6. component-library-data-display - card, image and aspect ratio, scroll
    area, separator, badge, avatar, list group, description list, stat
