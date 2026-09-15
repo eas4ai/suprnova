@@ -30,12 +30,14 @@ Falsifier: a shipped layout primitive reorders reading or focus order at
 a breakpoint, or wraps content in an unlabeled generic element by default.
 Mechanism: `.cairn/mechanisms/ui-live-check`; one Playwright case
 asserting tab order across breakpoints.
+Status: Agreed 2026-09-15
 
 [DATA-002] Badge, avatar, and stat components MUST carry text or a
 programmatic label for every status. A badge, avatar, or stat component
 MUST NOT convey status by color or image alone.
 Falsifier: a shipped status variant has no text and no `aria-label`.
 Mechanism: `.cairn/mechanisms/ui-live-check`.
+Status: Agreed 2026-09-15
 
 [DATA-003] Repeated items in a list, feed, or table MUST carry stable
 domain keys through `live:key`.
@@ -43,6 +45,7 @@ Falsifier: a shipped collection renders items without keys and a reorder
 moves focus or local state to another item.
 Mechanism: the morph fixtures under `crates/suprnova-live/browser/tests/`
 extended with the library's collection markup.
+Status: Agreed 2026-09-15
 
 ## Behavioral tier
 
@@ -59,6 +62,7 @@ Reading: Live spec 25's revision of 2026-09-13 records this; `charts-rs`
 (Apache-2.0, SVG with the default build, 22 chart types) enters the
 workspace as a dependency of the library crate and passes the audit,
 feature matrix, and license inventory like any other.
+Status: Agreed 2026-09-15
 
 [DATA-005] The datatable MUST use native table semantics. The datatable
 MUST expose sort, filter, and page state through `#[url]` fields as
@@ -67,3 +71,4 @@ Falsifier: a table renders as generic elements, a sort is not reflected
 in the URL, or a row mounts its own island.
 Mechanism: an `app/tests/` end-to-end case through `handle_request`;
 `.cairn/mechanisms/ui-live-check`.
+Status: Agreed 2026-09-15
