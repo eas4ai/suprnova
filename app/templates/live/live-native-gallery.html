@@ -19,6 +19,7 @@
 {% call date::date_picker("when", "Renewal date", years, months, days, min="2026-01-01", max="2028-12-31") %}{% endcall %}
 <p data-when="{{ when }}">Renewal {{ when }}</p>
 {% call combo::combobox("country", "Country", countries, query=country, placeholder="Type a country") %}{% endcall %}
+<p class="sn-live-native-search-state"><span hidden live:queued.show="country">Search pending</span><span hidden live:loading.show="country">Searching</span></p>
 <button class="sn-button" type="submit" live:loading.disabled="search">Search</button>
 </form>
 <header class="sn-live-native-header">

@@ -602,7 +602,9 @@ test("a proposal typed while its predecessor is in flight keeps the island's aut
   await country.fill("ca");
   await expect.poll(() => gate.held).toBe(true);
   await country.fill("Canada");
-  await page.waitForTimeout(400);
+  // The gallery shows the field's queued state; the second proposal now
+  // sits behind the held one.
+  await expect(page.getByText("Search pending", { exact: true })).toBeVisible();
   gate.release?.();
   await expect(island).toHaveAttribute("data-suprnova-live-revision", "2");
   await expect(page.locator("#country-listbox")).toHaveAttribute("data-sn-query", "Canada");
