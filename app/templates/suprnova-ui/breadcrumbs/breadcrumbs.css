@@ -1,0 +1,23 @@
+.sn-breadcrumbs-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sn-space-2);
+  margin: 0 0 var(--sn-density-stack);
+  padding: 0;
+  list-style: none;
+  font-size: var(--sn-font-size-sm);
+}
+
+.sn-breadcrumb + .sn-breadcrumb::before {
+  content: "/";
+  margin-inline-end: var(--sn-space-2);
+  color: var(--sn-color-text-muted);
+}
+
+.sn-breadcrumb-link {
+  color: var(--sn-color-link);
+}
+
+.sn-breadcrumb[aria-current="page"] {
+  color: var(--sn-color-text-muted);
+}

@@ -28,7 +28,9 @@ use suprnova::{
 use components::activity_feed::ActivityFeed;
 use components::avatar_uploader::AvatarUploader;
 use components::counter::Counter;
+use components::feedback_gallery::FeedbackGallery;
 use components::form_gallery::FormGallery;
+use components::navigation_gallery::NavigationGallery;
 use components::overlay_gallery::OverlayGallery;
 use providers::tenant::SingleTenant;
 
@@ -38,6 +40,12 @@ pub const DASHBOARD_PATH: &str = "/live";
 pub const FORMS_PATH: &str = "/live/forms";
 /// The overlay gallery: every overlay and disclosure component on one page.
 pub const OVERLAYS_PATH: &str = "/live/overlays";
+/// The feedback gallery: every feedback component on one page.
+pub const FEEDBACK_PATH: &str = "/live/feedback";
+/// Leaves a flash notice and redirects to the feedback gallery.
+pub const FEEDBACK_NOTICE_PATH: &str = "/live/feedback/notice";
+/// The navigation gallery: every navigation component on one page.
+pub const NAVIGATION_PATH: &str = "/live/navigation";
 /// The public document with one public seed.
 pub const PUBLIC_PATH: &str = "/live/public";
 /// The public todo listing, rendered from the ORM.
@@ -55,6 +63,8 @@ pub fn registry() -> Result<LiveRegistry, RegistryError> {
         .register::<ActivityFeed>()?
         .register::<FormGallery>()?
         .register::<OverlayGallery>()?
+        .register::<FeedbackGallery>()?
+        .register::<NavigationGallery>()?
         .build();
     Ok(registry)
 }
@@ -130,6 +140,42 @@ impl OverlaysMounts {
     }
 }
 
+/// The mount behind the feedback gallery page.
+#[derive(Clone)]
+pub struct FeedbackMounts {
+    pub gallery: LiveMount<FeedbackGallery>,
+}
+
+impl FeedbackMounts {
+    pub fn declare() -> Result<Self, FrameworkError> {
+        Ok(Self {
+            gallery: LiveMount::<FeedbackGallery>::identity_bound(
+                FEEDBACK_PATH,
+                "gallery",
+                "feedback-gallery",
+            )?,
+        })
+    }
+}
+
+/// The mount behind the navigation gallery page.
+#[derive(Clone)]
+pub struct NavigationMounts {
+    pub gallery: LiveMount<NavigationGallery>,
+}
+
+impl NavigationMounts {
+    pub fn declare() -> Result<Self, FrameworkError> {
+        Ok(Self {
+            gallery: LiveMount::<NavigationGallery>::identity_bound(
+                NAVIGATION_PATH,
+                "gallery",
+                "navigation-gallery",
+            )?,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct PublicMounts {
     /// The public counter island.
@@ -178,6 +224,8 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     let dashboard = DashboardMounts::declare()?;
     let forms = FormsMounts::declare()?;
     let overlays = OverlaysMounts::declare()?;
+    let feedback = FeedbackMounts::declare()?;
+    let navigation = NavigationMounts::declare()?;
     let public = PublicMounts::declare()?;
 
     // Optional authentication: a signed-in principal is recorded, an
@@ -234,6 +282,33 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
         .middleware(tenant())
         .into();
     let router = router.try_live_mount(&overlays.gallery)?;
+    let handler_mounts = feedback.clone();
+    let router: Router = router
+        .get(FEEDBACK_PATH, move |request: Request| {
+            let mounts = handler_mounts.clone();
+            async move { pages::feedback(request, &mounts).await }
+        })
+        .middleware(AuthMiddleware::redirect_to("/login"))
+        .middleware(tenant())
+        .into();
+    let router: Router = router
+        .get(FEEDBACK_NOTICE_PATH, |request: Request| async move {
+            pages::feedback_notice(request).await
+        })
+        .middleware(AuthMiddleware::redirect_to("/login"))
+        .middleware(tenant())
+        .into();
+    let router = router.try_live_mount(&feedback.gallery)?;
+    let handler_mounts = navigation.clone();
+    let router: Router = router
+        .get(NAVIGATION_PATH, move |request: Request| {
+            let mounts = handler_mounts.clone();
+            async move { pages::navigation(request, &mounts).await }
+        })
+        .middleware(AuthMiddleware::redirect_to("/login"))
+        .middleware(tenant())
+        .into();
+    let router = router.try_live_mount(&navigation.gallery)?;
 
     let handler_mounts = public.clone();
     let router: Router = router

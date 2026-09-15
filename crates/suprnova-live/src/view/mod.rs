@@ -4,6 +4,7 @@ mod contract;
 mod document;
 mod error;
 mod island;
+mod live_key;
 mod root;
 mod trusted_html;
 
@@ -26,6 +27,7 @@ pub use document::{
 };
 pub use error::{ViewError, ViewErrorKind};
 pub use island::IslandRender;
+pub use live_key::{LiveKeyError, LiveKeyErrorKind, check_live_key};
 pub(crate) use root::{
     IslandRootFlag, IslandRootInput, IslandSnapshotForm, MAX_SUCCESSOR_METADATA_BYTES,
     assemble_island_root, declared_stream,
@@ -37,6 +39,7 @@ pub use trusted_html::{
 
 /// Suprnova-owned checked filters made available to Askama view adapters.
 pub mod filters {
+    pub use super::live_key::filters::live_key;
     pub use super::trusted_html::filters::trusted_html;
 }
 

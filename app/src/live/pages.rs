@@ -10,11 +10,16 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use suprnova::live::{CanonicalValue, LiveBootstrapOptions, LiveDocument, MountFlags};
+use suprnova::session::session_mut;
 use suprnova::view::{AssetSet, DocumentResponseIntent, TrustedHtml, ViewName, ViewTemplate};
 use suprnova::{Auth, FrameworkError, HttpResponse, Model, Request, Response, StatusCode};
 
-use super::{DashboardMounts, FormsMounts, OverlaysMounts, PublicMounts};
+use super::{
+    DashboardMounts, FEEDBACK_PATH, FeedbackMounts, FormsMounts, NavigationMounts, OverlaysMounts,
+    PublicMounts,
+};
 use crate::models::todos::Todo;
 use crate::models::users::User;
 
@@ -163,6 +168,123 @@ pub async fn dashboard(request: Request, mounts: &DashboardMounts) -> Response {
                     counter: counter.html(),
                     uploader: uploader.html(),
                     feed: feed.html(),
+                },
+                intent()?,
+                AssetSet::empty(),
+            )
+            .map_err(FrameworkError::from)
+    }
+    .await;
+    result.map_err(failed)
+}
+
+/// One message the flash region renders after a redirect (FDB-004): the
+/// outcome the previous request left in the session, consumed on this read.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FlashMessage {
+    /// info, success, warning or error.
+    pub variant: String,
+    /// The message text.
+    pub text: String,
+}
+
+/// The session key the flash region reads and the notice route writes.
+pub const FLASH_KEY: &str = "suprnova-ui.flash";
+
+#[suprnova::view(path = "live/feedback.html")]
+struct FeedbackView<'a> {
+    bootstrap: &'a TrustedHtml,
+    gallery: &'a TrustedHtml,
+    messages: Vec<FlashMessage>,
+}
+
+#[suprnova::view(path = "live/navigation.html")]
+struct NavigationView<'a> {
+    bootstrap: &'a TrustedHtml,
+    gallery: &'a TrustedHtml,
+}
+
+/// The feedback gallery: the suprnova-ui base is opted in, every feedback
+/// component is mounted once, the empty state's reason comes from the
+/// `reason` query (FDB-003) and the flash region shows what the previous
+/// request left in the session (FDB-004).
+pub async fn feedback(request: Request, mounts: &FeedbackMounts) -> Response {
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let reason = request
+            .query_param("reason")
+            .unwrap_or_else(|| "empty".to_owned());
+        let messages = session_mut(|session| session.get_flash::<Vec<FlashMessage>>(FLASH_KEY))
+            .flatten()
+            .unwrap_or_default();
+        let mut document = LiveDocument::from_request(&request)?;
+        let parameters = CanonicalValue::Object(BTreeMap::from([(
+            "reason".to_owned(),
+            CanonicalValue::String(reason),
+        )]));
+        let gallery = document
+            .mount(&mounts.gallery, parameters, MountFlags::empty())
+            .await?;
+        let bootstrap = document.bootstrap(LiveBootstrapOptions::esm().with_suprnova_ui())?;
+        document
+            .render(
+                view("live/feedback.html")?,
+                &FeedbackView {
+                    bootstrap: bootstrap.html(),
+                    gallery: gallery.html(),
+                    messages,
+                },
+                intent()?,
+                AssetSet::empty(),
+            )
+            .map_err(FrameworkError::from)
+    }
+    .await;
+    result.map_err(failed)
+}
+
+/// `GET /live/feedback/notice`: leaves one success message in the session
+/// flash and redirects to the gallery, the way an accepted form post does;
+/// the gallery renders it once and a reload finds nothing.
+pub async fn feedback_notice(_request: Request) -> Response {
+    session_mut(|session| {
+        session.flash(
+            FLASH_KEY,
+            vec![FlashMessage {
+                variant: "success".to_owned(),
+                text: "Your changes were saved".to_owned(),
+            }],
+        );
+    });
+    Ok(HttpResponse::new()
+        .status(303)
+        .header("Location", FEEDBACK_PATH))
+}
+
+/// The navigation gallery: every navigation component mounted once; the
+/// page number comes from the `page` query so a reflected URL reloads onto
+/// the same page (NAV-003).
+pub async fn navigation(request: Request, mounts: &NavigationMounts) -> Response {
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let page = request
+            .query_param("page")
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(1);
+        let mut document = LiveDocument::from_request(&request)?;
+        let parameters = CanonicalValue::Object(BTreeMap::from([(
+            "page".to_owned(),
+            CanonicalValue::number(f64::from(page))
+                .map_err(|_| FrameworkError::internal("Live navigation page number"))?,
+        )]));
+        let gallery = document
+            .mount(&mounts.gallery, parameters, MountFlags::empty())
+            .await?;
+        let bootstrap = document.bootstrap(LiveBootstrapOptions::esm().with_suprnova_ui())?;
+        document
+            .render(
+                view("live/navigation.html")?,
+                &NavigationView {
+                    bootstrap: bootstrap.html(),
+                    gallery: gallery.html(),
                 },
                 intent()?,
                 AssetSet::empty(),

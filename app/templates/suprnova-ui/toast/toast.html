@@ -1,0 +1,19 @@
+{#
+  suprnova.toast - transient outcomes in one polite live region (FDB-004).
+  The region announces each toast once as it enters and never takes
+  focus; sn-toast-region times each toast out after its duration, pauses
+  while hovered or focused, hides toasts beyond the region's limit until
+  a slot frees, and answers the dismiss button. A toast is keyed and
+  preserved, so the browser owns its hidden state across a morph and a
+  dismissed toast stays dismissed. Critical errors belong in an alert as
+  well; a toast is never their only surface. Toasts render inside a loop,
+  so the key passes through the live_key filter: the island that mounts
+  them exposes `pub mod filters { pub use suprnova::view::filters::live_key; }`.
+#}
+{% macro toast_region(id, label="Notifications", limit=3) %}
+<sn-toast-region class="sn-toast-region" data-sn-limit="{{ limit }}"><div class="sn-toast-list" id="{{ id }}" role="status" aria-live="polite" aria-label="{{ label }}">{{ caller() }}</div></sn-toast-region>
+{% endmacro %}
+
+{% macro toast(key, text, variant="info", duration=6000) %}
+<div class="sn-toast" data-sn-variant="{{ variant }}" data-sn-duration="{{ duration }}" live:key="{{ key|live_key }}" data-suprnova-live-key="{{ key }}" live:preserve.self><span class="sn-toast-text">{{ text }}</span><button class="sn-toast-dismiss" type="button" data-sn-toast-dismiss aria-label="Dismiss">&#215;</button></div>
+{% endmacro %}

@@ -1,0 +1,63 @@
+{% import "suprnova-ui/header-bar/header-bar.html" as header %}
+{% import "suprnova-ui/footer/footer.html" as footer %}
+{% import "suprnova-ui/sidebar/sidebar.html" as sidebar %}
+{% import "suprnova-ui/breadcrumbs/breadcrumbs.html" as crumbs %}
+{% import "suprnova-ui/tabs/tabs.html" as tabs %}
+{% import "suprnova-ui/pagination/pagination.html" as pagination %}
+{% import "suprnova-ui/load-more/load-more.html" as more %}
+<div class="sn-navigation-gallery">
+{% call header::header_bar("site-header", "Suprnova", brand_href="/live") %}
+{% call header::header_link("/live", "Dashboard") %}{% endcall %}
+{% call header::header_link("/live/navigation", "Navigation", current=true) %}{% endcall %}
+{% call header::header_link("/live/feedback", "Feedback") %}{% endcall %}
+{% endcall %}
+<div class="sn-navigation-columns">
+{% call sidebar::sidebar("site-sidebar") %}
+{% call sidebar::sidebar_group("sidebar-library", "Library") %}
+{% call sidebar::sidebar_link("/live/forms", "Forms") %}{% endcall %}
+{% call sidebar::sidebar_link("/live/overlays", "Overlays") %}{% endcall %}
+{% call sidebar::sidebar_link("/live/navigation", "Navigation", current=true) %}{% endcall %}
+{% endcall %}
+{% call sidebar::sidebar_group("sidebar-account", "Account", open=false) %}
+{% call sidebar::sidebar_link("/live/me", "Profile") %}{% endcall %}
+{% endcall %}
+{% endcall %}
+<div class="sn-navigation-main">
+{% call crumbs::breadcrumbs("trail") %}
+{% call crumbs::crumb("/live", "Dashboard") %}{% endcall %}
+{% call crumbs::crumb("/live/forms", "Library") %}{% endcall %}
+{% call crumbs::crumb_current("Navigation") %}{% endcall %}
+{% endcall %}
+{% call tabs::tabs("local-tabs", mode="local", label="Details") %}
+{% call tabs::tab_list("Details") %}
+{% call tabs::tab("tab-summary", "panel-summary", "Summary", selected=true) %}{% endcall %}
+{% call tabs::tab("tab-history", "panel-history", "History") %}{% endcall %}
+{% endcall %}
+{% call tabs::tab_panel("panel-summary", "tab-summary", selected=true) %}<p>Page <span data-page="{{ page }}">{{ page }}</span> of {{ pages }}.</p>{% endcall %}
+{% call tabs::tab_panel("panel-history", "tab-history") %}<p>Loaded <span data-loaded="{{ items.len() }}">{{ items.len() }}</span> items.</p>{% endcall %}
+{% endcall %}
+{% call tabs::tabs("route-tabs", mode="route", label="Sections") %}
+{% call tabs::route_tab("/live/navigation", "Navigation", current=true) %}{% endcall %}
+{% call tabs::route_tab("/live/feedback", "Feedback") %}{% endcall %}
+{% endcall %}
+{% call pagination::pagination("route-pages", label="Pages by route") %}
+{% call pagination::page_edge_link("/live/navigation?page=1", "Previous", disabled=true) %}{% endcall %}
+{% call pagination::page_link("/live/navigation?page=1", 1, current=true) %}{% endcall %}
+{% call pagination::page_link("/live/navigation?page=2", 2) %}{% endcall %}
+{% call pagination::page_link("/live/navigation?page=3", 3) %}{% endcall %}
+{% call pagination::page_edge_link("/live/navigation?page=2", "Next") %}{% endcall %}
+{% endcall %}
+{% call pagination::pagination("live-pages", label="Pages by action") %}
+{% call pagination::page_action("previous_page", "Previous", disabled=first) %}{% endcall %}
+{% call pagination::page_position(page, pages) %}{% endcall %}
+{% call pagination::page_action("next_page", "Next", disabled=last) %}{% endcall %}
+{% endcall %}
+{% call more::load_more_list("feed", label="Feed") %}{% for item in items %}<li class="sn-feed-item" live:key="{{ item.key|live_key }}" data-suprnova-live-key="{{ item.key }}">{{ item.text }}</li>{% endfor %}{% endcall %}
+{% call more::load_more("load_more", exhausted=exhausted) %}{% endcall %}
+</div>
+</div>
+{% call footer::footer("site-footer", "Suprnova dogfood application") %}
+{% call footer::footer_link("/live/public", "Public counter") %}{% endcall %}
+{% call footer::footer_link("/live/todos", "Todos") %}{% endcall %}
+{% endcall %}
+</div>

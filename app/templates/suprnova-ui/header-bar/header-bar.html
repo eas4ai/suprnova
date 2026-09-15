@@ -1,0 +1,17 @@
+{#
+  suprnova.header-bar - the application's primary navigation landmark
+  (NAV-001, NAV-004). Destinations are anchors with real route URLs; the
+  current one carries aria-current from the server-bound `current` value,
+  never from the browser's location. Pair it with the drawer for compact
+  layouts; this view holds no collapse state of its own.
+#}
+{% macro header_bar(id, brand, brand_href="/", label="Primary") %}
+<header class="sn-header-bar" id="{{ id }}">
+<a class="sn-header-brand" href="{{ brand_href }}">{{ brand }}</a>
+<nav class="sn-header-nav" aria-label="{{ label }}">{{ caller() }}</nav>
+</header>
+{% endmacro %}
+
+{% macro header_link(href, text, current=false) %}
+<a class="sn-header-link" href="{{ href }}"{% if current %} aria-current="page"{% endif %}>{{ text }}</a>
+{% endmacro %}

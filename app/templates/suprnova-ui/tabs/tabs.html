@@ -1,0 +1,27 @@
+{#
+  suprnova.tabs - two explicit modes (NAV-002). Local tabs: sn-tabs owns
+  the tablist's arrow keys and selection, tabs and panels are keyed and
+  preserved so the selection is the browser's across a morph, and a tab
+  change makes no request. Route tabs: anchors with canonical URLs and
+  aria-current from the server, plain document navigation. The mode is a
+  required argument; there is no default.
+#}
+{% macro tabs(id, mode, label) %}
+{% if mode == "local" %}<sn-tabs class="sn-tabs" id="{{ id }}" data-sn-mode="local" data-sn-label="{{ label }}">{{ caller() }}</sn-tabs>{% elif mode == "route" %}<nav class="sn-tabs" id="{{ id }}" data-sn-mode="route" aria-label="{{ label }}">{{ caller() }}</nav>{% endif %}
+{% endmacro %}
+
+{% macro tab_list(label) %}
+<div class="sn-tablist" role="tablist" aria-label="{{ label }}">{{ caller() }}</div>
+{% endmacro %}
+
+{% macro tab(key, panel, text, selected=false) %}
+<button class="sn-tab" type="button" role="tab" id="{{ key }}" aria-controls="{{ panel }}" aria-selected="{% if selected %}true{% else %}false{% endif %}"{% if !selected %} tabindex="-1"{% endif %} live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self>{{ text }}</button>
+{% endmacro %}
+
+{% macro tab_panel(key, tab, selected=false) %}
+<div class="sn-tab-panel" role="tabpanel" id="{{ key }}" aria-labelledby="{{ tab }}" tabindex="0"{% if !selected %} hidden{% endif %} live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self>{{ caller() }}</div>
+{% endmacro %}
+
+{% macro route_tab(href, text, current=false) %}
+<a class="sn-tab" href="{{ href }}"{% if current %} aria-current="page"{% endif %}>{{ text }}</a>
+{% endmacro %}

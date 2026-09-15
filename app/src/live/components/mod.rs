@@ -4,5 +4,7 @@
 pub mod activity_feed;
 pub mod avatar_uploader;
 pub mod counter;
+pub mod feedback_gallery;
 pub mod form_gallery;
+pub mod navigation_gallery;
 pub mod overlay_gallery;

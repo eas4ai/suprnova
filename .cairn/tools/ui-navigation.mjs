@@ -79,7 +79,9 @@ if (!gallery || !existsSync(gallery)) {
   const view = readFileSync(gallery, "utf8");
   for (const name of NAVIGATION) {
     const macro = name.replace(/-/g, "_");
-    if (!new RegExp(`${macro}::${macro}\\(`).test(view)) fail("NAV-001", `the gallery mounts no ${name}`);
+    const imported = view.match(new RegExp(`\\{%\\s*import\\s+"suprnova-ui/${name}/${name}\\.html"\\s+as\\s+(\\w+)\\s*%\\}`));
+    const alias = imported ? imported[1] : macro;
+    if (!new RegExp(`${alias}::${macro}\\(`).test(view)) fail("NAV-001", `the gallery mounts no ${name}`);
   }
   const calls = [...view.matchAll(/tabs::tabs\(([^)]*)\)/g)];
   if (calls.length === 0) fail("NAV-002", "the gallery mounts no tabs");

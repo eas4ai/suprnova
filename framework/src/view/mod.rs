@@ -149,5 +149,6 @@ impl ViewRenderer {
 
 /// Checked filters available to the normative template substrate.
 pub mod filters {
+    pub use suprnova_live::view::filters::live_key;
     pub use suprnova_live::view::filters::trusted_html;
 }

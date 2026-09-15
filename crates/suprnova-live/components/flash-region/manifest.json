@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.flash-region",
+  "version": 1,
+  "root": "suprnova-ui/flash-region",
+  "files": [
+    "flash-region.html",
+    "flash-region.css"
+  ],
+  "elements": []
+}

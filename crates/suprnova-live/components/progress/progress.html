@@ -1,0 +1,14 @@
+{#
+  suprnova.progress - determinate or indeterminate progress on the native
+  progress element (FDB-006). Determinate work carries max and value;
+  indeterminate work carries max only, which the browser renders as
+  activity. The label names the work and the readout states completion in
+  text, so color never carries the meaning alone.
+#}
+{% macro progress(id, label, value=0, max=100, determinate=true) %}
+<div class="sn-progress">
+<label class="sn-progress-label" for="{{ id }}">{{ label }}</label>
+<progress class="sn-progress-bar" id="{{ id }}" max="{{ max }}" {% if determinate %}value="{{ value }}"{% endif %}></progress>
+<output class="sn-progress-readout" for="{{ id }}">{% if determinate %}{{ value }} of {{ max }}{% else %}Working{% endif %}</output>
+</div>
+{% endmacro %}

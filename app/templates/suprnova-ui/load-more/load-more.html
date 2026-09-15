@@ -1,0 +1,14 @@
+{#
+  suprnova.load-more - append the next page to a keyed list (NAV-006). The
+  list's items carry live:key, so the morph keeps every existing node and
+  inserts the new ones; the control is a button on a registered action,
+  disabled and busy while the action runs, and absent once the server
+  reports the last page (exhausted=true).
+#}
+{% macro load_more_list(id, label="Items") %}
+<ul class="sn-load-more-list" id="{{ id }}" aria-label="{{ label }}">{{ caller() }}</ul>
+{% endmacro %}
+
+{% macro load_more(action, text="Load more", exhausted=false) %}
+{% if !exhausted %}<button class="sn-load-more" type="button" live:click="{{ action }}" live:loading.disabled="{{ action }}" live:loading.busy="{{ action }}">{{ text }}</button>{% endif %}
+{% endmacro %}

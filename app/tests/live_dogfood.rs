@@ -550,3 +550,327 @@ async fn the_overlay_gallery_renders_every_overlay_on_its_native_primitive() {
         "the script never owns the open attribute"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_feedback_gallery_renders_every_feedback_component_on_real_state() {
+    let app = setup_app(6).await;
+    let session = seed_session(&app).await;
+
+    let reply = get(&app, "/live/feedback", Some(&session)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let html = reply.text();
+    assert!(html.contains("<h1>Feedback gallery</h1>"), "{html}");
+    assert_eq!(html.matches("suprnova-ui.css").count(), 1, "{html}");
+    let gallery = island_tag(&html, "feedback-gallery");
+    assert_eq!(
+        attribute(gallery, "data-suprnova-live-snapshot-kind"),
+        "instance"
+    );
+    for needle in [
+        // FDB-001: the role follows the variant and each variant carries its own cue.
+        "<div class=\"sn-alert\" id=\"welcome\" data-sn-variant=\"info\" role=\"status\">",
+        "<span class=\"sn-alert-label\">Information:</span>",
+        "<div class=\"sn-alert\" id=\"saved-alert\" data-sn-variant=\"success\" role=\"status\">",
+        "<span class=\"sn-alert-label\">Success:</span>",
+        "<div class=\"sn-alert\" id=\"quota\" data-sn-variant=\"warning\" role=\"status\">",
+        "<span class=\"sn-alert-label\">Warning:</span>",
+        // FDB-002: loading presentation is bound and authored hidden.
+        "<span class=\"sn-spinner\" role=\"status\" live:loading.show=\"save\" hidden>",
+        "<div class=\"sn-skeleton\" role=\"status\" live:loading.show=\"refresh\" hidden>",
+        "<span class=\"sn-skeleton-lines\" aria-hidden=\"true\" data-sn-lines=\"2\">",
+        // FDB-006: native progress, a value only when determinate, a label and a readout.
+        "<label class=\"sn-progress-label\" for=\"upload\">Upload</label>",
+        "<progress class=\"sn-progress-bar\" id=\"upload\" max=\"100\" value=\"0\"></progress>",
+        "<output class=\"sn-progress-readout\" for=\"upload\">0 of 100</output>",
+        "<progress class=\"sn-progress-bar\" id=\"indexing\" max=\"100\" ></progress>",
+        "<output class=\"sn-progress-readout\" for=\"indexing\">Working</output>",
+        // FDB-003: the reason is server state.
+        "<section class=\"sn-empty-state\" id=\"inbox\" data-sn-reason=\"empty\" aria-labelledby=\"inbox-title\">",
+        // FDB-004: one polite status region, empty until an outcome arrives.
+        "<div class=\"sn-toast-list\" id=\"toasts\" role=\"status\" aria-live=\"polite\" aria-label=\"Notifications\"></div>",
+        "<link rel=\"stylesheet\" href=\"/suprnova-ui/toast/toast.css\">",
+        "<script type=\"module\" src=\"/suprnova-ui/toast/toast.js\"></script>",
+    ] {
+        assert!(html.contains(needle), "missing {needle} in {html}");
+    }
+    assert!(
+        !html.contains("id=\"failure\""),
+        "no failure before one happens"
+    );
+    assert!(
+        !html.contains(" style="),
+        "no shipped view carries a style attribute"
+    );
+
+    // A failed save renders the persistent alert and the error toast together.
+    let snapshot = decoded_snapshot(gallery);
+    let revision = snapshot_revision(&snapshot);
+    let reply = send(
+        app.addr,
+        action_request(
+            &app,
+            ActionSpec {
+                component: "app.feedback-gallery",
+                document_key: "feedback-gallery",
+                snapshot,
+                seed: false,
+                base_revision: &revision,
+                operations: invoke("fail"),
+                model_proposals: Value::Object(Default::default()),
+                idempotency_key: &idempotency(1),
+            },
+            Some(&session),
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let accepted = reply.json();
+    assert_eq!(accepted["outcome"], "accepted", "{accepted}");
+    let rendered = accepted["render"]["html"].as_str().expect("a render");
+    assert!(
+        rendered.contains(
+            "<div class=\"sn-alert\" id=\"failure\" data-sn-variant=\"error\" role=\"alert\">"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("<div class=\"sn-toast\" data-sn-variant=\"error\" data-sn-duration=\"6000\" live:key=\"toast-1\" data-suprnova-live-key=\"toast-1\" live:preserve.self>"),
+        "{rendered}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_empty_state_takes_its_reason_from_the_document_and_offers_no_action_without_permission()
+ {
+    let app = setup_app(6).await;
+    let session = seed_session(&app).await;
+    for (reason, title, action) in [
+        ("empty", "Nothing here yet", Some("Create the first item")),
+        ("no-results", "No results", Some("Clear filters")),
+        ("no-permission", "Nothing to show", None),
+        ("disconnected", "Disconnected", Some("Retry")),
+    ] {
+        let reply = get(
+            &app,
+            &format!("/live/feedback?reason={reason}"),
+            Some(&session),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{reason}: {}", reply.text());
+        let html = reply.text();
+        let start = html
+            .find("<section class=\"sn-empty-state\"")
+            .unwrap_or_else(|| panic!("{reason}: no empty state in {html}"));
+        let end = html[start..].find("</section>").expect("closed") + start;
+        let empty = &html[start..end];
+        assert!(
+            empty.contains(&format!("data-sn-reason=\"{reason}\"")),
+            "{empty}"
+        );
+        assert!(empty.contains(title), "{reason}: {empty}");
+        match action {
+            Some(text) => assert!(empty.contains(text), "{reason}: {empty}"),
+            None => assert!(
+                !empty.contains("<button"),
+                "{reason}: an action the principal cannot take: {empty}"
+            ),
+        }
+    }
+    // An unknown reason is not echoed: the gallery falls back to `empty`.
+    let reply = get(&app, "/live/feedback?reason=%3Cscript%3E", Some(&session)).await;
+    let html = reply.text();
+    assert!(html.contains("data-sn-reason=\"empty\""), "{html}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_flash_region_shows_a_notice_once_after_the_redirect() {
+    let app = setup_app(6).await;
+    let session = seed_session(&app).await;
+
+    let reply = get(&app, "/live/feedback/notice", Some(&session)).await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.text());
+    assert_eq!(reply.header("location"), Some("/live/feedback"));
+
+    let reply = get(&app, "/live/feedback", Some(&session)).await;
+    let html = reply.text();
+    assert!(
+        html.contains(
+            "<div class=\"sn-flash\" data-sn-variant=\"success\">Your changes were saved</div>"
+        ),
+        "{html}"
+    );
+    let reply = get(&app, "/live/feedback", Some(&session)).await;
+    let html = reply.text();
+    assert!(
+        !html.contains("class=\"sn-flash\""),
+        "the flash was consumed: {html}"
+    );
+    assert!(
+        html.contains(
+            "<div class=\"sn-flash-region\" id=\"flash\" role=\"status\" aria-label=\"Notices\">"
+        ),
+        "{html}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_navigation_gallery_keeps_route_semantics_and_takes_current_from_the_server() {
+    let app = setup_app(6).await;
+    let session = seed_session(&app).await;
+
+    let reply = get(&app, "/live/navigation", Some(&session)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let html = reply.text();
+    assert!(html.contains("<h1>Navigation gallery</h1>"), "{html}");
+    let gallery = island_tag(&html, "navigation-gallery");
+    assert_eq!(
+        attribute(gallery, "data-suprnova-live-snapshot-kind"),
+        "instance"
+    );
+    for needle in [
+        "<a class=\"sn-header-link\" href=\"/live/navigation\" aria-current=\"page\">Navigation</a>",
+        "<a class=\"sn-header-link\" href=\"/live\">Dashboard</a>",
+        "<details class=\"sn-sidebar-group\" live:key=\"sidebar-library\" data-suprnova-live-key=\"sidebar-library\" live:preserve.self open>",
+        "<details class=\"sn-sidebar-group\" live:key=\"sidebar-account\" data-suprnova-live-key=\"sidebar-account\" live:preserve.self>",
+        "<a class=\"sn-sidebar-link\" href=\"/live/navigation\" aria-current=\"page\">Navigation</a>",
+        "<li class=\"sn-breadcrumb\" aria-current=\"page\">Navigation</li>",
+        "<sn-tabs class=\"sn-tabs\" id=\"local-tabs\" data-sn-mode=\"local\" data-sn-label=\"Details\">",
+        "<div class=\"sn-tablist\" role=\"tablist\" aria-label=\"Details\">",
+        "<button class=\"sn-tab\" type=\"button\" role=\"tab\" id=\"tab-summary\" aria-controls=\"panel-summary\" aria-selected=\"true\" live:key=\"tab-summary\"",
+        "<div class=\"sn-tab-panel\" role=\"tabpanel\" id=\"panel-history\" aria-labelledby=\"tab-history\" tabindex=\"0\" hidden live:key=\"panel-history\"",
+        "<nav class=\"sn-tabs\" id=\"route-tabs\" data-sn-mode=\"route\" aria-label=\"Sections\">",
+        "<a class=\"sn-tab\" href=\"/live/navigation\" aria-current=\"page\">Navigation</a>",
+        "<a class=\"sn-page\" href=\"/live/navigation?page=2\">2</a>",
+        "<a class=\"sn-page\" href=\"/live/navigation?page=1\" aria-current=\"page\">1</a>",
+        "<span class=\"sn-page\" aria-disabled=\"true\">Previous</span>",
+        "<button class=\"sn-page\" type=\"button\" live:click=\"previous_page\" live:loading.disabled=\"previous_page\" live:loading.busy=\"previous_page\" disabled>Previous</button>",
+        "<button class=\"sn-page\" type=\"button\" live:click=\"next_page\" live:loading.disabled=\"next_page\" live:loading.busy=\"next_page\">Next</button>",
+        "<span class=\"sn-page-position\">Page 1 of 3</span>",
+        "<li class=\"sn-feed-item\" live:key=\"row-1\" data-suprnova-live-key=\"row-1\">Row 1</li>",
+        "<button class=\"sn-load-more\" type=\"button\" live:click=\"load_more\"",
+        "<footer class=\"sn-footer\" id=\"site-footer\">",
+        "<script type=\"module\" src=\"/suprnova-ui/tabs/tabs.js\"></script>",
+    ] {
+        assert!(html.contains(needle), "missing {needle} in {html}");
+    }
+    // NAV-001: anchors navigate, buttons act.
+    for tag in html
+        .split('<')
+        .filter(|tag| tag.starts_with("a ") || tag.starts_with("button "))
+    {
+        let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
+        if tag.starts_with("a ") {
+            assert!(
+                tag.contains(" href=\""),
+                "an anchor without a destination: <{tag}>"
+            );
+            assert!(
+                !tag.contains(" live:"),
+                "an anchor performs an action: <{tag}>"
+            );
+        } else {
+            assert!(!tag.contains(" href="), "a button navigates: <{tag}>");
+        }
+    }
+    assert!(
+        !html.contains(" style="),
+        "no shipped view carries a style attribute"
+    );
+
+    // The page query mounts onto that page.
+    let reply = get(&app, "/live/navigation?page=3", Some(&session)).await;
+    let html = reply.text();
+    assert!(html.contains("<span data-page=\"3\">3</span>"), "{html}");
+    assert!(
+        html.contains("live:loading.busy=\"next_page\" disabled>Next</button>"),
+        "{html}"
+    );
+    let reply = get(&app, "/live/navigation?page=99", Some(&session)).await;
+    assert!(
+        reply.text().contains("<span data-page=\"3\">3</span>"),
+        "clamped"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_pagination_reflects_the_page_and_load_more_appends_keyed_rows() {
+    let app = setup_app(6).await;
+    let session = seed_session(&app).await;
+    let html = get(&app, "/live/navigation", Some(&session)).await.text();
+    let gallery = island_tag(&html, "navigation-gallery");
+    let mut snapshot = decoded_snapshot(gallery);
+    let mut sequence = 0;
+    let mut run = |action: &'static str, snapshot: Value| {
+        sequence += 1;
+        let idempotency_key = idempotency(sequence);
+        let revision = snapshot_revision(&snapshot);
+        let app = &app;
+        let session = &session;
+        async move {
+            let reply = send(
+                app.addr,
+                action_request(
+                    app,
+                    ActionSpec {
+                        component: "app.navigation-gallery",
+                        document_key: "navigation-gallery",
+                        snapshot,
+                        seed: false,
+                        base_revision: &revision,
+                        operations: invoke(action),
+                        model_proposals: Value::Object(Default::default()),
+                        idempotency_key: &idempotency_key,
+                    },
+                    Some(session),
+                    true,
+                ),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::OK, "{action}: {}", reply.text());
+            let accepted = reply.json();
+            assert_eq!(accepted["outcome"], "accepted", "{action}: {accepted}");
+            accepted
+        }
+    };
+
+    // NAV-003: the accepted result reflects the page into the same route's query.
+    let accepted = run("next_page", snapshot.clone()).await;
+    let rendered = accepted["render"]["html"].as_str().expect("a render");
+    assert!(
+        rendered.contains("<span data-page=\"2\">2</span>"),
+        "{rendered}"
+    );
+    assert_eq!(
+        accepted["url_intent"],
+        serde_json::json!({ "kind": "reflected", "target": "/live/navigation?page=2" }),
+        "{accepted}"
+    );
+    snapshot = accepted["snapshot"].clone();
+    let accepted = run("previous_page", snapshot).await;
+    assert_eq!(
+        accepted["url_intent"],
+        serde_json::json!({ "kind": "reflected", "target": "/live/navigation?page=1" }),
+        "{accepted}"
+    );
+
+    // NAV-006: every row stays, three more arrive, and the control leaves on the last page.
+    let html = get(&app, "/live/navigation", Some(&session)).await.text();
+    let mut snapshot = decoded_snapshot(island_tag(&html, "navigation-gallery"));
+    for expected in [6, 9] {
+        let accepted = run("load_more", snapshot.clone()).await;
+        let rendered = accepted["render"]["html"].as_str().expect("a render");
+        assert_eq!(
+            rendered.matches("class=\"sn-feed-item\"").count(),
+            expected,
+            "{rendered}"
+        );
+        assert!(rendered.contains("live:key=\"row-1\""), "{rendered}");
+        assert_eq!(
+            rendered.contains("class=\"sn-load-more\""),
+            expected < 9,
+            "{rendered}"
+        );
+        snapshot = accepted["snapshot"].clone();
+    }
+}

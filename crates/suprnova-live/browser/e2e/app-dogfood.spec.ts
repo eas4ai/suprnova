@@ -269,3 +269,112 @@ test("an open keyed overlay survives a morph that did not touch it, and focus fa
   await expect(page.locator("dialog#details-sheet")).toBeHidden();
   await expect(page.locator("sn-sheet")).toBeFocused();
 });
+
+test("a toast announces once from the status region without moving focus, and a critical error also renders as an alert", async ({
+  page,
+}) => {
+  await page.goto(`${APP_ORIGIN}/live/demo-login`);
+  await page.goto(`${APP_ORIGIN}/live/feedback`);
+  await expect(page.getByRole("heading", { name: "Feedback gallery" })).toBeVisible();
+  await expectConnected(page, 1);
+  expect(await page.evaluate(() => customElements.get("sn-toast-region") !== undefined)).toBe(true);
+  const region = page.locator("#toasts");
+  await expect(region).toHaveAttribute("role", "status");
+  await expect(region).toHaveAttribute("aria-live", "polite");
+
+  const save = page.getByRole("button", { name: "Save" });
+  await save.click();
+  await expect(region.locator(".sn-toast")).toHaveCount(1);
+  await expect(region.getByText("Saved 1 times", { exact: true })).toBeVisible();
+  await expect(save).toBeFocused();
+  await expect(page.locator("[data-saved]")).toHaveAttribute("data-saved", "1");
+
+  // A critical error is never only a toast: the persistent alert renders too.
+  await page.getByRole("button", { name: "Fail" }).click();
+  const failure = page.locator("#failure");
+  await expect(failure).toBeVisible();
+  await expect(failure).toHaveAttribute("role", "alert");
+  await expect(region.locator(".sn-toast")).toHaveCount(2);
+
+  // Dismissal is the browser's, and a morph keeps a dismissed toast dismissed.
+  const first = region.locator(".sn-toast").first();
+  await first.getByRole("button", { name: "Dismiss" }).click();
+  await expect(first).toBeHidden();
+  await page.getByRole("button", { name: "Advance" }).click();
+  await expect(page.locator("#upload")).toHaveAttribute("value", "25");
+  await expect(first).toBeHidden();
+  await expect(region.locator(".sn-toast").nth(1)).toBeVisible();
+});
+
+test("the flash region shows an outcome once after a redirect and nothing on the next document", async ({
+  page,
+}) => {
+  await page.goto(`${APP_ORIGIN}/live/demo-login`);
+  await page.goto(`${APP_ORIGIN}/live/feedback/notice`);
+  await expect(page).toHaveURL(`${APP_ORIGIN}/live/feedback`);
+  await expect(page.locator("#flash .sn-flash")).toHaveText("Your changes were saved");
+  await page.reload();
+  await expect(page.locator("#flash .sn-flash")).toHaveCount(0);
+});
+
+test("route pagination links canonical pages, and Live pagination reflects the page into the query without a history entry", async ({
+  page,
+}) => {
+  await page.goto(`${APP_ORIGIN}/live/demo-login`);
+  await page.goto(`${APP_ORIGIN}/live/navigation`);
+  await expect(page.getByRole("heading", { name: "Navigation gallery" })).toBeVisible();
+  await expectConnected(page, 1);
+
+  const routeLinks = page.locator("#route-pages a");
+  await expect(routeLinks).toHaveCount(4);
+  await expect(routeLinks.nth(1)).toHaveAttribute("href", "/live/navigation?page=2");
+  await expect(page.locator('#route-pages [aria-current="page"]')).toHaveText("1");
+
+  const length = await page.evaluate(() => history.length);
+  await page.locator("#live-pages").getByRole("button", { name: "Next" }).click();
+  await expect(page.locator("[data-page]")).toHaveAttribute("data-page", "2");
+  await expect(page).toHaveURL(`${APP_ORIGIN}/live/navigation?page=2`);
+  expect(await page.evaluate(() => history.length)).toBe(length);
+
+  // The reflected query reloads onto the same page.
+  await page.reload();
+  await expect(page.locator("[data-page]")).toHaveAttribute("data-page", "2");
+  await page.locator("#live-pages").getByRole("button", { name: "Previous" }).click();
+  await expect(page).toHaveURL(`${APP_ORIGIN}/live/navigation?page=1`);
+  expect(await page.evaluate(() => history.length)).toBe(length);
+
+  // Local tabs change without a request; the sidebar group keeps its open state across a morph.
+  const requests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/__live/action") requests.push(request.method());
+  });
+  await page.getByRole("tab", { name: "History" }).click();
+  await expect(page.getByRole("tab", { name: "History" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#panel-history")).toBeVisible();
+  await expect(page.locator("#panel-summary")).toBeHidden();
+  expect(requests).toEqual([]);
+
+  // Load more appends keyed rows and keeps the ones already there; the control leaves on the last page.
+  await expect(page.locator("#feed li")).toHaveCount(3);
+  // A property on the node, not an attribute: the morph syncs attributes from the
+  // server render, so only a node the morph kept still carries the witness.
+  const firstRow = page.locator("#feed li").first();
+  const before = await firstRow.evaluate((node) => {
+    (node as HTMLElement & { witness?: string }).witness = "kept";
+    return node.textContent;
+  });
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.locator("#feed li")).toHaveCount(6);
+  expect(
+    await page
+      .locator("#feed li")
+      .first()
+      .evaluate((node) => (node as HTMLElement & { witness?: string }).witness),
+  ).toBe("kept");
+  expect(await page.locator("#feed li").first().textContent()).toBe(before);
+  await expect(page.getByRole("tab", { name: "History" })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.locator("#feed li")).toHaveCount(9);
+  await expect(page.getByRole("button", { name: "Load more" })).toHaveCount(0);
+  expect(requests).toEqual(["POST", "POST"]);
+});

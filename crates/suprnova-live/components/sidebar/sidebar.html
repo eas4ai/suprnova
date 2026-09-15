@@ -1,0 +1,20 @@
+{#
+  suprnova.sidebar - section navigation with collapsible groups (NAV-001,
+  NAV-004). Each group is a native details element, keyed and preserved,
+  so its open state is the browser's and survives a morph; the current
+  link carries aria-current from the server-bound `current` value.
+#}
+{% macro sidebar(id, label="Sections") %}
+<nav class="sn-sidebar" id="{{ id }}" aria-label="{{ label }}">{{ caller() }}</nav>
+{% endmacro %}
+
+{% macro sidebar_group(key, title, open=true) %}
+<details class="sn-sidebar-group" live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self{% if open %} open{% endif %}>
+<summary class="sn-sidebar-summary">{{ title }}</summary>
+<ul class="sn-sidebar-list">{{ caller() }}</ul>
+</details>
+{% endmacro %}
+
+{% macro sidebar_link(href, text, current=false) %}
+<li class="sn-sidebar-item"><a class="sn-sidebar-link" href="{{ href }}"{% if current %} aria-current="page"{% endif %}>{{ text }}</a></li>
+{% endmacro %}
