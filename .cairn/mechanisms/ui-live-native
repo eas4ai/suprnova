@@ -1,0 +1,9 @@
+command: node .cairn/tools/ui-live-native.mjs crates/suprnova-live/components app/templates/live/live-native-gallery.html
+results: per-requirement
+inputs:
+  - .cairn/tools/ui-live-native.mjs
+  - crates/suprnova-live/components/
+  - app/templates/live/
+requirements:
+  - FORM-006
+  - FORM-007

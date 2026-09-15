@@ -1,0 +1,6 @@
+command: sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/combobox-stale-results.test.ts'
+inputs:
+  - crates/suprnova-live/browser/tests/combobox-stale-results.test.ts
+  - crates/suprnova-live/components/combobox/
+requirements:
+  - FORM-008

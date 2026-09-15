@@ -1,0 +1,9 @@
+command: sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/live-feed-status.test.ts'
+inputs:
+  - crates/suprnova-live/browser/tests/live-feed-status.test.ts
+  - crates/suprnova-live/browser/src/feedback/
+  - crates/suprnova-live/browser/src/islands/
+  - crates/suprnova-live/components/live-feed/
+  - crates/suprnova-live/components/notification-bell/
+requirements:
+  - FDB-005

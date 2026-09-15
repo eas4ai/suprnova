@@ -14,3 +14,5 @@ requirements:
   - FORM-004
   - FDB-003
   - DATA-005
+  - FORM-005
+  - NAV-005
