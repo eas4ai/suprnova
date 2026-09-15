@@ -632,7 +632,8 @@ UX flow:
   state change into it, and the stylesheets color the degraded, reconnecting
   and closed states apart from current, so a retired or reconnecting stream
   never presents itself as current. A morph keeps what the runtime projected:
-  while the island root carries `data-live-stream-state`, the morph leaves
+  while the island root carries `data-live-stream-state` and the replacement
+  declares the same stream, the morph leaves
   that attribute, `aria-busy` and `data-live-stream-motion` on the root and
   the text and live-region attributes of every `data-live-stream-status`
   element in place, so an action's re-render never shows the disconnected

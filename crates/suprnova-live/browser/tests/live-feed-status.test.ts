@@ -218,12 +218,13 @@ describe("FDB-005: a morph keeps the runtime's stream status", () => {
     } as unknown as MorphPlan;
   }
 
-  function statusPair(projected: boolean) {
-    const fixture = morphFixture(
-      projected
-        ? { currentOverrides: { "aria-busy": "false", "data-live-stream-state": "current" } }
-        : {},
-    );
+  function statusPair(projected: boolean, replacementStream: string | null = "activity") {
+    const fixture = morphFixture({
+      currentOverrides: projected
+        ? { "aria-busy": "false", "data-live-stream-state": "current", "live:stream": "activity" }
+        : { "live:stream": "activity" },
+      replacementOverrides: replacementStream === null ? {} : { "live:stream": replacementStream },
+    });
     const current = fakeElement(
       fixture.currentDocument,
       "p",
@@ -270,6 +271,27 @@ describe("FDB-005: a morph keeps the runtime's stream status", () => {
     expect(
       skipsNodeMorph(morphPlan, current as unknown as Node, replacement as unknown as Node),
     ).toBe(false);
+  });
+
+  it("hands the status back to the server when the replacement drops or changes the stream", () => {
+    for (const replacementStream of [null, "orders"]) {
+      const {
+        current,
+        fixture,
+        plan: morphPlan,
+        replacement,
+      } = statusPair(true, replacementStream);
+      const root = asElement(fixture.currentRoot);
+      expect(preservesStreamStatus(morphPlan, "data-live-stream-state", root)).toBe(false);
+      expect(preservesStreamStatus(morphPlan, "role", asElement(current))).toBe(false);
+      expect(
+        skipsNodeMorph(
+          morphPlan,
+          current.childNodes[0] as unknown as Node,
+          replacement.childNodes[0] as unknown as Node,
+        ),
+      ).toBe(false);
+    }
   });
 
   it("lets the server's text through when no stream is projected", () => {
