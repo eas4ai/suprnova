@@ -23,6 +23,7 @@ Falsifier: a shipped alert variant differs from its siblings only in color
 tokens.
 Mechanism: `.cairn/mechanisms/ui-live-check` (role and text presence) and
 the token stylesheet check for a non-color cue per variant.
+Status: Agreed 2026-09-14
 
 [FDB-002] Loading presentation MUST represent real queued or loading work.
 A spinner or skeleton MUST be bound through the `live:loading` state
@@ -34,6 +35,7 @@ Falsifier: a spinner or skeleton renders with no bound loading target and
 no lazy island, or appears before the runtime's delay.
 Mechanism: the feedback tool over the shipped views; a browserless
 harness case for the threshold.
+Status: Agreed 2026-09-14
 
 [FDB-003] The empty state MUST take its reason (empty, no results, no
 permission, disconnected) from server-rendered state. The empty state
@@ -41,6 +43,7 @@ MUST offer a next action only when one is available.
 Falsifier: a shipped empty state offers a create action the principal
 cannot perform.
 Mechanism: a dogfood document test per reason.
+Status: Agreed 2026-09-14
 
 ## Behavioral tier
 
@@ -51,6 +54,7 @@ Falsifier: a critical error is presented only as a toast, or a toast
 moves focus.
 Mechanism: a browserless harness case; `.cairn/mechanisms/ui-live-check`
 for the live-region attributes.
+Status: Agreed 2026-09-14
 
 [FDB-005] The live feed and notification bell MUST render a degraded
 stream state honestly when the stream is retired or reconnecting.
@@ -69,3 +73,4 @@ an element other than `progress`, an indeterminate instance carries a
 `value`, or an instance renders without a label.
 Mechanism: the feedback tool over the shipped views;
 `.cairn/mechanisms/ui-live-check`.
+Status: Agreed 2026-09-14

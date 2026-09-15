@@ -1,0 +1,6 @@
+command: sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/load-more-continuity.test.ts'
+inputs:
+  - crates/suprnova-live/browser/src/morph/
+  - crates/suprnova-live/browser/tests/
+requirements:
+  - NAV-006

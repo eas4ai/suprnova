@@ -1,0 +1,10 @@
+command: node .cairn/tools/ui-feedback.mjs crates/suprnova-live/components app/templates/live/feedback-gallery.html
+results: per-requirement
+inputs:
+  - .cairn/tools/ui-feedback.mjs
+  - crates/suprnova-live/components/
+  - app/templates/live/
+requirements:
+  - FDB-001
+  - FDB-002
+  - FDB-006

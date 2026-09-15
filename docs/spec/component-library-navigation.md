@@ -27,6 +27,7 @@ Falsifier: a shipped navigation item performs a Live action from an
 anchor, or navigates from a button.
 Mechanism: `.cairn/mechanisms/ui-live-check` and a grep over shipped
 views for `live:click` on anchors.
+Status: Agreed 2026-09-14
 
 [NAV-002] The tabs component MUST require an explicit mode: local panels
 with tablist semantics and local signals, or route tabs as anchors with
@@ -35,6 +36,7 @@ Falsifier: a tabs instance renders without a declared mode, or a local
 tab makes a server request on change.
 Mechanism: `.cairn/mechanisms/ui-live-check`; a browserless harness case
 asserting no request on a local tab change.
+Status: Agreed 2026-09-14
 
 [NAV-003] The pagination component MUST render canonical page URLs in
 route mode. In Live mode, the pagination component MUST reflect only the
@@ -43,6 +45,7 @@ history entry.
 Falsifier: a Live-mode page change creates a history entry, or a
 route-mode page link lacks a canonical URL.
 Mechanism: one Playwright case per mode.
+Status: Agreed 2026-09-14
 
 [NAV-004] The sidebar and header bar MUST take current-route state from
 server authority. The sidebar and header bar MUST hold only collapse
@@ -51,6 +54,7 @@ Falsifier: a shipped navigation component computes "current" in the
 browser.
 Mechanism: a grep over shipped views; the dogfood document test asserts
 `aria-current` in the canonical document.
+Status: Agreed 2026-09-14
 
 ## Behavioral tier
 
@@ -70,3 +74,4 @@ replaced by the append morph, or the control stays active after the last
 page.
 Mechanism: the navigation tool over the shipped views; a morph fixture
 under `crates/suprnova-live/browser/tests/`.
+Status: Agreed 2026-09-14

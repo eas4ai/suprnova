@@ -1,0 +1,10 @@
+command: node .cairn/tools/ui-navigation.mjs crates/suprnova-live/components app/templates/live/navigation-gallery.html
+results: per-requirement
+inputs:
+  - .cairn/tools/ui-navigation.mjs
+  - crates/suprnova-live/components/
+  - app/templates/live/
+requirements:
+  - NAV-001
+  - NAV-002
+  - NAV-004
