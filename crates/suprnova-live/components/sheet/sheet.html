@@ -1,0 +1,24 @@
+{#
+  suprnova.sheet - a native modal sheet (OVL-001). sheet_trigger opens it
+  and sheet_close closes it through the sn-sheet element; the dialog
+  element owns the open state, focus containment and Escape, and focus
+  returns to the trigger on close (OVL-005). Keyed and preserved across a
+  compatible morph (OVL-006). The host carries tabindex="-1" so it can take
+  focus when the trigger has left the document.
+#}
+{% macro sheet_trigger(target, text, variant="primary") %}
+<button class="sn-button sn-sheet-trigger" type="button" data-sn-variant="{{ variant }}" data-sn-sheet-open="{{ target }}">{{ text }}</button>
+{% endmacro %}
+
+{% macro sheet(id, key, title) %}
+<sn-sheet class="sn-sheet-host" tabindex="-1">
+<dialog class="sn-sheet" id="{{ id }}" aria-labelledby="{{ id }}-title" closedby="any" live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self>
+<h2 class="sn-sheet-title" id="{{ id }}-title">{{ title }}</h2>
+<div class="sn-sheet-body">{{ caller() }}</div>
+</dialog>
+</sn-sheet>
+{% endmacro %}
+
+{% macro sheet_close(target, text="Close", variant="secondary") %}
+<button class="sn-button" type="button" data-sn-variant="{{ variant }}" data-sn-sheet-close="{{ target }}">{{ text }}</button>
+{% endmacro %}

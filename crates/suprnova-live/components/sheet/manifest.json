@@ -1,0 +1,13 @@
+{
+  "name": "suprnova.sheet",
+  "version": 1,
+  "root": "suprnova-ui/sheet",
+  "files": [
+    "sheet.html",
+    "sheet.css",
+    "sheet.js"
+  ],
+  "elements": [
+    "sn-sheet"
+  ]
+}

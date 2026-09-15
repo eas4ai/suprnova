@@ -1,0 +1,14 @@
+{#
+  suprnova.popover - a native popover (OVL-001): the popover attribute owns
+  the open state and light dismiss, the trigger is a popovertarget
+  invoker, and the browser positions the panel against its invoker where
+  CSS anchor positioning exists (the invoker is the implicit anchor) and
+  centres it otherwise. Keyed and preserved across morphs (OVL-006).
+#}
+{% macro popover_trigger(target, text, variant="secondary") %}
+<button class="sn-button sn-popover-trigger" type="button" data-sn-variant="{{ variant }}" popovertarget="{{ target }}">{{ text }}</button>
+{% endmacro %}
+
+{% macro popover(id, key, label) %}
+<div class="sn-popover" id="{{ id }}" popover aria-label="{{ label }}" live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self>{{ caller() }}</div>
+{% endmacro %}

@@ -1,0 +1,22 @@
+{#
+  suprnova.dropdown-menu - a single-level list of choices in a native
+  popover (OVL-001, OVL-003). Navigation items are real anchors; action
+  items are buttons that invoke a registered action and hide the menu.
+  The list carries no menu role: it is an ordinary list of links and
+  buttons, so no script owns its keyboard behaviour.
+#}
+{% macro menu_trigger(target, text, variant="secondary") %}
+<button class="sn-button sn-menu-trigger" type="button" data-sn-variant="{{ variant }}" popovertarget="{{ target }}">{{ text }}</button>
+{% endmacro %}
+
+{% macro menu(id, key, label) %}
+<div class="sn-menu" id="{{ id }}" popover aria-label="{{ label }}" live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self><ul class="sn-menu-list">{{ caller() }}</ul></div>
+{% endmacro %}
+
+{% macro menu_link(href, text) %}
+<li class="sn-menu-item"><a class="sn-menu-link" href="{{ href }}">{{ text }}</a></li>
+{% endmacro %}
+
+{% macro menu_action(target, action, text) %}
+<li class="sn-menu-item"><button class="sn-menu-action" type="button" live:click="{{ action }}" popovertarget="{{ target }}" popovertargetaction="hide">{{ text }}</button></li>
+{% endmacro %}

@@ -532,6 +532,42 @@ export function preservationBody(revision = "7") {
     }`;
 }
 
+export function overlaySpikeBody(revision = "7") {
+  const notes = revision === "7" ? 1 : 2;
+  return `<button id="spike-action" live:click.prevent="save">Morph</button>
+    <button id="spike-popover-trigger" type="button" popovertarget="spike-popover">Hint</button>
+    <div id="spike-popover" popover data-suprnova-live-key="spike-popover" live:preserve.self><p id="spike-popover-text">Hint ${revision}</p><button id="spike-popover-action" live:click.prevent="save">Morph from inside</button></div>
+    <details id="spike-notes" data-suprnova-live-key="spike-notes" live:preserve.self>
+      <summary>Notes</summary>
+      <p>Notes: <span id="spike-note-count">${notes}</span></p>
+    </details>
+    <details id="spike-unkeyed">
+      <summary>Unkeyed</summary>
+      <p>Server-owned open state ${revision}</p>
+    </details>
+    <details id="spike-faq-a" name="spike-faq" open><summary>A</summary><p>First</p></details>
+    <details id="spike-faq-b" name="spike-faq"><summary>B</summary><p>Second</p></details>
+    <button id="spike-dialog-trigger" type="button">Open dialog</button>
+    <dialog id="spike-dialog" aria-labelledby="spike-dialog-title" data-suprnova-live-key="spike-dialog" live:preserve.self>
+      <h2 id="spike-dialog-title">Dialog ${revision}</h2>
+      <button id="spike-dialog-close" type="button">Close</button>
+    </dialog>`;
+}
+
+function overlaySpikeBoot() {
+  return `<script type="module">
+    import { boot } from "/assets/suprnova-live.esm.js";
+    boot();
+    const dialog = document.getElementById("spike-dialog");
+    let invoker = null;
+    document.addEventListener("click", (event) => {
+      if (event.target.id === "spike-dialog-trigger") { invoker = event.target; dialog.showModal(); }
+      if (event.target.id === "spike-dialog-close") dialog.close();
+    });
+    dialog.addEventListener("close", () => { if (invoker && invoker.isConnected) invoker.focus(); });
+  </script>`;
+}
+
 function continuityBoot() {
   return `<script type="module">
     import { Application, Controller } from "/test-vendor/stimulus.js";
@@ -1490,6 +1526,16 @@ export const scenarios = Object.freeze({
       })}<div id="modal-root" aria-label="Modal destination"></div>`,
       preservationBoot(),
       { endpoint: "/live?mode=preservation" },
+    ),
+  },
+  overlaySpike: {
+    html: document(
+      island({
+        protocolMinimum: "2",
+        body: overlaySpikeBody(),
+      }),
+      overlaySpikeBoot(),
+      { endpoint: "/live?mode=overlay-spike" },
     ),
   },
   continuity: {

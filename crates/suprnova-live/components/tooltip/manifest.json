@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.tooltip",
+  "version": 1,
+  "root": "suprnova-ui/tooltip",
+  "files": [
+    "tooltip.html",
+    "tooltip.css"
+  ],
+  "elements": []
+}
