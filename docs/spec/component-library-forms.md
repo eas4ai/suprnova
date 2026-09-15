@@ -63,6 +63,7 @@ Falsifier: the widget performs a transfer outside the `__live/upload`
 endpoint, or claims durable save before the finalizing action runs.
 Mechanism: `app/tests/live_uploads.rs`-style end-to-end test through
 `handle_request`, plus the browserless harness.
+Status: Agreed 2026-09-15
 
 ## Custom-element tier
 
@@ -72,6 +73,7 @@ enhancement the control works without.
 Falsifier: with the element helper absent, the one-time code cannot be
 entered and submitted.
 Mechanism: one browserless harness case with the helper disabled.
+Status: Agreed 2026-09-15
 
 [FORM-007] The date picker MUST accept only a date in its input. Its
 year, month, and day strips MUST be native radio groups inside CSS
@@ -83,6 +85,7 @@ Playwright case per qualified engine.
 Reading: Live spec 21 carries the 2026-09-13 revision recording this
 design; its locale, timezone, parsing, and constraint requirements still
 apply.
+Status: Agreed 2026-09-15
 
 [FORM-008] The combobox MUST implement the accessible combobox pattern
 (input, popup, listbox, option identity, active descendant, expanded
@@ -94,3 +97,4 @@ Mechanism: browserless harness cases for the keyboard map and stale
 suppression; Playwright per engine.
 Reading: tag/token input is out of the built-in set (Live spec 21,
 revision of 2026-09-13); the combobox ships single-value.
+Status: Agreed 2026-09-15

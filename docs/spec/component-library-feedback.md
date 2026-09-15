@@ -62,6 +62,7 @@ Falsifier: a retired transport leaves the feed presenting itself as live.
 Mechanism: the async-updates fixtures under
 `crates/suprnova-live/browser/tests/` extended with the feed component;
 an `app/tests/` end-to-end case.
+Status: Agreed 2026-09-15
 
 [FDB-006] The progress component MUST render a native `progress` element
 with `max` and `value` for determinate work and no `value` for

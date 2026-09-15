@@ -63,6 +63,7 @@ The account menu MUST document that classification.
 Falsifier: the account menu's markup appears in a shared cached shell.
 Mechanism: the dogfood stitched-dashboard test extended with the account
 menu.
+Status: Agreed 2026-09-15
 
 [NAV-006] The load-more control MUST be a button bound to a registered
 action that appends to a keyed list. Every item already present MUST keep
