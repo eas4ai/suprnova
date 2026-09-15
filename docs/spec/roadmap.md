@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: component-library-live-native
+Current: session-request-serialization
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -71,11 +71,17 @@ components in waves, the advanced components last, the datatable closing.
    card, image and aspect ratio, scroll area, separator, badge, avatar,
    list group, description list, stat card; the chart through
    `charts-rs`; the datatable last (`component-library-data-display.md`).
-7. component-library-live-native - upload widget, live feed, notification
-   bell, account menu, server-rendered chart, input OTP, date picker,
-   combobox; the custom-element enhancement layer lands here
-   (`component-library-forms.md` custom-element tier, `-feedback.md`,
-   `-navigation.md`, `-data-display.md` behavioral tiers).
+7. component-library-live-native - DONE 2026-09-15 (built between
+   `9c9883c0` and `dfeb91bb`; FORM-005 to FORM-008, FDB-005 and NAV-005
+   agreed on escalation `form-005` under the developer's 2026-09-14 ruling;
+   the Live gate failed four times and each cause was fixed on the tree,
+   `e1a3492a`, `824c3919`, `3478e659` with `14efccaa`, and `2dc59f5a`;
+   the review's two open findings were routed on escalation `form-008`;
+   receipts `e81fce64`, review `9300e61a`) - upload widget, live feed,
+   notification bell, account menu, input OTP, date picker, combobox; the
+   custom-element enhancement layer landed here (`component-library-forms.md`
+   custom-element tier, `-feedback.md`, `-navigation.md` behavioral tiers);
+   the server-rendered chart had landed under DATA-004 in item 6.
 8. session-request-serialization - session blocking through the cache lock
    driver, the session write race the live-native review recorded as an
    open finding and the developer routed here on escalation `form-008`
