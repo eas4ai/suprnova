@@ -1,0 +1,7 @@
+cairn: OVL-001: fail
+  reason: no collapsible component; no accordion component; no popover component; no dropdown-menu component; no dialog component; no sheet component; no drawer component
+cairn: OVL-002: fail
+  reason: no tooltip component; no gallery view at app/templates/live/overlay-gallery.html
+cairn: OVL-003: fail
+  reason: no dropdown-menu view; no gallery view at app/templates/live/overlay-gallery.html
+cairn: OVL-004: pass
