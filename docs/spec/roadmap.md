@@ -46,7 +46,11 @@ components in waves, the advanced components last, the datatable closing.
    namespaces, the checker and baseline mechanisms, and the form
    family's presentational tier (`component-library-foundations.md`,
    `component-library-forms.md`).
-4. component-library-overlays - dialog, sheet, drawer,
+4. component-library-overlays - DONE 2026-09-14 (built between
+   `e692a480` and `1efccb1d` after the developer's `ok` on escalation
+   `ovl-001`, which agreed OVL-001 to OVL-006 and raised the browser
+   baseline to the `popover` floor; receipts and review on `0ed49968`) -
+   dialog, sheet, drawer,
    single-level dropdown menu, popover, tooltip, tabs, collapsible and
    accordion; opens with the anchor-positioning and popover-continuity
    spike in the qualification host (`component-library-overlays.md`).
