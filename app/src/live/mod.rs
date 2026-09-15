@@ -25,6 +25,7 @@ use suprnova::{
     Request, Router, SlidingWindowConfig, container::App,
 };
 
+use components::account_menu::AccountMenu;
 use components::activity_feed::ActivityFeed;
 use components::avatar_uploader::AvatarUploader;
 use components::counter::Counter;
@@ -32,6 +33,7 @@ use components::data_display_gallery::DataDisplayGallery;
 use components::datatable_gallery::DatatableGallery;
 use components::feedback_gallery::FeedbackGallery;
 use components::form_gallery::FormGallery;
+use components::live_native_gallery::LiveNativeGallery;
 use components::navigation_gallery::NavigationGallery;
 use components::overlay_gallery::OverlayGallery;
 use providers::tenant::SingleTenant;
@@ -50,6 +52,10 @@ pub const FEEDBACK_NOTICE_PATH: &str = "/live/feedback/notice";
 pub const NAVIGATION_PATH: &str = "/live/navigation";
 /// The data-display gallery: every data-display component and one datatable.
 pub const DATA_DISPLAY_PATH: &str = "/live/data-display";
+/// The live-native gallery: the upload widget, the feed, the bell, the account menu and the custom-element tier.
+pub const LIVE_NATIVE_PATH: &str = "/live/live-native";
+/// Signs the principal out from the account menu and returns to the public page.
+pub const SIGN_OUT_PATH: &str = "/live/sign-out";
 /// The public document with one public seed.
 pub const PUBLIC_PATH: &str = "/live/public";
 /// The public todo listing, rendered from the ORM.
@@ -71,6 +77,8 @@ pub fn registry() -> Result<LiveRegistry, RegistryError> {
         .register::<NavigationGallery>()?
         .register::<DataDisplayGallery>()?
         .register::<DatatableGallery>()?
+        .register::<AccountMenu>()?
+        .register::<LiveNativeGallery>()?
         .build();
     Ok(registry)
 }
@@ -84,6 +92,8 @@ pub struct DashboardMounts {
     pub uploader: LiveMount<AvatarUploader>,
     /// The activity feed island.
     pub feed: LiveMount<ActivityFeed>,
+    /// The account menu island, the fourth stitch slot (NAV-005).
+    pub account: LiveMount<AccountMenu>,
 }
 
 impl DashboardMounts {
@@ -104,6 +114,11 @@ impl DashboardMounts {
                 DASHBOARD_PATH,
                 "feed",
                 "dashboard-feed",
+            )?,
+            account: LiveMount::<AccountMenu>::identity_bound(
+                DASHBOARD_PATH,
+                "account",
+                "dashboard-account",
             )?,
         })
     }
@@ -190,6 +205,33 @@ pub struct DataDisplayMounts {
     pub table: LiveMount<DatatableGallery>,
 }
 
+/// The mounts behind the live-native gallery page.
+#[derive(Clone)]
+pub struct LiveNativeMounts {
+    /// The account menu island.
+    pub menu: LiveMount<AccountMenu>,
+    /// The gallery island.
+    pub gallery: LiveMount<LiveNativeGallery>,
+}
+
+impl LiveNativeMounts {
+    /// Declares the page's islands once; the router and the handler share them.
+    pub fn declare() -> Result<Self, FrameworkError> {
+        Ok(Self {
+            menu: LiveMount::<AccountMenu>::identity_bound(
+                LIVE_NATIVE_PATH,
+                "menu",
+                "live-native-account",
+            )?,
+            gallery: LiveMount::<LiveNativeGallery>::identity_bound(
+                LIVE_NATIVE_PATH,
+                "gallery",
+                "live-native-gallery",
+            )?,
+        })
+    }
+}
+
 impl DataDisplayMounts {
     pub fn declare() -> Result<Self, FrameworkError> {
         Ok(Self {
@@ -258,6 +300,7 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     let feedback = FeedbackMounts::declare()?;
     let navigation = NavigationMounts::declare()?;
     let data_display = DataDisplayMounts::declare()?;
+    let live_native = LiveNativeMounts::declare()?;
     let public = PublicMounts::declare()?;
 
     // Optional authentication: a signed-in principal is recorded, an
@@ -293,7 +336,8 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     let router = router
         .try_live_mount(&dashboard.counter)?
         .try_live_mount(&dashboard.uploader)?
-        .try_live_mount(&dashboard.feed)?;
+        .try_live_mount(&dashboard.feed)?
+        .try_live_mount(&dashboard.account)?;
     let handler_mounts = forms.clone();
     let router: Router = router
         .get(FORMS_PATH, move |request: Request| {
@@ -352,6 +396,24 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
         .into();
     let router = router.try_live_mount(&data_display.gallery)?;
     let router = router.try_live_mount(&data_display.table)?;
+    let handler_mounts = live_native.clone();
+    let router: Router = router
+        .get(LIVE_NATIVE_PATH, move |request: Request| {
+            let mounts = handler_mounts.clone();
+            async move { pages::live_native(request, &mounts).await }
+        })
+        .middleware(AuthMiddleware::redirect_to("/login"))
+        .middleware(tenant())
+        .into();
+    let router: Router = router
+        .post(SIGN_OUT_PATH, |request: Request| async move {
+            pages::sign_out(request).await
+        })
+        .middleware(AuthMiddleware::redirect_to("/login"))
+        .middleware(tenant())
+        .into();
+    let router = router.try_live_mount(&live_native.menu)?;
+    let router = router.try_live_mount(&live_native.gallery)?;
 
     let handler_mounts = public.clone();
     let router: Router = router

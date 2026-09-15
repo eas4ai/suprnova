@@ -1,0 +1,41 @@
+{#
+  suprnova.upload - the upload widget over the shipped upload protocol
+  (FORM-005). The native file input carries live:upload for the island's
+  upload field; the progress element is the runtime's progress root and
+  receives data-live-upload-state, the bounded byte counts and the
+  announcements; cancel, retry and remove act through the runtime on the
+  opaque temporary reference. Every state name the domain knows (queued,
+  transferring, verifying, ready, finalizing, finalized, rejected, canceled,
+  expired, failed) is rendered as text and shown by CSS from the progress
+  root's state, so the widget never claims a durable save before the
+  finalizing action runs: "ready" reads as awaiting that action. The widget
+  adds no transfer path: every request the runtime makes goes to the
+  __live/upload route. Every attribute is a required parameter, so the view
+  stays flat under the checker's branch limit. Classification: varies with
+  the island that mounts it.
+#}
+{% macro upload(name, label, accept) %}
+<div class="sn-upload" data-sn-upload="{{ name }}">
+<label class="sn-upload-label" for="{{ name }}">{{ label }}</label>
+<input class="sn-upload-input" id="{{ name }}" type="file" live:upload="{{ name }}" data-suprnova-live-key="{{ name }}-input" accept="{{ accept }}">
+<progress class="sn-upload-progress" live:progress="{{ name }}" data-suprnova-live-key="{{ name }}-progress" max="100" aria-label="{{ label }} upload progress"></progress>
+<p class="sn-upload-status">
+<span class="sn-upload-state" data-sn-state="idle">No file chosen.</span>
+<span class="sn-upload-state" data-sn-state="queued">Queued.</span>
+<span class="sn-upload-state" data-sn-state="transferring">Transferring.</span>
+<span class="sn-upload-state" data-sn-state="verifying">Verifying on the server.</span>
+<span class="sn-upload-state" data-sn-state="ready">Verified. Not saved until you submit.</span>
+<span class="sn-upload-state" data-sn-state="finalizing">Saving.</span>
+<span class="sn-upload-state" data-sn-state="finalized">Saved.</span>
+<span class="sn-upload-state" data-sn-state="rejected">Rejected by the server. Choose another file.</span>
+<span class="sn-upload-state" data-sn-state="canceled">Canceled.</span>
+<span class="sn-upload-state" data-sn-state="expired">Expired. Choose the file again.</span>
+<span class="sn-upload-state" data-sn-state="failed">Transfer failed. Retry or choose the file again.</span>
+</p>
+<div class="sn-upload-controls" role="group" aria-label="{{ label }} upload controls">
+<button class="sn-upload-control" type="button" live:upload.cancel="{{ name }}" data-suprnova-live-key="{{ name }}-cancel">Cancel upload</button>
+<button class="sn-upload-control" type="button" live:upload.retry="{{ name }}" data-suprnova-live-key="{{ name }}-retry">Retry upload</button>
+<button class="sn-upload-control" type="button" live:upload.remove="{{ name }}" data-suprnova-live-key="{{ name }}-remove">Remove upload</button>
+</div>
+</div>
+{% endmacro %}

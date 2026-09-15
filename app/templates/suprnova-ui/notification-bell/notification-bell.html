@@ -1,0 +1,18 @@
+{#
+  suprnova.notification-bell - an unread count refreshed by the island's
+  stream (FDB-005). The button links to the notifications page, so it works
+  as a plain anchor; the count is text with an accessible name, never a dot
+  alone. The status element follows the same rule as the live feed: the
+  runtime announces every stream state change into it and writes
+  data-live-stream-state on the island root, so a degraded, reconnecting or
+  closed stream says so and only the current state reads current. Classification: stitch slot (the
+  count belongs to the principal).
+#}
+{% macro notification_bell(id, href, count, label="Notifications") %}
+<a class="sn-bell" id="{{ id }}" href="{{ href }}" aria-describedby="{{ id }}-status">
+<span class="sn-bell-icon" aria-hidden="true">&#128276;</span>
+<span class="sn-bell-label">{{ label }}</span>
+<span class="sn-bell-count" data-sn-count="{{ count }}">{{ count }} unread</span>
+</a>
+<span class="sn-bell-status" id="{{ id }}-status" data-live-stream-status role="status" aria-live="polite">Updates disconnected</span>
+{% endmacro %}

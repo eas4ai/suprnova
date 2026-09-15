@@ -1,0 +1,23 @@
+{#
+  suprnova.input-otp - a one-time code as one native input (FORM-006). The
+  input carries the whole code: inputmode numeric, autocomplete
+  one-time-code, a length pattern, and a transient model so the code never
+  enters a snapshot (FORM-004). The cells are presentation only, hidden from
+  assistive technology; sn-input-otp (input-otp.js) mirrors the typed
+  characters into them and marks the active cell, which is the auto-advance
+  the control works without: with the script absent the input is a plain
+  text field that submits the code. The wrapper is keyed with
+  live:preserve.self, so its upgrade marker survives a morph, and the script
+  re-mirrors after a re-render. Classification: varies with the island.
+#}
+{% macro input_otp(name, label, length=6) %}
+<sn-input-otp class="sn-otp" data-sn-length="{{ length }}" live:key="{{ name }}-otp" data-suprnova-live-key="{{ name }}-otp" live:preserve.self>
+<label class="sn-otp-label" for="{{ name }}">{{ label }}</label>
+<input class="sn-input sn-otp-input" id="{{ name }}" name="{{ name }}" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{% raw %}{{% endraw %}{{ length }}{% raw %}}{% endraw %}" maxlength="{{ length }}" spellcheck="false" autocapitalize="off" required live:model="{{ name }}">
+<span class="sn-otp-cells" aria-hidden="true">{{ caller() }}</span>
+</sn-input-otp>
+{% endmacro %}
+
+{% macro otp_cell(index) %}
+<span class="sn-otp-cell" data-sn-index="{{ index }}"></span>
+{% endmacro %}

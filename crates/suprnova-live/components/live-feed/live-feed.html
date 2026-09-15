@@ -1,0 +1,24 @@
+{#
+  suprnova.live-feed - a keyed list refreshed by the island's stream
+  (FDB-005). The island that mounts it declares live:stream; the runtime
+  writes data-live-stream-state on the island root and announces every
+  change into the status element (Updates disconnected, Connecting to
+  updates, Updates current, Updates degraded, Reconnecting to updates,
+  Updates closed), so a degraded, reconnecting or closed stream says so and
+  only the current state reads current; the server renders the disconnected
+  message as the default, and the CSS colors the status from the root's
+  state. Items pass through live_key so a refresh keeps every surviving
+  node. Classification: stitch slot when the island is
+  identity-bound, shell dependency when it is a public seed.
+#}
+{% macro live_feed(id, label) %}
+<section class="sn-live-feed" id="{{ id }}" aria-labelledby="{{ id }}-heading">
+<h2 class="sn-live-feed-heading" id="{{ id }}-heading">{{ label }}</h2>
+<p class="sn-live-feed-status" data-live-stream-status role="status" aria-live="polite">Updates disconnected</p>
+<ol class="sn-live-feed-list" data-suprnova-live-key="{{ id }}-list">{{ caller() }}</ol>
+</section>
+{% endmacro %}
+
+{% macro feed_item(key, time) %}
+<li class="sn-live-feed-item" live:key="{{ key|live_key }}" data-suprnova-live-key="{{ key }}"><time class="sn-live-feed-time">{{ time }}</time> {{ caller() }}</li>
+{% endmacro %}

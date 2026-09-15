@@ -7,8 +7,9 @@ mod live_support;
 
 use hyper::{Method, StatusCode};
 use live_support::{
-    ActionSpec, action_request, attribute, config_json, decoded_snapshot, empty, fresh_render, get,
-    idempotency, invoke, island_tag, request, seed_session, send, setup_app, snapshot_revision,
+    ActionSpec, UPLOAD_PATH, action_request, attribute, config_json, decoded_snapshot, empty,
+    fresh_render, get, idempotency, invoke, island_tag, request, seed_session, send, setup_app,
+    sha256_hex, snapshot_revision, tiny_png,
 };
 use serde_json::Value;
 use suprnova::live::{LiveComponent, LiveRegistry, RegistryErrorKind, live};
@@ -1072,5 +1073,215 @@ async fn the_datatable_mounts_from_the_query_and_reflects_sort_filter_and_page()
         accepted["url_intent"],
         serde_json::json!({"kind": "reflected", "target": "/live/data-display?dir=desc&filter=acme&sort=amount"}),
         "one page of two rows has no next page to reflect"
+    );
+}
+
+/// One control request on the reserved upload route, as the widget's runtime sends it.
+async fn upload_control(
+    app: &live_support::TestApp,
+    session: &live_support::SeededSession,
+    grant: Option<&str>,
+    body: Value,
+) -> live_support::Reply {
+    let mut builder = request(app, Method::POST, UPLOAD_PATH, Some(session), true)
+        .header("content-type", "application/json")
+        .header("accept", "application/json")
+        .header("x-suprnova-live", "upload-v1");
+    if let Some(grant) = grant {
+        builder = builder.header("authorization", format!("SuprnovaUpload {grant}"));
+    }
+    let request = builder
+        .body(http_body_util::Full::new(bytes::Bytes::from(
+            serde_json::to_vec(&body).expect("encode"),
+        )))
+        .expect("build control request");
+    send(app.addr, request).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_live_native_gallery_renders_every_component_on_native_controls() {
+    let app = setup_app(6).await;
+    let session = seed_session(&app).await;
+    let html = get(&app, "/live/live-native", Some(&session)).await.text();
+    for needle in [
+        // FORM-005: the upload widget over the shipped protocol, every state as text.
+        "<input class=\"sn-upload-input\" id=\"attachment\" type=\"file\" live:upload=\"attachment\" data-suprnova-live-key=\"attachment-input\" accept=\"image/png\">",
+        "<progress class=\"sn-upload-progress\" live:progress=\"attachment\" data-suprnova-live-key=\"attachment-progress\" max=\"100\" aria-label=\"Attachment upload progress\"></progress>",
+        "data-sn-state=\"ready\">Verified. Not saved until you submit.</span>",
+        "live:upload.cancel=\"attachment\"",
+        "live:upload.retry=\"attachment\"",
+        "live:upload.remove=\"attachment\"",
+        // FORM-006: one native input for the code, cells hidden from assistive technology.
+        "<sn-input-otp class=\"sn-otp\" data-sn-length=\"6\" live:key=\"code-otp\" data-suprnova-live-key=\"code-otp\" live:preserve.self>",
+        "id=\"code\" name=\"code\" type=\"text\" inputmode=\"numeric\" autocomplete=\"one-time-code\" pattern=\"[0-9]{6}\" maxlength=\"6\"",
+        "<span class=\"sn-otp-cells\" aria-hidden=\"true\">",
+        "<span class=\"sn-otp-cell\" data-sn-index=\"5\"></span>",
+        // FORM-007: a date input and native radio strips with legends.
+        "<sn-date-picker class=\"sn-date\" live:key=\"when-date\" data-suprnova-live-key=\"when-date\" live:preserve.self>",
+        "id=\"when\" name=\"when\" type=\"date\" min=\"2026-01-01\" max=\"2028-12-31\" live:model=\"when\"",
+        "<fieldset class=\"sn-date-strip\" data-sn-part=\"year\"><legend class=\"sn-date-legend\">Year</legend>",
+        "<input class=\"sn-date-radio\" type=\"radio\" name=\"when-month\" value=\"12\">December",
+        "<input class=\"sn-date-radio\" type=\"radio\" name=\"when-day\" value=\"31\">31",
+        // FORM-008: the combobox pattern over a native input, with a datalist before upgrade.
+        "<sn-combobox class=\"sn-combobox\" live:key=\"country-combobox\" data-suprnova-live-key=\"country-combobox\" live:preserve.self>",
+        "role=\"combobox\" aria-autocomplete=\"list\" aria-expanded=\"false\" aria-controls=\"country-listbox\"",
+        "<datalist id=\"country-datalist\"><option value=\"Canada\"></option>",
+        "<ul class=\"sn-combobox-listbox\" id=\"country-listbox\" role=\"listbox\" aria-label=\"Country suggestions\" data-sn-query=\"\"",
+        "<li class=\"sn-combobox-option\" id=\"country-option-1\" role=\"option\" aria-selected=\"false\" data-sn-value=\"ca\" live:key=\"ca\">Canada</li>",
+        // FDB-005: the feed and the bell render the disconnected default and a polite status.
+        "<section class=\"sn-live-feed\" id=\"activity\" aria-labelledby=\"activity-heading\">",
+        "<p class=\"sn-live-feed-status\" data-live-stream-status role=\"status\" aria-live=\"polite\">Updates disconnected</p>",
+        "<li class=\"sn-live-feed-item\" live:key=\"post-0\" data-suprnova-live-key=\"post-0\">",
+        "<span class=\"sn-bell-count\" data-sn-count=\"0\">0 unread</span>",
+        "<span class=\"sn-bell-status\" id=\"bell-status\" data-live-stream-status role=\"status\" aria-live=\"polite\">Updates disconnected</span>",
+        // NAV-005: the account menu is its own island, a details disclosure with anchors and a form.
+        "<details class=\"sn-account-menu\" id=\"account\">",
+        "<summary class=\"sn-account-menu-summary\" aria-label=\"Account: Ada Lovelace\">",
+        "<form class=\"sn-account-menu-form\" method=\"post\" action=\"/live/sign-out\"><input type=\"hidden\" name=\"_token\" value=\"",
+    ] {
+        assert!(html.contains(needle), "missing {needle} in {html}");
+    }
+    assert!(
+        html.contains("live:stream"),
+        "the gallery island declares its stream: {html}"
+    );
+    assert!(
+        !html.contains(" style="),
+        "no shipped view carries a style attribute"
+    );
+    assert_eq!(
+        html.matches("data-suprnova-live-island").count(),
+        2,
+        "two islands: the account menu and the gallery"
+    );
+    for script in [
+        "/suprnova-ui/input-otp/input-otp.js",
+        "/suprnova-ui/date-picker/date-picker.js",
+        "/suprnova-ui/combobox/combobox.js",
+    ] {
+        assert!(html.contains(script), "the document loads {script}");
+    }
+    // The transient code never enters the snapshot.
+    let snapshot = decoded_snapshot(island_tag(&html, "live-native-gallery"));
+    assert!(
+        snapshot.get("code").is_none(),
+        "the one-time code is transient: {snapshot}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_upload_widget_drives_the_shipped_protocol_and_finalizes_through_the_action() {
+    let app = setup_app(10).await;
+    let owner = seed_session(&app).await;
+    let html = get(&app, "/live/live-native", Some(&owner)).await.text();
+    let island = island_tag(&html, "live-native-gallery");
+    let snapshot = decoded_snapshot(island);
+    let revision = snapshot_revision(&snapshot);
+    let bytes = tiny_png();
+    let checksum = sha256_hex(&bytes);
+
+    // Every request below goes to the reserved upload route: create, one chunk, complete.
+    let created = upload_control(
+        &app,
+        &owner,
+        None,
+        serde_json::json!({
+            "field": "attachment",
+            "file": {"lastModified": 1, "name": "attachment.png", "size": bytes.len(), "type": "image/png"},
+            "idempotency_key": "create-attachment-1",
+            "island": {"component": "app.live-native-gallery", "documentKey": "live-native-gallery", "slot": "gallery"},
+            "operation": "create",
+            "protocol_version": 1,
+        }),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.text());
+    let created = created.json();
+    assert_eq!(created["state"], "queued", "{created}");
+    let handle = created["handle"].as_str().expect("handle").to_owned();
+    let grant = created["grant"].as_str().expect("grant").to_owned();
+
+    let chunk = request(&app, Method::POST, UPLOAD_PATH, Some(&owner), true)
+        .header("authorization", format!("SuprnovaUpload {grant}"))
+        .header("content-type", "application/octet-stream")
+        .header("x-suprnova-live", "upload-v1")
+        .header("x-suprnova-upload-checksum", &checksum)
+        .header("x-suprnova-upload-chunk", "0")
+        .header("x-suprnova-upload-handle", &handle)
+        .header("x-suprnova-upload-idempotency", "put-attachment-0")
+        .header("x-suprnova-upload-offset", "0")
+        .header("x-suprnova-upload-operation", "put_chunk")
+        .header("x-suprnova-upload-revision", "1")
+        .body(http_body_util::Full::new(bytes::Bytes::from(bytes.clone())))
+        .expect("build chunk request");
+    let stored = send(app.addr, chunk).await;
+    assert_eq!(stored.status, StatusCode::OK, "{}", stored.text());
+    let stored = stored.json();
+    assert_eq!(stored["state"], "transferring", "{stored}");
+    let after_chunk = stored["revision"].as_str().expect("revision").to_owned();
+
+    let completed = upload_control(
+        &app,
+        &owner,
+        Some(&grant),
+        serde_json::json!({
+            "expected_revision": after_chunk,
+            "handle": handle,
+            "idempotency_key": "complete-attachment-1",
+            "operation": "complete",
+            "protocol_version": 1,
+            "whole_checksum": checksum,
+        }),
+    )
+    .await;
+    assert_eq!(completed.status, StatusCode::OK, "{}", completed.text());
+    assert_eq!(
+        completed.json()["state"],
+        "ready",
+        "ready is verified, not saved: {}",
+        completed.text()
+    );
+    assert_eq!(
+        app.finalizer.committed().len(),
+        0,
+        "nothing is durable before the finalizing action"
+    );
+
+    // The finalizing action: the widget's form submits save_attachment with the
+    // handle as the model proposal.
+    let reply = send(
+        app.addr,
+        action_request(
+            &app,
+            ActionSpec {
+                component: "app.live-native-gallery",
+                document_key: "live-native-gallery",
+                snapshot,
+                seed: false,
+                base_revision: &revision,
+                operations: serde_json::json!([
+                    {"field": "attachment", "kind": "sync_model"},
+                    {"arguments": {}, "kind": "invoke_action", "name": "save_attachment"},
+                ]),
+                model_proposals: serde_json::json!({"attachment": handle}),
+                idempotency_key: &idempotency(41),
+            },
+            Some(&owner),
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let reply = reply.json();
+    assert_eq!(reply["outcome"], "accepted", "{reply}");
+    assert_eq!(
+        app.finalizer.committed().len(),
+        1,
+        "the application finalizer committed the attachment"
+    );
+    let rendered = reply["render"]["html"].as_str().unwrap_or_default();
+    assert!(
+        rendered.contains("data-saved=\"1\">Saved 1"),
+        "the view counts the finalized attachment: {reply}"
     );
 }

@@ -1,0 +1,42 @@
+@layer suprnova-ui {
+  .sn-otp {
+    display: grid;
+    gap: var(--sn-space-2);
+  }
+
+  .sn-otp-label {
+    font-weight: var(--sn-font-weight-medium);
+  }
+
+  .sn-otp-input {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: var(--sn-space-2);
+  }
+
+  .sn-otp-cells {
+    display: none;
+    gap: var(--sn-space-2);
+  }
+
+  .sn-otp[data-sn-upgraded] .sn-otp-cells {
+    display: flex;
+  }
+
+  .sn-otp-cell {
+    display: inline-grid;
+    place-items: center;
+    inline-size: var(--sn-space-10);
+    block-size: var(--sn-space-12);
+    border: var(--sn-state-border-width) solid var(--sn-color-border);
+    border-radius: var(--sn-radius-md);
+    background: var(--sn-color-surface-raised);
+    color: var(--sn-color-text);
+    font-size: var(--sn-font-size-lg);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .sn-otp-cell[data-sn-active] {
+    border-color: var(--sn-color-focus-ring);
+    box-shadow: 0 0 0 var(--sn-state-outline-width) var(--sn-color-focus-ring);
+  }
+}

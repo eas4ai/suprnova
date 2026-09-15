@@ -18,7 +18,7 @@ use suprnova::{Auth, FrameworkError, HttpResponse, Model, Request, Response, Sta
 
 use super::{
     DashboardMounts, DataDisplayMounts, FEEDBACK_PATH, FeedbackMounts, FormsMounts,
-    NavigationMounts, OverlaysMounts, PublicMounts,
+    LiveNativeMounts, NavigationMounts, OverlaysMounts, PublicMounts,
 };
 use crate::models::todos::Todo;
 use crate::models::users::User;
@@ -33,6 +33,7 @@ struct DashboardView<'a> {
     counter: &'a TrustedHtml,
     uploader: &'a TrustedHtml,
     feed: &'a TrustedHtml,
+    account: &'a TrustedHtml,
 }
 
 #[suprnova::view(path = "live/forms.html")]
@@ -159,7 +160,10 @@ pub async fn dashboard(request: Request, mounts: &DashboardMounts) -> Response {
         let feed = document
             .mount(&mounts.feed, parameters(), MountFlags::empty())
             .await?;
-        let bootstrap = document.bootstrap(LiveBootstrapOptions::esm())?;
+        let account = document
+            .mount(&mounts.account, parameters(), MountFlags::empty())
+            .await?;
+        let bootstrap = document.bootstrap(LiveBootstrapOptions::esm().with_suprnova_ui())?;
         document
             .render(
                 view("live/dashboard.html")?,
@@ -168,6 +172,7 @@ pub async fn dashboard(request: Request, mounts: &DashboardMounts) -> Response {
                     counter: counter.html(),
                     uploader: uploader.html(),
                     feed: feed.html(),
+                    account: account.html(),
                 },
                 intent()?,
                 AssetSet::empty(),
@@ -293,6 +298,52 @@ pub async fn navigation(request: Request, mounts: &NavigationMounts) -> Response
     }
     .await;
     result.map_err(failed)
+}
+
+/// The live-native gallery page: the account menu island and the gallery island.
+#[suprnova::view(path = "live/live-native.html")]
+struct LiveNativeView<'a> {
+    bootstrap: &'a TrustedHtml,
+    menu: &'a TrustedHtml,
+    gallery: &'a TrustedHtml,
+}
+
+/// `GET /live/live-native`: every live-native component, on a stream-backed
+/// island, with the account menu as its own island.
+pub async fn live_native(request: Request, mounts: &LiveNativeMounts) -> Response {
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let mut document = LiveDocument::from_request(&request)?;
+        let menu = document
+            .mount(&mounts.menu, parameters(), MountFlags::empty())
+            .await?;
+        let gallery = document
+            .mount(&mounts.gallery, parameters(), MountFlags::empty())
+            .await?;
+        let bootstrap = document.bootstrap(LiveBootstrapOptions::esm().with_suprnova_ui())?;
+        document
+            .render(
+                view("live/live-native.html")?,
+                &LiveNativeView {
+                    bootstrap: bootstrap.html(),
+                    menu: menu.html(),
+                    gallery: gallery.html(),
+                },
+                intent()?,
+                AssetSet::empty(),
+            )
+            .map_err(FrameworkError::from)
+    }
+    .await;
+    result.map_err(failed)
+}
+
+/// `POST /live/sign-out`: the account menu's sign-out form; logs the
+/// principal out and returns to the public page.
+pub async fn sign_out(_request: Request) -> Response {
+    Auth::logout().await?;
+    Ok(HttpResponse::new()
+        .status(303)
+        .header("Location", super::PUBLIC_PATH))
 }
 
 /// The data-display gallery page: the presentational island and the datatable island.

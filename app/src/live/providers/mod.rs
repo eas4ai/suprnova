@@ -25,13 +25,18 @@ const UPLOAD_CONTROLS: [&str; 14] = [
 ];
 
 /// Defines the abilities Live consults for the dogfood components: any
-/// signed-in user may subscribe to the activity stream and manage their own
-/// avatar upload. The route guard has already required the principal.
+/// signed-in user may subscribe to the activity streams and manage their own
+/// avatar and attachment uploads. The route guard has already required the principal.
 pub fn authorize_live() {
     Gate::define::<String, String>("live:app.activity-feed.stream.activity", |_, _| true);
+    Gate::define::<String, String>("live:app.live-native-gallery.stream.activity", |_, _| true);
     for control in UPLOAD_CONTROLS {
         Gate::define::<String, String>(
             &format!("live:app.avatar-uploader.upload.avatar.{control}"),
+            |_, _| true,
+        );
+        Gate::define::<String, String>(
+            &format!("live:app.live-native-gallery.upload.attachment.{control}"),
             |_, _| true,
         );
     }

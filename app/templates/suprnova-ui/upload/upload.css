@@ -1,0 +1,90 @@
+@layer suprnova-ui {
+  .sn-upload {
+    display: grid;
+    gap: var(--sn-space-2);
+  }
+
+  .sn-upload-label {
+    font-weight: var(--sn-font-weight-medium);
+  }
+
+  .sn-upload-input {
+    font: inherit;
+    color: var(--sn-color-text);
+  }
+
+  .sn-upload-input:focus-visible {
+    outline: var(--sn-state-outline-width) solid var(--sn-color-focus-ring);
+    outline-offset: var(--sn-state-outline-width);
+  }
+
+  .sn-upload-progress {
+    inline-size: 100%;
+    block-size: var(--sn-space-2);
+    accent-color: var(--sn-color-accent);
+  }
+
+  .sn-upload-progress:not([data-live-upload-state]) {
+    display: none;
+  }
+
+  .sn-upload-status {
+    margin: 0;
+    color: var(--sn-color-text-muted);
+  }
+
+  .sn-upload-state {
+    display: none;
+  }
+
+  .sn-upload:not(:has(.sn-upload-progress[data-live-upload-state])) .sn-upload-state[data-sn-state="idle"],
+  .sn-upload:has([data-live-upload-state="created"]) .sn-upload-state[data-sn-state="queued"],
+  .sn-upload:has([data-live-upload-state="queued"]) .sn-upload-state[data-sn-state="queued"],
+  .sn-upload:has([data-live-upload-state="transferring"]) .sn-upload-state[data-sn-state="transferring"],
+  .sn-upload:has([data-live-upload-state="verifying"]) .sn-upload-state[data-sn-state="verifying"],
+  .sn-upload:has([data-live-upload-state="ready"]) .sn-upload-state[data-sn-state="ready"],
+  .sn-upload:has([data-live-upload-state="finalizing"]) .sn-upload-state[data-sn-state="finalizing"],
+  .sn-upload:has([data-live-upload-state="finalized"]) .sn-upload-state[data-sn-state="finalized"],
+  .sn-upload:has([data-live-upload-state="rejected"]) .sn-upload-state[data-sn-state="rejected"],
+  .sn-upload:has([data-live-upload-state="canceled"]) .sn-upload-state[data-sn-state="canceled"],
+  .sn-upload:has([data-live-upload-state="expired"]) .sn-upload-state[data-sn-state="expired"],
+  .sn-upload:has([data-live-upload-state="failed"]) .sn-upload-state[data-sn-state="failed"] {
+    display: inline;
+  }
+
+  .sn-upload:has([data-live-upload-state="rejected"]) .sn-upload-status,
+  .sn-upload:has([data-live-upload-state="failed"]) .sn-upload-status,
+  .sn-upload:has([data-live-upload-state="expired"]) .sn-upload-status {
+    color: var(--sn-color-danger);
+  }
+
+  .sn-upload:has([data-live-upload-state="finalized"]) .sn-upload-status {
+    color: var(--sn-color-success);
+  }
+
+  .sn-upload-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--sn-space-2);
+  }
+
+  .sn-upload-control {
+    padding: var(--sn-space-1) var(--sn-space-3);
+    border: var(--sn-state-border-width) solid var(--sn-color-border);
+    border-radius: var(--sn-radius-md);
+    background: var(--sn-color-surface-raised);
+    color: var(--sn-color-text);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .sn-upload-control:disabled {
+    opacity: var(--sn-state-disabled-opacity);
+    cursor: not-allowed;
+  }
+
+  .sn-upload-control:focus-visible {
+    outline: var(--sn-state-outline-width) solid var(--sn-color-focus-ring);
+    outline-offset: var(--sn-state-outline-width);
+  }
+}

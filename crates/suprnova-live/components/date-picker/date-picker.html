@@ -1,0 +1,24 @@
+{#
+  suprnova.date-picker - a native date input with year, month and day strips
+  (FORM-007). The input accepts only a date (type date, min and max when
+  given) and carries the model; it is the control. The strips are native
+  radio groups inside CSS scroll-snap containers: tapping, clicking and the
+  arrow keys move the selection with no script. sn-date-picker
+  (date-picker.js) composes a strip selection into the input's value and
+  mirrors the input back onto the strips; with the script absent the input
+  still takes the date and the strips still select. The wrapper is keyed
+  with live:preserve.self, so its upgrade marker survives a morph.
+  Classification: varies with the island.
+#}
+{% macro date_picker(name, label, years, months, days, min, max) %}
+<sn-date-picker class="sn-date" live:key="{{ name }}-date" data-suprnova-live-key="{{ name }}-date" live:preserve.self>
+<label class="sn-date-label" for="{{ name }}">{{ label }}</label>
+<input class="sn-input sn-date-input" id="{{ name }}" name="{{ name }}" type="date" min="{{ min }}" max="{{ max }}" live:model="{{ name }}">
+<details class="sn-date-strips">
+<summary class="sn-date-summary">Pick the parts</summary>
+<fieldset class="sn-date-strip" data-sn-part="year"><legend class="sn-date-legend">Year</legend>{% for year in years %}<label class="sn-date-option"><input class="sn-date-radio" type="radio" name="{{ name }}-year" value="{{ year }}">{{ year }}</label>{% endfor %}</fieldset>
+<fieldset class="sn-date-strip" data-sn-part="month"><legend class="sn-date-legend">Month</legend>{% for month in months %}<label class="sn-date-option"><input class="sn-date-radio" type="radio" name="{{ name }}-month" value="{{ loop.index }}">{{ month }}</label>{% endfor %}</fieldset>
+<fieldset class="sn-date-strip" data-sn-part="day"><legend class="sn-date-legend">Day</legend>{% for day in days %}<label class="sn-date-option"><input class="sn-date-radio" type="radio" name="{{ name }}-day" value="{{ day }}">{{ day }}</label>{% endfor %}</fieldset>
+</details>
+</sn-date-picker>
+{% endmacro %}

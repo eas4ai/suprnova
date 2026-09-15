@@ -473,3 +473,84 @@ test("the datatable sorts, filters and pages through the URL without a history e
   await expect(page.locator("#invoices-filter")).toHaveValue("acme");
   await expect(table.locator("tbody tr")).toHaveCount(2);
 });
+
+test("the live-native enhancements upgrade, and every control still submits with its script blocked", async ({
+  page,
+}) => {
+  await page.goto(`${APP_ORIGIN}/live/demo-login`);
+  await expect(page).toHaveURL(`${APP_ORIGIN}/live`);
+  await page.goto(`${APP_ORIGIN}/live/live-native`);
+  await expect(page.getByRole("heading", { name: "Live native gallery" })).toBeVisible();
+  await expectConnected(page, 2);
+
+  // FORM-006: the element mirrors the code into the cells; the input holds it.
+  await expect(page.locator("sn-input-otp")).toHaveAttribute("data-sn-upgraded", "");
+  const code = page.locator("#code");
+  await code.fill("246810");
+  await expect(page.locator(".sn-otp-cell[data-sn-index='5']")).toHaveText("0");
+  await page.locator("#code-form button[type=submit]").click();
+  await expect(page.locator("[data-verified='1']")).toBeVisible();
+
+  // FORM-007: the strips are radios; choosing all three composes the input.
+  await page.locator("#renewal-form summary").click();
+  // The radios are visually hidden, so the labels take the clicks.
+  await page
+    .locator("[data-sn-part='year'] label")
+    .filter({ hasText: /^2027$/ })
+    .click();
+  await page
+    .locator("[data-sn-part='month'] label")
+    .filter({ hasText: /^March$/ })
+    .click();
+  await page.locator("[data-sn-part='day'] label").filter({ hasText: /^9$/ }).click();
+  await expect(page.locator("#when")).toHaveValue("2027-03-09");
+
+  // FORM-008: the listbox opens with arrow keys, the active option moves, Enter selects.
+  const country = page.locator("#country");
+  await expect(page.locator("sn-combobox")).toHaveAttribute("data-sn-upgraded", "");
+  await country.fill("ca");
+  await expect(country).toHaveAttribute("aria-expanded", "true");
+  await country.press("ArrowDown");
+  await expect(country).toHaveAttribute("aria-activedescendant", "country-option-1");
+  await country.press("Enter");
+  await expect(country).toHaveValue("Canada");
+  await expect(country).toHaveAttribute("aria-expanded", "false");
+
+  // FDB-005: the stream connects and the status names the state honestly.
+  const island = page.locator(
+    "[data-suprnova-live-island][data-suprnova-live-document-key='live-native-gallery']",
+  );
+  await expect(island).toHaveAttribute("data-live-stream-state", /current|connecting|degraded/);
+  const status = page.locator("#activity [data-live-stream-status]");
+  await expect(status).not.toHaveText("");
+  const state = await island.getAttribute("data-live-stream-state");
+  if (state !== "current") {
+    await expect(status).not.toHaveText(/current/i);
+  }
+  await page.getByRole("button", { name: "Post an update" }).click();
+  await expect(page.locator(".sn-bell-count")).toHaveText(/1 unread/);
+  await expect(page.locator(".sn-live-feed-item").first()).toHaveText(/Update \d+ posted/);
+
+  // NAV-005: the account menu is a details disclosure on its own island.
+  await page.locator("#account summary").click();
+  await expect(page.locator("#account").getByRole("link", { name: "Profile" })).toBeVisible();
+
+  // With every element script blocked, the native controls still carry the values.
+  await page.route("**/suprnova-ui/**/*.js", (route) => route.abort());
+  await page.goto(`${APP_ORIGIN}/live/live-native`);
+  await expectConnected(page, 2);
+  expect(await page.evaluate(() => customElements.get("sn-input-otp"))).toBeUndefined();
+  expect(await page.evaluate(() => customElements.get("sn-combobox"))).toBeUndefined();
+  await page.locator("#code").fill("135791");
+  await page.locator("#code-form button[type=submit]").click();
+  await expect(page.locator("[data-verified='1']")).toBeVisible();
+  // A strip selection needs no script; the date input takes the date itself.
+  await page.locator("#renewal-form summary").click();
+  await page.locator("[data-sn-part='day'] label").filter({ hasText: /^2$/ }).click();
+  await expect(page.locator("input[name='when-day'][value='2']")).toBeChecked();
+  await page.locator("#when").fill("2026-06-15");
+  await page.locator("#country").fill("Chile");
+  await page.locator("#renewal-form button[type=submit]").click();
+  await expect(page.locator("[data-when='2026-06-15']")).toBeVisible();
+  await page.unroute("**/suprnova-ui/**/*.js");
+});

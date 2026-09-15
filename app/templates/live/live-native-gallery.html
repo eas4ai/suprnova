@@ -1,0 +1,29 @@
+{% import "suprnova-ui/upload/upload.html" as upload %}
+{% import "suprnova-ui/live-feed/live-feed.html" as feed %}
+{% import "suprnova-ui/notification-bell/notification-bell.html" as bell %}
+{% import "suprnova-ui/input-otp/input-otp.html" as otp %}
+{% import "suprnova-ui/date-picker/date-picker.html" as date %}
+{% import "suprnova-ui/combobox/combobox.html" as combo %}
+<div class="sn-live-native-gallery">
+<form class="sn-form" id="attachment-form" live:submit.prevent="save_attachment">
+{% call upload::upload("attachment", "Attachment", accept="image/png") %}{% endcall %}
+<button class="sn-button" type="submit" live:loading.disabled="save_attachment">Save attachment</button>
+<p data-saved="{{ saved }}">Saved {{ saved }}</p>
+</form>
+<form class="sn-form" id="code-form" live:submit.prevent="verify">
+{% call otp::input_otp("code", "One-time code") %}{% for index in cells %}{% call otp::otp_cell(index) %}{% endcall %}{% endfor %}{% endcall %}
+<button class="sn-button" type="submit" live:loading.disabled="verify">Verify code</button>
+<p data-verified="{{ verified }}">Verified {{ verified }}</p>
+</form>
+<form class="sn-form" id="renewal-form" live:submit.prevent="search">
+{% call date::date_picker("when", "Renewal date", years, months, days, min="2026-01-01", max="2028-12-31") %}{% endcall %}
+<p data-when="{{ when }}">Renewal {{ when }}</p>
+{% call combo::combobox("country", "Country", countries, query=country, placeholder="Type a country") %}{% endcall %}
+<button class="sn-button" type="submit" live:loading.disabled="search">Search</button>
+</form>
+<header class="sn-live-native-header">
+{% call bell::notification_bell("bell", "/live/live-native", unread) %}{% endcall %}
+<button class="sn-button" type="button" live:click="post" live:loading.disabled="post">Post an update</button>
+</header>
+{% call feed::live_feed("activity", "Activity") %}{% for item in items %}{% call feed::feed_item(item.key, time=item.time) %}{{ item.text }}{% endcall %}{% endfor %}{% endcall %}
+</div>

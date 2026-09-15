@@ -241,7 +241,7 @@ async fn the_dashboard_is_stitched_per_principal_from_one_shared_shell() {
     assert_eq!(
         first.header("cache-control"),
         Some("private, no-store"),
-        "these bytes hold Alice's three islands, so nothing may store them; \
+        "these bytes hold Alice's four islands, so nothing may store them; \
          which code path produced them is irrelevant to that"
     );
 
@@ -258,8 +258,8 @@ async fn the_dashboard_is_stitched_per_principal_from_one_shared_shell() {
     );
     assert_eq!(stored.status, 200);
     assert_eq!(
-        stored.slots, 3,
-        "one slot for the counter, the uploader, and the feed"
+        stored.slots, 4,
+        "one slot for the counter, the uploader, the feed, and the account menu (NAV-005)"
     );
 
     // 3. Five whole seconds pass on the RenderCache clock - far inside the
@@ -309,6 +309,20 @@ async fn the_dashboard_is_stitched_per_principal_from_one_shared_shell() {
             let island = island_tag(&rest, key).to_owned();
             rest = rest.replace(&island, "");
         }
+        // The account menu's body names the principal and carries the
+        // session's CSRF token, so the whole slot is identity-bearing
+        // (NAV-005): strip it from tag to closing element.
+        let tag = island_tag(&rest, "dashboard-account").to_owned();
+        let start = rest
+            .find(&tag)
+            .expect("the account island is in the document");
+        let close = "</details>\n</div>";
+        let end = rest[start..]
+            .find(close)
+            .expect("the account island closes")
+            + start
+            + close.len();
+        rest.replace_range(start..end, "");
         rest
     };
     assert_eq!(

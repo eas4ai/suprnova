@@ -1,0 +1,70 @@
+@layer suprnova-ui {
+  .sn-date {
+    display: grid;
+    gap: var(--sn-space-2);
+  }
+
+  .sn-date-label {
+    font-weight: var(--sn-font-weight-medium);
+  }
+
+  .sn-date-summary {
+    cursor: pointer;
+    color: var(--sn-color-text-muted);
+  }
+
+  .sn-date-summary:focus-visible {
+    outline: var(--sn-state-outline-width) solid var(--sn-color-focus-ring);
+    outline-offset: var(--sn-state-outline-width);
+  }
+
+  .sn-date-strip {
+    display: flex;
+    gap: var(--sn-space-1);
+    margin: var(--sn-space-2) 0 0;
+    padding: var(--sn-space-1);
+    border: var(--sn-state-border-width) solid var(--sn-color-border);
+    border-radius: var(--sn-radius-md);
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x mandatory;
+  }
+
+  .sn-date-legend {
+    padding: 0 var(--sn-space-1);
+    font-size: var(--sn-font-size-sm);
+    color: var(--sn-color-text-muted);
+  }
+
+  .sn-date-option {
+    flex: none;
+    display: inline-grid;
+    place-items: center;
+    min-inline-size: var(--sn-space-10);
+    padding: var(--sn-space-1) var(--sn-space-2);
+    border-radius: var(--sn-radius-sm);
+    scroll-snap-align: center;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+  }
+
+  .sn-date-option:has(.sn-date-radio:checked) {
+    background: var(--sn-color-accent);
+    color: var(--sn-color-on-accent);
+  }
+
+  .sn-date-option:has(.sn-date-radio:focus-visible) {
+    outline: var(--sn-state-outline-width) solid var(--sn-color-focus-ring);
+    outline-offset: var(--sn-state-outline-width);
+  }
+
+  .sn-date-radio {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
