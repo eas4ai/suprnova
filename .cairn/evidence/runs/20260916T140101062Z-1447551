@@ -1,0 +1,18 @@
+mechanism: live-key-vocabulary
+commit: 3fc2a965
+inputs_digest: sha256:659cb234277deb916bcc696cff08fd1bfa72c257f3720a2c72fa1b3ff391aed6
+mechanism_digest: sha256:92e9a5ef3087b734d0ad4a559185a8a23db4897d352468f533d64f67d841ca2b
+kernel_digest: sha256:a75759bfeebcad18d5c4ede6438c2a1efc8380a27df350379634205af5b27b19
+inputs_detail: .cairn/evidence/runs/20260916T140101062Z-1447551.inputs.json
+command: sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/live-key-identity.test.ts && cd ../../.. && env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova-live --test checker_regressions -E "test(live_key)"'
+cwd: .
+exit: 0
+output_digest: sha256:352649da174c9fb2e1bfb4c9b3b101b1c3f1b41aebf269151691d1b87ff54297
+output: .cairn/evidence/runs/20260916T140101062Z-1447551.out
+stderr_output: .cairn/evidence/runs/20260916T140101062Z-1447551.err
+stderr_digest: sha256:13453aadace71cadc4ecf8c2ae9cf57552885efe208062a005afa44a3e44765d
+signal: none
+execution_error: null
+recorded: 2026-09-16T14:01:02.712Z
+results:
+  - LIVE-024 pass exit sha256:597eacb8d33c730a6d9ca030e3cc7038821fdb3983cba18ba53887d5ca56ba1f 2 sha256:bbe480d67e14b429a532865187fb6179ca26b2e91ee5a5255ade5967d5fcff7c

@@ -1,0 +1,18 @@
+mechanism: ui-light-dom
+commit: 3fc2a965
+inputs_digest: sha256:7d9e3f999b83ec89338d81afe0f0925348fe3433b796ea81cbf1d854e2233e6c
+mechanism_digest: sha256:d24ab7d5c369e7e0661de1dd5319fea1d2556cf0bbec32427f95fe0028c8253b
+kernel_digest: sha256:a75759bfeebcad18d5c4ede6438c2a1efc8380a27df350379634205af5b27b19
+inputs_detail: .cairn/evidence/runs/20260916T141454863Z-1447551.inputs.json
+command: sh -c '! grep -rn "attachShadow" crates/suprnova-live/browser/src crates/suprnova-live/components app/templates'
+cwd: .
+exit: 0
+output_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+output: .cairn/evidence/runs/20260916T141454863Z-1447551.out
+stderr_output: .cairn/evidence/runs/20260916T141454863Z-1447551.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-16T14:14:54.979Z
+results:
+  - UI-010 pass exit sha256:420bbcef2de0a6dfb6c36e0b0c32ab93b7130e5a429fb5290b920c8952f85a7e 16 sha256:7252cdb782bd94fd6151d6e1691e9a8cade56937ca0910c06a5a273543d221fe
