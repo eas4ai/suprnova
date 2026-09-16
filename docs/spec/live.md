@@ -265,10 +265,10 @@ Status: Agreed 2026-09-16
 
 [LIVE-026] A model field's declared debounce MUST be a duration the
 directive grammar lists: 100, 250, or 500 milliseconds.
-`#[model(debounce = N)]` MUST fail to compile for any other duration.
-`BindingTiming::debounce` MUST return an error for any other duration, so
-every declared debounce has a template modifier the checker and the
-browser runtime both accept.
+The `#[model(debounce = N)]` attribute MUST fail to compile for any other
+duration. The `BindingTiming::debounce` constructor MUST return an error
+for any other duration, so every declared debounce has a template modifier
+the checker and the browser runtime both accept.
 Falsifier: a component declaring `#[model(debounce = 300)]` compiles, or
 `BindingTiming::debounce(300)` succeeds.
 Evidence: `suprnova-macros/src/live/attrs.rs` and
