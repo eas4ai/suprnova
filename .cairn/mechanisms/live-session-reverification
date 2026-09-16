@@ -18,3 +18,5 @@ inputs:
   - .manual-translations.lock
 requirements:
   - LIVE-020
+reviewed:
+  - LIVE-020 sha256:72f635132fe8bbf23eeb8507f89ba6bfabebba19c7d48cc9dbc710fba979e32e
