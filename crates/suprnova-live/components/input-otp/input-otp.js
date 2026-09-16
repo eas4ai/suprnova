@@ -24,9 +24,21 @@ if (!customElements.get("sn-input-otp")) {
         input.addEventListener("input", mirror);
         input.addEventListener("focus", mirror);
         input.addEventListener("blur", mirror);
-        // A morph re-renders the cells from the server's empty markup; mirror
-        // again, writing only what differs so the observer settles.
-        new MutationObserver(mirror).observe(this.querySelector(".sn-otp-cells"), { childList: true, characterData: true, subtree: true });
+        // A morph re-renders the cells from the server's empty markup and
+        // resets the input, whose value the runtime restores in a later
+        // phase of the same render without an input event. Mirror now,
+        // writing only what differs so the observer settles, and once more
+        // on the next frame, after that restoration.
+        let frame = 0;
+        const remirror = () => {
+          mirror();
+          if (frame !== 0) return;
+          frame = requestAnimationFrame(() => {
+            frame = 0;
+            mirror();
+          });
+        };
+        new MutationObserver(remirror).observe(this.querySelector(".sn-otp-cells"), { childList: true, characterData: true, subtree: true });
         this.setAttribute("data-sn-upgraded", "");
         mirror();
       }
