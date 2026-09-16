@@ -23,7 +23,7 @@ Falsifier: with blocking enabled, two requests carrying one session are
 handled concurrently, the first persists a flash after the second loaded
 the session, and the second's write removes the flash; or a request waits
 past the bounded acquire without a decisive outcome.
-Evidence: the defect without blocking, `.cairn/backlog/concurrent-requests-on-one-session-write-back-last-writer-wins-so-a-flash-set-by-a-redirect-can-be-overwritten-by-a-request-that-started-earlier.md`, observed in the dogfood browser suite on 2026-09-15; `framework/src/session/middleware.rs` load and write paths; `framework/src/cache/mod.rs`, `Cache::lock`.
+Evidence: the defect without blocking, pinned by `framework/tests/session/blocking.rs` (`without_blocking_the_last_writer_wins_and_the_flash_is_lost`) from the backlog record the dogfood browser suite produced on 2026-09-15, retired at closure; `framework/src/session/middleware.rs` load and write paths; `framework/src/cache/mod.rs`, `Cache::lock`.
 Mechanism: `.cairn/mechanisms/session-blocking` (declared with the
 commitment `session-request-serialization`).
 Refines: none; parity with Laravel's `block()` middleware method.
