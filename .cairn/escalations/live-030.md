@@ -11,3 +11,7 @@ Reply: ok | instead | ask. If this isn't clear, ask me to explain it another way
 Concerns: LIVE-030
 Raised: 2026-09-16T19:48:54.865Z
 Raised after: LIVE-030=1
+Answer: instead Remove the backlog item; it is slop. Close the loop with no current commitment. (Shawn, in chat, 2026-09-16 19:18 EDT)
+Answered: 2026-09-16T23:19:16.696Z
+Answered after: LIVE-030=1
+Answered order: 15
