@@ -849,10 +849,13 @@ fn parse_model_args(attribute: &Attribute) -> syn::Result<(FieldKind, ModelTimin
                 } else if meta.path.is_ident("debounce") {
                     let literal: LitInt = meta.value()?.parse()?;
                     let milliseconds = literal.base10_parse::<u32>()?;
-                    if milliseconds == 0 || milliseconds > 60_000 {
+                    // The directive grammar lists these durations; a field
+                    // declaring another could never be bound by a template
+                    // the checker and the browser runtime accept (LIVE-026).
+                    if !matches!(milliseconds, 100 | 250 | 500) {
                         return Err(syn::Error::new(
                             literal.span(),
-                            "model debounce must be between 1 and 60000 milliseconds",
+                            "model debounce must be 100, 250, or 500 milliseconds, the durations the Live directive grammar lists",
                         ));
                     }
                     ModelTimingArgs::Debounce(milliseconds)

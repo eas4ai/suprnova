@@ -120,6 +120,21 @@ recientes primero.
   nunca se ejecutaba y el navegador enviaba el formulario de forma nativa. La
   vinculación de modelo del campo de búsqueda también usaba un debounce que
   el runtime no acepta; ahora usa 250 ms.
+- **`live:check` comprueba cada elemento que renderiza una vista.** Una vista
+  que llamaba a una macro con `caller()` mediante un bloque de llamada vacío,
+  como se llama al resumen de validación, no entregaba al checker contenido
+  tras esa llamada, así que el componente se daba por probado mientras el
+  resto de la vista quedaba sin comprobar. La llamada vacía ahora es contenido
+  vacío, y una vista que no renderiza nada no supera la comprobación. La
+  corrección expuso errores que ocultaba la galería de formularios del
+  dogfood.
+- **Un debounce de modelo declarado dura 100, 250 o 500 milisegundos.**
+  `#[model(debounce = N)]` aceptaba de 1 a 60000 ms, pero la gramática de
+  directivas que comparten el checker y el runtime del navegador enumera tres
+  duraciones, así que cualquier otro valor nunca podía vincularse desde una
+  plantilla; ahora no compila. `live:error` también acepta una acción como
+  destino, como la nombra un resumen de validación, en línea con lo que
+  resuelve el runtime.
 - **Cada emisión que admite el límite por scope de Live responde con una
   suscripción que conecta.** Las emisiones concurrentes de un scope en el
   mismo milisegundo acuñan descriptores idénticos, y el almacén de

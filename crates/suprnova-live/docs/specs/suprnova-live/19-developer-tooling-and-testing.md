@@ -1,7 +1,7 @@
 # Suprnova Live -- 19 Developer Tooling and Testing
 
 Status: Normative design specification
-Last revised: 2026-09-15
+Last revised: 2026-09-16
 
 ## Scope
 
@@ -467,6 +467,12 @@ unbounded framework memory, queues, connections, or diagnostic retention.
   reproducible on-demand measurements outside the correctness gate.
 
 ## Decisions and revisions
+
+- 2026-09-16 -- The checker renders an empty call block to a macro that
+  splices `caller()` as empty caller content, and fails a component whose view
+  renders no branch (LIVE-025). The empty caller had rendered zero branches,
+  which dropped every branch after the call, so a view proved clean while the
+  rest of it went unchecked: the dogfood form gallery hid 24 errors that way.
 
 - 2026-09-15 -- The checker resolves a feedback directive's target (`idle`,
   `dirty`, `queued`, `loading`, `validating`, `success`, `interrupted`,

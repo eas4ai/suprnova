@@ -77,7 +77,7 @@ pub struct LiveNativeGallery {
     #[model]
     when: String,
     /// The country query, bound with the combobox.
-    #[model(debounce = 300)]
+    #[model(debounce = 250)]
     country: String,
     /// Attachments saved so far through the finalizer.
     #[public]

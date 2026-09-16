@@ -1,7 +1,7 @@
 # Suprnova Live -- 11 Interaction Scheduling and Feedback
 
 Status: Normative design specification
-Last revised: 2026-09-15
+Last revised: 2026-09-16
 
 ## Scope
 
@@ -198,6 +198,11 @@ UX flow:
   proof.
 
 ## Decisions and revisions
+
+- 2026-09-16 -- `live:error` targets what the runtime resolves for error
+  feedback: a declared field or an action of the component or an ancestor
+  (LIVE-027). The checker had accepted a field only, refusing the validation
+  summary's form-level scope.
 
 - 2026-09-15 -- A latest-only model proposal that supersedes an in-flight
   request no longer discards that request's accepted response. The runtime

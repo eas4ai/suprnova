@@ -122,6 +122,20 @@ en premier.
   ne s'exécutait jamais et que le navigateur envoyait le formulaire
   nativement. La liaison de modèle du champ de recherche utilisait aussi un
   debounce que le runtime n'accepte pas ; elle utilise désormais 250 ms.
+- **`live:check` vérifie chaque élément qu'une vue rend.** Une vue qui
+  appelait une macro utilisant `caller()` avec un bloc d'appel vide, comme on
+  appelle le résumé de validation, ne transmettait au checker aucun contenu
+  après cet appel, si bien que le composant passait pour prouvé alors que le
+  reste de la vue n'était pas vérifié. L'appel vide est désormais un contenu
+  vide, et une vue qui ne rend rien échoue à la vérification. La correction a
+  révélé des erreurs que cachait la galerie de formulaires du dogfood.
+- **Un debounce de modèle déclaré dure 100, 250 ou 500 millisecondes.**
+  `#[model(debounce = N)]` acceptait de 1 à 60000 ms, mais la grammaire des
+  directives que partagent le checker et le runtime du navigateur en liste
+  trois, donc toute autre valeur ne pouvait jamais être liée par un template ;
+  elle ne compile plus. `live:error` accepte aussi une action comme cible,
+  comme la nomme un résumé de validation, conformément à ce que résout le
+  runtime.
 - **Chaque émission que la limite par scope de Live admet répond avec un
   abonnement qui se connecte.** Des émissions concurrentes d'un même scope
   dans la même milliseconde frappent des descripteurs identiques, et le

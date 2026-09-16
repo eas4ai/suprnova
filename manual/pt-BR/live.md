@@ -61,6 +61,10 @@ impl Counter {
 - Campos `#[public]` são renderizados e transportados no snapshot assinado.
   Campos `#[model]` também aceitam propostas do navegador por meio de
   `live:model`.
+  Um campo de modelo declara seu timing no atributo, como
+  `#[model(debounce = 250)]`; um debounce é de 100, 250 ou 500
+  milissegundos, as durações que `live:model.debounce.<n>ms` aceita, e
+  qualquer outra falha na compilação.
 - Métodos `#[action]` são os únicos pontos de entrada que o navegador pode
   invocar. Eles recebem argumentos validados e podem devolver resultados
   tipados, como um redirecionamento ou um flash.

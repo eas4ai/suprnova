@@ -122,6 +122,21 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   Aktion nie lief und der Browser das Formular nativ sendete. Die
   Model-Bindung des Suchfelds nutzte außerdem ein Debounce, das die Runtime
   nicht akzeptiert; sie nutzt jetzt 250 ms.
+- **`live:check` prüft jedes Element, das eine View rendert.** Eine View, die
+  ein Makro mit `caller()` über einen leeren Call-Block aufrief, wie die
+  Validierungszusammenfassung aufgerufen wird, lieferte dem Checker nach
+  diesem Aufruf keinen Inhalt mehr, sodass die Komponente als bewiesen galt,
+  während der Rest der View ungeprüft blieb. Der leere Aufruf ist jetzt leerer
+  Inhalt, und eine View, die nichts rendert, besteht die Prüfung nicht. Die
+  Korrektur deckte Fehler auf, die die Formulargalerie des Dogfoods verborgen
+  hatte.
+- **Ein deklariertes Model-Debounce beträgt 100, 250 oder 500 Millisekunden.**
+  `#[model(debounce = N)]` akzeptierte 1 bis 60000 ms, aber die
+  Direktiven-Grammatik, die Checker und Browser-Runtime teilen, listet drei
+  Dauern, sodass jeder andere Wert nie von einem Template gebunden werden
+  konnte; er lässt sich jetzt nicht kompilieren. `live:error` akzeptiert
+  außerdem eine Aktion als Ziel, wie eine Validierungszusammenfassung sie
+  nennt, passend zu dem, was die Runtime auflöst.
 - **Jede Ausgabe, die das Live-Limit pro Scope zulässt, antwortet mit einer
   Subscription, die sich verbinden lässt.** Gleichzeitige Ausgaben eines
   Scopes in derselben Millisekunde prägen identische Deskriptoren, und der

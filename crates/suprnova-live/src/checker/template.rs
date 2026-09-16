@@ -121,6 +121,20 @@ impl<'checker> TemplateChecker<'checker> {
             &mut diagnostics,
         );
         let branches = renderer.render(metadata.view());
+        // A view that renders no branch checked nothing, so it cannot prove
+        // the component (LIVE-025). A limit that emptied the branches has
+        // already reported itself; this keeps the result failed either way.
+        if branches.is_empty() {
+            diagnostics.push(
+                DiagnosticCode::DynamicStructureUnproved,
+                DiagnosticSeverity::Error,
+                Some(metadata.view()),
+                1,
+                1,
+                Some(metadata.identity()),
+            );
+            return diagnostics.finish();
+        }
         check_html_branches(
             &branches,
             self.registry,

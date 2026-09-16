@@ -17,5 +17,5 @@ pub use session::{
     SessionError, SessionErrorKind, SessionField, SessionIntent, SessionIntentKind, SessionIntents,
     SessionPort, SessionValue,
 };
-pub use timing::{BindingTiming, TimingError, TimingErrorKind};
+pub use timing::{BindingTiming, DEBOUNCE_MILLIS, TimingError, TimingErrorKind};
 pub use url::{UrlBinding, UrlBindingMode, UrlBindingSet, UrlError, UrlErrorKind};

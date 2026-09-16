@@ -61,6 +61,10 @@ impl Counter {
 - `view` ist die Template-Identität relativ zum Template-Wurzelverzeichnis.
 - `#[public]`-Felder werden gerendert und im signierten Snapshot mitgeführt.
   `#[model]`-Felder akzeptieren zusätzlich Browser-Vorschläge über `live:model`.
+  Ein Model-Feld deklariert sein Timing am Attribut, etwa
+  `#[model(debounce = 250)]`; ein Debounce beträgt 100, 250 oder 500
+  Millisekunden, die Dauern, die `live:model.debounce.<n>ms` akzeptiert, und
+  jede andere lässt sich nicht kompilieren.
 - `#[action]`-Methoden sind die einzigen Einstiegspunkte, die der Browser
   aufrufen kann. Sie erhalten validierte Argumente und können typisierte
   Ergebnisse wie eine Weiterleitung oder einen Flash zurückgeben.

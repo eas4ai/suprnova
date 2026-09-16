@@ -109,6 +109,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   itself and refused the whole submit, so the action never ran and the
   browser submitted the form natively. The search input's model binding also
   used a debounce the runtime does not accept; it now uses 250 ms.
+- **`live:check` checks every element a view renders.** A view that called a
+  macro splicing `caller()` with an empty call block, as the validation summary
+  is called, rendered no content after that call to the checker, so the
+  component proved clean while the rest of the view went unchecked. The empty
+  call is now empty content, and a view that renders nothing fails the check.
+  Fixing it exposed errors the dogfood form gallery had hidden.
+- **A declared model debounce is 100, 250, or 500 milliseconds.**
+  `#[model(debounce = N)]` accepted 1 to 60000 ms, but the directive grammar
+  the checker and the browser runtime share lists three durations, so any
+  other value could never be bound by a template; it now fails to compile.
+  `live:error` also accepts an action as its target, as a validation summary
+  names one, matching what the runtime resolves.
 - **Every issuance the Live per-scope limit admits answers with a subscription
   that connects.** Concurrent issuances of one scope in the same millisecond
   mint identical descriptors, and the host's credential store kept only the

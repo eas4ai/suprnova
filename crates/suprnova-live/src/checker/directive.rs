@@ -132,7 +132,7 @@ pub(crate) fn validate_directive(name: &str, value: &str, context: &mut Directiv
             validate_action(directive, value, context);
         }
         "model" => validate_model(value, &modifiers, context),
-        "error" => validate_field(value, false, context),
+        "error" => validate_error_target(value, context),
         "idle" | "dirty" | "queued" | "loading" | "validating" | "success" | "interrupted"
         | "offline" | "retrying" => {
             if !value.is_empty() {
@@ -411,6 +411,25 @@ fn validate_feedback_target(value: &str, context: &mut DirectiveContext<'_, '_>)
             .iter()
             .any(|field| field.name() == &field_name && field.model_codec().is_some())
     {
+        return;
+    }
+    validate_action_identity(value, context);
+}
+
+/// Error feedback targets what the browser runtime resolves for it: a field
+/// the component declares, or an action of the component or an ancestor, the
+/// scope a validation summary names (LIVE-027). A declared field keeps the
+/// field rules, so a secret or server-only field is still refused.
+fn validate_error_target(value: &str, context: &mut DirectiveContext<'_, '_>) {
+    let declares_field = ModelField::parse(value).is_ok_and(|field_name| {
+        context
+            .owner
+            .fields()
+            .iter()
+            .any(|field| field.name() == &field_name)
+    });
+    if declares_field {
+        validate_field(value, false, context);
         return;
     }
     validate_action_identity(value, context);

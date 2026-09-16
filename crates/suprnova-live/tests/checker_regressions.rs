@@ -273,6 +273,73 @@ fn live_key_alone_names_a_keyed_scope_and_a_duplicate_is_refused() {
     assert_code(duplicate, DiagnosticCode::DuplicateKey);
 }
 
+/// A macro that splices `caller()`, as the library's validation summary does.
+const SUMMARY_VIEW: &str = "tests/summary.html";
+const SUMMARY_MACRO: &str = r#"{% macro summary(action) %}<section live:error.live.polite="{{ action }}"><h2>Please correct</h2>{{ caller() }}</section>{% endmacro %}"#;
+
+fn check_with_summary(root: &str) -> suprnova_live::checker::CheckReport {
+    let registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (view(ROOT_VIEW), root.to_owned()),
+        (view(SUMMARY_VIEW), SUMMARY_MACRO.to_owned()),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html").to_owned(),
+        ),
+    ])
+    .expect("template catalog");
+    TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name())
+}
+
+/// LIVE-025: an empty call block is empty caller content, so everything the
+/// view renders after the call is still checked. Before the fix the empty
+/// caller rendered zero branches and this view proved clean.
+#[test]
+fn checker_proof_covers_the_view_after_an_empty_call_block() {
+    let report = check_with_summary(
+        r#"{% import "tests/summary.html" as s %}{% call s::summary("save") %}{% endcall %}
+           <button type="button" live:click="no_such_action">Probe</button>"#,
+    );
+    assert!(!report.is_proved());
+    assert_code(report, DiagnosticCode::UnknownAction);
+
+    let clean = check_with_summary(
+        r#"{% import "tests/summary.html" as s %}{% call s::summary("save") %}{% endcall %}
+           <button type="button" live:click="refresh">Refresh</button>"#,
+    );
+    assert!(clean.is_proved(), "{:?}", clean.diagnostics());
+}
+
+/// LIVE-025: a call block with content splices it once, and a failure inside
+/// the caller content is still reported.
+#[test]
+fn checker_proof_checks_caller_content() {
+    let report = check_with_summary(
+        r#"{% import "tests/summary.html" as s %}{% call s::summary("save") %}<button type="button" live:click="no_such_action">Inside</button>{% endcall %}"#,
+    );
+    assert!(!report.is_proved());
+    assert_code(report, DiagnosticCode::UnknownAction);
+}
+
+/// LIVE-027: error feedback may target an action the component declares, the
+/// scope a validation summary names, or a declared field; an undeclared
+/// name and a secret field are still refused.
+#[test]
+fn live_error_target_is_a_declared_field_or_action() {
+    for source in [
+        r#"<section live:error.live.polite="save"><h2>Please correct</h2></section>"#,
+        r#"<p live:error="query"></p>"#,
+    ] {
+        let report = check(source, CheckerLimits::default());
+        assert!(report.is_proved(), "{source}: {:?}", report.diagnostics());
+    }
+    let unknown = check(r#"<p live:error="nowhere"></p>"#, CheckerLimits::default());
+    assert!(!unknown.is_proved());
+    let secret = check(r#"<p live:error="secret"></p>"#, CheckerLimits::default());
+    assert_code(secret, DiagnosticCode::ForbiddenModel);
+}
+
 fn check(source: &str, limits: CheckerLimits) -> suprnova_live::checker::CheckReport {
     let registry = registry();
     let catalog = TemplateCatalog::new(vec![

@@ -3,7 +3,11 @@
 use std::error::Error;
 use std::fmt;
 
-const MAX_DEBOUNCE_MILLIS: u32 = 60_000;
+/// The debounce durations the reviewed directive grammar lists
+/// (`fixtures/v4/directive-grammar.json`). A declared debounce outside this
+/// set could never be bound by a template the checker and the browser
+/// runtime both accept (LIVE-026).
+pub const DEBOUNCE_MILLIS: [u32; 3] = [100, 250, 500];
 
 /// Closed model synchronization timing declaration.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -22,9 +26,10 @@ pub enum BindingTiming {
 }
 
 impl BindingTiming {
-    /// Creates a nonzero debounce no longer than sixty seconds.
+    /// Creates a debounce of one of the grammar's durations,
+    /// [`DEBOUNCE_MILLIS`].
     pub fn debounce(milliseconds: u32) -> Result<Self, TimingError> {
-        if milliseconds == 0 || milliseconds > MAX_DEBOUNCE_MILLIS {
+        if !is_listed_debounce(milliseconds) {
             return Err(TimingError {
                 kind: TimingErrorKind::InvalidDebounce,
             });
@@ -43,16 +48,27 @@ impl BindingTiming {
 
     pub(crate) const fn is_valid(self) -> bool {
         match self {
-            Self::Debounce(milliseconds) => milliseconds > 0 && milliseconds <= MAX_DEBOUNCE_MILLIS,
+            Self::Debounce(milliseconds) => is_listed_debounce(milliseconds),
             _ => true,
         }
     }
 }
 
+const fn is_listed_debounce(milliseconds: u32) -> bool {
+    let mut index = 0;
+    while index < DEBOUNCE_MILLIS.len() {
+        if DEBOUNCE_MILLIS[index] == milliseconds {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 /// Closed timing declaration failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimingErrorKind {
-    /// A debounce duration was zero or exceeded the hard ceiling.
+    /// A debounce duration was not one the directive grammar lists.
     InvalidDebounce,
 }
 

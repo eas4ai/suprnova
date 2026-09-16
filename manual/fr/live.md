@@ -61,6 +61,10 @@ impl Counter {
 - Les champs `#[public]` sont rendus et transportés dans l'instantané signé.
   Les champs `#[model]` acceptent en plus des propositions du navigateur via
   `live:model`.
+  Un champ de modèle déclare son timing sur l'attribut, comme
+  `#[model(debounce = 250)]` ; un debounce dure 100, 250 ou 500
+  millisecondes, les durées qu'accepte `live:model.debounce.<n>ms`, et toute
+  autre valeur ne compile pas.
 - Les méthodes `#[action]` sont les seuls points d'entrée que le navigateur
   peut invoquer. Elles reçoivent des arguments validés et peuvent renvoyer des
   résultats typés comme une redirection ou un flash.

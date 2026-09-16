@@ -59,6 +59,10 @@ impl Counter {
 - `view` is the template identity, relative to the template root.
 - `#[public]` fields are rendered and carried in the signed snapshot. `#[model]`
   fields additionally accept browser proposals through `live:model`.
+  A model field declares its timing on the attribute, such as
+  `#[model(debounce = 250)]`; a debounce is 100, 250, or 500 milliseconds,
+  the durations `live:model.debounce.<n>ms` accepts, and any other fails to
+  compile.
 - `#[action]` methods are the only entry points the browser can invoke. They
   receive validated arguments and may return typed outcomes such as a
   redirect or a flash.

@@ -578,8 +578,12 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         return Vec::new();
                     }
                     let bindings = bind_arguments(definition, call, scope.bindings);
+                    // An empty call block is empty caller content: one empty
+                    // branch. Zero branches would multiply every branch after
+                    // the call away and leave the rest of the view unchecked
+                    // (LIVE-025).
                     let caller = if call.nodes.is_empty() {
-                        Vec::new()
+                        vec![RenderedBranch::empty(view)]
                     } else {
                         self.expand_nodes(
                             &call.nodes,

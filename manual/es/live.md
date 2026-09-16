@@ -60,6 +60,10 @@ impl Counter {
 - `view` es la identidad de la plantilla, relativa a la raíz de plantillas.
 - Los campos `#[public]` se renderizan y viajan en el snapshot firmado. Los
   campos `#[model]` además aceptan propuestas del navegador mediante `live:model`.
+  Un campo de modelo declara su temporización en el atributo, como
+  `#[model(debounce = 250)]`; un debounce dura 100, 250 o 500 milisegundos,
+  las duraciones que acepta `live:model.debounce.<n>ms`, y cualquier otra no
+  compila.
 - Los métodos `#[action]` son los únicos puntos de entrada que el navegador
   puede invocar. Reciben argumentos validados y pueden devolver resultados
   tipados como una redirección o un flash.

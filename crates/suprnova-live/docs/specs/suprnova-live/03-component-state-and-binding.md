@@ -1,7 +1,7 @@
 # Suprnova Live -- 03 Component State and Binding
 
 Status: Normative design specification
-Last revised: 2026-09-15
+Last revised: 2026-09-16
 
 ## Scope
 
@@ -239,6 +239,12 @@ bytes, browser paths, and trusted metadata never enter that batch.
 - State is bounded and evolvable without sticky server objects.
 
 ## Decisions and revisions
+
+- 2026-09-16 -- A declared debounce is one of the durations the directive
+  grammar lists: 100, 250, or 500 milliseconds (LIVE-026). The model macro and
+  `BindingTiming` had accepted 1 to 60000 ms while the grammar the checker and
+  the browser runtime share lists three, so a field declaring any other
+  duration could never be bound by a template both accepted.
 
 - 2026-09-15 -- A model binding group reads a control whose value is null (an
   empty number or range input, a select with nothing selected) as the value

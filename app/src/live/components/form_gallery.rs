@@ -2,15 +2,40 @@
 //! library ships, so `live:check` and the document tests exercise the real
 //! set (Cairn FORM-001).
 
-use suprnova::live::{LiveComponent, live};
+use suprnova::live::{
+    LiveComponent, UploadPolicy, UploadReplacement, UploadScan, UploadType, live,
+};
+
+/// The avatar the file input proposes: one PNG, finalized with the form's
+/// `save` action. The gallery's file input binds a real upload field so
+/// `live:check` proves the control against the component (LIVE-025).
+fn avatar_policy() -> UploadPolicy {
+    UploadPolicy::builder()
+        .maximum_files(1)
+        .maximum_file_bytes(512 * 1024)
+        .replacement(UploadReplacement::RetirePrevious)
+        .accept(UploadType::Png)
+        .scan(UploadScan::Disabled)
+        .finalize_action("save")
+        .build()
+}
 
 /// A form that uses each shipped presentational component once, rendered
 /// by `live/form-gallery.html`.
 #[derive(LiveComponent)]
-#[live(name = "app.form-gallery", view = "live/form-gallery.html")]
+#[live(
+    name = "app.form-gallery",
+    view = "live/form-gallery.html",
+    minimum_protocol_version = 2,
+    checker_contract_version = 2
+)]
 pub struct FormGallery {
+    /// The pending avatar upload handle, bound with the file input.
+    #[model]
+    #[upload(policy = avatar_policy)]
+    avatar: String,
     /// Search text, bound with the library's debounced search input.
-    #[model(debounce = 300)]
+    #[model(debounce = 250)]
     query: String,
     /// Email address, bound with the plain input.
     #[model]
@@ -70,6 +95,7 @@ impl FormGallery {
             newsletter: false,
             country: String::new(),
             topics: Vec::new(),
+            avatar: String::new(),
             plans: vec![
                 ("starter".to_owned(), "Starter".to_owned()),
                 ("team".to_owned(), "Team".to_owned()),

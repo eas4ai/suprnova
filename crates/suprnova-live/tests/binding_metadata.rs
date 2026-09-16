@@ -54,6 +54,30 @@ fn timing_policies_are_closed_and_debounce_is_bounded() {
     );
 }
 
+/// LIVE-026: a declared debounce is one of the grammar's durations, so a
+/// template can always bind it with a modifier the checker and the runtime
+/// accept; 300 ms, which the dogfood galleries once declared, is refused.
+#[test]
+fn debounce_is_limited_to_the_grammar_durations() {
+    for milliseconds in [100, 250, 500] {
+        assert_eq!(
+            BindingTiming::debounce(milliseconds)
+                .expect("a listed debounce")
+                .debounce_millis(),
+            Some(milliseconds)
+        );
+    }
+    for milliseconds in [1, 99, 101, 300, 1_000, 60_000] {
+        assert_eq!(
+            BindingTiming::debounce(milliseconds)
+                .expect_err("an unlisted debounce")
+                .kind(),
+            TimingErrorKind::InvalidDebounce,
+            "{milliseconds} ms"
+        );
+    }
+}
+
 #[test]
 fn url_bindings_are_scalar_typed_and_preserve_navigation_semantics() {
     let reflected = UrlBinding::new(
