@@ -93,12 +93,17 @@ components in waves, the advanced components last, the datatable closing.
    `docs/commitments/session-request-serialization.md`); `SessionBlock`,
    `SESSION_BLOCK`, `block_session` on every route and group builder, the
    dogfood application blocking on every route.
-9. live-key-vocabulary - the runtime reads `live:key`, the attribute the
-   checker validates and the manual names, for morph identity, controls
-   and preservation scopes, and the library stops writing the key twice;
-   promoted from the backlog on escalation `ovl-006` (`live.md` LIVE-024,
-   `docs/commitments/live-key-vocabulary.md`); the form gallery's missing
-   `.prevent` rides along.
+9. live-key-vocabulary - DONE 2026-09-16 (built at `159dd219`, the
+   dogfood needles and one unformatted file fixed at `3fc2a965`
+   after the first stale check; receipts `0d0d3ce8`, review
+   `9c4ffc68`) - the runtime reads `live:key`, the attribute the checker
+   validates and the manual names, for morph identity, controls and
+   preservation scopes, and the library writes the key once; promoted
+   from the backlog on escalation `ovl-006` (`live.md` LIVE-024,
+   `docs/commitments/live-key-vocabulary.md`). The form gallery's
+   `.prevent` rode along, and its first browser case found a runtime
+   defect that refused any Live submit from a form holding an empty
+   number input or an unselected select, fixed in the same build.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
