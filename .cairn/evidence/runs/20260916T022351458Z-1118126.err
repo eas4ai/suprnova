@@ -1,0 +1,7 @@
+   Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.52s
+────────────
+[32;1m Nextest run[0m ID [1mc8c2b0e9-db91-446e-bb61-bdea88a5c40c[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m5[0m tests across [1m1[0m binary ([1m93[0m tests [33;1mskipped[0m)
+────────────
+[32;1m     Summary[0m [   0.325s] [1m5[0m tests run: [1m5[0m [32;1mpassed[0m, [1m93[0m [33;1mskipped[0m

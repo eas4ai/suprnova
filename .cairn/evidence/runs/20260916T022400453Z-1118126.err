@@ -1,0 +1,27 @@
+   Compiling sqlx-core v0.9.0
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper-rustls v0.27.9
+   Compiling tonic v0.12.3
+   Compiling lettre v0.11.22
+   Compiling sqlx-postgres v0.9.0
+   Compiling sqlx-mysql v0.9.0
+   Compiling sqlx-sqlite v0.9.0
+   Compiling reqwest v0.12.28
+   Compiling reqwest v0.13.4
+   Compiling sqlx v0.9.0
+   Compiling apple v0.3.1 (https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97)
+   Compiling qdrant-client v1.18.0
+   Compiling suprnova-web-push v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+   Compiling sea-query-sqlx v0.9.1
+   Compiling sea-schema v0.18.1
+   Compiling sea-orm v2.0.2
+   Compiling sea-orm-migration v2.0.2
+   Compiling suprnova-magnetar v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova-cli v2.0.2 (/home/shawn/workspace2/suprnova/suprnova-cli)
+   Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.54s
+────────────
+[32;1m Nextest run[0m ID [1m965f4d55-064b-4bd8-8658-c256e3448048[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m3[0m tests across [1m1[0m binary
+────────────
+[32;1m     Summary[0m [   0.009s] [1m3[0m tests run: [1m3[0m [32;1mpassed[0m, [1m0[0m [33;1mskipped[0m
