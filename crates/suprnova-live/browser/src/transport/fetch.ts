@@ -4,6 +4,7 @@ import type { RuntimeDiagnosticInput, RuntimeDiagnosticSink } from "../runtime/d
 import type { RuntimePorts } from "../runtime/ports.js";
 import type { RuntimeConfig } from "../runtime/types.js";
 import type { SchedulerTicket } from "../scheduler/types.js";
+import { ProtocolValidationError } from "../protocol.js";
 import type { BuiltLiveRequest } from "./request.js";
 import { LiveRequestBuilder } from "./request.js";
 import { readLiveResponse } from "./response.js";
@@ -107,6 +108,22 @@ const DEFAULT_RETRY_POLICY: RetryPolicy = Object.freeze({
   maximumDelayMs: 1_000,
   retryableStatuses: Object.freeze([502, 503, 504]),
 });
+
+/// A request the builder refused because it exceeds a protocol bound never
+/// left the browser; it is a resource limit the page can act on, not a
+/// network failure (LIVE-030). Other errors keep their transport meaning.
+export function refusedRequestDiagnostic(error: unknown): RuntimeDiagnosticInput | null {
+  if (!(error instanceof ProtocolValidationError)) return null;
+  if (!error.code.startsWith("too_many_") && error.code !== "protocol_too_many_entries") {
+    return null;
+  }
+  return {
+    code: "resource_limit",
+    detailCode: "resource_exhausted",
+    phase: "transport",
+    severity: "error",
+  };
+}
 
 export function transportFailureDiagnostic(
   failure: LiveTransportError,
@@ -304,7 +321,7 @@ export class LiveTransportCoordinator {
         retrying: false,
       });
       record.scheduler.finish(ticket, failure.kind === "aborted" ? "canceled" : "rejected");
-      const diagnostic = transportFailureDiagnostic(failure);
+      const diagnostic = refusedRequestDiagnostic(error) ?? transportFailureDiagnostic(failure);
       if (diagnostic !== null) this.#diagnostics.record(diagnostic);
       this.#pump(record);
     }

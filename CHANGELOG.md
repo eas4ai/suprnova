@@ -121,6 +121,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   other value could never be bound by a template; it now fails to compile.
   `live:error` also accepts an action as its target, as a validation summary
   names one, matching what the runtime resolves.
+- **A Live form of more than seven model fields submits.** The browser runtime
+  refused any request carrying more than eight operations or model proposals,
+  and any response with more than sixteen validation entries or eight events,
+  though the framework's server accepts 128 of each; the refused submit never
+  left the browser and was reported as a network failure. The browser now
+  admits the server's counts, `live:check` refuses a `live:submit` form of
+  more than 127 model fields, and a request refused for a limit is reported as
+  a resource limit that shows the action's error feedback.
 - **Every issuance the Live per-scope limit admits answers with a subscription
   that connects.** Concurrent issuances of one scope in the same millisecond
   mint identical descriptors, and the host's credential store kept only the

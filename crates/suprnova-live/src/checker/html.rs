@@ -56,6 +56,20 @@ struct ElementFrame {
     owner: ComponentName,
     island_index: usize,
     morph_control: Option<MorphControlKind>,
+    submit_form: Option<usize>,
+}
+
+/// The most model fields one `live:submit` form may bind: a Live request
+/// carries 128 operations, one per proposed field plus the invoked action
+/// (LIVE-029, matching the framework's `ProtocolLimits`).
+const MAX_SUBMIT_FORM_FIELDS: usize = 127;
+
+/// The distinct model fields under one `live:submit` form, and whether the
+/// form has already been reported past the bound.
+#[derive(Default)]
+struct SubmitForm {
+    fields: BTreeSet<String>,
+    reported: bool,
 }
 
 struct TeleportIntent {
@@ -89,6 +103,7 @@ struct HtmlState<'checker, 'diagnostics> {
     teleports: Vec<TeleportIntent>,
     freshness: Vec<(ComponentName, IslandFreshness)>,
     field_declarations: Vec<IslandFieldDeclarations>,
+    submit_forms: Vec<SubmitForm>,
     tokens: usize,
     attributes: usize,
     loop_depth: usize,
@@ -125,6 +140,7 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
             teleports: Vec::new(),
             freshness,
             field_declarations: vec![IslandFieldDeclarations::default()],
+            submit_forms: Vec::new(),
             tokens: 0,
             attributes: 0,
             loop_depth: 0,
@@ -221,6 +237,7 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
                 }
                 self.observe_freshness(island_index, &attributes, line);
                 self.observe_upload_model_exclusivity(island_index, &attributes, line, &owner);
+                let submit_form = self.observe_submit_form(&attributes, line, &owner);
                 self.validate_keys(&attributes, line, &owner);
                 let ancestors: Vec<ComponentName> = std::iter::once(self.root.identity().clone())
                     .chain(self.stack.iter().map(|frame| frame.owner.clone()))
@@ -268,6 +285,7 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
                             owner,
                             island_index,
                             morph_control: morph_control_kind(&attributes),
+                            submit_form,
                         });
                     }
                 }
@@ -318,6 +336,45 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
         self.stack
             .last()
             .map_or_else(|| self.root.identity().clone(), |frame| frame.owner.clone())
+    }
+
+    /// Counts the distinct model fields under the enclosing `live:submit`
+    /// form and reports the form once past what one request carries. A
+    /// submit proposes every model control of its form, so a larger form
+    /// has no working Live submit (LIVE-029). Returns the form index the
+    /// element's descendants inherit.
+    fn observe_submit_form(
+        &mut self,
+        attributes: &[(String, String)],
+        line: u64,
+        owner: &ComponentName,
+    ) -> Option<usize> {
+        let opens_form = attributes
+            .iter()
+            .any(|(name, _)| name == "live:submit" || name.starts_with("live:submit."));
+        let form = if opens_form {
+            self.submit_forms.push(SubmitForm::default());
+            Some(self.submit_forms.len() - 1)
+        } else {
+            self.stack.last().and_then(|frame| frame.submit_form)
+        };
+        let index = form?;
+        for (name, value) in attributes {
+            if name == "live:model" || name.starts_with("live:model.") {
+                self.submit_forms[index].fields.insert(value.clone());
+            }
+        }
+        let over = self.submit_forms[index].fields.len() > MAX_SUBMIT_FORM_FIELDS;
+        if over && !self.submit_forms[index].reported {
+            self.submit_forms[index].reported = true;
+            self.push(
+                DiagnosticCode::SubmitProposalLimit,
+                DiagnosticSeverity::Error,
+                line,
+                owner,
+            );
+        }
+        form
     }
 
     fn current_island_index(&self) -> usize {

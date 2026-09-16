@@ -1,7 +1,7 @@
 # Suprnova Live -- 06 Wire Protocol and Transport
 
 Status: Normative design specification
-Last revised: 2026-09-01
+Last revised: 2026-09-16
 
 ## Scope
 
@@ -271,6 +271,16 @@ blob store merely to replay bytes.
 - Rolling deployments have an explicit compatibility path.
 
 ## Decisions and revisions
+
+- 2026-09-16 -- The browser validators admit the message counts the
+  framework configures in `ProtocolLimits`: 128 model proposals, operations,
+  action arguments, validation entries, events, effects, and extensions
+  (LIVE-028). They had refused more than 8 or 16 of each, below the server,
+  so a form of more than seven model fields never submitted and a response
+  with seventeen validation entries was rejected. The checker refuses a
+  `live:submit` form of more than 127 model fields (LIVE-029), and a request
+  refused for a bound is a `resource_limit` diagnostic, not a network failure
+  (LIVE-030).
 
 - 2026-09-01 -- Locked the canonical v2 child-admission carrier to exact keys
   `envelope` and `parent_snapshot`. Parent response sealing validates every

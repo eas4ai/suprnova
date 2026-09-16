@@ -204,28 +204,17 @@ describe("Live request builder", () => {
       ),
     ).rejects.toThrow("request_document_key_conflict");
 
-    const operations = Array.from({ length: 9 }, () =>
+    // An intent already stops at the protocol's 128 operations and proposals,
+    // so no builder input exceeds them; tests/protocol-bounds.test.ts holds
+    // the validators to the same counts (LIVE-028).
+    const operations = Array.from({ length: 129 }, () =>
       Object.freeze({
         arguments: Object.freeze({}),
         kind: "invoke_action" as const,
         name: "search",
       }),
     );
-    await expect(
-      new LiveRequestBuilder().build(input(2, intent("instance", operations))),
-    ).rejects.toThrow("too_many_operations");
-
-    const proposalOperations = Array.from({ length: 9 }, (_, index) =>
-      Object.freeze({ field: `field_${String(index)}`, kind: "sync_model" as const }),
-    );
-    const excessiveProposals = Object.freeze(
-      Object.fromEntries(proposalOperations.map((operation) => [operation.field, operation.field])),
-    );
-    await expect(
-      new LiveRequestBuilder().build(
-        input(2, intent("instance", proposalOperations, excessiveProposals)),
-      ),
-    ).rejects.toThrow("too_many_model_proposals");
+    expect(() => intent("instance", operations)).toThrow("intent_operation_limit");
 
     await expect(
       new LiveRequestBuilder().build(

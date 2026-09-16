@@ -65,6 +65,9 @@ impl Counter {
   `#[model(debounce = 250)]`; um debounce é de 100, 250 ou 500
   milissegundos, as durações que `live:model.debounce.<n>ms` aceita, e
   qualquer outra falha na compilação.
+  Um formulário enviado com `live:submit` propõe cada controle de modelo
+  dentro dele em uma única requisição, que leva até 127 campos além da ação;
+  `live:check` recusa um formulário maior.
 - Métodos `#[action]` são os únicos pontos de entrada que o navegador pode
   invocar. Eles recebem argumentos validados e podem devolver resultados
   tipados, como um redirecionamento ou um flash.

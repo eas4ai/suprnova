@@ -130,6 +130,15 @@ são enviados atomicamente. Mais recentes primeiro.
   template; agora falha na compilação. `live:error` também aceita uma ação
   como alvo, como um resumo de validação a nomeia, em linha com o que o
   runtime resolve.
+- **Um formulário Live com mais de sete campos de modelo é enviado.** O
+  runtime do navegador recusava qualquer requisição com mais de oito operações
+  ou propostas de modelo, e qualquer resposta com mais de dezesseis entradas de
+  validação ou oito eventos, embora o servidor do framework aceite 128 de cada;
+  o envio recusado nunca saía do navegador e era relatado como falha de rede. O
+  navegador agora admite as contagens do servidor, `live:check` recusa um
+  formulário `live:submit` com mais de 127 campos de modelo, e uma requisição
+  recusada por um limite é relatada como limite de recursos que mostra o
+  feedback de erro da ação.
 - **Toda emissão que o limite por escopo do Live admite responde com uma
   assinatura que conecta.** Emissões concorrentes de um escopo no mesmo
   milissegundo cunham descritores idênticos, e o armazenamento de credenciais

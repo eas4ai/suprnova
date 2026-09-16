@@ -137,6 +137,15 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   konnte; er lässt sich jetzt nicht kompilieren. `live:error` akzeptiert
   außerdem eine Aktion als Ziel, wie eine Validierungszusammenfassung sie
   nennt, passend zu dem, was die Runtime auflöst.
+- **Ein Live-Formular mit mehr als sieben Model-Feldern wird gesendet.** Die
+  Browser-Runtime wies jede Anfrage mit mehr als acht Operationen oder
+  Model-Vorschlägen und jede Antwort mit mehr als sechzehn
+  Validierungseinträgen oder acht Events ab, obwohl der Server des Frameworks
+  jeweils 128 akzeptiert; der abgewiesene Submit verließ den Browser nie und
+  wurde als Netzwerkfehler gemeldet. Der Browser lässt jetzt die Anzahlen des
+  Servers zu, `live:check` weist ein `live:submit`-Formular mit mehr als 127
+  Model-Feldern ab, und eine wegen eines Limits abgewiesene Anfrage wird als
+  Ressourcenlimit gemeldet, das das Fehler-Feedback der Aktion anzeigt.
 - **Jede Ausgabe, die das Live-Limit pro Scope zulässt, antwortet mit einer
   Subscription, die sich verbinden lässt.** Gleichzeitige Ausgaben eines
   Scopes in derselben Millisekunde prägen identische Deskriptoren, und der

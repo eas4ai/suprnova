@@ -123,7 +123,8 @@ test("the form gallery's save form submits through Live with the page left in pl
   // submit event through; then live:submit.prevent runs the Live action and
   // the native GET submission, which would reload the page from the form's
   // own query, does not. The wait names the save action's own request, so a
-  // model proposal answered late cannot stand in for it.
+  // model proposal answered late cannot stand in for it. The form binds ten
+  // model controls, more than the eight the browser once admitted (LIVE-028).
   await page.locator("#email").fill("ada@example.com");
   await page.locator("#secret").fill("correct horse battery staple");
   await page.locator("#agree").check();

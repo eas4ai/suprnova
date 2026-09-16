@@ -23,7 +23,13 @@
 {% call field::field("secret", "Password", required=true) %}{% call password::password_input("secret", autocomplete="new-password", required=true) %}{% endcall %}{% endcall %}
 {% call field::field("bio", "About you") %}{% call textarea::textarea("bio") %}{% endcall %}{% endcall %}
 {% endcall %}
-{% call fieldset::fieldset("Consent") %}
+{% call fieldset::fieldset("Preferences") %}
+{% call field::field("quantity", "Seats") %}{% call number::number_input("quantity", min="1", max="50") %}{% endcall %}{% endcall %}
+{% call field::field("volume", "Volume") %}{% call slider::slider("volume") %}{% endcall %}{% endcall %}
+{% call field::field("query", "Search topics") %}{% call search::search_input("query") %}{% endcall %}{% endcall %}
+{% call field::field("country", "Country") %}{% call select::select("country", countries, placeholder="Choose a country") %}{% endcall %}{% endcall %}
+{% call radio::radio_group("plan", "Plan", plans) %}{% endcall %}
+{% call checkbox::checkbox_group("topics", "Topics", topic_options) %}{% endcall %}
 {% call checkbox::checkbox("agree", "I agree to the terms", required=true) %}{% endcall %}
 {% call switch::switch("newsletter", "Send me the newsletter") %}{% endcall %}
 {% call field::field("avatar", "Avatar") %}{% call file::file_input("avatar", accept="image/*") %}{% endcall %}{% endcall %}
@@ -35,17 +41,3 @@
 {% call button::button("Save", kind="submit", action="save") %}{% endcall %}
 {% endcall %}
 </form>
-{#
-  The preferences sync on their own timing outside the save form. A Live
-  request carries at most eight model proposals, and a submit proposes every
-  model control associated with its form, so a form with more than eight
-  model-bound controls cannot submit through Live.
-#}
-{% call fieldset::fieldset("Preferences") %}
-{% call field::field("quantity", "Seats") %}{% call number::number_input("quantity", min="1", max="50") %}{% endcall %}{% endcall %}
-{% call field::field("volume", "Volume") %}{% call slider::slider("volume") %}{% endcall %}{% endcall %}
-{% call field::field("query", "Search topics") %}{% call search::search_input("query") %}{% endcall %}{% endcall %}
-{% call field::field("country", "Country") %}{% call select::select("country", countries, placeholder="Choose a country") %}{% endcall %}{% endcall %}
-{% call radio::radio_group("plan", "Plan", plans) %}{% endcall %}
-{% call checkbox::checkbox_group("topics", "Topics", topic_options) %}{% endcall %}
-{% endcall %}

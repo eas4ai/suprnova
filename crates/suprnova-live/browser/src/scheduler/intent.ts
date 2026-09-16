@@ -28,7 +28,9 @@ export type IntentFinishReason =
   "accepted" | "terminal" | "canceled" | "superseded" | "retired" | "exhausted" | "rejected";
 export type IntentFinishObserver = (reason: IntentFinishReason) => void;
 
-const MAX_OPERATIONS_PER_INTENT = 32;
+// The operations one request carries, the framework server's bound: a submit
+// proposes every model control of its form, one operation each (LIVE-028).
+const MAX_OPERATIONS_PER_INTENT = 128;
 const MAX_MODEL_PROPOSALS_PER_INTENT = 128;
 const MAX_INTENT_JSON_DEPTH = 32;
 const MAX_INTENT_JSON_NODES = 2_048;

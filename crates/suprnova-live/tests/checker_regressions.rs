@@ -340,6 +340,55 @@ fn live_error_target_is_a_declared_field_or_action() {
     assert_code(secret, DiagnosticCode::ForbiddenModel);
 }
 
+/// LIVE-029: a `live:submit` form is refused past the 127 model fields one
+/// request carries with its action. The registry declares one model field,
+/// so the fixture binds the same field names the checker then reports as
+/// unknown; the proposal bound is reported on its own code either way.
+#[test]
+fn submit_form_proposals_are_bounded_by_one_request() {
+    // The test registry declares none of these fields, so each control also
+    // reports an unknown model; room for all of them keeps the bound's own
+    // report from being cut at the default diagnostic ceiling.
+    let limits = CheckerLimits::new(256 * 1024, 8_192, 16, 128, 32_768, 2_048, 256, 1_024)
+        .expect("checker limits within the engine maxima");
+    let form = |fields: usize| {
+        let controls: String = (0..fields)
+            .map(|index| format!(r#"<input aria-label="f{index}" live:model="field_{index}">"#))
+            .collect();
+        format!(r#"<form live:submit.prevent="save">{controls}</form>"#)
+    };
+    let within = check(&form(127), limits);
+    assert!(
+        !within
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DiagnosticCode::SubmitProposalLimit),
+        "127 fields fit one request"
+    );
+    let over = check(&form(128), limits);
+    let reported = over
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DiagnosticCode::SubmitProposalLimit)
+        .count();
+    assert_eq!(reported, 1, "one report per form: {:?}", over.diagnostics());
+
+    let outside = format!(
+        r#"<form live:submit.prevent="save"><input aria-label="q" live:model="query"></form>{}"#,
+        (0..130)
+            .map(|index| format!(r#"<input aria-label="o{index}" live:model="other_{index}">"#))
+            .collect::<String>()
+    );
+    let outside = check(&outside, limits);
+    assert!(
+        !outside
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DiagnosticCode::SubmitProposalLimit),
+        "controls outside the form do not count"
+    );
+}
+
 fn check(source: &str, limits: CheckerLimits) -> suprnova_live::checker::CheckReport {
     let registry = registry();
     let catalog = TemplateCatalog::new(vec![

@@ -66,6 +66,9 @@ pub enum DiagnosticCode {
     StackDepthLimit,
     /// Diagnostic production reached its hard ceiling.
     DiagnosticLimit,
+    /// A `live:submit` form binds more model fields than one Live request
+    /// carries, so its submit could never be sent.
+    SubmitProposalLimit,
 }
 
 impl DiagnosticCode {
@@ -102,6 +105,7 @@ impl DiagnosticCode {
             Self::AttributeLimit => "attribute_limit",
             Self::StackDepthLimit => "stack_depth_limit",
             Self::DiagnosticLimit => "diagnostic_limit",
+            Self::SubmitProposalLimit => "submit_proposal_limit",
         }
     }
 }

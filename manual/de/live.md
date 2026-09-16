@@ -65,6 +65,9 @@ impl Counter {
   `#[model(debounce = 250)]`; ein Debounce beträgt 100, 250 oder 500
   Millisekunden, die Dauern, die `live:model.debounce.<n>ms` akzeptiert, und
   jede andere lässt sich nicht kompilieren.
+  Ein mit `live:submit` gesendetes Formular schlägt jedes Model-Steuerelement
+  darin in einer Anfrage vor, die neben der Aktion bis zu 127 Felder trägt;
+  `live:check` weist ein größeres Formular ab.
 - `#[action]`-Methoden sind die einzigen Einstiegspunkte, die der Browser
   aufrufen kann. Sie erhalten validierte Argumente und können typisierte
   Ergebnisse wie eine Weiterleitung oder einen Flash zurückgeben.

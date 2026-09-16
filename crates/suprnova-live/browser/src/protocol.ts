@@ -26,6 +26,18 @@ function utf8Length(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
+/// Message counts the browser admits, the counts the framework's server
+/// configures in `ProtocolLimits` (`framework/src/live/runtime.rs`); a
+/// browser bound below the server's refused traffic the server accepts
+/// (LIVE-028).
+export const MAX_MODEL_PROPOSALS = 128;
+export const MAX_OPERATIONS = 128;
+export const MAX_ACTION_ARGUMENTS = 128;
+export const MAX_VALIDATION_ENTRIES = 128;
+export const MAX_EVENTS = 128;
+export const MAX_EFFECTS = 128;
+export const MAX_EXTENSIONS = 128;
+
 export class ProtocolValidationError extends Error {
   public constructor(public readonly code: string) {
     super(code);
@@ -76,7 +88,7 @@ function validateUpdateRequestV1(root: Readonly<Record<string, unknown>>): void 
   binaryIdentity(root["idempotency_key"], 16, 32);
   validateExtensions(asRecord(root["extensions"]));
   const modelProposals = asRecord(root["model_proposals"]);
-  if (Object.keys(modelProposals).length > 8) {
+  if (Object.keys(modelProposals).length > MAX_MODEL_PROPOSALS) {
     throw new ProtocolValidationError("too_many_model_proposals");
   }
   for (const field of Object.keys(modelProposals)) textIdentity(field);
@@ -96,7 +108,7 @@ function validateUpdateRequestV1(root: Readonly<Record<string, unknown>>): void 
   }
   asRecord(snapshot["envelope"]);
   const operations = asArray(root["operations"]);
-  if (operations.length === 0 || operations.length > 8) {
+  if (operations.length === 0 || operations.length > MAX_OPERATIONS) {
     throw new ProtocolValidationError("too_many_operations");
   }
   let invoked = false;
@@ -116,7 +128,7 @@ function validateUpdateRequestV1(root: Readonly<Record<string, unknown>>): void 
       invoked = true;
       textIdentity(operation["name"]);
       const arguments_ = asRecord(operation["arguments"]);
-      if (Object.keys(arguments_).length > 16) {
+      if (Object.keys(arguments_).length > MAX_ACTION_ARGUMENTS) {
         throw new ProtocolValidationError("too_many_action_arguments");
       }
       for (const name of Object.keys(arguments_)) textIdentity(name);
@@ -180,11 +192,11 @@ function validateUpdateResponseV1(root: Readonly<Record<string, unknown>>): void
     throw new ProtocolValidationError("unsupported_protocol_version");
   }
   binaryIdentity(root["correlation_id"], 16, 32);
-  const effects = validateEmissions(root["effects"], 8);
-  const events = validateEmissions(root["events"], 8);
+  const effects = validateEmissions(root["effects"], MAX_EFFECTS);
+  const events = validateEmissions(root["events"], MAX_EVENTS);
   validateExtensions(asRecord(root["extensions"]));
   const validation = asRecord(root["validation"]);
-  if (Object.keys(validation).length > 16) {
+  if (Object.keys(validation).length > MAX_VALIDATION_ENTRIES) {
     throw new ProtocolValidationError("protocol_too_many_entries");
   }
   const outcome = asString(root["outcome"]);
@@ -272,7 +284,7 @@ function validateUpdateRequestV2(root: Readonly<Record<string, unknown>>): void 
   binaryIdentity(root["idempotency_key"], 16, 32);
   validateExtensions(asRecord(root["extensions"]));
   const modelProposals = asRecord(root["model_proposals"]);
-  if (Object.keys(modelProposals).length > 8) {
+  if (Object.keys(modelProposals).length > MAX_MODEL_PROPOSALS) {
     throw new ProtocolValidationError("too_many_model_proposals");
   }
   for (const field of Object.keys(modelProposals)) textIdentity(field);
@@ -287,7 +299,7 @@ function validateUpdateRequestV2(root: Readonly<Record<string, unknown>>): void 
   }
 
   const operations = asArray(root["operations"]);
-  if (operations.length === 0 || operations.length > 8) {
+  if (operations.length === 0 || operations.length > MAX_OPERATIONS) {
     throw new ProtocolValidationError("too_many_operations");
   }
   let invoked = false;
@@ -313,7 +325,7 @@ function validateUpdateRequestV2(root: Readonly<Record<string, unknown>>): void 
       invoked = true;
       textIdentity(operation["name"]);
       const arguments_ = asRecord(operation["arguments"]);
-      if (Object.keys(arguments_).length > 16) {
+      if (Object.keys(arguments_).length > MAX_ACTION_ARGUMENTS) {
         throw new ProtocolValidationError("too_many_action_arguments");
       }
       for (const name of Object.keys(arguments_)) textIdentity(name);
@@ -369,11 +381,11 @@ function validateUpdateResponseV2(root: Readonly<Record<string, unknown>>): void
     throw new ProtocolValidationError("unsupported_protocol_version");
   }
   binaryIdentity(root["correlation_id"], 16, 32);
-  const effects = validateEmissions(root["effects"], 8);
-  const events = validateEmissions(root["events"], 8);
+  const effects = validateEmissions(root["effects"], MAX_EFFECTS);
+  const events = validateEmissions(root["events"], MAX_EVENTS);
   validateExtensions(asRecord(root["extensions"]));
   const validation = asRecord(root["validation"]);
-  if (Object.keys(validation).length > 16) {
+  if (Object.keys(validation).length > MAX_VALIDATION_ENTRIES) {
     throw new ProtocolValidationError("protocol_too_many_entries");
   }
   const outcome = asString(root["outcome"]);
@@ -802,7 +814,7 @@ function requireOperationKeys(
 function validateExtensions(value: Readonly<Record<string, unknown>>): void {
   const names = Object.keys(value);
   if (
-    names.length > 8 ||
+    names.length > MAX_EXTENSIONS ||
     names.some(
       (name) => !name.startsWith("x_") || name.length > 64 || !/^[A-Za-z0-9_.-]+$/u.test(name),
     )

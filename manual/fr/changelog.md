@@ -136,6 +136,15 @@ en premier.
   elle ne compile plus. `live:error` accepte aussi une action comme cible,
   comme la nomme un résumé de validation, conformément à ce que résout le
   runtime.
+- **Un formulaire Live de plus de sept champs de modèle est envoyé.** Le
+  runtime du navigateur refusait toute requête portant plus de huit opérations
+  ou propositions de modèle, et toute réponse portant plus de seize entrées de
+  validation ou huit événements, alors que le serveur du framework en accepte
+  128 de chaque ; l'envoi refusé ne quittait jamais le navigateur et était
+  signalé comme une panne réseau. Le navigateur admet désormais les nombres du
+  serveur, `live:check` refuse un formulaire `live:submit` de plus de 127
+  champs de modèle, et une requête refusée pour une limite est signalée comme
+  une limite de ressources qui affiche le retour d'erreur de l'action.
 - **Chaque émission que la limite par scope de Live admet répond avec un
   abonnement qui se connecte.** Des émissions concurrentes d'un même scope
   dans la même milliseconde frappent des descripteurs identiques, et le
