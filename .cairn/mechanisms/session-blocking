@@ -1,0 +1,13 @@
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test session -E 'test(blocking::)'
+inputs:
+  - framework/src/session/
+  - framework/src/cache/
+  - framework/src/routing/
+  - framework/src/http/request.rs
+  - framework/src/server.rs
+  - framework/tests/session/blocking.rs
+  - framework/tests/session/main.rs
+  - framework/tests/support/
+  - Cargo.lock
+requirements:
+  - SESS-001
