@@ -1,0 +1,20 @@
+mechanism: live-protocol-bounds
+commit: 582159b7
+inputs_digest: sha256:0647da6767f83e2c95649487d5d989e7f6a401a3c3df3cdb4cd0757a1d96b662
+mechanism_digest: sha256:6d98dc9c1cc37343d7ef0017814d97a0ad98a8b0af024d5f9260c7a6ed281a87
+kernel_digest: sha256:a75759bfeebcad18d5c4ede6438c2a1efc8380a27df350379634205af5b27b19
+inputs_detail: .cairn/evidence/runs/20260916T192151530Z-4056710.inputs.json
+command: sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/protocol-bounds.test.ts && cd ../../.. && env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova-live --test checker_regressions -E "test(submit_form_proposals)"'
+cwd: .
+exit: 0
+output_digest: sha256:6c6f078ef13a25332c863b1b4ae149cec5d7f3e13a46939b158240cb144f42fd
+output: .cairn/evidence/runs/20260916T192151530Z-4056710.out
+stderr_output: .cairn/evidence/runs/20260916T192151530Z-4056710.err
+stderr_digest: sha256:3336284ec1b0e61b4f03a6ab250a5d55e2aee2ef2d1dacc7a5eaab9c3837f031
+signal: none
+execution_error: null
+recorded: 2026-09-16T19:21:52.867Z
+results:
+  - LIVE-028 pass exit sha256:20fe715cd40593fc00fb39a2f8b503084241a53f65051ac79dc84e9c563c7599 1 sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+  - LIVE-029 pass exit sha256:ae354b637996b74b65e5be1b83f94210476ab2245db51c4ac086bb35f71598f2 1 sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+  - LIVE-030 pass exit sha256:ae1df4aacb53cb8aace2d10130f149d771510a36f500a29c9ef88d6756bc345e 1 sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855

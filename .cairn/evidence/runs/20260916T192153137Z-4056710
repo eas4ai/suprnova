@@ -1,0 +1,23 @@
+mechanism: ui-tokens
+commit: 582159b7
+inputs_digest: sha256:f9b20e5cc81b60c827f366b793eedca6b429f53fa1bbd341f26397acf800e179
+mechanism_digest: sha256:ca8fb41c4b569927ed87c647911b23f26bb405ba652427ddbd76e0d207182a05
+kernel_digest: sha256:a75759bfeebcad18d5c4ede6438c2a1efc8380a27df350379634205af5b27b19
+inputs_detail: .cairn/evidence/runs/20260916T192153137Z-4056710.inputs.json
+command: node .cairn/tools/ui-tokens.mjs crates/suprnova-live/browser/src/styles/suprnova-ui.css app/templates/suprnova-ui crates/suprnova-live/browser/src/styles/suprnova-ui.tailwind.css crates/suprnova-live/components manual
+cwd: .
+exit: 0
+output_digest: sha256:b7c78c7f4900cc0b9ca22736ccec6d7d33f69d794b3fe092c7248d2081318138
+output: .cairn/evidence/runs/20260916T192153137Z-4056710.out
+stderr_output: .cairn/evidence/runs/20260916T192153137Z-4056710.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-16T19:21:57.833Z
+results:
+  - UI-001 pass line sha256:aed425a76ef3330f271aec0d62f64f73788c5fbc6f308bf59b76a2cebc20f6ca 28 sha256:4144f0f14152c957f1f79ce78ccd2d97ad884cb57502155e4373ede52a0ec82f
+  - UI-002 pass line sha256:07eb5b469928fd3928664d2ece74ee9f6762732b52036327ddb8856bef8227a2 28 sha256:2a466f3f9f6aed99a65c1ad54d201b7e89ef8033b22a612301e5bb93fa5575aa
+  - UI-003 pass line sha256:a5d32981c8cccb5e5ad96156d88f632076403dab2e8ce0dde67b5f6feaae4045 28 sha256:39a0dbeb1276fcadc89fcd67bd9f745c1326d232faeb9cfec5ce5f017fbb92d3
+  - UI-004 pass line sha256:70a89f36024e1fb7c67286126e5138973cba81595f9a7134a83edf51b1c45074 28 sha256:9f45fd597b332bb97d2e6245a12b330f9f264fff198435dd0af7aed7a53b49d9
+  - UI-005 pass line sha256:7936f826c9ccddd2c4135ae150991a99d6e4f2696bbd83c0bd8014f1f0a1b04c 28 sha256:abf30608189e04cefdf384628010f3ed7226b625758919b55a6dd02f03f11466
+  - UI-007 pass line sha256:a0def64e5d8c3d1c5066790f0ff2dcf332c6301eeb748a26d769f7080798ec51 28 sha256:6a5cbe550f2a309c01ce98d9c9d258921052032125b55ec63446fb5802a02ced
