@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: checker-proves-runtime-accepts
+Current: live-protocol-bounds
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -115,6 +115,12 @@ components in waves, the advanced components last, the datatable closing.
    after the build found an empty call block hiding 24 errors in the form
    gallery (`live.md` LIVE-025 to LIVE-027,
    `docs/commitments/checker-proves-runtime-accepts.md`).
+11. live-protocol-bounds - the browser admits the message counts the
+   framework's protocol limits admit, `live:check` refuses a submit form
+   one request cannot carry, and a request refused for size fails visibly;
+   promoted on escalation `live-027` after the dogfood save form's ten
+   fields never submitted (`live.md` LIVE-028 to LIVE-030,
+   `docs/commitments/live-protocol-bounds.md`).
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

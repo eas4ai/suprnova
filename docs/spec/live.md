@@ -293,3 +293,46 @@ resolves a field, the island, or an action.
 Mechanism: `.cairn/mechanisms/checker-soundness`.
 Refines: Live spec 11, feedback targets; FORM-003.
 Status: Agreed 2026-09-16
+
+## The browser admits what the protocol admits
+
+[LIVE-028] The browser runtime's protocol validators MUST admit the
+message counts the framework's protocol limits admit: 128 model
+proposals, operations, arguments, validation entries, events, effects, and
+extensions per message.
+Falsifier: the browser refuses a request carrying nine model proposals, or
+a response carrying seventeen validation entries or nine events.
+Evidence: `crates/suprnova-live/browser/src/protocol.ts` refused more than
+8 proposals, operations, events, effects, and extensions and more than 16
+arguments and validation entries, while `framework/src/live/runtime.rs`
+configures `ProtocolLimits` at 128 for each and the browser scheduler
+admits 128 proposals; no Live specification sets the lower counts. The
+dogfood form gallery's ten-field save form never submitted.
+Mechanism: `.cairn/mechanisms/live-protocol-bounds`.
+Refines: Live spec 06, bounded envelopes; LIVE-027's promotion.
+Status: Agreed 2026-09-16
+
+[LIVE-029] The checker MUST fail a `live:submit` form whose descendant
+model controls name more distinct fields than one Live request carries,
+127: the 128 operations less the invoked action.
+Falsifier: a view whose `live:submit` form holds 128 distinct model fields
+proves.
+Evidence: a submit proposes every model control associated with its form
+(`crates/suprnova-live/browser/src/models/forms.ts`, `prepareAction`), and
+the checker proved the ten-field form the browser refused.
+Mechanism: `.cairn/mechanisms/live-protocol-bounds`.
+Refines: LIVE-025, UI-009.
+Status: Agreed 2026-09-16
+
+[LIVE-030] The browser runtime MUST record a `resource_limit` diagnostic
+with the detail `resource_exhausted` when it refuses to build a request
+that exceeds a protocol bound. The runtime MUST finish that action as
+rejected, so the action's error feedback shows.
+Falsifier: a refused oversized request records `transport_failed` with
+`network_failure`, or its action never reaches the error state.
+Evidence: the island transport caught the request builder's
+`ProtocolValidationError` as a network failure
+(`crates/suprnova-live/browser/src/transport/fetch.ts`, `#run`).
+Mechanism: `.cairn/mechanisms/live-protocol-bounds`.
+Refines: Live spec 11, feedback states; spec 06.
+Status: Agreed 2026-09-16

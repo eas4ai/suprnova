@@ -1,0 +1,24 @@
+command: sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/protocol-bounds.test.ts && cd ../../.. && env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova-live --test checker_regressions -E "test(submit_form_proposals)"'
+inputs:
+  - crates/suprnova-live/browser/src/protocol.ts
+  - crates/suprnova-live/browser/src/transport/
+  - crates/suprnova-live/browser/src/models/
+  - crates/suprnova-live/browser/src/runtime/
+  - crates/suprnova-live/browser/tests/protocol-bounds.test.ts
+  - crates/suprnova-live/browser/tests/request-builder.test.ts
+  - crates/suprnova-live/browser/tests/support/
+  - crates/suprnova-live/browser/dist/
+  - crates/suprnova-live/browser/test-host/
+  - crates/suprnova-live/browser/e2e/
+  - crates/suprnova-live/src/checker/
+  - crates/suprnova-live/tests/checker_regressions.rs
+  - crates/suprnova-live/docs/specs/suprnova-live/
+  - framework/src/live/runtime.rs
+  - app/templates/
+  - manual/
+  - CHANGELOG.md
+  - .manual-translations.lock
+requirements:
+  - LIVE-028
+  - LIVE-029
+  - LIVE-030
