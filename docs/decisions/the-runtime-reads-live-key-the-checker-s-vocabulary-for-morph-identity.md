@@ -12,5 +12,4 @@ Chosen 2026-09-15 on escalation ovl-006 after session-request-serialization reac
 
 ## Realized by
 
-(none yet: recorded, not built)
 - 159dd219  live: the runtime reads live:key for morph identity, controls and preservation, and the library writes the key once (LIVE-024)
