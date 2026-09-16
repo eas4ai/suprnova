@@ -1,0 +1,1255 @@
+   Compiling app v2.0.2 (/home/shawn/workspace2/suprnova/app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.68s
+────────────
+[32;1m Nextest run[0m ID [1m0976320e-27eb-4eab-906d-1cea24ac8a81[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m18[0m tests across [1m1[0m binary
+[31;1m        FAIL[0m [   0.055s] ( 2/18) [35;1mapp::live_dogfood[0m [34;1mthe_form_gallery_renders_every_presentational_component_with_the_library_base[0m
+[31;1m [0m [31;1mstdout[0m [31;1m───[0m
+
+    running 1 test
+    test the_form_gallery_renders_every_presentational_component_with_the_library_base ... FAILED
+
+    failures:
+
+    failures:
+        the_form_gallery_renders_every_presentational_component_with_the_library_base
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.05s
+    [0m
+[31;1m [0m [31;1mstderr[0m [31;1m───[0m
+
+    [0m[31;1mthread 'the_form_gallery_renders_every_presentational_component_with_the_library_base' (1331082) panicked at app/tests/live_dogfood.rs:332:9:[0m
+    [31;1mmissing live:model.debounce.300ms="query" in <!doctype html>[0m
+    <html lang="en">
+    <head>
+    <meta charset="utf-8">
+    <title>Form gallery</title>
+    <script id="suprnova-live-config" type="application/json">{"asset_identity":"suprnova-live-0.1.0-5347bf1fd920260d","credentials":"same-origin","endpoint":"/__live/action","max_parallel_per_island":1,"max_queued_per_island":8,"max_response_bytes":1048576,"protocol":{"maximum":2,"minimum":1},"request_timeout_ms":5000,"runtime_contract_version":1}</script><link rel="stylesheet" href="/__live/assets/suprnova-live-0.1.0-5347bf1fd920260d/suprnova-ui.css" integrity="sha256-oTtnyLILEdDDFaBAuSSSNbDFnMXRRUZuzWmQNEx7lkI=" crossorigin="anonymous"><link rel="modulepreload" href="/__live/assets/suprnova-live-0.1.0-5347bf1fd920260d/suprnova-live.esm.js" integrity="sha256-75dKI1YVYxk0MbhRXh3yvW3sOz93aFJN0PwYjttrI5Q=" crossorigin="anonymous"><script type="module" src="/__live/assets/suprnova-live-0.1.0-5347bf1fd920260d/suprnova-live.boot.esm.js" integrity="sha256-zqsO7hIJuVXcyGlgB4xZ3oqFb7qExJI5Yxgj2v8OR60=" crossorigin="anonymous"></script>
+    <link rel="stylesheet" href="/suprnova-ui/button/button.css">
+    <link rel="stylesheet" href="/suprnova-ui/button-group/button-group.css">
+    <link rel="stylesheet" href="/suprnova-ui/checkbox/checkbox.css">
+    <link rel="stylesheet" href="/suprnova-ui/field/field.css">
+    <link rel="stylesheet" href="/suprnova-ui/fieldset/fieldset.css">
+    <link rel="stylesheet" href="/suprnova-ui/file-input/file-input.css">
+    <link rel="stylesheet" href="/suprnova-ui/form-actions/form-actions.css">
+    <link rel="stylesheet" href="/suprnova-ui/input/input.css">
+    <link rel="stylesheet" href="/suprnova-ui/label/label.css">
+    <link rel="stylesheet" href="/suprnova-ui/number-input/number-input.css">
+    <link rel="stylesheet" href="/suprnova-ui/password-input/password-input.css">
+    <link rel="stylesheet" href="/suprnova-ui/radio-group/radio-group.css">
+    <link rel="stylesheet" href="/suprnova-ui/search-input/search-input.css">
+    <link rel="stylesheet" href="/suprnova-ui/select/select.css">
+    <link rel="stylesheet" href="/suprnova-ui/slider/slider.css">
+    <link rel="stylesheet" href="/suprnova-ui/switch/switch.css">
+    <link rel="stylesheet" href="/suprnova-ui/textarea/textarea.css">
+    <link rel="stylesheet" href="/suprnova-ui/validation-summary/validation-summary.css">
+    <script type="module" src="/suprnova-ui/password-input/password-input.js"></script>
+    </head>
+    <body>
+    <main>
+    <h1>Form gallery</h1>
+    <div data-suprnova-live-root="gallery" data-suprnova-live-island="" data-suprnova-live-component="app.form-gallery" data-suprnova-live-slot="gallery" data-suprnova-live-document-key="forms-gallery" data-suprnova-live-protocol-min="1" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="instance" data-suprnova-live-snapshot="eyJib2R5Ijp7ImJ1aWxkX2lkIjoic3Vwcm5vdmEtMi4wLjIiLCJjb21wb25lbnQiOnsiY29udHJhY3RfZGlnZXN0IjoiWjdZWkxkeWxUdV9aTXVCLUNuNzBXVmpmVWp3WEtoOGtLNWFFSTRIeGJwbyIsIm1lbW9fc2NoZW1hX3ZlcnNpb24iOjEsIm1vdW50X3NjaGVtYV92ZXJzaW9uIjoxLCJuYW1lIjoiYXBwLmZvcm0tZ2FsbGVyeSIsInN0YXRlX3NjaGVtYV92ZXJzaW9uIjoxfSwiZXhwaXJlc19hdCI6IjE3OTAxNzEyOTI4NjMiLCJleHRlbnNpb25zIjp7Inhfc3Vwcm5vdmFfZnJhbWV3b3JrX2RvY3VtZW50X3BhdGhfdjEiOiIvbGl2ZS9mb3JtcyJ9LCJmb3JtIjoiaW5zdGFuY2UiLCJpbnN0YW5jZV9pZCI6IkR5bVVNMzNHbHpNRTJpVGpDdndkOEEiLCJpc3N1ZWRfYXQiOiIxNzg5NTY2NDkyODYzIiwia2V5X2lkIjoiNTA3ZDlmOGZkMDFhYzkyNGUzYTg4ZDc5ZjIyZGE5ODEiLCJtZW1vIjp7fSwicmV2aXNpb24iOiIwIiwicm91dGUiOiJSZldlaHlZMHBzTU5FaHdaMjB2QnZGODJnSVJ3RDJyTFg0Qk5HcWZXR3BJIiwic2NoZW1hX3ZlcnNpb24iOjEsInNjb3BlIjoiaFF0bVZnSGk4SEJmUjF2RXFsOTMydkZVdDBtMUFwdkQtTlB3Z1pnTXdSMCIsInNsb3QiOiJnYWxsZXJ5Iiwic3RhdGUiOnsiYWdyZWUiOmZhbHNlLCJiaW8iOiIiLCJjb3VudHJpZXMiOltbImNhIiwiQ2FuYWRhIl0sWyJ1cyIsIlVuaXRlZCBTdGF0ZXMiXV0sImNvdW50cnkiOiIiLCJlbWFpbCI6IiIsIm5ld3NsZXR0ZXIiOmZhbHNlLCJwbGFuIjoiIiwicGxhbnMiOltbInN0YXJ0ZXIiLCJTdGFydGVyIl0sWyJ0ZWFtIiwiVGVhbSJdXSwicXVhbnRpdHkiOnsiJGxpdmUiOiJ1NjQiLCJ2YWx1ZSI6IjEifSwicXVlcnkiOiIiLCJ0b3BpY19vcHRpb25zIjpbWyJyZWxlYXNlcyIsIlJlbGVhc2VzIl0sWyJzZWN1cml0eSIsIlNlY3VyaXR5IGFkdmlzb3JpZXMiXV0sInRvcGljcyI6W10sInZvbHVtZSI6eyIkbGl2ZSI6InU2NCIsInZhbHVlIjoiNTAifX19LCJzaWduYXR1cmUiOiIxOWFDQjdCb3plVUtRdC1IZ05XaHJOVUV5RTVIWmtHNTBvWkpkcFJpRUc0In0" data-suprnova-live-revision="0" data-suprnova-live-lazy-complete="false" data-suprnova-live-instance="DymUM33GlzME2iTjCvwd8A">
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <form class="sn-form" live:submit.prevent="save">
+
+    <section class="sn-validation-summary" aria-labelledby="save-summary-title" live:error.live.polite="save">
+    <h2 class="sn-validation-summary-title" id="save-summary-title">Please correct the following</h2>
+
+    </section>
+
+
+    <fieldset class="sn-fieldset">
+    <legend>Account</legend>
+
+
+    <div class="sn-field" data-sn-field="email">
+    <label class="sn-label" for="email">Email <span class="sn-label-mark" aria-hidden="true">*</span></label>
+
+    <input class="sn-input" id="email" name="email" type="email" placeholder="" autocomplete="email" aria-describedby="email-hint email-error" required live:model="email">
+
+    <p class="sn-hint" id="email-hint">We never share it.</p>
+    <output class="sn-error" id="email-error" live:error.live.polite="email"></output>
+    </div>
+
+
+    <div class="sn-field" data-sn-field="secret">
+    <label class="sn-label" for="secret">Password <span class="sn-label-mark" aria-hidden="true">*</span></label>
+
+    <sn-password-reveal class="sn-password">
+    <input class="sn-input sn-password-input" id="secret" name="secret" type="password" autocomplete="new-password" aria-describedby="secret-hint secret-error" required live:model="secret">
+    <button class="sn-password-toggle" type="button" aria-controls="secret" aria-pressed="false">Show</button>
+    </sn-password-reveal>
+
+    <p class="sn-hint" id="secret-hint"></p>
+    <output class="sn-error" id="secret-error" live:error.live.polite="secret"></output>
+    </div>
+
+
+    <div class="sn-field" data-sn-field="bio">
+    <label class="sn-label" for="bio">About you</label>
+
+    <textarea class="sn-textarea" id="bio" name="bio" rows="4" placeholder="" aria-describedby="bio-hint bio-error" live:model="bio"></textarea>
+
+    <p class="sn-hint" id="bio-hint"></p>
+    <output class="sn-error" id="bio-error" live:error.live.polite="bio"></output>
+    </div>
+
+
+    </fieldset>
+
+
+    <fieldset class="sn-fieldset">
+    <legend>Preferences</legend>
+
+
+    <div class="sn-field" data-sn-field="quantity">
+    <label class="sn-label" for="quantity">Seats</label>
+
+    <input class="sn-input sn-number-input" id="quantity" name="quantity" type="number" inputmode="decimal" min="1" max="50" step="1" aria-describedby="quantity-hint quantity-error" live:model="quantity">
+
+    <p class="sn-hint" id="quantity-hint"></p>
+    <output class="sn-error" id="quantity-error" live:error.live.polite="quantity"></output>
+    </div>
+
+
+    <div class="sn-field" data-sn-field="volume">
+    <label class="sn-label" for="volume">Volume</label>
+
+    <div class="sn-slider">
+    <input class="sn-slider-input" id="volume" name="volume" type="range" min="0" max="100" step="1" aria-describedby="volume-hint volume-error" live:model="volume">
+    <output class="sn-slider-value" for="volume"></output>
+    </div>
+
+    <p class="sn-hint" id="volume-hint"></p>
+    <output class="sn-error" id="volume-error" live:error.live.polite="volume"></output>
+    </div>
+
+
+    <div class="sn-field" data-sn-field="query">
+    <label class="sn-label" for="query">Search topics</label>
+
+    <input class="sn-input sn-search-input" id="query" name="query" type="search" placeholder="Search" autocomplete="off" aria-describedby="query-hint query-error" live:model.debounce.250ms="query">
+
+    <p class="sn-hint" id="query-hint"></p>
+    <output class="sn-error" id="query-error" live:error.live.polite="query"></output>
+    </div>
+
+
+    <div class="sn-field" data-sn-field="country">
+    <label class="sn-label" for="country">Country</label>
+
+    <select class="sn-select" id="country" name="country" aria-describedby="country-hint country-error" live:model="country">
+    <option value="">Choose a country</option>
+
+    <option value="ca">Canada</option>
+
+    <option value="us">United States</option>
+
+    </select>
+
+    <p class="sn-hint" id="country-hint"></p>
+    <output class="sn-error" id="country-error" live:error.live.polite="country"></output>
+    </div>
+
+
+    <fieldset class="sn-radio-group" id="plan" aria-describedby="plan-hint plan-error">
+    <legend>Plan</legend>
+
+    <label class="sn-radio"><input class="sn-radio-input" name="plan" type="radio" value="starter" live:model="plan"> <span>Starter</span></label>
+
+    <label class="sn-radio"><input class="sn-radio-input" name="plan" type="radio" value="team" live:model="plan"> <span>Team</span></label>
+
+    </fieldset>
+
+
+    <fieldset class="sn-checkbox-group" id="topics" aria-describedby="topics-hint topics-error">
+    <legend>Topics</legend>
+
+    <label class="sn-checkbox"><input class="sn-checkbox-input" name="topics" type="checkbox" value="releases" live:model="topics"> <span>Releases</span></label>
+
+    <label class="sn-checkbox"><input class="sn-checkbox-input" name="topics" type="checkbox" value="security" live:model="topics"> <span>Security advisories</span></label>
+
+    </fieldset>
+
+
+    <label class="sn-checkbox"><input class="sn-checkbox-input" id="agree" name="agree" type="checkbox" aria-describedby="agree-hint agree-error" required live:model="agree"> <span>I agree to the terms</span></label>
+
+
+    <label class="sn-switch"><input class="sn-switch-input" id="newsletter" name="newsletter" type="checkbox" role="switch" aria-describedby="newsletter-hint newsletter-error" live:model="newsletter"> <span>Send me the newsletter</span></label>
+
+
+    <div class="sn-field" data-sn-field="avatar">
+    <label class="sn-label" for="avatar">Avatar</label>
+
+    <input class="sn-file-input" id="avatar" name="avatar" type="file" accept="image/*" aria-describedby="avatar-hint avatar-error">
+
+    <p class="sn-hint" id="avatar-hint"></p>
+    <output class="sn-error" id="avatar-error" live:error.live.polite="avatar"></output>
+    </div>
+
+
+    </fieldset>
+
+
+    <label class="sn-label" for="nickname">Nickname</label>
+
+    <input class="sn-input" id="nickname" name="nickname" type="text">
+
+    <div class="sn-form-actions">
+
+
+    <div class="sn-button-group" role="group" aria-label="Secondary actions">
+
+
+    <button class="sn-button" type="button" data-sn-variant="secondary" live:click="reset" live:loading.disabled="reset" live:loading.busy="reset">Reset</button>
+
+
+    <a class="sn-button" role="button" href="/live" data-sn-variant="secondary">Cancel</a>
+
+    </div>
+
+
+
+    <button class="sn-button" type="submit" data-sn-variant="primary" live:loading.disabled="save" live:loading.busy="save">Save</button>
+
+
+
+    </div>
+
+    </form></div>
+    </main>
+    </body>
+    </html>
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace[0m
+
+[31;1m  Cancelling[0m due to [31;1mtest failure[0m: [1m11[0m tests still running
+[31;1m        FAIL[0m [   0.075s] ( 5/18) [35;1mapp::live_dogfood[0m [34;1mthe_feedback_gallery_renders_every_feedback_component_on_real_state[0m
+[31;1m [0m [31;1mstdout[0m [31;1m───[0m
+
+    running 1 test
+    test the_feedback_gallery_renders_every_feedback_component_on_real_state ... FAILED
+
+    failures:
+
+    failures:
+        the_feedback_gallery_renders_every_feedback_component_on_real_state
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.07s
+    [0m
+[31;1m [0m [31;1mstderr[0m [31;1m───[0m
+
+    [0m[31;1mthread 'the_feedback_gallery_renders_every_feedback_component_on_real_state' (1331100) panicked at app/tests/live_dogfood.rs:638:5:[0m
+    [31;1m<div data-suprnova-live-root="gallery" data-suprnova-live-island="" data-suprnova-live-component="app.feedback-gallery" data-suprnova-live-slot="gallery" data-suprnova-live-document-key="feedback-gallery" data-suprnova-live-protocol-min="1" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="instance" data-suprnova-live-snapshot="eyJib2R5Ijp7ImJ1aWxkX2lkIjoic3Vwcm5vdmEtMi4wLjIiLCJjb21wb25lbnQiOnsiY29udHJhY3RfZGlnZXN0IjoiUG9ZZ3F0XzlPSFpsenY2eFF5TVlwS0hCWl9nTHlkSzRVeFRNbGZ2a3U5QSIsIm1lbW9fc2NoZW1hX3ZlcnNpb24iOjEsIm1vdW50X3NjaGVtYV92ZXJzaW9uIjoxLCJuYW1lIjoiYXBwLmZlZWRiYWNrLWdhbGxlcnkiLCJzdGF0ZV9zY2hlbWFfdmVyc2lvbiI6MX0sImV4cGlyZXNfYXQiOiIxNzkwMTcxMjkyODc4IiwiZXh0ZW5zaW9ucyI6eyJ4X3N1cHJub3ZhX2ZyYW1ld29ya19kb2N1bWVudF9wYXRoX3YxIjoiL2xpdmUvZmVlZGJhY2sifSwiZm9ybSI6Imluc3RhbmNlIiwiaW5zdGFuY2VfaWQiOiJkRUFZZTlxVm1xZzd2NHZPMTFCQS1BIiwiaXNzdWVkX2F0IjoiMTc4OTU2NjQ5Mjg5NSIsImtleV9pZCI6IjUyNzk0MGYzM2I3NjU4NmI2Njk2Nzk4MjJlOGE1ZDkwIiwibWVtbyI6e30sInJldmlzaW9uIjoiMSIsInJvdXRlIjoiZFBrbHFRNUUtTHN5am50N01vNHZ1OU9mTTNLbzc3X3lwdHRnaGU4RDlINCIsInNjaGVtYV92ZXJzaW9uIjoxLCJzY29wZSI6ImNybFAxTUU4ZFdTckt0bnRsQ3dfb2NaZnZpT1pMTXZJdm5LNVZGNTZyZEkiLCJzbG90IjoiZ2FsbGVyeSIsInN0YXRlIjp7ImNhbl9jcmVhdGUiOnRydWUsImZhaWx1cmUiOnRydWUsInByb2dyZXNzIjowLCJyZWFzb24iOiJlbXB0eSIsInNhdmVkIjowLCJ0b2FzdHMiOlt7ImtleSI6InRvYXN0LTEiLCJ0ZXh0IjoiVGhlIGxhc3Qgc2F2ZSBkaWQgbm90IHJlYWNoIHRoZSBzZXJ2ZXIiLCJ2YXJpYW50IjoiZXJyb3IifV19fSwic2lnbmF0dXJlIjoiT2hzWFY5RWxZRmhYSnZ1aWY5cXBvei1DMlNSRFlVbWVXOHR6QnJ1eVZkbyJ9" data-suprnova-live-revision="1" data-suprnova-live-lazy-complete="false" data-suprnova-live-instance="dEAYe9qVmqg7v4vO11BA-A">[0m
+
+
+
+
+
+
+    <div class="sn-feedback-gallery">
+
+    <div class="sn-alert" id="welcome" data-sn-variant="info" role="status">
+    <span class="sn-alert-icon" aria-hidden="true">i</span><span class="sn-alert-label">Information:</span>
+    <div class="sn-alert-body"><p class="sn-alert-title">Feedback gallery</p><p>Saved <span data-saved="0">0</span> times.</p></div>
+    </div>
+
+
+    <div class="sn-alert" id="saved-alert" data-sn-variant="success" role="status">
+    <span class="sn-alert-icon" aria-hidden="true">&#10003;</span><span class="sn-alert-label">Success:</span>
+    <div class="sn-alert-body"><p>Your changes are saved.</p></div>
+    </div>
+
+
+    <div class="sn-alert" id="quota" data-sn-variant="warning" role="status">
+    <span class="sn-alert-icon" aria-hidden="true">!</span><span class="sn-alert-label">Warning:</span>
+    <div class="sn-alert-body"><p>Storage is nearly full.</p></div>
+    </div>
+
+
+    <div class="sn-alert" id="failure" data-sn-variant="error" role="alert">
+    <span class="sn-alert-icon" aria-hidden="true">&#215;</span><span class="sn-alert-label">Error:</span>
+    <div class="sn-alert-body"><p class="sn-alert-title">Save failed</p><p>The last save did not reach the server. Try again.</p></div>
+    </div>
+
+    <p class="sn-feedback-toolbar">
+
+
+    <button class="sn-button" type="button" data-sn-variant="primary" live:click="save" live:loading.disabled="save" live:loading.busy="save">Save</button>
+
+
+
+    <span class="sn-spinner" role="status" live:loading.show="save" hidden><span class="sn-spinner-ring" aria-hidden="true"></span><span class="sn-spinner-label">Saving</span></span>
+
+
+
+    <button class="sn-button" type="button" data-sn-variant="danger" live:click="fail" live:loading.disabled="fail" live:loading.busy="fail">Fail</button>
+
+
+
+
+    <button class="sn-button" type="button" data-sn-variant="secondary" live:click="advance" live:loading.disabled="advance" live:loading.busy="advance">Advance</button>
+
+
+
+
+    <button class="sn-button" type="button" data-sn-variant="secondary" live:click="refresh" live:loading.disabled="refresh" live:loading.busy="refresh">Refresh</button>
+
+
+    </p>
+
+    <div class="sn-skeleton" role="status" live:loading.show="refresh" hidden>
+    <span class="sn-skeleton-label">Refreshing the list</span>
+    <span class="sn-skeleton-lines" aria-hidden="true" data-sn-lines="2"><span class="sn-skeleton-line"></span><span class="sn-skeleton-line"></span><span class="sn-skeleton-line"></span></span>
+    </div>
+
+
+    <div class="sn-progress">
+    <label class="sn-progress-label" for="upload">Upload</label>
+    <progress class="sn-progress-bar" id="upload" max="100" value="0"></progress>
+    <output class="sn-progress-readout" for="upload">0 of 100</output>
+    </div>
+
+
+    <div class="sn-progress">
+    <label class="sn-progress-label" for="indexing">Indexing</label>
+    <progress class="sn-progress-bar" id="indexing" max="100" ></progress>
+    <output class="sn-progress-readout" for="indexing">Working</output>
+    </div>
+
+
+
+    <section class="sn-empty-state" id="inbox" data-sn-reason="empty" aria-labelledby="inbox-title">
+    <h3 class="sn-empty-state-title" id="inbox-title">Nothing here yet</h3>
+    <p class="sn-empty-state-text">Items you create appear here.</p>
+    <div class="sn-empty-state-actions">
+
+    <button class="sn-button" type="button" data-sn-variant="primary" live:click="save" live:loading.disabled="save" live:loading.busy="save">Create the first item</button>
+
+    </div>
+    </section>
+
+
+
+    <sn-toast-region class="sn-toast-region" data-sn-limit="3"><div class="sn-toast-list" id="toasts" role="status" aria-live="polite" aria-label="Notifications">
+    <div class="sn-toast" data-sn-variant="error" data-sn-duration="6000" live:key="toast-1" live:preserve.self><span class="sn-toast-text">The last save did not reach the server</span><button class="sn-toast-dismiss" type="button" data-sn-toast-dismiss aria-label="Dismiss">&#215;</button></div>
+    </div></sn-toast-region>
+
+    <p>
+
+    <button class="sn-button" type="button" data-sn-variant="secondary" live:click="reset" live:loading.disabled="reset" live:loading.busy="reset">Reset</button>
+
+    </p>
+    </div></div>
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace[0m
+
+[31;1m        FAIL[0m [   0.077s] ( 7/18) [35;1mapp::live_dogfood[0m [34;1mthe_data_display_gallery_renders_every_component_with_text_and_server_rendered_marks[0m
+[31;1m [0m [31;1mstdout[0m [31;1m───[0m
+
+    running 1 test
+    test the_data_display_gallery_renders_every_component_with_text_and_server_rendered_marks ... FAILED
+
+    failures:
+
+    failures:
+        the_data_display_gallery_renders_every_component_with_text_and_server_rendered_marks
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.07s
+    [0m
+[31;1m [0m [31;1mstderr[0m [31;1m───[0m
+
+    [0m[31;1mthread 'the_data_display_gallery_renders_every_component_with_text_and_server_rendered_marks' (1331079) panicked at app/tests/live_dogfood.rs:912:9:[0m
+    [31;1mmissing <li class="sn-list-item" live:key="act-1" data-suprnova-live-key="act-1"> in <!doctype html>[0m
+    <html lang="en">
+    <head>
+    <meta charset="utf-8">
+    <title>Data display gallery</title>
+    <script id="suprnova-live-config" type="application/json">{"asset_identity":"suprnova-live-0.1.0-5347bf1fd920260d","credentials":"same-origin","endpoint":"/__live/action","max_parallel_per_island":1,"max_queued_per_island":8,"max_response_bytes":1048576,"protocol":{"maximum":2,"minimum":1},"request_timeout_ms":5000,"runtime_contract_version":1}</script><link rel="stylesheet" href="/__live/assets/suprnova-live-0.1.0-5347bf1fd920260d/suprnova-ui.css" integrity="sha256-oTtnyLILEdDDFaBAuSSSNbDFnMXRRUZuzWmQNEx7lkI=" crossorigin="anonymous"><link rel="modulepreload" href="/__live/assets/suprnova-live-0.1.0-5347bf1fd920260d/suprnova-live.esm.js" integrity="sha256-75dKI1YVYxk0MbhRXh3yvW3sOz93aFJN0PwYjttrI5Q=" crossorigin="anonymous"><script type="module" src="/__live/assets/suprnova-live-0.1.0-5347bf1fd920260d/suprnova-live.boot.esm.js" integrity="sha256-zqsO7hIJuVXcyGlgB4xZ3oqFb7qExJI5Yxgj2v8OR60=" crossorigin="anonymous"></script>
+    <link rel="stylesheet" href="/suprnova-ui/separator/separator.css">
+    <link rel="stylesheet" href="/suprnova-ui/scroll-area/scroll-area.css">
+    <link rel="stylesheet" href="/suprnova-ui/aspect-image/aspect-image.css">
+    <link rel="stylesheet" href="/suprnova-ui/card/card.css">
+    <link rel="stylesheet" href="/suprnova-ui/badge/badge.css">
+    <link rel="stylesheet" href="/suprnova-ui/avatar/avatar.css">
+    <link rel="stylesheet" href="/suprnova-ui/list-group/list-group.css">
+    <link rel="stylesheet" href="/suprnova-ui/description-list/description-list.css">
+    <link rel="stylesheet" href="/suprnova-ui/stat-card/stat-card.css">
+    <link rel="stylesheet" href="/suprnova-ui/chart/chart.css">
+    <link rel="stylesheet" href="/suprnova-ui/datatable/datatable.css">
+    <link rel="stylesheet" href="/suprnova-ui/pagination/pagination.css">
+    <link rel="stylesheet" href="/suprnova-ui/button/button.css">
+    </head>
+    <body>
+    <main>
+    <h1>Data display gallery</h1>
+    <div data-suprnova-live-root="gallery" data-suprnova-live-island="" data-suprnova-live-component="app.data-display-gallery" data-suprnova-live-slot="gallery" data-suprnova-live-document-key="data-display-gallery" data-suprnova-live-protocol-min="1" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="instance" data-suprnova-live-snapshot="eyJib2R5Ijp7ImJ1aWxkX2lkIjoic3Vwcm5vdmEtMi4wLjIiLCJjb21wb25lbnQiOnsiY29udHJhY3RfZGlnZXN0IjoiWU1LVTdWYU5jUXJhVFhZSDNyS3lOVUZxLUd6NUlWTmoybEk1dmlDSDhQayIsIm1lbW9fc2NoZW1hX3ZlcnNpb24iOjEsIm1vdW50X3NjaGVtYV92ZXJzaW9uIjoxLCJuYW1lIjoiYXBwLmRhdGEtZGlzcGxheS1nYWxsZXJ5Iiwic3RhdGVfc2NoZW1hX3ZlcnNpb24iOjF9LCJleHBpcmVzX2F0IjoiMTc5MDE3MTI5Mjg2MyIsImV4dGVuc2lvbnMiOnsieF9zdXBybm92YV9mcmFtZXdvcmtfZG9jdW1lbnRfcGF0aF92MSI6Ii9saXZlL2RhdGEtZGlzcGxheSJ9LCJmb3JtIjoiaW5zdGFuY2UiLCJpbnN0YW5jZV9pZCI6IjFIeWVZSFNOYTZ5TjE3amFUb1lGR3ciLCJpc3N1ZWRfYXQiOiIxNzg5NTY2NDkyODYzIiwia2V5X2lkIjoiNmNlMzdjYjVhYWY4ZjdhM2Q2NjE3OWIwZWQ3MWQ1NzciLCJtZW1vIjp7fSwicmV2aXNpb24iOiIwIiwicm91dGUiOiJpekRwNnp6S1F0NG82V0FWelZ5RENwNnI0cHBZb19nLVVmOUhUbzlKbjA4Iiwic2NoZW1hX3ZlcnNpb24iOjEsInNjb3BlIjoiSFJlQXZ2c0cwcmR3SFNHcktGS1hmekk3dHJDRWlVemZ1MHcyS2M5VzMwNCIsInNsb3QiOiJnYWxsZXJ5Iiwic3RhdGUiOnsiYWN0aXZpdHkiOlt7ImtleSI6ImFjdC0xIiwic3RhdHVzIjoiUGFpZCIsInRleHQiOiJJbnZvaWNlIDEwNDIgcGFpZCIsInZhcmlhbnQiOiJzdWNjZXNzIn0seyJrZXkiOiJhY3QtMiIsInN0YXR1cyI6IkNoYW5nZSIsInRleHQiOiJTZWF0IGFkZGVkIGZvciBHcmFjZSIsInZhcmlhbnQiOiJpbmZvIn0seyJrZXkiOiJhY3QtMyIsInN0YXR1cyI6Ildhcm5pbmciLCJ0ZXh0IjoiQ2FyZCBleHBpcmVzIG5leHQgbW9udGgiLCJ2YXJpYW50Ijoid2FybmluZyJ9LHsia2V5IjoiYWN0LTQiLCJzdGF0dXMiOiJGYWlsZWQiLCJ0ZXh0IjoiRXhwb3J0IGZhaWxlZCIsInZhcmlhbnQiOiJlcnJvciJ9XSwiY2h1cm4iOiIxLjgiLCJtZW1iZXJzX3RleHQiOiIzIG9mIDUgc2VhdHMiLCJvd25lciI6IkFkYSBMb3ZlbGFjZSIsIm93bmVyX2luaXRpYWxzIjoiQUwiLCJyZXZlbnVlIjo2NCwicmV2ZW51ZV9zZXJpZXMiOls0Miw0Nyw1MSw0OSw1OCw2NF0sInNlYXRzIjozN319LCJzaWduYXR1cmUiOiJ0aXdlZlVCYlcxaXJfUHFsdllDUTMwYkJ0bXZqMnUxUmpvaXgtLW1qaS1JIn0" data-suprnova-live-revision="0" data-suprnova-live-lazy-complete="false" data-suprnova-live-instance="1HyeYHSNa6yN17jaToYFGw">
+
+
+
+
+
+
+
+
+
+
+
+    <section aria-labelledby="stats-title">
+    <h2 id="stats-title">Statistics</h2>
+
+    <article class="sn-stat" id="stat-revenue" aria-labelledby="stat-revenue-label">
+    <p class="sn-stat-label" id="stat-revenue-label">Revenue</p>
+    <p class="sn-stat-value"><data value="64">64</data> <span class="sn-stat-unit">USD</span></p>
+    <p class="sn-stat-trend" data-sn-trend="up"><span class="sn-stat-direction">Up</span> 12% <span class="sn-stat-timeframe">vs last month</span></p>
+    </article>
+
+
+    <article class="sn-stat" id="stat-churn" aria-labelledby="stat-churn-label">
+    <p class="sn-stat-label" id="stat-churn-label">Churn</p>
+    <p class="sn-stat-value"><data value="1.8">1.8</data> <span class="sn-stat-unit">%</span></p>
+    <p class="sn-stat-trend" data-sn-trend="down"><span class="sn-stat-direction">Down</span> 0.4 pts <span class="sn-stat-timeframe">vs last month</span></p>
+    </article>
+
+
+    <article class="sn-stat" id="stat-seats" aria-labelledby="stat-seats-label">
+    <p class="sn-stat-label" id="stat-seats-label">Seats</p>
+    <p class="sn-stat-value"><data value="37">37</data></p>
+
+    </article>
+
+    </section>
+
+    <hr class="sn-separator">
+
+
+    <article class="sn-card" id="plan-card" aria-labelledby="plan-card-title">
+    <h2 class="sn-card-title" id="plan-card-title">Current plan</h2>
+
+    <p>Team plan, billed yearly. 
+    <span class="sn-badge" data-sn-variant="success">Active</span>
+     
+    <span class="sn-badge" data-sn-variant="warning">Renews soon</span>
+    </p>
+
+    <dl class="sn-description-list" id="plan-details" aria-label="Plan details">
+
+    <div class="sn-description"><dt class="sn-description-term">Owner</dt><dd class="sn-description-value">Ada Lovelace</dd></div>
+
+
+    <div class="sn-description"><dt class="sn-description-term">Members</dt><dd class="sn-description-value">3 of 5 seats</dd></div>
+
+
+    <div class="sn-description"><dt class="sn-description-term">Region</dt><dd class="sn-description-value">Frankfurt</dd></div>
+
+    </dl>
+
+
+    <div class="sn-card-actions" role="group" aria-label="Actions">
+
+
+    <button class="sn-button" type="button" data-sn-variant="primary" live:click="refresh" live:loading.disabled="refresh" live:loading.busy="refresh">Refresh</button>
+
+
+    <a class="sn-link" href="/live/navigation">Manage members</a>
+    </div>
+
+
+    </article>
+
+
+    <section class="sn-card" id="team-card" aria-labelledby="team-card-title">
+    <h3 class="sn-card-title" id="team-card-title">Team</h3>
+
+
+    <ul class="sn-avatar-group" role="list" aria-label="Team members">
+
+    <li class="sn-avatar-member"><span class="sn-avatar" role="img" aria-label="Ada Lovelace" data-sn-size="md">AL</span></li>
+
+
+    <li class="sn-avatar-member"><span class="sn-avatar" role="img" aria-label="Grace Hopper" data-sn-size="md">GH</span></li>
+
+
+    <li class="sn-avatar-member"><span class="sn-avatar" role="img" aria-label="Linus Torvalds" data-sn-size="sm">LT</span></li>
+
+    </ul>
+
+    <p>Owner: 
+    <span class="sn-avatar" role="img" aria-label="Ada Lovelace" data-sn-size="lg">AL</span>
+     Ada Lovelace</p>
+
+    <img class="sn-aspect-image" src="data:image/svg+xml,%3Csvg xmlns=&#39;http://www.w3.org/2000/svg&#39; viewBox=&#39;0 0 160 90&#39;%3E%3Crect width=&#39;160&#39; height=&#39;90&#39; fill=&#39;%23dfe7ef&#39;/%3E%3Ccircle cx=&#39;80&#39; cy=&#39;38&#39; r=&#39;18&#39; fill=&#39;%23a9b8c8&#39;/%3E%3Crect x=&#39;44&#39; y=&#39;60&#39; width=&#39;72&#39; height=&#39;22&#39; rx=&#39;11&#39; fill=&#39;%23a9b8c8&#39;/%3E%3C/svg%3E" alt="The team at the summit" data-sn-ratio="wide" loading="lazy" decoding="async">
+
+
+    </section>
+
+
+    <div class="sn-scroll-area" id="activity-scroll" role="region" aria-label="Recent activity" tabindex="0" data-sn-axis="block">
+
+    <ul class="sn-list-group" id="activity" aria-label="Recent activity">
+    <li class="sn-list-item" live:key="act-1"><span class="sn-activity-text">Invoice 1042 paid</span> 
+    <span class="sn-badge" data-sn-variant="success">Paid</span>
+    </li>
+
+    <li class="sn-list-item" live:key="act-2"><span class="sn-activity-text">Seat added for Grace</span> 
+    <span class="sn-badge" data-sn-variant="info">Change</span>
+    </li>
+
+    <li class="sn-list-item" live:key="act-3"><span class="sn-activity-text">Card expires next month</span> 
+    <span class="sn-badge" data-sn-variant="warning">Warning</span>
+    </li>
+
+    <li class="sn-list-item" live:key="act-4"><span class="sn-activity-text">Export failed</span> 
+    <span class="sn-badge" data-sn-variant="error">Failed</span>
+    </li>
+    </ul>
+
+    </div>
+
+
+
+    <button class="sn-button" type="button" data-sn-variant="primary" live:click="reorder" live:loading.disabled="reorder" live:loading.busy="reorder">Reorder</button>
+
+
+
+    <figure class="sn-chart" id="revenue-chart" aria-labelledby="revenue-chart-title">
+    <figcaption class="sn-chart-title" id="revenue-chart-title">Revenue by month</figcaption>
+    <div class="sn-chart-marks" aria-hidden="true"><svg width="600" height="400" viewBox="0 0 600 400" xmlns="http://www.w3.org/2000/svg">
+    <rect x="0" y="0" width="600" height="400" fill="#FFFFFF"/>
+    <g>
+    <line stroke-width="2" x1="258.5" y1="15" x2="283.5" y2="15" stroke="#5470C6"/>
+    <circle cx="271" cy="15" r="5.5" stroke-width="2" stroke="#5470C6" fill="#FFFFFF"/>
+    <text font-size="14" x="286.5" y="19" font-family="Roboto" fill="#464646">
+    Revenue
+    </text>
+    </g>
+    <g stroke="#E0E6F2">
+    <line stroke-width="1" x1="26" y1="27" x2="595" y2="27"/><line stroke-width="1" x1="26" y1="83.3" x2="595" y2="83.3"/><line stroke-width="1" x1="26" y1="139.7" x2="595" y2="139.7"/><line stroke-width="1" x1="26" y1="196" x2="595" y2="196"/><line stroke-width="1" x1="26" y1="252.3" x2="595" y2="252.3"/><line stroke-width="1" x1="26" y1="308.7" x2="595" y2="308.7"/>
+    </g>
+    <g>
+
+    <text font-size="14" x="2" y="32" font-family="Roboto" fill="#6E7079">
+    90
+    </text>
+    <text font-size="14" x="2" y="88.3" font-family="Roboto" fill="#6E7079">
+    75
+    </text>
+    <text font-size="14" x="2" y="144.7" font-family="Roboto" fill="#6E7079">
+    60
+    </text>
+    <text font-size="14" x="2" y="201" font-family="Roboto" fill="#6E7079">
+    45
+    </text>
+    <text font-size="14" x="2" y="257.3" font-family="Roboto" fill="#6E7079">
+    30
+    </text>
+    <text font-size="14" x="2" y="313.7" font-family="Roboto" fill="#6E7079">
+    15
+    </text>
+    <text font-size="14" x="10" y="370" font-family="Roboto" fill="#6E7079">
+    0
+    </text>
+    </g>
+    <g>
+    <g stroke="#6E7079">
+    <line stroke-width="1" x1="26" y1="365" x2="595" y2="365"/>
+    <line stroke-width="1" x1="26" y1="365" x2="26" y2="370"/>
+    <line stroke-width="1" x1="120.8" y1="365" x2="120.8" y2="370"/>
+    <line stroke-width="1" x1="215.7" y1="365" x2="215.7" y2="370"/>
+    <line stroke-width="1" x1="310.5" y1="365" x2="310.5" y2="370"/>
+    <line stroke-width="1" x1="405.3" y1="365" x2="405.3" y2="370"/>
+    <line stroke-width="1" x1="500.2" y1="365" x2="500.2" y2="370"/>
+    <line stroke-width="1" x1="595" y1="365" x2="595" y2="370"/>
+    </g>
+    <text font-size="14" x="61.9" y="384" font-family="Roboto" fill="#6E7079">
+    Apr
+    </text>
+    <text font-size="14" x="154.2" y="384" font-family="Roboto" fill="#6E7079">
+    May
+    </text>
+    <text font-size="14" x="251.6" y="384" font-family="Roboto" fill="#6E7079">
+    Jun
+    </text>
+    <text font-size="14" x="348.4" y="384" font-family="Roboto" fill="#6E7079">
+    Jul
+    </text>
+    <text font-size="14" x="440.2" y="384" font-family="Roboto" fill="#6E7079">
+    Aug
+    </text>
+    <text font-size="14" x="535.1" y="384" font-family="Roboto" fill="#6E7079">
+    Sep
+    </text>
+    </g>
+    <rect x="31" y="207.3" width="84.8" height="157.7" fill="#5470C6"/>
+    <rect x="125.8" y="188.5" width="84.8" height="176.5" fill="#5470C6"/>
+    <rect x="220.7" y="173.5" width="84.8" height="191.5" fill="#5470C6"/>
+    <rect x="315.5" y="181" width="84.8" height="184" fill="#5470C6"/>
+    <rect x="410.3" y="147.2" width="84.8" height="217.8" fill="#5470C6"/>
+    <rect x="505.2" y="124.6" width="84.8" height="240.4" fill="#5470C6"/>
+    </svg></div>
+    <p class="sn-chart-summary">Revenue rose from 42k in Apr to 64k in Sep, with one dip in Jul.</p>
+    <details class="sn-chart-data"><summary>Data table</summary>
+    <table class="sn-chart-table"><caption>Revenue by month</caption><thead><tr><th scope="col">Month</th><th scope="col">Revenue</th></tr></thead><tbody><tr><th scope="row">Apr</th><td>42</td></tr><tr><th scope="row">May</th><td>47</td></tr><tr><th scope="row">Jun</th><td>51</td></tr><tr><th scope="row">Jul</th><td>49</td></tr><tr><th scope="row">Aug</th><td>58</td></tr><tr><th scope="row">Sep</th><td>64</td></tr></tbody></table>
+    </details>
+    </figure>
+    </div>
+    <h2>Invoices</h2>
+    <div data-suprnova-live-root="table" data-suprnova-live-island="" data-suprnova-live-component="app.datatable-gallery" data-suprnova-live-slot="table" data-suprnova-live-document-key="datatable-gallery" data-suprnova-live-protocol-min="2" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="instance" data-suprnova-live-snapshot="eyJib2R5Ijp7ImJ1aWxkX2lkIjoic3Vwcm5vdmEtMi4wLjIiLCJjb21wb25lbnQiOnsiY29udHJhY3RfZGlnZXN0IjoiYU83a0xJc2R3QzVlZEtZdGJENFRHWUVJU01NeW5UU0VhRlhmTlpNdDR2ayIsIm1lbW9fc2NoZW1hX3ZlcnNpb24iOjEsIm1vdW50X3NjaGVtYV92ZXJzaW9uIjoxLCJuYW1lIjoiYXBwLmRhdGF0YWJsZS1nYWxsZXJ5Iiwic3RhdGVfc2NoZW1hX3ZlcnNpb24iOjF9LCJleHBpcmVzX2F0IjoiMTc5MDE3MTI5Mjg4NyIsImV4dGVuc2lvbnMiOnsieF9zdXBybm92YV9mcmFtZXdvcmtfZG9jdW1lbnRfcGF0aF92MSI6Ii9saXZlL2RhdGEtZGlzcGxheSJ9LCJmb3JtIjoiaW5zdGFuY2UiLCJpbnN0YW5jZV9pZCI6IlN1NFNaVGl3N0ZNdWV3cElHXzJNLUEiLCJpc3N1ZWRfYXQiOiIxNzg5NTY2NDkyODg3Iiwia2V5X2lkIjoiNmNlMzdjYjVhYWY4ZjdhM2Q2NjE3OWIwZWQ3MWQ1NzciLCJtZW1vIjp7fSwicmV2aXNpb24iOiIwIiwicm91dGUiOiJpekRwNnp6S1F0NG82V0FWelZ5RENwNnI0cHBZb19nLVVmOUhUbzlKbjA4Iiwic2NoZW1hX3ZlcnNpb24iOjEsInNjb3BlIjoiSFJlQXZ2c0cwcmR3SFNHcktGS1hmekk3dHJDRWlVemZ1MHcyS2M5VzMwNCIsInNsb3QiOiJ0YWJsZSIsInN0YXRlIjp7ImNvdW50IjoxNCwiZGlyZWN0aW9uIjoiYXNjIiwiZGlyZWN0aW9uX3dvcmQiOiJhc2NlbmRpbmciLCJmaWx0ZXIiOiIiLCJmaXJzdCI6dHJ1ZSwibGFzdCI6ZmFsc2UsInBhZ2UiOnsiJGxpdmUiOiJ1NjQiLCJ2YWx1ZSI6IjEifSwicGFnZXMiOnsiJGxpdmUiOiJ1NjQiLCJ2YWx1ZSI6IjQifSwicm93cyI6W3siYW1vdW50IjoiMTU3LjAwIiwiY3VzdG9tZXIiOiJVbWJyZWxsYSIsImtleSI6Imludi0xIiwibnVtYmVyIjoiMTAzMSIsInN0YXR1cyI6Ik9wZW4ifSx7ImFtb3VudCI6IjE5NC4wMCIsImN1c3RvbWVyIjoiR2xvYmV4Iiwia2V5IjoiaW52LTIiLCJudW1iZXIiOiIxMDMyIiwic3RhdHVzIjoiT3ZlcmR1ZSJ9LHsiYW1vdW50IjoiMjMxLjAwIiwiY3VzdG9tZXIiOiJIb29saSIsImtleSI6Imludi0zIiwibnVtYmVyIjoiMTAzMyIsInN0YXR1cyI6IlBhaWQifSx7ImFtb3VudCI6IjI2OC4wMCIsImN1c3RvbWVyIjoiSW5pdGVjaCIsImtleSI6Imludi00IiwibnVtYmVyIjoiMTAzNCIsInN0YXR1cyI6Ik9wZW4ifV0sInNvcnQiOiJudW1iZXIiLCJzb3J0ZWRfYnkiOiJudW1iZXIifX0sInNpZ25hdHVyZSI6ImUtdllqNUJvaElmYTJTWjI1emEtamNjSjJ6amdqMFpveTIyTlZKTUsyUmMifQ" data-suprnova-live-revision="0" data-suprnova-live-lazy-complete="false" data-suprnova-live-instance="Su4SZTiw7FMuewpIG_2M-A">
+
+
+    <form class="sn-datatable-filter" role="search" aria-label="Filter invoices" live:submit.prevent="filter"><label class="sn-datatable-filter-label" for="invoices-filter">Filter invoices</label><input class="sn-datatable-filter-input" id="invoices-filter" name="filter" type="search" value="" live:model="filter"><button class="sn-datatable-filter-button" type="submit" live:loading.disabled="filter">Apply</button></form>
+
+
+    <table class="sn-datatable" id="invoices">
+    <caption class="sn-datatable-caption">Invoices <span class="sn-datatable-count">(14 rows)</span></caption>
+
+
+    <thead><tr>
+
+    <th scope="col" class="sn-datatable-column" aria-sort="ascending"><form class="sn-datatable-sort" live:submit.prevent="sort"><input type="hidden" name="sort" value="number" live:model="sort"><button class="sn-datatable-sort-button" type="submit" live:loading.disabled="sort">Number</button></form></th>
+
+
+    <th scope="col" class="sn-datatable-column"><form class="sn-datatable-sort" live:submit.prevent="sort"><input type="hidden" name="sort" value="customer" live:model="sort"><button class="sn-datatable-sort-button" type="submit" live:loading.disabled="sort">Customer</button></form></th>
+
+
+    <th scope="col" class="sn-datatable-column"><form class="sn-datatable-sort" live:submit.prevent="sort"><input type="hidden" name="sort" value="amount" live:model="sort"><button class="sn-datatable-sort-button" type="submit" live:loading.disabled="sort">Amount</button></form></th>
+
+
+    <th scope="col" class="sn-datatable-column">Status</th>
+
+    </tr></thead>
+
+
+    <tbody>
+    <tr class="sn-datatable-row" live:key="inv-1">
+
+    <th scope="row" class="sn-datatable-cell">1031</th>
+
+
+    <td class="sn-datatable-cell">Umbrella</td>
+
+
+    <td class="sn-datatable-cell" data-sn-numeric="true">157.00</td>
+
+
+    <td class="sn-datatable-cell">Open</td>
+
+    </tr>
+
+    <tr class="sn-datatable-row" live:key="inv-2">
+
+    <th scope="row" class="sn-datatable-cell">1032</th>
+
+
+    <td class="sn-datatable-cell">Globex</td>
+
+
+    <td class="sn-datatable-cell" data-sn-numeric="true">194.00</td>
+
+
+    <td class="sn-datatable-cell">Overdue</td>
+
+    </tr>
+
+    <tr class="sn-datatable-row" live:key="inv-3">
+
+    <th scope="row" class="sn-datatable-cell">1033</th>
+
+
+    <td class="sn-datatable-cell">Hooli</td>
+
+
+    <td class="sn-datatable-cell" data-sn-numeric="true">231.00</td>
+
+
+    <td class="sn-datatable-cell">Paid</td>
+
+    </tr>
+
+    <tr class="sn-datatable-row" live:key="inv-4">
+
+    <th scope="row" class="sn-datatable-cell">1034</th>
+
+
+    <td class="sn-datatable-cell">Initech</td>
+
+
+    <td class="sn-datatable-cell" data-sn-numeric="true">268.00</td>
+
+
+    <td class="sn-datatable-cell">Open</td>
+
+    </tr>
+    </tbody>
+
+
+    </table>
+
+
+    <nav class="sn-pagination" id="invoice-pages" aria-label="Invoice pages">
+
+    <button class="sn-page" type="button" live:click="previous_page" live:loading.disabled="previous_page" live:loading.busy="previous_page" disabled>Previous</button>
+
+
+    <span class="sn-page-position">Page 1 of 4</span>
+
+
+    <button class="sn-page" type="button" live:click="next_page" live:loading.disabled="next_page" live:loading.busy="next_page">Next</button>
+
+    </nav>
+    </div>
+    </main>
+    </body>
+    </html>
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace[0m
+
+[31;1m        FAIL[0m [   0.081s] ( 8/18) [35;1mapp::live_dogfood[0m [34;1mthe_datatable_mounts_from_the_query_and_reflects_sort_filter_and_page[0m
+[31;1m [0m [31;1mstdout[0m [31;1m───[0m
+
+    running 1 test
+    test the_datatable_mounts_from_the_query_and_reflects_sort_filter_and_page ... FAILED
+
+    failures:
+
+    failures:
+        the_datatable_mounts_from_the_query_and_reflects_sort_filter_and_page
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.07s
+    [0m
+[31;1m [0m [31;1mstderr[0m [31;1m───[0m
+
+    [0m[31;1mthread 'the_datatable_mounts_from_the_query_and_reflects_sort_filter_and_page' (1331081) panicked at app/tests/live_dogfood.rs:978:9:[0m
+    [31;1mmissing <tr class="sn-datatable-row" live:key="inv-1" data-suprnova-live-key="inv-1"> in <!doctype html>[0m
+    <html lang="en">
+    <head>
+    <meta charset="utf-8">
+    <title>Data display gallery</title>
+    <script id="suprnova-live-config" type="application/json">{"asset_identity":"suprnova-live-0.1.0-5347bf1fd920260d","credentials":"same-origin","endpoint":"/__live/action","max_parallel_per_island":1,"max_queued_per_island":8,"max_response_bytes":1048576,"protocol":{"maximum":2,"minimum":1},"request_timeout_ms":5000,"runtime_contract_version":1}</script><link rel="stylesheet" href="/__live/assets/suprnova-live-0.1.0-5347bf1fd920260d/suprnova-ui.css" integrity="sha256-oTtnyLILEdDDFaBAuSSSNbDFnMXRRUZuzWmQNEx7lkI=" crossorigin="anonymous"><link rel="modulepreload" href="/__live/assets/suprnova-live-0.1.0-5347bf1fd920260d/suprnova-live.esm.js" integrity="sha256-75dKI1YVYxk0MbhRXh3yvW3sOz93aFJN0PwYjttrI5Q=" crossorigin="anonymous"><script type="module" src="/__live/assets/suprnova-live-0.1.0-5347bf1fd920260d/suprnova-live.boot.esm.js" integrity="sha256-zqsO7hIJuVXcyGlgB4xZ3oqFb7qExJI5Yxgj2v8OR60=" crossorigin="anonymous"></script>
+    <link rel="stylesheet" href="/suprnova-ui/separator/separator.css">
+    <link rel="stylesheet" href="/suprnova-ui/scroll-area/scroll-area.css">
+    <link rel="stylesheet" href="/suprnova-ui/aspect-image/aspect-image.css">
+    <link rel="stylesheet" href="/suprnova-ui/card/card.css">
+    <link rel="stylesheet" href="/suprnova-ui/badge/badge.css">
+    <link rel="stylesheet" href="/suprnova-ui/avatar/avatar.css">
+    <link rel="stylesheet" href="/suprnova-ui/list-group/list-group.css">
+    <link rel="stylesheet" href="/suprnova-ui/description-list/description-list.css">
+    <link rel="stylesheet" href="/suprnova-ui/stat-card/stat-card.css">
+    <link rel="stylesheet" href="/suprnova-ui/chart/chart.css">
+    <link rel="stylesheet" href="/suprnova-ui/datatable/datatable.css">
+    <link rel="stylesheet" href="/suprnova-ui/pagination/pagination.css">
+    <link rel="stylesheet" href="/suprnova-ui/button/button.css">
+    </head>
+    <body>
+    <main>
+    <h1>Data display gallery</h1>
+    <div data-suprnova-live-root="gallery" data-suprnova-live-island="" data-suprnova-live-component="app.data-display-gallery" data-suprnova-live-slot="gallery" data-suprnova-live-document-key="data-display-gallery" data-suprnova-live-protocol-min="1" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="instance" data-suprnova-live-snapshot="eyJib2R5Ijp7ImJ1aWxkX2lkIjoic3Vwcm5vdmEtMi4wLjIiLCJjb21wb25lbnQiOnsiY29udHJhY3RfZGlnZXN0IjoiWU1LVTdWYU5jUXJhVFhZSDNyS3lOVUZxLUd6NUlWTmoybEk1dmlDSDhQayIsIm1lbW9fc2NoZW1hX3ZlcnNpb24iOjEsIm1vdW50X3NjaGVtYV92ZXJzaW9uIjoxLCJuYW1lIjoiYXBwLmRhdGEtZGlzcGxheS1nYWxsZXJ5Iiwic3RhdGVfc2NoZW1hX3ZlcnNpb24iOjF9LCJleHBpcmVzX2F0IjoiMTc5MDE3MTI5Mjg2NiIsImV4dGVuc2lvbnMiOnsieF9zdXBybm92YV9mcmFtZXdvcmtfZG9jdW1lbnRfcGF0aF92MSI6Ii9saXZlL2RhdGEtZGlzcGxheSJ9LCJmb3JtIjoiaW5zdGFuY2UiLCJpbnN0YW5jZV9pZCI6InBPVE1QTHN1TUs0eEd1Z0R3VHVlbnciLCJpc3N1ZWRfYXQiOiIxNzg5NTY2NDkyODY2Iiwia2V5X2lkIjoiODZlNzBmNTE1ZTM1NjYyYzk3ZjE4ZWE2ZmY5OTEzMDMiLCJtZW1vIjp7fSwicmV2aXNpb24iOiIwIiwicm91dGUiOiJpekRwNnp6S1F0NG82V0FWelZ5RENwNnI0cHBZb19nLVVmOUhUbzlKbjA4Iiwic2NoZW1hX3ZlcnNpb24iOjEsInNjb3BlIjoiS2h5ejJyWVhiR0hjclEzbG9kSzZfbkFWRE82M2hMem9XaVJ2amFtc1p6SSIsInNsb3QiOiJnYWxsZXJ5Iiwic3RhdGUiOnsiYWN0aXZpdHkiOlt7ImtleSI6ImFjdC0xIiwic3RhdHVzIjoiUGFpZCIsInRleHQiOiJJbnZvaWNlIDEwNDIgcGFpZCIsInZhcmlhbnQiOiJzdWNjZXNzIn0seyJrZXkiOiJhY3QtMiIsInN0YXR1cyI6IkNoYW5nZSIsInRleHQiOiJTZWF0IGFkZGVkIGZvciBHcmFjZSIsInZhcmlhbnQiOiJpbmZvIn0seyJrZXkiOiJhY3QtMyIsInN0YXR1cyI6Ildhcm5pbmciLCJ0ZXh0IjoiQ2FyZCBleHBpcmVzIG5leHQgbW9udGgiLCJ2YXJpYW50Ijoid2FybmluZyJ9LHsia2V5IjoiYWN0LTQiLCJzdGF0dXMiOiJGYWlsZWQiLCJ0ZXh0IjoiRXhwb3J0IGZhaWxlZCIsInZhcmlhbnQiOiJlcnJvciJ9XSwiY2h1cm4iOiIxLjgiLCJtZW1iZXJzX3RleHQiOiIzIG9mIDUgc2VhdHMiLCJvd25lciI6IkFkYSBMb3ZlbGFjZSIsIm93bmVyX2luaXRpYWxzIjoiQUwiLCJyZXZlbnVlIjo2NCwicmV2ZW51ZV9zZXJpZXMiOls0Miw0Nyw1MSw0OSw1OCw2NF0sInNlYXRzIjozN319LCJzaWduYXR1cmUiOiJJa19oMFByMFJKR3BjQVc1dHU1UDkwTWdPTWtyOGthVGxSdVZSTGpPWEF3In0" data-suprnova-live-revision="0" data-suprnova-live-lazy-complete="false" data-suprnova-live-instance="pOTMPLsuMK4xGugDwTuenw">
+
+
+
+
+
+
+
+
+
+
+
+    <section aria-labelledby="stats-title">
+    <h2 id="stats-title">Statistics</h2>
+
+    <article class="sn-stat" id="stat-revenue" aria-labelledby="stat-revenue-label">
+    <p class="sn-stat-label" id="stat-revenue-label">Revenue</p>
+    <p class="sn-stat-value"><data value="64">64</data> <span class="sn-stat-unit">USD</span></p>
+    <p class="sn-stat-trend" data-sn-trend="up"><span class="sn-stat-direction">Up</span> 12% <span class="sn-stat-timeframe">vs last month</span></p>
+    </article>
+
+
+    <article class="sn-stat" id="stat-churn" aria-labelledby="stat-churn-label">
+    <p class="sn-stat-label" id="stat-churn-label">Churn</p>
+    <p class="sn-stat-value"><data value="1.8">1.8</data> <span class="sn-stat-unit">%</span></p>
+    <p class="sn-stat-trend" data-sn-trend="down"><span class="sn-stat-direction">Down</span> 0.4 pts <span class="sn-stat-timeframe">vs last month</span></p>
+    </article>
+
+
+    <article class="sn-stat" id="stat-seats" aria-labelledby="stat-seats-label">
+    <p class="sn-stat-label" id="stat-seats-label">Seats</p>
+    <p class="sn-stat-value"><data value="37">37</data></p>
+
+    </article>
+
+    </section>
+
+    <hr class="sn-separator">
+
+
+    <article class="sn-card" id="plan-card" aria-labelledby="plan-card-title">
+    <h2 class="sn-card-title" id="plan-card-title">Current plan</h2>
+
+    <p>Team plan, billed yearly. 
+    <span class="sn-badge" data-sn-variant="success">Active</span>
+     
+    <span class="sn-badge" data-sn-variant="warning">Renews soon</span>
+    </p>
+
+    <dl class="sn-description-list" id="plan-details" aria-label="Plan details">
+
+    <div class="sn-description"><dt class="sn-description-term">Owner</dt><dd class="sn-description-value">Ada Lovelace</dd></div>
+
+
+    <div class="sn-description"><dt class="sn-description-term">Members</dt><dd class="sn-description-value">3 of 5 seats</dd></div>
+
+
+    <div class="sn-description"><dt class="sn-description-term">Region</dt><dd class="sn-description-value">Frankfurt</dd></div>
+
+    </dl>
+
+
+    <div class="sn-card-actions" role="group" aria-label="Actions">
+
+
+    <button class="sn-button" type="button" data-sn-variant="primary" live:click="refresh" live:loading.disabled="refresh" live:loading.busy="refresh">Refresh</button>
+
+
+    <a class="sn-link" href="/live/navigation">Manage members</a>
+    </div>
+
+
+    </article>
+
+
+    <section class="sn-card" id="team-card" aria-labelledby="team-card-title">
+    <h3 class="sn-card-title" id="team-card-title">Team</h3>
+
+
+    <ul class="sn-avatar-group" role="list" aria-label="Team members">
+
+    <li class="sn-avatar-member"><span class="sn-avatar" role="img" aria-label="Ada Lovelace" data-sn-size="md">AL</span></li>
+
+
+    <li class="sn-avatar-member"><span class="sn-avatar" role="img" aria-label="Grace Hopper" data-sn-size="md">GH</span></li>
+
+
+    <li class="sn-avatar-member"><span class="sn-avatar" role="img" aria-label="Linus Torvalds" data-sn-size="sm">LT</span></li>
+
+    </ul>
+
+    <p>Owner: 
+    <span class="sn-avatar" role="img" aria-label="Ada Lovelace" data-sn-size="lg">AL</span>
+     Ada Lovelace</p>
+
+    <img class="sn-aspect-image" src="data:image/svg+xml,%3Csvg xmlns=&#39;http://www.w3.org/2000/svg&#39; viewBox=&#39;0 0 160 90&#39;%3E%3Crect width=&#39;160&#39; height=&#39;90&#39; fill=&#39;%23dfe7ef&#39;/%3E%3Ccircle cx=&#39;80&#39; cy=&#39;38&#39; r=&#39;18&#39; fill=&#39;%23a9b8c8&#39;/%3E%3Crect x=&#39;44&#39; y=&#39;60&#39; width=&#39;72&#39; height=&#39;22&#39; rx=&#39;11&#39; fill=&#39;%23a9b8c8&#39;/%3E%3C/svg%3E" alt="The team at the summit" data-sn-ratio="wide" loading="lazy" decoding="async">
+
+
+    </section>
+
+
+    <div class="sn-scroll-area" id="activity-scroll" role="region" aria-label="Recent activity" tabindex="0" data-sn-axis="block">
+
+    <ul class="sn-list-group" id="activity" aria-label="Recent activity">
+    <li class="sn-list-item" live:key="act-1"><span class="sn-activity-text">Invoice 1042 paid</span> 
+    <span class="sn-badge" data-sn-variant="success">Paid</span>
+    </li>
+
+    <li class="sn-list-item" live:key="act-2"><span class="sn-activity-text">Seat added for Grace</span> 
+    <span class="sn-badge" data-sn-variant="info">Change</span>
+    </li>
+
+    <li class="sn-list-item" live:key="act-3"><span class="sn-activity-text">Card expires next month</span> 
+    <span class="sn-badge" data-sn-variant="warning">Warning</span>
+    </li>
+
+    <li class="sn-list-item" live:key="act-4"><span class="sn-activity-text">Export failed</span> 
+    <span class="sn-badge" data-sn-variant="error">Failed</span>
+    </li>
+    </ul>
+
+    </div>
+
+
+
+    <button class="sn-button" type="button" data-sn-variant="primary" live:click="reorder" live:loading.disabled="reorder" live:loading.busy="reorder">Reorder</button>
+
+
+
+    <figure class="sn-chart" id="revenue-chart" aria-labelledby="revenue-chart-title">
+    <figcaption class="sn-chart-title" id="revenue-chart-title">Revenue by month</figcaption>
+    <div class="sn-chart-marks" aria-hidden="true"><svg width="600" height="400" viewBox="0 0 600 400" xmlns="http://www.w3.org/2000/svg">
+    <rect x="0" y="0" width="600" height="400" fill="#FFFFFF"/>
+    <g>
+    <line stroke-width="2" x1="258.5" y1="15" x2="283.5" y2="15" stroke="#5470C6"/>
+    <circle cx="271" cy="15" r="5.5" stroke-width="2" stroke="#5470C6" fill="#FFFFFF"/>
+    <text font-size="14" x="286.5" y="19" font-family="Roboto" fill="#464646">
+    Revenue
+    </text>
+    </g>
+    <g stroke="#E0E6F2">
+    <line stroke-width="1" x1="26" y1="27" x2="595" y2="27"/><line stroke-width="1" x1="26" y1="83.3" x2="595" y2="83.3"/><line stroke-width="1" x1="26" y1="139.7" x2="595" y2="139.7"/><line stroke-width="1" x1="26" y1="196" x2="595" y2="196"/><line stroke-width="1" x1="26" y1="252.3" x2="595" y2="252.3"/><line stroke-width="1" x1="26" y1="308.7" x2="595" y2="308.7"/>
+    </g>
+    <g>
+
+    <text font-size="14" x="2" y="32" font-family="Roboto" fill="#6E7079">
+    90
+    </text>
+    <text font-size="14" x="2" y="88.3" font-family="Roboto" fill="#6E7079">
+    75
+    </text>
+    <text font-size="14" x="2" y="144.7" font-family="Roboto" fill="#6E7079">
+    60
+    </text>
+    <text font-size="14" x="2" y="201" font-family="Roboto" fill="#6E7079">
+    45
+    </text>
+    <text font-size="14" x="2" y="257.3" font-family="Roboto" fill="#6E7079">
+    30
+    </text>
+    <text font-size="14" x="2" y="313.7" font-family="Roboto" fill="#6E7079">
+    15
+    </text>
+    <text font-size="14" x="10" y="370" font-family="Roboto" fill="#6E7079">
+    0
+    </text>
+    </g>
+    <g>
+    <g stroke="#6E7079">
+    <line stroke-width="1" x1="26" y1="365" x2="595" y2="365"/>
+    <line stroke-width="1" x1="26" y1="365" x2="26" y2="370"/>
+    <line stroke-width="1" x1="120.8" y1="365" x2="120.8" y2="370"/>
+    <line stroke-width="1" x1="215.7" y1="365" x2="215.7" y2="370"/>
+    <line stroke-width="1" x1="310.5" y1="365" x2="310.5" y2="370"/>
+    <line stroke-width="1" x1="405.3" y1="365" x2="405.3" y2="370"/>
+    <line stroke-width="1" x1="500.2" y1="365" x2="500.2" y2="370"/>
+    <line stroke-width="1" x1="595" y1="365" x2="595" y2="370"/>
+    </g>
+    <text font-size="14" x="61.9" y="384" font-family="Roboto" fill="#6E7079">
+    Apr
+    </text>
+    <text font-size="14" x="154.2" y="384" font-family="Roboto" fill="#6E7079">
+    May
+    </text>
+    <text font-size="14" x="251.6" y="384" font-family="Roboto" fill="#6E7079">
+    Jun
+    </text>
+    <text font-size="14" x="348.4" y="384" font-family="Roboto" fill="#6E7079">
+    Jul
+    </text>
+    <text font-size="14" x="440.2" y="384" font-family="Roboto" fill="#6E7079">
+    Aug
+    </text>
+    <text font-size="14" x="535.1" y="384" font-family="Roboto" fill="#6E7079">
+    Sep
+    </text>
+    </g>
+    <rect x="31" y="207.3" width="84.8" height="157.7" fill="#5470C6"/>
+    <rect x="125.8" y="188.5" width="84.8" height="176.5" fill="#5470C6"/>
+    <rect x="220.7" y="173.5" width="84.8" height="191.5" fill="#5470C6"/>
+    <rect x="315.5" y="181" width="84.8" height="184" fill="#5470C6"/>
+    <rect x="410.3" y="147.2" width="84.8" height="217.8" fill="#5470C6"/>
+    <rect x="505.2" y="124.6" width="84.8" height="240.4" fill="#5470C6"/>
+    </svg></div>
+    <p class="sn-chart-summary">Revenue rose from 42k in Apr to 64k in Sep, with one dip in Jul.</p>
+    <details class="sn-chart-data"><summary>Data table</summary>
+    <table class="sn-chart-table"><caption>Revenue by month</caption><thead><tr><th scope="col">Month</th><th scope="col">Revenue</th></tr></thead><tbody><tr><th scope="row">Apr</th><td>42</td></tr><tr><th scope="row">May</th><td>47</td></tr><tr><th scope="row">Jun</th><td>51</td></tr><tr><th scope="row">Jul</th><td>49</td></tr><tr><th scope="row">Aug</th><td>58</td></tr><tr><th scope="row">Sep</th><td>64</td></tr></tbody></table>
+    </details>
+    </figure>
+    </div>
+    <h2>Invoices</h2>
+    <div data-suprnova-live-root="table" data-suprnova-live-island="" data-suprnova-live-component="app.datatable-gallery" data-suprnova-live-slot="table" data-suprnova-live-document-key="datatable-gallery" data-suprnova-live-protocol-min="2" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="instance" data-suprnova-live-snapshot="eyJib2R5Ijp7ImJ1aWxkX2lkIjoic3Vwcm5vdmEtMi4wLjIiLCJjb21wb25lbnQiOnsiY29udHJhY3RfZGlnZXN0IjoiYU83a0xJc2R3QzVlZEtZdGJENFRHWUVJU01NeW5UU0VhRlhmTlpNdDR2ayIsIm1lbW9fc2NoZW1hX3ZlcnNpb24iOjEsIm1vdW50X3NjaGVtYV92ZXJzaW9uIjoxLCJuYW1lIjoiYXBwLmRhdGF0YWJsZS1nYWxsZXJ5Iiwic3RhdGVfc2NoZW1hX3ZlcnNpb24iOjF9LCJleHBpcmVzX2F0IjoiMTc5MDE3MTI5Mjg5MCIsImV4dGVuc2lvbnMiOnsieF9zdXBybm92YV9mcmFtZXdvcmtfZG9jdW1lbnRfcGF0aF92MSI6Ii9saXZlL2RhdGEtZGlzcGxheSJ9LCJmb3JtIjoiaW5zdGFuY2UiLCJpbnN0YW5jZV9pZCI6IjFveHZSR2NZVlpfcjhRV1dBUzE5TXciLCJpc3N1ZWRfYXQiOiIxNzg5NTY2NDkyODkwIiwia2V5X2lkIjoiODZlNzBmNTE1ZTM1NjYyYzk3ZjE4ZWE2ZmY5OTEzMDMiLCJtZW1vIjp7fSwicmV2aXNpb24iOiIwIiwicm91dGUiOiJpekRwNnp6S1F0NG82V0FWelZ5RENwNnI0cHBZb19nLVVmOUhUbzlKbjA4Iiwic2NoZW1hX3ZlcnNpb24iOjEsInNjb3BlIjoiS2h5ejJyWVhiR0hjclEzbG9kSzZfbkFWRE82M2hMem9XaVJ2amFtc1p6SSIsInNsb3QiOiJ0YWJsZSIsInN0YXRlIjp7ImNvdW50IjoxNCwiZGlyZWN0aW9uIjoiYXNjIiwiZGlyZWN0aW9uX3dvcmQiOiJhc2NlbmRpbmciLCJmaWx0ZXIiOiIiLCJmaXJzdCI6dHJ1ZSwibGFzdCI6ZmFsc2UsInBhZ2UiOnsiJGxpdmUiOiJ1NjQiLCJ2YWx1ZSI6IjEifSwicGFnZXMiOnsiJGxpdmUiOiJ1NjQiLCJ2YWx1ZSI6IjQifSwicm93cyI6W3siYW1vdW50IjoiMTU3LjAwIiwiY3VzdG9tZXIiOiJVbWJyZWxsYSIsImtleSI6Imludi0xIiwibnVtYmVyIjoiMTAzMSIsInN0YXR1cyI6Ik9wZW4ifSx7ImFtb3VudCI6IjE5NC4wMCIsImN1c3RvbWVyIjoiR2xvYmV4Iiwia2V5IjoiaW52LTIiLCJudW1iZXIiOiIxMDMyIiwic3RhdHVzIjoiT3ZlcmR1ZSJ9LHsiYW1vdW50IjoiMjMxLjAwIiwiY3VzdG9tZXIiOiJIb29saSIsImtleSI6Imludi0zIiwibnVtYmVyIjoiMTAzMyIsInN0YXR1cyI6IlBhaWQifSx7ImFtb3VudCI6IjI2OC4wMCIsImN1c3RvbWVyIjoiSW5pdGVjaCIsImtleSI6Imludi00IiwibnVtYmVyIjoiMTAzNCIsInN0YXR1cyI6Ik9wZW4ifV0sInNvcnQiOiJudW1iZXIiLCJzb3J0ZWRfYnkiOiJudW1iZXIifX0sInNpZ25hdHVyZSI6IjZMeDhWdm1ad2x6VTJ3RzdNZzBNMEtYamNiYXNPTGRjLTBQcjRHR3RCaUEifQ" data-suprnova-live-revision="0" data-suprnova-live-lazy-complete="false" data-suprnova-live-instance="1oxvRGcYVZ_r8QWWAS19Mw">
+
+
+    <form class="sn-datatable-filter" role="search" aria-label="Filter invoices" live:submit.prevent="filter"><label class="sn-datatable-filter-label" for="invoices-filter">Filter invoices</label><input class="sn-datatable-filter-input" id="invoices-filter" name="filter" type="search" value="" live:model="filter"><button class="sn-datatable-filter-button" type="submit" live:loading.disabled="filter">Apply</button></form>
+
+
+    <table class="sn-datatable" id="invoices">
+    <caption class="sn-datatable-caption">Invoices <span class="sn-datatable-count">(14 rows)</span></caption>
+
+
+    <thead><tr>
+
+    <th scope="col" class="sn-datatable-column" aria-sort="ascending"><form class="sn-datatable-sort" live:submit.prevent="sort"><input type="hidden" name="sort" value="number" live:model="sort"><button class="sn-datatable-sort-button" type="submit" live:loading.disabled="sort">Number</button></form></th>
+
+
+    <th scope="col" class="sn-datatable-column"><form class="sn-datatable-sort" live:submit.prevent="sort"><input type="hidden" name="sort" value="customer" live:model="sort"><button class="sn-datatable-sort-button" type="submit" live:loading.disabled="sort">Customer</button></form></th>
+
+
+    <th scope="col" class="sn-datatable-column"><form class="sn-datatable-sort" live:submit.prevent="sort"><input type="hidden" name="sort" value="amount" live:model="sort"><button class="sn-datatable-sort-button" type="submit" live:loading.disabled="sort">Amount</button></form></th>
+
+
+    <th scope="col" class="sn-datatable-column">Status</th>
+
+    </tr></thead>
+
+
+    <tbody>
+    <tr class="sn-datatable-row" live:key="inv-1">
+
+    <th scope="row" class="sn-datatable-cell">1031</th>
+
+
+    <td class="sn-datatable-cell">Umbrella</td>
+
+
+    <td class="sn-datatable-cell" data-sn-numeric="true">157.00</td>
+
+
+    <td class="sn-datatable-cell">Open</td>
+
+    </tr>
+
+    <tr class="sn-datatable-row" live:key="inv-2">
+
+    <th scope="row" class="sn-datatable-cell">1032</th>
+
+
+    <td class="sn-datatable-cell">Globex</td>
+
+
+    <td class="sn-datatable-cell" data-sn-numeric="true">194.00</td>
+
+
+    <td class="sn-datatable-cell">Overdue</td>
+
+    </tr>
+
+    <tr class="sn-datatable-row" live:key="inv-3">
+
+    <th scope="row" class="sn-datatable-cell">1033</th>
+
+
+    <td class="sn-datatable-cell">Hooli</td>
+
+
+    <td class="sn-datatable-cell" data-sn-numeric="true">231.00</td>
+
+
+    <td class="sn-datatable-cell">Paid</td>
+
+    </tr>
+
+    <tr class="sn-datatable-row" live:key="inv-4">
+
+    <th scope="row" class="sn-datatable-cell">1034</th>
+
+
+    <td class="sn-datatable-cell">Initech</td>
+
+
+    <td class="sn-datatable-cell" data-sn-numeric="true">268.00</td>
+
+
+    <td class="sn-datatable-cell">Open</td>
+
+    </tr>
+    </tbody>
+
+
+    </table>
+
+
+    <nav class="sn-pagination" id="invoice-pages" aria-label="Invoice pages">
+
+    <button class="sn-page" type="button" live:click="previous_page" live:loading.disabled="previous_page" live:loading.busy="previous_page" disabled>Previous</button>
+
+
+    <span class="sn-page-position">Page 1 of 4</span>
+
+
+    <button class="sn-page" type="button" live:click="next_page" live:loading.disabled="next_page" live:loading.busy="next_page">Next</button>
+
+    </nav>
+    </div>
+    </main>
+    </body>
+    </html>
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace[0m
+
+[31;1m        FAIL[0m [   0.067s] (13/18) [35;1mapp::live_dogfood[0m [34;1mthe_live_native_gallery_renders_every_component_on_native_controls[0m
+[31;1m [0m [31;1mstdout[0m [31;1m───[0m
+
+    running 1 test
+    test the_live_native_gallery_renders_every_component_on_native_controls ... FAILED
+
+    failures:
+
+    failures:
+        the_live_native_gallery_renders_every_component_on_native_controls
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.06s
+    [0m
+[31;1m [0m [31;1mstderr[0m [31;1m───[0m
+
+    [0m[31;1mthread 'the_live_native_gallery_renders_every_component_on_native_controls' (1331123) panicked at app/tests/live_dogfood.rs:1142:9:[0m
+    [31;1mmissing <input class="sn-upload-input" id="attachment" type="file" live:upload="attachment" data-suprnova-live-key="attachment-input" accept="image/png"> in <!doctype html>[0m
+    <html lang="en">
+    <head>
+    <meta charset="utf-8">
+    <title>Live native gallery</title>
+    <script id="suprnova-live-config" type="application/json">{"asset_identity":"suprnova-live-0.1.0-5347bf1fd920260d","credentials":"same-origin","endpoint":"/__live/action","max_parallel_per_island":1,"max_queued_per_island":8,"max_response_bytes":1048576,"protocol":{"maximum":2,"minimum":1},"request_timeout_ms":5000,"runtime_contract_version":1}</script><link rel="stylesheet" href="/__live/assets/suprnova-live-0.1.0-5347bf1fd920260d/suprnova-ui.css" integrity="sha256-oTtnyLILEdDDFaBAuSSSNbDFnMXRRUZuzWmQNEx7lkI=" crossorigin="anonymous"><link rel="modulepreload" href="/__live/assets/suprnova-live-0.1.0-5347bf1fd920260d/suprnova-live.esm.js" integrity="sha256-75dKI1YVYxk0MbhRXh3yvW3sOz93aFJN0PwYjttrI5Q=" crossorigin="anonymous"><script type="module" src="/__live/assets/suprnova-live-0.1.0-5347bf1fd920260d/suprnova-live.uploads.esm.js" integrity="sha256-GdSAaLIxKA9yrmslv07jCX6lraWWA2jFbLMqLHJHl8Q=" crossorigin="anonymous"></script><script type="module" src="/__live/assets/suprnova-live-0.1.0-5347bf1fd920260d/suprnova-live.async.esm.js" integrity="sha256-/uecLPJoDZrKUobQibxUlaGSDUE+pemJTnYZLE8bkN0=" crossorigin="anonymous"></script><script type="module" src="/__live/assets/suprnova-live-0.1.0-5347bf1fd920260d/suprnova-live.boot.async.esm.js" integrity="sha256-8CJ0Uje16cQCwNQVdrrHne9Xr3Ny9Fkv8Y9jWplinc8=" crossorigin="anonymous"></script>
+    <link rel="stylesheet" href="/suprnova-ui/button/button.css">
+    <link rel="stylesheet" href="/suprnova-ui/input/input.css">
+    <link rel="stylesheet" href="/suprnova-ui/upload/upload.css">
+    <link rel="stylesheet" href="/suprnova-ui/live-feed/live-feed.css">
+    <link rel="stylesheet" href="/suprnova-ui/notification-bell/notification-bell.css">
+    <link rel="stylesheet" href="/suprnova-ui/account-menu/account-menu.css">
+    <link rel="stylesheet" href="/suprnova-ui/input-otp/input-otp.css">
+    <link rel="stylesheet" href="/suprnova-ui/date-picker/date-picker.css">
+    <link rel="stylesheet" href="/suprnova-ui/combobox/combobox.css">
+    <script type="module" src="/suprnova-ui/input-otp/input-otp.js"></script>
+    <script type="module" src="/suprnova-ui/date-picker/date-picker.js"></script>
+    <script type="module" src="/suprnova-ui/combobox/combobox.js"></script>
+    </head>
+    <body>
+    <main>
+    <h1>Live native gallery</h1>
+    <div data-suprnova-live-root="menu" data-suprnova-live-island="" data-suprnova-live-component="app.account-menu" data-suprnova-live-slot="menu" data-suprnova-live-document-key="live-native-account" data-suprnova-live-protocol-min="1" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="instance" data-suprnova-live-snapshot="eyJib2R5Ijp7ImJ1aWxkX2lkIjoic3Vwcm5vdmEtMi4wLjIiLCJjb21wb25lbnQiOnsiY29udHJhY3RfZGlnZXN0IjoiNDhNZG1iNWp3bTZHNFpIVjMxSEhSajFFa2NNUkJTQ2lURE1fSWRzRVBZbyIsIm1lbW9fc2NoZW1hX3ZlcnNpb24iOjEsIm1vdW50X3NjaGVtYV92ZXJzaW9uIjoxLCJuYW1lIjoiYXBwLmFjY291bnQtbWVudSIsInN0YXRlX3NjaGVtYV92ZXJzaW9uIjoxfSwiZXhwaXJlc19hdCI6IjE3OTAxNzEyOTI5MTciLCJleHRlbnNpb25zIjp7Inhfc3Vwcm5vdmFfZnJhbWV3b3JrX2RvY3VtZW50X3BhdGhfdjEiOiIvbGl2ZS9saXZlLW5hdGl2ZSJ9LCJmb3JtIjoiaW5zdGFuY2UiLCJpbnN0YW5jZV9pZCI6Ijc2dWxyY1VKT2tlRWttcVFMUnQzX3ciLCJpc3N1ZWRfYXQiOiIxNzg5NTY2NDkyOTE3Iiwia2V5X2lkIjoiMDc2MjY1NWNkODg3ZmQ4NWI5YjcxMjdkZTc4M2YxYmMiLCJtZW1vIjp7fSwicmV2aXNpb24iOiIwIiwicm91dGUiOiJEY09xX0poYndMTkVINzh1MHVXa2ZNWW9UQkJycERVR08yanVlUXVjN09vIiwic2NoZW1hX3ZlcnNpb24iOjEsInNjb3BlIjoiV1B4ZllhbzlFeHVFVlBUaFMzQXZaVlpneTVyZVozaklxUzdEQWd1cHVXTSIsInNsb3QiOiJtZW51Iiwic3RhdGUiOnsiY3NyZiI6InEzczVtZ3I5N2w0bXMyZng5c2s4MjdhdzhmNTV1bXo5dHZubHZ1dzQiLCJpbml0aWFscyI6IkFMIiwibmFtZSI6IkFkYSBMb3ZlbGFjZSJ9fSwic2lnbmF0dXJlIjoidGIyWVFYdDZQRlZhM0hhc3NhcTRCTGZ0VVNFdFFvQW5CUk91ZHlmY2ZHbyJ9" data-suprnova-live-revision="0" data-suprnova-live-lazy-complete="false" data-suprnova-live-instance="76ulrcUJOkeEkmqQLRt3_w">
+
+    <details class="sn-account-menu" id="account">
+    <summary class="sn-account-menu-summary" aria-label="Account: Ada Lovelace">
+    <span class="sn-account-menu-avatar" aria-hidden="true">AL</span>
+    <span class="sn-account-menu-name">Ada Lovelace</span>
+    </summary>
+    <ul class="sn-account-menu-list" aria-label="Account">
+
+    <li class="sn-account-menu-item"><a class="sn-account-menu-link" href="/live/me">Profile</a></li>
+
+
+    <li class="sn-account-menu-item"><a class="sn-account-menu-link" href="/live/forms">Settings</a></li>
+
+
+    <li class="sn-account-menu-item"><form class="sn-account-menu-form" method="post" action="/live/sign-out"><input type="hidden" name="_token" value="q3s5mgr97l4ms2fx9sk827aw8f55umz9tvnlvuw4"><button class="sn-account-menu-link sn-account-menu-button" type="submit">Sign out</button></form></li>
+
+    </ul>
+    </details>
+    </div>
+    <div data-suprnova-live-root="gallery" data-suprnova-live-island="" data-suprnova-live-component="app.live-native-gallery" data-suprnova-live-slot="gallery" data-suprnova-live-document-key="live-native-gallery" data-suprnova-live-protocol-min="2" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="instance" data-suprnova-live-snapshot="eyJib2R5Ijp7ImJ1aWxkX2lkIjoic3Vwcm5vdmEtMi4wLjIiLCJjb21wb25lbnQiOnsiY29udHJhY3RfZGlnZXN0IjoiMEQtMlBKd0t4MlFIRUpEWFNuSWwtdXJsaGNGWDBIeW5pTk02RXc2RDhDYyIsIm1lbW9fc2NoZW1hX3ZlcnNpb24iOjEsIm1vdW50X3NjaGVtYV92ZXJzaW9uIjoxLCJuYW1lIjoiYXBwLmxpdmUtbmF0aXZlLWdhbGxlcnkiLCJzdGF0ZV9zY2hlbWFfdmVyc2lvbiI6MX0sImV4cGlyZXNfYXQiOiIxNzkwMTcxMjkyOTE5IiwiZXh0ZW5zaW9ucyI6eyJ4X3N1cHJub3ZhX2ZyYW1ld29ya19kb2N1bWVudF9wYXRoX3YxIjoiL2xpdmUvbGl2ZS1uYXRpdmUifSwiZm9ybSI6Imluc3RhbmNlIiwiaW5zdGFuY2VfaWQiOiI4N2s5bDN3UWFJVGFNbEtMdnhlUDR3IiwiaXNzdWVkX2F0IjoiMTc4OTU2NjQ5MjkxOSIsImtleV9pZCI6IjA3NjI2NTVjZDg4N2ZkODViOWI3MTI3ZGU3ODNmMWJjIiwibWVtbyI6e30sInJldmlzaW9uIjoiMCIsInJvdXRlIjoiRGNPcV9KaGJ3TE5FSDc4dTB1V2tmTVlvVEJCcnBEVUdPMmp1ZVF1YzdPbyIsInNjaGVtYV92ZXJzaW9uIjoxLCJzY29wZSI6IldQeGZZYW85RXh1RVZQVGhTM0F2WlZaZ3k1cmVaM2pJcVM3REFndXB1V00iLCJzbG90IjoiZ2FsbGVyeSIsInN0YXRlIjp7ImF0dGFjaG1lbnQiOiIiLCJjZWxscyI6WzAsMSwyLDMsNCw1XSwiY291bnRyaWVzIjpbWyJjYSIsIkNhbmFkYSJdLFsiY20iLCJDYW1lcm9vbiJdLFsiY2wiLCJDaGlsZSJdLFsiZGUiLCJHZXJtYW55Il0sWyJueiIsIk5ldyBaZWFsYW5kIl0sWyJ1cyIsIlVuaXRlZCBTdGF0ZXMiXV0sImNvdW50cnkiOiIiLCJkYXlzIjpbMSwyLDMsNCw1LDYsNyw4LDksMTAsMTEsMTIsMTMsMTQsMTUsMTYsMTcsMTgsMTksMjAsMjEsMjIsMjMsMjQsMjUsMjYsMjcsMjgsMjksMzAsMzFdLCJpdGVtcyI6W3sia2V5IjoicG9zdC0wIiwidGV4dCI6IkdhbGxlcnkgb3BlbmVkIiwidGltZSI6IjA5OjAwIn1dLCJtb250aHMiOlsiSmFudWFyeSIsIkZlYnJ1YXJ5IiwiTWFyY2giLCJBcHJpbCIsIk1heSIsIkp1bmUiLCJKdWx5IiwiQXVndXN0IiwiU2VwdGVtYmVyIiwiT2N0b2JlciIsIk5vdmVtYmVyIiwiRGVjZW1iZXIiXSwic2F2ZWQiOjAsInVucmVhZCI6MCwidmVyaWZpZWQiOjAsIndoZW4iOiIiLCJ5ZWFycyI6WzIwMjYsMjAyNywyMDI4XX19LCJzaWduYXR1cmUiOiI0NjdRVFAzaXdwVkRURExCM21vbG1TSUNva01SbjhfUGx0WU9NQzRuM0xZIn0" data-suprnova-live-revision="0" data-suprnova-live-lazy-complete="false" data-suprnova-live-instance="87k9l3wQaITaMlKLvxeP4w" live:stream="activity">
+
+
+
+
+
+    <div class="sn-live-native-gallery">
+    <form class="sn-form" id="attachment-form" live:submit.prevent="save_attachment">
+
+    <div class="sn-upload" data-sn-upload="attachment">
+    <label class="sn-upload-label" for="attachment">Attachment</label>
+    <input class="sn-upload-input" id="attachment" type="file" live:upload="attachment" live:key="attachment-input" accept="image/png">
+    <progress class="sn-upload-progress" live:progress="attachment" live:key="attachment-progress" max="100" aria-label="Attachment upload progress"></progress>
+    <p class="sn-upload-status">
+    <span class="sn-upload-state" data-sn-state="idle">No file chosen.</span>
+    <span class="sn-upload-state" data-sn-state="queued">Queued.</span>
+    <span class="sn-upload-state" data-sn-state="transferring">Transferring.</span>
+    <span class="sn-upload-state" data-sn-state="verifying">Verifying on the server.</span>
+    <span class="sn-upload-state" data-sn-state="ready">Verified. Not saved until you submit.</span>
+    <span class="sn-upload-state" data-sn-state="finalizing">Saving.</span>
+    <span class="sn-upload-state" data-sn-state="finalized">Saved.</span>
+    <span class="sn-upload-state" data-sn-state="rejected">Rejected by the server. Choose another file.</span>
+    <span class="sn-upload-state" data-sn-state="canceled">Canceled.</span>
+    <span class="sn-upload-state" data-sn-state="expired">Expired. Choose the file again.</span>
+    <span class="sn-upload-state" data-sn-state="failed">Transfer failed. Retry or choose the file again.</span>
+    </p>
+    <div class="sn-upload-controls" role="group" aria-label="Attachment upload controls">
+    <button class="sn-upload-control" type="button" live:upload.cancel="attachment" live:key="attachment-cancel">Cancel upload</button>
+    <button class="sn-upload-control" type="button" live:upload.retry="attachment" live:key="attachment-retry">Retry upload</button>
+    <button class="sn-upload-control" type="button" live:upload.remove="attachment" live:key="attachment-remove">Remove upload</button>
+    </div>
+    </div>
+
+    <button class="sn-button" type="submit" live:loading.disabled="save_attachment">Save attachment</button>
+    <p data-saved="0">Saved 0</p>
+    </form>
+    <form class="sn-form" id="code-form" live:submit.prevent="verify">
+
+    <sn-input-otp class="sn-otp" data-sn-length="6" live:key="code-otp" live:preserve.self>
+    <label class="sn-otp-label" for="code">One-time code</label>
+    <input class="sn-input sn-otp-input" id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" spellcheck="false" autocapitalize="off" required live:model="code">
+    <span class="sn-otp-cells" aria-hidden="true">
+    <span class="sn-otp-cell" data-sn-index="0"></span>
+
+    <span class="sn-otp-cell" data-sn-index="1"></span>
+
+    <span class="sn-otp-cell" data-sn-index="2"></span>
+
+    <span class="sn-otp-cell" data-sn-index="3"></span>
+
+    <span class="sn-otp-cell" data-sn-index="4"></span>
+
+    <span class="sn-otp-cell" data-sn-index="5"></span>
+    </span>
+    </sn-input-otp>
+
+    <button class="sn-button" type="submit" live:loading.disabled="verify">Verify code</button>
+    <p data-verified="0">Verified 0</p>
+    </form>
+    <form class="sn-form" id="renewal-form" live:submit.prevent="search">
+
+    <sn-date-picker class="sn-date" live:key="when-date" live:preserve.self>
+    <label class="sn-date-label" for="when">Renewal date</label>
+    <input class="sn-input sn-date-input" id="when" name="when" type="date" min="2026-01-01" max="2028-12-31" live:model="when">
+    <details class="sn-date-strips">
+    <summary class="sn-date-summary">Pick the parts</summary>
+    <fieldset class="sn-date-strip" data-sn-part="year"><legend class="sn-date-legend">Year</legend><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-year" value="2026">2026</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-year" value="2027">2027</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-year" value="2028">2028</label></fieldset>
+    <fieldset class="sn-date-strip" data-sn-part="month"><legend class="sn-date-legend">Month</legend><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-month" value="1">January</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-month" value="2">February</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-month" value="3">March</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-month" value="4">April</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-month" value="5">May</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-month" value="6">June</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-month" value="7">July</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-month" value="8">August</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-month" value="9">September</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-month" value="10">October</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-month" value="11">November</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-month" value="12">December</label></fieldset>
+    <fieldset class="sn-date-strip" data-sn-part="day"><legend class="sn-date-legend">Day</legend><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="1">1</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="2">2</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="3">3</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="4">4</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="5">5</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="6">6</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="7">7</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="8">8</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="9">9</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="10">10</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="11">11</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="12">12</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="13">13</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="14">14</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="15">15</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="16">16</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="17">17</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="18">18</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="19">19</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="20">20</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="21">21</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="22">22</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="23">23</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="24">24</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="25">25</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="26">26</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="27">27</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="28">28</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="29">29</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="30">30</label><label class="sn-date-option"><input class="sn-date-radio" type="radio" name="when-day" value="31">31</label></fieldset>
+    </details>
+    </sn-date-picker>
+
+    <p data-when="">Renewal </p>
+
+    <sn-combobox class="sn-combobox" live:key="country-combobox" live:preserve.self>
+    <label class="sn-combobox-label" for="country">Country</label>
+    <input class="sn-input sn-combobox-input" id="country" name="country" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="country-listbox" autocomplete="off" list="country-datalist" placeholder="Type a country" live:model="country">
+    <datalist id="country-datalist"><option value="Canada"></option><option value="Cameroon"></option><option value="Chile"></option><option value="Germany"></option><option value="New Zealand"></option><option value="United States"></option></datalist>
+    <ul class="sn-combobox-listbox" id="country-listbox" role="listbox" aria-label="Country suggestions" data-sn-query="" live:key="country-listbox" hidden><li class="sn-combobox-option" id="country-option-1" role="option" aria-selected="false" data-sn-value="ca" live:key="ca">Canada</li><li class="sn-combobox-option" id="country-option-2" role="option" aria-selected="false" data-sn-value="cm" live:key="cm">Cameroon</li><li class="sn-combobox-option" id="country-option-3" role="option" aria-selected="false" data-sn-value="cl" live:key="cl">Chile</li><li class="sn-combobox-option" id="country-option-4" role="option" aria-selected="false" data-sn-value="de" live:key="de">Germany</li><li class="sn-combobox-option" id="country-option-5" role="option" aria-selected="false" data-sn-value="nz" live:key="nz">New Zealand</li><li class="sn-combobox-option" id="country-option-6" role="option" aria-selected="false" data-sn-value="us" live:key="us">United States</li></ul>
+    </sn-combobox>
+
+    <p class="sn-live-native-search-state"><span hidden live:queued.show="country">Search pending</span><span hidden live:loading.show="country">Searching</span></p>
+    <button class="sn-button" type="submit" live:loading.disabled="search">Search</button>
+    </form>
+    <header class="sn-live-native-header">
+
+    <a class="sn-bell" id="bell" href="/live/live-native" aria-describedby="bell-status">
+    <span class="sn-bell-icon" aria-hidden="true">&#128276;</span>
+    <span class="sn-bell-label">Notifications</span>
+    <span class="sn-bell-count" data-sn-count="0">0 unread</span>
+    </a>
+    <span class="sn-bell-status" id="bell-status" data-live-stream-status role="status" aria-live="polite">Updates disconnected</span>
+
+    <button class="sn-button" type="button" live:click="post" live:loading.disabled="post">Post an update</button>
+    </header>
+
+    <section class="sn-live-feed" id="activity" aria-labelledby="activity-heading">
+    <h2 class="sn-live-feed-heading" id="activity-heading">Activity</h2>
+    <p class="sn-live-feed-status" data-live-stream-status role="status" aria-live="polite">Updates disconnected</p>
+    <ol class="sn-live-feed-list" live:key="activity-list">
+    <li class="sn-live-feed-item" live:key="post-0"><time class="sn-live-feed-time">09:00</time> Gallery opened</li>
+    </ol>
+    </section>
+
+    </div></div>
+    </main>
+    </body>
+    </html>
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace[0m
+
+────────────
+[31;1m     Summary[0m [   0.122s] [1m13[0m/[1m18[0m tests run: [1m8[0m [32;1mpassed[0m, [1m5[0m [31;1mfailed[0m, [1m0[0m [33;1mskipped[0m
+[31;1m        FAIL[0m [   0.055s] ( 2/18) [35;1mapp::live_dogfood[0m [34;1mthe_form_gallery_renders_every_presentational_component_with_the_library_base[0m
+[31;1m        FAIL[0m [   0.075s] ( 5/18) [35;1mapp::live_dogfood[0m [34;1mthe_feedback_gallery_renders_every_feedback_component_on_real_state[0m
+[31;1m        FAIL[0m [   0.077s] ( 7/18) [35;1mapp::live_dogfood[0m [34;1mthe_data_display_gallery_renders_every_component_with_text_and_server_rendered_marks[0m
+[31;1m        FAIL[0m [   0.081s] ( 8/18) [35;1mapp::live_dogfood[0m [34;1mthe_datatable_mounts_from_the_query_and_reflects_sort_filter_and_page[0m
+[31;1m        FAIL[0m [   0.067s] (13/18) [35;1mapp::live_dogfood[0m [34;1mthe_live_native_gallery_renders_every_component_on_native_controls[0m
+[33;1mwarning[0m: [1m5[0m/[1m18[0m tests were not run due to [33;1mtest failure[0m (run with [1m--no-fail-fast[0m to run all tests, or run with [1m--max-fail[0m)
+[31;1merror[0m: test run failed
