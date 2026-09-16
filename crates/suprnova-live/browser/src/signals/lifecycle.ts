@@ -241,9 +241,7 @@ export class SignalRuntime {
       return;
     }
     const identity =
-      owned.element === record.element
-        ? record.metadata.documentKey
-        : stableKeyOf(owned.element);
+      owned.element === record.element ? record.metadata.documentKey : stableKeyOf(owned.element);
     if (identity === null || !SAFE_SCOPE_KEY.test(identity) || state.identities.has(identity)) {
       this.#rejectDirective();
       return;

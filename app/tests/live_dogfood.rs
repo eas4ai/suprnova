@@ -309,7 +309,7 @@ async fn the_form_gallery_renders_every_presentational_component_with_the_librar
         "<textarea class=\"sn-textarea\" id=\"bio\"",
         "class=\"sn-input sn-number-input\" id=\"quantity\"",
         "type=\"range\"",
-        "live:model.debounce.300ms=\"query\"",
+        "live:model.debounce.250ms=\"query\"",
         "<sn-password-reveal class=\"sn-password\">",
         "type=\"password\"",
         "class=\"sn-checkbox-input\" id=\"agree\"",
@@ -498,15 +498,15 @@ async fn the_overlay_gallery_renders_every_overlay_on_its_native_primitive() {
     for needle in [
         "<span class=\"sn-tooltip-bubble\" id=\"save-tip\" role=\"tooltip\">",
         "aria-describedby=\"save-tip\"",
-        "<details class=\"sn-collapsible\" live:key=\"notes\" data-suprnova-live-key=\"notes\" live:preserve.self>",
-        "<details class=\"sn-accordion-item\" name=\"faq\" live:key=\"faq-open\" data-suprnova-live-key=\"faq-open\" live:preserve.self open>",
+        "<details class=\"sn-collapsible\" live:key=\"notes\" live:preserve.self>",
+        "<details class=\"sn-accordion-item\" name=\"faq\" live:key=\"faq-open\" live:preserve.self open>",
         "<div class=\"sn-popover\" id=\"hint\" popover aria-label=\"Hint\"",
         "popovertarget=\"hint\"",
         "<div class=\"sn-menu\" id=\"actions\" popover aria-label=\"Actions\"",
         "<a class=\"sn-menu-link\" href=\"/live\">Dashboard</a>",
         "<button class=\"sn-menu-action\" type=\"button\" live:click=\"add_note\" popovertarget=\"actions\" popovertargetaction=\"hide\">",
         "<sn-dialog class=\"sn-dialog-host\" tabindex=\"-1\">",
-        "<dialog class=\"sn-dialog\" id=\"confirm\" aria-labelledby=\"confirm-title\" closedby=\"any\" live:key=\"confirm\" data-suprnova-live-key=\"confirm\" live:preserve.self>",
+        "<dialog class=\"sn-dialog\" id=\"confirm\" aria-labelledby=\"confirm-title\" closedby=\"any\" live:key=\"confirm\" live:preserve.self>",
         "data-sn-dialog-open=\"confirm\"",
         "data-sn-dialog-close=\"confirm\"",
         "live:click=\"confirm_delete\"",
@@ -636,7 +636,7 @@ async fn the_feedback_gallery_renders_every_feedback_component_on_real_state() {
         "{rendered}"
     );
     assert!(
-        rendered.contains("<div class=\"sn-toast\" data-sn-variant=\"error\" data-sn-duration=\"6000\" live:key=\"toast-1\" data-suprnova-live-key=\"toast-1\" live:preserve.self>"),
+        rendered.contains("<div class=\"sn-toast\" data-sn-variant=\"error\" data-sn-duration=\"6000\" live:key=\"toast-1\" live:preserve.self>"),
         "{rendered}"
     );
 }
@@ -732,8 +732,8 @@ async fn the_navigation_gallery_keeps_route_semantics_and_takes_current_from_the
     for needle in [
         "<a class=\"sn-header-link\" href=\"/live/navigation\" aria-current=\"page\">Navigation</a>",
         "<a class=\"sn-header-link\" href=\"/live\">Dashboard</a>",
-        "<details class=\"sn-sidebar-group\" live:key=\"sidebar-library\" data-suprnova-live-key=\"sidebar-library\" live:preserve.self open>",
-        "<details class=\"sn-sidebar-group\" live:key=\"sidebar-account\" data-suprnova-live-key=\"sidebar-account\" live:preserve.self>",
+        "<details class=\"sn-sidebar-group\" live:key=\"sidebar-library\" live:preserve.self open>",
+        "<details class=\"sn-sidebar-group\" live:key=\"sidebar-account\" live:preserve.self>",
         "<a class=\"sn-sidebar-link\" href=\"/live/navigation\" aria-current=\"page\">Navigation</a>",
         "<li class=\"sn-breadcrumb\" aria-current=\"page\">Navigation</li>",
         "<sn-tabs class=\"sn-tabs\" id=\"local-tabs\" data-sn-mode=\"local\" data-sn-label=\"Details\">",
@@ -748,7 +748,7 @@ async fn the_navigation_gallery_keeps_route_semantics_and_takes_current_from_the
         "<button class=\"sn-page\" type=\"button\" live:click=\"previous_page\" live:loading.disabled=\"previous_page\" live:loading.busy=\"previous_page\" disabled>Previous</button>",
         "<button class=\"sn-page\" type=\"button\" live:click=\"next_page\" live:loading.disabled=\"next_page\" live:loading.busy=\"next_page\">Next</button>",
         "<span class=\"sn-page-position\">Page 1 of 3</span>",
-        "<li class=\"sn-feed-item\" live:key=\"row-1\" data-suprnova-live-key=\"row-1\">Row 1</li>",
+        "<li class=\"sn-feed-item\" live:key=\"row-1\">Row 1</li>",
         "<button class=\"sn-load-more\" type=\"button\" live:click=\"load_more\"",
         "<footer class=\"sn-footer\" id=\"site-footer\">",
         "<script type=\"module\" src=\"/suprnova-ui/tabs/tabs.js\"></script>",
@@ -900,7 +900,7 @@ async fn the_data_display_gallery_renders_every_component_with_text_and_server_r
         "data-sn-trend=\"up\"><span class=\"sn-stat-direction\">Up</span> 12%",
         "data-sn-trend=\"down\"><span class=\"sn-stat-direction\">Down</span> 0.4 pts",
         // DATA-003: keyed items.
-        "<li class=\"sn-list-item\" live:key=\"act-1\" data-suprnova-live-key=\"act-1\">",
+        "<li class=\"sn-list-item\" live:key=\"act-1\">",
         // DATA-004: SVG marks in the plain GET, a summary and a data table.
         "<figure class=\"sn-chart\" id=\"revenue-chart\" aria-labelledby=\"revenue-chart-title\">",
         "<div class=\"sn-chart-marks\" aria-hidden=\"true\"><svg",
@@ -951,12 +951,8 @@ async fn the_data_display_gallery_renders_every_component_with_text_and_server_r
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
     let accepted = reply.json();
     let rendered = accepted["render"]["html"].as_str().unwrap_or_default();
-    let first = rendered
-        .find("data-suprnova-live-key=\"act-4\"")
-        .expect("act-4 rendered");
-    let last = rendered
-        .find("data-suprnova-live-key=\"act-1\"")
-        .expect("act-1 rendered");
+    let first = rendered.find("live:key=\"act-4\"").expect("act-4 rendered");
+    let last = rendered.find("live:key=\"act-1\"").expect("act-1 rendered");
     assert!(first < last, "the reorder reversed the keyed list");
 }
 
@@ -973,7 +969,7 @@ async fn the_datatable_mounts_from_the_query_and_reflects_sort_filter_and_page()
         "<th scope=\"col\" class=\"sn-datatable-column\" aria-sort=\"ascending\">",
         "<th scope=\"row\" class=\"sn-datatable-cell\">1031</th>",
         "role=\"search\" aria-label=\"Filter invoices\" live:submit.prevent=\"filter\"",
-        "<tr class=\"sn-datatable-row\" live:key=\"inv-1\" data-suprnova-live-key=\"inv-1\">",
+        "<tr class=\"sn-datatable-row\" live:key=\"inv-1\">",
     ] {
         assert!(html.contains(needle), "missing {needle} in {html}");
     }
@@ -1105,25 +1101,25 @@ async fn the_live_native_gallery_renders_every_component_on_native_controls() {
     let html = get(&app, "/live/live-native", Some(&session)).await.text();
     for needle in [
         // FORM-005: the upload widget over the shipped protocol, every state as text.
-        "<input class=\"sn-upload-input\" id=\"attachment\" type=\"file\" live:upload=\"attachment\" data-suprnova-live-key=\"attachment-input\" accept=\"image/png\">",
-        "<progress class=\"sn-upload-progress\" live:progress=\"attachment\" data-suprnova-live-key=\"attachment-progress\" max=\"100\" aria-label=\"Attachment upload progress\"></progress>",
+        "<input class=\"sn-upload-input\" id=\"attachment\" type=\"file\" live:upload=\"attachment\" live:key=\"attachment-input\" accept=\"image/png\">",
+        "<progress class=\"sn-upload-progress\" live:progress=\"attachment\" live:key=\"attachment-progress\" max=\"100\" aria-label=\"Attachment upload progress\"></progress>",
         "data-sn-state=\"ready\">Verified. Not saved until you submit.</span>",
         "live:upload.cancel=\"attachment\"",
         "live:upload.retry=\"attachment\"",
         "live:upload.remove=\"attachment\"",
         // FORM-006: one native input for the code, cells hidden from assistive technology.
-        "<sn-input-otp class=\"sn-otp\" data-sn-length=\"6\" live:key=\"code-otp\" data-suprnova-live-key=\"code-otp\" live:preserve.self>",
+        "<sn-input-otp class=\"sn-otp\" data-sn-length=\"6\" live:key=\"code-otp\" live:preserve.self>",
         "id=\"code\" name=\"code\" type=\"text\" inputmode=\"numeric\" autocomplete=\"one-time-code\" pattern=\"[0-9]{6}\" maxlength=\"6\"",
         "<span class=\"sn-otp-cells\" aria-hidden=\"true\">",
         "<span class=\"sn-otp-cell\" data-sn-index=\"5\"></span>",
         // FORM-007: a date input and native radio strips with legends.
-        "<sn-date-picker class=\"sn-date\" live:key=\"when-date\" data-suprnova-live-key=\"when-date\" live:preserve.self>",
+        "<sn-date-picker class=\"sn-date\" live:key=\"when-date\" live:preserve.self>",
         "id=\"when\" name=\"when\" type=\"date\" min=\"2026-01-01\" max=\"2028-12-31\" live:model=\"when\"",
         "<fieldset class=\"sn-date-strip\" data-sn-part=\"year\"><legend class=\"sn-date-legend\">Year</legend>",
         "<input class=\"sn-date-radio\" type=\"radio\" name=\"when-month\" value=\"12\">December",
         "<input class=\"sn-date-radio\" type=\"radio\" name=\"when-day\" value=\"31\">31",
         // FORM-008: the combobox pattern over a native input, with a datalist before upgrade.
-        "<sn-combobox class=\"sn-combobox\" live:key=\"country-combobox\" data-suprnova-live-key=\"country-combobox\" live:preserve.self>",
+        "<sn-combobox class=\"sn-combobox\" live:key=\"country-combobox\" live:preserve.self>",
         "role=\"combobox\" aria-autocomplete=\"list\" aria-expanded=\"false\" aria-controls=\"country-listbox\"",
         "<datalist id=\"country-datalist\"><option value=\"Canada\"></option>",
         "<ul class=\"sn-combobox-listbox\" id=\"country-listbox\" role=\"listbox\" aria-label=\"Country suggestions\" data-sn-query=\"\"",
@@ -1131,7 +1127,7 @@ async fn the_live_native_gallery_renders_every_component_on_native_controls() {
         // FDB-005: the feed and the bell render the disconnected default and a polite status.
         "<section class=\"sn-live-feed\" id=\"activity\" aria-labelledby=\"activity-heading\">",
         "<p class=\"sn-live-feed-status\" data-live-stream-status role=\"status\" aria-live=\"polite\">Updates disconnected</p>",
-        "<li class=\"sn-live-feed-item\" live:key=\"post-0\" data-suprnova-live-key=\"post-0\">",
+        "<li class=\"sn-live-feed-item\" live:key=\"post-0\">",
         "<span class=\"sn-bell-count\" data-sn-count=\"0\">0 unread</span>",
         "<span class=\"sn-bell-status\" id=\"bell-status\" data-live-stream-status role=\"status\" aria-live=\"polite\">Updates disconnected</span>",
         // NAV-005: the account menu is its own island, a details disclosure with anchors and a form.
