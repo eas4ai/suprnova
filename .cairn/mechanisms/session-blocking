@@ -4,6 +4,7 @@ inputs:
   - framework/src/cache/
   - framework/src/routing/
   - framework/src/http/request.rs
+  - framework/src/lib.rs
   - framework/src/server.rs
   - framework/tests/session/blocking.rs
   - framework/tests/session/main.rs
