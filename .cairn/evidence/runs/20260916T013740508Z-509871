@@ -1,0 +1,18 @@
+mechanism: ui-collection-morph
+commit: 04be1af0
+inputs_digest: sha256:d0f8472a27cf0084eedf2c06b428f74139293e7d6103fed9bedbfe891c6b3f9e
+mechanism_digest: sha256:3d07ebf1249a9ddfafd8c5affe3a243719d7b4fc32006c380be3d81e341ea717
+kernel_digest: sha256:ee68ea41b9d1dc3121e1dae3ff4cab9287402301e1a142b9489484e3f59d8e90
+inputs_detail: .cairn/evidence/runs/20260916T013740508Z-509871.inputs.json
+command: sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/collection-continuity.test.ts'
+cwd: .
+exit: 0
+output_digest: sha256:fc04d8e583ba14e9adc403d83322bbd9f25aeb006e65f16f6ba05f63cb21210e
+output: .cairn/evidence/runs/20260916T013740508Z-509871.out
+stderr_output: .cairn/evidence/runs/20260916T013740508Z-509871.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-16T01:37:41.168Z
+results:
+  - DATA-003 pass exit sha256:bf78f9b41ab90b5872550eebcf92d7e7515e564f0a842fb11b3f6d10dd679f8d 8 sha256:b2afb1cf7628e7660ab95b5b5bb90fe2bf6c696ac7dd9df68106463a676aa7b2

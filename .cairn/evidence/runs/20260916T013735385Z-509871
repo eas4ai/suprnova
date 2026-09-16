@@ -1,0 +1,18 @@
+mechanism: cache-request-directives
+commit: 04be1af0
+inputs_digest: sha256:37899be6cc0b9d69243cab221da51cdc85a717b6be3b4360a098a5377bac9449
+mechanism_digest: sha256:eae28dd79d32e2ecb86b3c4545c7f0cafdc9da7a0298536cdcf65f9da614c044
+kernel_digest: sha256:ee68ea41b9d1dc3121e1dae3ff4cab9287402301e1a142b9489484e3f59d8e90
+inputs_detail: .cairn/evidence/runs/20260916T013735385Z-509871.inputs.json
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::request_directives_are_honored)'
+cwd: .
+exit: 0
+output_digest: sha256:f10b1df87c3fee5d03aa654022ad2651bc71ddae0bbf8b4098183ca2cc8b2031
+output: .cairn/evidence/runs/20260916T013735385Z-509871.out
+stderr_output: .cairn/evidence/runs/20260916T013735385Z-509871.err
+stderr_digest: sha256:f10b1df87c3fee5d03aa654022ad2651bc71ddae0bbf8b4098183ca2cc8b2031
+signal: none
+execution_error: null
+recorded: 2026-09-16T01:37:36.337Z
+results:
+  - CACHE-007 pass exit sha256:b6f6d71082c4009329e0ed21bb1ec5c9525c4e1b55911a9757fdf7339ada42bb 4 sha256:f32aded599edac01128725c183e6b15216affc8489a5e457e418b61f25811ca7

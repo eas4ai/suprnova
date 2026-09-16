@@ -1,0 +1,20 @@
+mechanism: ui-navigation
+commit: 04be1af0
+inputs_digest: sha256:383782580fa836673ba6df131ad48721d5929332283599ec204949e113951833
+mechanism_digest: sha256:060f28838e6b8e2ba5a4ba48c5d0dc7a515fa151ecf9cf5d18e5c81ab456f735
+kernel_digest: sha256:ee68ea41b9d1dc3121e1dae3ff4cab9287402301e1a142b9489484e3f59d8e90
+inputs_detail: .cairn/evidence/runs/20260916T015925806Z-509871.inputs.json
+command: node .cairn/tools/ui-navigation.mjs crates/suprnova-live/components app/templates/live/navigation-gallery.html
+cwd: .
+exit: 0
+output_digest: sha256:c9617522061cd710b91cbd1f8ae6b393df7b83a2e8f2bc3fc3074b65e596d816
+output: .cairn/evidence/runs/20260916T015925806Z-509871.out
+stderr_output: .cairn/evidence/runs/20260916T015925806Z-509871.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-16T01:59:25.907Z
+results:
+  - NAV-001 pass line sha256:2e9c25ef71a622aefe6cf9f9932d44c44e018b65206ab6865d2dad06f51d91ab 10 sha256:2a2e9372f20915bf6747e1238ecaab71bb93d78010822007cf3fb10c248ccfe3
+  - NAV-002 pass line sha256:bd9eeb28efd1eb109c998f789de2344f7bbdd9256541cc507ba71585421b3aaf 10 sha256:0336f45b2300bbca1c1cf851018fbc09227505d5aefefe470c63d6546ffcec66
+  - NAV-004 pass line sha256:fc5d938bffbd3184e7f03d3a6e595c09e24845693a37720a69b8dadaab0aec02 10 sha256:dd74a2f12702d5c0b730eeab1666fce681ac20467e66ffb343ea8a9a103f2668

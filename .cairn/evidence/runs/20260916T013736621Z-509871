@@ -1,0 +1,18 @@
+mechanism: cache-named-connection
+commit: 04be1af0
+inputs_digest: sha256:37899be6cc0b9d69243cab221da51cdc85a717b6be3b4360a098a5377bac9449
+mechanism_digest: sha256:121cdbe489983fdd035ae2a033eb0d99e156d9b0f5068ac4ebb85860967575d2
+kernel_digest: sha256:ee68ea41b9d1dc3121e1dae3ff4cab9287402301e1a142b9489484e3f59d8e90
+inputs_detail: .cairn/evidence/runs/20260916T013736621Z-509871.inputs.json
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::named_connection_is_preserved)'
+cwd: .
+exit: 0
+output_digest: sha256:4fc248f88ce46adb3e2d866e92cb71598a525edd3c73ce8597edf4809b85bcc6
+output: .cairn/evidence/runs/20260916T013736621Z-509871.out
+stderr_output: .cairn/evidence/runs/20260916T013736621Z-509871.err
+stderr_digest: sha256:4fc248f88ce46adb3e2d866e92cb71598a525edd3c73ce8597edf4809b85bcc6
+signal: none
+execution_error: null
+recorded: 2026-09-16T01:37:37.631Z
+results:
+  - CACHE-008 pass exit sha256:305cf1f382c682b3082621c14bf702eb894f646bc9cc35babb0155184a70616e 4 sha256:26d563dc0fee2dbc48495e7683cba18ee3b5eecf775b0106c0905451773da010

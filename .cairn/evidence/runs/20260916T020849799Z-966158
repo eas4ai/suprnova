@@ -1,0 +1,18 @@
+mechanism: cache-write-atomicity
+commit: ee60c838
+inputs_digest: sha256:37899be6cc0b9d69243cab221da51cdc85a717b6be3b4360a098a5377bac9449
+mechanism_digest: sha256:485ce11b9536aa9c2dec89f207a867e91dcd8b865eef1d1edb0a3c3cdb7937d0
+kernel_digest: sha256:ee68ea41b9d1dc3121e1dae3ff4cab9287402301e1a142b9489484e3f59d8e90
+inputs_detail: .cairn/evidence/runs/20260916T020849799Z-966158.inputs.json
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::write_and_generation_commit_together)'
+cwd: .
+exit: 0
+output_digest: sha256:39941f8539079a9647d5ff0841bb0b5f2966169ed94aa2530a11233f79462678
+output: .cairn/evidence/runs/20260916T020849799Z-966158.out
+stderr_output: .cairn/evidence/runs/20260916T020849799Z-966158.err
+stderr_digest: sha256:39941f8539079a9647d5ff0841bb0b5f2966169ed94aa2530a11233f79462678
+signal: none
+execution_error: null
+recorded: 2026-09-16T02:08:50.775Z
+results:
+  - CACHE-009 pass exit sha256:38ef1c675dd270ca1055347142059a013ef1702be78a039b0249bfce8ed1466e 5 sha256:ae73e8d5dcd8e5c334e668bf1f74a0d75d77be10b9bb2186ed863e8c30cc7ce2

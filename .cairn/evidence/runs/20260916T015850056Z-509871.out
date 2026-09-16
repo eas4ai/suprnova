@@ -1,0 +1,31 @@
+   Compiling ring v0.17.14
+   Compiling rustls v0.23.45
+   Compiling rustls-webpki v0.103.15
+   Compiling jsonwebtoken v9.3.1
+   Compiling tokio-rustls v0.26.4
+   Compiling sqlx-core v0.9.0
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling sqlx-sqlite v0.9.0
+   Compiling sqlx-mysql v0.9.0
+   Compiling sqlx-postgres v0.9.0
+   Compiling hyper-rustls v0.27.9
+   Compiling tonic v0.12.3
+   Compiling lettre v0.11.22
+   Compiling reqwest v0.12.28
+   Compiling reqwest v0.13.4
+   Compiling sqlx v0.9.0
+   Compiling suprnova-web-push v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+   Compiling apple v0.3.1 (https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97)
+   Compiling qdrant-client v1.18.0
+   Compiling sea-query-sqlx v0.9.1
+   Compiling sea-schema v0.18.1
+   Compiling sea-orm v2.0.2
+   Compiling suprnova-magnetar v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling sea-orm-migration v2.0.2
+   Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.33s
+────────────
+[32;1m Nextest run[0m ID [1mde481974-e104-496c-8b6f-f6cb71b7ba23[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m1[0m test across [1m1[0m binary ([1m112[0m tests [33;1mskipped[0m)
+────────────
+[32;1m     Summary[0m [   3.028s] [1m1[0m test run: [1m1[0m [32;1mpassed[0m, [1m112[0m [33;1mskipped[0m

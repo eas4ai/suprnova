@@ -1,0 +1,18 @@
+mechanism: cache-no-store
+commit: 04be1af0
+inputs_digest: sha256:37899be6cc0b9d69243cab221da51cdc85a717b6be3b4360a098a5377bac9449
+mechanism_digest: sha256:5bfddd241360e7752fdac331938cb37cf21da5138b90030c3d0cf4f39446f3e0
+kernel_digest: sha256:ee68ea41b9d1dc3121e1dae3ff4cab9287402301e1a142b9489484e3f59d8e90
+inputs_detail: .cairn/evidence/runs/20260916T013714508Z-509871.inputs.json
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::no_store_is_a_storage_veto)'
+cwd: .
+exit: 0
+output_digest: sha256:963d8074371c58732b4b4e332778bca31c341ca81b4b28176e19d3d61baf47af
+output: .cairn/evidence/runs/20260916T013714508Z-509871.out
+stderr_output: .cairn/evidence/runs/20260916T013714508Z-509871.err
+stderr_digest: sha256:963d8074371c58732b4b4e332778bca31c341ca81b4b28176e19d3d61baf47af
+signal: none
+execution_error: null
+recorded: 2026-09-16T01:37:29.011Z
+results:
+  - CACHE-001 pass exit sha256:6e2665e82b82dc4e2548686b118ed65f1b09cd01218a99da1daedc142304cd47 4 sha256:a3f972f510d1c079c859d1e6e6d42d849473cdc96d1096e69d54e00ba7f366ca

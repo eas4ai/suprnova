@@ -1,0 +1,9 @@
+
+ RUN  v4.1.11 /home/shawn/workspace2/suprnova/crates/suprnova-live/browser
+
+
+ Test Files  1 passed (1)
+      Tests  4 passed (4)
+   Start at  21:59:27
+   Duration  128ms (transform 48ms, setup 0ms, import 61ms, tests 3ms, environment 0ms)
+

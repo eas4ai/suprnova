@@ -1,0 +1,18 @@
+mechanism: ui-overlays-morph
+commit: 04be1af0
+inputs_digest: sha256:d0f8472a27cf0084eedf2c06b428f74139293e7d6103fed9bedbfe891c6b3f9e
+mechanism_digest: sha256:573e648be1a40314129fe10383121aa65d92b44e0012e13c70816b6a8b96ae26
+kernel_digest: sha256:ee68ea41b9d1dc3121e1dae3ff4cab9287402301e1a142b9489484e3f59d8e90
+inputs_detail: .cairn/evidence/runs/20260916T015926837Z-509871.inputs.json
+command: sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/overlay-continuity.test.ts'
+cwd: .
+exit: 0
+output_digest: sha256:bbd4b0da709605efad7a328f9f820b828caf337f1a1b1e8e9ac05942819d396d
+output: .cairn/evidence/runs/20260916T015926837Z-509871.out
+stderr_output: .cairn/evidence/runs/20260916T015926837Z-509871.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-16T01:59:27.367Z
+results:
+  - OVL-006 pass exit sha256:50362603e2278f26b0f0fcde7542f6f5b7c4a62475b179d3918c3fd8b19f8d6b 9 sha256:69b30c13b32f22d4efcd174b06dd2de5c6e2052a9f7f8cdf505ebb95f753a61c

@@ -1,0 +1,18 @@
+mechanism: spec-lint
+commit: ee60c838
+inputs_digest: sha256:c3e57dd20b8876a82379d19fefe43a8f4a0fcd9d1728ec6aad6b2c6f231c5a2a
+mechanism_digest: sha256:3d2b0fc682f0d1bcbc38637d0141294a7c8965717b0453cfb3b78570ccd0cf4e
+kernel_digest: sha256:ee68ea41b9d1dc3121e1dae3ff4cab9287402301e1a142b9489484e3f59d8e90
+inputs_detail: .cairn/evidence/runs/20260916T022227864Z-966158.inputs.json
+command: node .cairn/tools/spec-lint.mjs docs/spec
+cwd: .
+exit: 0
+output_digest: sha256:01329d0d0d6ff0abecaca74caa406b5fdc021de3e868416f7d8eccaaabfdfff0
+output: .cairn/evidence/runs/20260916T022227864Z-966158.out
+stderr_output: .cairn/evidence/runs/20260916T022227864Z-966158.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-16T02:22:27.983Z
+results:
+  - LIVE-014 pass exit sha256:142c2a31a9323e23c688c10767e25a6c3ed01f9e6affde14b842e4db43015362 2 sha256:0e9c3bab203d55ad338335470660bcd977fe2db04efd9dbf181843c3c0b47018

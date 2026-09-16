@@ -1,0 +1,6 @@
+spec-check ok files=40 domains=25 iterations=11 capabilities=160 acceptance_blocks=160 ux_flows=160 glossary_terms=107 archive_files=absent
+implementation-doc semantic mutation self-test ok cases=13
+implementation-doc-check ok files=28
+implementation-doc semantic mutation self-test ok cases=13
+implementation-doc-semantics ok files=7
+documentation contract ok

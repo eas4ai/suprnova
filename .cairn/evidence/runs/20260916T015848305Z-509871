@@ -1,0 +1,19 @@
+mechanism: ui-live-native
+commit: 04be1af0
+inputs_digest: sha256:287c542de0c67616c75f812c7e68fea06c91887d54f7bf57e1c6b7393ef72f4f
+mechanism_digest: sha256:a9e46de153305810c5ec086df52f6478c82805f1d5fcb47fb655f7649f512d0b
+kernel_digest: sha256:ee68ea41b9d1dc3121e1dae3ff4cab9287402301e1a142b9489484e3f59d8e90
+inputs_detail: .cairn/evidence/runs/20260916T015848305Z-509871.inputs.json
+command: node .cairn/tools/ui-live-native.mjs crates/suprnova-live/components app/templates/live/live-native-gallery.html
+cwd: .
+exit: 0
+output_digest: sha256:7a5c19e5bc725b673fe1b2c693649f5ea8d2fcaa5ed1f9c7e4e0b706f203d363
+output: .cairn/evidence/runs/20260916T015848305Z-509871.out
+stderr_output: .cairn/evidence/runs/20260916T015848305Z-509871.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-16T01:58:48.416Z
+results:
+  - FORM-006 pass line sha256:5b1f9103d28c334505509c2ff8c737fa4220dd27f526decb31a4e3a0cce61711 7 sha256:2b33a2ad19d3889cb3f8d8625a3644b08acf79bfaad610c5c858ba1312f05b35
+  - FORM-007 pass line sha256:dd94d65162522e0fec5fdc7e69e44a844b919adbeefad8eec6d43a8ba5273807 7 sha256:746cb5637b8422650f6a90147356fac551b00ca4413efa5673e15038c2281101

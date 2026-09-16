@@ -1,0 +1,20 @@
+mechanism: ui-feedback
+commit: 04be1af0
+inputs_digest: sha256:41574368d5baacfaff008d3890c5dce696f7ec391aa6f654df7be425825ad85f
+mechanism_digest: sha256:c46df8b1122f1560b308144ed51fe11d48bda54e1266b54eb1b3814736991f19
+kernel_digest: sha256:ee68ea41b9d1dc3121e1dae3ff4cab9287402301e1a142b9489484e3f59d8e90
+inputs_detail: .cairn/evidence/runs/20260916T013746905Z-509871.inputs.json
+command: node .cairn/tools/ui-feedback.mjs crates/suprnova-live/components app/templates/live/feedback-gallery.html
+cwd: .
+exit: 0
+output_digest: sha256:946ec7aa6ef2845aad566e62294b397cf4a585260c834a4e110817f409988c5d
+output: .cairn/evidence/runs/20260916T013746905Z-509871.out
+stderr_output: .cairn/evidence/runs/20260916T013746905Z-509871.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-16T01:37:47.021Z
+results:
+  - FDB-001 pass line sha256:e1016fe3c3a3b169802264beca934024ced3171a2fc3c118633b03b318097f23 10 sha256:667b2e27d933fa66fe95add3e5fb701d17667a99b5c8032d30359195fa14dc49
+  - FDB-002 pass line sha256:013109e109a5888ff2235292e760eadf8497d73759fa9832c35bb346571d3871 10 sha256:4b774a78ce061748860904727674d563091edbea4359f60e3886896a76b162c4
+  - FDB-006 pass line sha256:270dde132a173aea2cde14fea9c2c91c5dd5d19f23d8ffdc8cc1e802a3d18c79 10 sha256:d314ea62cd0e248a325cb922b5c26b22b9aaa6f28e69cf918adc1bd6c0a0e9ef
