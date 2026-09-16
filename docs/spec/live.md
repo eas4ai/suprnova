@@ -221,3 +221,27 @@ Mechanism: `.cairn/mechanisms/live-issuance-credentials`.
 Refines: LIVE-022, whose probe exposed it; the developer's answer on
 escalation `live-022`.
 Status: Agreed 2026-09-14
+
+## Key vocabulary
+
+[LIVE-024] The runtime MUST read an element's stable key from `live:key`,
+the attribute the checker validates and the manual names, wherever it
+resolves morph identity, morph controls and preservation scopes.
+`data-suprnova-live-key` stays the engine's own spelling on the roots the
+engine renders, and an element that carries both attributes with
+different values MUST fail morph validation instead of morphing under
+either.
+Falsifier: a template writes `live:key` alone on a `live:preserve.self`
+disclosure and a compatible morph replaces it or drops its open state; or
+an element carrying both attributes with different values morphs without
+a diagnostic.
+Evidence: the defect, recorded from OVL-006 on 2026-09-15: the checker
+validates `live:key` (`crates/suprnova-live/src/checker/html.rs`,
+`validate_keys`) while `crates/suprnova-live/browser/src/morph/keys.ts`,
+`controls.ts` and `preserve.ts` read only `data-suprnova-live-key`, so
+every library component writes both attributes.
+Mechanism: `.cairn/mechanisms/live-key-vocabulary` (declared with the
+commitment `live-key-vocabulary`).
+Refines: Live spec 12, keyed identity; spec 09, the directive set; OVL-006,
+whose stable key scope this vocabulary names.
+Status: Agreed 2026-09-15

@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: session-request-serialization
+Current: live-key-vocabulary
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -93,6 +93,12 @@ components in waves, the advanced components last, the datatable closing.
    `docs/commitments/session-request-serialization.md`); `SessionBlock`,
    `SESSION_BLOCK`, `block_session` on every route and group builder, the
    dogfood application blocking on every route.
+9. live-key-vocabulary - the runtime reads `live:key`, the attribute the
+   checker validates and the manual names, for morph identity, controls
+   and preservation scopes, and the library stops writing the key twice;
+   promoted from the backlog on escalation `ovl-006` (`live.md` LIVE-024,
+   `docs/commitments/live-key-vocabulary.md`); the form gallery's missing
+   `.prevent` rides along.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
