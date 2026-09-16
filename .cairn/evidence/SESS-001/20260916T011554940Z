@@ -1,0 +1,21 @@
+requirement: SESS-001
+requirement_digest: sha256:919a3295b186806b17c647b5bdd47ccb837a77e1ccab04a238209d95b3ec9ce8
+sequence: 1
+history_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+mechanism: session-blocking
+commit: 1a6c1dda
+inputs_digest: sha256:53ed5796fa3944c1ca6c334e5f85e7378d6530a67788ff563b82571cf8841045
+mechanism_digest: sha256:ee7dd8a6c6f3cd3f6eff9a128160c66567ad8af1014ae87068c769d771b0aa7b
+inputs_detail: .cairn/evidence/SESS-001/20260916T011554212Z-348864.inputs.json
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test session -E 'test(blocking::)'
+cwd: .
+exit: 0
+output_digest: sha256:46cb1ecc5307b7f01b61abd9614d2c5a989f70aae8951300abebddda4bcfc275
+output: .cairn/evidence/SESS-001/20260916T011554212Z-348864.out
+stderr_output: .cairn/evidence/SESS-001/20260916T011554212Z-348864.err
+stderr_digest: sha256:46cb1ecc5307b7f01b61abd9614d2c5a989f70aae8951300abebddda4bcfc275
+signal: none
+execution_error: null
+result: pass
+source: exit
+recorded: 2026-09-16T01:15:54.940Z
