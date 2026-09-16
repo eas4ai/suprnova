@@ -1,0 +1,16 @@
+
+ RUN  v4.1.11 /home/shawn/workspace2/suprnova/crates/suprnova-live/browser
+
+
+ Test Files  1 passed (1)
+      Tests  5 passed (5)
+   Start at  09:47:55
+   Duration  122ms (transform 44ms, setup 0ms, import 55ms, tests 4ms, environment 0ms)
+
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.67s
+────────────
+[32;1m Nextest run[0m ID [1mdc31f7c8-09ed-48a6-9802-263b452dc835[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m1[0m test across [1m1[0m binary ([1m8[0m tests [33;1mskipped[0m)
+────────────
+[32;1m     Summary[0m [   0.005s] [1m1[0m test run: [1m1[0m [32;1mpassed[0m, [1m8[0m [33;1mskipped[0m
