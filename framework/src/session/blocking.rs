@@ -123,12 +123,12 @@ const RETRY_INTERVAL: Duration = Duration::from_millis(25);
 pub(crate) async fn acquire(
     session_id: &str,
     block: SessionBlock,
-) -> Result<crate::cache::LockGuard, crate::http::HttpResponse> {
+) -> Result<HeldSessionLock, crate::http::HttpResponse> {
     let key = lock_key(session_id);
     let deadline = tokio::time::Instant::now() + block.wait_for();
     loop {
         match crate::cache::Cache::lock(&key, block.lock_for()).await {
-            Ok(Some(guard)) => return Ok(guard),
+            Ok(Some(guard)) => return Ok(HeldSessionLock(Some(guard))),
             Ok(None) => {
                 let now = tokio::time::Instant::now();
                 if now >= deadline {
@@ -158,11 +158,49 @@ pub(crate) async fn acquire(
     }
 }
 
-/// Release the session lock after the write. A guard whose TTL already
-/// ran out cannot be released, which means the handler outran the hold
-/// bound and later requests were no longer serialized behind it; that is
-/// logged, not raised, because the response itself is complete.
-pub(crate) async fn release(guard: crate::cache::LockGuard) {
+/// A session lock one request holds.
+///
+/// The server drops a request's future when the client goes away, a
+/// navigation that cancels an in-flight fetch or stream for example, and a
+/// future dropped at an await point never reaches the release after the
+/// write. Without a release on drop the session stayed locked for the whole
+/// hold bound, and every other request on the session queued behind a lock
+/// nobody held until its own wait bound answered 503. Dropping a lock that
+/// was not released hands the release to the runtime instead.
+pub(crate) struct HeldSessionLock(Option<crate::cache::LockGuard>);
+
+impl HeldSessionLock {
+    /// Release the session lock after the write.
+    pub(crate) async fn release(mut self) {
+        if let Some(guard) = self.0.take() {
+            release_guard(guard).await;
+        }
+    }
+}
+
+impl Drop for HeldSessionLock {
+    fn drop(&mut self) {
+        let Some(guard) = self.0.take() else {
+            return;
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(release_guard(guard));
+            }
+            // With no runtime left to release on, the hold bound is what
+            // frees the session, as it is for a crashed process.
+            Err(_) => tracing::warn!(
+                "session lock dropped outside a runtime; it frees when its hold bound expires"
+            ),
+        }
+    }
+}
+
+/// A guard whose TTL already ran out cannot be released, which means the
+/// handler outran the hold bound and later requests were no longer
+/// serialized behind it; that is logged, not raised, because the response
+/// itself is complete.
+async fn release_guard(guard: crate::cache::LockGuard) {
     match guard.release().await {
         Ok(true) => {}
         Ok(false) => tracing::warn!(

@@ -427,3 +427,46 @@ async fn a_cookieless_request_is_not_serialized() {
     assert_eq!(store.reads.load(Ordering::SeqCst), 0);
     assert!(store.events().is_empty());
 }
+
+/// A request the server abandons mid-handler, a navigation that cancels an
+/// in-flight fetch, must not keep the session locked for the hold bound:
+/// the next request on the session takes the lock well inside its wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_abandoned_request_releases_the_session_lock() {
+    ensure_crypt();
+    ensure_cache();
+    // A long hold and wait, so only a release on drop lets the second
+    // request in quickly.
+    let config = insecure_config().block(SessionBlock::new(
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+    ));
+    let (_, session, cookie_value) = stored_session(&config);
+    let store = Arc::new(RecordingStore::with_session(session));
+    let middleware = Arc::new(SessionMiddleware::with_store(config.clone(), store.clone()));
+
+    let stuck: suprnova::middleware::Next = Arc::new(move |_req| {
+        Box::pin(async move {
+            std::future::pending::<()>().await;
+            ok_json()
+        })
+    });
+    let abandoned = post_request(Some((&config.cookie_name, &cookie_value))).await;
+    let task = spawn_request(middleware.clone(), abandoned, stuck);
+    store.wait_for_reads(1).await;
+    // The server drops the request's future, as hyper does when the client
+    // disconnects.
+    task.abort();
+    let _ = task.await;
+
+    let next: suprnova::middleware::Next = Arc::new(move |_req| Box::pin(async move { ok_json() }));
+    let started = tokio::time::Instant::now();
+    let request = post_request(Some((&config.cookie_name, &cookie_value))).await;
+    let outcome = spawn_request(middleware, request, next).await.unwrap();
+    assert_eq!(outcome, Ok(200));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the abandoned request's lock was released on drop, not at its hold bound: waited {:?}",
+        started.elapsed()
+    );
+}

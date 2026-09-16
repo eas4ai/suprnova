@@ -2025,9 +2025,10 @@ impl Middleware for SessionMiddleware {
         // before the load and give it back after the write, on every
         // exit path this function has. A request without a valid
         // cookie names no row two requests could race over, so it runs
-        // unserialized and never touches the cache. A handler panic
-        // skips the release; the lock's TTL is the bound for that case,
-        // which is why the hold is bounded at all.
+        // unserialized and never touches the cache. A request the server
+        // abandons (the client went away) or a handler that panics never
+        // reaches the release below; dropping the held lock releases it
+        // instead, and the hold bound covers a process that dies.
         let block = original_session_id
             .as_ref()
             .and_then(|id| self.block_for(&request).map(|block| (id.clone(), block)));
@@ -2036,14 +2037,14 @@ impl Middleware for SessionMiddleware {
                 .handle_session(request, next, original_session_id, last_touch_at)
                 .await;
         };
-        let guard = match super::blocking::acquire(&session_id, block).await {
-            Ok(guard) => guard,
+        let held = match super::blocking::acquire(&session_id, block).await {
+            Ok(held) => held,
             Err(response) => return Err(response),
         };
         let response = self
             .handle_session(request, next, original_session_id, last_touch_at)
             .await;
-        super::blocking::release(guard).await;
+        held.release().await;
         response
     }
 }
