@@ -84,6 +84,11 @@ Directives use the closed `live:` grammar: `live:click`, `live:submit`,
 documented set. The checker proves every directive against the component:
 an unknown action, an unknown model field, a raw `safe` filter, or an
 accessibility violation fails `live:check` with the file, line, and column.
+`live:key` names an element's stable identity across morphs, and it is the
+one key attribute a template writes: the runtime reads it for morph
+identity, for morph controls such as `live:preserve.self`, and for the
+scopes that keep browser state; `data-suprnova-live-key` is the engine's
+own spelling on the roots it renders.
 
 Documents that place islands are ordinary views declared with
 `#[suprnova::view]`; the only unescaped value they accept is `TrustedHtml`

@@ -14,10 +14,10 @@
   varies with the island.
 #}
 {% macro combobox(name, label, options, query, placeholder) %}
-<sn-combobox class="sn-combobox" live:key="{{ name }}-combobox" data-suprnova-live-key="{{ name }}-combobox" live:preserve.self>
+<sn-combobox class="sn-combobox" live:key="{{ name }}-combobox" live:preserve.self>
 <label class="sn-combobox-label" for="{{ name }}">{{ label }}</label>
 <input class="sn-input sn-combobox-input" id="{{ name }}" name="{{ name }}" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="{{ name }}-listbox" autocomplete="off" list="{{ name }}-datalist" placeholder="{{ placeholder }}" live:model="{{ name }}">
 <datalist id="{{ name }}-datalist">{% for option in options %}<option value="{{ option.1 }}"></option>{% endfor %}</datalist>
-<ul class="sn-combobox-listbox" id="{{ name }}-listbox" role="listbox" aria-label="{{ label }} suggestions" data-sn-query="{{ query }}" data-suprnova-live-key="{{ name }}-listbox" hidden>{% for option in options %}<li class="sn-combobox-option" id="{{ name }}-option-{{ loop.index }}" role="option" aria-selected="false" data-sn-value="{{ option.0 }}" live:key="{{ option.0|live_key }}">{{ option.1 }}</li>{% endfor %}</ul>
+<ul class="sn-combobox-listbox" id="{{ name }}-listbox" role="listbox" aria-label="{{ label }} suggestions" data-sn-query="{{ query }}" live:key="{{ name }}-listbox" hidden>{% for option in options %}<li class="sn-combobox-option" id="{{ name }}-option-{{ loop.index }}" role="option" aria-selected="false" data-sn-value="{{ option.0 }}" live:key="{{ option.0|live_key }}">{{ option.1 }}</li>{% endfor %}</ul>
 </sn-combobox>
 {% endmacro %}

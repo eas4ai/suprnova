@@ -10,7 +10,7 @@
 {% endmacro %}
 
 {% macro menu(id, key, label) %}
-<div class="sn-menu" id="{{ id }}" popover aria-label="{{ label }}" live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self><ul class="sn-menu-list">{{ caller() }}</ul></div>
+<div class="sn-menu" id="{{ id }}" popover aria-label="{{ label }}" live:key="{{ key }}" live:preserve.self><ul class="sn-menu-list">{{ caller() }}</ul></div>
 {% endmacro %}
 
 {% macro menu_link(href, text) %}

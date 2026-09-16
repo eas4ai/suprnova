@@ -3,7 +3,7 @@ import type { StimulusContinuity, StimulusContinuityRoot } from "./port.js";
 const CONTROLLER_SELECTOR = "[data-controller]";
 const ISLAND_SELECTOR = "[data-suprnova-live-island]";
 const DOCUMENT_KEY_ATTRIBUTE = "data-suprnova-live-document-key";
-const LIVE_KEY_ATTRIBUTE = "data-suprnova-live-key";
+import { stableKeyOf } from "../directives/key.js";
 const SAFE_IDENTITY = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
 const MAX_CONTROLLER_ROOTS_PER_SCOPE = 1_024;
 
@@ -23,8 +23,7 @@ function elementLike(value: unknown): value is Element {
 }
 
 function stableIdentity(element: Element): string | null {
-  const candidate =
-    element.getAttribute(LIVE_KEY_ATTRIBUTE) ?? element.getAttribute(DOCUMENT_KEY_ATTRIBUTE);
+  const candidate = stableKeyOf(element) ?? element.getAttribute(DOCUMENT_KEY_ATTRIBUTE);
   if (candidate === null) return null;
   if (!SAFE_IDENTITY.test(candidate)) throw new StimulusLifecycleError("invalid_identity");
   return candidate;

@@ -99,6 +99,23 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ### Corrigido
 
+- **O `live:key` de um template chega ao runtime do Live.** O checker validava
+  `live:key` e o manual o nomeava, mas a identidade de morph, os controles de
+  morph e os escopos de preservação do runtime do navegador liam apenas o
+  `data-suprnova-live-key` do motor, então um controle com chave escrito como
+  o checker exige não tinha efeito e cada componente da biblioteca escrevia a
+  chave duas vezes. O runtime agora lê `live:key`, mantém a grafia do motor
+  para as raízes que ele renderiza, recusa um elemento que carrega as duas com
+  valores diferentes, e os componentes escrevem `live:key` sozinho. O
+  formulário de salvar da galeria de formulários também ganhou o modificador
+  `.prevent` que faltava, então um envio Live não recarrega mais a página a
+  partir da própria consulta do formulário.
+- **Um formulário Live com um campo numérico vazio ou um select sem seleção é
+  enviado.** O runtime lia o valor null desse controle como uma divergência
+  consigo mesmo e recusava todo o envio, então a ação nunca rodava e o
+  navegador enviava o formulário nativamente. O vínculo de modelo do campo
+  de busca também usava um debounce que o runtime não aceita; agora usa
+  250 ms.
 - **Toda emissão que o limite por escopo do Live admite responde com uma
   assinatura que conecta.** Emissões concorrentes de um escopo no mesmo
   milissegundo cunham descritores idênticos, e o armazenamento de credenciais

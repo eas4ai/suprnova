@@ -1,7 +1,7 @@
 import type { MorphControl } from "./controls.js";
 import type { MorphIdentityEntry, MorphPlan } from "./types.js";
 
-const KEY_ATTRIBUTE = "data-suprnova-live-key";
+import { stableKeyOf } from "./keys.js";
 const STREAM_STATE_ATTRIBUTE = "data-live-stream-state";
 const STREAM_STATUS_ATTRIBUTE = "data-live-stream-status";
 const STREAM_ROOT_ATTRIBUTES: ReadonlySet<string> = new Set([
@@ -23,7 +23,7 @@ function asElement(node: Node): Element | null {
 function controlAncestor(plan: MorphPlan, node: Node): ControlAncestor | null {
   let element = asElement(node);
   while (element !== null) {
-    const key = element.getAttribute(KEY_ATTRIBUTE);
+    const key = stableKeyOf(element);
     const control = key === null ? undefined : plan.controls.byKey.get(key);
     if (control !== undefined) return { control, root: element };
     if (element === plan.currentRoot || element === plan.replacementRoot) return null;

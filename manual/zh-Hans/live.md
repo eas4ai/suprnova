@@ -65,6 +65,7 @@ impl Counter {
 
 指令使用封闭的 `live:` 语法：`live:click`、`live:submit`、`live:model`、
 `live:upload`、`live:key`、`live:loading` 以及文档记录的其余集合。检查器针对组件证明每一条指令：未知的动作、未知的模型字段、原始的 `safe` 过滤器或无障碍违规都会使 `live:check` 失败，并给出文件、行和列。
+`live:key` 命名元素跨 morph 的稳定身份，是模板书写的唯一键属性：运行时为 morph 身份、`live:preserve.self` 这类 morph 控制以及保留浏览器状态的作用域读取它；`data-suprnova-live-key` 是引擎在其渲染的根上使用的自有写法。
 
 放置岛屿的文档是用 `#[suprnova::view]` 声明的普通视图；它们接受的唯一未转义值是通过 `trusted_html` 过滤器传入的 `TrustedHtml`。
 

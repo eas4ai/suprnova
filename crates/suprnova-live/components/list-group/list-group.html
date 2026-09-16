@@ -8,5 +8,5 @@
 {% endmacro %}
 
 {% macro list_item(key) %}
-<li class="sn-list-item" live:key="{{ key|live_key }}" data-suprnova-live-key="{{ key }}">{{ caller() }}</li>
+<li class="sn-list-item" live:key="{{ key|live_key }}">{{ caller() }}</li>
 {% endmacro %}

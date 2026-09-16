@@ -1,7 +1,7 @@
 # Suprnova Live -- 09 Runtime Bootstrap and Directives
 
 Status: Normative design specification
-Last revised: 2026-09-14
+Last revised: 2026-09-15
 
 ## Scope
 
@@ -224,6 +224,11 @@ UX flow:
   monkey-patching.
 
 ## Decisions and revisions
+
+- 2026-09-15 -- `live:key` is part of the directive set the runtime reads,
+  not only the checker's: it names an element's stable morph identity (spec
+  12, LIVE-024). `data-suprnova-live-key` remains the engine's spelling on
+  engine-rendered roots.
 
 - 2026-09-14 -- Manifest schema 3 adds a stylesheet artifact: the suprnova-ui
   token stylesheet and base layer ships as role `ui-styles` (`suprnova-ui.css`,

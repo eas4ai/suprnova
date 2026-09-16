@@ -87,6 +87,7 @@ reste de l'ensemble documenté. Le vérificateur prouve chaque directive contre
 le composant : une action inconnue, un champ de modèle inconnu, un filtre
 `safe` brut ou une violation d'accessibilité fait échouer `live:check` avec le
 fichier, la ligne et la colonne.
+`live:key` nomme l'identité stable d'un élément d'un morph à l'autre et c'est le seul attribut de clé qu'un template écrit : le runtime le lit pour l'identité du morph, pour les contrôles de morph comme `live:preserve.self` et pour les portées qui conservent l'état du navigateur ; `data-suprnova-live-key` est l'orthographe propre du moteur sur les racines qu'il rend.
 
 Les documents qui placent des îlots sont des vues ordinaires déclarées avec
 `#[suprnova::view]` ; la seule valeur non échappée qu'elles acceptent est

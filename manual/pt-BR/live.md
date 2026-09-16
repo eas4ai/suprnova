@@ -87,6 +87,7 @@ conjunto documentado. O verificador prova cada diretiva contra o componente:
 uma ação desconhecida, um campo de modelo desconhecido, um filtro `safe` bruto
 ou uma violação de acessibilidade faz `live:check` falhar com o arquivo, a
 linha e a coluna.
+`live:key` nomeia a identidade estável de um elemento através dos morphs e é o único atributo de chave que um template escreve: o runtime o lê para a identidade do morph, para controles de morph como `live:preserve.self` e para os escopos que mantêm estado do navegador; `data-suprnova-live-key` é a grafia própria do motor nas raízes que ele renderiza.
 
 Documentos que posicionam ilhas são views comuns declaradas com
 `#[suprnova::view]`; o único valor sem escape que elas aceitam é `TrustedHtml`

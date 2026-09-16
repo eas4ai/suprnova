@@ -94,6 +94,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **A template's `live:key` reaches the Live runtime.** The checker validated
+  `live:key` and the manual named it, but the browser runtime's morph
+  identity, morph controls and preservation scopes read only the engine's
+  `data-suprnova-live-key`, so a keyed control written as the checker
+  requires had no effect and every library component wrote the key twice.
+  The runtime now reads `live:key`, keeps the engine spelling for the roots
+  it renders, refuses an element carrying both with different values, and
+  the components write `live:key` alone. The form gallery's save form also
+  gained the `.prevent` modifier it lacked, so a Live submit no longer
+  reloads the page from the form's own query.
+- **A Live form holding an empty number input or an unselected select
+  submits.** The runtime read such a control's null value as a mismatch with
+  itself and refused the whole submit, so the action never ran and the
+  browser submitted the form natively. The search input's model binding also
+  used a debounce the runtime does not accept; it now uses 250 ms.
 - **Every issuance the Live per-scope limit admits answers with a subscription
   that connects.** Concurrent issuances of one scope in the same millisecond
   mint identical descriptors, and the host's credential store kept only the

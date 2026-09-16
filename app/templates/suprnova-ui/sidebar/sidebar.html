@@ -9,7 +9,7 @@
 {% endmacro %}
 
 {% macro sidebar_group(key, title, open=true) %}
-<details class="sn-sidebar-group" live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self{% if open %} open{% endif %}>
+<details class="sn-sidebar-group" live:key="{{ key }}" live:preserve.self{% if open %} open{% endif %}>
 <summary class="sn-sidebar-summary">{{ title }}</summary>
 <ul class="sn-sidebar-list">{{ caller() }}</ul>
 </details>

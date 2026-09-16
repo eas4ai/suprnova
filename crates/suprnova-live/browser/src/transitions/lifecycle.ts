@@ -1,3 +1,4 @@
+import { KEYED_SELECTOR, stableKeyOf } from "../morph/keys.js";
 import type { MorphIdentityEntry, MorphPlan } from "../morph/types.js";
 import {
   MAX_TRANSITION_TARGETS,
@@ -79,12 +80,9 @@ function identityLabel(entry: MorphIdentityEntry): string {
 
 function resolve(root: HTMLElement, entry: MorphIdentityEntry): Element | null {
   if (entry.current?.isConnected === true) return entry.current;
-  const candidates = [root, ...root.querySelectorAll("[data-suprnova-live-key], [id]")];
+  const candidates = [root, ...root.querySelectorAll(`${KEYED_SELECTOR}, [id]`)];
   for (const candidate of candidates) {
-    if (
-      entry.kind === "live_key" &&
-      candidate.getAttribute("data-suprnova-live-key") === entry.value
-    ) {
+    if (entry.kind === "live_key" && stableKeyOf(candidate) === entry.value) {
       return candidate;
     }
     if (entry.kind === "id" && candidate.id === entry.value) return candidate;

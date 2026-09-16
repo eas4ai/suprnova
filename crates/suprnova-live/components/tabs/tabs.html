@@ -15,11 +15,11 @@
 {% endmacro %}
 
 {% macro tab(key, panel, text, selected=false) %}
-<button class="sn-tab" type="button" role="tab" id="{{ key }}" aria-controls="{{ panel }}" aria-selected="{% if selected %}true{% else %}false{% endif %}"{% if !selected %} tabindex="-1"{% endif %} live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self>{{ text }}</button>
+<button class="sn-tab" type="button" role="tab" id="{{ key }}" aria-controls="{{ panel }}" aria-selected="{% if selected %}true{% else %}false{% endif %}"{% if !selected %} tabindex="-1"{% endif %} live:key="{{ key }}" live:preserve.self>{{ text }}</button>
 {% endmacro %}
 
 {% macro tab_panel(key, tab, selected=false) %}
-<div class="sn-tab-panel" role="tabpanel" id="{{ key }}" aria-labelledby="{{ tab }}" tabindex="0"{% if !selected %} hidden{% endif %} live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self>{{ caller() }}</div>
+<div class="sn-tab-panel" role="tabpanel" id="{{ key }}" aria-labelledby="{{ tab }}" tabindex="0"{% if !selected %} hidden{% endif %} live:key="{{ key }}" live:preserve.self>{{ caller() }}</div>
 {% endmacro %}
 
 {% macro route_tab(href, text, current=false) %}

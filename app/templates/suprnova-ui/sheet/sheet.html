@@ -12,7 +12,7 @@
 
 {% macro sheet(id, key, title) %}
 <sn-sheet class="sn-sheet-host" tabindex="-1">
-<dialog class="sn-sheet" id="{{ id }}" aria-labelledby="{{ id }}-title" closedby="any" live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self>
+<dialog class="sn-sheet" id="{{ id }}" aria-labelledby="{{ id }}-title" closedby="any" live:key="{{ key }}" live:preserve.self>
 <h2 class="sn-sheet-title" id="{{ id }}-title">{{ title }}</h2>
 <div class="sn-sheet-body">{{ caller() }}</div>
 </dialog>

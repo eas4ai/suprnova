@@ -1,8 +1,15 @@
+import { keyConflict, stableKeyOf } from "../directives/key.js";
 import type { IdentityPlan, MorphIdentityEntry, MorphIdentityKind, MorphLimits } from "./types.js";
 
 const ISLAND_ATTRIBUTE = "data-suprnova-live-island";
-const KEY_ATTRIBUTE = "data-suprnova-live-key";
 const DOCUMENT_KEY_ATTRIBUTE = "data-suprnova-live-document-key";
+
+export {
+  ENGINE_KEY_ATTRIBUTE,
+  KEYED_SELECTOR,
+  LIVE_KEY_ATTRIBUTE,
+  stableKeyOf,
+} from "../directives/key.js";
 const STATUS_ATTRIBUTE = "data-suprnova-live-status";
 const SAFE_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 
@@ -54,7 +61,8 @@ function scanOwnedTree(root: Element, limits: MorphLimits): readonly TreeIdentit
   while (stack.length > 0) {
     const [element, parentIdentity] = stack.pop() ?? fail("tree");
     const nested = element.hasAttribute(ISLAND_ATTRIBUTE);
-    const liveKey = element.getAttribute(KEY_ATTRIBUTE);
+    if (keyConflict(element)) fail("key_conflict");
+    const liveKey = stableKeyOf(element);
     const id = element.getAttribute("id");
     if (id !== null) {
       const validatedId = validKey(id, limits);

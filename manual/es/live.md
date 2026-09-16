@@ -86,6 +86,7 @@ documentado. El comprobador prueba cada directiva contra el componente: una
 acción desconocida, un campo de modelo desconocido, un filtro `safe` sin
 procesar o una violación de accesibilidad hacen fallar `live:check` con el
 archivo, la línea y la columna.
+`live:key` nombra la identidad estable de un elemento a través de los morphs y es el único atributo de clave que escribe una plantilla: el runtime lo lee para la identidad del morph, para los controles de morph como `live:preserve.self` y para los ámbitos que conservan estado del navegador; `data-suprnova-live-key` es la grafía propia del motor en las raíces que él renderiza.
 
 Los documentos que colocan islas son vistas ordinarias declaradas con
 `#[suprnova::view]`; el único valor sin escapar que aceptan es `TrustedHtml`

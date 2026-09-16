@@ -12,7 +12,7 @@
 
 {% macro dialog(id, key, title) %}
 <sn-dialog class="sn-dialog-host" tabindex="-1">
-<dialog class="sn-dialog" id="{{ id }}" aria-labelledby="{{ id }}-title" closedby="any" live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self>
+<dialog class="sn-dialog" id="{{ id }}" aria-labelledby="{{ id }}-title" closedby="any" live:key="{{ key }}" live:preserve.self>
 <h2 class="sn-dialog-title" id="{{ id }}-title">{{ title }}</h2>
 <div class="sn-dialog-body">{{ caller() }}</div>
 </dialog>

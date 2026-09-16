@@ -104,6 +104,24 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Behoben
 
+- **Das `live:key` eines Templates erreicht die Live-Runtime.** Der Checker
+  validierte `live:key` und das Handbuch nannte es, aber Morph-Identität,
+  Morph-Steuerungen und Bewahrungsbereiche der Browser-Runtime lasen nur das
+  `data-suprnova-live-key` der Engine, sodass eine Steuerung mit Key, wie der
+  Checker sie verlangt, keine Wirkung hatte und jede Bibliothekskomponente den
+  Key zweimal schrieb. Die Runtime liest jetzt `live:key`, behält die
+  Engine-Schreibweise für die Wurzeln, die sie rendert, weist ein Element mit
+  beiden Attributen und verschiedenen Werten ab, und die Komponenten
+  schreiben `live:key` allein. Das Speicherformular der Formulargalerie
+  erhielt außerdem den fehlenden Modifikator `.prevent`, sodass ein
+  Live-Submit die Seite nicht mehr aus der eigenen Query des Formulars neu
+  lädt.
+- **Ein Live-Formular mit leerem Zahlenfeld oder ohne Auswahl in einem Select
+  wird gesendet.** Die Runtime las den Wert null eines solchen Steuerelements
+  als Abweichung von sich selbst und wies den ganzen Submit ab, sodass die
+  Aktion nie lief und der Browser das Formular nativ sendete. Die
+  Model-Bindung des Suchfelds nutzte außerdem ein Debounce, das die Runtime
+  nicht akzeptiert; sie nutzt jetzt 250 ms.
 - **Jede Ausgabe, die das Live-Limit pro Scope zulässt, antwortet mit einer
   Subscription, die sich verbinden lässt.** Gleichzeitige Ausgaben eines
   Scopes in derselben Millisekunde prägen identische Deskriptoren, und der

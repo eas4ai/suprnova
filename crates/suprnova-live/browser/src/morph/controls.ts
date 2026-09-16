@@ -4,7 +4,7 @@ import type { TeleportTargetPort } from "./teleport.js";
 
 const CONTROL_NAMES = new Set(["preserve", "ignore", "replace", "persist", "teleport"]);
 const ISLAND_ATTRIBUTE = "data-suprnova-live-island";
-const KEY_ATTRIBUTE = "data-suprnova-live-key";
+import { stableKeyOf } from "./keys.js";
 const ENGINE_ATTRIBUTE_PREFIX = "data-suprnova-live-";
 const SAFE_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 
@@ -48,7 +48,7 @@ function utf8Length(value: string): number {
 }
 
 function stableKey(element: Element, limits: MorphLimits): string {
-  const key = element.getAttribute(KEY_ATTRIBUTE);
+  const key = stableKeyOf(element);
   if (key === null || !SAFE_KEY.test(key) || utf8Length(key) > limits.maxKeyBytes) {
     return fail("key_invalid");
   }
@@ -183,7 +183,7 @@ function externalIdentity(element: Element, limits: MorphLimits): string | null 
   if (id !== null && (!SAFE_KEY.test(id) || utf8Length(id) > limits.maxKeyBytes)) {
     fail("active_teleport_identity");
   }
-  const liveKey = element.getAttribute(KEY_ATTRIBUTE);
+  const liveKey = stableKeyOf(element);
   if (liveKey !== null) return `live_key:${stableKey(element, limits)}`;
   return id === null ? null : `id:${id}`;
 }

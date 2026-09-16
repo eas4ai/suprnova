@@ -15,5 +15,5 @@
 {% endmacro %}
 
 {% macro toast(key, text, variant="info", duration=6000) %}
-<div class="sn-toast" data-sn-variant="{{ variant }}" data-sn-duration="{{ duration }}" live:key="{{ key|live_key }}" data-suprnova-live-key="{{ key }}" live:preserve.self><span class="sn-toast-text">{{ text }}</span><button class="sn-toast-dismiss" type="button" data-sn-toast-dismiss aria-label="Dismiss">&#215;</button></div>
+<div class="sn-toast" data-sn-variant="{{ variant }}" data-sn-duration="{{ duration }}" live:key="{{ key|live_key }}" live:preserve.self><span class="sn-toast-text">{{ text }}</span><button class="sn-toast-dismiss" type="button" data-sn-toast-dismiss aria-label="Dismiss">&#215;</button></div>
 {% endmacro %}

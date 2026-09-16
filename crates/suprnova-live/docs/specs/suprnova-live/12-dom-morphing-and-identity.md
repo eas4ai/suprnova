@@ -1,7 +1,7 @@
 # Suprnova Live -- 12 DOM Morphing and Identity
 
 Status: Normative design specification
-Last revised: 2026-09-01
+Last revised: 2026-09-15
 
 ## Scope
 
@@ -45,9 +45,17 @@ Stable keys shall identify logical elements and component boundaries across
 renders. Unkeyed matching may use safe structural rules but shall not guess
 identity where reordering would lose application-user state.
 
+A template declares a stable key with `live:key`, the attribute the
+checker validates; the runtime reads it wherever it resolves morph
+identity, morph controls, and preservation scopes. `data-suprnova-live-key`
+is the engine's own spelling on the roots the engine renders, and an
+element carrying both with different values fails morph validation.
+
 Acceptance criteria:
 
 - Key syntax, scope, uniqueness, and allowed value sources are explicit.
+- `live:key` alone keys a morph scope from a template; both spellings name
+  one identity, and a disagreeing pair is refused (`key_conflict`).
 - Duplicate keys fail checking or morph validation with source-oriented
   diagnostics where possible.
 - Keyed list reordering moves existing identity rather than recreating it.
@@ -217,6 +225,15 @@ UX flow:
 - Failure uses controlled recovery rather than silent partial corruption.
 
 ## Decisions and revisions
+
+- 2026-09-15 -- `live:key` is the stable key the runtime reads (LIVE-024).
+  The checker validated `live:key` and the manual named it while the
+  runtime's identity, controls, and preservation read only
+  `data-suprnova-live-key`, so a keyed control written as the checker
+  requires had no effect and every library component wrote the key twice.
+  The runtime reads `live:key` first and the engine spelling otherwise, a
+  disagreeing pair fails validation, and the components write `live:key`
+  alone.
 
 - 2026-09-01 -- Made successful parent morph plus browser snapshot commit the
   sole child-delivery pairing boundary. Failed morph, redirect/navigation,

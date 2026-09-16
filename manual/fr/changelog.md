@@ -104,6 +104,24 @@ en premier.
 
 ### Corrigé
 
+- **Le `live:key` d'un template atteint le runtime Live.** Le checker validait
+  `live:key` et le manuel le nommait, mais l'identité de morph, les contrôles
+  de morph et les portées de conservation du runtime navigateur ne lisaient
+  que le `data-suprnova-live-key` du moteur, si bien qu'un contrôle à clé
+  écrit comme le checker l'exige n'avait aucun effet et que chaque composant
+  de la bibliothèque écrivait la clé deux fois. Le runtime lit désormais
+  `live:key`, garde l'orthographe du moteur pour les racines qu'il rend,
+  refuse un élément portant les deux avec des valeurs différentes, et les
+  composants écrivent `live:key` seul. Le formulaire d'enregistrement de la
+  galerie de formulaires a aussi reçu le modificateur `.prevent` qui lui
+  manquait, donc un envoi Live ne recharge plus la page depuis la propre
+  requête du formulaire.
+- **Un formulaire Live contenant un champ numérique vide ou un select sans
+  sélection est envoyé.** Le runtime lisait la valeur null d'un tel contrôle
+  comme un écart avec lui-même et refusait tout l'envoi, si bien que l'action
+  ne s'exécutait jamais et que le navigateur envoyait le formulaire
+  nativement. La liaison de modèle du champ de recherche utilisait aussi un
+  debounce que le runtime n'accepte pas ; elle utilise désormais 250 ms.
 - **Chaque émission que la limite par scope de Live admet répond avec un
   abonnement qui se connecte.** Des émissions concurrentes d'un même scope
   dans la même milliseconde frappent des descripteurs identiques, et le

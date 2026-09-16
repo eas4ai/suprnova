@@ -87,6 +87,7 @@ Rest der dokumentierten Menge. Der Checker beweist jede Direktive gegen die
 Komponente: Eine unbekannte Aktion, ein unbekanntes Modellfeld, ein roher
 `safe`-Filter oder ein Barrierefreiheitsverstoß lässt `live:check` mit Datei,
 Zeile und Spalte fehlschlagen.
+`live:key` benennt die stabile Identität eines Elements über Morphs hinweg und ist das eine Key-Attribut, das ein Template schreibt: Die Runtime liest es für die Morph-Identität, für Morph-Steuerungen wie `live:preserve.self` und für die Bereiche, die Browser-Zustand bewahren; `data-suprnova-live-key` ist die eigene Schreibweise der Engine auf den Wurzeln, die sie rendert.
 
 Dokumente, die Inseln platzieren, sind gewöhnliche Views, die mit
 `#[suprnova::view]` deklariert werden; der einzige nicht maskierte Wert, den

@@ -10,7 +10,7 @@
 {% endmacro %}
 
 {% macro accordion_item(name, key, summary, open=false) %}
-<details class="sn-accordion-item" name="{{ name }}" live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self{% if open %} open{% endif %}>
+<details class="sn-accordion-item" name="{{ name }}" live:key="{{ key }}" live:preserve.self{% if open %} open{% endif %}>
 <summary class="sn-accordion-summary">{{ summary }}</summary>
 <div class="sn-accordion-panel">{{ caller() }}</div>
 </details>

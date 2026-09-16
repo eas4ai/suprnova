@@ -103,6 +103,23 @@ recientes primero.
 
 ### Corregido
 
+- **El `live:key` de una plantilla llega al runtime de Live.** El checker
+  validaba `live:key` y el manual lo nombraba, pero la identidad de morph, los
+  controles de morph y los ámbitos de conservación del runtime del navegador
+  solo leían el `data-suprnova-live-key` del motor, así que un control con
+  clave escrito como exige el checker no tenía efecto y cada componente de la
+  biblioteca escribía la clave dos veces. El runtime ahora lee `live:key`,
+  conserva la grafía del motor para las raíces que renderiza, rechaza un
+  elemento que lleva ambas con valores distintos, y los componentes escriben
+  `live:key` a solas. El formulario de guardado de la galería de formularios
+  también ganó el modificador `.prevent` que le faltaba, así que un envío
+  Live ya no recarga la página desde la propia consulta del formulario.
+- **Un formulario Live con un campo numérico vacío o un select sin selección
+  se envía.** El runtime leía el valor null de ese control como una
+  discrepancia consigo mismo y rechazaba todo el envío, así que la acción
+  nunca se ejecutaba y el navegador enviaba el formulario de forma nativa. La
+  vinculación de modelo del campo de búsqueda también usaba un debounce que
+  el runtime no acepta; ahora usa 250 ms.
 - **Cada emisión que admite el límite por scope de Live responde con una
   suscripción que conecta.** Las emisiones concurrentes de un scope en el
   mismo milisegundo acuñan descriptores idénticos, y el almacén de

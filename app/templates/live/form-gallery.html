@@ -16,7 +16,7 @@
 {% import "suprnova-ui/form-actions/form-actions.html" as actions %}
 {% import "suprnova-ui/validation-summary/validation-summary.html" as summary %}
 {% import "suprnova-ui/file-input/file-input.html" as file %}
-<form class="sn-form" live:submit="save">
+<form class="sn-form" live:submit.prevent="save">
 {% call summary::validation_summary("save") %}{% endcall %}
 {% call fieldset::fieldset("Account") %}
 {% call field::field("email", "Email", hint="We never share it.", required=true) %}{% call input::input("email", kind="email", required=true, autocomplete="email") %}{% endcall %}{% endcall %}

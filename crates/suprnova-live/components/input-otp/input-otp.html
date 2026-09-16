@@ -11,7 +11,7 @@
   re-mirrors after a re-render. Classification: varies with the island.
 #}
 {% macro input_otp(name, label, length=6) %}
-<sn-input-otp class="sn-otp" data-sn-length="{{ length }}" live:key="{{ name }}-otp" data-suprnova-live-key="{{ name }}-otp" live:preserve.self>
+<sn-input-otp class="sn-otp" data-sn-length="{{ length }}" live:key="{{ name }}-otp" live:preserve.self>
 <label class="sn-otp-label" for="{{ name }}">{{ label }}</label>
 <input class="sn-input sn-otp-input" id="{{ name }}" name="{{ name }}" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{% raw %}{{% endraw %}{{ length }}{% raw %}}{% endraw %}" maxlength="{{ length }}" spellcheck="false" autocapitalize="off" required live:model="{{ name }}">
 <span class="sn-otp-cells" aria-hidden="true">{{ caller() }}</span>

@@ -252,6 +252,27 @@ fn a_feedback_directive_targets_a_model_field_or_an_action() {
     assert_code(unknown, DiagnosticCode::UnknownAction);
 }
 
+/// LIVE-024: a template keys a morph scope with `live:key` alone, the one
+/// stable-key attribute the checker validates and the runtime reads; the
+/// engine's `data-suprnova-live-key` spelling is not a directive and a
+/// duplicate `live:key` is still refused.
+#[test]
+fn live_key_alone_names_a_keyed_scope_and_a_duplicate_is_refused() {
+    let proved = check(
+        r#"<details live:key="notes" live:preserve.self><summary>Notes</summary><p>Body</p></details>
+           <ul><li live:key="one">One</li><li live:key="two">Two</li></ul>"#,
+        CheckerLimits::default(),
+    );
+    assert!(proved.is_proved(), "{:?}", proved.diagnostics());
+    let duplicate = check(
+        r#"<details live:key="notes" live:preserve.self><summary>Notes</summary></details>
+           <p live:key="notes">Twice</p>"#,
+        CheckerLimits::default(),
+    );
+    assert!(!duplicate.is_proved());
+    assert_code(duplicate, DiagnosticCode::DuplicateKey);
+}
+
 fn check(source: &str, limits: CheckerLimits) -> suprnova_live::checker::CheckReport {
     let registry = registry();
     let catalog = TemplateCatalog::new(vec![

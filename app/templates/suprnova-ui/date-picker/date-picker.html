@@ -11,7 +11,7 @@
   Classification: varies with the island.
 #}
 {% macro date_picker(name, label, years, months, days, min, max) %}
-<sn-date-picker class="sn-date" live:key="{{ name }}-date" data-suprnova-live-key="{{ name }}-date" live:preserve.self>
+<sn-date-picker class="sn-date" live:key="{{ name }}-date" live:preserve.self>
 <label class="sn-date-label" for="{{ name }}">{{ label }}</label>
 <input class="sn-input sn-date-input" id="{{ name }}" name="{{ name }}" type="date" min="{{ min }}" max="{{ max }}" live:model="{{ name }}">
 <details class="sn-date-strips">

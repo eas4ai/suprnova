@@ -1,3 +1,4 @@
+import { stableKeyOf } from "../morph/keys.js";
 import { DirectiveOwnership, type OwnedDirective } from "../directives/ownership.js";
 import type { EventRouter } from "../directives/events.js";
 import type { IslandRecord } from "../islands/record.js";
@@ -242,7 +243,7 @@ export class SignalRuntime {
     const identity =
       owned.element === record.element
         ? record.metadata.documentKey
-        : owned.element.getAttribute("data-suprnova-live-key");
+        : stableKeyOf(owned.element);
     if (identity === null || !SAFE_SCOPE_KEY.test(identity) || state.identities.has(identity)) {
       this.#rejectDirective();
       return;

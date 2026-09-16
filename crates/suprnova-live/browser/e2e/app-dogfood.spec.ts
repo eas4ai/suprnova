@@ -109,6 +109,39 @@ test("the activity feed subscribes over the asynchronous transport and refreshes
   await expectConnected(page, 4);
 });
 
+test("the form gallery's save form submits through Live with the page left in place", async ({
+  page,
+}) => {
+  await page.goto(`${APP_ORIGIN}/live/demo-login`);
+  await page.goto(`${APP_ORIGIN}/live/forms`);
+  await expectConnected(page, 1);
+  const statuses: number[] = [];
+  page.on("response", (response) => {
+    if (response.url().includes("/__live/action")) statuses.push(response.status());
+  });
+  let navigations = 0;
+  page.on("framenavigated", (frame) => {
+    if (frame === page.mainFrame()) navigations += 1;
+  });
+  // The required controls first, so the browser's own validation lets the
+  // submit event through; then live:submit.prevent runs the Live action and
+  // the native GET submission, which would reload the page from the form's
+  // own query, does not.
+  await page.locator("#email").fill("ada@example.com");
+  await page.locator("#secret").fill("correct horse battery staple");
+  await page.locator("#agree").check();
+  // The model proposals those controls send settle before the submit, so the
+  // requests counted from here are the submit's own.
+  await expectConnected(page, 1);
+  const beforeSubmit = statuses.length;
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect.poll(() => statuses.length).toBeGreaterThan(beforeSubmit);
+  expect(statuses.every((status) => status === 200)).toBe(true);
+  await expect(page).toHaveURL(`${APP_ORIGIN}/live/forms`);
+  await expectConnected(page, 1);
+  expect(navigations).toBe(0);
+});
+
 test("the form gallery loads the suprnova-ui base and its vendored assets, and the password reveal upgrades", async ({
   page,
 }) => {
@@ -431,13 +464,10 @@ test("the data-display gallery keeps one focus order across viewports, and a reo
   const firstItem = page.locator("#activity li").first();
   const before = await firstItem.evaluate((node) => {
     (node as HTMLElement & { witness?: string }).witness = "kept";
-    return node.getAttribute("data-suprnova-live-key");
+    return node.getAttribute("live:key");
   });
   await page.getByRole("button", { name: "Reorder" }).click();
-  await expect(page.locator("#activity li").last()).toHaveAttribute(
-    "data-suprnova-live-key",
-    before ?? "",
-  );
+  await expect(page.locator("#activity li").last()).toHaveAttribute("live:key", before ?? "");
   expect(
     await page
       .locator("#activity li")

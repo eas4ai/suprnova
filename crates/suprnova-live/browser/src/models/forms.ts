@@ -37,7 +37,7 @@ interface SelectedSample {
   readonly editSequence: bigint;
 }
 
-interface ModelBinding {
+export interface ModelBinding {
   readonly identity: string;
   readonly owned: OwnedDirective;
   readonly timing: ModelTimingPolicy;
@@ -408,7 +408,7 @@ function groupBindings(bindings: readonly ModelBinding[]): Map<string, ModelBind
   return grouped;
 }
 
-function readBindingGroup(bindings: readonly ModelBinding[]): ModelControlRead {
+export function readBindingGroup(bindings: readonly ModelBinding[]): ModelControlRead {
   const eligible = bindings.filter((binding) => controlEligibleForModel(binding.owned.element));
   if (eligible.length === 0) return Object.freeze({ kind: "missing" });
   const radios = eligible.filter((binding) => {
@@ -438,11 +438,15 @@ function readBindingGroup(bindings: readonly ModelBinding[]): ModelControlRead {
   const values = reads.filter(
     (read): read is Readonly<{ kind: "value"; value: JsonValue }> => read.kind === "value",
   );
-  if (values.length === 0) return Object.freeze({ kind: "missing" });
-  if (values.some((candidate) => !modelValuesEqual(candidate.value, values[0]?.value ?? MISSING))) {
+  const first = values[0];
+  if (first === undefined) return Object.freeze({ kind: "missing" });
+  // Compare against the first read itself: a control whose value is null (an
+  // empty number or range, a select with nothing selected) is a value, and
+  // a nullish fallback here turned it into a mismatch that refused the form.
+  if (values.some((candidate) => !modelValuesEqual(candidate.value, first.value))) {
     return Object.freeze({ code: "control_unsupported", kind: "invalid" });
   }
-  return values[0] ?? Object.freeze({ kind: "missing" });
+  return first;
 }
 
 function readToValue(read: ModelControlRead): JsonValue | typeof MISSING {

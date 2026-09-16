@@ -35,7 +35,7 @@
 {% endmacro %}
 
 {% macro datatable_row(key) %}
-<tr class="sn-datatable-row" live:key="{{ key|live_key }}" data-suprnova-live-key="{{ key }}">{{ caller() }}</tr>
+<tr class="sn-datatable-row" live:key="{{ key|live_key }}">{{ caller() }}</tr>
 {% endmacro %}
 
 {% macro datatable_row_heading(text) %}

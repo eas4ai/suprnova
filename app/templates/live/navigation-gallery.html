@@ -52,7 +52,7 @@
 {% call pagination::page_position(page, pages) %}{% endcall %}
 {% call pagination::page_action("next_page", "Next", disabled=last) %}{% endcall %}
 {% endcall %}
-{% call more::load_more_list("feed", label="Feed") %}{% for item in items %}<li class="sn-feed-item" live:key="{{ item.key|live_key }}" data-suprnova-live-key="{{ item.key }}">{{ item.text }}</li>{% endfor %}{% endcall %}
+{% call more::load_more_list("feed", label="Feed") %}{% for item in items %}<li class="sn-feed-item" live:key="{{ item.key|live_key }}">{{ item.text }}</li>{% endfor %}{% endcall %}
 {% call more::load_more("load_more", exhausted=exhausted) %}{% endcall %}
 </div>
 </div>

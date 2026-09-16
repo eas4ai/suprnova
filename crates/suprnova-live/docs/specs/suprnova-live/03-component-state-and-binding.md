@@ -1,7 +1,7 @@
 # Suprnova Live -- 03 Component State and Binding
 
 Status: Normative design specification
-Last revised: 2026-08-25
+Last revised: 2026-09-15
 
 ## Scope
 
@@ -239,6 +239,13 @@ bytes, browser paths, and trusted metadata never enter that batch.
 - State is bounded and evolvable without sticky server objects.
 
 ## Decisions and revisions
+
+- 2026-09-15 -- A model binding group reads a control whose value is null (an
+  empty number or range input, a select with nothing selected) as the value
+  null. The group compared each read against a nullish fallback of the
+  first, so a null first value mismatched itself, the form's submit sampling
+  threw `model_control_invalid`, the action was never scheduled, and the
+  native submission ran instead.
 
 - 2026-08-25 -- Made upload/model-field exclusivity island-wide rather than
   element-local, preventing a separately placed ordinary model control from

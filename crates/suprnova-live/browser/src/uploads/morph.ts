@@ -1,7 +1,7 @@
 import type { RuntimeFeatureDirectiveOwnership } from "../features/contract.js";
 import { MAX_UPLOAD_FILES_PER_DOCUMENT, validateUploadField } from "./types.js";
 
-const KEY_ATTRIBUTE = "data-suprnova-live-key";
+import { stableKeyOf } from "../directives/key.js";
 const SAFE_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 
 interface UploadMorphElement {
@@ -50,7 +50,7 @@ function keyedElement(
 ): UploadMorphElement | null {
   let key: string | null;
   try {
-    key = ownership.element.getAttribute(KEY_ATTRIBUTE);
+    key = stableKeyOf(ownership.element);
   } catch {
     return null;
   }

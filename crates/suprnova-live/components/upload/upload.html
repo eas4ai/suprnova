@@ -17,8 +17,8 @@
 {% macro upload(name, label, accept) %}
 <div class="sn-upload" data-sn-upload="{{ name }}">
 <label class="sn-upload-label" for="{{ name }}">{{ label }}</label>
-<input class="sn-upload-input" id="{{ name }}" type="file" live:upload="{{ name }}" data-suprnova-live-key="{{ name }}-input" accept="{{ accept }}">
-<progress class="sn-upload-progress" live:progress="{{ name }}" data-suprnova-live-key="{{ name }}-progress" max="100" aria-label="{{ label }} upload progress"></progress>
+<input class="sn-upload-input" id="{{ name }}" type="file" live:upload="{{ name }}" live:key="{{ name }}-input" accept="{{ accept }}">
+<progress class="sn-upload-progress" live:progress="{{ name }}" live:key="{{ name }}-progress" max="100" aria-label="{{ label }} upload progress"></progress>
 <p class="sn-upload-status">
 <span class="sn-upload-state" data-sn-state="idle">No file chosen.</span>
 <span class="sn-upload-state" data-sn-state="queued">Queued.</span>
@@ -33,9 +33,9 @@
 <span class="sn-upload-state" data-sn-state="failed">Transfer failed. Retry or choose the file again.</span>
 </p>
 <div class="sn-upload-controls" role="group" aria-label="{{ label }} upload controls">
-<button class="sn-upload-control" type="button" live:upload.cancel="{{ name }}" data-suprnova-live-key="{{ name }}-cancel">Cancel upload</button>
-<button class="sn-upload-control" type="button" live:upload.retry="{{ name }}" data-suprnova-live-key="{{ name }}-retry">Retry upload</button>
-<button class="sn-upload-control" type="button" live:upload.remove="{{ name }}" data-suprnova-live-key="{{ name }}-remove">Remove upload</button>
+<button class="sn-upload-control" type="button" live:upload.cancel="{{ name }}" live:key="{{ name }}-cancel">Cancel upload</button>
+<button class="sn-upload-control" type="button" live:upload.retry="{{ name }}" live:key="{{ name }}-retry">Retry upload</button>
+<button class="sn-upload-control" type="button" live:upload.remove="{{ name }}" live:key="{{ name }}-remove">Remove upload</button>
 </div>
 </div>
 {% endmacro %}

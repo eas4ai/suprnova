@@ -15,10 +15,10 @@
 <section class="sn-live-feed" id="{{ id }}" aria-labelledby="{{ id }}-heading">
 <h2 class="sn-live-feed-heading" id="{{ id }}-heading">{{ label }}</h2>
 <p class="sn-live-feed-status" data-live-stream-status role="status" aria-live="polite">Updates disconnected</p>
-<ol class="sn-live-feed-list" data-suprnova-live-key="{{ id }}-list">{{ caller() }}</ol>
+<ol class="sn-live-feed-list" live:key="{{ id }}-list">{{ caller() }}</ol>
 </section>
 {% endmacro %}
 
 {% macro feed_item(key, time) %}
-<li class="sn-live-feed-item" live:key="{{ key|live_key }}" data-suprnova-live-key="{{ key }}"><time class="sn-live-feed-time">{{ time }}</time> {{ caller() }}</li>
+<li class="sn-live-feed-item" live:key="{{ key|live_key }}"><time class="sn-live-feed-time">{{ time }}</time> {{ caller() }}</li>
 {% endmacro %}

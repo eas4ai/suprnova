@@ -2,7 +2,7 @@ import type { MorphPlan } from "./types.js";
 
 const SAFE_TARGET = /^#[A-Za-z][A-Za-z0-9_-]{0,127}$/u;
 const ISLAND_ATTRIBUTE = "data-suprnova-live-island";
-const KEY_ATTRIBUTE = "data-suprnova-live-key";
+import { stableKeyOf } from "./keys.js";
 const CONTROL_ATTRIBUTE = "live:teleport";
 const SAFE_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 
@@ -87,7 +87,7 @@ function teleportCandidate(element: Element): ActiveTeleport | null {
       (control) => name === control || name.startsWith(`${control}.`),
     ),
   );
-  const key = element.getAttribute(KEY_ATTRIBUTE);
+  const key = stableKeyOf(element);
   if (controls.length !== 1 || !SAFE_TARGET.test(target) || key === null || !SAFE_KEY.test(key)) {
     throw new Error("teleport_control_invalid");
   }
@@ -98,7 +98,7 @@ function teleportCandidate(element: Element): ActiveTeleport | null {
 }
 
 function findKey(root: Element, key: string): Element | null {
-  return walk(root).find((element) => element.getAttribute(KEY_ATTRIBUTE) === key) ?? null;
+  return walk(root).find((element) => stableKeyOf(element) === key) ?? null;
 }
 
 export class TeleportRegistry implements TeleportTargetPort {

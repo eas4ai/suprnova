@@ -1,0 +1,19 @@
+command: sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/live-key-identity.test.ts && cd ../../.. && env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova-live --test checker_regressions -E "test(live_key)"'
+inputs:
+  - crates/suprnova-live/browser/tests/live-key-identity.test.ts
+  - crates/suprnova-live/browser/tests/support/
+  - crates/suprnova-live/browser/src/morph/
+  - crates/suprnova-live/browser/src/uploads/morph.ts
+  - crates/suprnova-live/browser/src/stimulus/lifecycle.ts
+  - crates/suprnova-live/browser/src/signals/lifecycle.ts
+  - crates/suprnova-live/browser/src/transitions/lifecycle.ts
+  - crates/suprnova-live/src/checker/
+  - crates/suprnova-live/tests/checker_regressions.rs
+  - crates/suprnova-live/components/
+  - app/templates/
+  - crates/suprnova-live/docs/specs/suprnova-live/
+  - manual/
+  - CHANGELOG.md
+  - .manual-translations.lock
+requirements:
+  - LIVE-024

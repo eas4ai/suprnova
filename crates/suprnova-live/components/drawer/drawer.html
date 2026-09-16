@@ -12,7 +12,7 @@
 
 {% macro drawer(id, key, title, side="start") %}
 <sn-drawer class="sn-drawer-host" tabindex="-1">
-<dialog class="sn-drawer" id="{{ id }}" aria-labelledby="{{ id }}-title" closedby="any" data-sn-side="{{ side }}" live:key="{{ key }}" data-suprnova-live-key="{{ key }}" live:preserve.self>
+<dialog class="sn-drawer" id="{{ id }}" aria-labelledby="{{ id }}-title" closedby="any" data-sn-side="{{ side }}" live:key="{{ key }}" live:preserve.self>
 <h2 class="sn-drawer-title" id="{{ id }}-title">{{ title }}</h2>
 <div class="sn-drawer-body">{{ caller() }}</div>
 </dialog>
