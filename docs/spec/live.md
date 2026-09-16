@@ -177,9 +177,9 @@ Status: Agreed 2026-09-13
 
 [LIVE-020] The framework MUST re-verify a membership's session against
 the shared session store before delivery, at most once per membership per
-ten seconds, and MUST retire a membership whose session the store no
-longer holds, so a session destroyed on another node stops receiving
-events within that interval.
+ten seconds. The framework MUST retire a membership whose session the
+store no longer holds, so a session destroyed on another node stops
+receiving events within that interval.
 Falsifier: a session row is removed from the store directly, the clock
 advances past ten seconds, and a publish still reaches the membership.
 Mechanism: `.cairn/mechanisms/live-session-reverification`.
