@@ -115,10 +115,6 @@ test("the form gallery's save form submits through Live with the page left in pl
   await page.goto(`${APP_ORIGIN}/live/demo-login`);
   await page.goto(`${APP_ORIGIN}/live/forms`);
   await expectConnected(page, 1);
-  const statuses: number[] = [];
-  page.on("response", (response) => {
-    if (response.url().includes("/__live/action")) statuses.push(response.status());
-  });
   let navigations = 0;
   page.on("framenavigated", (frame) => {
     if (frame === page.mainFrame()) navigations += 1;
@@ -126,17 +122,18 @@ test("the form gallery's save form submits through Live with the page left in pl
   // The required controls first, so the browser's own validation lets the
   // submit event through; then live:submit.prevent runs the Live action and
   // the native GET submission, which would reload the page from the form's
-  // own query, does not.
+  // own query, does not. The wait names the save action's own request, so a
+  // model proposal answered late cannot stand in for it.
   await page.locator("#email").fill("ada@example.com");
   await page.locator("#secret").fill("correct horse battery staple");
   await page.locator("#agree").check();
-  // The model proposals those controls send settle before the submit, so the
-  // requests counted from here are the submit's own.
-  await expectConnected(page, 1);
-  const beforeSubmit = statuses.length;
+  const save = page.waitForResponse(
+    (response) =>
+      response.url().includes("/__live/action") &&
+      (response.request().postData() ?? "").includes('"name":"save"'),
+  );
   await page.getByRole("button", { name: "Save" }).click();
-  await expect.poll(() => statuses.length).toBeGreaterThan(beforeSubmit);
-  expect(statuses.every((status) => status === 200)).toBe(true);
+  expect((await save).status()).toBe(200);
   await expect(page).toHaveURL(`${APP_ORIGIN}/live/forms`);
   await expectConnected(page, 1);
   expect(navigations).toBe(0);
