@@ -1,0 +1,23 @@
+mechanism: ui-tokens
+commit: 40010b50
+inputs_digest: sha256:bc04e34c6ad5f93ffff6b7c16e2e34c9d0a1a32408d656f2babbf0814533a7ab
+mechanism_digest: sha256:ca8fb41c4b569927ed87c647911b23f26bb405ba652427ddbd76e0d207182a05
+kernel_digest: sha256:a75759bfeebcad18d5c4ede6438c2a1efc8380a27df350379634205af5b27b19
+inputs_detail: .cairn/evidence/runs/20260916T181710810Z-3415384.inputs.json
+command: node .cairn/tools/ui-tokens.mjs crates/suprnova-live/browser/src/styles/suprnova-ui.css app/templates/suprnova-ui crates/suprnova-live/browser/src/styles/suprnova-ui.tailwind.css crates/suprnova-live/components manual
+cwd: .
+exit: 0
+output_digest: sha256:b7c78c7f4900cc0b9ca22736ccec6d7d33f69d794b3fe092c7248d2081318138
+output: .cairn/evidence/runs/20260916T181710810Z-3415384.out
+stderr_output: .cairn/evidence/runs/20260916T181710810Z-3415384.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-16T18:17:15.216Z
+results:
+  - UI-001 pass line sha256:aed425a76ef3330f271aec0d62f64f73788c5fbc6f308bf59b76a2cebc20f6ca 27 sha256:77c7ac50900a9b782f7f1aec534795090ddb2ca241e5f8fcc4789f75ff6a036d
+  - UI-002 pass line sha256:07eb5b469928fd3928664d2ece74ee9f6762732b52036327ddb8856bef8227a2 27 sha256:0b0e328158edc3e0927713cacaa99262e59e017a3251dff5a9b3ab29ade2a50f
+  - UI-003 pass line sha256:a5d32981c8cccb5e5ad96156d88f632076403dab2e8ce0dde67b5f6feaae4045 27 sha256:f87b8e39bc707029a602fd50778b4eda3a5370e70407e8e2500c0b71e3313631
+  - UI-004 pass line sha256:70a89f36024e1fb7c67286126e5138973cba81595f9a7134a83edf51b1c45074 27 sha256:173e8b0c5b936e5957bf61c3ff2fb7b58b57475f0a54fed238fc6b73d52087a7
+  - UI-005 pass line sha256:7936f826c9ccddd2c4135ae150991a99d6e4f2696bbd83c0bd8014f1f0a1b04c 27 sha256:a4e6207e949fe778fef1771fa524e91c902d72f021eb8bdf9d5e0ef05c096b59
+  - UI-007 pass line sha256:a0def64e5d8c3d1c5066790f0ff2dcf332c6301eeb748a26d769f7080798ec51 27 sha256:761bcd2a736346633f831f7bc093c0e1b3e1bcdee1f74cccec5a3b37e0f9a188

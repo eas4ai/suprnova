@@ -1,0 +1,20 @@
+mechanism: checker-soundness
+commit: 40010b50
+inputs_digest: sha256:713d3edbb8e522d4de03bfc2a4bec19f358fb07a8cc27c2486fd1dce241b2f3c
+mechanism_digest: sha256:bc193fea2874b9d4f0339345fdd08d35179b42b56e67b8e7b9cc305eebf5e92b
+kernel_digest: sha256:a75759bfeebcad18d5c4ede6438c2a1efc8380a27df350379634205af5b27b19
+inputs_detail: .cairn/evidence/runs/20260916T181350655Z-3415384.inputs.json
+command: sh -c 'env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova-live --test checker_regressions --test binding_metadata -E "test(checker_proof) or test(live_error_target) or test(debounce)" && env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo test -p suprnova-macros --test live_ui'
+cwd: .
+exit: 0
+output_digest: sha256:58218fe8ad0083afa4f9b382b936331d7ba3a3dccb3a31cf37fd9a1eca011454
+output: .cairn/evidence/runs/20260916T181350655Z-3415384.out
+stderr_output: .cairn/evidence/runs/20260916T181350655Z-3415384.err
+stderr_digest: sha256:dbfc5e460708b4393e0ff068d55f886998a3a7f06c8b276eaeb40444e26cc516
+signal: none
+execution_error: null
+recorded: 2026-09-16T18:17:10.546Z
+results:
+  - LIVE-025 pass exit sha256:fda29bfc0efec91994403096711ecb935506a3ada32f7a4ceafa9be81c5db5bf 2 sha256:3ed5d25fb1536eee3871d031edd263222a5b35f4119ca200861e65811a6d5dce
+  - LIVE-026 pass exit sha256:274791ef76bf7d6b8134e255f8fecd3b39201653437b15a42fb905b264d2e2ae 2 sha256:3ed5d25fb1536eee3871d031edd263222a5b35f4119ca200861e65811a6d5dce
+  - LIVE-027 pass exit sha256:841fe2f70c6785104c0fc2ec7614956e3a5422ab4389b9342d8a76283335bbde 2 sha256:3ed5d25fb1536eee3871d031edd263222a5b35f4119ca200861e65811a6d5dce
