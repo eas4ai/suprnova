@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: live-key-vocabulary
+Current: checker-proves-runtime-accepts
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -104,6 +104,13 @@ components in waves, the advanced components last, the datatable closing.
    `.prevent` rode along, and its first browser case found a runtime
    defect that refused any Live submit from a form holding an empty
    number input or an unselected select, fixed in the same build.
+10. checker-proves-runtime-accepts - `live:check` proves a component only
+   after checking every element its view renders, a declared debounce is
+   one the grammar and the runtime accept, and error feedback may target
+   an action; promoted on escalation `live-024` and widened on `live-008`
+   after the build found an empty call block hiding 24 errors in the form
+   gallery (`live.md` LIVE-025 to LIVE-027,
+   `docs/commitments/checker-proves-runtime-accepts.md`).
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

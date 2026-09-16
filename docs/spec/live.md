@@ -245,3 +245,51 @@ commitment `live-key-vocabulary`).
 Refines: Live spec 12, keyed identity; spec 09, the directive set; OVL-006,
 whose stable key scope this vocabulary names.
 Status: Agreed 2026-09-15
+
+## The checker proves what the runtime accepts
+
+[LIVE-025] The checker MUST render an empty call block to a macro that
+splices `caller()` as empty caller content. The checker MUST fail a
+component whose view renders no branch, so a component is proved only when
+every element its view renders was checked.
+Falsifier: a view calls such a macro with an empty call block and then
+names an action the component does not declare, and the checker reports
+clean; or a view that renders no branch reports proved.
+Evidence: the defect, found 2026-09-16 building this commitment:
+`crates/suprnova-live/src/checker/branch.rs` built an empty caller as zero
+branches, and splicing zero branches dropped every branch after the call,
+so the dogfood form gallery proved clean while hiding 24 errors.
+Mechanism: `.cairn/mechanisms/checker-soundness`.
+Refines: LIVE-008, whose falsifier the defect satisfied; UI-009.
+Status: Agreed 2026-09-16
+
+[LIVE-026] A model field's declared debounce MUST be a duration the
+directive grammar lists: 100, 250, or 500 milliseconds.
+`#[model(debounce = N)]` MUST fail to compile for any other duration.
+`BindingTiming::debounce` MUST return an error for any other duration, so
+every declared debounce has a template modifier the checker and the
+browser runtime both accept.
+Falsifier: a component declaring `#[model(debounce = 300)]` compiles, or
+`BindingTiming::debounce(300)` succeeds.
+Evidence: `suprnova-macros/src/live/attrs.rs` and
+`crates/suprnova-live/src/state/timing.rs` accepted 1 to 60000 ms while
+`crates/suprnova-live/fixtures/v4/directive-grammar.json` lists three
+debounce modifiers; the dogfood form gallery and live-native gallery
+declared 300 ms, a timing no template could bind.
+Mechanism: `.cairn/mechanisms/checker-soundness`.
+Refines: Live spec 03, binding timing; spec 11, model update timing.
+Status: Agreed 2026-09-16
+
+[LIVE-027] The checker MUST accept a `live:error` target that names a
+field the component declares or an action the component or one of its
+ancestors declares, the targets the browser runtime resolves for error
+feedback.
+Falsifier: a validation summary writing `live:error.live.polite="save"` on
+a component that declares the action `save` fails the checker.
+Evidence: `crates/suprnova-live/src/checker/directive.rs` validated
+`live:error` as a field only, while
+`crates/suprnova-live/browser/src/feedback/targets.ts` (`scopeFor`)
+resolves a field, the island, or an action.
+Mechanism: `.cairn/mechanisms/checker-soundness`.
+Refines: Live spec 11, feedback targets; FORM-003.
+Status: Agreed 2026-09-16

@@ -1,0 +1,25 @@
+command: sh -c 'env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova-live --test checker_regressions --test binding_metadata -E "test(checker_proof) or test(live_error_target) or test(debounce)" && env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo test -p suprnova-macros --test live_ui'
+inputs:
+  - crates/suprnova-live/src/checker/
+  - crates/suprnova-live/src/state/
+  - crates/suprnova-live/tests/checker_regressions.rs
+  - crates/suprnova-live/tests/binding_metadata.rs
+  - crates/suprnova-live/tests/checker_support/
+  - crates/suprnova-live/tests/fixtures/
+  - crates/suprnova-live/fixtures/v4/
+  - crates/suprnova-live/components/
+  - crates/suprnova-live/docs/specs/suprnova-live/
+  - suprnova-macros/src/live/
+  - suprnova-macros/tests/live_ui.rs
+  - suprnova-macros/tests/ui/live/
+  - app/src/live/
+  - app/templates/
+  - app/tests/
+  - manual/
+  - CHANGELOG.md
+  - .manual-translations.lock
+  - Cargo.lock
+requirements:
+  - LIVE-025
+  - LIVE-026
+  - LIVE-027
