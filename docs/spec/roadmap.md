@@ -104,7 +104,11 @@ components in waves, the advanced components last, the datatable closing.
    `.prevent` rode along, and its first browser case found a runtime
    defect that refused any Live submit from a form holding an empty
    number input or an unselected select, fixed in the same build.
-10. checker-proves-runtime-accepts - `live:check` proves a component only
+10. checker-proves-runtime-accepts - DONE 2026-09-16 (built at
+   `f7ca27ca`; the first Live gate found a session lock held past an
+   abandoned request, kept on escalation `loop-035-sess-001` at `0e51a13e`,
+   and a save form over the eight-proposal cap, fixed at `e88a9596`;
+   receipts `fc6946b5`, review `75e095a2`) - `live:check` proves a component only
    after checking every element its view renders, a declared debounce is
    one the grammar and the runtime accept, and error feedback may target
    an action; promoted on escalation `live-024` and widened on `live-008`

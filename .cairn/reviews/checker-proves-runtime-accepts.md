@@ -53,5 +53,5 @@ Receipts on `fc6946b5`, from the stale check after escalation `loop-035-sess-001
 - UI-009 and the `live:check` group, `ui-live-check`: `.cairn/evidence/runs/20260916T183107199Z-3415384`, every dogfood component proved with the fixed checker.
 - The Live gate group (LIVE-010, LIVE-011, LIVE-012, UI-008, UI-012, OVL-005, FDB-004, NAV-003): `.cairn/evidence/runs/20260916T181724572Z-3415384`, pass on chromium, firefox and webkit; the failing run was `20260916T161220094Z-2630644`.
 - The dogfood group, `ui-dogfood-tests`: `.cairn/evidence/runs/20260916T181715424Z-3415384`, pass.
-- SESS-001 and every other stale requirement: pass, receipts from process 3415384 committed at `fc6946b5`.
+- Every other stale requirement: pass, receipts from process 3415384 committed at `fc6946b5`; SESS-001 was not stale after its fix was committed and checked with the session-blocking tests.
 
