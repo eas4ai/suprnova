@@ -115,7 +115,10 @@ components in waves, the advanced components last, the datatable closing.
    after the build found an empty call block hiding 24 errors in the form
    gallery (`live.md` LIVE-025 to LIVE-027,
    `docs/commitments/checker-proves-runtime-accepts.md`).
-11. live-protocol-bounds - the browser admits the message counts the
+11. live-protocol-bounds - DONE 2026-09-16 (built at `dc031353`, receipts
+   `7b4918d7`, review `46bbc3da`; the browser caps turned out to be
+   unspecified and below the server's, so the browser was aligned to 128)
+   - the browser admits the message counts the
    framework's protocol limits admit, `live:check` refuses a submit form
    one request cannot carry, and a request refused for size fails visibly;
    promoted on escalation `live-027` after the dogfood save form's ten
