@@ -1,0 +1,69 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+────────────
+[32;1m Nextest run[0m ID [1mac917538-f98d-4e6f-892b-955132cfdeeb[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m5[0m tests across [1m2[0m binaries ([1m15[0m tests [33;1mskipped[0m)
+────────────
+[32;1m     Summary[0m [   0.006s] [1m5[0m tests run: [1m5[0m [32;1mpassed[0m, [1m15[0m [33;1mskipped[0m
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-macros v2.0.2 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.81s
+     Running tests/live_ui.rs (target/debug/deps/live_ui-8305e077f4dbc57d)
+
+running 1 test
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-macros-tests v0.0.0 (/home/shawn/workspace2/suprnova/target/tests/trybuild/suprnova-macros)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.86s
+
+
+test [0m[1mtests/ui/live/pass/all_metadata.rs[0m [should pass] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/pass/minimal.rs[0m [should pass] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/pass/streams.rs[0m [should pass] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/pass/upload_policy.rs[0m [should pass] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/conflicting_model_timing.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/duplicate_action_name.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/duplicate_struct_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/duplicate_url_query.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/event_payload_contract.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/generic_component.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/invalid_action_signature.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/invalid_debounce.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/invalid_name.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/invalid_version.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/misplaced_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/model_locked.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/mount_destructured_parameter.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/mount_reference_parameter.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/no_zero_input_verified_context.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/private_action.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/private_component.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/reference_state.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/refresh_requires_v2.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/secret_url.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/server_only_url.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/session_dehydrated.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/stream_duplicate_event.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/stream_invalid_mode.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/stream_requires_v2.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/stream_unknown_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/transient_url.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/transient_without_model.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/unknown_method_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/unknown_struct_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/unlisted_model_debounce.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/unsupported_protocol.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/unsupported_url_codec.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_duplicate_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_misplaced_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_non_model.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_policy_return.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_policy_signature.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_unknown_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/validation_selection_without_hook.rs[0m [should fail to compile] ... [0m[32mok
+[0m
+
+test live_component_authoring_contract ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.90s
+

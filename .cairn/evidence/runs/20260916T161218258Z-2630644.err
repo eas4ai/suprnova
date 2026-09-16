@@ -1,0 +1,12 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+────────────
+[32;1m Nextest run[0m ID [1me4961680-ccaa-4900-9170-8322452293c6[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m18[0m tests across [1m1[0m binary
+────────────
+[32;1m     Summary[0m [   0.154s] [1m18[0m tests run: [1m18[0m [32;1mpassed[0m, [1m0[0m [33;1mskipped[0m
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
+────────────
+[32;1m Nextest run[0m ID [1m32c1223f-34e3-404f-9372-37a304c862df[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m1[0m test across [1m1[0m binary ([1m112[0m tests [33;1mskipped[0m)
+────────────
+[32;1m     Summary[0m [   0.006s] [1m1[0m test run: [1m1[0m [32;1mpassed[0m, [1m112[0m [33;1mskipped[0m
