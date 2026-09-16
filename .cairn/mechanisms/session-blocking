@@ -12,3 +12,5 @@ inputs:
   - Cargo.lock
 requirements:
   - SESS-001
+reviewed:
+  - SESS-001 sha256:6051490235d7b5016ffd46ad3ab622f09fb66b337a84bfa96c6bea4e078ecc30
