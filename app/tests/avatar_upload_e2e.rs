@@ -144,6 +144,11 @@ async fn setup_app() -> TestApp {
         Arc::new(DatabaseSessionDriver::new(session_config.lifetime));
 
     let router = Arc::new(build_router());
+    // The cache store `Server::run` boots from `CACHE_DRIVER`; the session
+    // middleware's blocking (SESS-001) takes its lock through it.
+    suprnova::App::bind_if_absent::<dyn suprnova::CacheStore>(Arc::new(
+        suprnova::InMemoryCache::new(),
+    ));
     let middleware = Arc::new({
         app::bootstrap::register_http_stack();
         MiddlewareRegistry::from_global()

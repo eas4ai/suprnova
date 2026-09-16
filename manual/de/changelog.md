@@ -73,6 +73,16 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   hält keinen Formularwert, sodass das Formular mit blockiertem Skript
   denselben Wert sendet. Die Combobox verweigert eine Listbox, die für eine
   ältere Abfrage gerendert wurde.
+- **Session-Blocking serialisiert die Requests, die dieselbe Session tragen.**
+  `SESSION_BLOCK=true` oder `SessionConfig::block(SessionBlock::default())`
+  lässt die Session-Middleware vom Laden bis zum Schreiben einen Cache-Lock für
+  die Session halten, und `block_session` auf einer Route oder Gruppe aktiviert
+  es nur für diese Routen. Beide Grenzen bestimmst du, die Haltedauer und die
+  Wartezeit, und ein Request, der über die Grenze hinaus wartet, antwortet mit
+  `503` und `Retry-After`. Ohne das schrieben zwei gleichzeitige Requests auf
+  einer Session nach dem Prinzip "der letzte gewinnt" zurück, sodass ein von
+  einem Redirect gesetzter Flash an einen früher gestarteten Request verloren
+  gehen konnte.
 
 ### Geändert
 

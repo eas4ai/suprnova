@@ -285,6 +285,38 @@ let mw = SessionMiddleware::with_store(SessionConfig::from_env(), store);
 
 `SessionMiddleware::new` または `with_store` で登録された `SessionStore` は、`destroy_all_for_user` によって解決されます。セッションストアが登録されていない場合（テストやミドルウェアを一度も構築しなかった埋め込みシステムなど）のみ、新しい `DatabaseSessionDriver` にフォールバックします。
 
+## セッションブロッキング
+
+同じセッションクッキーを持つ 2 つのリクエストは同じ行を読み込み、調整がなければ最後に書いた方が勝ちます。最初のリクエストが設定したフラッシュは、後続のリクエストが読む前に消えてしまうことがあります。これは、リダイレクトが着地する間に Live のアイランドが接続するなど、1 つのページが複数のリクエストを同時に発行するたびに起こります。セッションブロッキングはそれらを直列化します。有効にすると、セッションミドルウェアはセッションを読み込む前に[キャッシュ](cache.md)のロックドライバーを通じてセッション ID のロックを取得し、ハンドラーと書き込みの間それを保持し、その後に解放します。そのため 2 番目のリクエストは 1 番目が永続化したものを読み込みます。
+
+既定では無効です。環境変数またはコードでアプリケーション全体に対して有効にするか、`block_session` で 1 つのルートやグループに対して有効にします。
+
+```env
+SESSION_BLOCK=true
+SESSION_BLOCK_LOCK_SECONDS=10   # 1 つのリクエストがロックを保持する時間
+SESSION_BLOCK_WAIT_SECONDS=10   # リクエストがロック取得を待つ時間
+```
+
+```rust
+use std::time::Duration;
+use suprnova::{global_middleware, Router, SessionBlock, SessionConfig, SessionMiddleware};
+
+let config = SessionConfig::from_env().block(SessionBlock::default());
+global_middleware!(SessionMiddleware::install(config).await);
+
+// 1 つのルートはロックを 1 分間保持し、アプリの残りは既定値のままです。
+let router: Router = Router::new()
+    .post("/orders", place_order)
+    .block_session(SessionBlock::new(Duration::from_secs(60), Duration::from_secs(10)))
+    .into();
+```
+
+どちらの上限も意図的なものです。保持時間はロックの TTL です。それを超えて走るハンドラーはロックを失い、後続のリクエストはその後ろで待つのをやめ、ミドルウェアは上限を引き上げられるよう警告をログに記録します。待機時間は、接続を開いたままにする代わりに `Retry-After: 1` 付きの `503 Service Unavailable` で応答するまでにリクエストが待つ時間です。ルート単位のブロックはグローバルのものより優先されます。セッションクッキーのないリクエストは 2 つのリクエストが競合しうる行を指さないため、決して待たず、キャッシュにも触れません。ブロッキングはフレームワークが `CACHE_DRIVER` から起動するキャッシュストアを使います。インメモリドライバーは 1 プロセス内のリクエストを直列化し、複数ノードのデプロイでロックをノード間で効かせるには Redis が必要です。
+
+### Suprnovaが異なる設計を選んだ理由
+
+Laravel の `block()` は待機時間が尽きると `LockTimeoutException` を投げ、それは 500 として現れます。Suprnova は `Retry-After` 付きの `503` で応答します。自分のセッションをめぐる競争に負けたリクエストは、クライアントが再試行できる一時的な状態であり、サーバーの障害ではないからです。
+
 ## sessionsテーブル
 
 デフォルトのドライバーは、次の形の `sessions` テーブルを期待します（`framework/src/session/driver/database.rs` にあるSeaORMのエンティティが、正となる定義です）:

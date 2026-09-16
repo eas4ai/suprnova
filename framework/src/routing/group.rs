@@ -5,6 +5,8 @@ use super::{BoxedHandler, RouteBuilder, Router};
 use crate::FrameworkError;
 use crate::http::{Request, Response};
 use crate::middleware::{BoxedMiddleware, Middleware, into_boxed};
+use crate::session::SessionBlock;
+use crate::session::blocking::register_route_block;
 use hyper::Method;
 use std::future::Future;
 use std::sync::Arc;
@@ -41,6 +43,8 @@ pub struct GroupBuilder {
     prefix: String,
     /// Middleware to apply to all routes in this group
     middleware: Vec<BoxedMiddleware>,
+    /// Session block to register for every route in this group
+    block: Option<SessionBlock>,
 }
 
 /// A route registered within a group
@@ -84,6 +88,13 @@ impl GroupBuilder {
     /// ```
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.middleware.push(into_boxed(middleware));
+        self
+    }
+
+    /// Serialize the requests that carry one session on every route in
+    /// this group (SESS-001); see [`RouteBuilder::block_session`].
+    pub fn block_session(mut self, block: SessionBlock) -> Self {
+        self.block = Some(block);
         self
     }
 
@@ -178,6 +189,9 @@ impl GroupBuilder {
             for mw in &self.middleware {
                 self.outer_router
                     .add_middleware(http_method.clone(), &full_path, mw.clone());
+            }
+            if let Some(block) = self.block {
+                register_route_block(&http_method, &full_path, block);
             }
         }
 
@@ -467,6 +481,7 @@ impl Router {
             group_routes: built.routes,
             prefix: prefix.to_string(),
             middleware: Vec::new(),
+            block: None,
         }
     }
 }

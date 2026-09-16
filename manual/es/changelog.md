@@ -72,6 +72,15 @@ recientes primero.
   su propio archivo vendorizado y no guarda ningún valor de formulario, así que
   el formulario envía el mismo valor con el script bloqueado. El combobox
   rechaza un listbox renderizado para una consulta más antigua.
+- **El bloqueo de sesión serializa las peticiones que llevan la misma sesión.**
+  `SESSION_BLOCK=true`, o `SessionConfig::block(SessionBlock::default())`,
+  hace que el middleware de sesión mantenga un lock de caché para la sesión
+  desde la carga hasta la escritura, y `block_session` en una ruta o grupo lo
+  activa solo para esas rutas. Los dos límites son tuyos, la retención y la
+  espera, y una petición que espera más allá del límite responde `503` con
+  `Retry-After`. Sin él, dos peticiones concurrentes sobre una sesión
+  escribían con la regla "gana la última", así que un flash fijado por una
+  redirección podía perderse ante una petición que había empezado antes.
 
 ### Cambiado
 

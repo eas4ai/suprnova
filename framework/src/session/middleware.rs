@@ -1022,64 +1022,71 @@ impl crate::supervisor::Supervisor for SessionGcSupervisor {
     }
 }
 
-#[async_trait]
-impl Middleware for SessionMiddleware {
-    async fn handle(&self, mut request: Request, next: Next) -> Response {
-        // Defensive: refuse to run at all when `Crypt` isn't installed.
-        // `Server::from_config` guarantees a key is in place before
-        // middleware boots (failing closed in production, generating a
-        // transient key in dev). If we somehow got here without one -
-        // e.g. an embedder built a service loop without going through
-        // `Server::from_config` - bail out closed rather than emit or
-        // accept plaintext session ids.
-        if !crate::crypto::Crypt::is_initialized() {
-            return Err(crate::http::HttpResponse::text(
-                "Internal Server Error: encryption key not installed",
-            )
-            .status(500));
-        }
-
-        // Read the session ID from the inbound cookie. The cookie
-        // value is AES-256-GCM ciphertext; decrypt failure (tamper,
-        // key rotation) silently mints a fresh session id rather than
-        // logging per-request - same fail-quietly semantics as Laravel
-        // when the SESSION cookie is unreadable.
-        //
-        // `original_session_id` carries the id we LOADED the session
-        // with so the regeneration-aware persistence step at the
-        // bottom of `handle` knows which store row to destroy when a
-        // handler (login, 2FA promotion, remember-me hydration, manual
-        // regenerate, logout_and_invalidate) rotated the id this
-        // request. `None` when no cookie was present or when the
-        // cookie was unreadable - neither case names a real row, so
-        // there's nothing to migrate away from.
-        //
-        // Shape validation: even a successfully-decrypted id must
-        // match the 40-char lowercase-alphanumeric shape minted by
-        // `generate_session_id` before we let it reach the store.
-        // The AES-256-GCM cookie is authenticated, so a foreign id
-        // requires a key-compromise OR a rotated key whose ciphertext
-        // we can no longer trust - either way, the right move is to
-        // mint a fresh id rather than route an attacker-controlled
-        // string into the session-store lookup. Mirrors Laravel's
-        // `Store::isValidId` check in `Illuminate/Session/Store.php`
-        // (the source of [`super::store::is_valid_session_id`]).
-        let (original_session_id, last_touch_at): (Option<String>, Option<u64>) =
-            match request.cookie(&self.config.cookie_prefix.apply(&self.config.cookie_name)) {
-                Some(raw) => match Cookie::read_encrypted_for(&self.config.cookie_name, &raw) {
-                    Ok(payload) => match parse_session_cookie_payload(&payload) {
-                        Some((id, touched_at)) => (Some(id), touched_at),
-                        None => {
-                            tracing::debug!(
-                                "session cookie decrypted to an invalid payload; minting a fresh id"
-                            );
-                            (None, None)
-                        }
-                    },
-                    Err(_) => (None, None),
+impl SessionMiddleware {
+    /// Read the session ID from the inbound cookie. The cookie
+    /// value is AES-256-GCM ciphertext; decrypt failure (tamper,
+    /// key rotation) silently mints a fresh session id rather than
+    /// logging per-request - same fail-quietly semantics as Laravel
+    /// when the SESSION cookie is unreadable.
+    ///
+    /// The returned id is the one the session is LOADED with, so the
+    /// regeneration-aware persistence step at the bottom of
+    /// `handle_session` knows which store row to destroy when a
+    /// handler (login, 2FA promotion, remember-me hydration, manual
+    /// regenerate, logout_and_invalidate) rotated the id this
+    /// request. `None` when no cookie was present or when the
+    /// cookie was unreadable - neither case names a real row, so
+    /// there's nothing to migrate away from, and nothing to serialize
+    /// behind a session lock either.
+    ///
+    /// Shape validation: even a successfully-decrypted id must
+    /// match the 40-char lowercase-alphanumeric shape minted by
+    /// `generate_session_id` before we let it reach the store.
+    /// The AES-256-GCM cookie is authenticated, so a foreign id
+    /// requires a key-compromise OR a rotated key whose ciphertext
+    /// we can no longer trust - either way, the right move is to
+    /// mint a fresh id rather than route an attacker-controlled
+    /// string into the session-store lookup. Mirrors Laravel's
+    /// `Store::isValidId` check in `Illuminate/Session/Store.php`
+    /// (the source of [`super::store::is_valid_session_id`]).
+    fn inbound_session(&self, request: &Request) -> (Option<String>, Option<u64>) {
+        match request.cookie(&self.config.cookie_prefix.apply(&self.config.cookie_name)) {
+            Some(raw) => match Cookie::read_encrypted_for(&self.config.cookie_name, &raw) {
+                Ok(payload) => match parse_session_cookie_payload(&payload) {
+                    Some((id, touched_at)) => (Some(id), touched_at),
+                    None => {
+                        tracing::debug!(
+                            "session cookie decrypted to an invalid payload; minting a fresh id"
+                        );
+                        (None, None)
+                    }
                 },
-                None => (None, None),
-            };
+                Err(_) => (None, None),
+            },
+            None => (None, None),
+        }
+    }
+
+    /// The session block that applies to `request`: the matched route's
+    /// own block first, then the configured global one. `None` keeps the
+    /// request concurrent with the others on its session.
+    fn block_for(&self, request: &Request) -> Option<super::blocking::SessionBlock> {
+        request
+            .route_pattern()
+            .and_then(|pattern| super::blocking::route_block(request.method(), pattern))
+            .or(self.config.block)
+    }
+
+    /// Load the session named by the cookie, run the handler with it in
+    /// scope, and persist it afterwards. Runs inside the session lock when
+    /// blocking applies (see [`Middleware::handle`] on this type).
+    async fn handle_session(
+        &self,
+        mut request: Request,
+        next: Next,
+        original_session_id: Option<String>,
+        last_touch_at: Option<u64>,
+    ) -> Response {
         let session_id = original_session_id
             .clone()
             .unwrap_or_else(generate_session_id);
@@ -1991,6 +1998,53 @@ impl Middleware for SessionMiddleware {
         // so the relative ordering in the `Set-Cookie` header list is
         // stable (session first, then remember-me / clears).
         attach_pending_cookies(response, pending_cookies)
+    }
+}
+
+#[async_trait]
+impl Middleware for SessionMiddleware {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        // Defensive: refuse to run at all when `Crypt` isn't installed.
+        // `Server::from_config` guarantees a key is in place before
+        // middleware boots (failing closed in production, generating a
+        // transient key in dev). If we somehow got here without one -
+        // e.g. an embedder built a service loop without going through
+        // `Server::from_config` - bail out closed rather than emit or
+        // accept plaintext session ids.
+        if !crate::crypto::Crypt::is_initialized() {
+            return Err(crate::http::HttpResponse::text(
+                "Internal Server Error: encryption key not installed",
+            )
+            .status(500));
+        }
+
+        let (original_session_id, last_touch_at) = self.inbound_session(&request);
+
+        // Session blocking (SESS-001): when a block applies and the
+        // request names a stored session, take that session's lock
+        // before the load and give it back after the write, on every
+        // exit path this function has. A request without a valid
+        // cookie names no row two requests could race over, so it runs
+        // unserialized and never touches the cache. A handler panic
+        // skips the release; the lock's TTL is the bound for that case,
+        // which is why the hold is bounded at all.
+        let block = original_session_id
+            .as_ref()
+            .and_then(|id| self.block_for(&request).map(|block| (id.clone(), block)));
+        let Some((session_id, block)) = block else {
+            return self
+                .handle_session(request, next, original_session_id, last_touch_at)
+                .await;
+        };
+        let guard = match super::blocking::acquire(&session_id, block).await {
+            Ok(guard) => guard,
+            Err(response) => return Err(response),
+        };
+        let response = self
+            .handle_session(request, next, original_session_id, last_touch_at)
+            .await;
+        super::blocking::release(guard).await;
+        response
     }
 }
 

@@ -40,11 +40,13 @@
 //! }
 //! ```
 
+pub mod blocking;
 pub mod config;
 pub mod driver;
 pub mod middleware;
 pub mod store;
 
+pub use blocking::SessionBlock;
 pub use config::{MAX_SESSION_LIFETIME_MINUTES, MAX_SESSION_LIFETIME_SECS, SessionConfig};
 pub use driver::DatabaseSessionDriver;
 pub use middleware::{

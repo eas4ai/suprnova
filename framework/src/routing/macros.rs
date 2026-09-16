@@ -51,6 +51,8 @@ pub const fn validate_route_path(path: &'static str) -> &'static str {
 }
 use crate::middleware::{BoxedMiddleware, Middleware, into_boxed};
 use crate::routing::router::{BoxedHandler, Router, register_route_name};
+use crate::session::SessionBlock;
+use crate::session::blocking::register_route_block;
 use hyper::Method;
 use std::future::Future;
 use std::sync::Arc;
@@ -199,6 +201,7 @@ pub struct RouteDefBuilder<H> {
     handler: H,
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
+    block: Option<SessionBlock>,
 }
 
 impl<H, Fut> RouteDefBuilder<H>
@@ -214,6 +217,7 @@ where
             handler,
             name: None,
             middlewares: Vec::new(),
+            block: None,
         }
     }
 
@@ -226,6 +230,14 @@ where
     /// Add middleware to this route
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.middlewares.push(into_boxed(middleware));
+        self
+    }
+
+    /// Serialize the requests that carry one session on this route
+    /// (SESS-001); see [`crate::routing::RouteBuilder::block_session`].
+    /// Overrides a block set on the enclosing group.
+    pub fn block_session(mut self, block: SessionBlock) -> Self {
+        self.block = Some(block);
         self
     }
 
@@ -250,6 +262,10 @@ where
             .middlewares
             .into_iter()
             .fold(builder, |b, m| b.middleware_boxed(m));
+        let builder = match self.block {
+            Some(block) => builder.block_session(block),
+            None => builder,
+        };
 
         // Apply name if present, otherwise convert to Router
         if let Some(name) = self.name {
@@ -572,6 +588,7 @@ pub struct AnyRouteDefBuilder<H> {
     handler: H,
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
+    block: Option<SessionBlock>,
 }
 
 impl<H, Fut> AnyRouteDefBuilder<H>
@@ -585,6 +602,7 @@ where
             handler,
             name: None,
             middlewares: Vec::new(),
+            block: None,
         }
     }
 
@@ -612,6 +630,10 @@ where
             .middlewares
             .into_iter()
             .fold(multi, |b, m| b.middleware_boxed(m));
+        let multi = match self.block {
+            Some(block) => multi.block_session(block),
+            None => multi,
+        };
         if let Some(name) = self.name {
             multi.name(name)
         } else {
@@ -897,6 +919,7 @@ pub struct GroupRoute {
     handler: Arc<BoxedHandler>,
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
+    block: Option<SessionBlock>,
 }
 
 /// A multi-method route (`any!`) stored within a group. Holds a
@@ -909,6 +932,7 @@ pub struct GroupAnyRoute {
     handler: Arc<BoxedHandler>,
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
+    block: Option<SessionBlock>,
 }
 
 /// An item that can be added to a route group - a single-method route,
@@ -960,6 +984,7 @@ pub struct GroupDef {
     prefix: &'static str,
     items: Vec<GroupItem>,
     group_middlewares: Vec<BoxedMiddleware>,
+    group_block: Option<SessionBlock>,
 }
 
 impl GroupDef {
@@ -972,6 +997,7 @@ impl GroupDef {
             prefix,
             items: Vec::new(),
             group_middlewares: Vec::new(),
+            group_block: None,
         }
     }
 
@@ -1027,6 +1053,15 @@ impl GroupDef {
         self
     }
 
+    /// Serialize the requests that carry one session on every route in
+    /// this group, nested groups included (SESS-001); see
+    /// [`crate::routing::RouteBuilder::block_session`]. A nested group or
+    /// a route sets its own block to override this one.
+    pub fn block_session(mut self, block: SessionBlock) -> Self {
+        self.group_block = Some(block);
+        self
+    }
+
     /// Register all routes in this group with the router
     ///
     /// This prepends the group prefix to each route path and applies
@@ -1046,17 +1081,21 @@ impl GroupDef {
     /// Parent group middleware is applied before child group middleware,
     /// which is applied before route-specific middleware.
     pub fn register(self, mut router: Router) -> Router {
-        self.register_with_inherited(&mut router, "", &[]);
+        self.register_with_inherited(&mut router, "", &[], None);
         router
     }
 
-    /// Internal recursive registration with inherited prefix and middleware
+    /// Internal recursive registration with inherited prefix, middleware
+    /// and session block
     fn register_with_inherited(
         self,
         router: &mut Router,
         parent_prefix: &str,
         inherited_middleware: &[BoxedMiddleware],
+        inherited_block: Option<SessionBlock>,
     ) {
+        // The nearest block wins: this group's own, else the parent's.
+        let group_block = self.group_block.or(inherited_block);
         // Build the full prefix for this group. join_paths keeps the
         // `/` boundary canonical so a root parent (`group!("/")`) or a
         // trailing-slash prefix can't smuggle `//` into child routes.
@@ -1128,6 +1167,9 @@ impl GroupDef {
                     for mw in route.middlewares {
                         router.add_middleware(http_method.clone(), full_path, mw);
                     }
+                    if let Some(block) = route.block.or(group_block) {
+                        register_route_block(&http_method, full_path, block);
+                    }
                 }
                 GroupItem::AnyRoute(any_route) => {
                     // Prefix join + matchit normalisation, mirroring the
@@ -1178,11 +1220,20 @@ impl GroupDef {
                         for mw in &any_route.middlewares {
                             router.add_middleware(method.clone(), full_path, mw.clone());
                         }
+                        if let Some(block) = any_route.block.or(group_block) {
+                            register_route_block(method, full_path, block);
+                        }
                     }
                 }
                 GroupItem::NestedGroup(nested) => {
-                    // Recursively register the nested group with accumulated prefix and middleware
-                    nested.register_with_inherited(router, &full_prefix, &combined_middleware);
+                    // Recursively register the nested group with accumulated
+                    // prefix, middleware and session block
+                    nested.register_with_inherited(
+                        router,
+                        &full_prefix,
+                        &combined_middleware,
+                        group_block,
+                    );
                 }
             }
         }
@@ -1206,6 +1257,7 @@ where
             handler: Arc::new(boxed),
             name: self.name,
             middlewares: self.middlewares,
+            block: self.block,
         }
     }
 }
@@ -1246,6 +1298,7 @@ where
             handler: Arc::new(boxed),
             name: self.name,
             middlewares: self.middlewares,
+            block: self.block,
         }
     }
 }

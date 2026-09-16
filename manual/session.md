@@ -390,6 +390,60 @@ let store: Arc<dyn SessionStore> = Arc::new(MyRedisStore::new());
 let mw = SessionMiddleware::with_store(SessionConfig::from_env(), store);
 ```
 
+## Session blocking
+
+Two requests that carry one session cookie load the same row, and without
+coordination the one that writes last wins: a flash the first request set
+can be gone before any later request reads it. That happens whenever a page
+fires several requests at once, such as Live islands connecting while a
+redirect lands. Session blocking serializes them. With it enabled, the
+session middleware takes a lock for the session id through the
+[cache](cache.md) lock driver before it loads the session, holds it through
+your handler and the write, and releases it after, so the second request
+loads what the first one persisted.
+
+It is off by default. Enable it for the whole application from the
+environment or in code, or for one route or group with `block_session`:
+
+```env
+SESSION_BLOCK=true
+SESSION_BLOCK_LOCK_SECONDS=10   # how long one request holds the lock
+SESSION_BLOCK_WAIT_SECONDS=10   # how long a request waits to take it
+```
+
+```rust
+use std::time::Duration;
+use suprnova::{global_middleware, Router, SessionBlock, SessionConfig, SessionMiddleware};
+
+let config = SessionConfig::from_env().block(SessionBlock::default());
+global_middleware!(SessionMiddleware::install(config).await);
+
+// One route holds the lock for a minute; the rest of the app keeps the default.
+let router: Router = Router::new()
+    .post("/orders", place_order)
+    .block_session(SessionBlock::new(Duration::from_secs(60), Duration::from_secs(10)))
+    .into();
+```
+
+Both bounds are deliberate. The hold is the lock's TTL: a handler that runs
+past it loses the lock, later requests stop queueing behind it, and the
+middleware logs a warning so you raise the bound. The wait is how long a
+request queues before it answers `503 Service Unavailable` with
+`Retry-After: 1` instead of holding a connection open. A route-level block
+takes precedence over the global one. A request without a session cookie
+names no row two requests could race over, so it never waits and never
+touches the cache. Blocking uses the cache store the framework boots from
+`CACHE_DRIVER`: the in-memory driver serializes requests within one
+process, and a deployment with several nodes needs Redis for the lock to
+hold across them.
+
+### Why Suprnova diverges
+
+Laravel's `block()` throws a `LockTimeoutException` when the wait runs out,
+which surfaces as a 500. Suprnova answers `503` with `Retry-After`, because
+a request that lost the race for its own session is a transient condition
+the client can retry, not a fault in the server.
+
 ## The sessions table
 
 The default driver expects a `sessions` table with this shape (the

@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use super::blocking::SessionBlock;
 use crate::http::CookiePrefix;
 
 /// Maximum session/remember lifetime in seconds: 9999-12-31T23:59:59Z as
@@ -83,6 +84,13 @@ pub struct SessionConfig {
     /// "I closed my browser and want to come back next month" path -
     /// the session cookie itself is short-lived (default 2 hours).
     pub remember_lifetime: Duration,
+    /// Serialize the requests that carry one session (SESS-001). `None`,
+    /// the default, keeps requests concurrent; `Some` makes the session
+    /// middleware hold a cache lock for the session from load to write,
+    /// so a write never overwrites what a concurrent request persisted
+    /// after this one loaded. A route-level `block_session` takes
+    /// precedence over this value. Mirrors Laravel's `session.block`.
+    pub block: Option<SessionBlock>,
 }
 
 impl Default for SessionConfig {
@@ -103,6 +111,7 @@ impl Default for SessionConfig {
             table_name: "sessions".to_string(),
             connection: None,
             remember_lifetime: Duration::from_secs(30 * 24 * 60 * 60), // 30 days
+            block: None,
         }
     }
 }
@@ -137,6 +146,12 @@ impl SessionConfig {
     /// - `REMEMBER_LIFETIME`: Remember-me token/cookie lifetime in
     ///   minutes (default: `43200` = 30 days; clamped like
     ///   `SESSION_LIFETIME`)
+    /// - `SESSION_BLOCK`: Serialize the requests that carry one session
+    ///   through the cache lock driver (default: `false`)
+    /// - `SESSION_BLOCK_LOCK_SECONDS`: How long one request holds the
+    ///   session lock (default: `10`)
+    /// - `SESSION_BLOCK_WAIT_SECONDS`: How long a request waits for the
+    ///   lock before it answers `503` (default: `10`)
     pub fn from_env() -> Self {
         fn bool_env(name: &str, default: bool) -> bool {
             crate::env_optional(name)
@@ -172,6 +187,19 @@ impl SessionConfig {
             .and_then(|s: String| s.parse().ok())
             .unwrap_or(30 * 24 * 60); // 30 days
 
+        let block = bool_env("SESSION_BLOCK", false).then(|| {
+            let lock_seconds: u64 = crate::env_optional("SESSION_BLOCK_LOCK_SECONDS")
+                .and_then(|s: String| s.parse().ok())
+                .unwrap_or(10);
+            let wait_seconds: u64 = crate::env_optional("SESSION_BLOCK_WAIT_SECONDS")
+                .and_then(|s: String| s.parse().ok())
+                .unwrap_or(10);
+            SessionBlock::new(
+                Duration::from_secs(lock_seconds),
+                Duration::from_secs(wait_seconds),
+            )
+        });
+
         Self {
             // Clamp before multiplying: `SESSION_LIFETIME=u64::MAX`
             // would otherwise wrap the minutes-to-seconds conversion
@@ -204,6 +232,7 @@ impl SessionConfig {
                     .min(MAX_SESSION_LIFETIME_MINUTES)
                     .saturating_mul(60),
             ),
+            block,
         }
     }
 
@@ -265,6 +294,13 @@ impl SessionConfig {
     /// Set the named DB connection used by the session store.
     pub fn connection(mut self, name: impl Into<String>) -> Self {
         self.connection = Some(name.into());
+        self
+    }
+
+    /// Serialize the requests that carry one session, holding the session
+    /// lock for the block's hold bound and waiting up to its wait bound.
+    pub fn block(mut self, block: SessionBlock) -> Self {
+        self.block = Some(block);
         self
     }
 }

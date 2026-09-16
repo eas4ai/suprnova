@@ -2060,6 +2060,17 @@ impl RouteBuilder {
         self
     }
 
+    /// Serialize the requests that carry one session on the most recently
+    /// registered route: the session middleware holds the session's cache
+    /// lock from load to write for `block`'s hold bound and waits up to
+    /// its wait bound (SESS-001). Takes precedence over the global
+    /// [`crate::session::SessionConfig::block`]. Mirrors Laravel's
+    /// `Route::block()`.
+    pub fn block_session(self, block: crate::session::SessionBlock) -> RouteBuilder {
+        crate::session::blocking::register_route_block(&self.last_method, &self.last_path, block);
+        self
+    }
+
     /// Register a GET route (for chaining without .name())
     pub fn get<H, Fut>(self, path: &str, handler: H) -> RouteBuilder
     where
@@ -2340,6 +2351,16 @@ impl MultiMethodRouteBuilder {
         for method in &self.methods {
             self.router
                 .add_middleware(method.clone(), &self.path, middleware.clone());
+        }
+        self
+    }
+
+    /// Serialize the requests that carry one session on every method this
+    /// route was registered against (SESS-001); see
+    /// [`RouteBuilder::block_session`].
+    pub fn block_session(self, block: crate::session::SessionBlock) -> Self {
+        for method in &self.methods {
+            crate::session::blocking::register_route_block(method, &self.path, block);
         }
         self
     }

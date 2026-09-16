@@ -227,6 +227,11 @@ async fn boot(accepts: usize, cache: CacheBoot) -> TestApp {
     // harness installs itself.
     suprnova::container::provider::bootstrap().expect("register injectable services");
 
+    // The cache store `Server::run` boots from `CACHE_DRIVER`; the session
+    // middleware's blocking (SESS-001) takes its lock through it, so a
+    // harness without one would fail every session request closed.
+    App::bind_if_absent::<dyn suprnova::CacheStore>(Arc::new(suprnova::InMemoryCache::new()));
+
     // The same Live bindings `bootstrap::register` installs.
     App::singleton(app::live::registry().expect("Live component registry"));
     let finalizer = Arc::new(AppUploadFinalizer::default());

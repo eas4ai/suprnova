@@ -72,6 +72,16 @@ en premier.
   détient aucune valeur de formulaire, donc le formulaire envoie la même valeur
   avec le script bloqué. La combobox refuse une listbox rendue pour une requête
   plus ancienne.
+- **Le blocage de session sérialise les requêtes qui portent la même session.**
+  `SESSION_BLOCK=true`, ou `SessionConfig::block(SessionBlock::default())`,
+  fait tenir au middleware de session un verrou de cache pour la session du
+  chargement à l'écriture, et `block_session` sur une route ou un groupe
+  l'active pour ces routes seules. Les deux bornes vous appartiennent, la
+  garde et l'attente, et une requête qui attend au-delà de la borne répond
+  `503` avec `Retry-After`. Sans lui, deux requêtes concurrentes sur une
+  session écrivaient selon la règle du dernier écrivain, si bien qu'un flash
+  posé par une redirection pouvait être perdu au profit d'une requête partie
+  plus tôt.
 
 ### Modifié
 

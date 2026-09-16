@@ -14,7 +14,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use suprnova::session::{SessionConfig, SessionData, SessionMiddleware, SessionStore};
+use suprnova::session::{
+    SessionBlock, SessionConfig, SessionData, SessionMiddleware, SessionStore,
+};
 use suprnova::{Crypt, EncryptionKey, FrameworkError};
 
 fn ensure_crypt() {
@@ -174,7 +176,9 @@ fn stored_session(config: &SessionConfig) -> (String, SessionData, String) {
 }
 
 fn ok_json() -> suprnova::http::Response {
-    Ok(suprnova::HttpResponse::json(serde_json::json!({"ok": true})))
+    Ok(suprnova::HttpResponse::json(
+        serde_json::json!({"ok": true}),
+    ))
 }
 
 /// Handle one request through `middleware` on its own task, so two of them
@@ -244,4 +248,182 @@ async fn without_blocking_the_last_writer_wins_and_the_flash_is_lost() {
         !stored.has("_flash.new.notice") && !stored.has("_flash.old.notice"),
         "the second write carried the copy loaded before the flash and removed it"
     );
+}
+
+fn ensure_cache() {
+    use suprnova::cache::{CacheStore, InMemoryCache};
+    suprnova::App::bind_if_absent::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+}
+
+fn blocking_config(wait: Duration) -> SessionConfig {
+    insecure_config().block(SessionBlock::new(Duration::from_secs(5), wait))
+}
+
+/// With blocking on, the second request cannot load until the first has
+/// written, so it reads the flash the first one set and its own write
+/// carries it forward.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_blocking_the_second_request_loads_after_the_first_wrote() {
+    ensure_crypt();
+    ensure_cache();
+    let config = blocking_config(Duration::from_secs(5));
+    let (_, session, cookie_value) = stored_session(&config);
+    let store = Arc::new(RecordingStore::with_session(session));
+    let middleware = Arc::new(SessionMiddleware::with_store(config.clone(), store.clone()));
+    let second_saw_flash = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // The first request flashes and then lingers, long enough for the
+    // second request to load the session if nothing held it back.
+    let first: suprnova::middleware::Next = Arc::new(move |_req| {
+        Box::pin(async move {
+            suprnova::session_mut(|s| s.flash("notice", "saved"));
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            ok_json()
+        })
+    });
+    let seen = second_saw_flash.clone();
+    let second: suprnova::middleware::Next = Arc::new(move |_req| {
+        let seen = seen.clone();
+        Box::pin(async move {
+            // The flash the first request set has been aged once by this
+            // request's load, so it reads through the flash accessor.
+            let visible = suprnova::session_mut(|s| s.get_flash::<String>("notice"))
+                .flatten()
+                .is_some();
+            seen.store(visible, Ordering::SeqCst);
+            suprnova::session_mut(|s| s.put("touched", true));
+            ok_json()
+        })
+    });
+
+    let first_request = post_request(Some((&config.cookie_name, &cookie_value))).await;
+    let first_task = spawn_request(middleware.clone(), first_request, first);
+    store.wait_for_reads(1).await;
+    let second_request = post_request(Some((&config.cookie_name, &cookie_value))).await;
+    let second_task = spawn_request(middleware, second_request, second);
+
+    assert_eq!(first_task.await.unwrap(), Ok(200));
+    assert_eq!(second_task.await.unwrap(), Ok(200));
+
+    assert_eq!(
+        store.events(),
+        vec!["read", "write", "read", "write"],
+        "the second load waited for the first write"
+    );
+    assert!(second_saw_flash.load(Ordering::SeqCst));
+    assert!(store.stored().has("touched"));
+}
+
+/// A request that cannot take the lock inside the wait bound answers 503
+/// without loading the session, instead of waiting indefinitely.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_wait_to_acquire_is_bounded_and_ends_in_a_503() {
+    ensure_crypt();
+    ensure_cache();
+    let config = blocking_config(Duration::from_millis(200));
+    let (session_id, session, cookie_value) = stored_session(&config);
+    let store = Arc::new(RecordingStore::with_session(session));
+    let middleware = Arc::new(SessionMiddleware::with_store(config.clone(), store.clone()));
+
+    // Another holder of this session's lock: the request must wait behind it.
+    let held = suprnova::Cache::lock(
+        &format!("session:block:{session_id}"),
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap()
+    .expect("the test holds the session lock first");
+
+    let next: suprnova::middleware::Next = Arc::new(move |_req| Box::pin(async move { ok_json() }));
+    let started = tokio::time::Instant::now();
+    let request = post_request(Some((&config.cookie_name, &cookie_value))).await;
+    let outcome = spawn_request(middleware, request, next).await.unwrap();
+    let elapsed = started.elapsed();
+    held.release().await.unwrap();
+
+    assert_eq!(outcome, Err(503));
+    assert!(
+        elapsed >= Duration::from_millis(200) && elapsed < Duration::from_secs(2),
+        "the wait bound is the whole story: waited {elapsed:?}"
+    );
+    assert_eq!(
+        store.reads.load(Ordering::SeqCst),
+        0,
+        "a refused request never loads the session"
+    );
+}
+
+/// A route opts in on its own through the builder, with the global option
+/// off; a request matched elsewhere stays unserialized.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_route_level_block_applies_without_the_global_option() {
+    use suprnova::Router;
+
+    ensure_crypt();
+    ensure_cache();
+    let config = insecure_config();
+    assert!(config.block.is_none());
+    let (session_id, session, cookie_value) = stored_session(&config);
+    let store = Arc::new(RecordingStore::with_session(session));
+    let middleware = Arc::new(SessionMiddleware::with_store(config.clone(), store.clone()));
+
+    // Registering the route records its block; the router itself is not
+    // needed afterwards, the server stamps the pattern on the request.
+    let _router: Router = Router::new()
+        .post("/session-blocking/notice", |_req| async move { ok_json() })
+        .block_session(SessionBlock::new(
+            Duration::from_secs(5),
+            Duration::from_millis(200),
+        ))
+        .into();
+
+    let held = suprnova::Cache::lock(
+        &format!("session:block:{session_id}"),
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap()
+    .expect("the test holds the session lock first");
+    let next: suprnova::middleware::Next = Arc::new(move |_req| Box::pin(async move { ok_json() }));
+
+    let blocked = post_request(Some((&config.cookie_name, &cookie_value)))
+        .await
+        .with_route_pattern("/session-blocking/notice");
+    let blocked = spawn_request(middleware.clone(), blocked, next.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        blocked,
+        Err(503),
+        "the route's block waited behind the held lock"
+    );
+    assert_eq!(store.reads.load(Ordering::SeqCst), 0);
+
+    let elsewhere = post_request(Some((&config.cookie_name, &cookie_value)))
+        .await
+        .with_route_pattern("/session-blocking/other");
+    let elsewhere = spawn_request(middleware, elsewhere, next).await.unwrap();
+    held.release().await.unwrap();
+    assert_eq!(elsewhere, Ok(200), "a route without a block never waits");
+    assert_eq!(store.reads.load(Ordering::SeqCst), 1);
+}
+
+/// A request without a session cookie names no row two requests could
+/// race over, so blocking leaves it alone: no lock, no store access.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cookieless_request_is_not_serialized() {
+    ensure_crypt();
+    ensure_cache();
+    let config = blocking_config(Duration::from_millis(200));
+    let store = Arc::new(RecordingStore::default());
+    let middleware = Arc::new(SessionMiddleware::with_store(config, store.clone()));
+    let next: suprnova::middleware::Next = Arc::new(move |_req| Box::pin(async move { ok_json() }));
+
+    let outcome = spawn_request(middleware, post_request(None).await, next)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, Ok(200));
+    assert_eq!(store.reads.load(Ordering::SeqCst), 0);
+    assert!(store.events().is_empty());
 }

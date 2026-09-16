@@ -33,8 +33,8 @@ use suprnova::queue::worker::register_job;
 use suprnova::{
     App, CsrfMiddleware, DB, EloquentUserProvider, EventFacade, FrameworkError, IncludeMiddleware,
     Inertia, InertiaConfig, InertiaRequestExt, InertiaSharedData, LocaleMiddleware, LocaleShare,
-    Prop, S3Config, SessionConfig, SessionMiddleware, Storage, SupervisorRegistry, UserProvider,
-    bind, global_middleware, singleton,
+    Prop, S3Config, SessionBlock, SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
+    UserProvider, bind, global_middleware, singleton,
 };
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
@@ -344,8 +344,12 @@ pub fn register_http_stack() {
 
     // The session config is bound once and cloned because the CSRF
     // middleware below reads the same values, so the session cookie and
-    // the XSRF cookie cannot drift apart.
-    let session_config = SessionConfig::from_env();
+    // the XSRF cookie cannot drift apart. Session blocking is on for the
+    // whole application (SESS-001): the dashboard mounts four islands
+    // whose connecting requests carry the session, and without the lock
+    // a flash set by the feedback notice route lost to whichever of them
+    // wrote last.
+    let session_config = SessionConfig::from_env().block(SessionBlock::default());
     global_middleware!(SessionMiddleware::new(session_config.clone()));
 
     global_middleware!(

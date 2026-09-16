@@ -413,11 +413,11 @@ pub use ::chrono_tz::Tz;
 pub use seed::Seeder;
 pub use server::{Server, handle_request, handle_request_with_peer};
 pub use session::{
-    DatabaseSessionDriver, SessionConfig, SessionData, SessionGcSupervisor, SessionMiddleware,
-    SessionMigrationError, SessionStore, auth_user_id, clear_auth_user, destroy_all_for_user,
-    generate_csrf_token, generate_session_id, get_csrf_token, invalidate_session, is_authenticated,
-    is_valid_session_id, regenerate_csrf_token, regenerate_session_id, session, session_mut,
-    set_auth_user,
+    DatabaseSessionDriver, SessionBlock, SessionConfig, SessionData, SessionGcSupervisor,
+    SessionMiddleware, SessionMigrationError, SessionStore, auth_user_id, clear_auth_user,
+    destroy_all_for_user, generate_csrf_token, generate_session_id, get_csrf_token,
+    invalidate_session, is_authenticated, is_valid_session_id, regenerate_csrf_token,
+    regenerate_session_id, session, session_mut, set_auth_user,
 };
 pub use sse::{EndSignal, SseEvent, StreamedEvent};
 pub use static_files::StaticFiles;

@@ -66,6 +66,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `HTMLElement` defined by its own vendored file and holds no form value, so
   the form submits the same value with the script blocked. The combobox
   refuses a listbox rendered for an older query.
+- **Session blocking serializes the requests that carry one session.**
+  `SESSION_BLOCK=true`, or `SessionConfig::block(SessionBlock::default())`,
+  makes the session middleware hold a cache lock for the session from load
+  to write, and `block_session` on a route or group enables it for those
+  routes alone. Both bounds are yours, the hold and the wait, and a request
+  that waits past the bound answers `503` with `Retry-After`. Without it,
+  two concurrent requests on one session wrote back last-writer-wins, so a
+  flash set by a redirect could be lost to a request that started earlier.
 
 ### Changed
 

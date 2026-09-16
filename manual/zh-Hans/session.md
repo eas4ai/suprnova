@@ -283,6 +283,38 @@ let store: Arc<dyn SessionStore> = Arc::new(MyRedisStore::new());
 let mw = SessionMiddleware::with_store(SessionConfig::from_env(), store);
 ```
 
+## 会话阻塞
+
+两个携带同一会话 cookie 的请求会加载同一行，没有协调时最后写入者胜出：第一个请求设置的 flash 可能在任何后续请求读取之前就已消失。只要一个页面同时发出多个请求就会发生这种情况，例如重定向落地时 Live 岛正在连接。会话阻塞把它们串行化。启用后，会话中间件在加载会话之前通过[缓存](cache.md)的锁驱动为会话 id 取得一把锁，在你的处理器和写入期间持有它，之后释放，因此第二个请求加载的是第一个请求持久化的内容。
+
+它默认关闭。通过环境变量或代码为整个应用启用，或用 `block_session` 为某条路由或某个分组启用：
+
+```env
+SESSION_BLOCK=true
+SESSION_BLOCK_LOCK_SECONDS=10   # 一个请求持有锁的时长
+SESSION_BLOCK_WAIT_SECONDS=10   # 一个请求等待取锁的时长
+```
+
+```rust
+use std::time::Duration;
+use suprnova::{global_middleware, Router, SessionBlock, SessionConfig, SessionMiddleware};
+
+let config = SessionConfig::from_env().block(SessionBlock::default());
+global_middleware!(SessionMiddleware::install(config).await);
+
+// 一条路由持锁一分钟；应用的其余部分保持默认值。
+let router: Router = Router::new()
+    .post("/orders", place_order)
+    .block_session(SessionBlock::new(Duration::from_secs(60), Duration::from_secs(10)))
+    .into();
+```
+
+两个上限都是有意为之。持有时长是锁的 TTL：超出它的处理器会失去锁，后续请求不再排在它后面，中间件会记录一条警告以便你调高上限。等待时长是请求在以带 `Retry-After: 1` 的 `503 Service Unavailable` 应答之前排队的时间，而不是让连接一直挂着。路由级阻塞优先于全局阻塞。没有会话 cookie 的请求不指向任何两个请求可能争用的行，因此它从不等待，也从不触碰缓存。阻塞使用框架从 `CACHE_DRIVER` 启动的缓存存储：内存驱动在单个进程内串行化请求，多节点部署需要 Redis 才能让锁跨节点生效。
+
+### 为什么 Suprnova 有所不同
+
+Laravel 的 `block()` 在等待耗尽时抛出 `LockTimeoutException`，表现为 500。Suprnova 以带 `Retry-After` 的 `503` 应答，因为在自己会话的竞争中落败的请求是客户端可以重试的暂时状态，而不是服务器的故障。
+
 ## sessions 表
 
 默认的驱动程序期望有一张这种形态的 `sessions` 表（`framework/src/session/driver/database.rs` 里的那个 SeaORM 实体才是事实来源）：

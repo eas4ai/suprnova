@@ -312,8 +312,11 @@ test("the flash region shows an outcome once after a redirect and nothing on the
   page,
 }) => {
   await page.goto(`${APP_ORIGIN}/live/demo-login`);
-  // The dashboard's islands connect through requests that carry the session;
-  // the notice must not race a write from one of them.
+  // The dashboard's islands connect through requests that carry the session,
+  // and every request that loads the session ages the flash, so one landing
+  // after the notice would consume it: wait until they are all connected.
+  // Session blocking (SESS-001) is on for every route here, so the notice's
+  // write can no longer lose to one of theirs either.
   await expectConnected(page, 4);
   await page.goto(`${APP_ORIGIN}/live/feedback/notice`);
   await expect(page).toHaveURL(`${APP_ORIGIN}/live/feedback`);

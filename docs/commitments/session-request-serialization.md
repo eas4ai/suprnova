@@ -24,7 +24,11 @@ live-native review's open finding, on the developer's `ok` to escalation
 - A framework integration test under `framework/tests/session/` that
   handles two requests on one session concurrently with blocking on and
   proves the flash survives, and one with blocking off that documents the
-  race; the dogfood flash case enables blocking on the feedback routes.
+  race; the dogfood application enables blocking for every route, because
+  the requests that raced the feedback notice's flash were the dashboard
+  islands' own. Its flash case still waits for them to connect: every
+  request that loads the session ages the flash, so one landing after the
+  notice would consume it, which is flash semantics, not the write race.
 - Manual: `manual/session.md` gains the section; the six mirrors are
   re-stamped under the translation lock; the 2.0.2 changelog gains the
   entry.
