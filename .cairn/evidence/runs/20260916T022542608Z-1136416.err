@@ -1,0 +1,6 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+────────────
+[32;1m Nextest run[0m ID [1ma46f9f4f-5e69-4a43-b28a-318f8adc9a48[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m5[0m tests across [1m1[0m binary ([1m93[0m tests [33;1mskipped[0m)
+────────────
+[32;1m     Summary[0m [   0.325s] [1m5[0m tests run: [1m5[0m [32;1mpassed[0m, [1m93[0m [33;1mskipped[0m
