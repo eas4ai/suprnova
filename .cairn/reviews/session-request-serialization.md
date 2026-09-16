@@ -1,12 +1,13 @@
 # Review - session-request-serialization
 
 commitment: session-request-serialization
-commit: 5c561a51
+commit: 237d5970
 examined:
   - SESS-001 against the built tree: the session middleware's lock wrapper around load, handler and write; the config option, its env reader and the route and group builders' `block_session`; the receipts recorded on it.
   - The five session blocking tests and the three unit tests on the route-block registry, plus the same test group run against a scratch mutant whose `block_for` always answers `None` (`~/workspace2/scratchpads/session-blocking/mutation-no-lock.log`, 2026-09-15): exactly the three feature tests failed and the race and cookieless tests passed.
   - The dogfood application with blocking on for every route: its dogfood tests, and the dogfood browser suite on chromium.
   - The manual chapter, its six mirrors, the changelog entry in seven locales and the translation lock.
+  - Re-examined at `237d5970` after closure retired the backlog record SESS-001 cites: the requirement's Evidence line now names the race test instead of the record, the obligation and falsifier are unchanged, the mechanism was reviewed against the new block (LOOP-059) and its receipt at `20260916T022542608Z-1136416` passes.
 findings:
   - resolved: The commitment said the dogfood flash case enables blocking on the feedback routes, but the requests that raced the notice's flash were the dashboard islands' connecting requests on other routes, and a lock only serializes the requests that take it; the dogfood application enables blocking for every route in its bootstrap instead, and the commitment records the correction.
   - resolved: With blocking on, the flash case was first rewritten to drop its wait for the dashboard's islands and failed on chromium; every request that loads the session ages the flash, so an island request landing after the notice consumed it, which is flash semantics shared with Laravel and not the write race SESS-001 names. The case keeps its wait with that reason written beside it, and the commitment says so.
