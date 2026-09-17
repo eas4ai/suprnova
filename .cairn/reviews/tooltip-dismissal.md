@@ -10,7 +10,7 @@ examined:
 findings:
   - resolved: The component harness could load a component's stylesheet only together with its script, so OVL-002's script-absent clause had nothing to run against. `mountComponents` now takes `scripts: false`, which keeps the stylesheet and leaves the script out.
   - resolved: The first cases used the old `span` wrapper, so they exercised markup the view no longer renders. Both the new cases and the OVL-007 case now carry the `sn-tooltip` wrapper the macro renders.
-  - recorded: The Live gate failed twice on cases this commitment never touched, each passing alone afterwards: a reference-host upload test that read the browser bundle mid-rebuild ("artifact integrity mismatch for suprnova-live.esm.js"), and a firefox asynchronous-updates case that timed out waiting for a stream state. See the limits below.
+  - resolved: Captured in the backlog, outside this commitment (`.cairn/backlog/the-upload-file-provider-s-retry-tests-fail-about-one-run-in-fifteen-which-turns-the-live-gate-red-at-random.md`, with the measured rate): the Live gate failed four times on cases this commitment never touched, each passing alone afterwards: a reference-host upload test that read the browser bundle mid-rebuild ("artifact integrity mismatch for suprnova-live.esm.js"), and a firefox asynchronous-updates case that timed out waiting for a stream state. See the limits below.
 
 ## Build review, 2026-09-17
 
