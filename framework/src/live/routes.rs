@@ -88,6 +88,13 @@ impl Router {
     /// from `templates/suprnova-ui/<component>/` at
     /// `/suprnova-ui/<component>/<file>` (UI-017). Only `.css` and `.js`
     /// files with a closed component name are reachable.
+    ///
+    /// The directory is resolved under the application base path
+    /// (`APP_BASE_PATH`, or the working directory) and read on each request,
+    /// so a deployment ships `templates/suprnova-ui/` beside the binary.
+    /// Installation fails when the directory cannot be read, so an
+    /// application started anywhere else refuses to start instead of
+    /// answering 404 for every component asset (UI-021).
     pub fn try_live_ui_assets(self) -> Result<Self, FrameworkError> {
         self.try_live_ui_assets_from(
             crate::app::paths::base_path("templates").join(super::ui_assets::LIVE_UI_TEMPLATE_ROOT),
@@ -95,12 +102,20 @@ impl Router {
     }
 
     /// The same route over an explicit component directory, for hosts whose
-    /// template root is not the process base path.
+    /// template root is not the process base path. Installation fails when
+    /// the directory cannot be read.
     pub fn try_live_ui_assets_from(
         self,
         root: impl Into<std::path::PathBuf>,
     ) -> Result<Self, FrameworkError> {
-        let assets = std::sync::Arc::new(super::ui_assets::LiveUiAssets::from_root(root.into()));
+        let root = root.into();
+        if let Err(error) = std::fs::read_dir(&root) {
+            return Err(FrameworkError::internal(format!(
+                "cannot read the vendored Live component directory {}: {error}; start the application from its project directory, set APP_BASE_PATH to that directory, or ship templates/suprnova-ui with the binary",
+                root.display()
+            )));
+        }
+        let assets = std::sync::Arc::new(super::ui_assets::LiveUiAssets::from_root(root));
         let router: Router = self
             .try_methods(
                 &LIVE_HTTP_METHODS,

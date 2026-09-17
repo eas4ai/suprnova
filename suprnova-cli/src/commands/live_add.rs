@@ -5,11 +5,19 @@
 //! one, its JavaScript when it has one, and the manifest that names them. The
 //! shipped library is embedded in this binary; `--manifest` installs a
 //! third-party component in the same format from a directory on disk. Every
-//! file lands under `templates/<root>/`; a file the application has edited is
-//! kept, and `--force` is the only way past that.
+//! file lands under `templates/<root>/`, beside a record of the digest of each
+//! file it installed. A later run replaces a file whose bytes still match its
+//! record, because the application never edited it (UI-022); a file the
+//! application has edited, or one no record vouches for, is kept, and
+//! `--force` is the only way past that. A third-party file must be a regular
+//! file inside its manifest's directory (UI-023).
 
+use std::collections::BTreeMap;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest as _, Sha256};
 
 use crate::secure_fs;
 use crate::ui;
@@ -17,6 +25,11 @@ use crate::ui;
 /// The template root the shipped library installs under; a third-party
 /// manifest may not claim it.
 pub const RESERVED_ROOT: &str = "suprnova-ui";
+
+/// The install record beside a component's files: the SHA-256 of each file
+/// as `live:add` last wrote it. The leading dot keeps it outside the manifest
+/// file names and outside the names the component asset route serves.
+pub const INSTALL_RECORD: &str = ".suprnova-installed.json";
 
 /// One component of the shipped library, embedded at build time.
 pub struct EmbeddedComponent {
@@ -146,9 +159,14 @@ pub enum Outcome {
     Written,
     /// The file existed with the same bytes.
     Unchanged,
-    /// The file existed with different bytes and was left alone.
+    /// The file existed with bytes the application edited and was left alone.
     Kept,
-    /// The file existed with different bytes and `--force` replaced it.
+    /// The file existed with different bytes that no install record vouches
+    /// for, so whether the application edited it is unknown, and it was left
+    /// alone.
+    Unrecorded,
+    /// The file existed with different bytes and was replaced: its bytes
+    /// matched the install record, or `--force` was passed.
     Replaced,
 }
 
@@ -205,6 +223,9 @@ fn run_inner(
             Outcome::Written => "written",
             Outcome::Unchanged => "unchanged",
             Outcome::Kept => "kept, edited locally (pass --force to replace)",
+            Outcome::Unrecorded => {
+                "kept, no install record shows it unedited (pass --force to replace)"
+            }
             Outcome::Replaced => "replaced",
         };
         ui::label_value(&file, word);
@@ -260,9 +281,33 @@ fn third_party(path: &Path) -> Result<Source, String> {
         );
     }
     let directory = path.parent().unwrap_or(Path::new("."));
+    let canonical_directory = fs::canonicalize(directory)
+        .map_err(|error| format!("cannot read {}: {error}", directory.display()))?;
     let mut files = Vec::new();
     for file in &manifest.files {
         let file_path = directory.join(file);
+        // A link would install whatever it points at, a key or a
+        // configuration file included, as a template the application serves.
+        let metadata = fs::symlink_metadata(&file_path)
+            .map_err(|error| format!("cannot read {}: {error}", file_path.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "{} is a symbolic link; a component's files must be regular files in its directory",
+                file_path.display()
+            ));
+        }
+        if !metadata.is_file() {
+            return Err(format!("{} is not a regular file", file_path.display()));
+        }
+        let canonical = fs::canonicalize(&file_path)
+            .map_err(|error| format!("cannot read {}: {error}", file_path.display()))?;
+        if !canonical.starts_with(&canonical_directory) {
+            return Err(format!(
+                "{} resolves outside {}",
+                file_path.display(),
+                directory.display()
+            ));
+        }
         let content = fs::read_to_string(&file_path)
             .map_err(|error| format!("cannot read {}: {error}", file_path.display()))?;
         files.push((file.clone(), content));
@@ -285,27 +330,75 @@ fn install(
     let mut planned: Vec<(String, String)> = Vec::with_capacity(source.files.len() + 1);
     planned.push(("manifest.json".to_owned(), source.manifest_source.clone()));
     planned.extend(source.files.iter().cloned());
+    let record_path = target.join(INSTALL_RECORD);
+    secure_fs::ensure_contained(project, &record_path)?;
+    let mut record = read_record(&record_path)?;
     let mut outcomes = Vec::with_capacity(planned.len());
     for (file, content) in &planned {
         let path = target.join(file);
         secure_fs::ensure_contained(project, &path)?;
-        let outcome = match fs::read_to_string(&path) {
-            Ok(existing) if existing == *content => Outcome::Unchanged,
-            Ok(_) if !force => Outcome::Kept,
-            Ok(_) => Outcome::Replaced,
-            Err(_) => Outcome::Written,
+        let outcome = match fs::read(&path) {
+            Ok(existing) if existing == content.as_bytes() => Outcome::Unchanged,
+            Ok(_) if force => Outcome::Replaced,
+            Ok(existing) => match record.get(file) {
+                Some(installed) if *installed == digest(&existing) => Outcome::Replaced,
+                Some(_) => Outcome::Kept,
+                None => Outcome::Unrecorded,
+            },
+            Err(error) if error.kind() == ErrorKind::NotFound => Outcome::Written,
+            Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
         };
         if !dry_run && matches!(outcome, Outcome::Written | Outcome::Replaced) {
             fs::create_dir_all(&target)
                 .map_err(|error| format!("cannot create {}: {error}", target.display()))?;
             secure_fs::write_atomic(&path, content.as_bytes())?;
         }
+        // A kept file keeps its old entry, so a later run still sees the edit.
+        if matches!(
+            outcome,
+            Outcome::Written | Outcome::Replaced | Outcome::Unchanged
+        ) {
+            record.insert(file.clone(), digest(content.as_bytes()));
+        }
         outcomes.push((
             format!("templates/{}/{file}", source.manifest.root),
             outcome,
         ));
     }
+    if !dry_run {
+        let bytes = serde_json::to_vec_pretty(&record)
+            .map_err(|error| format!("cannot encode the install record: {error}"))?;
+        fs::create_dir_all(&target)
+            .map_err(|error| format!("cannot create {}: {error}", target.display()))?;
+        secure_fs::write_atomic(&record_path, &bytes)?;
+    }
     Ok(outcomes)
+}
+
+/// The install record, or an empty one when the directory has none: an empty
+/// record vouches for nothing, so every differing file is kept. A record that
+/// cannot be read or decoded is an error rather than an empty record, so a
+/// damaged record never passes silently for a directory installed before
+/// records existed.
+fn read_record(path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "cannot decode the install record {}: {error}; delete it to keep every file that differs from the shipped one",
+            path.display()
+        )
+    })
+}
+
+fn digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]

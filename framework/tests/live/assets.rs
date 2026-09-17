@@ -805,6 +805,32 @@ async fn the_suprnova_ui_base_loads_only_when_a_document_opts_in() {
     tag_order(&opted, &["suprnova-live-config", &link, &core_link]);
 }
 
+/// UI-021: the vendored component asset route refuses to install over a
+/// directory it cannot read and names that directory, so an application
+/// started outside its project directory refuses to start instead of
+/// answering 404 for every component stylesheet and script.
+#[test]
+fn ui_021_the_component_asset_route_refuses_a_directory_it_cannot_read() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let missing = root.path().join("templates").join("suprnova-ui");
+    let Err(refused) = Router::new().try_live_ui_assets_from(missing.clone()) else {
+        panic!("a missing component directory is refused");
+    };
+    let message = refused.to_string();
+    assert!(
+        message.contains(&missing.display().to_string()),
+        "the refusal names the directory: {message}"
+    );
+    assert!(message.contains("APP_BASE_PATH"), "{message}");
+
+    let file = root.path().join("suprnova-ui");
+    std::fs::write(&file, "not a directory\n").expect("file");
+    assert!(
+        Router::new().try_live_ui_assets_from(file).is_err(),
+        "a file in place of the directory is refused"
+    );
+}
+
 /// UI-017: a vendored component's stylesheet and script are served from its
 /// directory under the reserved template root with validators, and nothing
 /// else in that directory is reachable.
