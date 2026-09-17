@@ -1,6 +1,7 @@
-command: sh -c 'cd crates/suprnova-live/browser && npx playwright test --config playwright.components.config.ts e2e/components/tooltip.spec.ts --reporter=line'
+command: node .cairn/tools/ui-tooltip-dismissal.mjs
 results: per-requirement
 inputs:
+  - .cairn/tools/ui-tooltip-dismissal.mjs
   - crates/suprnova-live/components/tooltip/
   - crates/suprnova-live/browser/e2e/components/tooltip.spec.ts
   - crates/suprnova-live/browser/e2e/components/support.ts
