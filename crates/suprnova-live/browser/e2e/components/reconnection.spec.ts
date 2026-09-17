@@ -35,11 +35,21 @@ const FIXTURES: readonly Fixture[] = [
     element: "sn-password-reveal",
     html: `<sn-password-reveal class="sn-password"><input class="sn-input sn-password-input" id="password" name="password" type="password" autocomplete="current-password"><button class="sn-password-toggle" type="button" aria-controls="password" aria-pressed="false">Show</button></sn-password-reveal>`,
   },
-  ...(["dialog", "sheet", "drawer"] as const).map((kind) => ({
-    component: kind,
-    element: `sn-${kind}`,
-    html: `<button class="sn-button" type="button" data-sn-${kind}-open="${kind}-one">Open</button><sn-${kind} class="sn-${kind}-host" tabindex="-1"><dialog class="sn-${kind}" id="${kind}-one" aria-labelledby="${kind}-one-title" closedby="any"><h2 id="${kind}-one-title">Title</h2><div><button class="sn-button" type="button" data-sn-${kind}-close="${kind}-one">Close</button></div></dialog></sn-${kind}>`,
-  })),
+  {
+    component: "dialog",
+    element: "sn-dialog",
+    html: `<button class="sn-button" type="button" data-sn-dialog-open="dialog-one">Open</button><sn-dialog class="sn-dialog-host" tabindex="-1"><dialog class="sn-dialog" id="dialog-one" aria-labelledby="dialog-one-title" closedby="any"><h2 id="dialog-one-title">Title</h2><div><button class="sn-button" type="button" data-sn-dialog-close="dialog-one">Close</button></div></dialog></sn-dialog>`,
+  },
+  {
+    component: "sheet",
+    element: "sn-sheet",
+    html: `<button class="sn-button" type="button" data-sn-sheet-open="sheet-one">Open</button><sn-sheet class="sn-sheet-host" tabindex="-1"><dialog class="sn-sheet" id="sheet-one" aria-labelledby="sheet-one-title" closedby="any"><h2 id="sheet-one-title">Title</h2><div><button class="sn-button" type="button" data-sn-sheet-close="sheet-one">Close</button></div></dialog></sn-sheet>`,
+  },
+  {
+    component: "drawer",
+    element: "sn-drawer",
+    html: `<button class="sn-button" type="button" data-sn-drawer-open="drawer-one">Open</button><sn-drawer class="sn-drawer-host" tabindex="-1"><dialog class="sn-drawer" id="drawer-one" aria-labelledby="drawer-one-title" closedby="any"><h2 id="drawer-one-title">Title</h2><div><button class="sn-button" type="button" data-sn-drawer-close="drawer-one">Close</button></div></dialog></sn-drawer>`,
+  },
   {
     component: "tabs",
     element: "sn-tabs",

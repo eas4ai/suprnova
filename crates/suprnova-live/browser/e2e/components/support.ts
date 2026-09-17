@@ -89,16 +89,20 @@ export async function mountComponents(page: Page, document: ComponentDocument): 
  * fails the case with a reason instead of hanging it.
  */
 export async function within<T>(step: Promise<T>, milliseconds: number, what: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let cancel = (): void => undefined;
   const expired = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
+    // suprnova-correctness-delay-allow: watchdog -- failure-only deadline for a step a frozen renderer never finishes, which Playwright's own timeouts cannot interrupt
+    const timer = setTimeout(() => {
       reject(new Error(`${what} did not finish within ${String(milliseconds)} ms`));
     }, milliseconds);
+    cancel = () => {
+      clearTimeout(timer);
+    };
   });
   try {
     return await Promise.race([step, expired]);
   } finally {
-    clearTimeout(timer);
+    cancel();
   }
 }
 
