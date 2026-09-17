@@ -97,7 +97,7 @@ Rest der dokumentierten Menge. Der Checker beweist jede Direktive gegen die
 Komponente: Eine unbekannte Aktion, ein unbekanntes Modellfeld, ein roher
 `safe`-Filter oder ein Barrierefreiheitsverstoß lässt `live:check` mit Datei,
 Zeile und Spalte fehlschlagen.
-`live:key` benennt die stabile Identität eines Elements über Morphs hinweg und ist das eine Key-Attribut, das ein Template schreibt: Die Runtime liest es für die Morph-Identität, für Morph-Steuerungen wie `live:preserve.self` und für die Bereiche, die Browser-Zustand bewahren; `data-suprnova-live-key` ist die eigene Schreibweise der Engine auf den Wurzeln, die sie rendert. `live:key`-Werte und Element-IDs innerhalb einer Insel verwenden ein gemeinsames Alphabet, das die Runtime bei jedem Morph prüft: zuerst ein ASCII-Buchstabe oder eine Ziffer, dann Buchstaben, Ziffern, `_`, `-`, `.` und `:`, höchstens 128 Bytes, jeder Wert eindeutig in der Insel. `live:check` weist einen literalen Schlüssel oder eine literale ID außerhalb dieses Alphabets ab, ebenso eine ID, die eine Schleife wiederholt.
+`live:key` benennt die stabile Identität eines Elements über Morphs hinweg und ist das eine Key-Attribut, das ein Template schreibt: Die Runtime liest es für die Morph-Identität, für Morph-Steuerungen wie `live:preserve.self` und für die Bereiche, die Browser-Zustand bewahren; `data-suprnova-live-key` ist die eigene Schreibweise der Engine auf den Wurzeln, die sie rendert. `live:key`-Werte und Element-IDs innerhalb einer Insel verwenden ein gemeinsames Alphabet, das die Runtime bei jedem Morph prüft: zuerst ein ASCII-Buchstabe oder eine Ziffer, dann Buchstaben, Ziffern, `_`, `-`, `.` und `:`, höchstens 128 Bytes, jeder Wert eindeutig in der Insel. `live:check` weist einen literalen Schlüssel oder eine literale ID außerhalb dieses Alphabets ab, ebenso eine literale ID innerhalb einer Schleife, die jeder Eintrag nach dem ersten wiederholen würde.
 
 Dokumente, die Inseln platzieren, sind gewöhnliche Views, die mit
 `#[suprnova::view]` deklariert werden; der einzige nicht maskierte Wert, den
@@ -514,12 +514,12 @@ Schalter und `selected=` für Auswahl, Radiogruppe und Checkbox-Gruppe, die die
 Liste der angehakten Werte nimmt. Ein Passwort und ein Einmalcode rendern
 ihren Wert nie. Die Eingaben von Radio- und Checkbox-Gruppen tragen ihren
 Wert als Schlüssel, sodass eine Auswahl, die der Benutzer noch nicht gesendet
-hat, ein erneutes Rendern übersteht. Ein Feld, an das mehr als eine Checkbox
-gebunden ist, wird als Liste der angehakten Werte vorgeschlagen, eine Gruppe
-aus einer einzigen Checkbox als Boolean. Ein Rendern, das ersetzen muss, was
-der Benutzer getippt hat, etwa das Rendern als Antwort auf ein Zurücksetzen,
-übergibt eine Sequenznummer als `authority=`, und das nächste Rendern
-übergibt keine:
+hat, ein erneutes Rendern übersteht. Eine Checkbox-Gruppe wird unabhängig von ihrer Optionsanzahl als Liste der
+angehakten Werte vorgeschlagen, ebenso jedes Feld, an das mehr als eine
+Checkbox gebunden ist; eine einzelne Checkbox wird als Boolean vorgeschlagen.
+Ein Rendern, das ersetzen muss, was der Benutzer getippt hat, etwa das
+Rendern als Antwort auf ein Zurücksetzen, übergibt eine Sequenznummer als
+`authority=`, und das nächste Rendern übergibt keine:
 
 ```html
 {% call input::input("email", kind="email", value=email, authority=authority) %}{% endcall %}

@@ -204,9 +204,10 @@ en premier.
   remplacer ce que l'utilisateur a saisi.
 - **Un groupe de cases à cocher propose la liste des valeurs cochées.** Le
   runtime lisait chaque case à cocher comme un booléen, si bien qu'un groupe
-  dont les cases divergeaient ne pouvait pas être envoyé. Un champ auquel plus
-  d'une case à cocher est liée propose désormais les valeurs cochées dans
-  l'ordre du document ; une case à cocher seule reste un booléen.
+  dont les cases divergeaient ne pouvait pas être envoyé. Un groupe de cases à
+  cocher de toute taille, et tout champ auquel plus d'une case à cocher est
+  liée, propose désormais les valeurs cochées dans l'ordre du document ; une
+  case à cocher seule reste un booléen.
 - **Une proposition de modèle que son champ ne peut pas décoder est une erreur
   de validation sur ce champ.** Une proposition comme null pour un champ `u64`
   ou un booléen pour un champ liste était ignorée silencieusement : l'action

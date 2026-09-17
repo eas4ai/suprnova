@@ -205,9 +205,10 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   getippt hat.
 - **Eine Checkbox-Gruppe schlägt die Liste der angehakten Werte vor.** Die
   Runtime las jede Checkbox als Boolean, sodass eine Gruppe, deren Boxen
-  voneinander abwichen, nicht gesendet werden konnte. Ein Feld, an das mehr
-  als eine Checkbox gebunden ist, schlägt jetzt die angehakten Werte in
-  Dokumentreihenfolge vor; eine einzelne Checkbox bleibt ein Boolean.
+  voneinander abwichen, nicht gesendet werden konnte. Eine Checkbox-Gruppe
+  beliebiger Größe, und jedes Feld, an das mehr als eine Checkbox gebunden
+  ist, schlägt jetzt die angehakten Werte in Dokumentreihenfolge vor; eine
+  einzelne Checkbox bleibt ein Boolean.
 - **Ein Model-Vorschlag, den sein Feld nicht dekodieren kann, ist ein
   Validierungsfehler auf diesem Feld.** Ein Vorschlag wie null für ein
   `u64`-Feld oder ein Boolean für ein Listenfeld wurde stillschweigend

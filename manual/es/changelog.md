@@ -200,9 +200,10 @@ recientes primero.
   debe reemplazar lo que el usuario escribió.
 - **Un grupo de casillas propone la lista de valores marcados.** El runtime
   leía cada casilla como un booleano, así que un grupo cuyas casillas no
-  coincidían no se podía enviar. Un campo al que se vincula más de una casilla
-  propone ahora los valores marcados en el orden del documento; una casilla
-  sola sigue siendo un booleano.
+  coincidían no se podía enviar. Un grupo de casillas de cualquier tamaño, y
+  cualquier campo al que se vincula más de una casilla, propone ahora los
+  valores marcados en el orden del documento; una casilla sola sigue siendo un
+  booleano.
 - **Una propuesta de modelo que su campo no puede decodificar es un error de
   validación en ese campo.** Una propuesta como null para un campo `u64` o un
   booleano para un campo de lista se descartaba en silencio: la acción se

@@ -176,8 +176,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `authority=` marks the render that must replace what the user typed.
 - **A checkbox group proposes the list of checked values.** The runtime read
   every checkbox as a boolean, so a group whose boxes disagreed could not be
-  submitted. A field that more than one checkbox binds now proposes the
-  checked values in document order; a single checkbox stays a boolean.
+  submitted. A checkbox group of any size, and any field that more than one
+  checkbox binds, now proposes the checked values in document order; a single
+  checkbox stays a boolean.
 - **A model proposal its field cannot decode is a validation error on that
   field.** A proposal such as null for a `u64` field or a boolean for a list
   field was dropped silently: the action ran and the response carried no

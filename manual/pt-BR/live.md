@@ -97,7 +97,7 @@ conjunto documentado. O verificador prova cada diretiva contra o componente:
 uma ação desconhecida, um campo de modelo desconhecido, um filtro `safe` bruto
 ou uma violação de acessibilidade faz `live:check` falhar com o arquivo, a
 linha e a coluna.
-`live:key` nomeia a identidade estável de um elemento através dos morphs e é o único atributo de chave que um template escreve: o runtime o lê para a identidade do morph, para controles de morph como `live:preserve.self` e para os escopos que mantêm estado do navegador; `data-suprnova-live-key` é a grafia própria do motor nas raízes que ele renderiza. Valores de `live:key` e ids de elemento dentro de uma ilha usam um único alfabeto, o que o runtime verifica a cada morph: primeiro uma letra ou um dígito ASCII, depois letras, dígitos, `_`, `-`, `.` e `:`, no máximo 128 bytes, cada um único na ilha. `live:check` recusa uma chave ou um id literal fora desse alfabeto, e um id que um loop repete.
+`live:key` nomeia a identidade estável de um elemento através dos morphs e é o único atributo de chave que um template escreve: o runtime o lê para a identidade do morph, para controles de morph como `live:preserve.self` e para os escopos que mantêm estado do navegador; `data-suprnova-live-key` é a grafia própria do motor nas raízes que ele renderiza. Valores de `live:key` e ids de elemento dentro de uma ilha usam um único alfabeto, o que o runtime verifica a cada morph: primeiro uma letra ou um dígito ASCII, depois letras, dígitos, `_`, `-`, `.` e `:`, no máximo 128 bytes, cada um único na ilha. `live:check` recusa uma chave ou um id literal fora desse alfabeto, e um id literal dentro de um loop, que cada item depois do primeiro repetiria.
 
 Documentos que posicionam ilhas são views comuns declaradas com
 `#[suprnova::view]`; o único valor sem escape que elas aceitam é `TrustedHtml`
@@ -506,11 +506,12 @@ interruptor, e `selected=` para um seletor, um grupo de rádios e um grupo de
 caixas, que recebe a lista de valores marcados. Uma senha e um código de uso
 único nunca renderizam seu valor. As entradas dos grupos de rádios e de caixas
 têm o valor como chave, então uma escolha que o usuário ainda não enviou
-sobrevive a uma nova renderização. Um campo ao qual mais de uma caixa de
-seleção está vinculada é proposto como a lista de valores marcados, e um grupo
-de uma única caixa como um booleano. Uma renderização que precisa substituir o
-que o usuário digitou, como a que responde a um reset, passa um número de
-sequência como `authority=`, e a renderização seguinte não passa nenhum:
+sobrevive a uma nova renderização. Um grupo de caixas é proposto como a lista de valores marcados seja qual for o
+número de opções, assim como qualquer campo ao qual mais de uma caixa de
+seleção esteja vinculada; uma única caixa é proposta como um booleano. Uma
+renderização que precisa substituir o que o usuário digitou, como a que
+responde a um reset, passa um número de sequência como `authority=`, e a
+renderização seguinte não passa nenhum:
 
 ```html
 {% call input::input("email", kind="email", value=email, authority=authority) %}{% endcall %}

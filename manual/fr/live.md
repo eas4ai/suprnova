@@ -97,7 +97,7 @@ reste de l'ensemble documenté. Le vérificateur prouve chaque directive contre
 le composant : une action inconnue, un champ de modèle inconnu, un filtre
 `safe` brut ou une violation d'accessibilité fait échouer `live:check` avec le
 fichier, la ligne et la colonne.
-`live:key` nomme l'identité stable d'un élément d'un morph à l'autre et c'est le seul attribut de clé qu'un template écrit : le runtime le lit pour l'identité du morph, pour les contrôles de morph comme `live:preserve.self` et pour les portées qui conservent l'état du navigateur ; `data-suprnova-live-key` est l'orthographe propre du moteur sur les racines qu'il rend. Les valeurs de `live:key` et les identifiants d'élément à l'intérieur d'un îlot utilisent un seul alphabet, celui que le runtime vérifie à chaque morph : d'abord une lettre ou un chiffre ASCII, puis des lettres, des chiffres, `_`, `-`, `.` et `:`, au plus 128 octets, chacun unique dans l'îlot. `live:check` refuse une clé ou un identifiant littéral hors de cet alphabet, ainsi qu'un identifiant qu'une boucle répète.
+`live:key` nomme l'identité stable d'un élément d'un morph à l'autre et c'est le seul attribut de clé qu'un template écrit : le runtime le lit pour l'identité du morph, pour les contrôles de morph comme `live:preserve.self` et pour les portées qui conservent l'état du navigateur ; `data-suprnova-live-key` est l'orthographe propre du moteur sur les racines qu'il rend. Les valeurs de `live:key` et les identifiants d'élément à l'intérieur d'un îlot utilisent un seul alphabet, celui que le runtime vérifie à chaque morph : d'abord une lettre ou un chiffre ASCII, puis des lettres, des chiffres, `_`, `-`, `.` et `:`, au plus 128 octets, chacun unique dans l'îlot. `live:check` refuse une clé ou un identifiant littéral hors de cet alphabet, ainsi qu'un identifiant littéral à l'intérieur d'une boucle, que chaque élément après le premier répéterait.
 
 Les documents qui placent des îlots sont des vues ordinaires déclarées avec
 `#[suprnova::view]` ; la seule valeur non échappée qu'elles acceptent est
@@ -511,8 +511,9 @@ boutons radio et un groupe de cases, qui prend la liste des valeurs cochées.
 Un mot de passe et un code à usage unique ne rendent jamais leur valeur. Les
 saisies des groupes de boutons radio et de cases ont leur valeur pour clé, si
 bien qu'un choix que l'utilisateur n'a pas encore envoyé survit à un nouveau
-rendu. Un champ auquel plus d'une case à cocher est liée est proposé comme la
-liste des valeurs cochées, et un groupe d'une seule case comme un booléen. Un
+rendu. Un groupe de cases est proposé comme la liste des valeurs cochées quel que
+soit son nombre d'options, tout comme n'importe quel champ auquel plus d'une
+case à cocher est liée ; une seule case est proposée comme un booléen. Un
 rendu qui doit remplacer ce que l'utilisateur a saisi, comme celui qui répond
 à une réinitialisation, passe un numéro de séquence comme `authority=`, et le
 rendu suivant n'en passe aucun :

@@ -102,7 +102,8 @@ own spelling on the roots it renders. `live:key` values and element ids
 inside an island use one alphabet, the one the runtime checks at every morph:
 an ASCII letter or digit first, then letters, digits, `_`, `-`, `.`, and `:`,
 at most 128 bytes, each unique in the island. `live:check` refuses a literal
-key or id outside it, and an id a loop repeats.
+key or id outside it, and a literal id inside a loop, which every item after
+the first would repeat.
 
 Documents that place islands are ordinary views declared with
 `#[suprnova::view]`; the only unescaped value they accept is `TrustedHtml`
@@ -498,8 +499,9 @@ a checkbox and a switch, and `selected=` for a select, a radio group, and a
 checkbox group, which takes the list of checked values. A password and a
 one-time code never render their value. Radio and checkbox group inputs are
 keyed by value, so a choice the user has not sent survives a re-render. A
-field that more than one checkbox binds is proposed as the list of checked
-values, and a group of one checkbox as a boolean. A render that must replace
+checkbox group is proposed as the list of checked values whatever its number
+of options, as is any field that more than one checkbox binds; a single
+checkbox is proposed as a boolean. A render that must replace
 what the user has typed, such as the one answering a reset, passes a sequence
 number as `authority=`, and the next render passes none:
 

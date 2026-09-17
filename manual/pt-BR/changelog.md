@@ -192,9 +192,10 @@ são enviados atomicamente. Mais recentes primeiro.
   digitou.
 - **Um grupo de caixas de seleção propõe a lista de valores marcados.** O
   runtime lia cada caixa de seleção como um booleano, então um grupo cujas
-  caixas divergiam não podia ser enviado. Um campo ao qual mais de uma caixa
-  de seleção está vinculada agora propõe os valores marcados na ordem do
-  documento; uma caixa de seleção sozinha continua sendo um booleano.
+  caixas divergiam não podia ser enviado. Um grupo de caixas de seleção de
+  qualquer tamanho, e qualquer campo ao qual mais de uma caixa de seleção
+  esteja vinculada, agora propõe os valores marcados na ordem do documento;
+  uma caixa de seleção sozinha continua sendo um booleano.
 - **Uma proposta de modelo que o seu campo não consegue decodificar é um erro
   de validação nesse campo.** Uma proposta como null para um campo `u64` ou
   um booleano para um campo de lista era descartada em silêncio: a ação rodava

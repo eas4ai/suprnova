@@ -96,7 +96,7 @@ documentado. El comprobador prueba cada directiva contra el componente: una
 acción desconocida, un campo de modelo desconocido, un filtro `safe` sin
 procesar o una violación de accesibilidad hacen fallar `live:check` con el
 archivo, la línea y la columna.
-`live:key` nombra la identidad estable de un elemento a través de los morphs y es el único atributo de clave que escribe una plantilla: el runtime lo lee para la identidad del morph, para los controles de morph como `live:preserve.self` y para los ámbitos que conservan estado del navegador; `data-suprnova-live-key` es la grafía propia del motor en las raíces que él renderiza. Los valores de `live:key` y los ids de elemento dentro de una isla usan un solo alfabeto, el que el runtime comprueba en cada morph: primero una letra o un dígito ASCII, después letras, dígitos, `_`, `-`, `.` y `:`, como máximo 128 bytes, cada uno único en la isla. `live:check` rechaza una clave o un id literal fuera de ese alfabeto, y un id que un bucle repite.
+`live:key` nombra la identidad estable de un elemento a través de los morphs y es el único atributo de clave que escribe una plantilla: el runtime lo lee para la identidad del morph, para los controles de morph como `live:preserve.self` y para los ámbitos que conservan estado del navegador; `data-suprnova-live-key` es la grafía propia del motor en las raíces que él renderiza. Los valores de `live:key` y los ids de elemento dentro de una isla usan un solo alfabeto, el que el runtime comprueba en cada morph: primero una letra o un dígito ASCII, después letras, dígitos, `_`, `-`, `.` y `:`, como máximo 128 bytes, cada uno único en la isla. `live:check` rechaza una clave o un id literal fuera de ese alfabeto, y un id literal dentro de un bucle, que cada elemento después del primero repetiría.
 
 Los documentos que colocan islas son vistas ordinarias declaradas con
 `#[suprnova::view]`; el único valor sin escapar que aceptan es `TrustedHtml`
@@ -507,11 +507,12 @@ interruptor, y `selected=` para un selector, un grupo de radios y un grupo de
 casillas, que recibe la lista de valores marcados. Una contraseña y un código
 de un solo uso nunca renderizan su valor. Las entradas de los grupos de radios
 y de casillas llevan su valor como clave, así que una elección que el usuario
-aún no ha enviado sobrevive a un nuevo renderizado. Un campo al que se vincula
-más de una casilla se propone como la lista de valores marcados, y un grupo de
-una sola casilla como un booleano. Un renderizado que debe reemplazar lo que
-el usuario ha escrito, como el que responde a un reinicio, pasa un número de
-secuencia como `authority=`, y el siguiente renderizado no pasa ninguno:
+aún no ha enviado sobrevive a un nuevo renderizado. Un grupo de casillas se propone como la lista de valores marcados sea cual sea
+su número de opciones, igual que cualquier campo al que se vincula más de una
+casilla; una sola casilla se propone como un booleano. Un renderizado que debe
+reemplazar lo que el usuario ha escrito, como el que responde a un reinicio,
+pasa un número de secuencia como `authority=`, y el siguiente renderizado no
+pasa ninguno:
 
 ```html
 {% call input::input("email", kind="email", value=email, authority=authority) %}{% endcall %}
