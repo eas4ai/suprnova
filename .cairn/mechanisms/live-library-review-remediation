@@ -21,7 +21,7 @@ inputs:
   - framework/tests/support/
   - framework/tests/templates/live/
   - app/
-  - suprnova-cli/src/commands/live_add.rs
+  - suprnova-cli/src/
   - suprnova-cli/tests/live_add.rs
   - manual/live.md
   - Cargo.lock

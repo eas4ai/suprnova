@@ -20,6 +20,8 @@
 //   Rust cases               one nextest run per requirement and test
 //                            target, over tests whose names start with the
 //                            identifier in snake case (live_031_...)
+//   dogfood live:check       FORM-009's forms stay provable: live:check on
+//                            the dogfood application proves every view
 //   manual text              LIVE-035's second obligation: manual/live.md
 //                            says that a key `live_key` refuses fails the
 //                            island's render, and names `live_key_digest`
@@ -39,12 +41,12 @@ const REQUIREMENTS = [
 // carry it, one nextest run per entry.
 const RUST = {
   "DATA-006": [["-p", "suprnova-live", "--test", "view_charts"]],
-  "LIVE-031": [["-p", "suprnova", "--test", "live_dogfood_forms"]],
+  "LIVE-031": [["-p", "suprnova", "--test", "live_dogfood_forms"], ["-p", "suprnova-live", "--lib"]],
   "LIVE-033": [["-p", "suprnova-live", "--test", "checker_regressions", "--test", "view_live_key"]],
   "LIVE-034": [["-p", "suprnova-live", "--test", "checker_regressions"]],
   "LIVE-035": [["-p", "suprnova-live", "--test", "view_live_key"]],
   "LIVE-036": [["-p", "suprnova-live", "--test", "checker_regressions"]],
-  "FORM-009": [["-p", "app", "--test", "live_dogfood"]],
+  "FORM-009": [["-p", "app", "--test", "live_dogfood"], ["-p", "suprnova-live", "--test", "checker_regressions"]],
   "UI-021": [["-p", "suprnova", "--test", "live_assets"]],
   "UI-022": [["-p", "suprnova-cli", "--test", "live_add"]],
   "UI-023": [["-p", "suprnova-cli", "--test", "live_add"]],
@@ -120,6 +122,17 @@ try {
   } catch {
     broken.set("LIVE-032", `runtime unit cases produced no report (exit ${String(vitest.status)})`);
   }
+
+  const check = run("dogfood live:check", "cargo", ["run", "-q", "-p", "suprnova-cli", "--", "live:check"], {
+    cwd: "app",
+    env: CARGO_ENV,
+  });
+  record(
+    "FORM-009: live:check proves every dogfood view, the form gallery's value controls included",
+    check.status === 0,
+    "dogfood live:check",
+  );
+  if (check.status !== 0) process.stdout.write(`${check.stdout}${check.stderr}`.split("\n").slice(-20).join("\n"));
 
   process.stdout.write("run: manual text\n");
   const manual = readFileSync("manual/live.md", "utf8");
