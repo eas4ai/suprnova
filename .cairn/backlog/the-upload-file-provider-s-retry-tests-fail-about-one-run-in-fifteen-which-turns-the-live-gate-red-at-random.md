@@ -1,0 +1,7 @@
+# The upload file provider's retry tests fail about one run in fifteen, which turns the Live gate red at random
+
+Surfaced from: LIVE-010
+Outside because: LIVE-010 to LIVE-012 are the Live gate's own requirements for the engine's upload and asynchronous behavior; a test that reports a different transfer state under its own timing is a defect in that test or in the provider's state machine, which no requirement of the tooltip commitment names.
+Captured: 2026-09-17T22:55:19.997Z
+
+Measured 2026-09-17: the shipped test binary crates/suprnova-live/tests/upload_file_provider.rs failed 2 of 30 consecutive whole-file runs on an otherwise idle machine, each time a different test and each passing alone. provider_failures_do_not_commit_chunks_and_retries_remain_available (line 996) read IncompleteTransfer where it expects ProviderUnavailable, and interrupted_and_checksum_failed_chunks_are_retryable_without_accepting_state (line 922) failed the same way; an earlier run failed retirement_wakes_and_cancels_store_sync_and_read_waits with upload_incomplete_transfer at line 1593. The tests in this file run in parallel in one binary over a controlled store with pause points, so a state read can land on the wrong side of a pause. Four consecutive Live gate runs on 2026-09-17 evening failed, two of them in this file and two in browser cases that also pass alone (a firefox asynchronous-updates case, a chrome-bfcache lifecycle case), so the gate needs two or three attempts to go green.

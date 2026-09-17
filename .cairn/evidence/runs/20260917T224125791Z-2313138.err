@@ -1,0 +1,350 @@
+    Checking suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-macros v2.0.2 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Checking suprnova-magnetar v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+    Checking suprnova-web-push v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+    Checking suprnova-live-test-support v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+    Checking suprnova-live-macro-fixture v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-macro-fixture)
+    Checking suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 39.02s
+    Checking suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-macros v2.0.2 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Checking suprnova-magnetar v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+    Checking suprnova-web-push v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+    Checking suprnova-live-test-support v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+    Checking suprnova-live-macro-fixture v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-macro-fixture)
+    Checking suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 37.72s
+    Blocking waiting for file lock on artifact directory
+    Checking suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+    Checking suprnova-live-fuzz v0.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live/fuzz)
+warning: manual implementation of a no-op waker
+   --> fuzz_targets/support.rs:267:6
+    |
+267 | impl Wake for NoopWake {
+    |      ^^^^
+    |
+    = help: use `std::task::Waker::noop()` instead
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#manual_noop_waker
+    = note: `#[warn(clippy::manual_noop_waker)]` on by default
+
+warning: `suprnova-live-fuzz` (bin "protocol_v2_request") generated 1 warning
+warning: `suprnova-live-fuzz` (bin "async_envelope") generated 1 warning (1 duplicate)
+warning: `suprnova-live-fuzz` (bin "signed_snapshot") generated 1 warning (1 duplicate)
+warning: using `chunks_exact` with a constant chunk size
+  --> fuzz_targets/upload_media_header.rs:28:10
+   |
+28 |         .chunks_exact(2)
+   |          ^^^^^^^^^^^^^^^ help: consider using `as_chunks` instead: `as_chunks::<2>().0.iter()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#chunks_exact_to_as_chunks
+   = note: `#[warn(clippy::chunks_exact_to_as_chunks)]` on by default
+
+warning: `suprnova-live-fuzz` (bin "async_sequence") generated 1 warning (1 duplicate)
+warning: `suprnova-live-fuzz` (bin "upload_media_header") generated 1 warning (run `cargo clippy --fix --bin "upload_media_header" -p suprnova-live-fuzz -- -D clippy::disallowed_methods` to apply 1 suggestion)
+warning: `suprnova-live-fuzz` (bin "child_parameters") generated 1 warning (1 duplicate)
+warning: `suprnova-live-fuzz` (bin "protocol_v2_response") generated 1 warning (1 duplicate)
+warning: `suprnova-live-fuzz` (bin "directive_contract") generated 1 warning (1 duplicate)
+warning: `suprnova-live-fuzz` (bin "update_request") generated 1 warning (1 duplicate)
+warning: `suprnova-live-fuzz` (bin "update_response") generated 1 warning (1 duplicate)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.77s
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.64s
+     Running tests/browser_contract_properties.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/browser_contract_properties-fd540f4031e7e09c)
+     Running tests/golden_fixtures.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/golden_fixtures-e099ae1e35f60b7e)
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.54s
+     Running tests/checker_negative.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/checker_negative-252d7b89a097df1c)
+     Running tests/checker_positive.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/checker_positive-d634f879ee7a1688)
+     Running tests/checker_regressions.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/checker_regressions-bcdff040a39ccc1e)
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.39s
+     Running tests/compatibility.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/compatibility-b7604550a26e1719)
+     Running tests/protocol_v2.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/protocol_v2-4e508a43df77e918)
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.54s
+     Running tests/security_boundaries.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/security_boundaries-e1a9f9dd1d42a74c)
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.50s
+     Running tests/security_hostile_context.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/security_hostile_context-1666dc557950494e)
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-macros v2.0.2 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.88s
+     Running tests/live_ui.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/live_ui-8305e077f4dbc57d)
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-macros-tests v0.0.0 (/home/shawn/workspace2/scratchpads/suprnova-target/tests/trybuild/suprnova-macros)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.56s
+
+
+test [0m[1mtests/ui/live/pass/all_metadata.rs[0m [should pass] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/pass/minimal.rs[0m [should pass] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/pass/streams.rs[0m [should pass] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/pass/upload_policy.rs[0m [should pass] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/conflicting_model_timing.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/duplicate_action_name.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/duplicate_struct_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/duplicate_url_query.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/event_payload_contract.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/generic_component.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/invalid_action_signature.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/invalid_debounce.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/invalid_name.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/invalid_version.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/misplaced_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/model_locked.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/mount_destructured_parameter.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/mount_reference_parameter.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/no_zero_input_verified_context.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/private_action.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/private_component.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/reference_state.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/refresh_requires_v2.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/secret_url.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/server_only_url.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/session_dehydrated.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/stream_duplicate_event.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/stream_invalid_mode.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/stream_requires_v2.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/stream_unknown_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/transient_url.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/transient_without_model.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/unknown_method_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/unknown_struct_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/unlisted_model_debounce.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/unsupported_protocol.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/unsupported_url_codec.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_duplicate_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_misplaced_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_non_model.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_policy_return.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_policy_signature.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_unknown_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/validation_selection_without_hook.rs[0m [should fail to compile] ... [0m[32mok
+[0m
+
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.08s
+     Running tests/iteration_004_adversarial.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/iteration_004_adversarial-8a021a80cd5f4e87)
+     Running tests/iteration_004_conformance.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/iteration_004_conformance-513cf58a96262a3a)
+     Running tests/iteration_004_exhaustion.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/iteration_004_exhaustion-cc2409993f25d15e)
+    Checking suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+    Checking suprnova-live-test-support v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+    Checking suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+    Checking suprnova-live-macro-fixture v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-macro-fixture)
+    Checking suprnova-macros v2.0.2 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.53s
+    Checking suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+    Checking suprnova-live-macro-fixture v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-macro-fixture)
+    Checking suprnova-live-compile-10 v0.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live/tests/fixtures/compile/10-component)
+    Checking suprnova-live-compile-100 v0.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live/tests/fixtures/compile/100-component)
+    Checking suprnova-live-compile-1 v0.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live/tests/fixtures/compile/1-component)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.26s
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-live-fuzz v0.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live/fuzz)
+    Finished `release` profile [optimized + debuginfo] target(s) in 2.92s
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-live-test-support v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.65s
+     Running tests/reference_host.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/reference_host-8828a016481a9b71)
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-live-test-support v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-live-macro-fixture v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-macro-fixture)
+   Compiling suprnova-macros v2.0.2 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.82s
+     Running unittests src/lib.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/suprnova_live-a1aadb82fa3c5df6)
+     Running tests/action_dispatch.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/action_dispatch-5785259873c1bf91)
+     Running tests/action_outcomes.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/action_outcomes-bfaa6a789397a9b5)
+     Running tests/async_authorization.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/async_authorization-d4fb488703e0e515)
+     Running tests/async_backpressure.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/async_backpressure-6171f5d8af80f9b1)
+     Running tests/async_budget_contract.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/async_budget_contract-120a5f9cd7ac19db)
+     Running tests/async_envelope.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/async_envelope-8a1718f9ebc4d5f7)
+     Running tests/async_metadata.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/async_metadata-89b3a6a2e84b887c)
+     Running tests/async_security.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/async_security-a0a6d58f16439250)
+     Running tests/async_subscription.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/async_subscription-a5d904a1df8581cd)
+     Running tests/async_transport_conformance.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/async_transport_conformance-975e402f4e706961)
+     Running tests/benchmark_contract.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/benchmark_contract-bbb4349a12cc5556)
+     Running tests/binding_metadata.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/binding_metadata-b824ddffe2bf7621)
+     Running tests/browser_contract_properties.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/browser_contract_properties-0b9ddf9accf130a5)
+     Running tests/browser_render_context.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/browser_render_context-e270701fac731ea6)
+     Running tests/canonical_contract.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/canonical_contract-4fb8f08489ab9214)
+     Running tests/canonical_properties.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/canonical_properties-5adb3e5e8c96c2d5)
+     Running tests/checker_negative.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/checker_negative-a31cd03a446b83ac)
+     Running tests/checker_positive.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/checker_positive-682750b89b638d44)
+     Running tests/checker_regressions.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/checker_regressions-2ba4a06e1292f83a)
+     Running tests/child_parameter_envelope.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/child_parameter_envelope-b5de4c7b183adf35)
+     Running tests/child_parameter_properties.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/child_parameter_properties-a36d83614da538c6)
+     Running tests/child_parameter_support.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/child_parameter_support-13786258b0f8c5c8)
+     Running tests/child_parameter_tampering.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/child_parameter_tampering-942c508159dbbdb0)
+     Running tests/child_parameter_v2.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/child_parameter_v2-97cc9c604b9046ff)
+     Running tests/compatibility.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/compatibility-921af4e915a69b2c)
+     Running tests/component_harness.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/component_harness-6c33e289e9666303)
+     Running tests/component_support.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/component_support-cf47cbdb5b5eddfd)
+     Running tests/composition.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/composition-9a3ae931f901006b)
+     Running tests/crypto_contract.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/crypto_contract-17d786a63e91e9b0)
+     Running tests/crypto_rfc_vectors.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/crypto_rfc_vectors-a44c5140c2fdd8a6)
+     Running tests/document_render.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/document_render-eba03b939684acad)
+     Running tests/endpoint_contract.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/endpoint_contract-365a83861c52bdab)
+     Running tests/endpoint_duplicates.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/endpoint_duplicates-3aaf007ca250b8d7)
+     Running tests/endpoint_failures.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/endpoint_failures-bae7e2c5fc1cd6bc)
+     Running tests/endpoint_navigation_target.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/endpoint_navigation_target-af3100d9107bd320)
+     Running tests/error_redaction.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/error_redaction-b267da462d0d1920)
+     Running tests/execution_concurrency.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/execution_concurrency-1293ea9e14db5f1b)
+     Running tests/execution_fault_matrix.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/execution_fault_matrix-708d33572426a31a)
+     Running tests/execution_order.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/execution_order-4967cae0593cb889)
+     Running tests/fuzz_regressions.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/fuzz_regressions-6b100a5848551957)
+     Running tests/golden_fixtures.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/golden_fixtures-fb345e2e9ee7907e)
+     Running tests/hostile_adapter.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/hostile_adapter-acf52d573f3d434e)
+     Running tests/idempotency_digest.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/idempotency_digest-8fa70dd5411faa40)
+     Running tests/initial_mount.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/initial_mount-5344338d780190f6)
+     Running tests/initial_mount_failures.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/initial_mount_failures-5c97983524a0a064)
+     Running tests/integrated_workspace.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/integrated_workspace-a2c572b27049989c)
+     Running tests/island_render.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/island_render-bc0a44284af4ac78)
+     Running tests/iteration_004_adversarial.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/iteration_004_adversarial-5115f1f0b95aad16)
+     Running tests/iteration_004_conformance.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/iteration_004_conformance-b9dbe1b2a74f633e)
+     Running tests/iteration_004_exhaustion.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/iteration_004_exhaustion-e1e348dc77acd6be)
+     Running tests/lazy_components.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/lazy_components-f1f5a817a15ecd69)
+     Running tests/ledger_claims.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/ledger_claims-b6264ad045ff3e8e)
+     Running tests/ledger_concurrency.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/ledger_concurrency-70ca9cc9d0c6543c)
+     Running tests/ledger_distributed.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/ledger_distributed-cabbf7583d4828a5)
+     Running tests/ledger_expiry.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/ledger_expiry-176a61eb9312f5a5)
+     Running tests/ledger_mounts.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/ledger_mounts-2fd9b0a2ebfce03d)
+     Running tests/ledger_record.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/ledger_record-b1a916f195d0955f)
+     Running tests/ledger_support.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/ledger_support-7d01900d3c76483a)
+     Running tests/lifecycle_failures.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/lifecycle_failures-ceaefbb1cb17e26a)
+     Running tests/lifecycle_order.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/lifecycle_order-d2e001ea1375cd2d)
+     Running tests/metadata_contract.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/metadata_contract-5775d9f46518bd8d)
+     Running tests/model_binding.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/model_binding-9d2d72e082aeb508)
+     Running tests/model_binding_properties.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/model_binding_properties-4f654b15c39003e7)
+     Running tests/mounted_document_path.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/mounted_document_path-d2b6351f9f2e2086)
+     Running tests/parser_properties.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/parser_properties-a8bc4b0aa31299d8)
+     Running tests/promotion_support.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/promotion_support-1c571bc40f697b75)
+     Running tests/protocol_support.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/protocol_support-31e196d24c80762c)
+     Running tests/protocol_v2.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/protocol_v2-4249831030c8f364)
+     Running tests/public_seed_mount.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/public_seed_mount-a7f766a0a5b5c5de)
+     Running tests/registry_contract.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/registry_contract-4c99f0d11b1a6dcb)
+     Running tests/render_cache_coherence.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/render_cache_coherence-0c808232f0058614)
+     Running tests/render_cache_entry.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/render_cache_entry-294b8dd8ab4d9b7f)
+     Running tests/render_cache_generation.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/render_cache_generation-f233a2ddd28b3b52)
+     Running tests/render_cache_hot.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/render_cache_hot-0c296946d548e75d)
+     Running tests/render_cache_key.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/render_cache_key-8c1bc908d67c5b71)
+     Running tests/render_cache_lease.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/render_cache_lease-9050bc4ba7cc5f54)
+     Running tests/render_cache_policy.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/render_cache_policy-af6456b3e0868eda)
+     Running tests/render_cache_singleflight.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/render_cache_singleflight-ea4e8c0440bf9f98)
+     Running tests/render_cache_store.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/render_cache_store-ebf2f1fd48095953)
+     Running tests/render_cache_store_conformance.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/render_cache_store_conformance-53b75383da7cdc28)
+     Running tests/render_cache_variance.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/render_cache_variance-3367d3edc0417367)
+     Running tests/request_protocol.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/request_protocol-8df187c2b67f1043)
+     Running tests/resource_foundation.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/resource_foundation-49485396847832a2)
+     Running tests/response_ordering.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/response_ordering-639b7e77a14b5f5b)
+     Running tests/response_protocol.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/response_protocol-fdad09b863b456d4)
+     Running tests/runtime_artifacts.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/runtime_artifacts-3090daca9f4e6c79)
+     Running tests/security_boundaries.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/security_boundaries-f01910ed038365cd)
+     Running tests/security_hostile_context.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/security_hostile_context-2eba17f743f9226f)
+     Running tests/seed_promotion.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/seed_promotion-22daa4e2a3491620)
+     Running tests/seed_promotion_concurrency.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/seed_promotion_concurrency-a19c29902f713eba)
+     Running tests/seed_promotion_limits.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/seed_promotion_limits-677172f2be883b65)
+     Running tests/snapshot_composition.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/snapshot_composition-ea68672b3f4cdd54)
+     Running tests/snapshot_schema.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/snapshot_schema-229e215dbc1bc5fc)
+     Running tests/snapshot_state.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/snapshot_state-64e89ce98cb2dd6f)
+     Running tests/snapshot_support.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/snapshot_support-2e398477ba08b7e5)
+     Running tests/snapshot_tampering.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/snapshot_tampering-c60dabb9d95d6d68)
+     Running tests/state_categories.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/state_categories-e7d2a7fc0244017a)
+     Running tests/successor_island_render.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/successor_island_render-468d82312708cff7)
+     Running tests/trusted_context.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/trusted_context-f98067c443cec9bb)
+     Running tests/trusted_markup.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/trusted_markup-7fc96ec73e17d9cd)
+     Running tests/upload_budget_contract.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/upload_budget_contract-c77d28cac192d9ad)
+     Running tests/upload_cleanup.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/upload_cleanup-a7f527f21ffe4640)
+     Running tests/upload_direct_provider.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/upload_direct_provider-0a6d0be3fe20f5ca)
+     Running tests/upload_file_provider.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/upload_file_provider-2b45e0db0035e40f)
+     Running tests/upload_finalization.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/upload_finalization-0f27b0d2625f6edd)
+     Running tests/upload_framework_budget_integrity.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/upload_framework_budget_integrity-9bca47b8947feb29)
+     Running tests/upload_identity.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/upload_identity-7b589b8a354d52d8)
+     Running tests/upload_protocol.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/upload_protocol-806c611813c918e0)
+     Running tests/upload_security.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/upload_security-0c5550237d26dab5)
+     Running tests/upload_service.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/upload_service-f9a682fd42244e92)
+     Running tests/upload_state.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/upload_state-502fc952d40ca6f6)
+     Running tests/upload_validation.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/upload_validation-587a696ea39db0e7)
+     Running tests/validation.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/validation-6eb486db27f9ec2c)
+     Running tests/view_charts.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/view_charts-6df042a8081bb722)
+     Running tests/view_contract.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/view_contract-78419d1d01c65168)
+     Running tests/view_escaping.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/view_escaping-409b8abccd60fbdc)
+     Running tests/view_live_key.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/view_live_key-ad60fea8a3fb936d)
+     Running tests/workspace_contract.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/workspace_contract-95e9962d531b4a8c)
+     Running benches/action_framework_budget.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/action_framework_budget-9e1304f5c041b8ce)
+     Running benches/async_framework_budget.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/async_framework_budget-52a8073077564894)
+     Running benches/render_cache_budget.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/render_cache_budget-abccc1f2b8b0b17b)
+     Running benches/snapshot_budget.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/snapshot_budget-40a5f5c02f159ffd)
+     Running benches/upload_framework_budget.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/upload_framework_budget-f95fa1727f849550)
+     Running unittests src/lib.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/suprnova_live_macro_fixture-b76e15a799873031)
+     Running unittests src/lib.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/suprnova_live_test_support-4c185e77ce9339d1)
+     Running unittests src/bin/async-reference-host.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/async_reference_host-69dc542fbc653299)
+     Running unittests src/bin/correctness-delay-rust-parser.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/correctness_delay_rust_parser-cae08ba13e9253df)
+     Running unittests src/bin/suprnova-live-reference-host.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/suprnova_live_reference_host-7650fcf71d50b18e)
+     Running tests/reference_host.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/reference_host-5c1b67fa59854298)
+     Running unittests src/lib.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/suprnova_macros-5921c2880cc6e39f)
+     Running tests/data_derive.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/data_derive-c2264d95cbcaf82d)
+     Running tests/live_ui.rs (/home/shawn/workspace2/scratchpads/suprnova-target/debug/deps/live_ui-0839ce93725bc0e6)
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-macros-tests v0.0.0 (/home/shawn/workspace2/scratchpads/suprnova-target/tests/trybuild/suprnova-macros)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.71s
+
+
+test [0m[1mtests/ui/live/pass/all_metadata.rs[0m [should pass] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/pass/minimal.rs[0m [should pass] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/pass/streams.rs[0m [should pass] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/pass/upload_policy.rs[0m [should pass] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/conflicting_model_timing.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/duplicate_action_name.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/duplicate_struct_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/duplicate_url_query.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/event_payload_contract.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/generic_component.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/invalid_action_signature.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/invalid_debounce.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/invalid_name.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/invalid_version.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/misplaced_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/model_locked.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/mount_destructured_parameter.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/mount_reference_parameter.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/no_zero_input_verified_context.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/private_action.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/private_component.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/reference_state.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/refresh_requires_v2.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/secret_url.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/server_only_url.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/session_dehydrated.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/stream_duplicate_event.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/stream_invalid_mode.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/stream_requires_v2.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/stream_unknown_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/transient_url.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/transient_without_model.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/unknown_method_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/unknown_struct_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/unlisted_model_debounce.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/unsupported_protocol.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/unsupported_url_codec.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_duplicate_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_misplaced_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_non_model.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_policy_return.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_policy_signature.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/upload_unknown_helper.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/ui/live/fail/validation_selection_without_hook.rs[0m [should fail to compile] ... [0m[32mok
+[0m
+
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-live-test-support v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling suprnova-live-macro-fixture v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-macro-fixture)
+   Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.84s
+   Doc-tests suprnova_live
+   Doc-tests suprnova_live_macro_fixture
+   Doc-tests suprnova_live_test_support
+   Doc-tests suprnova_macros
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.13s

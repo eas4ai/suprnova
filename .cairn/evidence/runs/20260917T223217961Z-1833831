@@ -1,0 +1,25 @@
+mechanism: live-gate
+commit: e9684ff300f811fa17d43e13176f97d9974c886c
+inputs_digest: sha256:1d018f8e5d1fdb3980aa4a6275ebcd2c6e11a471e3a238f2e42eb48c447fa4cd
+mechanism_digest: sha256:edfe7c2f034bb8abb17c3f0e8a172cfcbcb8d13ed3eb0442a35b9f5f8509945c
+kernel_digest: sha256:160c9a5b8ec13386549cffdd26241209b59c4eb8645da1fe5f13eff7bb81e37c
+inputs_detail: .cairn/evidence/runs/20260917T223217961Z-1833831.inputs.json
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 crates/suprnova-live/scripts/gate.sh
+cwd: .
+exit: 1
+output_digest: sha256:0d038e256d175d11f9db51d88732f5818b1c241ecba66833103803bb8185f3e2
+output: .cairn/evidence/runs/20260917T223217961Z-1833831.out
+stderr_output: .cairn/evidence/runs/20260917T223217961Z-1833831.err
+stderr_digest: sha256:4baa1cfbbf4baf21125fafd6eb8441d73eb3140debcae6ac20a37cbde468e877
+signal: none
+execution_error: null
+recorded: 2026-09-17T22:40:42.319Z
+results:
+  - LIVE-010 fail exit sha256:63a15e98e94abc92a02ba85b7ab1ab8953379c7b400d8adefc7fdf9e5d4d986e 28 sha256:02051bce03ce96acc691317ef85d61779bf038fe4aa66065a6531ccbf86c18e8
+  - LIVE-011 fail exit sha256:9557af502269ae26b5f2b655a7d5bd427d76e7495a7e7e6ff7aa836662e5d707 28 sha256:dafb3e41b4dcbcb964e0cc57904feed9a4463dd8d2dbef47b507ef22f0c56a99
+  - LIVE-012 fail exit sha256:9e1c206920884ae5656b6b8ce5da73ea86166161ffd889122feefeac2418c76a 28 sha256:b0a5a30bfd9b6b0459b6100b74dc20653ab6f461f11dc2908f547522608d2f3c
+  - UI-008 fail exit sha256:1e06b8e54603c5a8f1a662a5a843bf468cb89097bf545f4e34ba43aae6838547 28 sha256:1fc8ff3d76b557f86d4dde0f2adadea8858ccbbc3535099b46f250283b462dcd
+  - UI-012 fail exit sha256:193dcfbf8864acb35b56a5ef631186a1ee6dd3598a83005b7b5deecff771ba4d 28 sha256:08753ab56df54395232ffe035c56c0e8a42da495dde55d9ca4effe9850f23dec
+  - OVL-005 fail exit sha256:d072997edd88bd9c6ff9226197eb41c9a58d61b18235b324d9bfdcecdfdb2f67 23 sha256:3caef4dd559711b1908ca6e330a60a74292566e1223de5126650c5077ebdf61e
+  - FDB-004 fail exit sha256:4d76e1da5fdb25765f61d4ce96fb295c9847e6134cae4fc09e6b12ca38e3cd8c 22 sha256:ccb0d938cc97388f5da2639d20b212d9ac04466a291da7d64febd253e7773005
+  - NAV-003 fail exit sha256:d69bcaaabf98ce95da331101a51fa9cb228febd22f507dc69f8916c608c6872a 22 sha256:fb20d780f6024a1f80f1512220130963ea5d08618db53fbd223983b576d6ef71
