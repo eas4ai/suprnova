@@ -499,7 +499,12 @@ async fn form_009_the_form_gallery_renders_the_island_values_into_its_controls()
     let html = get(&app, "/live/forms", Some(&session)).await.text();
     let gallery = island_tag(&html, "forms-gallery");
     let island = &html[html.find(gallery).expect("gallery island")..];
-    for (id, value) in [("quantity", "1"), ("volume", "50"), ("email", ""), ("query", "")] {
+    for (id, value) in [
+        ("quantity", "1"),
+        ("volume", "50"),
+        ("email", ""),
+        ("query", ""),
+    ] {
         let tag = tag_with_id(island, id);
         assert!(
             tag.contains(&format!(" value=\"{value}\"")),
@@ -507,9 +512,15 @@ async fn form_009_the_form_gallery_renders_the_island_values_into_its_controls()
         );
     }
     assert!(island.contains("<output class=\"sn-slider-value\" for=\"volume\">50</output>"));
-    assert!(island.contains("live:model=\"bio\">\n</textarea>"), "{island}");
+    assert!(
+        island.contains("live:model=\"bio\">\n</textarea>"),
+        "{island}"
+    );
     for unset in [" checked", " selected", "data-suprnova-live-authoritative"] {
-        assert!(!island.contains(unset), "nothing mounted carries {unset}: {island}");
+        assert!(
+            !island.contains(unset),
+            "nothing mounted carries {unset}: {island}"
+        );
     }
 
     let mut sequence = 0;
@@ -604,19 +615,27 @@ async fn form_009_the_form_gallery_renders_the_island_values_into_its_controls()
     ] {
         assert!(rendered.contains(needle), "missing {needle} in {rendered}");
     }
-    assert!(!rendered.contains("data-suprnova-live-authoritative"), "{rendered}");
+    assert!(
+        !rendered.contains("data-suprnova-live-authoritative"),
+        "{rendered}"
+    );
 
     let reset = run("reset", serde_json::json!({}), saved["snapshot"].clone()).await;
     let rendered = reset["render"]["html"].as_str().unwrap_or_default();
     assert_eq!(
-        rendered.matches(" data-suprnova-live-authoritative=\"1\"").count(),
+        rendered
+            .matches(" data-suprnova-live-authoritative=\"1\"")
+            .count(),
         12,
         "every value control of the reset render is authoritative: {rendered}"
     );
     let quantity = tag_with_id(rendered, "quantity");
     assert!(quantity.contains(" value=\"1\""), "{quantity}");
     for unset in [" checked", " selected"] {
-        assert!(!rendered.contains(unset), "the reset clears {unset}: {rendered}");
+        assert!(
+            !rendered.contains(unset),
+            "the reset clears {unset}: {rendered}"
+        );
     }
 
     let after = run("save", serde_json::json!({}), reset["snapshot"].clone()).await;
