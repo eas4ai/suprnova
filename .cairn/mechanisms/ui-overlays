@@ -4,6 +4,8 @@ inputs:
   - .cairn/tools/ui-overlays.mjs
   - crates/suprnova-live/components/
   - app/templates/live/
+reviewed:
+  - OVL-002 sha256:7ef7f0ca268a3e91c4fd96f81815c7c217c29e6e676ae37412ef320cd02ed405
 requirements:
   - OVL-001
   - OVL-002
