@@ -15,15 +15,15 @@ examined:
 findings:
   - resolved: The first `cairn check` found `live:check` at the branch limit on both galleries: every value control's `{% if %}` doubled the branch states, so any real form built on FORM-009's macros would fail the check. The checker now expands a conditional that renders only `checked`, `selected` or the correction marker once, because no check reads them; anything else still branches, and a regression pins both sides.
   - resolved: The draft dogfood cases for FORM-010 and the reset passed without the keys or the authority marker, because every gallery control sends its update as the user edits. The cases now hold a request on its way to open the window a selection is unanswered in, and use an edit the island refuses for the reset; both fail on a build without the fix.
-  - resolved (review D1): a checkbox group rendered with one option proposed a boolean, which LIVE-031 then refused, so an untouched submit could never run. The group marks its boxes and the runtime reads a marked box as a list member.
-  - resolved (review D2): `live:add --manifest manifest.json` failed on the empty parent path.
-  - resolved (review D3): the textarea macro lost a leading line feed to the HTML parser.
-  - resolved (review R1): the symlink check and the read named the file twice; the read now goes through one handle that must be the checked file on Unix. The race itself is not reproducible in a test; the symlink cases cover the check.
-  - resolved (review R2): the gradient indicator vanished under forced colors; the select returns to its native indicator there.
-  - resolved (review R3, N1, N2, N4, N5, N6): the instanced action path is covered, the bag bound follows the engine, shadowing is per arm, the digest key is measured at 33 bytes, the install record follows each write, and `try_live_ui_assets` itself is tested.
-  - resolved (review N3, in part): ids are judged per island and not inside `template`; a literal id inside a loop stays refused, because the checker cannot tell that an element in a loop renders once, and the manual says so.
+  - resolved: Review D1: a checkbox group rendered with one option proposed a boolean, which LIVE-031 then refused, so an untouched submit could never run. The group marks its boxes and the runtime reads a marked box as a list member.
+  - resolved: Review D2: `live:add --manifest manifest.json` failed on the empty parent path.
+  - resolved: Review D3: the textarea macro lost a leading line feed to the HTML parser.
+  - resolved: Review R1: the symlink check and the read named the file twice; the read now goes through one handle that must be the checked file on Unix. The race itself is not reproducible in a test; the symlink cases cover the check.
+  - resolved: Review R2: the gradient indicator vanished under forced colors; the select returns to its native indicator there.
+  - resolved: Review R3, N1, N2, N4, N5, N6: the instanced action path is covered, the bag bound follows the engine, shadowing is per arm, the digest key is measured at 33 bytes, the install record follows each write, and `try_live_ui_assets` itself is tested.
+  - resolved: Review N3, in part: ids are judged per island and not inside `template`; a literal id inside a loop stays refused, because the checker cannot tell that an element in a loop renders once, and the manual says so.
   - resolved: The Live gate's correctness-delay scanner refused the new component case files: a dynamic tag name in the dialog, sheet and drawer fixtures, and the `setTimeout` deadline that bounds a step a frozen renderer never finishes. The fixtures are literal, and the deadline carries the scanner's watchdog exception; Playwright's own action timeouts cannot interrupt a frozen renderer (the FORM-011 case hung past five minutes without it).
-  - recorded: `.cairn/backlog/the-browser-runtime-drops-an-edit-equal-to-its-last-proposal-after-a-server-render-changed-the-control.md`, found while proving the reset.
+  - resolved: Captured in the backlog, outside this commitment: `.cairn/backlog/the-browser-runtime-drops-an-edit-equal-to-its-last-proposal-after-a-server-render-changed-the-control.md`, found while proving the reset.
 
 ## Build review, 2026-09-17
 
