@@ -98,3 +98,54 @@ suppression; Playwright per engine.
 Reading: tag/token input is out of the built-in set (Live spec 21,
 revision of 2026-09-13); the combobox ships single-value.
 Status: Agreed 2026-09-15
+
+[FORM-009] The form-family macros MUST render the island's current value
+of each bound field into its control: the value of an input, a range, and
+a textarea, the checked state of a checkbox, a switch, and a radio, and
+the selected state of a select option.
+Falsifier: the dogfood form gallery mounts a quantity of 1 and its number
+input renders empty, or a submit that changed no control proposes a value
+other than the one the island holds.
+Evidence: the review of 2026-09-17 found that no macro under
+`crates/suprnova-live/components/` takes a value, so an untouched Save of
+the form gallery proposed an empty bio and country, newsletter false,
+quantity null, and volume 50, and the gallery's reset action left typed
+values on screen.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: FORM-001; Live spec 03, binding.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment
+
+[FORM-010] A radio group and a checkbox group MUST keep a selection the
+user has not yet sent across a re-render of their island.
+Falsifier: a checked topic box of the dogfood form gallery is cleared by a
+model update of another field of the island.
+Evidence: group inputs carry no id or key, so
+`crates/suprnova-live/browser/src/continuity/forms.ts` never captures them,
+and the macros render no checked state.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: FORM-001; Live spec 12, control continuity.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment
+
+[FORM-011] The combobox MUST stay responsive while its input holds text
+that no option matches.
+Falsifier: typing a query that matches no option into the combobox leaves
+the page unable to run a script within three seconds.
+Evidence: the combobox's MutationObserver watches the listbox's hidden
+attribute that its own render rewrites, and an attribute write queues a
+record even when the value is unchanged
+(`crates/suprnova-live/components/combobox/combobox.js`).
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: FORM-008.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment
+
+[FORM-012] The combobox MUST show every option of a listbox the server
+rendered for the text its input holds.
+Falsifier: a listbox rendered for the query "sao" whose only option is a
+name that does not contain "sao" shows no option while the input holds
+"sao".
+Evidence: `combobox.js` filters options by substring even when the
+listbox's `data-sn-query` equals the input, which hides the results of an
+accent-insensitive, synonym, code, or fuzzy server search.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: FORM-008.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment

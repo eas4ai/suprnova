@@ -234,3 +234,60 @@ Falsifier: a document that never opted in serves a library base in its
 bootstrap markup.
 Mechanism: a framework test beside `framework/tests/live/assets.rs`.
 Status: Agreed 2026-09-13
+
+[UI-020] A library custom element MUST keep one set of listeners and
+observers however often a morph moves or reconnects it.
+Falsifier: after the element is moved in the document, one click on the
+password reveal toggles twice and leaves the input a password field.
+Evidence: the combobox, input OTP, date picker, and password input
+elements bind in `connectedCallback` with no guard, and the dialog, sheet,
+and drawer guard on a host attribute a morph removes; idiomorph moves a
+persistent-id node with `moveBefore` or `insertBefore`.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: UI-018; Live spec 12, morph identity.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment
+
+[UI-021] The framework MUST serve every vendored component stylesheet and
+script to an application started outside its project directory, or refuse
+to start while a mounted component asset route cannot read its directory.
+Falsifier: an application whose working directory holds no templates
+directory answers 404 for a vendored component script and starts cleanly.
+Evidence: `Router::try_live_ui_assets` reads the vendored files from the
+working directory on every request (`framework/src/live/ui_assets.rs`),
+while views are compiled in and runtime artifacts are embedded; the
+scaffold Dockerfile's runtime image holds only the binary and `public/`.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: UI-008, UI-017.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment
+
+[UI-022] The `live:add` command MUST replace an installed file the
+application has not edited when the shipped file changes.
+Falsifier: after an unedited install of an older shipped component,
+adding the current one keeps the older file or reports it edited locally.
+Evidence: `suprnova-cli/src/commands/live_add.rs` compares the existing
+bytes with the new bytes only and records no installed version.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: UI-017.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment
+
+[UI-023] The `live:add` command MUST refuse to install a third-party
+component whose named file is a symbolic link or resolves outside the
+directory that holds its manifest.
+Falsifier: a component whose script is a symbolic link to a file outside
+its directory installs that file's bytes.
+Evidence: `live_add.rs` reads each third-party file with
+`fs::read_to_string`, which follows symbolic links.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: UI-017.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment
+
+[UI-024] The base layer MUST draw the select's dropdown indicator in the
+scheme's text color, in the light and the dark scheme.
+Falsifier: in the dark scheme the indicator draws in black on the dark
+surface.
+Evidence: `crates/suprnova-live/browser/src/styles/suprnova-ui.css` draws
+it as a data-URI SVG, whose `currentColor` does not inherit the document's
+color.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: UI-001, UI-002.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment

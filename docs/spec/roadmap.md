@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: live-protocol-bounds
+Current: live-library-review-remediation
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -124,6 +124,18 @@ components in waves, the advanced components last, the datatable closing.
    promoted on escalation `live-027` after the dogfood save form's ten
    fields never submitted (`live.md` LIVE-028 to LIVE-030,
    `docs/commitments/live-protocol-bounds.md`).
+
+12. live-library-review-remediation - the adversarial review of Live and
+   the component library before the 2.1.0 release found eighteen defects,
+   among them a combobox that freezes the page, form macros that render no
+   island state, undecodable proposals dropped with an accepted outcome, and
+   keys the checker proves and the runtime refuses; promoted on the
+   developer's direction of 2026-09-17 (`component-library-forms.md` FORM-008
+   to FORM-012, `component-library-feedback.md` FDB-007,
+   `component-library-navigation.md` NAV-007, `component-library-overlays.md`
+   OVL-007, `component-library-data-display.md` DATA-006,
+   `component-library-foundations.md` UI-020 to UI-024, `live.md` LIVE-031
+   to LIVE-036, `docs/commitments/live-library-review-remediation.md`).
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

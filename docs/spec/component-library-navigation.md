@@ -76,3 +76,13 @@ page.
 Mechanism: the navigation tool over the shipped views; a morph fixture
 under `crates/suprnova-live/browser/tests/`.
 Status: Agreed 2026-09-14
+
+[NAV-007] A local tabs instance MUST select only its own tabs and panels,
+whether another tabs instance is nested inside it or around it.
+Falsifier: clicking a tab of local tabs nested in a panel of another local
+tabs instance hides that outer panel.
+Evidence: `crates/suprnova-live/components/tabs/tabs.js` selects every
+descendant tab and handles the events that bubble from a nested instance.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: NAV-002.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment

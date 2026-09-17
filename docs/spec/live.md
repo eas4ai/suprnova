@@ -336,3 +336,78 @@ Evidence: the island transport caught the request builder's
 Mechanism: `.cairn/mechanisms/live-protocol-bounds`.
 Refines: Live spec 11, feedback states; spec 06.
 Status: Agreed 2026-09-16
+
+[LIVE-031] The framework MUST answer a model proposal its field cannot
+decode with a validation error on that field. The framework MUST NOT run
+the requested action after such a proposal.
+Falsifier: a proposal of null for a u64 model field, or of a boolean for a
+list field, returns an accepted outcome with no validation entry, or the
+action runs.
+Evidence: `suprnova-macros/src/live/component.rs` discards each
+proposal's application result and `framework/src/live/action.rs` never
+reads the batch's binding issues; the dogfood form gallery's Save answered
+accepted with empty validation for quantity null and topics false.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: Live spec 03, invalid conversions produce field-level binding
+errors.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment
+
+[LIVE-032] The browser runtime MUST propose the list of checked values
+for a model field that more than one checkbox binds.
+Falsifier: checking two boxes of the dogfood form gallery's topic group
+proposes a boolean.
+Evidence: `crates/suprnova-live/browser/src/models/control.ts` reads each
+checkbox as its checked state, and a group whose boxes disagree reads as
+`control_unsupported`.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: Live spec 03, HTML control semantics map predictably to Rust
+values.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment
+
+[LIVE-033] The checker, the `live_key` filter, and the browser runtime
+MUST accept the same stable-key alphabet.
+Falsifier: a key the checker and the filter accept, such as "-1" or
+"_draft", makes the runtime refuse the island's morph.
+Evidence: `crates/suprnova-live/src/checker/html.rs` and
+`crates/suprnova-live/src/view/live_key.rs` accept a leading underscore,
+hyphen, dot, or colon, which `SAFE_KEY` in
+`crates/suprnova-live/browser/src/morph/keys.ts` refuses.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: LIVE-024, LIVE-025.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment
+
+[LIVE-034] The checker and the browser runtime MUST agree on the element
+ids an island may hold.
+Falsifier: a view whose island holds the id "_top" or "user[email]" passes
+`live:check` and its first morph fails.
+Evidence: `keys.ts` validates every id inside an island with `SAFE_KEY`,
+and the checker only records ids for teleport targets.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: LIVE-025.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment
+
+[LIVE-035] The framework MUST provide a view filter that turns any value
+into a stable key the checker and the browser runtime accept, one value
+always yielding the same key. The manual MUST say that a loop key the
+`live_key` filter refuses fails its island's render.
+Falsifier: no shipped filter can key a datatable row by an email address,
+or the manual omits the render failure.
+Evidence: the `live_key` filter returns an error for any byte outside its
+alphabet, so one row keyed by an address containing @ fails the island for
+every viewer.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: LIVE-024; DATA-005.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment
+
+[LIVE-036] The checker MUST check a name that a loop or a match arm binds
+inside a macro body as that binding, not as a macro parameter of the same
+name.
+Falsifier: a macro with a parameter `name` whose body writes
+`live:model` from `name` inside `for name in names`, called with a literal
+argument, is proved.
+Evidence: `crates/suprnova-live/src/checker/branch.rs` keeps a call's
+argument bindings inside loop bodies (`expand_loop`), while Askama renders
+the loop's own values.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: LIVE-025.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment

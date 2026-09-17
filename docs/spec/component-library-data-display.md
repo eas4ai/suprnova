@@ -72,3 +72,14 @@ in the URL, or a row mounts its own island.
 Mechanism: an `app/tests/` end-to-end case through `handle_request`;
 `.cairn/mechanisms/ui-live-check`.
 Status: Agreed 2026-09-15
+
+[DATA-006] The chart renderer MUST return an error instead of panicking
+for any series of finite values.
+Falsifier: a call to `render_chart` with a value of 1e12 panics.
+Evidence: charts-rs 1.0.0 overflows in `src/charts/util.rs` for values
+from 1e12, and `crates/suprnova-live/src/view/charts.rs` checks only that
+each value is finite.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: DATA-004; the house rule that public-surface code returns a
+Result and does not panic.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment

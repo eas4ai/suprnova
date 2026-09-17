@@ -71,3 +71,16 @@ or an unkeyed one persists across a replaced region.
 Mechanism: the morph continuity fixtures under
 `crates/suprnova-live/browser/tests/` extended with overlay cases.
 Status: Agreed 2026-09-14
+
+[OVL-007] The tooltip MUST keep its bubble visible while the pointer
+moves from the trigger onto the bubble.
+Falsifier: the bubble hides once the pointer moves from the trigger onto
+it.
+Evidence: `crates/suprnova-live/components/tooltip/tooltip.css` sets
+`pointer-events: none` on the bubble.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: OVL-002; Live spec 23, tooltips; WCAG 2.2 success criterion
+1.4.13.
+Reading: dismissing the bubble without moving the pointer or focus needs
+script, which OVL-002 excludes; that change waits in next-iteration.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment

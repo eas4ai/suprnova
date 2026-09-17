@@ -75,3 +75,14 @@ an element other than `progress`, an indeterminate instance carries a
 Mechanism: the feedback tool over the shipped views;
 `.cairn/mechanisms/ui-live-check`.
 Status: Agreed 2026-09-14
+
+[FDB-007] The toast region MUST hold a toast's timer while the pointer is
+over any part of that toast or focus is inside it.
+Falsifier: the pointer moves from a toast's text to its padding and the
+toast times out while the pointer stays over it, or the toast hides while
+its dismiss button has focus.
+Evidence: `crates/suprnova-live/components/toast/toast.js` resumes the
+timers on a pointerleave captured from any descendant of the region.
+Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Refines: FDB-004; Live spec 24, toasts.
+Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment
