@@ -358,7 +358,9 @@ export class ModelFormRuntime {
 
   #connectedGroups(record: IslandRecord): Map<string, ModelBinding[]> {
     return groupBindings(
-      [...(this.#byIsland.get(record) ?? [])].filter((binding) => binding.owned.element.isConnected),
+      [...(this.#byIsland.get(record) ?? [])].filter(
+        (binding) => binding.owned.element.isConnected,
+      ),
     );
   }
 
