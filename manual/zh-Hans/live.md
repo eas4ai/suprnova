@@ -49,6 +49,7 @@ impl Counter {
   接受来自浏览器的提议。
   模型字段在属性上声明其时机，例如 `#[model(debounce = 250)]`；防抖时长为 100、250 或 500 毫秒，即 `live:model.debounce.<n>ms` 接受的时长，其他任何值都无法编译。
   以 `live:submit` 提交的表单会在一个请求中提出其中每个模型控件，该请求除动作外最多携带 127 个字段；更大的表单会被 `live:check` 拒绝。
+  字段无法解码的提议，例如 `u64` 字段收到的空数字，是该字段上的校验错误：动作不会执行，字段保留其值，并由 `live:error` 显示该错误。
 - `#[action]` 方法是浏览器唯一可以调用的入口。它们接收经过验证的参数，并可返回重定向或 flash 等类型化结果。
 
 每个字段类型都必须实现 `Default`；除非挂载钩子另有指定，新岛屿从这些默认值开始。
@@ -67,7 +68,7 @@ impl Counter {
 
 指令使用封闭的 `live:` 语法：`live:click`、`live:submit`、`live:model`、
 `live:upload`、`live:key`、`live:loading` 以及文档记录的其余集合。检查器针对组件证明每一条指令：未知的动作、未知的模型字段、原始的 `safe` 过滤器或无障碍违规都会使 `live:check` 失败，并给出文件、行和列。
-`live:key` 命名元素跨 morph 的稳定身份，是模板书写的唯一键属性：运行时为 morph 身份、`live:preserve.self` 这类 morph 控制以及保留浏览器状态的作用域读取它；`data-suprnova-live-key` 是引擎在其渲染的根上使用的自有写法。
+`live:key` 命名元素跨 morph 的稳定身份，是模板书写的唯一键属性：运行时为 morph 身份、`live:preserve.self` 这类 morph 控制以及保留浏览器状态的作用域读取它；`data-suprnova-live-key` 是引擎在其渲染的根上使用的自有写法。岛内的 `live:key` 值和元素 ID 使用同一套字母表，即运行时在每次 morph 时检查的那一套：首字符为 ASCII 字母或数字，其后为字母、数字、`_`、`-`、`.` 和 `:`，最多 128 字节，且在岛内各自唯一。`live:check` 会拒绝超出该字母表的字面量键或 ID，以及被循环重复的 ID。
 
 放置岛屿的文档是用 `#[suprnova::view]` 声明的普通视图；它们接受的唯一未转义值是通过 `trusted_html` 过滤器传入的 `TrustedHtml`。
 
@@ -350,7 +351,7 @@ suprnova live:add field
 suprnova live:add password-input
 ```
 
-你编辑过的文件在后续运行中会被保留；`--force` 会替换它。第三方组件通过 `--manifest` 从自己的清单安装到自己的根目录下。在视图中调用这些宏，用 `try_live_ui_assets()` 提供打包进来的样式表与脚本，并在文档中链接它们：
+`live:add` 会记录它写入的每个文件的摘要，因此之后的运行会在库更改某个从未被编辑过的文件时替换该文件，保留已被编辑过的文件并如实报告；`--force` 也会替换已编辑的文件。第三方组件通过 `--manifest` 从自己的清单安装到自己的根目录下，清单列出的每个文件都必须是清单目录内的普通文件，绝不能是符号链接。在视图中调用这些宏，用 `try_live_ui_assets()` 提供打包进来的样式表与脚本，并在文档中链接它们：
 
 ```html
 {% import "suprnova-ui/field/field.html" as field %}
@@ -360,7 +361,16 @@ suprnova live:add password-input
 {% endcall %}
 ```
 
+`try_live_ui_assets()` 在每次请求时从应用基础路径下的 `templates/suprnova-ui/` 读取文件，因此请将该目录与二进制文件一起分发，并从包含它的目录启动应用，或将 `APP_BASE_PATH` 设为该目录。该目录无法读取时，应用会拒绝启动并指出该目录。
+
 检查器会展开这些宏，所以 `live:check` 能像证明任何其他视图一样证明库视图。目前的表单家族包括：字段、标签、输入框、文本域、数字输入、滑块、搜索输入、带显示切换的密码输入、复选框与复选框组、单选组、开关、下拉选择、按钮与链接按钮、按钮组、fieldset、表单操作栏、校验摘要以及文件输入。库组件命名为 `suprnova.*`，注册表会拒绝来自任何其他 crate 的该前缀；自定义元素位于 light DOM 并带有 `sn-` 前缀。
+
+每个值控件都接收岛的当前值，因此页面会显示该值，未做任何更改的提交会原样发回它：输入框、文本域、数字输入、滑块、搜索输入和日期选择器使用 `value=`，复选框和开关使用 `checked=`，下拉选择、单选组和复选框组使用 `selected=`，其中复选框组接收已勾选值的列表。密码和一次性验证码从不渲染其值。单选组和复选框组的输入以值作为键，因此用户尚未发送的选择能在重新渲染后保留。由多个复选框绑定的字段会作为已勾选值的列表提出，只有一个复选框的组则作为布尔值提出。必须替换用户已输入内容的渲染（例如响应重置的那次渲染）会把一个序列号作为 `authority=` 传入，下一次渲染则不传：
+
+```html
+{% call input::input("email", kind="email", value=email, authority=authority) %}{% endcall %}
+{% call checkbox::checkbox_group("topics", "Topics", topic_options, topics) %}{% endcall %}
+```
 
 浮层一族建立在同样的基础之上：工具提示、可折叠块与手风琴、弹出层、单层下拉菜单、对话框、抽屉面板和侧边抽屉。每一个都在任何脚本运行之前，通过浏览器自身的原语保持打开状态：折叠内容用 `details`，弹出层和菜单用 `popover` 属性，三种模态用 `dialog`，由随组件安装的 `sn-dialog`、`sn-sheet` 和 `sn-drawer` 元素通过 `showModal()` 打开，关闭时把焦点交还给触发器。打开和关闭从不发出 Live 请求；只有你放进浮层里的动作才会。每个浮层根都带有稳定的键和 `live:preserve.self`，所以打开的浮层能够在没有替换其区域的 morph 之后继续保持打开：
 
@@ -374,9 +384,9 @@ suprnova live:add password-input
 {% endcall %}
 ```
 
-`popover` 属性把支持的基线定在 Chrome 与 Edge 114、Firefox 128 和 Safari 17。在存在 CSS 锚点定位的地方，弹出层和菜单位于触发器之下；否则由浏览器居中显示。手风琴的单项展开模式依赖 `details name`，较旧的受支持版本会把它们当作彼此独立的折叠块。
+`popover` 属性把支持的基线定在 Chrome 与 Edge 114、Firefox 128 和 Safari 17。在存在 CSS 锚点定位的地方，弹出层和菜单位于触发器之下；否则由浏览器居中显示。手风琴的单项展开模式依赖 `details name`，较旧的受支持版本会把它们当作彼此独立的折叠块。指针从触发器移到气泡上时，工具提示保持打开，因此其文字可以被阅读或选中。
 
-接下来是反馈家族和导航家族。反馈：提示框、骨架屏、加载指示器、进度条、空状态，以及旁边带有 flash 区域的 toast 区域。它们各自呈现服务器或运行时已经持有的状态。提示框根据变体选择角色，并用符号和隐藏标签标记每个变体，绝不只靠颜色。加载指示器或骨架屏通过 `live:loading.show` 绑定到已注册的动作，并以隐藏状态输出，运行时在自身的延迟之后显示它并保持超过最短时长，因此快速的动作永远不会让它闪烁。进度条是带标签和文字读数的原生 `progress` 元素，只在确定性工作时携带值。空状态从服务器渲染的状态中获取原因（空、无结果、无权限、已断开），且只在调用方渲染了下一步动作时才提供它。toast 从礼貌的状态区域只播报一次，绝不夺取焦点；供应的 `sn-toast-region` 元素让 toast 超时消失，在悬停或聚焦时暂停，限制同时显示的数量，并响应关闭按钮；每个 toast 都带键并被保留，因此关闭的 toast 在 morph 之后仍保持关闭。严重错误也应放进提示框；toast 绝不是它唯一的呈现面。toast 在循环中渲染，因此它们的键会经过 `live_key` 过滤器，挂载它们的岛通过 `pub mod filters { pub use suprnova::view::filters::live_key; }` 暴露该过滤器。flash 区域把上一个请求留在会话中的内容只渲染一次：
+接下来是反馈家族和导航家族。反馈：提示框、骨架屏、加载指示器、进度条、空状态，以及旁边带有 flash 区域的 toast 区域。它们各自呈现服务器或运行时已经持有的状态。提示框根据变体选择角色，并用符号和隐藏标签标记每个变体，绝不只靠颜色。加载指示器或骨架屏通过 `live:loading.show` 绑定到已注册的动作，并以隐藏状态输出，运行时在自身的延迟之后显示它并保持超过最短时长，因此快速的动作永远不会让它闪烁。进度条是带标签和文字读数的原生 `progress` 元素，只在确定性工作时携带值。空状态从服务器渲染的状态中获取原因（空、无结果、无权限、已断开），且只在调用方渲染了下一步动作时才提供它。toast 从礼貌的状态区域只播报一次，绝不夺取焦点；供应的 `sn-toast-region` 元素让 toast 超时消失，在指针位于 toast 的任何部分之上或焦点位于其内部时暂停，限制同时显示的数量，并响应关闭按钮；每个 toast 都带键并被保留，因此关闭的 toast 在 morph 之后仍保持关闭。严重错误也应放进提示框；toast 绝不是它唯一的呈现面。toast 在循环中渲染，因此它们的键会经过 `live_key` 过滤器，挂载它们的岛通过 `pub mod filters { pub use suprnova::view::filters::live_key; }` 暴露该过滤器。对于键字母表之外的值（例如电子邮件地址），`live_key` 会使岛的渲染失败；此类数据应改用 `live_key_digest` 生成键，它把任意值转换为字母表内的稳定键，并以同样的方式从 `suprnova::view::filters` 导出。flash 区域把上一个请求留在会话中的内容只渲染一次：
 
 ```html
 {% import "suprnova-ui/alert/alert.html" as alert %}
@@ -386,7 +396,7 @@ suprnova live:add password-input
 {% call spinner::spinner(action="save", label="Saving") %}{% endcall %}
 ```
 
-导航：页眉栏、页脚、带可折叠分组的侧边栏、面包屑、标签页、分页和加载更多。每个目的地都是带真实路由 URL 的锚点，每个动作都是按钮；当前项的 `aria-current` 来自你绑定的值，绝不来自浏览器的位置。侧边栏的分组是带键并被保留的原生 `details`。标签页必须指定模式：`local` 是带 tablist 语义的面板，方向键由供应的 `sn-tabs` 元素处理，切换时不发出请求；`route` 则是作为锚点的标签页。分页同样必须指定模式：路由分页是规范链接，Live 分页是针对你的动作的按钮，其结果通过 `url_intent` 把新的查询反映到当前历史条目，不为每页创建历史条目。加载更多是针对已注册动作的按钮，向带键的列表追加内容，因此 morph 保留已有的每一行，而当你把它渲染为已耗尽时，该控件会离开视图。URL 反映是协议 2 的结果，因此通过 `url_intent` 分页的岛要声明 `minimum_protocol_version = 2`；它带键的行像 toast 一样经过 `live_key`：
+导航：页眉栏、页脚、带可折叠分组的侧边栏、面包屑、标签页、分页和加载更多。每个目的地都是带真实路由 URL 的锚点，每个动作都是按钮；当前项的 `aria-current` 来自你绑定的值，绝不来自浏览器的位置。侧边栏的分组是带键并被保留的原生 `details`。标签页必须指定模式：`local` 是带 tablist 语义的面板，方向键由供应的 `sn-tabs` 元素处理，切换时不发出请求；`route` 则是作为锚点的标签页。标签页可以嵌套：内层的标签页实例只选择它自己的标签和面板。分页同样必须指定模式：路由分页是规范链接，Live 分页是针对你的动作的按钮，其结果通过 `url_intent` 把新的查询反映到当前历史条目，不为每页创建历史条目。加载更多是针对已注册动作的按钮，向带键的列表追加内容，因此 morph 保留已有的每一行，而当你把它渲染为已耗尽时，该控件会离开视图。URL 反映是协议 2 的结果，因此通过 `url_intent` 分页的岛要声明 `minimum_protocol_version = 2`；它带键的行像 toast 一样经过 `live_key`：
 
 ```html
 {% import "suprnova-ui/tabs/tabs.html" as tabs %}
@@ -414,6 +424,8 @@ pub fn chart_svg(&self) -> TrustedHtml {
     .expect("a bounded fixed series renders")
 }
 ```
+
+`render_chart` 会返回错误，而不是绘制绝对值超过 1e9 的值，因为这超出了渲染器坐标轴运算所能容纳的范围。
 
 数据表是最后一个组件，每张表一个岛。它是原生 `table`，标题说明结果数量，列标题带 `scope`，已排序列带 `aria-sort`。排序和筛选是对岛的模型字段的 Live 提交，翻页是 Live 按钮，岛把已应用的排序、方向、筛选和页码声明为 `#[url]` 字段，并在每个动作之后通过 `url_intent` 反映它们，因此地址栏始终持有可分享的 URL，文档也从中挂载同样的视图：
 
@@ -444,7 +456,7 @@ live-native 家族是最后一个家族：只有在运行中的运行时之上�
 
 实时信息流和通知铃铛位于由流支撑的孤岛上。运行时在孤岛根上写入 `data-live-stream-state`，并把每次变化播报到宏渲染的 `[data-live-stream-status]` 元素中 (Updates disconnected, Connecting to updates, Updates current, Updates degraded, Reconnecting to updates, Updates closed)，因此降级、重连中或已关闭的流会如实说明，只有 current 状态读作最新。信息流条目经过 `live_key`。账户菜单是一个由锚点和注销表单组成的 `details` 折叠元素，注销表单携带会话的 CSRF 令牌提交；它是 RenderCache 下的拼接槽，所以应用把它挂载为自己的身份绑定孤岛，共享外壳从不包含主体的名字。
 
-自定义元素层增强它从不替换的原生控件。每个元素都是仅由自身的 vendored 文件定义的 light DOM `HTMLElement` 子类，带有 `sn-` 前缀，且不持有表单值，因为其中的原生输入才是控件：阻止脚本后，表单仍提交相同的值。OTP 输入是绑定到临时模型的单个原生输入 (`inputmode="numeric"`、`autocomplete="one-time-code"`、长度模式)，`sn-input-otp` 把键入的字符镜像到 `aria-hidden` 的格子中。日期选择器是一个 `type="date"` 输入，其年、月、日条带是 CSS scroll-snap 容器内由原生单选按钮组成的 fieldset，因此点按、点击和方向键无需脚本即可选择；`sn-date-picker` 把完整的选择合成到输入中。组合框是建立在原生输入之上的无障碍组合框模式 (`role="combobox"`、`aria-expanded`、`aria-activedescendant`、由选项组成的 `role="listbox"`)，并为无脚本情形提供 `datalist`；`sn-combobox` 过滤、移动活动选项并选择，且拒绝 `data-sn-query` 不是输入当前文本的列表框，因此过期结果永远不会替换更新查询的结果:
+自定义元素层增强它从不替换的原生控件。每个元素都是仅由自身的 vendored 文件定义的 light DOM `HTMLElement` 子类，带有 `sn-` 前缀，且不持有表单值，因为其中的原生输入才是控件：阻止脚本后，表单仍提交相同的值。OTP 输入是绑定到临时模型的单个原生输入 (`inputmode="numeric"`、`autocomplete="one-time-code"`、长度模式)，`sn-input-otp` 把键入的字符镜像到 `aria-hidden` 的格子中。日期选择器是一个 `type="date"` 输入，其年、月、日条带是 CSS scroll-snap 容器内由原生单选按钮组成的 fieldset，因此点按、点击和方向键无需脚本即可选择；`sn-date-picker` 把完整的选择合成到输入中。组合框是建立在原生输入之上的无障碍组合框模式 (`role="combobox"`、`aria-expanded`、`aria-activedescendant`、由选项组成的 `role="listbox"`)，并为无脚本情形提供 `datalist`，`sn-combobox` 负责移动活动选项并选择。默认情况下，选项是服务器对查询的应答：每次渲染时都为模型字段渲染这些选项，只要它们所应答的查询就是输入的文本，元素就会全部显示，无论搜索匹配了什么，并把对旧文本的应答保持隐藏，因此过期结果永远不会替换更新查询的结果。对于固定列表，传入 `remote=false`，元素会按键入的文本过滤它:
 
 ```html
 {% call otp::input_otp("code", "One-time code") %}{% for index in cells %}{% call otp::otp_cell(index) %}{% endcall %}{% endfor %}{% endcall %}

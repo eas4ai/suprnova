@@ -139,6 +139,83 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   with every concurrent issuance. A descriptor now keeps every unconsumed
   secret until each is consumed or expires, and the claims under construction
   are keyed by subscription id.
+- **The combobox stays responsive and shows what the server answered.** Text
+  that no option matched froze the page, because the element's observer
+  watched attributes its own render rewrote even when nothing changed. The
+  element also filtered the server's options by substring, hiding results a
+  server search matched another way, such as an accent-insensitive or code
+  match. It now writes only what changed, shows every option while the
+  listbox answers the input's current text, keeps an answer to older text
+  hidden, and filters by the typed text only for a fixed list, which
+  `remote=false` selects.
+- **A library custom element binds once however a morph moves it.** The
+  combobox, input OTP, date picker, and password input bound their listeners
+  on every connection, and the dialog, sheet, and drawer guarded on an
+  attribute a morph removes, so a moved element answered one click twice and
+  the password reveal toggled back at once. Every element now binds per
+  connection, releases its listeners and observers when it leaves the
+  document, and keeps them across an atomic move.
+- **A toast holds while the pointer is anywhere on it or focus is inside it.**
+  The region resumed its timers when the pointer left any child element, so
+  moving from a toast's text to its padding let it time out under the
+  pointer, and a toast could hide while its dismiss button had focus.
+- **Nested tabs act on their own tabs.** A local tabs instance selected every
+  tab below it and handled the events of a nested instance, so a click on an
+  inner tab hid the outer panel.
+- **The tooltip bubble stays open while the pointer moves onto it.** The
+  bubble ignored the pointer, so it hid as the pointer left the trigger and
+  its text could not be read or selected.
+- **The select's dropdown indicator follows the text color.** It was a
+  data-URI SVG, whose `currentColor` does not inherit the document's color, so
+  it drew black on the dark scheme's surface.
+- **The form controls show the island's values.** No form macro took a value,
+  so a number input mounted at 1 rendered empty and a submit that changed
+  nothing proposed an empty value. Each value control now takes `value=`,
+  `checked=`, or `selected=`, radio and checkbox group inputs are keyed by
+  value so a choice the user has not sent survives a re-render, and
+  `authority=` marks the render that must replace what the user typed.
+- **A checkbox group proposes the list of checked values.** The runtime read
+  every checkbox as a boolean, so a group whose boxes disagreed could not be
+  submitted. A field that more than one checkbox binds now proposes the
+  checked values in document order; a single checkbox stays a boolean.
+- **A model proposal its field cannot decode is a validation error on that
+  field.** A proposal such as null for a `u64` field or a boolean for a list
+  field was dropped silently: the action ran and the response carried no
+  validation. The field now reports the error through `live:error` and keeps
+  its value, and the action does not run.
+- **The checker, the `live_key` filter, and the runtime accept one key
+  alphabet.** The checker and the filter accepted a key beginning with `_`,
+  `-`, `.`, or `:`, which the runtime refuses, so the island's first morph
+  failed. A key now begins with an ASCII letter or digit everywhere, and
+  `live:check` holds the element ids inside an island to the rule the runtime
+  checks, refusing an invalid id (`invalid_element_id`) and a repeated one
+  (`duplicate_element_id`), a literal id inside a loop included.
+- **`live_key_digest` keys any value.** `live_key` fails the island's render
+  for a value outside the key alphabet, so a row keyed by an email address
+  failed the island for every viewer. The new filter turns any value into a
+  stable key, one value always yielding the same key.
+- **`live:check` checks a loop or match binding as that binding.** Inside a
+  macro body, a name that a `for`, a `match` arm, or an `if let` bound was
+  checked as the macro parameter of the same name, so a literal argument
+  proved a directive that the loop's own values render.
+- **`render_chart` returns an error for a value beyond 1e9.** The renderer's
+  axis arithmetic overflowed and panicked from about 1e12; a value whose
+  magnitude exceeds 1e9 is now an input error.
+- **An application that cannot read its vendored components refuses to
+  start.** `try_live_ui_assets()` reads `templates/suprnova-ui/` under the
+  application base path on each request, so an application started
+  elsewhere, such as from a container image that holds only the binary,
+  answered 404 for every component stylesheet and script and started
+  cleanly. Installing the route now fails and names the directory.
+- **`live:add` replaces a file you never edited.** It compared bytes only, so
+  after a library update it kept every installed file and reported it edited
+  locally. It now records each file's digest beside the component and
+  replaces a file whose bytes still match the record; a file you edited, or
+  one no record vouches for, is kept and reported.
+- **`live:add --manifest` refuses a file that is a symbolic link.** Each
+  third-party file was read through links, so a component could install the
+  bytes of any readable file as a template. A named file must be a regular
+  file inside the manifest's directory.
 
 ### Security
 

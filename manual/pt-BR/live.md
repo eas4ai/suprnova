@@ -68,6 +68,9 @@ impl Counter {
   Um formulário enviado com `live:submit` propõe cada controle de modelo
   dentro dele em uma única requisição, que leva até 127 campos além da ação;
   `live:check` recusa um formulário maior.
+  Uma proposta que o campo não consegue decodificar, como um número vazio para
+  um campo `u64`, é um erro de validação nesse campo: a ação não roda, o campo
+  mantém seu valor e `live:error` mostra o erro.
 - Métodos `#[action]` são os únicos pontos de entrada que o navegador pode
   invocar. Eles recebem argumentos validados e podem devolver resultados
   tipados, como um redirecionamento ou um flash.
@@ -94,7 +97,7 @@ conjunto documentado. O verificador prova cada diretiva contra o componente:
 uma ação desconhecida, um campo de modelo desconhecido, um filtro `safe` bruto
 ou uma violação de acessibilidade faz `live:check` falhar com o arquivo, a
 linha e a coluna.
-`live:key` nomeia a identidade estável de um elemento através dos morphs e é o único atributo de chave que um template escreve: o runtime o lê para a identidade do morph, para controles de morph como `live:preserve.self` e para os escopos que mantêm estado do navegador; `data-suprnova-live-key` é a grafia própria do motor nas raízes que ele renderiza.
+`live:key` nomeia a identidade estável de um elemento através dos morphs e é o único atributo de chave que um template escreve: o runtime o lê para a identidade do morph, para controles de morph como `live:preserve.self` e para os escopos que mantêm estado do navegador; `data-suprnova-live-key` é a grafia própria do motor nas raízes que ele renderiza. Valores de `live:key` e ids de elemento dentro de uma ilha usam um único alfabeto, o que o runtime verifica a cada morph: primeiro uma letra ou um dígito ASCII, depois letras, dígitos, `_`, `-`, `.` e `:`, no máximo 128 bytes, cada um único na ilha. `live:check` recusa uma chave ou um id literal fora desse alfabeto, e um id que um loop repete.
 
 Documentos que posicionam ilhas são views comuns declaradas com
 `#[suprnova::view]`; o único valor sem escape que elas aceitam é `TrustedHtml`
@@ -461,11 +464,15 @@ suprnova live:add field
 suprnova live:add password-input
 ```
 
-Um arquivo que você editou é mantido em uma execução posterior; `--force` o
-substitui. Um componente de terceiros é instalado a partir do seu próprio
-manifesto com `--manifest`, sob a sua própria raiz. Chame as macros nas suas
-views, sirva a folha de estilos e o script com `try_live_ui_assets()` e faça o
-link a partir do documento:
+`live:add` registra o digest de cada arquivo que escreve, então uma execução
+posterior substitui um arquivo que você nunca editou quando a biblioteca o
+altera, mantém um arquivo que você editou e avisa isso; `--force` também
+substitui um arquivo editado. Um componente de terceiros é instalado a partir
+do seu próprio manifesto com `--manifest`, sob a sua própria raiz, e cada
+arquivo que ele nomeia precisa ser um arquivo comum dentro do diretório do
+manifesto, nunca um link simbólico. Chame as macros nas suas views, sirva a
+folha de estilos e o script com `try_live_ui_assets()` e faça o link a partir
+do documento:
 
 ```html
 {% import "suprnova-ui/field/field.html" as field %}
@@ -474,6 +481,12 @@ link a partir do documento:
 {% call input::input("email", kind="email", required=true) %}{% endcall %}
 {% endcall %}
 ```
+
+`try_live_ui_assets()` lê os arquivos de `templates/suprnova-ui/` sob o
+caminho base da aplicação a cada requisição, então distribua esse diretório
+com o binário e inicie a aplicação a partir do diretório que o contém, ou
+defina `APP_BASE_PATH` como esse diretório. Quando o diretório não pode ser
+lido, a aplicação se recusa a iniciar e o nomeia.
 
 O verificador expande as macros, então o `live:check` prova uma view da
 biblioteca como qualquer outra. A família de formulários hoje: campo, rótulo,
@@ -484,6 +497,25 @@ fieldset, ações do formulário, resumo de validação e entrada de arquivo. Os
 componentes da biblioteca chamam-se `suprnova.*` e o registro recusa esse
 prefixo vindo de qualquer outro crate; os elementos personalizados são light
 DOM e levam o prefixo `sn-`.
+
+Cada controle de valor recebe o valor atual da ilha, então a página o mostra e
+um envio que não mudou nada o devolve inalterado: `value=` para uma entrada,
+uma área de texto, uma entrada numérica, um controle deslizante, uma entrada de
+busca e um seletor de data, `checked=` para uma caixa de seleção e um
+interruptor, e `selected=` para um seletor, um grupo de rádios e um grupo de
+caixas, que recebe a lista de valores marcados. Uma senha e um código de uso
+único nunca renderizam seu valor. As entradas dos grupos de rádios e de caixas
+têm o valor como chave, então uma escolha que o usuário ainda não enviou
+sobrevive a uma nova renderização. Um campo ao qual mais de uma caixa de
+seleção está vinculada é proposto como a lista de valores marcados, e um grupo
+de uma única caixa como um booleano. Uma renderização que precisa substituir o
+que o usuário digitou, como a que responde a um reset, passa um número de
+sequência como `authority=`, e a renderização seguinte não passa nenhum:
+
+```html
+{% call input::input("email", kind="email", value=email, authority=authority) %}{% endcall %}
+{% call checkbox::checkbox_group("topics", "Topics", topic_options, topics) %}{% endcall %}
+```
 
 A família de overlays vem sobre as mesmas fundações: tooltip, collapsible e
 accordion, popover, um menu suspenso de um único nível, dialog, sheet e drawer.
@@ -510,7 +542,9 @@ O atributo `popover` fixa a base suportada em Chrome e Edge 114, Firefox 128 e
 Safari 17. Onde existe o posicionamento por âncora do CSS, o popover e o menu
 ficam sob seu gatilho; caso contrário o navegador os centraliza. O modo de
 abertura única do accordion depende de `details name`, que versões suportadas
-mais antigas tratam como disclosures independentes.
+mais antigas tratam como disclosures independentes. O tooltip continua aberto
+enquanto o ponteiro passa do gatilho para o balão, então seu texto pode ser
+lido ou selecionado.
 
 Seguem a família de feedback e a família de navegação. Feedback: alert,
 skeleton, spinner, progress, empty state e uma região de toasts com uma região
@@ -525,9 +559,10 @@ empty state toma seu motivo (vazio, sem resultados, sem permissão,
 desconectado) do estado renderizado no servidor e só oferece uma próxima ação
 onde quem chama a renderiza. Um toast anuncia uma vez a partir de uma região
 de status polida e nunca toma o foco; o elemento vendorizado `sn-toast-region`
-expira os toasts, pausa durante hover ou foco, limita quantos aparecem de uma
-vez e responde ao botão de fechar, com cada toast com chave e preservado para
-que um toast fechado continue fechado após um morph. Um erro crítico também pertence a um alert; um toast nunca é sua única superfície. Os toasts são renderizados dentro de um loop, então suas chaves passam pelo filtro `live_key`, e a island que os monta o expõe com `pub mod filters { pub use suprnova::view::filters::live_key; }`. A região de flash
+expira os toasts, pausa enquanto o ponteiro está sobre qualquer parte de um
+toast ou o foco está dentro dele, limita quantos aparecem de uma vez e responde
+ao botão de fechar, com cada toast com chave e preservado para
+que um toast fechado continue fechado após um morph. Um erro crítico também pertence a um alert; um toast nunca é sua única superfície. Os toasts são renderizados dentro de um loop, então suas chaves passam pelo filtro `live_key`, e a island que os monta o expõe com `pub mod filters { pub use suprnova::view::filters::live_key; }`. `live_key` faz a renderização da ilha falhar para um valor fora do alfabeto de chaves, como um endereço de e-mail; gere as chaves desses dados com `live_key_digest`, que transforma qualquer valor em uma chave estável dentro do alfabeto e é exportado da mesma forma a partir de `suprnova::view::filters`. A região de flash
 renderiza uma única vez o que a requisição anterior deixou na sessão:
 
 ```html
@@ -545,11 +580,12 @@ a partir do valor que você vincula, nunca da localização do navegador. Os
 grupos da sidebar são `details` nativos, com chave e preservados. As tabs
 exigem um modo: `local`, painéis com semântica de tablist, teclas de seta pelo
 elemento vendorizado `sn-tabs` e nenhuma requisição na troca, ou `route`, tabs
-como âncoras. A paginação também exige um modo: páginas de rota são links
-canônicos, e páginas Live são botões sobre suas ações cujo resultado reflete a
-nova query na entrada de histórico atual por `url_intent`, sem entrada por
-página. Load more é um botão sobre uma ação registrada que acrescenta a uma
-lista com chaves, de modo que o morph mantém cada linha já presente, e o controle sai da view quando você o renderiza esgotado. Uma reflexão de URL é um resultado do protocolo 2, então uma island que pagina por `url_intent` declara `minimum_protocol_version = 2`; suas linhas com chaves passam por `live_key` como um toast:
+como âncoras. As tabs se aninham: uma instância de tabs interna seleciona
+apenas suas próprias tabs e painéis. A paginação também exige um modo:
+páginas de rota são links canônicos, e páginas Live são botões sobre suas
+ações cujo resultado reflete a nova query na entrada de histórico atual por
+`url_intent`, sem entrada por página. Load more é um botão sobre uma ação
+registrada que acrescenta a uma lista com chaves, de modo que o morph mantém cada linha já presente, e o controle sai da view quando você o renderiza esgotado. Uma reflexão de URL é um resultado do protocolo 2, então uma island que pagina por `url_intent` declara `minimum_protocol_version = 2`; suas linhas com chaves passam por `live_key` como um toast:
 
 ```html
 {% import "suprnova-ui/tabs/tabs.html" as tabs %}
@@ -595,6 +631,10 @@ pub fn chart_svg(&self) -> TrustedHtml {
 }
 ```
 
+`render_chart` retorna um erro em vez de desenhar um valor cuja magnitude
+excede 1e9, além do intervalo que a aritmética de eixos do renderizador
+comporta.
+
 A datatable é o último componente, com uma island por tabela. É uma `table`
 nativa com um caption que nomeia a contagem de resultados, cabeçalhos de
 coluna com `scope` e `aria-sort` na coluna ordenada. Ordenar e filtrar são
@@ -631,7 +671,7 @@ A família live-native é a última: os componentes que só fazem sentido sobre 
 
 O feed ao vivo e o sino de notificações ficam em uma ilha apoiada por um stream. O runtime escreve `data-live-stream-state` na raiz da ilha e anuncia cada mudança no elemento `[data-live-stream-status]` que as macros renderizam (Updates disconnected, Connecting to updates, Updates current, Updates degraded, Reconnecting to updates, Updates closed), de modo que um stream degradado, em reconexão ou fechado diz isso e só o estado current se lê como atual. Os itens do feed passam por `live_key`. O menu de conta é um `details` expansível com âncoras e um formulário de saída que envia com o token CSRF da sessão; ele é um slot de stitch sob o RenderCache, então uma aplicação o monta como sua própria ilha ligada à identidade e o shell compartilhado nunca contém o nome do principal.
 
-A camada de elementos personalizados aprimora controles nativos que nunca substitui. Cada elemento é uma subclasse de `HTMLElement` em light DOM definida apenas pelo seu próprio arquivo vendorizado, carrega o prefixo `sn-` e não guarda valor de formulário, porque a entrada nativa dentro dele é o controle: bloqueie o script e o formulário ainda envia o mesmo valor. A entrada OTP é uma única entrada nativa (`inputmode="numeric"`, `autocomplete="one-time-code"`, um padrão de comprimento) sobre um modelo transitório, e `sn-input-otp` espelha os caracteres digitados em células `aria-hidden`. O seletor de data é uma entrada `type="date"`, e suas faixas de ano, mês e dia são fieldsets de radios nativos dentro de contêineres CSS scroll-snap, então tocar, clicar e as setas selecionam sem script; `sn-date-picker` compõe uma seleção completa na entrada. O combobox é o padrão acessível de combobox (`role="combobox"`, `aria-expanded`, `aria-activedescendant`, um `role="listbox"` de opções) sobre uma entrada nativa com uma `datalist` para o caso sem script; `sn-combobox` filtra, move a opção ativa e seleciona, e recusa um listbox cujo `data-sn-query` não é o texto atual da entrada, de modo que um resultado obsoleto nunca substitui os resultados de uma consulta mais nova:
+A camada de elementos personalizados aprimora controles nativos que nunca substitui. Cada elemento é uma subclasse de `HTMLElement` em light DOM definida apenas pelo seu próprio arquivo vendorizado, carrega o prefixo `sn-` e não guarda valor de formulário, porque a entrada nativa dentro dele é o controle: bloqueie o script e o formulário ainda envia o mesmo valor. A entrada OTP é uma única entrada nativa (`inputmode="numeric"`, `autocomplete="one-time-code"`, um padrão de comprimento) sobre um modelo transitório, e `sn-input-otp` espelha os caracteres digitados em células `aria-hidden`. O seletor de data é uma entrada `type="date"`, e suas faixas de ano, mês e dia são fieldsets de radios nativos dentro de contêineres CSS scroll-snap, então tocar, clicar e as setas selecionam sem script; `sn-date-picker` compõe uma seleção completa na entrada. O combobox é o padrão acessível de combobox (`role="combobox"`, `aria-expanded`, `aria-activedescendant`, um `role="listbox"` de opções) sobre uma entrada nativa com uma `datalist` para o caso sem script, e `sn-combobox` move a opção ativa e seleciona. Por padrão, as opções são a resposta do seu servidor à consulta: renderize-as para o campo de modelo a cada renderização, e o elemento mostra todas elas enquanto a consulta à qual respondem for o texto da entrada, seja qual for a correspondência encontrada pela sua busca, e mantém oculta uma resposta a um texto mais antigo, de modo que um resultado obsoleto nunca substitui os resultados de uma consulta mais nova. Passe `remote=false` para uma lista fixa, que o elemento filtra pelo texto digitado:
 
 ```html
 {% call otp::input_otp("code", "One-time code") %}{% for index in cells %}{% call otp::otp_cell(index) %}{% endcall %}{% endfor %}{% endcall %}

@@ -157,6 +157,104 @@ en premier.
   concurrentes. Un descripteur conserve désormais chaque secret non consommé
   jusqu'à ce qu'il soit consommé ou expire, et les claims en construction sont
   indexés par identifiant d'abonnement.
+- **La combobox reste réactive et affiche ce que le serveur a répondu.** Un
+  texte auquel aucune option ne correspondait figeait la page, parce que
+  l'observateur de l'élément surveillait des attributs que son propre rendu
+  réécrivait même quand rien ne changeait. L'élément filtrait aussi les
+  options du serveur par sous-chaîne, masquant des résultats qu'une recherche
+  côté serveur avait trouvés autrement, comme une correspondance insensible
+  aux accents ou sur un code. Il n'écrit désormais que ce qui a changé,
+  affiche chaque option tant que la listbox répond au texte courant du champ,
+  garde masquée une réponse à un texte plus ancien, et ne filtre selon le
+  texte saisi que pour une liste fixe, que sélectionne `remote=false`.
+- **Un élément personnalisé de la bibliothèque se lie une seule fois, quelle
+  que soit la façon dont un morph le déplace.** La combobox, la saisie OTP, le
+  sélecteur de date et la saisie de mot de passe liaient leurs écouteurs à
+  chaque connexion, et le dialog, le sheet et le drawer se protégeaient par un
+  attribut qu'un morph retire, si bien qu'un élément déplacé répondait deux
+  fois à un seul clic et que la révélation du mot de passe s'annulait
+  aussitôt. Chaque élément se lie désormais une fois par connexion, libère ses
+  écouteurs et ses observateurs quand il quitte le document, et les conserve
+  lors d'un déplacement atomique.
+- **Un toast reste affiché tant que le pointeur est n'importe où dessus ou que
+  le focus est à l'intérieur.** La région relançait ses minuteurs quand le
+  pointeur quittait un élément enfant quelconque, si bien que passer du texte
+  d'un toast à sa marge intérieure le laissait expirer sous le pointeur, et
+  qu'un toast pouvait se masquer pendant que son bouton de fermeture avait le
+  focus.
+- **Les tabs imbriqués agissent sur leurs propres tabs.** Une instance de tabs
+  locale sélectionnait chaque tab en dessous d'elle et traitait les événements
+  d'une instance imbriquée, si bien qu'un clic sur un tab intérieur masquait
+  le panneau extérieur.
+- **La bulle du tooltip reste ouverte pendant que le pointeur passe dessus.**
+  La bulle ignorait le pointeur, si bien qu'elle se masquait dès que le
+  pointeur quittait le déclencheur et que son texte ne pouvait être ni lu ni
+  sélectionné.
+- **L'indicateur de liste déroulante du select suit la couleur du texte.**
+  C'était un SVG en data URI, dont le `currentColor` n'hérite pas de la
+  couleur du document, si bien qu'il se dessinait en noir sur la surface du
+  thème sombre.
+- **Les contrôles de formulaire affichent les valeurs de l'îlot.** Aucune
+  macro de formulaire ne prenait de valeur, si bien qu'une saisie numérique
+  montée à 1 était rendue vide et qu'un envoi qui ne changeait rien proposait
+  une valeur vide. Chaque contrôle de valeur prend désormais `value=`,
+  `checked=` ou `selected=`, les saisies des groupes de boutons radio et de
+  cases ont leur valeur pour clé, si bien qu'un choix que l'utilisateur n'a pas
+  envoyé survit à un nouveau rendu, et `authority=` marque le rendu qui doit
+  remplacer ce que l'utilisateur a saisi.
+- **Un groupe de cases à cocher propose la liste des valeurs cochées.** Le
+  runtime lisait chaque case à cocher comme un booléen, si bien qu'un groupe
+  dont les cases divergeaient ne pouvait pas être envoyé. Un champ auquel plus
+  d'une case à cocher est liée propose désormais les valeurs cochées dans
+  l'ordre du document ; une case à cocher seule reste un booléen.
+- **Une proposition de modèle que son champ ne peut pas décoder est une erreur
+  de validation sur ce champ.** Une proposition comme null pour un champ `u64`
+  ou un booléen pour un champ liste était ignorée silencieusement : l'action
+  s'exécutait et la réponse ne portait aucune validation. Le champ signale
+  désormais l'erreur via `live:error` et garde sa valeur, et l'action ne
+  s'exécute pas.
+- **Le vérificateur, le filtre `live_key` et le runtime acceptent un seul
+  alphabet de clés.** Le vérificateur et le filtre acceptaient une clé
+  commençant par `_`, `-`, `.` ou `:`, que le runtime refuse, si bien que le
+  premier morph de l'îlot échouait. Une clé commence désormais partout par une
+  lettre ou un chiffre ASCII, et `live:check` soumet les identifiants
+  d'élément à l'intérieur d'un îlot à la règle que vérifie le runtime, en
+  refusant un identifiant invalide (`invalid_element_id`) et un identifiant
+  répété (`duplicate_element_id`), y compris un identifiant littéral dans une
+  boucle.
+- **`live_key_digest` donne une clé à n'importe quelle valeur.** `live_key`
+  fait échouer le rendu de l'îlot pour une valeur hors de l'alphabet des clés,
+  si bien qu'une ligne ayant une adresse e-mail pour clé faisait échouer
+  l'îlot pour chaque visiteur. Le nouveau filtre transforme toute valeur en
+  une clé stable, une même valeur donnant toujours la même clé.
+- **`live:check` vérifie une liaison de boucle ou de match comme cette
+  liaison.** Dans le corps d'une macro, un nom lié par un `for`, un bras de
+  `match` ou un `if let` était vérifié comme le paramètre de macro du même
+  nom, si bien qu'un argument littéral prouvait une directive que rendent les
+  propres valeurs de la boucle.
+- **`render_chart` renvoie une erreur pour une valeur au-delà de 1e9.**
+  L'arithmétique des axes du moteur de rendu débordait et paniquait à partir
+  d'environ 1e12 ; une valeur dont la magnitude dépasse 1e9 est désormais une
+  erreur d'entrée.
+- **Une application qui ne peut pas lire ses composants vendorisés refuse de
+  démarrer.** `try_live_ui_assets()` lit `templates/suprnova-ui/` sous le
+  chemin de base de l'application à chaque requête, si bien qu'une
+  application démarrée ailleurs, par exemple depuis une image de conteneur qui
+  ne contient que le binaire, répondait 404 pour chaque feuille de style et
+  chaque script de composant et démarrait sans erreur. L'installation de la
+  route échoue désormais et nomme le répertoire.
+- **`live:add` remplace un fichier que vous n'avez jamais modifié.** Il ne
+  comparait que les octets, si bien qu'après une mise à jour de la
+  bibliothèque il conservait chaque fichier installé et le signalait comme
+  modifié localement. Il enregistre désormais le digest de chaque fichier à
+  côté du composant et remplace un fichier dont les octets correspondent
+  encore à l'enregistrement ; un fichier que vous avez modifié, ou un fichier
+  qu'aucun enregistrement ne garantit, est conservé et signalé.
+- **`live:add --manifest` refuse un fichier qui est un lien symbolique.**
+  Chaque fichier tiers était lu en suivant les liens, si bien qu'un composant
+  pouvait installer comme template les octets de n'importe quel fichier
+  lisible. Un fichier nommé doit être un fichier ordinaire dans le répertoire
+  du manifeste.
 
 ### Sécurité
 

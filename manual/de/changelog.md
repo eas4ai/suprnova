@@ -158,6 +158,102 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   Ein Deskriptor behält jetzt jedes nicht verbrauchte Secret, bis es
   verbraucht wird oder abläuft, und die Claims im Aufbau sind nach
   Subscription-Id abgelegt.
+- **Die Combobox bleibt reaktionsfähig und zeigt, was der Server geantwortet
+  hat.** Text, auf den keine Option passte, ließ die Seite einfrieren, weil
+  der Observer des Elements Attribute beobachtete, die sein eigenes Rendern
+  neu schrieb, auch wenn sich nichts änderte. Das Element filterte die
+  Optionen des Servers außerdem nach Teilzeichenfolge und verbarg so
+  Ergebnisse, die eine Serversuche auf andere Weise getroffen hatte, etwa
+  akzentunabhängig oder über einen Code. Es schreibt jetzt nur, was sich
+  geändert hat, zeigt jede Option, solange die Listbox den aktuellen Text des
+  Eingabefelds beantwortet, hält eine Antwort auf älteren Text verborgen und
+  filtert nur bei einer festen Liste, die `remote=false` wählt, nach dem
+  getippten Text.
+- **Ein Custom Element der Bibliothek bindet einmal, wie auch immer ein Morph
+  es verschiebt.** Combobox, Einmalcode-Eingabe, Datumswähler und
+  Passworteingabe banden ihre Listener bei jeder Verbindung, und Dialog, Sheet
+  und Drawer sicherten sich über ein Attribut ab, das ein Morph entfernt,
+  sodass ein verschobenes Element einen Klick zweimal beantwortete und die
+  Passwortanzeige sofort wieder zurückschaltete. Jedes Element bindet jetzt
+  einmal pro Verbindung, gibt seine Listener und Observer frei, wenn es das
+  Dokument verlässt, und behält sie über ein atomares Verschieben hinweg.
+- **Ein Toast läuft nicht aus, solange der Zeiger irgendwo auf ihm liegt oder
+  der Fokus darin ist.** Die Region setzte ihre Timer fort, sobald der Zeiger
+  irgendein Kindelement verließ, sodass ein Toast beim Wechsel von seinem Text
+  zu seinem Innenabstand unter dem Zeiger auslief und ein Toast verschwinden
+  konnte, während sein Schließen-Button den Fokus hatte.
+- **Verschachtelte Tabs wirken auf ihre eigenen Tabs.** Eine lokale
+  Tabs-Instanz wählte jeden Tab unter sich aus und verarbeitete die Events
+  einer verschachtelten Instanz, sodass ein Klick auf einen inneren Tab das
+  äußere Panel verbarg.
+- **Die Sprechblase des Tooltips bleibt offen, während der Zeiger auf sie
+  wandert.** Die Sprechblase ignorierte den Zeiger, sodass sie verschwand,
+  sobald der Zeiger den Auslöser verließ, und ihr Text sich weder lesen noch
+  markieren ließ.
+- **Der Dropdown-Indikator des Selects folgt der Textfarbe.** Er war ein SVG
+  als Data-URI, dessen `currentColor` die Farbe des Dokuments nicht erbt,
+  sodass er auf der Oberfläche des dunklen Farbschemas schwarz gezeichnet
+  wurde.
+- **Die Formularsteuerelemente zeigen die Werte der Insel.** Kein
+  Formularmakro nahm einen Wert entgegen, sodass eine mit 1 gemountete
+  Zahleneingabe leer gerendert wurde und ein Submit, der nichts geändert
+  hatte, einen leeren Wert vorschlug. Jedes Wert-Steuerelement nimmt jetzt
+  `value=`, `checked=` oder `selected=`, die Eingaben von Radio- und
+  Checkbox-Gruppen tragen ihren Wert als Schlüssel, sodass eine Auswahl, die
+  der Benutzer nicht gesendet hat, ein erneutes Rendern übersteht, und
+  `authority=` markiert das Rendern, das ersetzen muss, was der Benutzer
+  getippt hat.
+- **Eine Checkbox-Gruppe schlägt die Liste der angehakten Werte vor.** Die
+  Runtime las jede Checkbox als Boolean, sodass eine Gruppe, deren Boxen
+  voneinander abwichen, nicht gesendet werden konnte. Ein Feld, an das mehr
+  als eine Checkbox gebunden ist, schlägt jetzt die angehakten Werte in
+  Dokumentreihenfolge vor; eine einzelne Checkbox bleibt ein Boolean.
+- **Ein Model-Vorschlag, den sein Feld nicht dekodieren kann, ist ein
+  Validierungsfehler auf diesem Feld.** Ein Vorschlag wie null für ein
+  `u64`-Feld oder ein Boolean für ein Listenfeld wurde stillschweigend
+  verworfen: Die Aktion lief, und die Antwort trug keine Validierung. Das Feld
+  meldet den Fehler jetzt über `live:error` und behält seinen Wert, und die
+  Aktion läuft nicht.
+- **Checker, `live_key`-Filter und Runtime akzeptieren ein gemeinsames
+  Schlüsselalphabet.** Checker und Filter akzeptierten einen Schlüssel, der
+  mit `_`, `-`, `.` oder `:` beginnt, den die Runtime ablehnt, sodass der
+  erste Morph der Insel fehlschlug. Ein Schlüssel beginnt jetzt überall mit
+  einem ASCII-Buchstaben oder einer Ziffer, und `live:check` hält die
+  Element-IDs innerhalb einer Insel an die Regel, die die Runtime prüft, und
+  weist eine ungültige ID (`invalid_element_id`) und eine wiederholte
+  (`duplicate_element_id`) ab, eine literale ID in einer Schleife
+  eingeschlossen.
+- **`live_key_digest` bildet aus jedem Wert einen Schlüssel.** `live_key` lässt
+  das Rendern der Insel bei einem Wert außerhalb des Schlüsselalphabets
+  fehlschlagen, sodass eine nach E-Mail-Adresse geschlüsselte Zeile die Insel
+  für jeden Betrachter scheitern ließ. Der neue Filter macht aus jedem Wert
+  einen stabilen Schlüssel, wobei ein Wert immer denselben Schlüssel ergibt.
+- **`live:check` prüft eine Schleifen- oder Match-Bindung als diese Bindung.**
+  In einem Makrokörper wurde ein Name, den ein `for`, ein `match`-Arm oder ein
+  `if let` gebunden hatte, als gleichnamiger Makroparameter geprüft, sodass
+  ein literales Argument eine Direktive bewies, die die eigenen Werte der
+  Schleife rendern.
+- **`render_chart` gibt für einen Wert über 1e9 einen Fehler zurück.** Die
+  Achsenarithmetik des Renderers lief ab etwa 1e12 über und löste eine Panic
+  aus; ein Wert, dessen Betrag 1e9 übersteigt, ist jetzt ein Eingabefehler.
+- **Eine Anwendung, die ihre vendorierten Komponenten nicht lesen kann,
+  verweigert den Start.** `try_live_ui_assets()` liest `templates/suprnova-ui/`
+  bei jeder Anfrage unter dem Basispfad der Anwendung, sodass eine anderswo
+  gestartete Anwendung, etwa aus einem Container-Image, das nur das Binary
+  enthält, für jedes Stylesheet und Skript einer Komponente mit 404
+  antwortete und trotzdem sauber startete. Das Installieren der Route schlägt
+  jetzt fehl und nennt das Verzeichnis.
+- **`live:add` ersetzt eine Datei, die Sie nie bearbeitet haben.** Es verglich
+  nur Bytes, sodass es nach einem Update der Bibliothek jede installierte
+  Datei behielt und als lokal bearbeitet meldete. Es zeichnet jetzt den Digest
+  jeder Datei neben der Komponente auf und ersetzt eine Datei, deren Bytes
+  noch dem Eintrag entsprechen; eine Datei, die Sie bearbeitet haben, oder
+  eine, für die kein Eintrag bürgt, wird behalten und gemeldet.
+- **`live:add --manifest` weist eine Datei ab, die ein symbolischer Link ist.**
+  Jede Datei eines Drittanbieters wurde über Links hinweg gelesen, sodass eine
+  Komponente die Bytes jeder lesbaren Datei als Template installieren konnte.
+  Eine benannte Datei muss eine reguläre Datei im Verzeichnis des Manifests
+  sein.
 
 ### Sicherheit
 

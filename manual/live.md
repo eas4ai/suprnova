@@ -66,6 +66,9 @@ impl Counter {
   A form submitted with `live:submit` proposes every model control inside
   it in one request, which carries up to 127 fields beside the action;
   `live:check` refuses a larger form.
+  A proposal the field cannot decode, such as an empty number for a `u64`
+  field, is a validation error on that field: the action does not run, the
+  field keeps its value, and `live:error` shows the error.
 - `#[action]` methods are the only entry points the browser can invoke. They
   receive validated arguments and may return typed outcomes such as a
   redirect or a flash.
@@ -95,7 +98,11 @@ accessibility violation fails `live:check` with the file, line, and column.
 one key attribute a template writes: the runtime reads it for morph
 identity, for morph controls such as `live:preserve.self`, and for the
 scopes that keep browser state; `data-suprnova-live-key` is the engine's
-own spelling on the roots it renders.
+own spelling on the roots it renders. `live:key` values and element ids
+inside an island use one alphabet, the one the runtime checks at every morph:
+an ASCII letter or digit first, then letters, digits, `_`, `-`, `.`, and `:`,
+at most 128 bytes, each unique in the island. `live:check` refuses a literal
+key or id outside it, and an id a loop repeats.
 
 Documents that place islands are ordinary views declared with
 `#[suprnova::view]`; the only unescaped value they accept is `TrustedHtml`
@@ -453,10 +460,14 @@ suprnova live:add field
 suprnova live:add password-input
 ```
 
-A file you have edited is kept on a later run; `--force` replaces it. A
-third-party component installs from its own manifest with `--manifest`, under
-its own root. Call the macros from your views, serve the vendored stylesheet
-and script with `try_live_ui_assets()`, and link them from the document:
+`live:add` records the digest of every file it writes, so a later run
+replaces a file you never edited when the library changes it, keeps a file
+you edited, and says so; `--force` replaces an edited file too. A third-party
+component installs from its own manifest with `--manifest`, under its own
+root, and each file it names must be a regular file inside the manifest's
+directory, never a symbolic link. Call the macros from your views, serve the
+vendored stylesheet and script with `try_live_ui_assets()`, and link them
+from the document:
 
 ```html
 {% import "suprnova-ui/field/field.html" as field %}
@@ -466,6 +477,12 @@ and script with `try_live_ui_assets()`, and link them from the document:
 {% endcall %}
 ```
 
+`try_live_ui_assets()` reads the files from `templates/suprnova-ui/` under the
+application base path on each request, so ship that directory with the
+binary and start the application from the directory that holds it, or set
+`APP_BASE_PATH` to that directory. When the directory cannot be read, the
+application refuses to start and names it.
+
 The checker expands the macros, so `live:check` proves a library view like any
 other. The form family today: field, label, input, textarea, number input,
 slider, search input, password input with reveal, checkbox and checkbox group,
@@ -473,6 +490,23 @@ radio group, switch, select, button and link button, button group, fieldset,
 form actions, validation summary, and file input. Library components are named
 `suprnova.*` and the registry refuses that prefix from any other crate; custom
 elements are light DOM and carry the `sn-` prefix.
+
+Each value control takes the island's current value, so the page shows it and
+a submit that changed nothing sends it back unchanged: `value=` for an input,
+textarea, number input, slider, search input, and date picker, `checked=` for
+a checkbox and a switch, and `selected=` for a select, a radio group, and a
+checkbox group, which takes the list of checked values. A password and a
+one-time code never render their value. Radio and checkbox group inputs are
+keyed by value, so a choice the user has not sent survives a re-render. A
+field that more than one checkbox binds is proposed as the list of checked
+values, and a group of one checkbox as a boolean. A render that must replace
+what the user has typed, such as the one answering a reset, passes a sequence
+number as `authority=`, and the next render passes none:
+
+```html
+{% call input::input("email", kind="email", value=email, authority=authority) %}{% endcall %}
+{% call checkbox::checkbox_group("topics", "Topics", topic_options, topics) %}{% endcall %}
+```
 
 The overlay family ships on the same foundations: tooltip, collapsible and
 accordion, popover, a single-level dropdown menu, dialog, sheet, and drawer.
@@ -499,7 +533,9 @@ The `popover` attribute sets the supported baseline at Chrome and Edge 114,
 Firefox 128, and Safari 17. Where CSS anchor positioning exists the popover and
 menu sit under their trigger; elsewhere the browser centres them. The
 accordion's single-open mode rests on `details name`, which older supported
-releases treat as independent disclosures.
+releases treat as independent disclosures. The tooltip stays open while the
+pointer moves from its trigger onto the bubble, so its text can be read or
+selected.
 
 The feedback family and the navigation family follow. Feedback: alert,
 skeleton, spinner, progress, empty state, and a toast region with a flash
@@ -514,12 +550,16 @@ empty state takes its reason (empty, no results, no permission, disconnected)
 from server-rendered state and offers a next action only where the caller
 renders one. A toast announces once from a polite status region and never
 takes focus; the vendored `sn-toast-region` element times toasts out, pauses
-while hovered or focused, bounds how many show at once, and answers the
+while the pointer is over any part of a toast or focus is inside it, bounds how many show at once, and answers the
 dismiss button, with each toast keyed and preserved so a dismissed toast stays
 dismissed across a morph. A critical error belongs in an alert as well; a
 toast is never its only surface. Toasts render inside a loop, so their keys
 pass through the `live_key` filter, and the island that mounts them exposes
 it with `pub mod filters { pub use suprnova::view::filters::live_key; }`.
+`live_key` fails the island's render for a value outside the key alphabet,
+such as an email address; key such data with `live_key_digest`, which turns
+any value into a stable key in the alphabet and is exported the same way from
+`suprnova::view::filters`.
 The flash region renders what the previous request left in the session, once:
 
 ```html
@@ -537,6 +577,7 @@ route URL and every action is a button; the current item carries
 The sidebar's groups are native `details`, keyed and preserved. Tabs require a
 mode: `local` panels with tablist semantics, arrow keys from the vendored
 `sn-tabs` element, and no request on a change, or `route` tabs as anchors.
+Tabs nest: an inner tabs instance selects only its own tabs and panels.
 Pagination requires a mode too: route pages are canonical links, and Live
 pages are buttons on your actions whose result reflects the new query into the
 current history entry through `url_intent`, with no history entry per page.
@@ -588,6 +629,9 @@ pub fn chart_svg(&self) -> TrustedHtml {
     .expect("a bounded fixed series renders")
 }
 ```
+
+`render_chart` returns an error rather than drawing a value whose magnitude
+exceeds 1e9, beyond the range the renderer's axis arithmetic holds.
 
 The datatable is the last component, and one island per table. It is a
 native `table` with a caption naming the result count, column headers with
@@ -656,10 +700,13 @@ containers, so tap, click and arrow keys select with no script;
 `sn-date-picker` composes a complete selection into the input. The combobox
 is the accessible combobox pattern (`role="combobox"`, `aria-expanded`,
 `aria-activedescendant`, a `role="listbox"` of options) over a native input
-with a `datalist` for the script-free case; `sn-combobox` filters, moves the
-active option and selects, and refuses a listbox whose `data-sn-query` is
-not the input's current text, so a stale result never replaces results for
-a newer query:
+with a `datalist` for the script-free case, and `sn-combobox` moves the
+active option and selects. By default the options are your server's answer
+to the query: render them for the model field on every render, and the
+element shows all of them while the query they answer is the input's text,
+whatever your search matched, and keeps an answer to older text hidden, so a
+stale result never replaces results for a newer query. Pass `remote=false`
+for a fixed list, which the element filters by the typed text:
 
 ```html
 {% call otp::input_otp("code", "One-time code") %}{% for index in cells %}{% call otp::otp_cell(index) %}{% endcall %}{% endfor %}{% endcall %}

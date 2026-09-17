@@ -68,6 +68,9 @@ impl Counter {
   Ein mit `live:submit` gesendetes Formular schlägt jedes Model-Steuerelement
   darin in einer Anfrage vor, die neben der Aktion bis zu 127 Felder trägt;
   `live:check` weist ein größeres Formular ab.
+  Ein Vorschlag, den das Feld nicht dekodieren kann, etwa eine leere Zahl für
+  ein `u64`-Feld, ist ein Validierungsfehler auf diesem Feld: Die Aktion läuft
+  nicht, das Feld behält seinen Wert, und `live:error` zeigt den Fehler.
 - `#[action]`-Methoden sind die einzigen Einstiegspunkte, die der Browser
   aufrufen kann. Sie erhalten validierte Argumente und können typisierte
   Ergebnisse wie eine Weiterleitung oder einen Flash zurückgeben.
@@ -94,7 +97,7 @@ Rest der dokumentierten Menge. Der Checker beweist jede Direktive gegen die
 Komponente: Eine unbekannte Aktion, ein unbekanntes Modellfeld, ein roher
 `safe`-Filter oder ein Barrierefreiheitsverstoß lässt `live:check` mit Datei,
 Zeile und Spalte fehlschlagen.
-`live:key` benennt die stabile Identität eines Elements über Morphs hinweg und ist das eine Key-Attribut, das ein Template schreibt: Die Runtime liest es für die Morph-Identität, für Morph-Steuerungen wie `live:preserve.self` und für die Bereiche, die Browser-Zustand bewahren; `data-suprnova-live-key` ist die eigene Schreibweise der Engine auf den Wurzeln, die sie rendert.
+`live:key` benennt die stabile Identität eines Elements über Morphs hinweg und ist das eine Key-Attribut, das ein Template schreibt: Die Runtime liest es für die Morph-Identität, für Morph-Steuerungen wie `live:preserve.self` und für die Bereiche, die Browser-Zustand bewahren; `data-suprnova-live-key` ist die eigene Schreibweise der Engine auf den Wurzeln, die sie rendert. `live:key`-Werte und Element-IDs innerhalb einer Insel verwenden ein gemeinsames Alphabet, das die Runtime bei jedem Morph prüft: zuerst ein ASCII-Buchstabe oder eine Ziffer, dann Buchstaben, Ziffern, `_`, `-`, `.` und `:`, höchstens 128 Bytes, jeder Wert eindeutig in der Insel. `live:check` weist einen literalen Schlüssel oder eine literale ID außerhalb dieses Alphabets ab, ebenso eine ID, die eine Schleife wiederholt.
 
 Dokumente, die Inseln platzieren, sind gewöhnliche Views, die mit
 `#[suprnova::view]` deklariert werden; der einzige nicht maskierte Wert, den
@@ -469,11 +472,15 @@ suprnova live:add field
 suprnova live:add password-input
 ```
 
-Eine Datei, die du bearbeitet hast, bleibt bei einem späteren Lauf erhalten;
-`--force` ersetzt sie. Eine Komponente eines Drittanbieters wird mit
-`--manifest` aus ihrem eigenen Manifest unter ihrer eigenen Wurzel
-installiert. Rufe die Makros aus deinen Views auf, liefere Stylesheet und
-Skript mit `try_live_ui_assets()` aus und binde sie im Dokument ein:
+`live:add` zeichnet den Digest jeder Datei auf, die es schreibt, sodass ein
+späterer Lauf eine nie bearbeitete Datei ersetzt, wenn die Bibliothek sie
+ändert, und eine von Ihnen bearbeitete Datei behält und das meldet; `--force`
+ersetzt auch eine bearbeitete Datei. Eine Komponente eines Drittanbieters
+wird mit `--manifest` aus ihrem eigenen Manifest unter ihrer eigenen Wurzel
+installiert, und jede Datei, die das Manifest benennt, muss eine reguläre
+Datei im Verzeichnis des Manifests sein, nie ein symbolischer Link. Rufen Sie
+die Makros aus Ihren Views auf, liefern Sie Stylesheet und Skript mit
+`try_live_ui_assets()` aus und binden Sie sie im Dokument ein:
 
 ```html
 {% import "suprnova-ui/field/field.html" as field %}
@@ -483,6 +490,13 @@ Skript mit `try_live_ui_assets()` aus und binde sie im Dokument ein:
 {% endcall %}
 ```
 
+`try_live_ui_assets()` liest die Dateien bei jeder Anfrage aus
+`templates/suprnova-ui/` unter dem Basispfad der Anwendung. Liefern Sie dieses
+Verzeichnis daher mit dem Binary aus und starten Sie die Anwendung aus dem
+Verzeichnis, das es enthält, oder setzen Sie `APP_BASE_PATH` auf dieses
+Verzeichnis. Lässt sich das Verzeichnis nicht lesen, verweigert die Anwendung
+den Start und nennt es.
+
 Der Checker expandiert die Makros, sodass `live:check` eine Bibliotheks-View
 wie jede andere beweist. Die Formularfamilie heute: Feld, Label, Eingabe,
 Textbereich, Zahleneingabe, Schieberegler, Sucheingabe, Passworteingabe mit
@@ -491,6 +505,26 @@ und Link-Button, Button-Gruppe, Fieldset, Formularaktionen,
 Validierungsübersicht und Dateieingabe. Bibliothekskomponenten heißen
 `suprnova.*`, und die Registry weist dieses Präfix aus jeder anderen Crate
 zurück; Custom Elements liegen im Light DOM und tragen das Präfix `sn-`.
+
+Jedes Wert-Steuerelement nimmt den aktuellen Wert der Insel an, sodass die
+Seite ihn zeigt und ein Submit, der nichts geändert hat, ihn unverändert
+zurücksendet: `value=` für Eingabe, Textbereich, Zahleneingabe,
+Schieberegler, Sucheingabe und Datumswähler, `checked=` für Checkbox und
+Schalter und `selected=` für Auswahl, Radiogruppe und Checkbox-Gruppe, die die
+Liste der angehakten Werte nimmt. Ein Passwort und ein Einmalcode rendern
+ihren Wert nie. Die Eingaben von Radio- und Checkbox-Gruppen tragen ihren
+Wert als Schlüssel, sodass eine Auswahl, die der Benutzer noch nicht gesendet
+hat, ein erneutes Rendern übersteht. Ein Feld, an das mehr als eine Checkbox
+gebunden ist, wird als Liste der angehakten Werte vorgeschlagen, eine Gruppe
+aus einer einzigen Checkbox als Boolean. Ein Rendern, das ersetzen muss, was
+der Benutzer getippt hat, etwa das Rendern als Antwort auf ein Zurücksetzen,
+übergibt eine Sequenznummer als `authority=`, und das nächste Rendern
+übergibt keine:
+
+```html
+{% call input::input("email", kind="email", value=email, authority=authority) %}{% endcall %}
+{% call checkbox::checkbox_group("topics", "Topics", topic_options, topics) %}{% endcall %}
+```
 
 Die Overlay-Familie erscheint auf denselben Grundlagen: Tooltip, Collapsible
 und Accordion, Popover, ein einstufiges Dropdown-Menü, Dialog, Sheet und
@@ -518,7 +552,9 @@ Das `popover`-Attribut setzt die unterstützte Basis auf Chrome und Edge 114,
 Firefox 128 und Safari 17. Wo CSS-Anker-Positionierung vorhanden ist, sitzen
 Popover und Menü unter ihrem Auslöser; sonst zentriert der Browser sie. Der
 Einzelöffnungsmodus des Accordions beruht auf `details name`, das ältere
-unterstützte Versionen als unabhängige Disclosures behandeln.
+unterstützte Versionen als unabhängige Disclosures behandeln. Der Tooltip
+bleibt offen, während der Zeiger von seinem Auslöser auf die Sprechblase
+wandert, sodass sich sein Text lesen oder markieren lässt.
 
 Die Feedback-Familie und die Navigationsfamilie folgen. Feedback: Alert,
 Skeleton, Spinner, Progress, Empty State und eine Toast-Region mit einer
@@ -535,10 +571,11 @@ Grund (leer, keine Treffer, keine Berechtigung, getrennt) aus servergerendertem
 Zustand und bietet eine nächste Aktion nur dort, wo der Aufrufer eine
 rendert. Ein Toast kündigt einmal aus einer höflichen Statusregion an und
 nimmt nie den Fokus; das vendorierte Element `sn-toast-region` lässt Toasts
-auslaufen, pausiert bei Hover oder Fokus, begrenzt, wie viele gleichzeitig
+auslaufen, pausiert, solange der Zeiger über einem beliebigen Teil eines
+Toasts liegt oder der Fokus darin ist, begrenzt, wie viele gleichzeitig
 sichtbar sind, und beantwortet den Schließen-Button; jeder Toast ist
 schlüsselbasiert und erhalten, sodass ein geschlossener Toast über einen Morph
-hinweg geschlossen bleibt. Ein kritischer Fehler gehört auch in einen Alert; ein Toast ist nie seine einzige Fläche. Toasts werden in einer Schleife gerendert, daher laufen ihre Schlüssel durch den Filter `live_key`, und die Island, die sie mountet, stellt ihn mit `pub mod filters { pub use suprnova::view::filters::live_key; }` bereit. Die Flash-Region rendert einmal, was
+hinweg geschlossen bleibt. Ein kritischer Fehler gehört auch in einen Alert; ein Toast ist nie seine einzige Fläche. Toasts werden in einer Schleife gerendert, daher laufen ihre Schlüssel durch den Filter `live_key`, und die Island, die sie mountet, stellt ihn mit `pub mod filters { pub use suprnova::view::filters::live_key; }` bereit. `live_key` lässt das Rendern der Insel bei einem Wert außerhalb des Schlüsselalphabets fehlschlagen, etwa bei einer E-Mail-Adresse; bilden Sie die Schlüssel für solche Daten mit `live_key_digest`, das jeden Wert in einen stabilen Schlüssel im Alphabet umwandelt und auf dieselbe Weise aus `suprnova::view::filters` exportiert wird. Die Flash-Region rendert einmal, was
 die vorige Anfrage in der Session hinterlassen hat:
 
 ```html
@@ -556,10 +593,12 @@ einer echten Routen-URL und jede Aktion ein Button; das aktuelle Element trägt
 Browsers. Die Gruppen der Sidebar sind native `details`, schlüsselbasiert und
 erhalten. Tabs verlangen einen Modus: `local` mit Tablist-Semantik,
 Pfeiltasten aus dem vendorierten Element `sn-tabs` und keiner Anfrage beim
-Wechsel, oder `route` mit Tabs als Ankern. Pagination verlangt ebenfalls einen
-Modus: Routenseiten sind kanonische Links, Live-Seiten sind Buttons auf Ihren
-Aktionen, deren Ergebnis die neue Query über `url_intent` in den aktuellen
-History-Eintrag spiegelt, ohne Eintrag pro Seite. Load more ist ein Button auf
+Wechsel, oder `route` mit Tabs als Ankern. Tabs lassen sich verschachteln:
+Eine innere Tabs-Instanz wählt nur ihre eigenen Tabs und Panels aus.
+Pagination verlangt ebenfalls einen Modus: Routenseiten sind kanonische
+Links, Live-Seiten sind Buttons auf Ihren Aktionen, deren Ergebnis die neue
+Query über `url_intent` in den aktuellen History-Eintrag spiegelt, ohne
+Eintrag pro Seite. Load more ist ein Button auf
 einer registrierten Aktion, der an eine schlüsselbasierte Liste anfügt, sodass
 der Morph jede bereits vorhandene Zeile behält, und das Steuerelement verschwindet, sobald Sie es erschöpft rendern. Eine URL-Reflexion ist ein Ergebnis von Protokoll 2, daher deklariert eine Island, die über `url_intent` paginiert, `minimum_protocol_version = 2`; ihre Zeilen mit Schlüssel laufen wie ein Toast durch `live_key`:
 
@@ -609,6 +648,10 @@ pub fn chart_svg(&self) -> TrustedHtml {
 }
 ```
 
+`render_chart` gibt einen Fehler zurück, statt einen Wert zu zeichnen, dessen
+Betrag 1e9 übersteigt und damit außerhalb des Bereichs liegt, den die
+Achsenarithmetik des Renderers abdeckt.
+
 Die Datatable ist die letzte Komponente, mit einer Island pro Tabelle. Sie
 ist eine native `table` mit einer Caption, die die Ergebniszahl nennt,
 Spaltenköpfen mit `scope` und `aria-sort` auf der sortierten Spalte. Sortieren
@@ -645,7 +688,7 @@ Die Live-native-Familie ist die letzte: die Komponenten, die nur auf der laufend
 
 Der Live-Feed und die Benachrichtigungsglocke sitzen auf einer stream-gestützten Insel. Die Runtime schreibt `data-live-stream-state` auf die Inselwurzel und kündigt jede Änderung in dem `[data-live-stream-status]`-Element an, das die Makros rendern (Updates disconnected, Connecting to updates, Updates current, Updates degraded, Reconnecting to updates, Updates closed), sodass ein degradierter, sich wiederverbindender oder geschlossener Stream das auch sagt und nur der aktuelle Zustand als aktuell gilt. Feed-Einträge laufen durch `live_key`. Das Kontomenü ist eine `details`-Aufklappung aus Ankern und einem Abmeldeformular, das mit dem CSRF-Token der Sitzung sendet; es ist ein Stitch-Slot unter RenderCache, also bindet eine Anwendung es als eigene identitätsgebundene Insel ein, und die geteilte Hülle enthält nie den Namen des Prinzipals.
 
-Die Custom-Element-Stufe erweitert native Steuerelemente, die sie nie ersetzt. Jedes Element ist eine Light-DOM-Unterklasse von `HTMLElement`, die nur ihre eigene mitgelieferte Datei definiert, trägt das Präfix `sn-` und hält keinen Formularwert, denn das native Eingabefeld darin ist das Steuerelement: Blockiert man das Skript, sendet das Formular denselben Wert. Die Einmalcode-Eingabe ist ein einziges natives Eingabefeld (`inputmode="numeric"`, `autocomplete="one-time-code"`, ein Längenmuster) an einem transienten Modell, und `sn-input-otp` spiegelt die getippten Zeichen in `aria-hidden`-Zellen. Der Datumswähler ist ein `type="date"`-Eingabefeld, und seine Jahres-, Monats- und Tagesleisten sind Fieldsets aus nativen Radiobuttons in CSS-Scroll-Snap-Containern, sodass Tippen, Klicken und Pfeiltasten ohne Skript auswählen; `sn-date-picker` setzt eine vollständige Auswahl in das Eingabefeld zusammen. Die Combobox ist das barrierefreie Combobox-Muster (`role="combobox"`, `aria-expanded`, `aria-activedescendant`, eine `role="listbox"` mit Optionen) über einem nativen Eingabefeld mit einer `datalist` für den skriptfreien Fall; `sn-combobox` filtert, bewegt die aktive Option und wählt aus und verweigert eine Listbox, deren `data-sn-query` nicht der aktuelle Text des Eingabefelds ist, sodass ein veraltetes Ergebnis nie die Ergebnisse einer neueren Abfrage ersetzt:
+Die Custom-Element-Stufe erweitert native Steuerelemente, die sie nie ersetzt. Jedes Element ist eine Light-DOM-Unterklasse von `HTMLElement`, die nur ihre eigene mitgelieferte Datei definiert, trägt das Präfix `sn-` und hält keinen Formularwert, denn das native Eingabefeld darin ist das Steuerelement: Blockiert man das Skript, sendet das Formular denselben Wert. Die Einmalcode-Eingabe ist ein einziges natives Eingabefeld (`inputmode="numeric"`, `autocomplete="one-time-code"`, ein Längenmuster) an einem transienten Modell, und `sn-input-otp` spiegelt die getippten Zeichen in `aria-hidden`-Zellen. Der Datumswähler ist ein `type="date"`-Eingabefeld, und seine Jahres-, Monats- und Tagesleisten sind Fieldsets aus nativen Radiobuttons in CSS-Scroll-Snap-Containern, sodass Tippen, Klicken und Pfeiltasten ohne Skript auswählen; `sn-date-picker` setzt eine vollständige Auswahl in das Eingabefeld zusammen. Die Combobox ist das barrierefreie Combobox-Muster (`role="combobox"`, `aria-expanded`, `aria-activedescendant`, eine `role="listbox"` mit Optionen) über einem nativen Eingabefeld mit einer `datalist` für den skriptfreien Fall, und `sn-combobox` bewegt die aktive Option und wählt aus. Standardmäßig sind die Optionen die Antwort Ihres Servers auf die Abfrage: Rendern Sie sie bei jedem Rendern für das Model-Feld, dann zeigt das Element sie alle, solange die Abfrage, die sie beantworten, der Text des Eingabefelds ist, gleich, worauf Ihre Suche gepasst hat, und hält eine Antwort auf älteren Text verborgen, sodass ein veraltetes Ergebnis nie die Ergebnisse einer neueren Abfrage ersetzt. Übergeben Sie `remote=false` für eine feste Liste, die das Element nach dem getippten Text filtert:
 
 ```html
 {% call otp::input_otp("code", "One-time code") %}{% for index in cells %}{% call otp::otp_cell(index) %}{% endcall %}{% endfor %}{% endcall %}

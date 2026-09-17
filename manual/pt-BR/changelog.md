@@ -150,6 +150,93 @@ são enviados atomicamente. Mais recentes primeiro.
   slot com todas as emissões concorrentes. Um descritor agora guarda cada
   segredo não consumido até que seja consumido ou expire, e os claims em
   construção são indexados por id de assinatura.
+- **O combobox continua responsivo e mostra o que o servidor respondeu.** Um
+  texto com o qual nenhuma opção correspondia travava a página, porque o
+  observer do elemento observava atributos que a sua própria renderização
+  reescrevia mesmo quando nada mudava. O elemento também filtrava as opções
+  do servidor por substring, escondendo resultados que uma busca no servidor
+  encontrou de outro jeito, como uma correspondência insensível a acentos ou
+  por código. Agora ele escreve só o que mudou, mostra todas as opções
+  enquanto o listbox responde ao texto atual da entrada, mantém oculta uma
+  resposta a um texto mais antigo e filtra pelo texto digitado apenas em uma
+  lista fixa, que `remote=false` seleciona.
+- **Um elemento personalizado da biblioteca faz o vínculo uma única vez, seja
+  como for que um morph o mova.** O combobox, a entrada OTP, o seletor de data
+  e a entrada de senha vinculavam seus listeners a cada conexão, e o dialog, o
+  sheet e o drawer se protegiam por um atributo que um morph remove, então um
+  elemento movido respondia duas vezes a um único clique e a revelação da
+  senha voltava atrás na hora. Cada elemento agora faz o vínculo uma vez por
+  conexão, libera seus listeners e observers quando sai do documento e os
+  mantém durante uma movimentação atômica.
+- **Um toast permanece enquanto o ponteiro está em qualquer parte dele ou o
+  foco está dentro dele.** A região retomava seus timers quando o ponteiro
+  saía de qualquer elemento filho, então passar do texto de um toast para o
+  seu padding deixava-o expirar sob o ponteiro, e um toast podia sumir
+  enquanto seu botão de fechar tinha o foco.
+- **Tabs aninhadas agem sobre as próprias tabs.** Uma instância local de tabs
+  selecionava todas as tabs abaixo dela e tratava os eventos de uma instância
+  aninhada, então um clique em uma tab interna escondia o painel externo.
+- **O balão do tooltip continua aberto enquanto o ponteiro passa para ele.** O
+  balão ignorava o ponteiro, então sumia quando o ponteiro deixava o gatilho e
+  seu texto não podia ser lido nem selecionado.
+- **O indicador de lista suspensa do select segue a cor do texto.** Era um SVG
+  em data URI, cujo `currentColor` não herda a cor do documento, então era
+  desenhado em preto sobre a superfície do esquema escuro.
+- **Os controles de formulário mostram os valores da ilha.** Nenhuma macro de
+  formulário recebia um valor, então uma entrada numérica montada em 1 era
+  renderizada vazia e um envio que não mudava nada propunha um valor vazio.
+  Cada controle de valor agora recebe `value=`, `checked=` ou `selected=`, as
+  entradas dos grupos de rádios e de caixas têm o valor como chave, então uma
+  escolha que o usuário não enviou sobrevive a uma nova renderização, e
+  `authority=` marca a renderização que precisa substituir o que o usuário
+  digitou.
+- **Um grupo de caixas de seleção propõe a lista de valores marcados.** O
+  runtime lia cada caixa de seleção como um booleano, então um grupo cujas
+  caixas divergiam não podia ser enviado. Um campo ao qual mais de uma caixa
+  de seleção está vinculada agora propõe os valores marcados na ordem do
+  documento; uma caixa de seleção sozinha continua sendo um booleano.
+- **Uma proposta de modelo que o seu campo não consegue decodificar é um erro
+  de validação nesse campo.** Uma proposta como null para um campo `u64` ou
+  um booleano para um campo de lista era descartada em silêncio: a ação rodava
+  e a resposta não trazia validação. O campo agora relata o erro por
+  `live:error` e mantém seu valor, e a ação não roda.
+- **O verificador, o filtro `live_key` e o runtime aceitam um único alfabeto
+  de chaves.** O verificador e o filtro aceitavam uma chave começando com
+  `_`, `-`, `.` ou `:`, que o runtime recusa, então o primeiro morph da ilha
+  falhava. Uma chave agora começa com uma letra ou um dígito ASCII em todo
+  lugar, e `live:check` submete os ids de elemento dentro de uma ilha à regra
+  que o runtime verifica, recusando um id inválido (`invalid_element_id`) e um
+  repetido (`duplicate_element_id`), incluindo um id literal dentro de um
+  loop.
+- **`live_key_digest` gera uma chave para qualquer valor.** `live_key` faz a
+  renderização da ilha falhar para um valor fora do alfabeto de chaves, então
+  uma linha com um endereço de e-mail como chave fazia a ilha falhar para
+  todo visitante. O novo filtro transforma qualquer valor em uma chave
+  estável, e um mesmo valor sempre gera a mesma chave.
+- **`live:check` verifica um vínculo de loop ou de match como esse vínculo.**
+  Dentro do corpo de uma macro, um nome vinculado por um `for`, um braço de
+  `match` ou um `if let` era verificado como o parâmetro da macro de mesmo
+  nome, então um argumento literal provava uma diretiva que os próprios
+  valores do loop renderizam.
+- **`render_chart` retorna um erro para um valor acima de 1e9.** A aritmética
+  de eixos do renderizador estourava e entrava em panic a partir de cerca de
+  1e12; um valor cuja magnitude excede 1e9 agora é um erro de entrada.
+- **Uma aplicação que não consegue ler seus componentes vendorizados se
+  recusa a iniciar.** `try_live_ui_assets()` lê `templates/suprnova-ui/` sob
+  o caminho base da aplicação a cada requisição, então uma aplicação iniciada
+  em outro lugar, como a partir de uma imagem de contêiner que contém só o
+  binário, respondia 404 para cada folha de estilos e script de componente e
+  iniciava sem erro. Instalar a rota agora falha e nomeia o diretório.
+- **`live:add` substitui um arquivo que você nunca editou.** Ele comparava só
+  bytes, então depois de uma atualização da biblioteca mantinha cada arquivo
+  instalado e o relatava como editado localmente. Agora registra o digest de
+  cada arquivo ao lado do componente e substitui um arquivo cujos bytes ainda
+  correspondem ao registro; um arquivo que você editou, ou um que nenhum
+  registro garante, é mantido e relatado.
+- **`live:add --manifest` recusa um arquivo que é um link simbólico.** Cada
+  arquivo de terceiros era lido seguindo links, então um componente podia
+  instalar como template os bytes de qualquer arquivo legível. Um arquivo
+  nomeado precisa ser um arquivo comum dentro do diretório do manifesto.
 
 ### Segurança
 
