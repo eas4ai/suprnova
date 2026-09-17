@@ -164,6 +164,24 @@ export class ModelState {
     return true;
   }
 
+  /**
+   * Takes an applied render into the field without counting an edit: the
+   * value the render gave its controls is the accepted server value, and the
+   * value the controls show once local edits are restored is the baseline the
+   * next edit is compared with (LIVE-037).
+   */
+  settle(field: string, accepted: ModelValue, shown: ModelValue): void {
+    const state = this.#required(field);
+    const acceptedValue = isMissing(accepted) ? MISSING : immutableModelValue(accepted);
+    const shownValue = isMissing(shown) ? MISSING : immutableModelValue(shown);
+    const changed =
+      !modelValuesEqual(state.acceptedServerValue, acceptedValue) ||
+      !modelValuesEqual(state.browserProposal, shownValue);
+    state.acceptedServerValue = acceptedValue;
+    state.browserProposal = shownValue;
+    if (changed) this.#notify();
+  }
+
   proposal(field: string): ModelValue {
     return this.#required(field).browserProposal;
   }

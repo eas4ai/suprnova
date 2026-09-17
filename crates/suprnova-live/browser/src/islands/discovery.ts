@@ -575,6 +575,7 @@ export class DocumentRuntime {
             );
           }
         }
+        const rendered = this.#events.readRenderedModels(record);
         if (continuity !== null) {
           restoreContinuity(continuity, continuityRoot, {
             restoreSignals: (captured) => this.#signals.restore(record, captured),
@@ -584,6 +585,7 @@ export class DocumentRuntime {
             this.#driveFeatureDriver(7, continuityRoot);
           }
         }
+        this.#events.settleRenderedModels(record, rendered);
       },
       reflectUrl: (response) => {
         if (response.reflectedUrl === null) return;

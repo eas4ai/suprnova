@@ -1,6 +1,7 @@
 import { DIRECTIVE_EVENT_TYPES } from "../generated/directive-contract.js";
 import type { IslandRecord } from "../islands/record.js";
 import { ModelFormRuntime, type ModelDispatch } from "../models/forms.js";
+import type { ModelControlRead } from "../models/control.js";
 import type { ModelState } from "../models/state.js";
 import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
 import { DelegatedListenerRegistry } from "../runtime/listeners.js";
@@ -89,6 +90,17 @@ export class EventRouter {
 
   modelState(record: IslandRecord): ModelState | null {
     return this.#models.state(record);
+  }
+
+  readRenderedModels(record: IslandRecord): ReadonlyMap<string, ModelControlRead> {
+    return this.#models.readRendered(record);
+  }
+
+  settleRenderedModels(
+    record: IslandRecord,
+    rendered: ReadonlyMap<string, ModelControlRead>,
+  ): void {
+    this.#models.settleRender(record, rendered);
   }
 
   proposeTypedModel(record: IslandRecord, field: string, value: JsonValue): boolean {

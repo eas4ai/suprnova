@@ -212,6 +212,40 @@ export class ModelFormRuntime {
     return this.#state(record).propose(field, value);
   }
 
+  /** What each bound field's controls hold right after a render is morphed in. */
+  readRendered(record: IslandRecord): ReadonlyMap<string, ModelControlRead> {
+    const reads = new Map<string, ModelControlRead>();
+    for (const [field, group] of this.#connectedGroups(record)) {
+      reads.set(field, readBindingGroup(group));
+    }
+    return reads;
+  }
+
+  /**
+   * Settles an applied render into model state (LIVE-037). `rendered` is what
+   * the render put in each field's controls, read before continuity restores
+   * local edits; the controls' values after that restore become the baseline
+   * the next edit is compared with, so an edit is sent whenever it differs
+   * from what the user sees. A field with an edit in flight, or one still
+   * waiting on its timing, keeps its newer proposal.
+   */
+  settleRender(record: IslandRecord, rendered: ReadonlyMap<string, ModelControlRead>): void {
+    const state = this.#states.get(record);
+    if (state === undefined) return;
+    const registered = new Set(state.fields());
+    const timing = this.#timings.get(record);
+    for (const [field, group] of this.#connectedGroups(record)) {
+      if (!registered.has(field) || state.snapshot(field).inFlightIntent !== null) continue;
+      if (group.some((binding) => timing?.waiting(binding.identity) === true)) continue;
+      const accepted = rendered.get(field);
+      state.settle(
+        field,
+        accepted === undefined ? MISSING : readToValue(accepted),
+        readToValue(readBindingGroup(group)),
+      );
+    }
+  }
+
   trackIntent(record: IslandRecord, batch: ModelBatch, intent: ServerIntent): void {
     const fields = Object.keys(batch.proposals);
     if (fields.length === 0) return;
@@ -320,6 +354,12 @@ export class ModelFormRuntime {
       });
     }
     return buildModelBatch(samples);
+  }
+
+  #connectedGroups(record: IslandRecord): Map<string, ModelBinding[]> {
+    return groupBindings(
+      [...(this.#byIsland.get(record) ?? [])].filter((binding) => binding.owned.element.isConnected),
+    );
   }
 
   #readField(record: IslandRecord, field: string): ModelControlRead {

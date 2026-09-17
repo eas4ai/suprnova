@@ -138,11 +138,12 @@ test("FORM-010 and LIVE-032: a group selection the server has not answered survi
   await expect(security).toBeChecked();
 });
 
-test("FORM-009: a reset replaces an edit the island refused, and only that render does", async ({
+test("FORM-009 and LIVE-037: a reset replaces an edit the island refused, and the same edit made again is sent again", async ({
   page,
 }) => {
   await openGallery(page);
   const quantity = page.locator("#quantity");
+  const error = page.locator("#quantity-error");
   const answered = (field: string) =>
     page.waitForResponse(
       (reply) =>
@@ -157,19 +158,22 @@ test("FORM-009: a reset replaces an edit the island refused, and only that rende
   await quantity.fill("");
   await refused;
   await expect(quantity).toHaveValue("");
+  await expect(error).not.toBeEmpty();
   const reset = page.waitForResponse((reply) => actionNamed("reset")(reply.request()));
   await page.getByRole("button", { name: "Reset" }).click();
   expect((await reset).status()).toBe(200);
   await expect(quantity).toHaveValue("1");
+  await expect(error).toBeEmpty();
 
-  // A refused edit made after the reset survives the next re-render. The
-  // valid edit before it is what makes the empty count a new proposal.
-  const accepted = answered("quantity");
-  await quantity.fill("5");
-  await accepted;
+  // The reset's render is the baseline the next edit is compared with, so
+  // the same empty count typed again is sent, refused, and shown again.
   refused = answered("quantity");
   await quantity.fill("");
-  await refused;
+  expect((await refused).status()).toBe(200);
+  await expect(error).not.toBeEmpty();
+
+  // Only the render answering the reset replaces what the user typed: the
+  // refused edit survives the next re-render.
   const search = answered("query");
   await page.locator("#query").fill("docs");
   expect((await search).status()).toBe(200);

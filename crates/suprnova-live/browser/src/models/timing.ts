@@ -107,6 +107,11 @@ export class ModelTimingCoordinator {
     entry.callback = null;
   }
 
+  /** Whether an edit under `key` still waits on its timing, not yet dispatched. */
+  waiting(key: string): boolean {
+    return (this.#entries.get(key)?.callback ?? null) !== null;
+  }
+
   pending(): number {
     let count = 0;
     for (const entry of this.#entries.values()) if (entry.callback !== null) count += 1;

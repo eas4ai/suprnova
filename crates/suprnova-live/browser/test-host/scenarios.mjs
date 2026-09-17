@@ -102,9 +102,9 @@ function integrity(value) {
   return `sha256-${sha256(value)}`;
 }
 
-const externalModuleIntegrity = "sha256-Guk+J681dha+DAmswpWVarb2BOgXHLA42kioSjf/2o8=";
+const externalModuleIntegrity = "sha256-AhH6iNsa7HdOSjZw8DUKrRxJ1UKoGBzy4s1RiUcTPX4=";
 const externalClassicBootIntegrity = "sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=";
-const externalClassicRuntimeIntegrity = "sha256-WSKS3XgoCaKqfIQDFc15pPyg8fmJBBeDML+E8Lp7gzI=";
+const externalClassicRuntimeIntegrity = "sha256-NvZ1PgNiaw402QNxliu9vFNa2SwONyqixB+I7ZsnG5o=";
 
 function requireReviewedIntegrity(value, expected, name) {
   if (integrity(value) !== expected) throw new Error(`${name}_integrity_drift`);
@@ -119,7 +119,7 @@ function externalModuleScript(variant = "plain") {
   }
   if (variant === "integrity") {
     requireReviewedIntegrity(externalModuleBootSource, externalModuleIntegrity, "module_boot");
-    return '<script type="module" src="/test-boot/module.js" integrity="sha256-Guk+J681dha+DAmswpWVarb2BOgXHLA42kioSjf/2o8=" crossorigin="anonymous"></script>';
+    return '<script type="module" src="/test-boot/module.js" integrity="sha256-AhH6iNsa7HdOSjZw8DUKrRxJ1UKoGBzy4s1RiUcTPX4=" crossorigin="anonymous"></script>';
   }
   throw new Error("unsupported_external_module_script_variant");
 }
@@ -156,7 +156,7 @@ function hashOnlyClassicDocument() {
   requireReviewedIntegrity(externalClassicBootSource, externalClassicBootIntegrity, "classic_boot");
   return document(
     island(),
-    '<script src="/assets/suprnova-live.classic.js" integrity="sha256-WSKS3XgoCaKqfIQDFc15pPyg8fmJBBeDML+E8Lp7gzI=" crossorigin="anonymous"></script><script src="/test-boot/classic.js" integrity="sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=" crossorigin="anonymous"></script>',
+    '<script src="/assets/suprnova-live.classic.js" integrity="sha256-NvZ1PgNiaw402QNxliu9vFNa2SwONyqixB+I7ZsnG5o=" crossorigin="anonymous"></script><script src="/test-boot/classic.js" integrity="sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=" crossorigin="anonymous"></script>',
   );
 }
 
