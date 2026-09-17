@@ -1,0 +1,18 @@
+mechanism: live-model-render-baseline
+commit: 3c868f880b4e050559e2fe3644cace5394b2917f
+inputs_digest: sha256:c7927f83869f8ead7af36c4fb5e268c5301bb262010ca82bf4d61d99cd00d891
+mechanism_digest: sha256:e66fb78c98d85181264bfeba225432e9eb28b86077658213ca5a0e632b26cb8d
+kernel_digest: sha256:160c9a5b8ec13386549cffdd26241209b59c4eb8645da1fe5f13eff7bb81e37c
+inputs_detail: .cairn/evidence/runs/20260917T171556171Z-962644.inputs.json
+command: sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/model-render-baseline.test.ts && npx playwright test --config playwright.dogfood.config.ts --grep LIVE-037'
+cwd: .
+exit: 0
+output_digest: sha256:f30ef81093b1735bf005c1931879120ea74cc8502201e6684875b40cf4fbfe5e
+output: .cairn/evidence/runs/20260917T171556171Z-962644.out
+stderr_output: .cairn/evidence/runs/20260917T171556171Z-962644.err
+stderr_digest: sha256:b79bdc82b24123c745cc4fce4a8fbcf0a480a22f368f6cc8ebf993b454cfc45d
+signal: none
+execution_error: null
+recorded: 2026-09-17T17:16:17.218Z
+results:
+  - LIVE-037 pass exit sha256:18d83604727f323c257c7ba64ea89ee2716fb3eea3b9532015f453666e4e6009 2 sha256:9b1143833d917b3d8cc90a4e79bb3e002831735cb0f4469356f14ce35bfc33c5
