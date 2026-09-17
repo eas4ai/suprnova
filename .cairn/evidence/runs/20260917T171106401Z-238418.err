@@ -1,0 +1,27 @@
+   Compiling sqlx-core v0.9.0
+   Compiling tokio-rustls v0.26.4
+   Compiling suprnova-live-test-support v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling hyper-rustls v0.27.9
+   Compiling tonic v0.12.3
+   Compiling lettre v0.11.22
+   Compiling sqlx-sqlite v0.9.0
+   Compiling sqlx-postgres v0.9.0
+   Compiling sqlx-mysql v0.9.0
+   Compiling reqwest v0.12.28
+   Compiling reqwest v0.13.4
+   Compiling sqlx v0.9.0
+   Compiling suprnova-web-push v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+   Compiling apple v0.3.1 (https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97)
+   Compiling qdrant-client v1.18.0
+   Compiling sea-query-sqlx v0.9.1
+   Compiling sea-schema v0.18.1
+   Compiling sea-orm v2.0.2
+   Compiling sea-orm-migration v2.0.2
+   Compiling suprnova-magnetar v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.02s
+────────────
+ Nextest run ID 18ea4f41-2234-4d61-9d19-37ad4ac4b33e with nextest profile: default
+    Starting 10 tests across 1 binary
+────────────
+     Summary [   0.034s] 10 tests run: 10 passed, 0 skipped

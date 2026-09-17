@@ -1,0 +1,25 @@
+
+ RUN  v4.1.11 /home/shawn/workspace2/suprnova/crates/suprnova-live/browser
+
+
+ Test Files  1 passed (1)
+      Tests  4 passed (4)
+   Start at  12:56:06
+   Duration  170ms (transform 68ms, setup 0ms, import 86ms, tests 5ms, environment 0ms)
+
+[WebServer]    Compiling suprnova-magnetar v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+[WebServer]    Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+[WebServer]    Compiling suprnova-web-push v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+[WebServer]    Compiling suprnova-macros v2.0.2 (/home/shawn/workspace2/suprnova/suprnova-macros)
+[WebServer]    Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+[WebServer]    Compiling app v2.0.2 (/home/shawn/workspace2/suprnova/app)
+[WebServer]     Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.25s
+[WebServer]      Running `/home/shawn/workspace2/scratchpads/suprnova-target/debug/examples/live_dogfood_host`
+
+Running 3 tests using 1 worker
+
+  ✓  1 [chromium] › e2e/app-dogfood-forms.spec.ts:141:1 › FORM-009 and LIVE-037: a reset replaces an edit the island refused, and the same edit made again is sent again (1.1s)
+  ✓  2 [firefox] › e2e/app-dogfood-forms.spec.ts:141:1 › FORM-009 and LIVE-037: a reset replaces an edit the island refused, and the same edit made again is sent again (1.7s)
+  ✓  3 [webkit] › e2e/app-dogfood-forms.spec.ts:141:1 › FORM-009 and LIVE-037: a reset replaces an edit the island refused, and the same edit made again is sent again (1.9s)
+
+  3 passed (26.1s)

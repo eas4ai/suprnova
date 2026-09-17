@@ -1,0 +1,17 @@
+   Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+   Compiling app v2.0.2 (/home/shawn/workspace2/suprnova/app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.12s
+────────────
+ Nextest run ID cf3de887-2828-4043-8e57-e16ac6e56c08 with nextest profile: default
+    Starting 19 tests across 1 binary
+────────────
+     Summary [   0.179s] 19 tests run: 19 passed, 0 skipped
+   Compiling suprnova-live-test-support v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 07s
+────────────
+ Nextest run ID e4499c38-0d92-4046-9244-81fddd24970f with nextest profile: default
+    Starting 1 test across 1 binary (112 tests skipped)
+────────────
+     Summary [   0.008s] 1 test run: 1 passed, 112 skipped

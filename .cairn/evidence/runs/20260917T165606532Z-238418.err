@@ -1,0 +1,8 @@
+[WebServer]    Compiling suprnova-magnetar v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+[WebServer]    Compiling suprnova-live v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+[WebServer]    Compiling suprnova-web-push v2.0.2 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+[WebServer]    Compiling suprnova-macros v2.0.2 (/home/shawn/workspace2/suprnova/suprnova-macros)
+[WebServer]    Compiling suprnova v2.0.2 (/home/shawn/workspace2/suprnova/framework)
+[WebServer]    Compiling app v2.0.2 (/home/shawn/workspace2/suprnova/app)
+[WebServer]     Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.25s
+[WebServer]      Running `/home/shawn/workspace2/scratchpads/suprnova-target/debug/examples/live_dogfood_host`

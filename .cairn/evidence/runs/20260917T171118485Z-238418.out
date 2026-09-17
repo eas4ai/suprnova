@@ -1,0 +1,53 @@
+run: component browser cases
+  component browser cases: exit 0
+run: dogfood form cases
+  dogfood form cases: exit 0
+run: runtime unit cases
+  runtime unit cases: exit 0
+run: dogfood live:check
+  dogfood live:check: exit 0
+run: manual text
+run: Rust cases for DATA-006, run 1 of 1 (-p suprnova-live --test view_charts)
+  Rust cases for DATA-006, run 1 of 1 (-p suprnova-live --test view_charts): exit 0
+run: Rust cases for LIVE-031, run 1 of 2 (-p suprnova --test live_dogfood_forms)
+  Rust cases for LIVE-031, run 1 of 2 (-p suprnova --test live_dogfood_forms): exit 0
+run: Rust cases for LIVE-031, run 2 of 2 (-p suprnova-live --lib)
+  Rust cases for LIVE-031, run 2 of 2 (-p suprnova-live --lib): exit 0
+run: Rust cases for LIVE-033, run 1 of 1 (-p suprnova-live --test checker_regressions --test view_live_key)
+  Rust cases for LIVE-033, run 1 of 1 (-p suprnova-live --test checker_regressions --test view_live_key): exit 0
+run: Rust cases for LIVE-034, run 1 of 1 (-p suprnova-live --test checker_regressions)
+  Rust cases for LIVE-034, run 1 of 1 (-p suprnova-live --test checker_regressions): exit 0
+run: Rust cases for LIVE-035, run 1 of 1 (-p suprnova-live --test view_live_key)
+  Rust cases for LIVE-035, run 1 of 1 (-p suprnova-live --test view_live_key): exit 0
+run: Rust cases for LIVE-036, run 1 of 1 (-p suprnova-live --test checker_regressions)
+  Rust cases for LIVE-036, run 1 of 1 (-p suprnova-live --test checker_regressions): exit 0
+run: Rust cases for FORM-009, run 1 of 2 (-p app --test live_dogfood)
+  Rust cases for FORM-009, run 1 of 2 (-p app --test live_dogfood): exit 0
+run: Rust cases for FORM-009, run 2 of 2 (-p suprnova-live --test checker_regressions)
+  Rust cases for FORM-009, run 2 of 2 (-p suprnova-live --test checker_regressions): exit 0
+run: Rust cases for UI-021, run 1 of 1 (-p suprnova --test live_assets)
+  Rust cases for UI-021, run 1 of 1 (-p suprnova --test live_assets): exit 0
+run: Rust cases for UI-022, run 1 of 1 (-p suprnova-cli --test live_add)
+  Rust cases for UI-022, run 1 of 1 (-p suprnova-cli --test live_add): exit 0
+run: Rust cases for UI-023, run 1 of 1 (-p suprnova-cli --test live_add)
+  Rust cases for UI-023, run 1 of 1 (-p suprnova-cli --test live_add): exit 0
+cairn: FORM-008: pass
+cairn: FORM-009: pass
+cairn: FORM-010: pass
+cairn: FORM-011: pass
+cairn: FORM-012: pass
+cairn: FDB-007: pass
+cairn: NAV-007: pass
+cairn: OVL-007: pass
+cairn: DATA-006: pass
+cairn: UI-020: pass
+cairn: UI-021: pass
+cairn: UI-022: pass
+cairn: UI-023: pass
+cairn: UI-024: pass
+cairn: LIVE-031: pass
+cairn: LIVE-032: pass
+cairn: LIVE-033: pass
+cairn: LIVE-034: pass
+cairn: LIVE-035: pass
+cairn: LIVE-036: pass

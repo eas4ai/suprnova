@@ -1,0 +1,23 @@
+mechanism: ui-tokens
+commit: 544000e8c2535037d9b3d028690d0afe4dc22203
+inputs_digest: sha256:ac5caae0eed38942893d81a277bba172d846282a6408b3ed2d3839a2cd381171
+mechanism_digest: sha256:ca8fb41c4b569927ed87c647911b23f26bb405ba652427ddbd76e0d207182a05
+kernel_digest: sha256:160c9a5b8ec13386549cffdd26241209b59c4eb8645da1fe5f13eff7bb81e37c
+inputs_detail: .cairn/evidence/runs/20260917T165634503Z-238418.inputs.json
+command: node .cairn/tools/ui-tokens.mjs crates/suprnova-live/browser/src/styles/suprnova-ui.css app/templates/suprnova-ui crates/suprnova-live/browser/src/styles/suprnova-ui.tailwind.css crates/suprnova-live/components manual
+cwd: .
+exit: 0
+output_digest: sha256:b7c78c7f4900cc0b9ca22736ccec6d7d33f69d794b3fe092c7248d2081318138
+output: .cairn/evidence/runs/20260917T165634503Z-238418.out
+stderr_output: .cairn/evidence/runs/20260917T165634503Z-238418.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-17T16:56:40.814Z
+results:
+  - UI-001 pass line sha256:aed425a76ef3330f271aec0d62f64f73788c5fbc6f308bf59b76a2cebc20f6ca 32 sha256:a4d3a43b9b3a33e226de57a2c13342cdf2e9a4d4f1174c0d6a5448af0edb8b2c
+  - UI-002 pass line sha256:07eb5b469928fd3928664d2ece74ee9f6762732b52036327ddb8856bef8227a2 32 sha256:85bdf17464501a829ce5411f846af3a23371b1154a54f997b85c22d1dcd626da
+  - UI-003 pass line sha256:a5d32981c8cccb5e5ad96156d88f632076403dab2e8ce0dde67b5f6feaae4045 32 sha256:b06be28d01fd44e0d27f10bb8324b7642d8f2b70669bfbf10c8b7ce490c19ec1
+  - UI-004 pass line sha256:70a89f36024e1fb7c67286126e5138973cba81595f9a7134a83edf51b1c45074 32 sha256:d768b85d66e46704a6d697ba9a59d608b3d0018f192bae56e60881ad1fe51f06
+  - UI-005 pass line sha256:7936f826c9ccddd2c4135ae150991a99d6e4f2696bbd83c0bd8014f1f0a1b04c 32 sha256:b6aaa00cb58b0d7724b223875009fd4ea4bf4f18fa1317195e3d94b8daf92bbc
+  - UI-007 pass line sha256:a0def64e5d8c3d1c5066790f0ff2dcf332c6301eeb748a26d769f7080798ec51 32 sha256:a6e016f9c7adfd720bbf16b33ed133269887d93988e83d4cde4b8751fe17372a
