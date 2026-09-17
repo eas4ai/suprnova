@@ -546,8 +546,12 @@ y Safari 17. Donde existe el posicionamiento por ancla de CSS, el popover y el
 menú se sitúan bajo su disparador; en otro caso el navegador los centra. El
 modo de apertura única del accordion descansa en `details name`, que las
 versiones soportadas más antiguas tratan como disclosures independientes. El
-tooltip sigue abierto mientras el puntero pasa de su disparador a la burbuja,
-así que su texto se puede leer o seleccionar.
+tooltip sigue abierto mientras el puntero pasa de su disparador a la
+burbuja, así que su texto se puede leer o seleccionar, y Escape lo cierra
+donde se muestra, sin mover el puntero ni el foco; el siguiente hover o foco
+de ese disparador vuelve a mostrarlo. El cierre lo lleva a solas el elemento
+vendorizado `sn-tooltip`, y la burbuja sigue mostrándose al pasar el puntero
+y al recibir foco en una página que nunca lo carga.
 
 Siguen la familia de feedback y la familia de navegación. Feedback: alert,
 skeleton, spinner, progress, empty state y una región de toasts con una región

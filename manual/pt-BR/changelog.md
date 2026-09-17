@@ -246,6 +246,13 @@ são enviados atomicamente. Mais recentes primeiro.
   renderização que uma ilha aplica agora é a referência com que a próxima
   edição é comparada, e o estado sujo de um campo é comparado com o valor que
   essa renderização deu ao seu controle.
+- **Um tooltip pode ser fechado onde é mostrado.** Um balão que cobre
+  conteúdo só podia ser fechado movendo o ponteiro ou o foco para longe, o
+  que o critério de sucesso 1.4.13 da WCAG 2.2 não aceita. Escape agora o
+  esconde sem mover nenhum dos dois, e o próximo hover ou foco desse gatilho
+  o mostra de novo. O balão continua aparecendo sem nenhum script na página;
+  o novo elemento `sn-tooltip` carrega o fechamento sozinho, e
+  `live:add tooltip` o instala.
 
 ### Segurança
 

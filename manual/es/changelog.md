@@ -258,6 +258,13 @@ recientes primero.
   isla conservaba otro valor. El renderizado que aplica una isla es ahora la
   referencia con la que se compara la siguiente edición, y el estado sucio de
   un campo se compara con el valor que ese renderizado dio a su control.
+- **Un tooltip se puede cerrar donde se muestra.** Una burbuja que cubre
+  contenido solo se podía cerrar moviendo el puntero o el foco, algo que el
+  criterio de éxito 1.4.13 de WCAG 2.2 no acepta. Escape ahora la oculta sin
+  mover ninguno de los dos, y el siguiente hover o foco de ese disparador
+  vuelve a mostrarla. La burbuja se sigue mostrando sin ningún script en la
+  página; el nuevo elemento `sn-tooltip` lleva el cierre a solas, y
+  `live:add tooltip` lo instala.
 
 ### Seguridad
 

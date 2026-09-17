@@ -551,7 +551,11 @@ les centre. Le mode d'ouverture unique de l'accordion repose sur `details
 name`, que les versions prises en charge plus anciennes traitent comme des
 disclosures indépendants. Le tooltip reste ouvert pendant que le pointeur
 passe de son déclencheur à la bulle, si bien que son texte peut être lu ou
-sélectionné.
+sélectionné, et Échap le ferme là où il est affiché, sans déplacer ni le
+pointeur ni le focus ; le prochain survol ou focus de ce déclencheur
+l'affiche de nouveau. La fermeture est portée à elle seule par l'élément
+vendorisé `sn-tooltip`, et la bulle s'affiche toujours au survol et au focus
+dans une page qui ne le charge jamais.
 
 La famille feedback et la famille navigation suivent. Feedback : alert,
 skeleton, spinner, progress, empty state et une région de toasts avec une

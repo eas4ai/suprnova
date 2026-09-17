@@ -554,7 +554,12 @@ Popover und Menü unter ihrem Auslöser; sonst zentriert der Browser sie. Der
 Einzelöffnungsmodus des Accordions beruht auf `details name`, das ältere
 unterstützte Versionen als unabhängige Disclosures behandeln. Der Tooltip
 bleibt offen, während der Zeiger von seinem Auslöser auf die Sprechblase
-wandert, sodass sich sein Text lesen oder markieren lässt.
+wandert, sodass sich sein Text lesen oder markieren lässt, und Escape
+schließt ihn, wo er gezeigt wird, ohne Zeiger oder Fokus zu bewegen; das
+nächste Hovern oder Fokussieren dieses Auslösers zeigt ihn erneut. Das
+Schließen übernimmt allein das vendorierte Element `sn-tooltip`, und die
+Sprechblase erscheint weiterhin bei Hover und bei Fokus auf einer Seite, die
+es nie lädt.
 
 Die Feedback-Familie und die Navigationsfamilie folgen. Feedback: Alert,
 Skeleton, Spinner, Progress, Empty State und eine Toast-Region mit einer

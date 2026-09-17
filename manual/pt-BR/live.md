@@ -543,9 +543,12 @@ O atributo `popover` fixa a base suportada em Chrome e Edge 114, Firefox 128 e
 Safari 17. Onde existe o posicionamento por âncora do CSS, o popover e o menu
 ficam sob seu gatilho; caso contrário o navegador os centraliza. O modo de
 abertura única do accordion depende de `details name`, que versões suportadas
-mais antigas tratam como disclosures independentes. O tooltip continua aberto
-enquanto o ponteiro passa do gatilho para o balão, então seu texto pode ser
-lido ou selecionado.
+mais antigas tratam como disclosures independentes. O tooltip continua
+aberto enquanto o ponteiro passa do gatilho para o balão, então seu texto
+pode ser lido ou selecionado, e Escape o fecha onde é mostrado, sem mover o
+ponteiro nem o foco; o próximo hover ou foco desse gatilho o mostra de novo.
+O fechamento cabe somente ao elemento vendorizado `sn-tooltip`, e o balão
+continua aparecendo ao hover e ao foco em uma página que nunca o carrega.
 
 Seguem a família de feedback e a família de navegação. Feedback: alert,
 skeleton, spinner, progress, empty state e uma região de toasts com uma região

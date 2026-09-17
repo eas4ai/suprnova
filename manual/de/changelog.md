@@ -264,6 +264,14 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   jetzt die Referenz, mit der die nächste Änderung verglichen wird, und der
   Dirty-Zustand eines Felds wird mit dem Wert verglichen, den dieses Rendern
   seinem Steuerelement gegeben hat.
+- **Ein Tooltip lässt sich schließen, wo er gezeigt wird.** Eine Sprechblase,
+  die Inhalt verdeckt, ließ sich bisher nur schließen, indem man Zeiger oder
+  Fokus wegbewegte, was das Erfolgskriterium 1.4.13 von WCAG 2.2 nicht
+  zulässt. Escape blendet sie jetzt aus, ohne eines von beiden zu bewegen,
+  und das nächste Hovern oder Fokussieren dieses Auslösers zeigt sie erneut.
+  Die Sprechblase erscheint weiterhin auch ohne Skript auf der Seite; das
+  neue Element `sn-tooltip` trägt das Schließen allein, und
+  `live:add tooltip` installiert es.
 
 ### Sicherheit
 

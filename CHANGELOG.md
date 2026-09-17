@@ -224,6 +224,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   island held another value. The render an island applies is now the baseline
   the next edit is compared with, and a field's dirty state compares with the
   value that render gave its control.
+- **A tooltip can be dismissed where it is shown.** A bubble that covers
+  content could be dismissed only by moving the pointer or focus away, which
+  WCAG 2.2 success criterion 1.4.13 does not accept. Escape now hides it with
+  neither moved, and the next hover or focus of that trigger shows it again.
+  The bubble still shows with no script in the page; the new `sn-tooltip`
+  element carries the dismissal alone, and `live:add tooltip` installs it.
 
 ### Security
 

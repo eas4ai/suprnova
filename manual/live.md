@@ -537,7 +537,10 @@ menu sit under their trigger; elsewhere the browser centres them. The
 accordion's single-open mode rests on `details name`, which older supported
 releases treat as independent disclosures. The tooltip stays open while the
 pointer moves from its trigger onto the bubble, so its text can be read or
-selected.
+selected, and Escape dismisses it where it is shown, without moving the
+pointer or focus; the next hover or focus of that trigger shows it again.
+The dismissal is the vendored `sn-tooltip` element, and the bubble still
+shows on hover and on focus in a page that never loads it.
 
 The feedback family and the navigation family follow. Feedback: alert,
 skeleton, spinner, progress, empty state, and a toast region with a flash

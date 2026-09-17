@@ -265,6 +265,13 @@ en premier.
   désormais la référence à laquelle la prochaine modification est comparée, et
   l'état sale d'un champ se compare à la valeur que ce rendu a donnée à son
   contrôle.
+- **Un tooltip peut être fermé là où il est affiché.** Une bulle qui couvre
+  du contenu ne pouvait être fermée qu'en déplaçant le pointeur ou le focus,
+  ce que le critère de succès 1.4.13 de WCAG 2.2 n'accepte pas. Échap la
+  masque désormais sans déplacer ni l'un ni l'autre, et le prochain survol ou
+  focus de ce déclencheur l'affiche de nouveau. La bulle s'affiche toujours
+  sans aucun script dans la page ; le nouvel élément `sn-tooltip` porte la
+  fermeture à lui seul, et `live:add tooltip` l'installe.
 
 ### Sécurité
 
