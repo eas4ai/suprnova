@@ -8,7 +8,8 @@
 // (details, the popover attribute, dialog) and no vendored script owns open
 // state or focus containment: no script writes the open or hidden attribute,
 // toggles a class for open state, or handles Tab to trap focus.
-// OVL-002: the tooltip ships no script, shows on :hover and :focus-visible,
+// OVL-002: the tooltip shows on :hover and :focus-visible with no script of
+// its own needed to show the bubble,
 // and the gallery associates every tooltip through aria-describedby.
 // OVL-003: the menu is single level (no list inside an item), navigation
 // items are anchors and action items are buttons on a registered action.
@@ -68,7 +69,11 @@ if (!root || !existsSync(root)) {
   // OVL-002
   if (!present.includes("tooltip")) fail("OVL-002", "no tooltip component");
   else {
-    if (read("tooltip", "tooltip.js") !== null) fail("OVL-002", "the tooltip ships a script");
+    // OVL-002 (revised 2026-09-17) admits a dismissal enhancement; what it
+    // still refuses is a bubble that needs script to show, which the
+    // script-absent browser case in ui-tooltip-dismissal reads directly.
+    const script = read("tooltip", "tooltip.js");
+    if (script !== null && !/sn-tooltip/.test(script)) fail("OVL-002", "the tooltip script defines no sn-tooltip element");
     const css = read("tooltip", "tooltip.css") ?? "";
     for (const needle of [":hover", ":focus-visible"]) if (!css.includes(needle)) fail("OVL-002", `tooltip.css has no ${needle} rule`);
     if (!/role="tooltip"/.test(read("tooltip", "tooltip.html") ?? "")) fail("OVL-002", "the bubble has no tooltip role");

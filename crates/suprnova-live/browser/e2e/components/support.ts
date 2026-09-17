@@ -17,6 +17,12 @@ export interface ComponentDocument {
   readonly html: string;
   /** The component directories whose stylesheet and script the page loads. */
   readonly components: readonly string[];
+  /**
+   * Loads each named component's script as well, true by default. A case
+   * that proves a component works with no script of its own sets it false
+   * and keeps the stylesheet.
+   */
+  readonly scripts?: boolean;
   /** Pins the document's color scheme, as `data-theme` on the root. */
   readonly theme?: "light" | "dark";
   /**
@@ -79,6 +85,7 @@ export async function mountComponents(page: Page, document: ComponentDocument): 
   for (const component of document.components) {
     const stylesheet = join(componentsRoot, component, `${component}.css`);
     if (existsSync(stylesheet)) await page.addStyleTag({ path: stylesheet });
+    if (document.scripts === false) continue;
     const script = join(componentsRoot, component, `${component}.js`);
     if (existsSync(script)) await page.addScriptTag({ path: script });
   }

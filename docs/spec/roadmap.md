@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: live-model-render-baseline
+Current: tooltip-dismissal
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -152,6 +152,13 @@ components in waves, the advanced components last, the datatable closing.
    remediation's reset, promoted on the developer's `ok` to escalation
    `live-031` (`live.md` LIVE-037,
    `docs/commitments/live-model-render-baseline.md`).
+
+14. tooltip-dismissal - a tooltip bubble that covers content cannot be dismissed
+   where it is shown, which WCAG 2.2 success criterion 1.4.13 requires;
+   specified 2026-09-17 in the phase between loops, which revised OVL-002
+   to admit a dismissal enhancement and agreed OVL-008
+   (`component-library-overlays.md` OVL-002 revised and OVL-008,
+   `docs/commitments/tooltip-dismissal.md`).
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

@@ -1,0 +1,11 @@
+command: sh -c 'cd crates/suprnova-live/browser && npx playwright test --config playwright.components.config.ts e2e/components/tooltip.spec.ts --reporter=line'
+results: per-requirement
+inputs:
+  - crates/suprnova-live/components/tooltip/
+  - crates/suprnova-live/browser/e2e/components/tooltip.spec.ts
+  - crates/suprnova-live/browser/e2e/components/support.ts
+  - crates/suprnova-live/browser/playwright.components.config.ts
+  - crates/suprnova-live/browser/src/styles/suprnova-ui.css
+requirements:
+  - OVL-002
+  - OVL-008
