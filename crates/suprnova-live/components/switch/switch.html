@@ -1,7 +1,9 @@
 {#
   suprnova.switch - a checkbox with the switch role for a real binary
   setting (Live spec 21, choice and toggle); the base layer draws it.
+  checked is the island's current value (FORM-009), and authority marks a
+  server correction (Live spec 12).
 #}
-{% macro switch(name, label) %}
-<label class="sn-switch"><input class="sn-switch-input" id="{{ name }}" name="{{ name }}" type="checkbox" role="switch" aria-describedby="{{ name }}-hint {{ name }}-error" live:model="{{ name }}"> <span>{{ label }}</span></label>
+{% macro switch(name, label, checked=false, authority="") %}
+<label class="sn-switch"><input class="sn-switch-input" id="{{ name }}" name="{{ name }}" type="checkbox" role="switch" aria-describedby="{{ name }}-hint {{ name }}-error"{% if checked %} checked{% endif %}{% if !authority.is_empty() %} data-suprnova-live-authoritative="{{ authority }}"{% endif %} live:model="{{ name }}"> <span>{{ label }}</span></label>
 {% endmacro %}

@@ -6,7 +6,13 @@ import type { RuntimeClock, RuntimeScheduler } from "../runtime/ports.js";
 import type { ServerIntent, ServerOperation } from "../scheduler/intent.js";
 import { FIFO_POLICY } from "../scheduler/policy.js";
 import type { SchedulerPolicy } from "../scheduler/types.js";
-import { controlEligibleForModel, readModelControl, type ModelControlRead } from "./control.js";
+import {
+  controlEligibleForModel,
+  isCheckbox,
+  readCheckboxGroup,
+  readModelControl,
+  type ModelControlRead,
+} from "./control.js";
 import { ModelState, type ModelEditResult } from "./state.js";
 import {
   ModelTimingCoordinator,
@@ -411,6 +417,16 @@ function groupBindings(bindings: readonly ModelBinding[]): Map<string, ModelBind
 export function readBindingGroup(bindings: readonly ModelBinding[]): ModelControlRead {
   const eligible = bindings.filter((binding) => controlEligibleForModel(binding.owned.element));
   if (eligible.length === 0) return Object.freeze({ kind: "missing" });
+  // A field more than one checkbox binds is a collection: its value is the
+  // list of the checked boxes' values (LIVE-032). One checkbox stays a
+  // boolean, because the browser holds no codec to tell the two apart.
+  const checkboxes = bindings.filter((binding) => isCheckbox(binding.owned.element));
+  if (checkboxes.length > 1) {
+    if (checkboxes.length !== bindings.length) {
+      return Object.freeze({ code: "control_unsupported", kind: "invalid" });
+    }
+    return readCheckboxGroup(eligible.map((binding) => binding.owned.element as HTMLInputElement));
+  }
   const radios = eligible.filter((binding) => {
     const element = binding.owned.element;
     return (

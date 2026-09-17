@@ -477,6 +477,154 @@ async fn the_gallery_snapshot_never_carries_the_password() {
     );
 }
 
+/// The opening tag of the element whose id is `id`.
+fn tag_with_id<'h>(html: &'h str, id: &str) -> &'h str {
+    let at = html
+        .find(&format!(" id=\"{id}\""))
+        .unwrap_or_else(|| panic!("no element with id {id} in {html}"));
+    let start = html[..at].rfind('<').expect("tag start");
+    let end = html[at..].find('>').expect("tag end") + at;
+    &html[start..=end]
+}
+
+/// FORM-009: each form control renders the island's current value, so the
+/// page shows it and a submit that changed no control sends it back. The
+/// render that answers `reset` marks every value control authoritative, so it
+/// replaces what the user typed, and the render after it does not (Live spec
+/// 12).
+#[tokio::test]
+async fn form_009_the_form_gallery_renders_the_island_values_into_its_controls() {
+    let app = setup_app(10).await;
+    let session = seed_session(&app).await;
+    let html = get(&app, "/live/forms", Some(&session)).await.text();
+    let gallery = island_tag(&html, "forms-gallery");
+    let island = &html[html.find(gallery).expect("gallery island")..];
+    for (id, value) in [("quantity", "1"), ("volume", "50"), ("email", ""), ("query", "")] {
+        let tag = tag_with_id(island, id);
+        assert!(
+            tag.contains(&format!(" value=\"{value}\"")),
+            "{id} renders the mounted value {value:?}: {tag}"
+        );
+    }
+    assert!(island.contains("<output class=\"sn-slider-value\" for=\"volume\">50</output>"));
+    assert!(island.contains("live:model=\"bio\"></textarea>"), "{island}");
+    for unset in [" checked", " selected", "data-suprnova-live-authoritative"] {
+        assert!(!island.contains(unset), "nothing mounted carries {unset}: {island}");
+    }
+
+    let mut sequence = 0;
+    let mut run = |action: &'static str, proposals: Value, snapshot: Value| {
+        sequence += 1;
+        let idempotency_key = idempotency(sequence);
+        let revision = snapshot_revision(&snapshot);
+        let app = &app;
+        let session = &session;
+        let mut operations: Vec<Value> = proposals
+            .as_object()
+            .map(|fields| {
+                fields
+                    .keys()
+                    .map(|field| serde_json::json!({"field": field, "kind": "sync_model"}))
+                    .collect()
+            })
+            .unwrap_or_default();
+        operations.extend(invoke(action).as_array().cloned().unwrap_or_default());
+        async move {
+            let reply = send(
+                app.addr,
+                action_request(
+                    app,
+                    ActionSpec {
+                        component: "app.form-gallery",
+                        document_key: "forms-gallery",
+                        snapshot,
+                        seed: false,
+                        base_revision: &revision,
+                        operations: Value::Array(operations),
+                        model_proposals: proposals,
+                        idempotency_key: &idempotency_key,
+                    },
+                    Some(session),
+                    true,
+                ),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::OK, "{action}: {}", reply.text());
+            let accepted = reply.json();
+            assert_eq!(accepted["outcome"], "accepted", "{action}: {accepted}");
+            accepted
+        }
+    };
+
+    let saved = run(
+        "save",
+        serde_json::json!({
+            "email": "ada@example.com",
+            "bio": "Hello",
+            "quantity": 3,
+            "volume": 20,
+            "query": "rust",
+            "agree": true,
+            "plan": "team",
+            "newsletter": true,
+            "country": "us",
+            "topics": ["security"],
+        }),
+        decoded_snapshot(gallery),
+    )
+    .await;
+    let rendered = saved["render"]["html"].as_str().unwrap_or_default();
+    for (id, value) in [
+        ("quantity", "3"),
+        ("volume", "20"),
+        ("email", "ada@example.com"),
+        ("query", "rust"),
+    ] {
+        let tag = tag_with_id(rendered, id);
+        assert!(
+            tag.contains(&format!(" value=\"{value}\"")),
+            "{id} renders the saved value {value:?}: {tag}"
+        );
+    }
+    for id in ["agree", "newsletter"] {
+        let tag = tag_with_id(rendered, id);
+        assert!(tag.contains(" checked"), "{id} renders checked: {tag}");
+    }
+    for needle in [
+        "live:model=\"bio\">Hello</textarea>",
+        "<output class=\"sn-slider-value\" for=\"volume\">20</output>",
+        "<option value=\"us\" selected>United States</option>",
+        "<option value=\"ca\">Canada</option>",
+        "value=\"team\" checked",
+        "value=\"starter\" live:key=",
+        "value=\"security\" checked",
+        "value=\"releases\" live:key=",
+    ] {
+        assert!(rendered.contains(needle), "missing {needle} in {rendered}");
+    }
+    assert!(!rendered.contains("data-suprnova-live-authoritative"), "{rendered}");
+
+    let reset = run("reset", serde_json::json!({}), saved["snapshot"].clone()).await;
+    let rendered = reset["render"]["html"].as_str().unwrap_or_default();
+    assert_eq!(
+        rendered.matches(" data-suprnova-live-authoritative=\"1\"").count(),
+        12,
+        "every value control of the reset render is authoritative: {rendered}"
+    );
+    let quantity = tag_with_id(rendered, "quantity");
+    assert!(quantity.contains(" value=\"1\""), "{quantity}");
+    for unset in [" checked", " selected"] {
+        assert!(!rendered.contains(unset), "the reset clears {unset}: {rendered}");
+    }
+
+    let after = run("save", serde_json::json!({}), reset["snapshot"].clone()).await;
+    let rendered = after["render"]["html"].as_str().unwrap_or_default();
+    assert!(
+        !rendered.contains("data-suprnova-live-authoritative"),
+        "only the render answering the reset is authoritative: {rendered}"
+    );
+}
+
 /// OVL-001 to OVL-004: the overlay gallery renders every overlay on its
 /// native primitive, keyed and preserved, with no Live directive on an open
 /// or close control, and the vendored assets beside them.
@@ -1114,7 +1262,7 @@ async fn the_live_native_gallery_renders_every_component_on_native_controls() {
         "<span class=\"sn-otp-cell\" data-sn-index=\"5\"></span>",
         // FORM-007: a date input and native radio strips with legends.
         "<sn-date-picker class=\"sn-date\" live:key=\"when-date\" live:preserve.self>",
-        "id=\"when\" name=\"when\" type=\"date\" min=\"2026-01-01\" max=\"2028-12-31\" live:model=\"when\"",
+        "id=\"when\" name=\"when\" type=\"date\" min=\"2026-01-01\" max=\"2028-12-31\" value=\"\" live:model=\"when\"",
         "<fieldset class=\"sn-date-strip\" data-sn-part=\"year\"><legend class=\"sn-date-legend\">Year</legend>",
         "<input class=\"sn-date-radio\" type=\"radio\" name=\"when-month\" value=\"12\">December",
         "<input class=\"sn-date-radio\" type=\"radio\" name=\"when-day\" value=\"31\">31",

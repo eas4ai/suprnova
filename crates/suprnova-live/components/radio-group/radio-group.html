@@ -1,12 +1,16 @@
 {#
   suprnova.radio-group - a fieldset of native radios over (value, label)
   pairs bound to one model path; the legend is the group's accessible name.
+  selected is the island's current value, whose radio renders checked
+  (FORM-009). Each radio is keyed by its value, so a choice the user has not
+  sent survives a re-render of the island (FORM-010); authority marks a
+  server correction (Live spec 12).
 #}
-{% macro radio_group(name, legend, options, required=false) %}
+{% macro radio_group(name, legend, options, required=false, selected="", authority="") %}
 <fieldset class="sn-radio-group" id="{{ name }}" aria-describedby="{{ name }}-hint {{ name }}-error">
 <legend>{{ legend }}</legend>
 {% for option in options %}
-<label class="sn-radio"><input class="sn-radio-input" name="{{ name }}" type="radio" value="{{ option.0 }}"{% if required %} required{% endif %} live:model="{{ name }}"> <span>{{ option.1 }}</span></label>
+<label class="sn-radio"><input class="sn-radio-input" name="{{ name }}" type="radio" value="{{ option.0 }}"{% if option.0.as_bytes() == selected.as_bytes() %} checked{% endif %}{% if required %} required{% endif %}{% if !authority.is_empty() %} data-suprnova-live-authoritative="{{ authority }}"{% endif %} live:key="{{ name }}-{{ option.0|live_key_digest }}" live:model="{{ name }}"> <span>{{ option.1 }}</span></label>
 {% endfor %}
 </fieldset>
 {% endmacro %}

@@ -6,6 +6,11 @@ use suprnova::live::{
     LiveComponent, UploadPolicy, UploadReplacement, UploadScan, UploadType, live,
 };
 
+/// The checked filter the radio and checkbox groups key their inputs with.
+pub mod filters {
+    pub use suprnova::view::filters::live_key_digest;
+}
+
 /// The avatar the file input proposes: one PNG, finalized with the form's
 /// `save` action. The gallery's file input binds a real upload field so
 /// `live:check` proves the control against the component (LIVE-025).
@@ -76,6 +81,14 @@ pub struct FormGallery {
     /// Topic choices offered to the checkbox group.
     #[public]
     topic_options: Vec<(String, String)>,
+    /// The correction sequence the controls carry in the render that answers
+    /// `reset`, so that render replaces the user's unsent edits; empty in
+    /// every other render (Live spec 12).
+    #[public]
+    authority: String,
+    /// How many resets this island has answered, the source of `authority`.
+    #[public]
+    resets: u64,
 }
 
 #[live]
@@ -108,6 +121,8 @@ impl FormGallery {
                 ("releases".to_owned(), "Releases".to_owned()),
                 ("security".to_owned(), "Security advisories".to_owned()),
             ],
+            authority: String::new(),
+            resets: 0,
         }
     }
 
@@ -130,5 +145,14 @@ impl FormGallery {
         self.newsletter = fresh.newsletter;
         self.country = fresh.country;
         self.topics = fresh.topics;
+        self.resets = self.resets.saturating_add(1);
+        self.authority = self.resets.to_string();
+    }
+
+    /// Drops the correction once it is rendered, so only the render that
+    /// answers `reset` overrides what the user has typed since.
+    #[rendered]
+    pub fn release_authority(&mut self) {
+        self.authority.clear();
     }
 }

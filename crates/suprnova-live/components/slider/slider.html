@@ -1,11 +1,12 @@
 {#
   suprnova.slider - a native range input; the current value is shown in an
   output the browser keeps in sync, so the number is readable without
-  script.
+  script. value is the island's current number (FORM-009), and authority
+  marks a server correction (Live spec 12).
 #}
-{% macro slider(name, min="0", max="100", step="1") %}
+{% macro slider(name, min="0", max="100", step="1", value="", authority="") %}
 <div class="sn-slider">
-<input class="sn-slider-input" id="{{ name }}" name="{{ name }}" type="range" min="{{ min }}" max="{{ max }}" step="{{ step }}" aria-describedby="{{ name }}-hint {{ name }}-error" live:model="{{ name }}">
-<output class="sn-slider-value" for="{{ name }}"></output>
+<input class="sn-slider-input" id="{{ name }}" name="{{ name }}" type="range" min="{{ min }}" max="{{ max }}" step="{{ step }}" aria-describedby="{{ name }}-hint {{ name }}-error" value="{{ value }}"{% if !authority.is_empty() %} data-suprnova-live-authoritative="{{ authority }}"{% endif %} live:model="{{ name }}">
+<output class="sn-slider-value" for="{{ name }}">{{ value }}</output>
 </div>
 {% endmacro %}

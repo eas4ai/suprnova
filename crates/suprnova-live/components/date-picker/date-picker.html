@@ -7,13 +7,14 @@
   (date-picker.js) composes a strip selection into the input's value and
   mirrors the input back onto the strips; with the script absent the input
   still takes the date and the strips still select. The wrapper is keyed
-  with live:preserve.self, so its upgrade marker survives a morph.
-  Classification: varies with the island.
+  with live:preserve.self, so its upgrade marker survives a morph. value is
+  the island's current date (FORM-009), and authority marks a server
+  correction (Live spec 12). Classification: varies with the island.
 #}
-{% macro date_picker(name, label, years, months, days, min, max) %}
+{% macro date_picker(name, label, years, months, days, min, max, value="", authority="") %}
 <sn-date-picker class="sn-date" live:key="{{ name }}-date" live:preserve.self>
 <label class="sn-date-label" for="{{ name }}">{{ label }}</label>
-<input class="sn-input sn-date-input" id="{{ name }}" name="{{ name }}" type="date" min="{{ min }}" max="{{ max }}" live:model="{{ name }}">
+<input class="sn-input sn-date-input" id="{{ name }}" name="{{ name }}" type="date" min="{{ min }}" max="{{ max }}" value="{{ value }}"{% if !authority.is_empty() %} data-suprnova-live-authoritative="{{ authority }}"{% endif %} live:model="{{ name }}">
 <details class="sn-date-strips">
 <summary class="sn-date-summary">Pick the parts</summary>
 <fieldset class="sn-date-strip" data-sn-part="year"><legend class="sn-date-legend">Year</legend>{% for year in years %}<label class="sn-date-option"><input class="sn-date-radio" type="radio" name="{{ name }}-year" value="{{ year }}">{{ year }}</label>{% endfor %}</fieldset>

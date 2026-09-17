@@ -55,6 +55,18 @@ function readInput(element: HTMLInputElement): ModelControlRead {
   return modelValue(element.value);
 }
 
+export function isCheckbox(element: Element): element is HTMLInputElement {
+  return (
+    element.tagName.toUpperCase() === "INPUT" &&
+    (element as HTMLInputElement).type.toLowerCase() === "checkbox"
+  );
+}
+
+/** Reads the checkboxes that bind one collection field as their checked values, in order. */
+export function readCheckboxGroup(elements: readonly HTMLInputElement[]): ModelControlRead {
+  return modelValue(elements.filter((element) => element.checked).map((element) => element.value));
+}
+
 function readSelect(element: HTMLSelectElement): ModelControlRead {
   if (!element.multiple) {
     return element.selectedIndex < 0 ? modelValue(null) : modelValue(element.value);

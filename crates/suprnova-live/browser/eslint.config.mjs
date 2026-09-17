@@ -46,6 +46,7 @@ export default tseslint.config(
       "e2e/**/*.ts",
       "playwright.config.ts",
       "playwright.components.config.ts",
+      "playwright.dogfood.config.ts",
       "vitest.config.ts",
     ],
     languageOptions: {

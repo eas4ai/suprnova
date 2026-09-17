@@ -1,7 +1,9 @@
 {#
   suprnova.search-input - a search input whose model binding is debounced
-  (FORM-003): the server sees a settled query, not every keystroke.
+  (FORM-003): the server sees a settled query, not every keystroke. value
+  is the island's current query (FORM-009), and authority marks a server
+  correction (Live spec 12).
 #}
-{% macro search_input(name, placeholder="Search") %}
-<input class="sn-input sn-search-input" id="{{ name }}" name="{{ name }}" type="search" placeholder="{{ placeholder }}" autocomplete="off" aria-describedby="{{ name }}-hint {{ name }}-error" live:model.debounce.250ms="{{ name }}">
+{% macro search_input(name, placeholder="Search", value="", authority="") %}
+<input class="sn-input sn-search-input" id="{{ name }}" name="{{ name }}" type="search" placeholder="{{ placeholder }}" autocomplete="off" aria-describedby="{{ name }}-hint {{ name }}-error" value="{{ value }}"{% if !authority.is_empty() %} data-suprnova-live-authoritative="{{ authority }}"{% endif %} live:model.debounce.250ms="{{ name }}">
 {% endmacro %}

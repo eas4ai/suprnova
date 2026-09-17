@@ -1,7 +1,10 @@
 {#
   suprnova.input - a native text-like input bound to a model path. kind is
-  the HTML type (text, email, url, tel); the value comes from the model.
+  the HTML type (text, email, url, tel); value is the island's current value
+  of the field, rendered so the control shows it (FORM-009). authority, when
+  set to a sequence number, marks the render as a server correction that
+  replaces the user's unsent edit (Live spec 12).
 #}
-{% macro input(name, kind="text", placeholder="", required=false, autocomplete="off") %}
-<input class="sn-input" id="{{ name }}" name="{{ name }}" type="{{ kind }}" placeholder="{{ placeholder }}" autocomplete="{{ autocomplete }}" aria-describedby="{{ name }}-hint {{ name }}-error"{% if required %} required{% endif %} live:model="{{ name }}">
+{% macro input(name, kind="text", placeholder="", required=false, autocomplete="off", value="", authority="") %}
+<input class="sn-input" id="{{ name }}" name="{{ name }}" type="{{ kind }}" placeholder="{{ placeholder }}" autocomplete="{{ autocomplete }}" aria-describedby="{{ name }}-hint {{ name }}-error"{% if required %} required{% endif %} value="{{ value }}"{% if !authority.is_empty() %} data-suprnova-live-authoritative="{{ authority }}"{% endif %} live:model="{{ name }}">
 {% endmacro %}

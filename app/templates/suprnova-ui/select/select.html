@@ -1,12 +1,14 @@
 {#
   suprnova.select - a native select over (value, label) pairs bound to one
   model path; an empty placeholder option keeps "nothing chosen" explicit.
+  selected is the island's current value, whose option renders selected
+  (FORM-009), and authority marks a server correction (Live spec 12).
 #}
-{% macro select(name, options, placeholder="", required=false) %}
-<select class="sn-select" id="{{ name }}" name="{{ name }}" aria-describedby="{{ name }}-hint {{ name }}-error"{% if required %} required{% endif %} live:model="{{ name }}">
+{% macro select(name, options, placeholder="", required=false, selected="", authority="") %}
+<select class="sn-select" id="{{ name }}" name="{{ name }}" aria-describedby="{{ name }}-hint {{ name }}-error"{% if required %} required{% endif %}{% if !authority.is_empty() %} data-suprnova-live-authoritative="{{ authority }}"{% endif %} live:model="{{ name }}">
 {% if placeholder != "" %}<option value="">{{ placeholder }}</option>{% endif %}
 {% for option in options %}
-<option value="{{ option.0 }}">{{ option.1 }}</option>
+<option value="{{ option.0 }}"{% if option.0.as_bytes() == selected.as_bytes() %} selected{% endif %}>{{ option.1 }}</option>
 {% endfor %}
 </select>
 {% endmacro %}

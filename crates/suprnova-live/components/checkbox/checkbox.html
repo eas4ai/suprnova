@@ -1,17 +1,22 @@
 {#
-  suprnova.checkbox - one native checkbox with its label. checkbox_group
-  renders a fieldset of checkboxes over (value, label) pairs bound to a
-  collection model path.
+  suprnova.checkbox - one native checkbox with its label; checked is the
+  island's current value (FORM-009). checkbox_group renders a fieldset of
+  checkboxes over (value, label) pairs bound to a collection model path:
+  selected is the island's current list, whose boxes render checked, and the
+  runtime proposes the list of checked values (LIVE-032). Each box is keyed
+  by its value, so a choice the user has not sent survives a re-render of the
+  island (FORM-010). A group of one box proposes a boolean, like a single
+  checkbox. authority marks a server correction (Live spec 12).
 #}
-{% macro checkbox(name, label, required=false) %}
-<label class="sn-checkbox"><input class="sn-checkbox-input" id="{{ name }}" name="{{ name }}" type="checkbox" aria-describedby="{{ name }}-hint {{ name }}-error"{% if required %} required{% endif %} live:model="{{ name }}"> <span>{{ label }}</span></label>
+{% macro checkbox(name, label, required=false, checked=false, authority="") %}
+<label class="sn-checkbox"><input class="sn-checkbox-input" id="{{ name }}" name="{{ name }}" type="checkbox" aria-describedby="{{ name }}-hint {{ name }}-error"{% if checked %} checked{% endif %}{% if required %} required{% endif %}{% if !authority.is_empty() %} data-suprnova-live-authoritative="{{ authority }}"{% endif %} live:model="{{ name }}"> <span>{{ label }}</span></label>
 {% endmacro %}
 
-{% macro checkbox_group(name, legend, options) %}
+{% macro checkbox_group(name, legend, options, selected, authority="") %}
 <fieldset class="sn-checkbox-group" id="{{ name }}" aria-describedby="{{ name }}-hint {{ name }}-error">
 <legend>{{ legend }}</legend>
 {% for option in options %}
-<label class="sn-checkbox"><input class="sn-checkbox-input" name="{{ name }}" type="checkbox" value="{{ option.0 }}" live:model="{{ name }}"> <span>{{ option.1 }}</span></label>
+<label class="sn-checkbox"><input class="sn-checkbox-input" name="{{ name }}" type="checkbox" value="{{ option.0 }}"{% if selected.contains(option.0|ref) %} checked{% endif %}{% if !authority.is_empty() %} data-suprnova-live-authoritative="{{ authority }}"{% endif %} live:key="{{ name }}-{{ option.0|live_key_digest }}" live:model="{{ name }}"> <span>{{ option.1 }}</span></label>
 {% endfor %}
 </fieldset>
 {% endmacro %}
