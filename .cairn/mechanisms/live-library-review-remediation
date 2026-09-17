@@ -1,0 +1,47 @@
+command: node .cairn/tools/live-library-review.mjs
+results: per-requirement
+inputs:
+  - .cairn/tools/live-library-review.mjs
+  - crates/suprnova-live/src/
+  - crates/suprnova-live/tests/
+  - crates/suprnova-live/components/
+  - crates/suprnova-live/browser/src/
+  - crates/suprnova-live/browser/dist/
+  - crates/suprnova-live/browser/e2e/
+  - crates/suprnova-live/browser/tests/
+  - crates/suprnova-live/browser/test-host/
+  - crates/suprnova-live/browser/playwright.components.config.ts
+  - crates/suprnova-live/browser/playwright.dogfood.config.ts
+  - crates/suprnova-live/browser/package.json
+  - suprnova-macros/src/live/
+  - framework/src/live/
+  - framework/src/view/
+  - framework/tests/live/
+  - framework/tests/support/
+  - framework/tests/templates/live/
+  - app/
+  - suprnova-cli/src/commands/live_add.rs
+  - suprnova-cli/tests/live_add.rs
+  - manual/live.md
+  - Cargo.lock
+requirements:
+  - FORM-008
+  - FORM-009
+  - FORM-010
+  - FORM-011
+  - FORM-012
+  - FDB-007
+  - NAV-007
+  - OVL-007
+  - DATA-006
+  - UI-020
+  - UI-021
+  - UI-022
+  - UI-023
+  - UI-024
+  - LIVE-031
+  - LIVE-032
+  - LIVE-033
+  - LIVE-034
+  - LIVE-035
+  - LIVE-036
