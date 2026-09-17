@@ -900,8 +900,9 @@ impl ComponentExecutor {
         // A proposal a field refused is a validation error on that field, and
         // the action does not run on a value it never received (LIVE-031).
         if !binding_issues.is_empty() {
-            validation = with_binding_issues(&validation, &binding_issues)
-                .ok_or_else(ActionExecutionError::validation_bound)?;
+            validation =
+                with_binding_issues(&validation, &binding_issues, validation_engine.max_issues())
+                    .ok_or_else(ActionExecutionError::validation_bound)?;
             status = ValidationStatus::Invalid;
         }
         let mut transaction = None;
@@ -1041,7 +1042,15 @@ impl ComponentExecutor {
                 record_execution_phase(trace, ExecutionPhase::Bind);
                 let issues = catch_sync(|| instance.bind_models(proposals), LifecyclePhase::Bind)?;
                 if !issues.is_empty() {
-                    validation = with_binding_issues(&validation, &issues).ok_or_else(|| {
+                    // A model sync runs no validator, so its bag holds at most
+                    // one issue per proposal, which the request's proposal
+                    // limit already bounds.
+                    validation = with_binding_issues(
+                        &validation,
+                        &issues,
+                        crate::validation::HARD_MAX_VALIDATION_ISSUES,
+                    )
+                    .ok_or_else(|| {
                         LifecycleError::new(
                             LifecycleErrorKind::ComponentFailure,
                             LifecyclePhase::Bind,
@@ -1092,8 +1101,9 @@ impl ComponentExecutor {
 
 /// The bag with one field issue for every refused proposal appended, each
 /// named by the proposal's path and the binding issue's stable code, or `None`
-/// when the result would exceed the bag's hard bound.
-fn with_binding_issues(bag: &ErrorBag, issues: &[BindingIssue]) -> Option<ErrorBag> {
+/// when the result would hold more than `bound` issues, the ceiling the
+/// validator's own issues are held to.
+fn with_binding_issues(bag: &ErrorBag, issues: &[BindingIssue], bound: usize) -> Option<ErrorBag> {
     let mut merged = bag.issues().to_vec();
     for issue in issues {
         let Some(path) = issue.path() else {
@@ -1106,6 +1116,9 @@ fn with_binding_issues(bag: &ErrorBag, issues: &[BindingIssue]) -> Option<ErrorB
         if !merged.contains(&entry) {
             merged.push(entry);
         }
+    }
+    if merged.len() > bound {
+        return None;
     }
     ErrorBag::from_issues(merged).ok()
 }
@@ -1169,5 +1182,28 @@ fn catch_sync<T>(
             phase,
         )),
         Err(_) => Err(LifecycleError::new(LifecycleErrorKind::Panicked, phase)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_binding_issues;
+    use crate::state::{BindingIssue, BindingIssueKind, ModelPath};
+    use crate::validation::ErrorBag;
+
+    fn refused(index: usize) -> BindingIssue {
+        BindingIssue::new(BindingIssueKind::InvalidType)
+            .at_path(ModelPath::parse(&format!("field_{index}")).expect("model path"))
+    }
+
+    /// LIVE-031: the refused proposals join the bag only within the ceiling
+    /// the validator's own issues are held to, so a response never carries
+    /// more validation entries than the engine was configured to answer.
+    #[test]
+    fn live_031_refused_proposals_stay_within_the_configured_validation_bound() {
+        let issues: Vec<BindingIssue> = (0..4).map(refused).collect();
+        let merged = with_binding_issues(&ErrorBag::default(), &issues, 4).expect("within bound");
+        assert_eq!(merged.issues().len(), 4);
+        assert!(with_binding_issues(&ErrorBag::default(), &issues, 3).is_none());
     }
 }

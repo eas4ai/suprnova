@@ -119,8 +119,8 @@ async fn live_031_an_undecodable_proposal_is_a_field_error_and_the_action_does_n
     // the same field error.
     let snapshot = answer["snapshot"].clone();
     let (status, _, body) = dispatch(
-        router,
-        middleware,
+        router.clone(),
+        middleware.clone(),
         form_action_request(
             ActionRequest {
                 snapshot,
@@ -139,5 +139,37 @@ async fn live_031_an_undecodable_proposal_is_a_field_error_and_the_action_does_n
     assert!(
         answer["validation"].get("seats").is_some(),
         "a model sync carries the field error: {answer}"
+    );
+
+    // An action on that instance, with a refused proposal beside it, answers
+    // the field error and leaves the save count where the first save put it.
+    let snapshot = answer["snapshot"].clone();
+    let (status, _, body) = dispatch(
+        router,
+        middleware,
+        form_action_request(
+            ActionRequest {
+                snapshot,
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "R0dHR0dHR0dHR0dHR0dHRw",
+            },
+            json!({"seats": null}),
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let answer: Value = serde_json::from_slice(&body).expect("instanced action JSON");
+    assert!(
+        answer["validation"].get("seats").is_some(),
+        "an instanced action carries the field error: {answer}"
+    );
+    assert!(
+        answer["render"]["html"]
+            .as_str()
+            .is_some_and(|html| html.contains("<p id=\"saves\">1</p>")),
+        "the instanced save did not run: {answer}"
     );
 }

@@ -829,6 +829,21 @@ fn ui_021_the_component_asset_route_refuses_a_directory_it_cannot_read() {
         Router::new().try_live_ui_assets_from(file).is_err(),
         "a file in place of the directory is refused"
     );
+
+    // The application's own call reads under its base path: one started
+    // where no templates directory exists is refused the same way. The base
+    // path is restored before any assertion can unwind.
+    let previous = suprnova::base_path("");
+    suprnova::set_base_path(root.path());
+    let installed = Router::new().try_live_ui_assets();
+    suprnova::set_base_path(previous);
+    let Err(refused) = installed else {
+        panic!("an application base path without templates is refused");
+    };
+    assert!(
+        refused.to_string().contains(&missing.display().to_string()),
+        "the refusal names the directory under the base path: {refused}"
+    );
 }
 
 /// UI-017: a vendored component's stylesheet and script are served from its

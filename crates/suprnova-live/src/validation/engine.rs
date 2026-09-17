@@ -76,6 +76,11 @@ impl ValidationEngine {
         Ok(Self { max_issues })
     }
 
+    /// The issue ceiling a validated bag stays within.
+    pub(crate) const fn max_issues(self) -> usize {
+        self.max_issues
+    }
+
     /// Runs the exact declared selection and applies its completed bag update.
     pub async fn validate(
         &self,
