@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use askama_parser::node::{Call, If, Macro, Node};
-use askama_parser::{Ast, Expr, LetValueOrBlock, PathOrIdentifier, Span, Syntax};
+use askama_parser::{Ast, Expr, LetValueOrBlock, PathOrIdentifier, Span, Syntax, Target};
 
 use crate::identity::{ComponentName, ViewName};
 
@@ -428,7 +428,9 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     }
                     self.append_text(
                         branches,
-                        if expression_uses_filter(source, expression.span(), "live_key") {
+                        if expression_uses_filter(source, expression.span(), "live_key")
+                            || expression_uses_filter(source, expression.span(), "live_key_digest")
+                        {
                             CHECKED_KEY_MARKER
                         } else {
                             DYNAMIC_MARKER
@@ -457,26 +459,73 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         if node.branches.iter().all(|branch| branch.cond.is_some()) {
                             choices.push(&[]);
                         }
+                        let mut names = Vec::new();
+                        for branch in &node.branches {
+                            if let Some(target) =
+                                branch.cond.as_ref().and_then(|cond| cond.target.as_ref())
+                            {
+                                bound_names(target, &mut names);
+                            }
+                        }
+                        let shadowed = shadowed_bindings(scope.bindings, &names);
+                        let branch_scope = Scope {
+                            template: scope.template,
+                            bindings: shadowed.as_ref().unwrap_or(scope.bindings),
+                            caller: scope.caller,
+                            macro_depth: scope.macro_depth,
+                        };
                         self.expand_choices(
-                            branches, &choices, overrides, view, source, stack, scope,
+                            branches,
+                            &choices,
+                            overrides,
+                            view,
+                            source,
+                            stack,
+                            &branch_scope,
                         )
                     }
                 }
                 Node::Match(node) => {
+                    let mut names = Vec::new();
+                    for arm in &node.arms {
+                        for target in &arm.target {
+                            bound_names(target, &mut names);
+                        }
+                    }
+                    let shadowed = shadowed_bindings(scope.bindings, &names);
+                    let arm_scope = Scope {
+                        template: scope.template,
+                        bindings: shadowed.as_ref().unwrap_or(scope.bindings),
+                        caller: scope.caller,
+                        macro_depth: scope.macro_depth,
+                    };
                     let choices: Vec<&[Box<Node<'_>>]> =
                         node.arms.iter().map(|arm| arm.nodes.as_slice()).collect();
-                    self.expand_choices(branches, &choices, overrides, view, source, stack, scope)
+                    self.expand_choices(
+                        branches, &choices, overrides, view, source, stack, &arm_scope,
+                    )
                 }
-                Node::Loop(node) => self.expand_loop(
-                    branches,
-                    &node.body,
-                    &node.else_nodes,
-                    overrides,
-                    view,
-                    source,
-                    stack,
-                    scope,
-                ),
+                Node::Loop(node) => {
+                    let mut names = vec!["loop"];
+                    bound_names(&node.var, &mut names);
+                    let shadowed = shadowed_bindings(scope.bindings, &names);
+                    let loop_scope = Scope {
+                        template: scope.template,
+                        bindings: shadowed.as_ref().unwrap_or(scope.bindings),
+                        caller: scope.caller,
+                        macro_depth: scope.macro_depth,
+                    };
+                    self.expand_loop(
+                        branches,
+                        &node.body,
+                        &node.else_nodes,
+                        overrides,
+                        view,
+                        source,
+                        stack,
+                        &loop_scope,
+                    )
+                }
                 Node::Include(include) => match ViewName::parse(include.path) {
                     Ok(include) => {
                         let fragments = self.render_view(&include, &Overrides::new(), stack);
@@ -900,6 +949,59 @@ fn binding_for(expression: &Expr<'_>, outer: &Bindings) -> Binding {
         Expr::Group(inner) => binding_for(inner, outer),
         _ => Binding::Dynamic,
     }
+}
+
+/// Collects the names a `for` target, a `match` arm, or an `if let` binds.
+fn bound_names<'a>(target: &Target<'a>, names: &mut Vec<&'a str>) {
+    match target {
+        Target::Name(name) => names.push(**name),
+        Target::Tuple(tuple) => {
+            for inner in &tuple.1 {
+                bound_names(inner, names);
+            }
+        }
+        Target::Array(array) => {
+            for inner in array.iter() {
+                bound_names(inner, names);
+            }
+        }
+        Target::Struct(structure) => {
+            for named in &structure.1 {
+                bound_names(&named.dest, names);
+            }
+        }
+        Target::OrChain(chain) => {
+            for inner in chain.iter() {
+                bound_names(inner, names);
+            }
+        }
+        Target::Rest(rest) => {
+            if let Some(name) = &**rest {
+                names.push(**name);
+            }
+        }
+        Target::NumLit(..)
+        | Target::StrLit(_)
+        | Target::CharLit(_)
+        | Target::BoolLit(_)
+        | Target::Path(_)
+        | Target::Placeholder(_) => {}
+    }
+}
+
+/// The bindings with every name a loop, a match arm, or an `if let` binds
+/// removed, or `None` when it binds none of them. Inside that body the name is
+/// the new binding, whatever literal a macro argument of the same name holds,
+/// so the checker must not prove it from the argument (LIVE-036).
+fn shadowed_bindings(bindings: &Bindings, names: &[&str]) -> Option<Bindings> {
+    if !names.iter().any(|name| bindings.contains_key(*name)) {
+        return None;
+    }
+    let mut inner = bindings.clone();
+    for name in names {
+        inner.remove(*name);
+    }
+    Some(inner)
 }
 
 /// The arm an `{% if %}` takes when every condition before it is decided by

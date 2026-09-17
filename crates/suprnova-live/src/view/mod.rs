@@ -29,7 +29,8 @@ pub use document::{
 };
 pub use error::{ViewError, ViewErrorKind};
 pub use island::IslandRender;
-pub use live_key::{LiveKeyError, LiveKeyErrorKind, check_live_key};
+pub use live_key::{LiveKeyError, LiveKeyErrorKind, check_live_key, live_key_digest};
+pub(crate) use live_key::{MAX_KEY_BYTES, in_key_alphabet};
 pub(crate) use root::{
     IslandRootFlag, IslandRootInput, IslandSnapshotForm, MAX_SUCCESSOR_METADATA_BYTES,
     assemble_island_root, declared_stream,
@@ -41,7 +42,7 @@ pub use trusted_html::{
 
 /// Suprnova-owned checked filters made available to Askama view adapters.
 pub mod filters {
-    pub use super::live_key::filters::live_key;
+    pub use super::live_key::filters::{live_key, live_key_digest};
     pub use super::trusted_html::filters::trusted_html;
 }
 

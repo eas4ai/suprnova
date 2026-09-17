@@ -69,3 +69,55 @@ fn too_many_points_or_series_are_rejected_before_rendering() {
     let error = render_chart(ChartKind::Bar, &["Apr"], &many).expect_err("13 series");
     assert_eq!(error.kind(), ChartErrorKind::TooLarge);
 }
+
+#[test]
+fn data_006_every_finite_series_renders_or_is_refused_without_panicking() {
+    // The magnitudes that stress the renderer's integer axis arithmetic:
+    // zero, tiny, fractional, the step boundaries it branches on, and the
+    // accepted bound itself, with both signs, as single points and as pairs.
+    let magnitudes = [
+        0.0,
+        f32::MIN_POSITIVE,
+        1.0e-30,
+        0.05,
+        0.5,
+        1.0,
+        9.0,
+        99.0,
+        499.0,
+        999.0,
+        4_999.0,
+        9_999.0,
+        60_000.0,
+        1.0e6,
+        3.3e8,
+        9.99e8,
+        1.0e9,
+    ];
+    let values: Vec<f32> = magnitudes
+        .iter()
+        .flat_map(|magnitude| [*magnitude, -*magnitude])
+        .collect();
+    for kind in [ChartKind::Bar, ChartKind::Line] {
+        for first in &values {
+            render_chart(kind, &["Apr"], &series(vec![*first]))
+                .unwrap_or_else(|error| panic!("{kind:?} [{first}] was refused: {error}"));
+            for second in &values {
+                render_chart(kind, &["Apr", "May"], &series(vec![*first, *second])).unwrap_or_else(
+                    |error| panic!("{kind:?} [{first}, {second}] was refused: {error}"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn data_006_a_value_beyond_the_renderer_range_is_an_input_error() {
+    for kind in [ChartKind::Bar, ChartKind::Line] {
+        for value in [1.000_001e9, 1.0e12, -1.0e12, 1.0e30, f32::MAX, f32::MIN] {
+            let error = render_chart(kind, &["Apr", "May"], &series(vec![1.0, value]))
+                .expect_err("a value beyond 1e9");
+            assert_eq!(error.kind(), ChartErrorKind::Input, "{kind:?} {value}");
+        }
+    }
+}

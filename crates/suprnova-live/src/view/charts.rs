@@ -20,6 +20,10 @@ const MAX_LABEL_BYTES: usize = 64;
 const MAX_POINTS: usize = 512;
 /// The most series one chart may carry.
 const MAX_SERIES: usize = 12;
+/// The largest magnitude a point may carry. `charts-rs` computes its axis
+/// steps in `i32` and overflows once a series spans much more than 2e9, so
+/// a larger value is refused before it reaches the renderer (DATA-006).
+const MAX_VALUE_MAGNITUDE: f32 = 1.0e9;
 
 /// Which mark the chart draws.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,7 +58,8 @@ impl ChartSeries {
 pub enum ChartErrorKind {
     /// No series, no label, or a series whose length differs from the labels.
     Shape,
-    /// A label or series name is empty or exceeds the bound, or a value is not finite.
+    /// A label or series name is empty or exceeds the bound, or a value is
+    /// not finite or its magnitude exceeds 1e9.
     Input,
     /// Too many series or points.
     TooLarge,
@@ -136,7 +141,11 @@ pub fn render_chart(
         if entry.values.len() != labels.len() {
             return Err(ChartError::new(ChartErrorKind::Shape));
         }
-        if entry.values.iter().any(|value| !value.is_finite()) {
+        if entry
+            .values
+            .iter()
+            .any(|value| !value.is_finite() || value.abs() > MAX_VALUE_MAGNITUDE)
+        {
             return Err(ChartError::new(ChartErrorKind::Input));
         }
         list.push(Series::new(entry.name.clone(), entry.values.clone()));

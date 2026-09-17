@@ -389,6 +389,95 @@ fn submit_form_proposals_are_bounded_by_one_request() {
     );
 }
 
+/// LIVE-033: a literal key the runtime refuses, one starting with `_`, `-`,
+/// `.` or `:`, fails the check instead of the island's first morph.
+#[test]
+fn live_033_a_literal_key_outside_the_runtime_alphabet_is_refused() {
+    for key in ["-1", "_draft", ".x", ":flash"] {
+        let report = check(
+            &format!(r#"<p live:key="{key}">Keyed</p>"#),
+            CheckerLimits::default(),
+        );
+        assert!(!report.is_proved(), "{key}");
+        assert_code(report, DiagnosticCode::InvalidKey);
+    }
+    let proved = check(r#"<p live:key="1-a">Keyed</p>"#, CheckerLimits::default());
+    assert!(proved.is_proved(), "{:?}", proved.diagnostics());
+}
+
+/// LIVE-034: the runtime validates every element id inside an island with
+/// the stable-key rule and refuses a repeated one, so the checker does too;
+/// a dynamic part is left to the data, and its literal bytes are judged.
+#[test]
+fn live_034_element_ids_follow_the_runtime_rule() {
+    for id in ["_top", "user[email]", "a b", ""] {
+        let report = check(
+            &format!(r#"<p id="{id}">Text</p>"#),
+            CheckerLimits::default(),
+        );
+        assert!(!report.is_proved(), "{id:?}");
+        assert_code(report, DiagnosticCode::InvalidElementId);
+    }
+    let repeated = check(
+        r#"<p id="notes">One</p><p id="notes">Two</p>"#,
+        CheckerLimits::default(),
+    );
+    assert!(!repeated.is_proved());
+    assert_code(repeated, DiagnosticCode::DuplicateElementId);
+    let looped = check(
+        r#"<ul>{% for row in rows %}<li id="row">{{ row }}</li>{% endfor %}</ul>"#,
+        CheckerLimits::default(),
+    );
+    assert!(!looped.is_proved());
+    assert_code(looped, DiagnosticCode::DuplicateElementId);
+    let dynamic_prefix = check(
+        r#"<ul>{% for row in rows %}<li id="_{{ row }}">{{ row }}</li>{% endfor %}</ul>"#,
+        CheckerLimits::default(),
+    );
+    assert_code(dynamic_prefix, DiagnosticCode::InvalidElementId);
+    let proved = check(
+        r#"<p id="notes">One</p><p id="notes-2">Two</p>"#,
+        CheckerLimits::default(),
+    );
+    assert!(proved.is_proved(), "{:?}", proved.diagnostics());
+    let dynamic = check(
+        r#"<ul>{% for row in rows %}<li id="row-{{ row|live_key_digest }}" live:key="row-{{ row|live_key_digest }}">{{ row }}</li>{% endfor %}</ul>"#,
+        CheckerLimits::default(),
+    );
+    assert!(
+        dynamic.diagnostics().iter().all(|diagnostic| !matches!(
+            diagnostic.code(),
+            DiagnosticCode::InvalidElementId
+                | DiagnosticCode::DuplicateElementId
+                | DiagnosticCode::InvalidKey
+        )),
+        "{:?}",
+        dynamic.diagnostics()
+    );
+}
+
+/// LIVE-036: inside a loop, a match arm, or an `if let`, a name the node
+/// binds is that binding, not the macro argument of the same name, so a
+/// model written from it is unproved rather than proved from the argument.
+#[test]
+fn live_036_a_name_a_loop_binds_shadows_the_macro_argument() {
+    let shadowed = check(
+        r#"{% macro bound(name) %}{% for name in names %}<input live:model.blur="{{ name }}">{% endfor %}{% endmacro %}{% call bound("query") %}{% endcall %}"#,
+        CheckerLimits::default(),
+    );
+    assert!(!shadowed.is_proved(), "{:?}", shadowed.diagnostics());
+    let matched = check(
+        r#"{% macro bound(name) %}{% match choice %}{% when Some(name) %}<input live:model.blur="{{ name }}">{% when None %}{% endmatch %}{% endmacro %}{% call bound("query") %}{% endcall %}"#,
+        CheckerLimits::default(),
+    );
+    assert!(!matched.is_proved(), "{:?}", matched.diagnostics());
+    let unshadowed = check(
+        r#"{% macro bound(name) %}{% for other in names %}<input live:model.blur="{{ name }}">{% endfor %}{% endmacro %}{% call bound("query") %}{% endcall %}"#,
+        CheckerLimits::default(),
+    );
+    assert!(unshadowed.is_proved(), "{:?}", unshadowed.diagnostics());
+}
+
 fn check(source: &str, limits: CheckerLimits) -> suprnova_live::checker::CheckReport {
     let registry = registry();
     let catalog = TemplateCatalog::new(vec![

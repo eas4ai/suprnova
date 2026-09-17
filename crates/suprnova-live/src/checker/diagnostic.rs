@@ -69,6 +69,12 @@ pub enum DiagnosticCode {
     /// A `live:submit` form binds more model fields than one Live request
     /// carries, so its submit could never be sent.
     SubmitProposalLimit,
+    /// An element id inside an island is empty, too long, or spelled outside
+    /// the stable-key alphabet the runtime checks at every morph.
+    InvalidElementId,
+    /// An element id repeats inside an island, including a literal id a loop
+    /// renders once per item.
+    DuplicateElementId,
 }
 
 impl DiagnosticCode {
@@ -106,6 +112,8 @@ impl DiagnosticCode {
             Self::StackDepthLimit => "stack_depth_limit",
             Self::DiagnosticLimit => "diagnostic_limit",
             Self::SubmitProposalLimit => "submit_proposal_limit",
+            Self::InvalidElementId => "invalid_element_id",
+            Self::DuplicateElementId => "duplicate_element_id",
         }
     }
 }

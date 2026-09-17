@@ -11,6 +11,7 @@ use html5ever::tokenizer::{BufferQueue, TagKind, Token, TokenSink, TokenSinkResu
 use crate::identity::{ComponentName, ModelField};
 use crate::metadata::ComponentMetadata;
 use crate::registry::ComponentRegistry;
+use crate::view::{MAX_KEY_BYTES, in_key_alphabet};
 
 use super::branch::{
     CHECKED_KEY_MARKER, DYNAMIC_MARKER, LOOP_END_MARKER, LOOP_START_MARKER, RenderedBranch,
@@ -99,6 +100,7 @@ struct HtmlState<'checker, 'diagnostics> {
     diagnostics: &'diagnostics mut DiagnosticCollector,
     stack: Vec<ElementFrame>,
     keys: BTreeSet<String>,
+    element_ids: BTreeSet<String>,
     ids: BTreeMap<String, Vec<ComponentName>>,
     teleports: Vec<TeleportIntent>,
     freshness: Vec<(ComponentName, IslandFreshness)>,
@@ -136,6 +138,7 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
             diagnostics,
             stack: Vec::new(),
             keys: BTreeSet::new(),
+            element_ids: BTreeSet::new(),
             ids: BTreeMap::new(),
             teleports: Vec::new(),
             freshness,
@@ -239,6 +242,7 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
                 self.observe_upload_model_exclusivity(island_index, &attributes, line, &owner);
                 let submit_form = self.observe_submit_form(&attributes, line, &owner);
                 self.validate_keys(&attributes, line, &owner);
+                self.validate_element_id(&attributes, line, &owner);
                 let ancestors: Vec<ComponentName> = std::iter::once(self.root.identity().clone())
                     .chain(self.stack.iter().map(|frame| frame.owner.clone()))
                     .collect();
@@ -474,13 +478,10 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
     fn validate_keys(&mut self, attributes: &[(String, String)], line: u64, owner: &ComponentName) {
         for (_, key) in attributes.iter().filter(|(name, _)| name == "live:key") {
             let checked = key.contains(CHECKED_KEY_MARKER) && !key.contains(DYNAMIC_MARKER);
-            let valid = !key.is_empty()
-                && key.len() <= 128
+            let valid = key.len() <= MAX_KEY_BYTES
                 && !key.contains(DYNAMIC_MARKER)
                 && (self.loop_depth == 0 || checked)
-                && key.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
-                });
+                && in_key_alphabet(key);
             if !valid {
                 self.push(
                     DiagnosticCode::InvalidKey,
@@ -496,6 +497,42 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
                     owner,
                 );
             }
+        }
+    }
+
+    /// The runtime checks every element id inside an island with the
+    /// stable-key rule and refuses a repeated one at the first morph
+    /// (LIVE-034), so ids are held to the same rule here. A dynamic part of an
+    /// id is data the checker cannot see; the literal bytes around it, the
+    /// first byte included, are judged, and only a fully literal id can be
+    /// known to repeat.
+    fn validate_element_id(
+        &mut self,
+        attributes: &[(String, String)],
+        line: u64,
+        owner: &ComponentName,
+    ) {
+        let Some((_, id)) = attributes.iter().find(|(name, _)| name == "id") else {
+            return;
+        };
+        let dynamic = id.contains(DYNAMIC_MARKER) || id.contains(CHECKED_KEY_MARKER);
+        let spelled = id
+            .replace(DYNAMIC_MARKER, "d")
+            .replace(CHECKED_KEY_MARKER, "k");
+        if !in_key_alphabet(&spelled) || (!dynamic && id.len() > MAX_KEY_BYTES) {
+            self.push(
+                DiagnosticCode::InvalidElementId,
+                DiagnosticSeverity::Error,
+                line,
+                owner,
+            );
+        } else if !dynamic && (self.loop_depth > 0 || !self.element_ids.insert(id.clone())) {
+            self.push(
+                DiagnosticCode::DuplicateElementId,
+                DiagnosticSeverity::Error,
+                line,
+                owner,
+            );
         }
     }
 
