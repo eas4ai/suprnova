@@ -153,7 +153,11 @@ components in waves, the advanced components last, the datatable closing.
    `live-031` (`live.md` LIVE-037,
    `docs/commitments/live-model-render-baseline.md`).
 
-14. tooltip-dismissal - a tooltip bubble that covers content cannot be dismissed
+14. tooltip-dismissal - DONE 2026-09-17 (built at `2c137bf4`, documented
+   at `1a706450`, receipts `78803f43`, review `abcbe761`; the Live gate needed
+   five runs, four of them red on intermittent cases outside this work, now in
+   the backlog with a measured rate) - a tooltip bubble that covers content
+   cannot be dismissed
    where it is shown, which WCAG 2.2 success criterion 1.4.13 requires;
    specified 2026-09-17 in the phase between loops, which revised OVL-002
    to admit a dismissal enhancement and agreed OVL-008
