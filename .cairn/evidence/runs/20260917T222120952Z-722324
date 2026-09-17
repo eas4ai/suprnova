@@ -1,0 +1,23 @@
+mechanism: ui-tokens
+commit: 1a706450787fd57d13a9250ba40632a05ced0d05
+inputs_digest: sha256:5d240e75cb5a0cff05195c815cc16cf10eb7805bd7cc834c1750a7051d51557a
+mechanism_digest: sha256:ca8fb41c4b569927ed87c647911b23f26bb405ba652427ddbd76e0d207182a05
+kernel_digest: sha256:160c9a5b8ec13386549cffdd26241209b59c4eb8645da1fe5f13eff7bb81e37c
+inputs_detail: .cairn/evidence/runs/20260917T222120952Z-722324.inputs.json
+command: node .cairn/tools/ui-tokens.mjs crates/suprnova-live/browser/src/styles/suprnova-ui.css app/templates/suprnova-ui crates/suprnova-live/browser/src/styles/suprnova-ui.tailwind.css crates/suprnova-live/components manual
+cwd: .
+exit: 0
+output_digest: sha256:b7c78c7f4900cc0b9ca22736ccec6d7d33f69d794b3fe092c7248d2081318138
+output: .cairn/evidence/runs/20260917T222120952Z-722324.out
+stderr_output: .cairn/evidence/runs/20260917T222120952Z-722324.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-17T22:21:25.923Z
+results:
+  - UI-001 pass line sha256:aed425a76ef3330f271aec0d62f64f73788c5fbc6f308bf59b76a2cebc20f6ca 34 sha256:fb5777dd5016bbaf21b3e78ec20ef56ea33b329b9439b47a14d70ed55a5119b5
+  - UI-002 pass line sha256:07eb5b469928fd3928664d2ece74ee9f6762732b52036327ddb8856bef8227a2 34 sha256:ff3832a491c3241a12a7fe4c1d42a38706ca9b7069ab0e4d82a04b29bc126ab2
+  - UI-003 pass line sha256:a5d32981c8cccb5e5ad96156d88f632076403dab2e8ce0dde67b5f6feaae4045 34 sha256:c1f6261d7f7a134954ad1bdcd433187e58304831a4b7bbf4e3f1d7c985c72e9a
+  - UI-004 pass line sha256:70a89f36024e1fb7c67286126e5138973cba81595f9a7134a83edf51b1c45074 34 sha256:54a622da00f9dec6dacdf892b8909ef6b1cc6f0489da8bc14b8fe5dbd55b959d
+  - UI-005 pass line sha256:7936f826c9ccddd2c4135ae150991a99d6e4f2696bbd83c0bd8014f1f0a1b04c 34 sha256:a0b38451b4bd8192ed18eaaa091f054c794fdc6bfbfc5c89d2dffdc4be2e1c36
+  - UI-007 pass line sha256:a0def64e5d8c3d1c5066790f0ff2dcf332c6301eeb748a26d769f7080798ec51 34 sha256:672f193b02be65a869a144894290859bf954e7979f9b3e67f7daa6604f496c21
