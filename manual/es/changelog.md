@@ -250,6 +250,14 @@ recientes primero.
   podía instalar como plantilla los bytes de cualquier archivo legible. Un
   archivo nombrado debe ser un archivo regular dentro del directorio del
   manifiesto.
+- **Una edición de modelo que un renderizado había reemplazado se envía al
+  volver a escribirla.** El navegador comparaba cada edición con el valor que
+  había propuesto por última vez, así que tras un valor rechazado y un
+  renderizado que lo reemplazó, como un reinicio, escribir el mismo valor de
+  nuevo no enviaba nada: el control lo mostraba sin ningún error mientras la
+  isla conservaba otro valor. El renderizado que aplica una isla es ahora la
+  referencia con la que se compara la siguiente edición, y el estado sucio de
+  un campo se compara con el valor que ese renderizado dio a su control.
 
 ### Seguridad
 

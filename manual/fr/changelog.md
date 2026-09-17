@@ -256,6 +256,15 @@ en premier.
   pouvait installer comme template les octets de n'importe quel fichier
   lisible. Un fichier nommé doit être un fichier ordinaire dans le répertoire
   du manifeste.
+- **Une modification de modèle remplacée par un rendu est envoyée quand elle
+  est retapée.** Le navigateur comparait chaque modification à la valeur qu'il
+  avait proposée en dernier, si bien qu'après une valeur refusée et un rendu
+  qui l'avait remplacée, par exemple une réinitialisation, retaper la même
+  valeur n'envoyait rien : le contrôle l'affichait sans erreur pendant que
+  l'îlot conservait une autre valeur. Le rendu qu'applique un îlot est
+  désormais la référence à laquelle la prochaine modification est comparée, et
+  l'état sale d'un champ se compare à la valeur que ce rendu a donnée à son
+  contrôle.
 
 ### Sécurité
 

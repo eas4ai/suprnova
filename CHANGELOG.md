@@ -217,6 +217,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   third-party file was read through links, so a component could install the
   bytes of any readable file as a template. A named file must be a regular
   file inside the manifest's directory.
+- **A model edit that a render replaced is sent when it is typed again.** The
+  browser compared each edit with the value it last proposed, so after a
+  refused value and a render that replaced it, such as a reset, typing the same
+  value again sent nothing: the control showed it with no error while the
+  island held another value. The render an island applies is now the baseline
+  the next edit is compared with, and a field's dirty state compares with the
+  value that render gave its control.
 
 ### Security
 

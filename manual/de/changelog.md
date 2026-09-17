@@ -255,6 +255,15 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   Komponente die Bytes jeder lesbaren Datei als Template installieren konnte.
   Eine benannte Datei muss eine reguläre Datei im Verzeichnis des Manifests
   sein.
+- **Eine Model-Änderung, die ein Rendern ersetzt hatte, wird beim erneuten
+  Eintippen gesendet.** Der Browser verglich jede Änderung mit dem zuletzt
+  vorgeschlagenen Wert, sodass nach einem abgelehnten Wert und einem Rendern,
+  das ihn ersetzte, etwa einem Zurücksetzen, das erneute Eintippen desselben
+  Werts nichts sendete: Das Steuerelement zeigte ihn fehlerfrei an, während die
+  Insel einen anderen Wert hielt. Das Rendern, das eine Insel anwendet, ist
+  jetzt die Referenz, mit der die nächste Änderung verglichen wird, und der
+  Dirty-Zustand eines Felds wird mit dem Wert verglichen, den dieses Rendern
+  seinem Steuerelement gegeben hat.
 
 ### Sicherheit
 

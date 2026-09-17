@@ -238,6 +238,14 @@ são enviados atomicamente. Mais recentes primeiro.
   arquivo de terceiros era lido seguindo links, então um componente podia
   instalar como template os bytes de qualquer arquivo legível. Um arquivo
   nomeado precisa ser um arquivo comum dentro do diretório do manifesto.
+- **Uma edição de modelo substituída por uma renderização é enviada quando é
+  digitada novamente.** O navegador comparava cada edição com o valor que havia
+  proposto por último, então depois de um valor recusado e uma renderização que
+  o substituiu, como uma redefinição, digitar o mesmo valor de novo não enviava
+  nada: o controle o mostrava sem erro enquanto a ilha mantinha outro valor. A
+  renderização que uma ilha aplica agora é a referência com que a próxima
+  edição é comparada, e o estado sujo de um campo é comparado com o valor que
+  essa renderização deu ao seu controle.
 
 ### Segurança
 
