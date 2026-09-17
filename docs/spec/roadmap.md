@@ -142,7 +142,11 @@ components in waves, the advanced components last, the datatable closing.
    `component-library-foundations.md` UI-020 to UI-024, `live.md` LIVE-031
    to LIVE-036, `docs/commitments/live-library-review-remediation.md`).
 
-13. live-model-render-baseline - after a refused value and a render that replaces it,
+13. live-model-render-baseline - DONE 2026-09-17 (built at `661e7310`,
+   formatted at `3c868f88` after the first check, receipts `3166159b`, review
+   `4c1ba597`; the settle step also moved `dirty` onto the last applied render,
+   which nothing had updated since mount) - after a refused value and a render
+   that replaces it,
    the browser sent nothing when the same value was typed again, leaving a
    control and its island out of step with no error; found while proving the
    remediation's reset, promoted on the developer's `ok` to escalation

@@ -12,4 +12,6 @@ Chosen 2026-09-17 by the developer on escalation live-031 (ok), after live-libra
 
 ## Realized by
 
-(none yet: recorded, not built)
+- 661e7310  live: a render an island applies becomes the baseline the next model edit is compared with, so an edit it replaced is sent when typed again (LIVE-037)
+- 544000e8  docs: the 2.0.2 changelog records that an edit a render replaced is sent when typed again, in seven locales
+- 3c868f88  live: prettier formats the model settle methods
