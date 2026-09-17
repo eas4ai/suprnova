@@ -8,10 +8,19 @@ if (!customElements.get("sn-input-otp")) {
   customElements.define(
     "sn-input-otp",
     class extends HTMLElement {
+      // One connection's listeners and observer (UI-020): a disconnect
+      // aborts them, and a morph that moves the element keeps them.
+      #connection = null;
+
       connectedCallback() {
+        this.#connection?.abort();
+        this.#connection = null;
         const input = this.querySelector("input");
         const cells = Array.from(this.querySelectorAll(".sn-otp-cell"));
         if (!input || cells.length === 0) return;
+        const connection = new AbortController();
+        this.#connection = connection;
+        const { signal } = connection;
         const mirror = () => {
           const value = input.value;
           cells.forEach((cell, index) => {
@@ -21,9 +30,9 @@ if (!customElements.get("sn-input-otp")) {
             if (active !== cell.hasAttribute("data-sn-active")) cell.toggleAttribute("data-sn-active", active);
           });
         };
-        input.addEventListener("input", mirror);
-        input.addEventListener("focus", mirror);
-        input.addEventListener("blur", mirror);
+        input.addEventListener("input", mirror, { signal });
+        input.addEventListener("focus", mirror, { signal });
+        input.addEventListener("blur", mirror, { signal });
         // A morph re-renders the cells from the server's empty markup and
         // resets the input, whose value the runtime restores in a later
         // phase of the same render without an input event. Mirror now,
@@ -35,12 +44,22 @@ if (!customElements.get("sn-input-otp")) {
           if (frame !== 0) return;
           frame = requestAnimationFrame(() => {
             frame = 0;
-            mirror();
+            if (!signal.aborted) mirror();
           });
         };
-        new MutationObserver(remirror).observe(this.querySelector(".sn-otp-cells"), { childList: true, characterData: true, subtree: true });
-        this.setAttribute("data-sn-upgraded", "");
+        const observer = new MutationObserver(remirror);
+        observer.observe(this.querySelector(".sn-otp-cells"), { childList: true, characterData: true, subtree: true });
+        signal.addEventListener("abort", () => observer.disconnect(), { once: true });
+        if (!this.hasAttribute("data-sn-upgraded")) this.setAttribute("data-sn-upgraded", "");
         mirror();
+      }
+
+      // A morph that moves the element keeps its connection.
+      connectedMoveCallback() {}
+
+      disconnectedCallback() {
+        this.#connection?.abort();
+        this.#connection = null;
       }
     },
   );

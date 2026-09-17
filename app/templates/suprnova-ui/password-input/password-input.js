@@ -5,16 +5,36 @@ if (!customElements.get("sn-password-reveal")) {
   customElements.define(
     "sn-password-reveal",
     class extends HTMLElement {
+      // One connection's listener (UI-020): a disconnect aborts it, and a
+      // morph that moves the element keeps it.
+      #connection = null;
+
       connectedCallback() {
+        this.#connection?.abort();
+        this.#connection = null;
         const button = this.querySelector("button[aria-controls]");
         const input = this.querySelector("input");
         if (!button || !input) return;
-        button.addEventListener("click", () => {
-          const reveal = input.type === "password";
-          input.type = reveal ? "text" : "password";
-          button.setAttribute("aria-pressed", String(reveal));
-          button.textContent = reveal ? "Hide" : "Show";
-        });
+        const connection = new AbortController();
+        this.#connection = connection;
+        button.addEventListener(
+          "click",
+          () => {
+            const reveal = input.type === "password";
+            input.type = reveal ? "text" : "password";
+            button.setAttribute("aria-pressed", String(reveal));
+            button.textContent = reveal ? "Hide" : "Show";
+          },
+          { signal: connection.signal },
+        );
+      }
+
+      // A morph that moves the element keeps its connection.
+      connectedMoveCallback() {}
+
+      disconnectedCallback() {
+        this.#connection?.abort();
+        this.#connection = null;
       }
     },
   );

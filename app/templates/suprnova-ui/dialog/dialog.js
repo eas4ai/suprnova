@@ -8,32 +8,60 @@ if (!customElements.get("sn-dialog")) {
   customElements.define(
     "sn-dialog",
     class extends HTMLElement {
+      // One connection's listeners (UI-020): a disconnect aborts them, and a
+      // morph that moves the element keeps them.
+      #connection = null;
+
       connectedCallback() {
+        this.#connection?.abort();
+        this.#connection = null;
         const dialog = this.querySelector("dialog");
-        if (!dialog || this.hasAttribute("data-sn-ready")) return;
-        this.setAttribute("data-sn-ready", "");
+        if (!dialog) return;
+        const connection = new AbortController();
+        this.#connection = connection;
+        const { signal } = connection;
         let invoker = null;
-        document.addEventListener("click", (event) => {
-          const target = event.target instanceof Element ? event.target : null;
-          const opener = target && target.closest(`[data-sn-dialog-open="${dialog.id}"]`);
-          if (opener) {
-            invoker = opener;
-            if (!dialog.open) dialog.showModal();
-            return;
-          }
-          const closer = target && target.closest(`[data-sn-dialog-close="${dialog.id}"]`);
-          if (closer && dialog.open) dialog.close();
-        });
+        document.addEventListener(
+          "click",
+          (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            const opener = target && target.closest(`[data-sn-dialog-open="${dialog.id}"]`);
+            if (opener) {
+              invoker = opener;
+              if (!dialog.open) dialog.showModal();
+              return;
+            }
+            const closer = target && target.closest(`[data-sn-dialog-close="${dialog.id}"]`);
+            if (closer && dialog.open) dialog.close();
+          },
+          { signal },
+        );
         if (!("closedBy" in dialog)) {
-          dialog.addEventListener("click", (event) => {
-            if (event.target === dialog) dialog.close();
-          });
+          dialog.addEventListener(
+            "click",
+            (event) => {
+              if (event.target === dialog) dialog.close();
+            },
+            { signal },
+          );
         }
-        dialog.addEventListener("close", () => {
-          const home = invoker && invoker.isConnected ? invoker : this;
-          invoker = null;
-          home.focus();
-        });
+        dialog.addEventListener(
+          "close",
+          () => {
+            const home = invoker && invoker.isConnected ? invoker : this;
+            invoker = null;
+            home.focus();
+          },
+          { signal },
+        );
+      }
+
+      // A morph that moves the element keeps its connection and state.
+      connectedMoveCallback() {}
+
+      disconnectedCallback() {
+        this.#connection?.abort();
+        this.#connection = null;
       }
     },
   );

@@ -9,9 +9,18 @@ if (!customElements.get("sn-date-picker")) {
   customElements.define(
     "sn-date-picker",
     class extends HTMLElement {
+      // One connection's listeners and observer (UI-020): a disconnect
+      // aborts them, and a morph that moves the element keeps them.
+      #connection = null;
+
       connectedCallback() {
+        this.#connection?.abort();
+        this.#connection = null;
         const input = this.querySelector("input[type=date]");
         if (!input) return;
+        const connection = new AbortController();
+        this.#connection = connection;
+        const { signal } = connection;
         const strip = (part) => this.querySelector(`[data-sn-part="${part}"]`);
         const checked = (part) => {
           const root = strip(part);
@@ -46,15 +55,29 @@ if (!customElements.get("sn-date-picker")) {
           check("month", month);
           check("day", day);
         };
-        this.addEventListener("change", (event) => {
-          if (event.target !== input && event.target instanceof HTMLInputElement && event.target.type === "radio") compose();
-        });
-        input.addEventListener("change", mirror);
+        this.addEventListener(
+          "change",
+          (event) => {
+            if (event.target !== input && event.target instanceof HTMLInputElement && event.target.type === "radio") compose();
+          },
+          { signal },
+        );
+        input.addEventListener("change", mirror, { signal });
         // A morph re-renders the strips from the server's unchecked markup;
         // mirror the input back onto them, writing only what differs.
-        new MutationObserver(mirror).observe(this, { childList: true, subtree: true });
-        this.setAttribute("data-sn-upgraded", "");
+        const observer = new MutationObserver(mirror);
+        observer.observe(this, { childList: true, subtree: true });
+        signal.addEventListener("abort", () => observer.disconnect(), { once: true });
+        if (!this.hasAttribute("data-sn-upgraded")) this.setAttribute("data-sn-upgraded", "");
         mirror();
+      }
+
+      // A morph that moves the element keeps its connection.
+      connectedMoveCallback() {}
+
+      disconnectedCallback() {
+        this.#connection?.abort();
+        this.#connection = null;
       }
     },
   );
