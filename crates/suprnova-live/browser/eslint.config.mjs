@@ -45,6 +45,7 @@ export default tseslint.config(
       "tests/**/*.ts",
       "e2e/**/*.ts",
       "playwright.config.ts",
+      "playwright.components.config.ts",
       "vitest.config.ts",
     ],
     languageOptions: {

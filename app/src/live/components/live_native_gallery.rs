@@ -172,11 +172,10 @@ impl LiveNativeGallery {
         self.code = String::new();
     }
 
-    /// Re-filters the country choices from the typed query.
+    /// Submits the renewal form; the country choices already answer the
+    /// query, because every render filters them.
     #[action]
-    pub fn search(&mut self) {
-        self.filter_countries();
-    }
+    pub fn search(&mut self) {}
 
     /// Posts an activity item: a new keyed feed entry and one more unread
     /// notification, published so every subscribed feed refreshes.
@@ -192,6 +191,13 @@ impl LiveNativeGallery {
             },
         );
         self.unread = self.unread.saturating_add(1);
+    }
+
+    /// Answers the combobox's query on every render, a model update
+    /// included, so the listbox the server renders is always the answer to
+    /// the query it carries (FORM-008, FORM-012).
+    #[rendering]
+    pub fn answer_country_query(&mut self) {
         self.filter_countries();
     }
 }

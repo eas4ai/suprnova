@@ -1122,7 +1122,7 @@ async fn the_live_native_gallery_renders_every_component_on_native_controls() {
         "<sn-combobox class=\"sn-combobox\" live:key=\"country-combobox\" live:preserve.self>",
         "role=\"combobox\" aria-autocomplete=\"list\" aria-expanded=\"false\" aria-controls=\"country-listbox\"",
         "<datalist id=\"country-datalist\"><option value=\"Canada\"></option>",
-        "<ul class=\"sn-combobox-listbox\" id=\"country-listbox\" role=\"listbox\" aria-label=\"Country suggestions\" data-sn-query=\"\"",
+        "<ul class=\"sn-combobox-listbox\" id=\"country-listbox\" role=\"listbox\" aria-label=\"Country suggestions\" data-sn-remote data-sn-query=\"\"",
         "<li class=\"sn-combobox-option\" id=\"country-option-1\" role=\"option\" aria-selected=\"false\" data-sn-value=\"ca\" live:key=\"ca\">Canada</li>",
         // FDB-005: the feed and the bell render the disconnected default and a polite status.
         "<section class=\"sn-live-feed\" id=\"activity\" aria-labelledby=\"activity-heading\">",
