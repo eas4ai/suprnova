@@ -1,0 +1,6 @@
+  → Checking Live views under templates
+  Building and running the application's Live tooling helper...
+  ✗ live/form-gallery.html:1:1: branch_limit [error] in app.form-gallery
+  ✗ live/live-native-gallery.html:1:1: branch_limit [error] in app.live-native-gallery
+  ✗ Live check failed with 2 error(s)
+  → Checked 11 component(s) against 79 template file(s): 9 proved, 2 error(s), 0 unproved
