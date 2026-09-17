@@ -6,7 +6,7 @@ import { mountComponents } from "./support.js";
 // keyboard focus in a document the enhancement never reaches (OVL-002), and
 // Escape dismisses it where it is shown, with neither the pointer nor focus
 // moved (OVL-008). The markup is what suprnova.tooltip renders.
-const TOOLTIP = `<main style="padding: 4rem"><span class="sn-tooltip"><button class="sn-button" id="trigger" type="button" aria-describedby="tip">Save</button><span class="sn-tooltip-bubble" id="tip" role="tooltip">Saves the notes to the server</span></span><button class="sn-button" id="elsewhere" type="button">Elsewhere</button></main>`;
+const TOOLTIP = `<main style="padding: 4rem"><sn-tooltip class="sn-tooltip"><button class="sn-button" id="trigger" type="button" aria-describedby="tip">Save</button><span class="sn-tooltip-bubble" id="tip" role="tooltip">Saves the notes to the server</span></sn-tooltip><button class="sn-button" id="elsewhere" type="button">Elsewhere</button></main>`;
 
 async function hoverTrigger(page: Page): Promise<void> {
   const box = await page.locator("#trigger").boundingBox();

@@ -41,3 +41,13 @@
   visibility: visible;
   opacity: 1;
 }
+
+/* A bubble the user dismissed with Escape stays hidden while the pointer
+   rests where it was shown, and sn-tooltip drops the mark when the pointer
+   or focus leaves, so the next hover or focus shows it again (OVL-008). This
+   rule follows the showing rules deliberately: they carry the same
+   specificity, and the later rule wins. */
+.sn-tooltip[data-sn-dismissed] > .sn-tooltip-bubble {
+  visibility: hidden;
+  opacity: 0;
+}

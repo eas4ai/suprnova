@@ -4,7 +4,10 @@
   "root": "suprnova-ui/tooltip",
   "files": [
     "tooltip.html",
-    "tooltip.css"
+    "tooltip.css",
+    "tooltip.js"
   ],
-  "elements": []
+  "elements": [
+    "sn-tooltip"
+  ]
 }

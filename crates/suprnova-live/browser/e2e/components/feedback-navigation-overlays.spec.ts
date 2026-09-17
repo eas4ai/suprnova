@@ -94,7 +94,7 @@ test("OVL-007: the tooltip bubble stays visible while the pointer moves onto it"
   page,
 }) => {
   await mountComponents(page, {
-    html: `<main style="padding: 4rem"><span class="sn-tooltip"><button class="sn-button" id="trigger" type="button" aria-describedby="tip">Save</button><span class="sn-tooltip-bubble" id="tip" role="tooltip">Saves the notes to the server</span></span></main>`,
+    html: `<main style="padding: 4rem"><sn-tooltip class="sn-tooltip"><button class="sn-button" id="trigger" type="button" aria-describedby="tip">Save</button><span class="sn-tooltip-bubble" id="tip" role="tooltip">Saves the notes to the server</span></sn-tooltip></main>`,
     components: ["tooltip"],
   });
   // The fade is not under test; without it, visibility follows :hover at once.
