@@ -126,9 +126,9 @@
     {
       "file": "suprnova-ui.css",
       "role": "ui-styles",
-      "bytes": 16642,
-      "sha256": "a13b67c8b20b11d0c315a040b9249235b0c59cc5d145466ecd6990344c7b9642",
-      "sri": "sha256-oTtnyLILEdDDFaBAuSSSNbDFnMXRRUZuzWmQNEx7lkI=",
+      "bytes": 16613,
+      "sha256": "df2ea1b7c4359f111f199b953c6bdf60d4ccf3585babfd929974cb3298a3b3a0",
+      "sri": "sha256-3y6ht8Q1nxEfGZuVPGvfYNTM81hbq/2SmXTLMpijs6A=",
       "capability": "ui@1",
       "capability_version": 1,
       "compatible_core": ">=0.1.0 <0.2.0",

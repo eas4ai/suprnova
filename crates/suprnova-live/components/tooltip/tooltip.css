@@ -17,12 +17,23 @@
   font-size: var(--sn-font-size-sm);
   line-height: var(--sn-font-leading-tight);
   white-space: nowrap;
-  pointer-events: none;
   visibility: hidden;
   opacity: 0;
   transition-property: opacity, visibility;
   transition-duration: var(--sn-motion-duration-fast);
   transition-timing-function: var(--sn-motion-easing-standard);
+}
+
+/* The bubble takes the pointer, and this bridge spans the gap between the
+   trigger and the bubble, so moving the pointer from the trigger onto the
+   bubble never leaves the wrapper's :hover (OVL-007). A hidden bubble takes
+   no pointer events, bridge included. */
+.sn-tooltip-bubble::before {
+  position: absolute;
+  inset-block-end: 100%;
+  inset-inline: 0;
+  block-size: var(--sn-space-1);
+  content: "";
 }
 
 .sn-tooltip:hover > .sn-tooltip-bubble,

@@ -510,13 +510,20 @@
     resize: vertical;
   }
 
+  /* The dropdown indicator is two currentColor gradient triangles, so it
+     takes the select's own text color in either scheme; currentColor inside
+     a data-URI SVG never sees the document's color (UI-024). */
   select:not([multiple], [size]) {
     padding-inline-end: var(--sn-space-8);
     appearance: none;
-    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='currentColor' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+    background-image:
+      linear-gradient(45deg, transparent 50%, currentColor 50%),
+      linear-gradient(135deg, currentColor 50%, transparent 50%);
     background-repeat: no-repeat;
-    background-position: right var(--sn-space-3) center;
-    background-size: var(--sn-space-4);
+    background-position:
+      right calc(var(--sn-space-3) + var(--sn-space-2)) center,
+      right calc(var(--sn-space-3) + var(--sn-space-1)) center;
+    background-size: var(--sn-space-1) var(--sn-space-1);
   }
 
   input[type="checkbox"],
