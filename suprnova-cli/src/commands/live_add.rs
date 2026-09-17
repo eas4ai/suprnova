@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read as _};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
@@ -280,43 +280,56 @@ fn third_party(path: &Path) -> Result<Source, String> {
             "the `suprnova.` component namespace is reserved for the shipped library".to_owned(),
         );
     }
-    let directory = path.parent().unwrap_or(Path::new("."));
-    let canonical_directory = fs::canonicalize(directory)
-        .map_err(|error| format!("cannot read {}: {error}", directory.display()))?;
+    // A manifest named without a directory sits in the working directory.
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     let mut files = Vec::new();
     for file in &manifest.files {
-        let file_path = directory.join(file);
-        // A link would install whatever it points at, a key or a
-        // configuration file included, as a template the application serves.
-        let metadata = fs::symlink_metadata(&file_path)
-            .map_err(|error| format!("cannot read {}: {error}", file_path.display()))?;
-        if metadata.file_type().is_symlink() {
-            return Err(format!(
-                "{} is a symbolic link; a component's files must be regular files in its directory",
-                file_path.display()
-            ));
-        }
-        if !metadata.is_file() {
-            return Err(format!("{} is not a regular file", file_path.display()));
-        }
-        let canonical = fs::canonicalize(&file_path)
-            .map_err(|error| format!("cannot read {}: {error}", file_path.display()))?;
-        if !canonical.starts_with(&canonical_directory) {
-            return Err(format!(
-                "{} resolves outside {}",
-                file_path.display(),
-                directory.display()
-            ));
-        }
-        let content = fs::read_to_string(&file_path)
-            .map_err(|error| format!("cannot read {}: {error}", file_path.display()))?;
-        files.push((file.clone(), content));
+        files.push((file.clone(), read_component_file(&directory.join(file))?));
     }
     Ok(Source {
         manifest,
         manifest_source,
         files,
     })
+}
+
+/// Reads one file a third-party manifest names, refusing anything but a
+/// regular file (UI-023). A link would install whatever it points at, a key
+/// or a configuration file included, as a template the application serves.
+/// The entry is judged without following it, then read through one handle; on
+/// Unix that handle must be the very file judged, so a link swapped in between
+/// is refused rather than followed. A manifest's file names hold no separator
+/// and no leading dot, so a regular file it names lies in its directory.
+fn read_component_file(path: &Path) -> Result<String, String> {
+    let cannot_read = |error: std::io::Error| format!("cannot read {}: {error}", path.display());
+    let entry = fs::symlink_metadata(path).map_err(cannot_read)?;
+    if entry.file_type().is_symlink() {
+        return Err(format!(
+            "{} is a symbolic link; a component's files must be regular files in its directory",
+            path.display()
+        ));
+    }
+    if !entry.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    let mut handle = fs::File::open(path).map_err(cannot_read)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let opened = handle.metadata().map_err(cannot_read)?;
+        if (opened.dev(), opened.ino()) != (entry.dev(), entry.ino()) {
+            return Err(format!(
+                "{} changed while live:add read it; run it again",
+                path.display()
+            ));
+        }
+    }
+    let mut content = String::new();
+    handle.read_to_string(&mut content).map_err(cannot_read)?;
+    Ok(content)
 }
 
 fn install(
@@ -348,11 +361,6 @@ fn install(
             Err(error) if error.kind() == ErrorKind::NotFound => Outcome::Written,
             Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
         };
-        if !dry_run && matches!(outcome, Outcome::Written | Outcome::Replaced) {
-            fs::create_dir_all(&target)
-                .map_err(|error| format!("cannot create {}: {error}", target.display()))?;
-            secure_fs::write_atomic(&path, content.as_bytes())?;
-        }
         // A kept file keeps its old entry, so a later run still sees the edit.
         if matches!(
             outcome,
@@ -360,19 +368,31 @@ fn install(
         ) {
             record.insert(file.clone(), digest(content.as_bytes()));
         }
+        if !dry_run && matches!(outcome, Outcome::Written | Outcome::Replaced) {
+            fs::create_dir_all(&target)
+                .map_err(|error| format!("cannot create {}: {error}", target.display()))?;
+            secure_fs::write_atomic(&path, content.as_bytes())?;
+            // The record follows every write, so a run that stops partway
+            // still vouches for each file it wrote.
+            write_record(&record_path, &record)?;
+        }
         outcomes.push((
             format!("templates/{}/{file}", source.manifest.root),
             outcome,
         ));
     }
     if !dry_run {
-        let bytes = serde_json::to_vec_pretty(&record)
-            .map_err(|error| format!("cannot encode the install record: {error}"))?;
         fs::create_dir_all(&target)
             .map_err(|error| format!("cannot create {}: {error}", target.display()))?;
-        secure_fs::write_atomic(&record_path, &bytes)?;
+        write_record(&record_path, &record)?;
     }
     Ok(outcomes)
+}
+
+fn write_record(path: &Path, record: &BTreeMap<String, String>) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(record)
+        .map_err(|error| format!("cannot encode the install record: {error}"))?;
+    secure_fs::write_atomic(path, &bytes)
 }
 
 /// The install record, or an empty one when the directory has none: an empty

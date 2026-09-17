@@ -155,7 +155,11 @@ fn vendor_widget(root: &Path, view: &str) -> std::path::PathBuf {
     )
     .expect("manifest");
     fs::write(vendor.join("widget.html"), view).expect("view");
-    fs::write(vendor.join("widget.css"), ".acme-widget { display: block; }\n").expect("css");
+    fs::write(
+        vendor.join("widget.css"),
+        ".acme-widget { display: block; }\n",
+    )
+    .expect("css");
     vendor.join("manifest.json")
 }
 
@@ -168,7 +172,8 @@ fn ui_022_an_unedited_older_install_is_replaced_and_an_edited_one_is_kept() {
     let project = project();
     let root = project.path();
     let older = "{% macro widget(name) %}<div>{{ name }}</div>{% endmacro %}\n";
-    let newer = "{% macro widget(name) %}<div class=\"acme-widget\">{{ name }}</div>{% endmacro %}\n";
+    let newer =
+        "{% macro widget(name) %}<div class=\"acme-widget\">{{ name }}</div>{% endmacro %}\n";
     let manifest = vendor_widget(root, older);
     let installed = add_manifest(root, &manifest);
     assert!(installed.status.success(), "{}", combined(&installed));
@@ -192,13 +197,21 @@ fn ui_022_an_unedited_older_install_is_replaced_and_an_edited_one_is_kept() {
     fs::write(root.join("vendor/acme-widget/widget.html"), older).expect("another shipped view");
     let kept = add_manifest(root, &manifest);
     assert!(kept.status.success(), "{}", combined(&kept));
-    assert_eq!(fs::read_to_string(&view).expect("view"), edited, "the edit survives");
+    assert_eq!(
+        fs::read_to_string(&view).expect("view"),
+        edited,
+        "the edit survives"
+    );
     let report = combined(&kept);
     assert!(report.contains("kept, edited locally"), "{report}");
 
     // The edit stays known across runs: a second run still keeps it.
     let again = add_manifest(root, &manifest);
-    assert!(combined(&again).contains("kept, edited locally"), "{}", combined(&again));
+    assert!(
+        combined(&again).contains("kept, edited locally"),
+        "{}",
+        combined(&again)
+    );
 }
 
 #[test]
@@ -228,7 +241,11 @@ fn ui_022_a_shipped_file_installed_from_an_older_release_is_replaced() {
     let upgraded = add(root, &["field"]);
     assert!(upgraded.status.success(), "{}", combined(&upgraded));
     assert_eq!(fs::read_to_string(&view).expect("view"), shipped);
-    assert!(!combined(&upgraded).contains("edited locally"), "{}", combined(&upgraded));
+    assert!(
+        !combined(&upgraded).contains("edited locally"),
+        "{}",
+        combined(&upgraded)
+    );
 }
 
 #[test]
@@ -248,7 +265,11 @@ fn ui_022_a_differing_file_no_record_vouches_for_is_kept_with_the_reason() {
         fs::read_to_string(&view).expect("view"),
         "{# a copy from before install records #}\n"
     );
-    assert!(combined(&second).contains("no install record"), "{}", combined(&second));
+    assert!(
+        combined(&second).contains("no install record"),
+        "{}",
+        combined(&second)
+    );
 }
 
 #[test]
@@ -269,6 +290,48 @@ fn ui_022_a_damaged_install_record_is_refused_and_named() {
     assert_eq!(fs::read_to_string(&view).expect("view"), "{# edited #}\n");
 }
 
+#[test]
+fn ui_022_a_run_that_stops_partway_still_vouches_for_the_files_it_wrote() {
+    let project = project();
+    let root = project.path();
+    let manifest = vendor_widget(
+        root,
+        "{% macro widget(name) %}<div>{{ name }}</div>{% endmacro %}\n",
+    );
+    // The stylesheet's target is a directory, so the run stops at it, after
+    // the manifest and the view are written.
+    let target = root.join("templates/acme-ui/widget");
+    fs::create_dir_all(target.join("widget.css")).expect("blocking directory");
+    let stopped = add_manifest(root, &manifest);
+    assert!(!stopped.status.success(), "{}", combined(&stopped));
+    fs::remove_dir(target.join("widget.css")).expect("unblock");
+
+    let newer =
+        "{% macro widget(name) %}<div class=\"acme-widget\">{{ name }}</div>{% endmacro %}\n";
+    fs::write(root.join("vendor/acme-widget/widget.html"), newer).expect("newer view");
+    let upgraded = add_manifest(root, &manifest);
+    assert!(upgraded.status.success(), "{}", combined(&upgraded));
+    assert_eq!(
+        fs::read_to_string(target.join("widget.html")).expect("view"),
+        newer,
+        "the view written before the stop is replaced: {}",
+        combined(&upgraded)
+    );
+}
+
+#[test]
+fn ui_023_a_manifest_named_in_the_working_directory_installs() {
+    let project = project();
+    let root = project.path();
+    let vendored = vendor_widget(root, "{% macro widget(name) %}{{ name }}{% endmacro %}\n");
+    for file in ["manifest.json", "widget.html", "widget.css"] {
+        fs::copy(vendored.with_file_name(file), root.join(file)).expect("copy to the project");
+    }
+    let installed = add(root, &["--manifest", "manifest.json"]);
+    assert!(installed.status.success(), "{}", combined(&installed));
+    assert!(root.join("templates/acme-ui/widget/widget.css").is_file());
+}
+
 #[cfg(unix)]
 #[test]
 fn ui_023_a_third_party_file_that_is_a_symbolic_link_is_refused() {
@@ -283,15 +346,29 @@ fn ui_023_a_third_party_file_that_is_a_symbolic_link_is_refused() {
 
     let refused = add_manifest(root, &manifest);
     assert!(!refused.status.success(), "{}", combined(&refused));
-    assert!(combined(&refused).contains("symbolic link"), "{}", combined(&refused));
-    assert!(!root.join("templates/acme-ui").exists(), "nothing installed");
+    assert!(
+        combined(&refused).contains("symbolic link"),
+        "{}",
+        combined(&refused)
+    );
+    assert!(
+        !root.join("templates/acme-ui").exists(),
+        "nothing installed"
+    );
 
     // A link that stays inside the directory is refused the same way.
     fs::remove_file(&script).expect("drop the link");
-    fs::write(root.join("vendor/acme-widget/real.css"), ".acme-widget {}\n").expect("real");
+    fs::write(
+        root.join("vendor/acme-widget/real.css"),
+        ".acme-widget {}\n",
+    )
+    .expect("real");
     std::os::unix::fs::symlink(root.join("vendor/acme-widget/real.css"), &script)
         .expect("link inside the directory");
     let refused = add_manifest(root, &manifest);
     assert!(!refused.status.success(), "{}", combined(&refused));
-    assert!(!root.join("templates/acme-ui").exists(), "nothing installed");
+    assert!(
+        !root.join("templates/acme-ui").exists(),
+        "nothing installed"
+    );
 }
