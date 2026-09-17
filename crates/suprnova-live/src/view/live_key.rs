@@ -80,6 +80,9 @@ pub fn check_live_key(key: &str) -> Result<(), LiveKeyError> {
     Err(LiveKeyError { kind })
 }
 
+/// The length of every key `live_key_digest` returns: `k` and 32 hex digits.
+pub(crate) const DIGEST_KEY_BYTES: usize = 33;
+
 /// Derives a stable key from any value: `k` followed by the first 32
 /// lowercase hex digits of the SHA-256 of the value's text. One value always
 /// yields the same key, and every key is in the alphabet and 33 bytes long,
@@ -92,7 +95,7 @@ pub fn live_key_digest(value: &str) -> String {
 
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let digest = Sha256::digest(value.as_bytes());
-    let mut key = String::with_capacity(33);
+    let mut key = String::with_capacity(DIGEST_KEY_BYTES);
     key.push('k');
     for byte in digest.iter().take(16) {
         key.push(char::from(HEX[usize::from(byte >> 4)]));

@@ -14,7 +14,8 @@ use crate::registry::ComponentRegistry;
 use crate::view::{MAX_KEY_BYTES, in_key_alphabet};
 
 use super::branch::{
-    CHECKED_KEY_MARKER, DYNAMIC_MARKER, LOOP_END_MARKER, LOOP_START_MARKER, RenderedBranch,
+    CHECKED_DIGEST_MARKER, CHECKED_KEY_MARKER, DYNAMIC_MARKER, LOOP_END_MARKER, LOOP_START_MARKER,
+    RenderedBranch,
 };
 use super::diagnostic::{DiagnosticCode, DiagnosticCollector, DiagnosticSeverity};
 use super::directive::{
@@ -100,7 +101,7 @@ struct HtmlState<'checker, 'diagnostics> {
     diagnostics: &'diagnostics mut DiagnosticCollector,
     stack: Vec<ElementFrame>,
     keys: BTreeSet<String>,
-    element_ids: BTreeSet<String>,
+    element_ids: BTreeSet<(usize, String)>,
     ids: BTreeMap<String, Vec<ComponentName>>,
     teleports: Vec<TeleportIntent>,
     freshness: Vec<(ComponentName, IslandFreshness)>,
@@ -242,7 +243,7 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
                 self.observe_upload_model_exclusivity(island_index, &attributes, line, &owner);
                 let submit_form = self.observe_submit_form(&attributes, line, &owner);
                 self.validate_keys(&attributes, line, &owner);
-                self.validate_element_id(&attributes, line, &owner);
+                self.validate_element_id(&attributes, island_index, line, &owner);
                 let ancestors: Vec<ComponentName> = std::iter::once(self.root.identity().clone())
                     .chain(self.stack.iter().map(|frame| frame.owner.clone()))
                     .collect();
@@ -477,7 +478,8 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
 
     fn validate_keys(&mut self, attributes: &[(String, String)], line: u64, owner: &ComponentName) {
         for (_, key) in attributes.iter().filter(|(name, _)| name == "live:key") {
-            let checked = key.contains(CHECKED_KEY_MARKER) && !key.contains(DYNAMIC_MARKER);
+            let checked = (key.contains(CHECKED_KEY_MARKER) || key.contains(CHECKED_DIGEST_MARKER))
+                && !key.contains(DYNAMIC_MARKER);
             let valid = key.len() <= MAX_KEY_BYTES
                 && !key.contains(DYNAMIC_MARKER)
                 && (self.loop_depth == 0 || checked)
@@ -505,20 +507,31 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
     /// (LIVE-034), so ids are held to the same rule here. A dynamic part of an
     /// id is data the checker cannot see; the literal bytes around it, the
     /// first byte included, are judged, and only a fully literal id can be
-    /// known to repeat.
+    /// known to repeat. Each island's ids are its own, as the runtime scans
+    /// each island apart, and the content of a `template` element is inert
+    /// markup the runtime does not scan. The checker cannot tell that an
+    /// element inside a loop renders only once, so a literal id there is a
+    /// repeat.
     fn validate_element_id(
         &mut self,
         attributes: &[(String, String)],
+        island_index: usize,
         line: u64,
         owner: &ComponentName,
     ) {
         let Some((_, id)) = attributes.iter().find(|(name, _)| name == "id") else {
             return;
         };
-        let dynamic = id.contains(DYNAMIC_MARKER) || id.contains(CHECKED_KEY_MARKER);
+        if self.stack.iter().any(|frame| frame.tag == "template") {
+            return;
+        }
+        let dynamic = id.contains(DYNAMIC_MARKER)
+            || id.contains(CHECKED_KEY_MARKER)
+            || id.contains(CHECKED_DIGEST_MARKER);
         let spelled = id
             .replace(DYNAMIC_MARKER, "d")
-            .replace(CHECKED_KEY_MARKER, "k");
+            .replace(CHECKED_KEY_MARKER, "k")
+            .replace(CHECKED_DIGEST_MARKER, "k");
         if !in_key_alphabet(&spelled) || (!dynamic && id.len() > MAX_KEY_BYTES) {
             self.push(
                 DiagnosticCode::InvalidElementId,
@@ -526,7 +539,9 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
                 line,
                 owner,
             );
-        } else if !dynamic && (self.loop_depth > 0 || !self.element_ids.insert(id.clone())) {
+        } else if !dynamic
+            && (self.loop_depth > 0 || !self.element_ids.insert((island_index, id.clone())))
+        {
             self.push(
                 DiagnosticCode::DuplicateElementId,
                 DiagnosticSeverity::Error,

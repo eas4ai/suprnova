@@ -16,6 +16,19 @@ use super::template::TemplateCatalog;
 
 pub(crate) const DYNAMIC_MARKER: &str = "suprnova-checker-dynamic-7f3e";
 pub(crate) const CHECKED_KEY_MARKER: &str = "suprnova-checker-key-7f3e";
+/// Stands in for a `live_key_digest` key, at that key's exact length, so a
+/// key built around one is measured as the runtime will measure it.
+pub(crate) const CHECKED_DIGEST_MARKER: &str = "suprnova-checker-digest-7f3e-0000";
+const _: () = assert!(CHECKED_DIGEST_MARKER.len() == crate::view::DIGEST_KEY_BYTES);
+
+/// Attributes no check reads: a control's checked or selected state and the
+/// runtime's server-correction marker. An `{% if %}` whose every arm renders
+/// only these, as a form renders each control's state from the island
+/// (FORM-009), is expanded once without them instead of doubling the branch
+/// states, since no check can see the difference. A check that starts reading
+/// one of them must remove it from this list.
+const UNCHECKED_STATE_ATTRIBUTES: &[&str] =
+    &["checked", "selected", "data-suprnova-live-authoritative"];
 pub(crate) const LOOP_START_MARKER: &str = "suprnova-checker-loop-start-7f3e";
 pub(crate) const LOOP_END_MARKER: &str = "suprnova-checker-loop-end-7f3e";
 
@@ -428,9 +441,9 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     }
                     self.append_text(
                         branches,
-                        if expression_uses_filter(source, expression.span(), "live_key")
-                            || expression_uses_filter(source, expression.span(), "live_key_digest")
-                        {
+                        if expression_uses_filter(source, expression.span(), "live_key_digest") {
+                            CHECKED_DIGEST_MARKER
+                        } else if expression_uses_filter(source, expression.span(), "live_key") {
                             CHECKED_KEY_MARKER
                         } else {
                             DYNAMIC_MARKER
@@ -450,60 +463,54 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             ),
                             None => branches,
                         }
+                    } else if renders_only_unchecked_state(node, source) {
+                        branches
                     } else {
-                        let mut choices: Vec<&[Box<Node<'_>>]> = node
+                        // A name an `if let` binds shadows a macro argument
+                        // only inside the arm that binds it.
+                        let mut choices: Vec<Choice<'_, '_>> = node
                             .branches
                             .iter()
-                            .map(|branch| branch.nodes.as_slice())
+                            .map(|branch| {
+                                let mut names = Vec::new();
+                                if let Some(target) =
+                                    branch.cond.as_ref().and_then(|cond| cond.target.as_ref())
+                                {
+                                    bound_names(target, &mut names);
+                                }
+                                Choice {
+                                    nodes: branch.nodes.as_slice(),
+                                    shadowed: shadowed_bindings(scope.bindings, &names),
+                                }
+                            })
                             .collect();
                         if node.branches.iter().all(|branch| branch.cond.is_some()) {
-                            choices.push(&[]);
+                            choices.push(Choice {
+                                nodes: &[],
+                                shadowed: None,
+                            });
                         }
-                        let mut names = Vec::new();
-                        for branch in &node.branches {
-                            if let Some(target) =
-                                branch.cond.as_ref().and_then(|cond| cond.target.as_ref())
-                            {
-                                bound_names(target, &mut names);
-                            }
-                        }
-                        let shadowed = shadowed_bindings(scope.bindings, &names);
-                        let branch_scope = Scope {
-                            template: scope.template,
-                            bindings: shadowed.as_ref().unwrap_or(scope.bindings),
-                            caller: scope.caller,
-                            macro_depth: scope.macro_depth,
-                        };
                         self.expand_choices(
-                            branches,
-                            &choices,
-                            overrides,
-                            view,
-                            source,
-                            stack,
-                            &branch_scope,
+                            branches, &choices, overrides, view, source, stack, scope,
                         )
                     }
                 }
                 Node::Match(node) => {
-                    let mut names = Vec::new();
-                    for arm in &node.arms {
-                        for target in &arm.target {
-                            bound_names(target, &mut names);
-                        }
-                    }
-                    let shadowed = shadowed_bindings(scope.bindings, &names);
-                    let arm_scope = Scope {
-                        template: scope.template,
-                        bindings: shadowed.as_ref().unwrap_or(scope.bindings),
-                        caller: scope.caller,
-                        macro_depth: scope.macro_depth,
-                    };
-                    let choices: Vec<&[Box<Node<'_>>]> =
-                        node.arms.iter().map(|arm| arm.nodes.as_slice()).collect();
-                    self.expand_choices(
-                        branches, &choices, overrides, view, source, stack, &arm_scope,
-                    )
+                    let choices: Vec<Choice<'_, '_>> = node
+                        .arms
+                        .iter()
+                        .map(|arm| {
+                            let mut names = Vec::new();
+                            for target in &arm.target {
+                                bound_names(target, &mut names);
+                            }
+                            Choice {
+                                nodes: arm.nodes.as_slice(),
+                                shadowed: shadowed_bindings(scope.bindings, &names),
+                            }
+                        })
+                        .collect();
+                    self.expand_choices(branches, &choices, overrides, view, source, stack, scope)
                 }
                 Node::Loop(node) => {
                     let mut names = vec!["loop"];
@@ -515,6 +522,8 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         caller: scope.caller,
                         macro_depth: scope.macro_depth,
                     };
+                    // The loop's own names are bound in its body, not in
+                    // the `{% else %}` rendered when it has no items.
                     self.expand_loop(
                         branches,
                         &node.body,
@@ -523,7 +532,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         view,
                         source,
                         stack,
-                        &loop_scope,
+                        (&loop_scope, scope),
                     )
                 }
                 Node::Include(include) => match ViewName::parse(include.path) {
@@ -691,7 +700,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
     fn expand_choices(
         &mut self,
         branches: Vec<RenderedBranch>,
-        choices: &[&[Box<Node<'_>>]],
+        choices: &[Choice<'_, '_>],
         overrides: &Overrides,
         view: &ViewName,
         source: &str,
@@ -703,8 +712,21 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             for choice in choices {
                 let mut seed = branch.clone();
                 seed.branched = true;
-                let choice_branches =
-                    self.expand_nodes(choice, vec![seed], overrides, view, source, stack, scope);
+                let choice_scope = Scope {
+                    template: scope.template,
+                    bindings: choice.shadowed.as_ref().unwrap_or(scope.bindings),
+                    caller: scope.caller,
+                    macro_depth: scope.macro_depth,
+                };
+                let choice_branches = self.expand_nodes(
+                    choice.nodes,
+                    vec![seed],
+                    overrides,
+                    view,
+                    source,
+                    stack,
+                    &choice_scope,
+                );
                 for choice_branch in choice_branches {
                     if !self.admit_branch(&mut expanded, choice_branch, view) {
                         return expanded;
@@ -757,7 +779,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         view: &ViewName,
         source: &str,
         stack: &mut Vec<ViewName>,
-        scope: &Scope<'_, '_>,
+        (body_scope, else_scope): (&Scope<'_, '_>, &Scope<'_, '_>),
     ) -> Vec<RenderedBranch> {
         let mut expanded = Vec::new();
         for branch in branches {
@@ -769,7 +791,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 view,
             );
             let body_branches =
-                self.expand_nodes(body, body_seeds, overrides, view, source, stack, scope);
+                self.expand_nodes(body, body_seeds, overrides, view, source, stack, body_scope);
             for body_branch in body_branches {
                 let completed = self.append_text(
                     vec![body_branch],
@@ -792,7 +814,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 view,
                 source,
                 stack,
-                scope,
+                else_scope,
             );
             for empty_branch in empty_branches {
                 if !self.admit_branch(&mut expanded, empty_branch, view) {
@@ -948,6 +970,76 @@ fn binding_for(expression: &Expr<'_>, outer: &Bindings) -> Binding {
         Expr::Var(name) => outer.get(*name).cloned().unwrap_or(Binding::Dynamic),
         Expr::Group(inner) => binding_for(inner, outer),
         _ => Binding::Dynamic,
+    }
+}
+
+/// One arm of an `{% if %}` or a `{% match %}`: its nodes, and the argument
+/// bindings with the names the arm itself binds removed, when it binds any.
+struct Choice<'n, 'a> {
+    nodes: &'n [Box<Node<'a>>],
+    shadowed: Option<Bindings>,
+}
+
+/// Whether every arm of `node` renders only attributes no check reads, see
+/// [`UNCHECKED_STATE_ATTRIBUTES`]. An arm qualifies when it is literal text
+/// and expressions, the expressions sit inside quoted attribute values, none
+/// is a raw `safe` output, and the text is whitespace-separated attributes
+/// from that list. An `if let` never qualifies, because it binds names.
+fn renders_only_unchecked_state(node: &If<'_>, source: &str) -> bool {
+    node.branches.iter().all(|branch| {
+        branch
+            .cond
+            .as_ref()
+            .is_none_or(|cond| cond.target.is_none())
+            && unchecked_state_only(&branch.nodes, source)
+    })
+}
+
+fn unchecked_state_only(nodes: &[Box<Node<'_>>], source: &str) -> bool {
+    // An expression is spelled as a NUL, which no attribute name admits, so
+    // one outside a quoted value disqualifies the arm.
+    let mut text = String::new();
+    for node in nodes {
+        match node.as_ref() {
+            Node::Lit(lit) => {
+                text.push_str(*lit.lws);
+                text.push_str(*lit.val);
+                text.push_str(*lit.rws);
+            }
+            Node::Expr(_, expression) => {
+                if expression_uses_raw_safe(source, expression.span()) {
+                    return false;
+                }
+                text.push('\0');
+            }
+            Node::Comment(_) => {}
+            _ => return false,
+        }
+    }
+    let mut rest = text.as_str();
+    loop {
+        let trimmed = rest.trim_start_matches([' ', '\t', '\n', '\r']);
+        if trimmed.is_empty() {
+            return true;
+        }
+        if trimmed.len() == rest.len() {
+            return false;
+        }
+        let name_len = trimmed
+            .bytes()
+            .take_while(|byte| byte.is_ascii_lowercase() || *byte == b'-')
+            .count();
+        let (name, after) = trimmed.split_at(name_len);
+        if !UNCHECKED_STATE_ATTRIBUTES.contains(&name) {
+            return false;
+        }
+        rest = match after.strip_prefix("=\"") {
+            Some(value) => match value.find('"') {
+                Some(end) => &value[end + 1..],
+                None => return false,
+            },
+            None => after,
+        };
     }
 }
 

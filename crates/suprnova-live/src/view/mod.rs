@@ -29,8 +29,8 @@ pub use document::{
 };
 pub use error::{ViewError, ViewErrorKind};
 pub use island::IslandRender;
+pub(crate) use live_key::{DIGEST_KEY_BYTES, MAX_KEY_BYTES, in_key_alphabet};
 pub use live_key::{LiveKeyError, LiveKeyErrorKind, check_live_key, live_key_digest};
-pub(crate) use live_key::{MAX_KEY_BYTES, in_key_alphabet};
 pub(crate) use root::{
     IslandRootFlag, IslandRootInput, IslandSnapshotForm, MAX_SUCCESSOR_METADATA_BYTES,
     assemble_island_root, declared_stream,

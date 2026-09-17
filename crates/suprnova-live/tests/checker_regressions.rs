@@ -405,6 +405,24 @@ fn live_033_a_literal_key_outside_the_runtime_alphabet_is_refused() {
     assert!(proved.is_proved(), "{:?}", proved.diagnostics());
 }
 
+/// LIVE-033: a key built around `live_key_digest` is measured at the
+/// digest's real length of 33 bytes, so a long literal prefix that pushes the
+/// key past the runtime's 128 bytes is refused here, not at the first morph.
+#[test]
+fn live_033_a_digest_key_is_measured_at_its_rendered_length() {
+    let keyed = |prefix: &str| {
+        check(
+            &format!(
+                r#"<ul>{{% for row in rows %}}<li live:key="{prefix}-{{{{ row|live_key_digest }}}}">{{{{ row }}}}</li>{{% endfor %}}</ul>"#
+            ),
+            CheckerLimits::default(),
+        )
+    };
+    let longest = keyed(&"a".repeat(94));
+    assert!(longest.is_proved(), "{:?}", longest.diagnostics());
+    assert_code(keyed(&"a".repeat(95)), DiagnosticCode::InvalidKey);
+}
+
 /// LIVE-034: the runtime validates every element id inside an island with
 /// the stable-key rule and refuses a repeated one, so the checker does too;
 /// a dynamic part is left to the data, and its literal bytes are judged.
@@ -440,6 +458,37 @@ fn live_034_element_ids_follow_the_runtime_rule() {
         CheckerLimits::default(),
     );
     assert!(proved.is_proved(), "{:?}", proved.diagnostics());
+    // The runtime scans neither a template element's inert content nor a
+    // nested island's elements as part of the enclosing island.
+    let inert = check(
+        r#"<p id="notes">One</p><template><p id="notes">Two</p><p id="_draft">Three</p></template>"#,
+        CheckerLimits::default(),
+    );
+    assert!(inert.is_proved(), "{:?}", inert.diagnostics());
+    let registry = registry();
+    let nested = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            r#"<p id="panel">Parent</p><section live:component="tests.model-child" live:key="model-child"><p id="panel">Child</p></section>"#
+                .to_owned(),
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html").to_owned(),
+        ),
+        (view(MODEL_CHILD_VIEW), "<div></div>".to_owned()),
+    ])
+    .expect("nested island template catalog");
+    let nested = TemplateChecker::new(&registry, &nested, CheckerLimits::default())
+        .check_component(&root_name());
+    assert!(
+        nested
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code() != DiagnosticCode::DuplicateElementId),
+        "{:?}",
+        nested.diagnostics()
+    );
     let dynamic = check(
         r#"<ul>{% for row in rows %}<li id="row-{{ row|live_key_digest }}" live:key="row-{{ row|live_key_digest }}">{{ row }}</li>{% endfor %}</ul>"#,
         CheckerLimits::default(),
@@ -476,6 +525,62 @@ fn live_036_a_name_a_loop_binds_shadows_the_macro_argument() {
         CheckerLimits::default(),
     );
     assert!(unshadowed.is_proved(), "{:?}", unshadowed.diagnostics());
+    // Where the node does not bind the name, the argument still stands: the
+    // else of an `if let`, a match arm binding nothing, and a loop's else.
+    for source in [
+        r#"{% macro bound(name) %}{% if let Some(name) = choice %}<p>{{ name }}</p>{% else %}<input live:model.blur="{{ name }}">{% endif %}{% endmacro %}{% call bound("query") %}{% endcall %}"#,
+        r#"{% macro bound(name) %}{% match choice %}{% when Some(name) %}<p>{{ name }}</p>{% when None %}<input live:model.blur="{{ name }}">{% endmatch %}{% endmacro %}{% call bound("query") %}{% endcall %}"#,
+        r#"{% macro bound(name) %}{% for name in names %}<p>{{ name }}</p>{% else %}<input live:model.blur="{{ name }}">{% endfor %}{% endmacro %}{% call bound("query") %}{% endcall %}"#,
+    ] {
+        let report = check(source, CheckerLimits::default());
+        assert!(report.is_proved(), "{source}: {:?}", report.diagnostics());
+    }
+}
+
+/// FORM-009: a form renders each control's checked or selected state and the
+/// runtime's correction marker from island data. Those conditionals render
+/// only attributes no check reads, so ten such controls are one branch state,
+/// not a million; a conditional that renders anything else still branches,
+/// and its arm is still checked.
+#[test]
+fn form_009_control_state_rendered_from_the_island_does_not_multiply_branch_states() {
+    let controls = |attribute: &str| {
+        (0..10)
+            .map(|index| {
+                format!(
+                    r#"<input type="checkbox" live:model.blur="query"{{% if on{index} %}} {attribute}{{% endif %}}{{% if !authority.is_empty() %}} data-suprnova-live-authoritative="{{{{ authority }}}}"{{% endif %}}>"#
+                )
+            })
+            .collect::<String>()
+    };
+    let state = check(&controls("checked"), CheckerLimits::default());
+    assert!(state.is_proved(), "{:?}", state.diagnostics());
+    let selected = check(
+        r#"<select live:model.blur="query">{% for option in options %}<option value="{{ option.0 }}"{% if option.0 == chosen %} selected{% endif %}>{{ option.1 }}</option>{% endfor %}</select>"#,
+        CheckerLimits::default(),
+    );
+    assert!(selected.is_proved(), "{:?}", selected.diagnostics());
+
+    assert_code(
+        check(&controls("disabled"), CheckerLimits::default()),
+        DiagnosticCode::BranchLimit,
+    );
+    assert_code(
+        check(
+            r#"<input live:model.blur="query"{% if on %} checked live:model.change="missing"{% endif %}>"#,
+            CheckerLimits::default(),
+        ),
+        DiagnosticCode::UnknownModel,
+    );
+    let outside_quotes = check(
+        r#"<input live:model.blur="query"{% if on %} {{ attribute }}{% endif %}>"#,
+        CheckerLimits::default(),
+    );
+    assert!(
+        !outside_quotes.is_proved(),
+        "{:?}",
+        outside_quotes.diagnostics()
+    );
 }
 
 fn check(source: &str, limits: CheckerLimits) -> suprnova_live::checker::CheckReport {
