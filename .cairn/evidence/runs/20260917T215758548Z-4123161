@@ -1,0 +1,19 @@
+mechanism: ui-tooltip-dismissal
+commit: 80628395acbeae5f5ff25b79c6f5cfb47ce34643
+inputs_digest: sha256:451656ef3f9889e213a33fbfcc2e8af33a69c2e45b7320d83f03581620148d08
+mechanism_digest: sha256:d9ed2b93bf757b37703bbff518f5f0bef87077d5b7e1f74b9ea714b9fc4e2716
+kernel_digest: sha256:160c9a5b8ec13386549cffdd26241209b59c4eb8645da1fe5f13eff7bb81e37c
+inputs_detail: .cairn/evidence/runs/20260917T215758548Z-4123161.inputs.json
+command: sh -c 'cd crates/suprnova-live/browser && npx playwright test --config playwright.components.config.ts e2e/components/tooltip.spec.ts --reporter=line'
+cwd: .
+exit: 1
+output_digest: sha256:4096802737028fc8d6acc3675f77702be9e2026879dd842b7e9b0373b802d131
+output: .cairn/evidence/runs/20260917T215758548Z-4123161.out
+stderr_output: .cairn/evidence/runs/20260917T215758548Z-4123161.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-17T21:58:38.970Z
+results:
+  - OVL-002 unverified none sha256:7ef7f0ca268a3e91c4fd96f81815c7c217c29e6e676ae37412ef320cd02ed405 14 sha256:3e4f22480c86858df58dab8f721b54f69fc249953ae3879958f5743718195551
+  - OVL-008 unverified none sha256:38f5bf55132a8149087fd8e0abd3d70bc32fa936b4c4b490d75aa75e7e41d8ba 1 sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855

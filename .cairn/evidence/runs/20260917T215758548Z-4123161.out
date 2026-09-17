@@ -1,0 +1,236 @@
+
+Running 9 tests using 1 worker
+
+[1/9] [chromium] › e2e/components/tooltip.spec.ts:17:1 › OVL-002: the bubble shows on hover and on focus with no script in the document
+[2/9] [chromium] › e2e/components/tooltip.spec.ts:29:1 › OVL-008: Escape dismisses the hovered bubble without moving the pointer, and the next hover shows it again
+  1) [chromium] › e2e/components/tooltip.spec.ts:29:1 › OVL-008: Escape dismisses the hovered bubble without moving the pointer, and the next hover shows it again 
+
+    Error: expect(locator).toBeHidden() failed
+
+    Locator:  locator('#tip')
+    Expected: hidden
+    Received: visible
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toBeHidden" with timeout 5000ms
+      - waiting for locator('#tip')
+        14 × locator resolved to <span id="tip" role="tooltip" class="sn-tooltip-bubble">Saves the notes to the server</span>
+           - unexpected value "visible"
+
+
+      34 |   await expect(page.locator("#tip")).toBeVisible();
+      35 |   await page.keyboard.press("Escape");
+    > 36 |   await expect(page.locator("#tip")).toBeHidden();
+         |                                      ^
+      37 |
+      38 |   // The pointer never moved; the next hover of the same trigger shows it.
+      39 |   await page.mouse.move(1, 1);
+        at /home/shawn/workspace2/suprnova/crates/suprnova-live/browser/e2e/components/tooltip.spec.ts:36:38
+
+    Error Context: test-results/tooltip-OVL-008-Escape-dis-9a766-e-next-hover-shows-it-again-chromium/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/tooltip-OVL-008-Escape-dis-9a766-e-next-hover-shows-it-again-chromium/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/tooltip-OVL-008-Escape-dis-9a766-e-next-hover-shows-it-again-chromium/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+[3/9] [chromium] › e2e/components/tooltip.spec.ts:44:1 › OVL-008: Escape dismisses the focused bubble, and focusing the trigger again shows it
+  2) [chromium] › e2e/components/tooltip.spec.ts:44:1 › OVL-008: Escape dismisses the focused bubble, and focusing the trigger again shows it 
+
+    Error: expect(locator).toBeHidden() failed
+
+    Locator:  locator('#tip')
+    Expected: hidden
+    Received: visible
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toBeHidden" with timeout 5000ms
+      - waiting for locator('#tip')
+        14 × locator resolved to <span id="tip" role="tooltip" class="sn-tooltip-bubble">Saves the notes to the server</span>
+           - unexpected value "visible"
+
+
+      50 |   await expect(page.locator("#tip")).toBeVisible();
+      51 |   await page.keyboard.press("Escape");
+    > 52 |   await expect(page.locator("#tip")).toBeHidden();
+         |                                      ^
+      53 |   await expect(page.locator("#trigger")).toBeFocused();
+      54 |
+      55 |   await page.locator("#elsewhere").focus();
+        at /home/shawn/workspace2/suprnova/crates/suprnova-live/browser/e2e/components/tooltip.spec.ts:52:38
+
+    Error Context: test-results/tooltip-OVL-008-Escape-dis-564c9--the-trigger-again-shows-it-chromium/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/tooltip-OVL-008-Escape-dis-564c9--the-trigger-again-shows-it-chromium/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/tooltip-OVL-008-Escape-dis-564c9--the-trigger-again-shows-it-chromium/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+[4/9] [firefox] › e2e/components/tooltip.spec.ts:17:1 › OVL-002: the bubble shows on hover and on focus with no script in the document
+[5/9] [firefox] › e2e/components/tooltip.spec.ts:29:1 › OVL-008: Escape dismisses the hovered bubble without moving the pointer, and the next hover shows it again
+  3) [firefox] › e2e/components/tooltip.spec.ts:29:1 › OVL-008: Escape dismisses the hovered bubble without moving the pointer, and the next hover shows it again 
+
+    Error: expect(locator).toBeHidden() failed
+
+    Locator:  locator('#tip')
+    Expected: hidden
+    Received: visible
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toBeHidden" with timeout 5000ms
+      - waiting for locator('#tip')
+        14 × locator resolved to <span id="tip" role="tooltip" class="sn-tooltip-bubble">Saves the notes to the server</span>
+           - unexpected value "visible"
+
+
+      34 |   await expect(page.locator("#tip")).toBeVisible();
+      35 |   await page.keyboard.press("Escape");
+    > 36 |   await expect(page.locator("#tip")).toBeHidden();
+         |                                      ^
+      37 |
+      38 |   // The pointer never moved; the next hover of the same trigger shows it.
+      39 |   await page.mouse.move(1, 1);
+        at /home/shawn/workspace2/suprnova/crates/suprnova-live/browser/e2e/components/tooltip.spec.ts:36:38
+
+    Error Context: test-results/tooltip-OVL-008-Escape-dis-9a766-e-next-hover-shows-it-again-firefox/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/tooltip-OVL-008-Escape-dis-9a766-e-next-hover-shows-it-again-firefox/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/tooltip-OVL-008-Escape-dis-9a766-e-next-hover-shows-it-again-firefox/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+[6/9] [firefox] › e2e/components/tooltip.spec.ts:44:1 › OVL-008: Escape dismisses the focused bubble, and focusing the trigger again shows it
+  4) [firefox] › e2e/components/tooltip.spec.ts:44:1 › OVL-008: Escape dismisses the focused bubble, and focusing the trigger again shows it 
+
+    Error: expect(locator).toBeHidden() failed
+
+    Locator:  locator('#tip')
+    Expected: hidden
+    Received: visible
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toBeHidden" with timeout 5000ms
+      - waiting for locator('#tip')
+        14 × locator resolved to <span id="tip" role="tooltip" class="sn-tooltip-bubble">Saves the notes to the server</span>
+           - unexpected value "visible"
+
+
+      50 |   await expect(page.locator("#tip")).toBeVisible();
+      51 |   await page.keyboard.press("Escape");
+    > 52 |   await expect(page.locator("#tip")).toBeHidden();
+         |                                      ^
+      53 |   await expect(page.locator("#trigger")).toBeFocused();
+      54 |
+      55 |   await page.locator("#elsewhere").focus();
+        at /home/shawn/workspace2/suprnova/crates/suprnova-live/browser/e2e/components/tooltip.spec.ts:52:38
+
+    Error Context: test-results/tooltip-OVL-008-Escape-dis-564c9--the-trigger-again-shows-it-firefox/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/tooltip-OVL-008-Escape-dis-564c9--the-trigger-again-shows-it-firefox/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/tooltip-OVL-008-Escape-dis-564c9--the-trigger-again-shows-it-firefox/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+[7/9] [webkit] › e2e/components/tooltip.spec.ts:17:1 › OVL-002: the bubble shows on hover and on focus with no script in the document
+[8/9] [webkit] › e2e/components/tooltip.spec.ts:29:1 › OVL-008: Escape dismisses the hovered bubble without moving the pointer, and the next hover shows it again
+  5) [webkit] › e2e/components/tooltip.spec.ts:29:1 › OVL-008: Escape dismisses the hovered bubble without moving the pointer, and the next hover shows it again 
+
+    Error: expect(locator).toBeHidden() failed
+
+    Locator:  locator('#tip')
+    Expected: hidden
+    Received: visible
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toBeHidden" with timeout 5000ms
+      - waiting for locator('#tip')
+        14 × locator resolved to <span id="tip" role="tooltip" class="sn-tooltip-bubble">Saves the notes to the server</span>
+           - unexpected value "visible"
+
+
+      34 |   await expect(page.locator("#tip")).toBeVisible();
+      35 |   await page.keyboard.press("Escape");
+    > 36 |   await expect(page.locator("#tip")).toBeHidden();
+         |                                      ^
+      37 |
+      38 |   // The pointer never moved; the next hover of the same trigger shows it.
+      39 |   await page.mouse.move(1, 1);
+        at /home/shawn/workspace2/suprnova/crates/suprnova-live/browser/e2e/components/tooltip.spec.ts:36:38
+
+    Error Context: test-results/tooltip-OVL-008-Escape-dis-9a766-e-next-hover-shows-it-again-webkit/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/tooltip-OVL-008-Escape-dis-9a766-e-next-hover-shows-it-again-webkit/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/tooltip-OVL-008-Escape-dis-9a766-e-next-hover-shows-it-again-webkit/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+[9/9] [webkit] › e2e/components/tooltip.spec.ts:44:1 › OVL-008: Escape dismisses the focused bubble, and focusing the trigger again shows it
+  6) [webkit] › e2e/components/tooltip.spec.ts:44:1 › OVL-008: Escape dismisses the focused bubble, and focusing the trigger again shows it 
+
+    Error: expect(locator).toBeHidden() failed
+
+    Locator:  locator('#tip')
+    Expected: hidden
+    Received: visible
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toBeHidden" with timeout 5000ms
+      - waiting for locator('#tip')
+        14 × locator resolved to <span id="tip" role="tooltip" class="sn-tooltip-bubble">Saves the notes to the server</span>
+           - unexpected value "visible"
+
+
+      50 |   await expect(page.locator("#tip")).toBeVisible();
+      51 |   await page.keyboard.press("Escape");
+    > 52 |   await expect(page.locator("#tip")).toBeHidden();
+         |                                      ^
+      53 |   await expect(page.locator("#trigger")).toBeFocused();
+      54 |
+      55 |   await page.locator("#elsewhere").focus();
+        at /home/shawn/workspace2/suprnova/crates/suprnova-live/browser/e2e/components/tooltip.spec.ts:52:38
+
+    Error Context: test-results/tooltip-OVL-008-Escape-dis-564c9--the-trigger-again-shows-it-webkit/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/tooltip-OVL-008-Escape-dis-564c9--the-trigger-again-shows-it-webkit/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/tooltip-OVL-008-Escape-dis-564c9--the-trigger-again-shows-it-webkit/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+  6 failed
+    [chromium] › e2e/components/tooltip.spec.ts:29:1 › OVL-008: Escape dismisses the hovered bubble without moving the pointer, and the next hover shows it again 
+    [chromium] › e2e/components/tooltip.spec.ts:44:1 › OVL-008: Escape dismisses the focused bubble, and focusing the trigger again shows it 
+    [firefox] › e2e/components/tooltip.spec.ts:29:1 › OVL-008: Escape dismisses the hovered bubble without moving the pointer, and the next hover shows it again 
+    [firefox] › e2e/components/tooltip.spec.ts:44:1 › OVL-008: Escape dismisses the focused bubble, and focusing the trigger again shows it 
+    [webkit] › e2e/components/tooltip.spec.ts:29:1 › OVL-008: Escape dismisses the hovered bubble without moving the pointer, and the next hover shows it again 
+    [webkit] › e2e/components/tooltip.spec.ts:44:1 › OVL-008: Escape dismisses the focused bubble, and focusing the trigger again shows it 
+  3 passed (39.6s)
