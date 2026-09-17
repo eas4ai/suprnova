@@ -414,14 +414,22 @@ function groupBindings(bindings: readonly ModelBinding[]): Map<string, ModelBind
   return grouped;
 }
 
+/** Marks a checkbox whose field is a list of checked values, whatever the group's size. */
+export const COLLECTION_ATTRIBUTE = "data-suprnova-live-collection";
+
 export function readBindingGroup(bindings: readonly ModelBinding[]): ModelControlRead {
   const eligible = bindings.filter((binding) => controlEligibleForModel(binding.owned.element));
   if (eligible.length === 0) return Object.freeze({ kind: "missing" });
   // A field more than one checkbox binds is a collection: its value is the
-  // list of the checked boxes' values (LIVE-032). One checkbox stays a
-  // boolean, because the browser holds no codec to tell the two apart.
+  // list of the checked boxes' values (LIVE-032). A checkbox group marks its
+  // boxes, so a group rendered with one option is a list as well; an unmarked
+  // single checkbox stays a boolean, because the browser holds no codec to
+  // tell the two apart.
   const checkboxes = bindings.filter((binding) => isCheckbox(binding.owned.element));
-  if (checkboxes.length > 1) {
+  if (
+    checkboxes.length > 1 ||
+    checkboxes.some((binding) => binding.owned.element.hasAttribute(COLLECTION_ATTRIBUTE))
+  ) {
     if (checkboxes.length !== bindings.length) {
       return Object.freeze({ code: "control_unsupported", kind: "invalid" });
     }

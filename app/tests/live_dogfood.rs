@@ -507,7 +507,7 @@ async fn form_009_the_form_gallery_renders_the_island_values_into_its_controls()
         );
     }
     assert!(island.contains("<output class=\"sn-slider-value\" for=\"volume\">50</output>"));
-    assert!(island.contains("live:model=\"bio\"></textarea>"), "{island}");
+    assert!(island.contains("live:model=\"bio\">\n</textarea>"), "{island}");
     for unset in [" checked", " selected", "data-suprnova-live-authoritative"] {
         assert!(!island.contains(unset), "nothing mounted carries {unset}: {island}");
     }
@@ -560,7 +560,9 @@ async fn form_009_the_form_gallery_renders_the_island_values_into_its_controls()
         "save",
         serde_json::json!({
             "email": "ada@example.com",
-            "bio": "Hello",
+            // The parser drops a line feed after `<textarea>`, so the view
+            // writes one before the value and this leading one survives.
+            "bio": "\nHello",
             "quantity": 3,
             "volume": 20,
             "query": "rust",
@@ -591,14 +593,14 @@ async fn form_009_the_form_gallery_renders_the_island_values_into_its_controls()
         assert!(tag.contains(" checked"), "{id} renders checked: {tag}");
     }
     for needle in [
-        "live:model=\"bio\">Hello</textarea>",
+        "live:model=\"bio\">\n\nHello</textarea>",
         "<output class=\"sn-slider-value\" for=\"volume\">20</output>",
         "<option value=\"us\" selected>United States</option>",
         "<option value=\"ca\">Canada</option>",
         "value=\"team\" checked",
         "value=\"starter\" live:key=",
         "value=\"security\" checked",
-        "value=\"releases\" live:key=",
+        "value=\"releases\" data-suprnova-live-collection live:key=",
     ] {
         assert!(rendered.contains(needle), "missing {needle} in {rendered}");
     }

@@ -1,8 +1,11 @@
 {#
   suprnova.textarea - a native textarea bound to a model path; value is the
   island's current text, rendered as the content (FORM-009), and authority
-  marks a server correction (Live spec 12).
+  marks a server correction (Live spec 12). A line feed follows the start tag
+  because the HTML parser drops the first one there, so a value that begins
+  with a line feed keeps it.
 #}
 {% macro textarea(name, rows=4, placeholder="", required=false, value="", authority="") %}
-<textarea class="sn-textarea" id="{{ name }}" name="{{ name }}" rows="{{ rows }}" placeholder="{{ placeholder }}" aria-describedby="{{ name }}-hint {{ name }}-error"{% if required %} required{% endif %}{% if !authority.is_empty() %} data-suprnova-live-authoritative="{{ authority }}"{% endif %} live:model="{{ name }}">{{ value }}</textarea>
+<textarea class="sn-textarea" id="{{ name }}" name="{{ name }}" rows="{{ rows }}" placeholder="{{ placeholder }}" aria-describedby="{{ name }}-hint {{ name }}-error"{% if required %} required{% endif %}{% if !authority.is_empty() %} data-suprnova-live-authoritative="{{ authority }}"{% endif %} live:model="{{ name }}">
+{{ value }}</textarea>
 {% endmacro %}

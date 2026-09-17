@@ -526,6 +526,15 @@
     background-size: var(--sn-space-1) var(--sn-space-1);
   }
 
+  /* Forced colors drop every background image that is not a url(), the
+     gradients included, so there the select keeps its native indicator. */
+  @media (forced-colors: active) {
+    select:not([multiple], [size]) {
+      appearance: auto;
+      background-image: none;
+    }
+  }
+
   input[type="checkbox"],
   input[type="radio"] {
     inline-size: var(--sn-space-4);
