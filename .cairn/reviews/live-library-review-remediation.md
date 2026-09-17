@@ -1,7 +1,7 @@
 # Review - live-library-review-remediation
 
 commitment: live-library-review-remediation
-commit: 9f48d020
+commit: 76268c32
 examined:
   - FORM-008, FORM-011, FORM-012: `combobox.js` (conditional writes, the remote mode keyed on `data-sn-query`, the observer on `hidden` only), the macro's `remote` parameter, the gallery's `#[rendering]` filter; the component cases in `e2e/components/combobox.spec.ts` on chromium, firefox and webkit, four of five failing on the previous script.
   - FORM-009, FORM-010, LIVE-032: the ten value macros and their app copies, `readBindingGroup` and `readCheckboxGroup` with the `data-suprnova-live-collection` marker, the form gallery's authority and `#[rendered]` release; `form_009_the_form_gallery_renders_the_island_values_into_its_controls` (fails with the number input's value removed), `tests/model-form-groups.test.ts` (fails on the previous runtime), and `e2e/app-dogfood-forms.spec.ts`, whose group and reset cases fail on a build without the keys or the authority marker and pass 27 of 27 across three repeats.
@@ -72,3 +72,8 @@ Receipts on `9f48d020`, from check process 2795057, every mechanism passing:
 - The Live gate group: `.cairn/evidence/runs/20260917T155304693Z-2795057`, pass.
 - `ui-live-check`: `.cairn/evidence/runs/20260917T160628744Z-2795057`, every dogfood view proved.
 - Every other stale requirement: pass, receipts from process 2795057 committed at `92e2703b`.
+
+Receipts on `76268c32`, after `cargo fmt` rewrapped assertions in `app/tests/live_dogfood.rs` (no change in behavior), from the stale check (process 2991424), committed at `462bd192`:
+
+- The requirement group again, all twenty passing: `.cairn/evidence/runs/20260917T160944704Z-2991424`.
+- `ui-dogfood-tests`: `.cairn/evidence/runs/20260917T161136230Z-2991424`; `ui-live-check`: `.cairn/evidence/runs/20260917T161141987Z-2991424`; both pass.
