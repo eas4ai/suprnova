@@ -17,6 +17,7 @@ inputs:
   - framework/src/live/
   - framework/src/view/
   - framework/tests/live/
+  - framework/Cargo.toml
   - framework/tests/support/
   - framework/tests/templates/live/
   - app/
