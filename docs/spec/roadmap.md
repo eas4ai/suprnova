@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: live-library-review-remediation
+Current: live-model-render-baseline
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -141,6 +141,13 @@ components in waves, the advanced components last, the datatable closing.
    OVL-007, `component-library-data-display.md` DATA-006,
    `component-library-foundations.md` UI-020 to UI-024, `live.md` LIVE-031
    to LIVE-036, `docs/commitments/live-library-review-remediation.md`).
+
+13. live-model-render-baseline - after a refused value and a render that replaces it,
+   the browser sent nothing when the same value was typed again, leaving a
+   control and its island out of step with no error; found while proving the
+   remediation's reset, promoted on the developer's `ok` to escalation
+   `live-031` (`live.md` LIVE-037,
+   `docs/commitments/live-model-render-baseline.md`).
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

@@ -411,3 +411,21 @@ the loop's own values.
 Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
 Refines: LIVE-025.
 Status: Agreed 2026-09-17 by promotion the-review-of-live-and-the-component-library-is-remediated-in-one-commitment
+
+[LIVE-037] The browser runtime MUST send a model update for an edit whose
+value differs from the value its control held after the island's last
+applied render, even when that value equals the value the browser last
+proposed.
+Falsifier: on the dogfood form gallery, clearing the seat count, pressing
+Reset, and clearing the count again sends no model update for the seat
+count.
+Evidence: `ModelState.propose` in
+`crates/suprnova-live/browser/src/models/state.ts` compares an edit with
+`browserProposal`, which only an edit sets, and `ModelState.reconcile` has
+no caller in the runtime; `crates/suprnova-live/browser/e2e/app-dogfood-forms.spec.ts`
+makes a valid edit before the second empty one to avoid it.
+Mechanism: `.cairn/mechanisms/live-model-render-baseline`.
+Refines: Live spec 11, dirty state compares the current browser proposal
+to the last accepted server-authoritative value, and a response updates
+accepted server state without overwriting a newer unsent local edit.
+Status: Agreed 2026-09-17 by promotion a-render-that-changes-a-bound-control-becomes-the-baseline-its-next-edit-is-compared-with

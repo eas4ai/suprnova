@@ -1,0 +1,15 @@
+command: sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/model-render-baseline.test.ts && npx playwright test --config playwright.dogfood.config.ts --grep LIVE-037'
+inputs:
+  - crates/suprnova-live/browser/src/models/
+  - crates/suprnova-live/browser/src/runtime/
+  - crates/suprnova-live/browser/src/morph/
+  - crates/suprnova-live/browser/src/continuity/
+  - crates/suprnova-live/browser/tests/model-render-baseline.test.ts
+  - crates/suprnova-live/browser/tests/support/
+  - crates/suprnova-live/browser/dist/
+  - crates/suprnova-live/browser/e2e/app-dogfood-forms.spec.ts
+  - crates/suprnova-live/browser/playwright.dogfood.config.ts
+  - app/
+  - CHANGELOG.md
+requirements:
+  - LIVE-037
