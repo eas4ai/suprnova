@@ -1,0 +1,23 @@
+mechanism: ui-tokens
+commit: 9f48d020b57feeca777e5657608a53fbfa3636b7
+inputs_digest: sha256:c08aed7111599d46176100b449e999a981e8b6cb15a54716d6c22c40debe4f59
+mechanism_digest: sha256:ca8fb41c4b569927ed87c647911b23f26bb405ba652427ddbd76e0d207182a05
+kernel_digest: sha256:160c9a5b8ec13386549cffdd26241209b59c4eb8645da1fe5f13eff7bb81e37c
+inputs_detail: .cairn/evidence/runs/20260917T155253859Z-2795057.inputs.json
+command: node .cairn/tools/ui-tokens.mjs crates/suprnova-live/browser/src/styles/suprnova-ui.css app/templates/suprnova-ui crates/suprnova-live/browser/src/styles/suprnova-ui.tailwind.css crates/suprnova-live/components manual
+cwd: .
+exit: 0
+output_digest: sha256:b7c78c7f4900cc0b9ca22736ccec6d7d33f69d794b3fe092c7248d2081318138
+output: .cairn/evidence/runs/20260917T155253859Z-2795057.out
+stderr_output: .cairn/evidence/runs/20260917T155253859Z-2795057.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-17T15:52:58.671Z
+results:
+  - UI-001 pass line sha256:aed425a76ef3330f271aec0d62f64f73788c5fbc6f308bf59b76a2cebc20f6ca 31 sha256:46aef33dc3996da2990ada0233194bb0025443af72349ca10c0d0588584ee40b
+  - UI-002 pass line sha256:07eb5b469928fd3928664d2ece74ee9f6762732b52036327ddb8856bef8227a2 31 sha256:26ffb80703c4dbd1136407ee86c9769d72a906b47be8641f05e0038bae8f963f
+  - UI-003 pass line sha256:a5d32981c8cccb5e5ad96156d88f632076403dab2e8ce0dde67b5f6feaae4045 31 sha256:38fad348778d5bc27daaaaeae94c350241f01b24f896ad8bdb9cff0570ba5d55
+  - UI-004 pass line sha256:70a89f36024e1fb7c67286126e5138973cba81595f9a7134a83edf51b1c45074 31 sha256:cddd5cd9bc61171c50b3ccd9c8739ea08611eb3292ecdd943076bc3b78414764
+  - UI-005 pass line sha256:7936f826c9ccddd2c4135ae150991a99d6e4f2696bbd83c0bd8014f1f0a1b04c 31 sha256:1c60051ffa24623a30fed30d3d50fc851496e295ab3a22d159609a8095c8e626
+  - UI-007 pass line sha256:a0def64e5d8c3d1c5066790f0ff2dcf332c6301eeb748a26d769f7080798ec51 31 sha256:1aa055f919b6c0ab14afe4d1ab7e9aad17008563461fe4c6d02749f5da6575ac
