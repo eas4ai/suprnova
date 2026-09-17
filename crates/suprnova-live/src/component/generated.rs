@@ -13,7 +13,7 @@ use crate::limits::InputLimits;
 use crate::metadata::ComponentMetadata;
 use crate::snapshot::state::{StateCodec, StateExposure};
 use crate::state::ModelCodec;
-use crate::state::ProposalBatch;
+use crate::state::{BindingIssue, ProposalBatch};
 use crate::view::{AssetSet, IslandRender, ViewRenderer, ViewTemplate};
 
 use super::{
@@ -30,8 +30,12 @@ pub trait GeneratedComponentState: Send + Sized + 'static {
     /// Reconstructs snapshot-backed fields and initializes non-snapshot fields safely.
     fn hydrate_state(state: &CanonicalValue) -> Result<Self, ComponentError>;
 
-    /// Applies only previously authorized typed model proposals.
-    fn bind_generated_models(&mut self, proposals: &ProposalBatch) -> Result<(), ComponentError>;
+    /// Applies only previously authorized typed model proposals and returns the
+    /// issue of every proposal a field refused.
+    fn bind_generated_models(
+        &mut self,
+        proposals: &ProposalBatch,
+    ) -> Result<Vec<BindingIssue>, ComponentError>;
 
     /// Renders the generated checked Askama view through the engine boundary.
     fn render_generated_view(
@@ -217,7 +221,10 @@ where
         self.component.hydrated_generated(context)
     }
 
-    fn bind_models(&mut self, proposals: &ProposalBatch) -> Result<(), ComponentError> {
+    fn bind_models(
+        &mut self,
+        proposals: &ProposalBatch,
+    ) -> Result<Vec<BindingIssue>, ComponentError> {
         self.component.bind_generated_models(proposals)
     }
 

@@ -352,13 +352,16 @@ impl ComponentInstance for SearchComponent {
         self
     }
 
-    fn bind_models(&mut self, proposals: &ProposalBatch) -> Result<(), ComponentError> {
+    fn bind_models(
+        &mut self,
+        proposals: &ProposalBatch,
+    ) -> Result<Vec<suprnova_live::state::BindingIssue>, ComponentError> {
         self.control.binds.fetch_add(1, Ordering::SeqCst);
         let path = ModelPath::parse("count").map_err(|_| ComponentError::contract_failure())?;
         match proposals.apply_required(&path, &mut self.state, |state, count: u64| {
             state.count = count;
         }) {
-            ProposalApplication::Applied => Ok(()),
+            ProposalApplication::Applied => Ok(Vec::new()),
             _ => Err(ComponentError::contract_failure()),
         }
     }

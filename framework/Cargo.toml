@@ -427,6 +427,10 @@ name = "live_dogfood"
 path = "tests/live/dogfood.rs"
 
 [[test]]
+name = "live_dogfood_forms"
+path = "tests/live/dogfood_forms.rs"
+
+[[test]]
 name = "live_dogfood_server"
 path = "tests/live/dogfood_server.rs"
 

@@ -55,6 +55,30 @@ impl DogfoodCounter {
     }
 }
 
+pub const FORM_DOCUMENT_PATH: &str = "/dogfood/form";
+pub const FORM_DOCUMENT_KEY: &str = "dogfood-form";
+
+/// A form island whose model fields decode strictly: a seat count and a
+/// topic list, with a count of the saves that ran.
+#[derive(LiveComponent)]
+#[live(name = "tests.dogfood-form", view = "live/tests/dogfood-form.html")]
+pub struct DogfoodForm {
+    #[model]
+    seats: u64,
+    #[model]
+    topics: Vec<String>,
+    #[public]
+    saves: u64,
+}
+
+#[live]
+impl DogfoodForm {
+    #[action]
+    pub fn save(&mut self) {
+        self.saves += 1;
+    }
+}
+
 #[suprnova::view(path = "live/dogfood-document.html")]
 pub struct DogfoodDocument<'a> {
     pub bootstrap: &'a TrustedHtml,
@@ -145,6 +169,19 @@ pub fn fixture() {
         LiveRegistry::builder()
             .register::<DogfoodCounter>()
             .expect("register dogfood counter")
+            .build(),
+    );
+}
+
+/// `fixture` with the form island registered beside the counter.
+pub fn form_fixture() {
+    fixture();
+    App::singleton(
+        LiveRegistry::builder()
+            .register::<DogfoodCounter>()
+            .expect("register dogfood counter")
+            .register::<DogfoodForm>()
+            .expect("register dogfood form")
             .build(),
     );
 }
@@ -310,6 +347,134 @@ fn build_router_with(configure: fn(LiveRouteGuard) -> LiveRouteGuard) -> Router 
         .expect("install guarded Live routes")
         .try_live_mount(&mount)
         .expect("register dogfood mount")
+}
+
+/// The guarded dogfood router with the form island beside the counter. A
+/// process binds one mount catalog, so the form's tests own their binary.
+pub fn build_form_router() -> Router {
+    with_form_route(build_router_with(live_guard))
+}
+
+/// Adds the form island's document at `FORM_DOCUMENT_PATH` to `router`.
+fn with_form_route(router: Router) -> Router {
+    let mount =
+        LiveMount::<DogfoodForm>::public_seed(FORM_DOCUMENT_PATH, "form", FORM_DOCUMENT_KEY)
+            .expect("declare dogfood form mount");
+    let handler_mount = mount.clone();
+    let router: Router = router
+        .get(FORM_DOCUMENT_PATH, move |request: Request| {
+            let mount = handler_mount.clone();
+            async move {
+                let result: Result<HttpResponse, FrameworkError> = async {
+                    let mut document = LiveDocument::from_request(&request).map_err(|error| {
+                        FrameworkError::internal(format!("from_request {error}"))
+                    })?;
+                    let island = document
+                        .mount(
+                            &mount,
+                            CanonicalValue::Object(BTreeMap::new()),
+                            MountFlags::empty(),
+                        )
+                        .await
+                        .map_err(|error| FrameworkError::internal(format!("mount {error}")))?;
+                    let bootstrap = document
+                        .bootstrap(LiveBootstrapOptions::esm())
+                        .map_err(|error| FrameworkError::internal(format!("bootstrap {error}")))?;
+                    document
+                        .render(
+                            ViewName::parse("live/dogfood-document.html")
+                                .map_err(|_| FrameworkError::internal("view identity"))?,
+                            &DogfoodDocument {
+                                bootstrap: bootstrap.html(),
+                                island: island.html(),
+                            },
+                            DocumentResponseIntent::html(StatusCode::OK)
+                                .map_err(|_| FrameworkError::internal("response intent"))?,
+                            AssetSet::empty(),
+                        )
+                        .map_err(FrameworkError::from)
+                }
+                .await;
+                result.map_err(|error| {
+                    HttpResponse::text(format!("Live document failed: {error}")).status(500)
+                })
+            }
+        })
+        .into();
+    router
+        .try_live_mount(&mount)
+        .expect("register dogfood form mount")
+}
+
+/// A request on the form island that proposes `proposals`, one `sync_model`
+/// operation per proposed field, followed by `save` when `save` is set and
+/// alone otherwise, which is a model sync. A snapshot carrying a revision is
+/// an instance, which a model sync needs; any other is the public seed.
+pub fn form_action_request(
+    spec: ActionRequest<'_>,
+    proposals: Value,
+    save: bool,
+) -> hyper::Request<Full<Bytes>> {
+    let (base_revision, snapshot) = match &spec.snapshot["body"]["revision"] {
+        Value::String(revision) => (
+            revision.clone(),
+            json!({"envelope": spec.snapshot, "kind": "instance"}),
+        ),
+        Value::Number(revision) => (
+            revision.to_string(),
+            json!({"envelope": spec.snapshot, "kind": "instance"}),
+        ),
+        _ => (
+            "0".to_owned(),
+            json!({
+                "browser_nonce": "ICEiIyQlJicoKSorLC0uLw",
+                "envelope": spec.snapshot,
+                "kind": "seed_promotion",
+            }),
+        ),
+    };
+    let mut operations: Vec<Value> = proposals
+        .as_object()
+        .expect("proposals are an object")
+        .keys()
+        .map(|field| json!({"field": field, "kind": "sync_model"}))
+        .collect();
+    if save {
+        operations.push(json!({"arguments": {}, "kind": "invoke_action", "name": "save"}));
+    }
+    let body = serde_json::to_vec(&json!({
+        "base_revision": base_revision,
+        "child_parameters": null,
+        "component": "tests.dogfood-form",
+        "correlation_id": "MDEyMzQ1Njc4OTo7PD0-Pw",
+        "extensions": {"x_suprnova_live_document_key_v1": FORM_DOCUMENT_KEY},
+        "idempotency_key": spec.idempotency_key,
+        "model_proposals": proposals,
+        "operations": operations,
+        "protocol_version": 2,
+        "runtime_contract_version": 2,
+        "snapshot": snapshot,
+        "snapshot_schema_version": 1,
+    }))
+    .expect("encode Live form action request");
+    let mut builder = hyper::Request::builder()
+        .method(hyper::Method::POST)
+        .uri(ACTION_PATH)
+        .header("host", "127.0.0.1")
+        .header(
+            "content-type",
+            "application/vnd.suprnova.live+json; charset=utf-8; version=2",
+        )
+        .header("cookie", spec.cookie);
+    if let Some(site) = spec.fetch_site {
+        builder = builder.header("sec-fetch-site", site);
+    }
+    if let Some(id) = spec.login {
+        builder = builder.header("x-test-login", id);
+    }
+    builder
+        .body(Full::new(Bytes::from(body)))
+        .expect("build Live form action request")
 }
 
 pub async fn dispatch(

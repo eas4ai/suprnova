@@ -373,9 +373,9 @@ impl ComponentInstance for TraceFixture {
     fn bind_models(
         &mut self,
         _proposals: &suprnova_live::state::ProposalBatch,
-    ) -> Result<(), ComponentError> {
+    ) -> Result<Vec<suprnova_live::state::BindingIssue>, ComponentError> {
         self.record("bind");
-        self.fail(FailurePoint::Bind)
+        self.fail(FailurePoint::Bind).map(|()| Vec::new())
     }
 
     fn before_action<'a>(

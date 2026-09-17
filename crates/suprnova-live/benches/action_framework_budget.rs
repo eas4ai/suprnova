@@ -75,9 +75,12 @@ impl ComponentInstance for BudgetInstance {
         self
     }
 
-    fn bind_models(&mut self, proposals: &ProposalBatch) -> Result<(), ComponentError> {
+    fn bind_models(
+        &mut self,
+        proposals: &ProposalBatch,
+    ) -> Result<Vec<suprnova_live::state::BindingIssue>, ComponentError> {
         if proposals.issues().is_empty() {
-            Ok(())
+            Ok(Vec::new())
         } else {
             Err(ComponentError::contract_failure())
         }

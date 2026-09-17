@@ -178,6 +178,7 @@ pub mod snapshot {
 
 #[doc(hidden)]
 pub mod state {
+    pub use suprnova_live::state::BindingIssue;
     pub use suprnova_live::state::BindingTiming;
     pub use suprnova_live::state::ModelCodec;
     pub use suprnova_live::state::ModelPath;

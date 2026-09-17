@@ -221,6 +221,16 @@ fn expand_definition(
             )
         })
         .count();
+    // A component with no model fields refuses nothing, and a `mut` binding
+    // it never mutates would warn in the application's crate.
+    let binding_issues = if runtime_fields
+        .iter()
+        .any(|field| matches!(field.kind, FieldKind::Model | FieldKind::Transient))
+    {
+        quote!(let mut issues = ::std::vec::Vec::new();)
+    } else {
+        quote!(let issues = ::std::vec::Vec::new();)
+    };
     let model_bindings = runtime_fields
         .iter()
         .filter(|field| matches!(field.kind, FieldKind::Model | FieldKind::Transient))
@@ -233,10 +243,14 @@ fn expand_definition(
                         .map_err(|_| {
                             ::suprnova::live::__private::component::ComponentError::contract_failure()
                         })?;
-                    let _application = proposals.apply_optional::<Self, #inner, _>(
-                        &path,
-                        self,
-                        |component, value| component.#ident = value,
+                    issues.extend(
+                        proposals
+                            .apply_optional::<Self, #inner, _>(
+                                &path,
+                                self,
+                                |component, value| component.#ident = value,
+                            )
+                            .into_issue(),
                     );
                 }
             } else {
@@ -246,10 +260,14 @@ fn expand_definition(
                         .map_err(|_| {
                             ::suprnova::live::__private::component::ComponentError::contract_failure()
                         })?;
-                    let _application = proposals.apply_required::<Self, #ty, _>(
-                        &path,
-                        self,
-                        |component, value| component.#ident = value,
+                    issues.extend(
+                        proposals
+                            .apply_required::<Self, #ty, _>(
+                                &path,
+                                self,
+                                |component, value| component.#ident = value,
+                            )
+                            .into_issue(),
                     );
                 }
             }
@@ -368,11 +386,12 @@ fn expand_definition(
                 &mut self,
                 proposals: &::suprnova::live::__private::state::ProposalBatch,
             ) -> ::std::result::Result<
-                (),
+                ::std::vec::Vec<::suprnova::live::__private::state::BindingIssue>,
                 ::suprnova::live::__private::component::ComponentError,
             > {
+                #binding_issues
                 #(#model_bindings)*
-                ::std::result::Result::Ok(())
+                ::std::result::Result::Ok(issues)
             }
 
             fn render_generated_view(

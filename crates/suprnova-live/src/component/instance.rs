@@ -14,7 +14,7 @@ use crate::identity::{ActionName, InstanceId, Revision, UnixMillis};
 use crate::metadata::ComponentMetadata;
 use crate::protocol::BrowserRenderContext;
 use crate::snapshot::state::StateExposure;
-use crate::state::ProposalBatch;
+use crate::state::{BindingIssue, ProposalBatch};
 use crate::view::IslandRender;
 
 /// Bounded boxed future used by generated object-safe component hooks.
@@ -266,10 +266,15 @@ pub trait ComponentInstance: ActionTarget {
         Box::pin(async { Ok(()) })
     }
 
-    /// Applies a separately prepared typed model-proposal batch.
-    fn bind_models(&mut self, proposals: &ProposalBatch) -> Result<(), ComponentError> {
+    /// Applies a separately prepared typed model-proposal batch and returns the
+    /// issue of every proposal it refused, which the engine answers as a
+    /// validation error on that field (LIVE-031).
+    fn bind_models(
+        &mut self,
+        proposals: &ProposalBatch,
+    ) -> Result<Vec<BindingIssue>, ComponentError> {
         if proposals.is_empty() {
-            Ok(())
+            Ok(Vec::new())
         } else {
             Err(ComponentError::contract_failure())
         }

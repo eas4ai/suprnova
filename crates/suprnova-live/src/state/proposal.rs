@@ -41,6 +41,19 @@ pub enum ProposalApplication {
     Applied,
 }
 
+impl ProposalApplication {
+    /// Returns the binding issue of a refused proposal, null for a required
+    /// field or a value its codec could not decode, and `None` when nothing
+    /// was refused.
+    #[must_use]
+    pub fn into_issue(self) -> Option<BindingIssue> {
+        match self {
+            Self::Null(issue) | Self::Invalid(issue) => Some(issue),
+            Self::Missing | Self::Applied => None,
+        }
+    }
+}
+
 /// Closed reason a proposal batch was rejected before generated setters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProposalErrorKind {

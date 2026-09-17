@@ -175,6 +175,7 @@ fn generated_abi_is_symbol_allowlisted() {
         "suprnova_live::snapshot::state::FieldCategory",
         "suprnova_live::snapshot::state::StateCodec",
         "suprnova_live::snapshot::state::StateExposure",
+        "suprnova_live::state::BindingIssue",
         "suprnova_live::state::BindingTiming",
         "suprnova_live::state::ModelCodec",
         "suprnova_live::state::ModelPath",

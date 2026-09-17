@@ -18,9 +18,10 @@ use crate::identity::ActionName;
 use crate::limits::InputLimits;
 use crate::registry::ComponentDescriptor;
 use crate::snapshot::state::StateExposure;
+use crate::state::BindingIssue;
 use crate::validation::{
-    BagPolicy, ErrorBag, ValidationEngine, ValidationEngineError, ValidationPort,
-    ValidationRequest, ValidationStatus,
+    BagPolicy, ErrorBag, ValidationEngine, ValidationEngineError, ValidationIssue,
+    ValidationMessageId, ValidationPort, ValidationRequest, ValidationStatus,
 };
 use crate::view::IslandRender;
 
@@ -34,6 +35,7 @@ pub struct LifecycleOutput {
     render: IslandRender,
     state: CanonicalValue,
     memo: CanonicalValue,
+    validation: ErrorBag,
 }
 
 /// Complete pre-signing result of one registered action request.
@@ -64,13 +66,18 @@ pub(crate) struct PromotionMountState {
 
 impl ActionExecutionOutput {
     pub(crate) fn fresh_render(output: LifecycleOutput) -> Self {
-        let (render, state, memo) = output.into_parts();
+        let LifecycleOutput {
+            render,
+            state,
+            memo,
+            validation,
+        } = output;
         Self {
             result: ActionResult::render(),
             render: Some(render),
             state,
             memo,
-            validation: ErrorBag::default(),
+            validation,
             action_executed: false,
             transaction: None,
         }
@@ -178,6 +185,10 @@ impl ActionExecutionError {
     }
 
     fn validation(_error: ValidationEngineError) -> Self {
+        Self::validation_bound()
+    }
+
+    const fn validation_bound() -> Self {
         Self {
             kind: ActionExecutionErrorKind::Validation,
             teardown_failed: false,
@@ -853,10 +864,11 @@ impl ComponentExecutor {
             .map_err(ActionExecutionError::lifecycle)?;
 
         record_execution_phase(trace, ExecutionPhase::Bind);
-        if let Some(proposals) = proposals {
-            catch_sync(|| instance.bind_models(proposals), LifecyclePhase::Bind)
-                .map_err(ActionExecutionError::lifecycle)?;
-        }
+        let binding_issues = match proposals {
+            Some(proposals) => catch_sync(|| instance.bind_models(proposals), LifecyclePhase::Bind)
+                .map_err(ActionExecutionError::lifecycle)?,
+            None => Vec::new(),
+        };
 
         // The capability is minted only after verified reconstruction and `hydrated` complete.
         record_execution_phase(trace, ExecutionPhase::Authorize);
@@ -881,10 +893,17 @@ impl ComponentExecutor {
         .with_action(action)
         .with_prepared_arguments(arguments)
         .with_target(instance.action_target());
-        let status = validation_engine
+        let mut status = validation_engine
             .validate(validation_port, request, &mut validation, bag_policy)
             .await
             .map_err(ActionExecutionError::validation)?;
+        // A proposal a field refused is a validation error on that field, and
+        // the action does not run on a value it never received (LIVE-031).
+        if !binding_issues.is_empty() {
+            validation = with_binding_issues(&validation, &binding_issues)
+                .ok_or_else(ActionExecutionError::validation_bound)?;
+            status = ValidationStatus::Invalid;
+        }
         let mut transaction = None;
         if status != ValidationStatus::Invalid && transaction_policy == TransactionPolicy::Required
         {
@@ -1015,11 +1034,20 @@ impl ComponentExecutor {
         if hydrated {
             catch_future(|| instance.hydrated(context), LifecyclePhase::Hydrate)?.await?;
         }
+        let mut validation = ErrorBag::default();
         match operation {
             RegisteredOperation::None => {}
             RegisteredOperation::SyncModels { proposals, trace } => {
                 record_execution_phase(trace, ExecutionPhase::Bind);
-                catch_sync(|| instance.bind_models(proposals), LifecyclePhase::Bind)?;
+                let issues = catch_sync(|| instance.bind_models(proposals), LifecyclePhase::Bind)?;
+                if !issues.is_empty() {
+                    validation = with_binding_issues(&validation, &issues).ok_or_else(|| {
+                        LifecycleError::new(
+                            LifecycleErrorKind::ComponentFailure,
+                            LifecyclePhase::Bind,
+                        )
+                    })?;
+                }
             }
             RegisteredOperation::ParamsChangedV1Historical(parameters) => {
                 catch_future(
@@ -1057,8 +1085,29 @@ impl ComponentExecutor {
             render,
             state,
             memo,
+            validation,
         })
     }
+}
+
+/// The bag with one field issue for every refused proposal appended, each
+/// named by the proposal's path and the binding issue's stable code, or `None`
+/// when the result would exceed the bag's hard bound.
+fn with_binding_issues(bag: &ErrorBag, issues: &[BindingIssue]) -> Option<ErrorBag> {
+    let mut merged = bag.issues().to_vec();
+    for issue in issues {
+        let Some(path) = issue.path() else {
+            continue;
+        };
+        let Ok(message) = ValidationMessageId::parse(issue.kind().as_str()) else {
+            continue;
+        };
+        let entry = ValidationIssue::new(path.clone(), message);
+        if !merged.contains(&entry) {
+            merged.push(entry);
+        }
+    }
+    ErrorBag::from_issues(merged).ok()
 }
 
 fn catch_future<'a, T>(
