@@ -1,0 +1,5 @@
+run: tooltip component cases
+  tooltip component cases: exit 1
+cairn: OVL-002: pass
+cairn: OVL-008: fail
+  reason: tooltip.spec.ts > OVL-008: Escape dismisses the hovered bubble without moving the pointer, and the next hover shows it again (chromium); tooltip.spec.ts > OVL-008: Escape dismisses the focused bubble, and focusing the trigger again shows it (chromium); tooltip.spec.ts > OVL-008: Escape dismisses the hovered bubble without moving the pointer, and the next hover shows it again (firefox); tooltip.spec.ts > OVL-008: Escape dismisses the focused bubble, and focusing the trigger again shows it (firefox); tooltip.spec.ts > OVL-008: Escape dismisses the hovered bubble without moving the pointer, and the next hover shows it again (webkit); tooltip.spec.ts > OVL-008: Escape dismisses the focused bubble, and focusing the trigger again shows it (webkit)

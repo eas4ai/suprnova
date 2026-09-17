@@ -1,0 +1,19 @@
+mechanism: ui-tooltip-dismissal
+commit: 0f5c3faf27a0175383ad1455684ebff4078d99bc
+inputs_digest: sha256:c6b471b7209e5def2a85a4f17648e813e9e74b8d44676a65ad51d45682704a67
+mechanism_digest: sha256:c2b8ccf930eeb7b4a74df0d4041e10afc9e39012cf555e26ca88468fdcba5cbf
+kernel_digest: sha256:160c9a5b8ec13386549cffdd26241209b59c4eb8645da1fe5f13eff7bb81e37c
+inputs_detail: .cairn/evidence/runs/20260917T220012533Z-155601.inputs.json
+command: node .cairn/tools/ui-tooltip-dismissal.mjs
+cwd: .
+exit: 1
+output_digest: sha256:fa725f0950581adc4fc5139a90b3dcaf67650643ca0122224e7377652ca2e29c
+output: .cairn/evidence/runs/20260917T220012533Z-155601.out
+stderr_output: .cairn/evidence/runs/20260917T220012533Z-155601.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-17T22:00:51.223Z
+results:
+  - OVL-002 pass line sha256:7ef7f0ca268a3e91c4fd96f81815c7c217c29e6e676ae37412ef320cd02ed405 16 sha256:801ec2107675a91fe88429123f46aea1f929530cd1e58592d9735930c391fb1a
+  - OVL-008 fail line sha256:38f5bf55132a8149087fd8e0abd3d70bc32fa936b4c4b490d75aa75e7e41d8ba 2 sha256:21d440dc01b209d5575911a0e13c16072dc787129dab80663ac2441ac8c5d80c
