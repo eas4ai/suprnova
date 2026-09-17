@@ -35,4 +35,20 @@ Rejected: one commitment per item, which would stage 2.1.0 behind eighteen loops
 
 ## Realized by
 
-(none yet: recorded, not built)
+- 5fc3d651  live: the combobox stays responsive for text no option matches, shows every option the server answered, and hides an answer to older text (FORM-011, FORM-012, FORM-008)
+- e3a5a79c  live: every library custom element keeps one set of listeners and observers however a morph moves or reconnects it (UI-020)
+- c6cfecdb  live: a toast holds while the pointer is anywhere on it or focus is inside, nested tabs act on their own tabs, the tooltip bubble takes the pointer, and the select indicator follows the text color (FDB-007, NAV-007, OVL-007, UI-024)
+- 371f53df  live: the checker, the key filter, and the runtime share one key alphabet and one id rule, live_key_digest keys any value, a loop binding shadows a macro argument, and a chart refuses a value past 1e9 (LIVE-033 to LIVE-036, DATA-006)
+- 452b7128  live: a model proposal its field cannot decode answers a validation error on that field, and the action it accompanies does not run (LIVE-031)
+- f3bcf1bc  live: the form controls render the island's values, a group selection the server has not answered survives a re-render, and a checkbox group proposes the list of checked values (FORM-009, FORM-010, LIVE-032)
+- 754f15f9  live: an application that cannot read its vendored components refuses to start, live:add replaces a file the application never edited, and a third-party file that is a symbolic link is refused (UI-021, UI-022, UI-023)
+- ca45ee6a  cairn: the live-library-review-remediation mechanism runs each group of requirement-named cases once and reports every requirement from the cases that name it
+- 48bfd4b4  docs: the Live chapter and the 2.0.2 changelog record the review remediation, in seven locales
+- 993a4d8f  cairn: the review remediation mechanism declares framework/Cargo.toml, which names the live_dogfood_forms test target LIVE-031's case runs in
+- 1003935f  live: live:check expands a control's rendered state once, binds a shadowing name only where it is bound, measures a digest key at its real length, and judges ids per island (FORM-009, LIVE-033, LIVE-034, LIVE-036)
+- 2a44590e  live: a checkbox group of one option proposes a list, a textarea keeps a leading line feed, and the select keeps an indicator in forced colors (LIVE-032, FORM-009, UI-024)
+- a59f5d53  live: refused proposals join the validation bag within the engine's configured ceiling, an instanced action with one is covered, and try_live_ui_assets is proved under a base path without templates (LIVE-031, UI-021)
+- 7a9e6e58  cli: live:add reads a manifest named in the working directory, reads each third-party file through the handle it checked, and records every file as it writes it (UI-022, UI-023)
+- 8f649633  docs: a checkbox group of any size proposes a list, and live:check refuses a literal id inside a loop, in seven locales
+- 8b7d38f6  cairn: the review remediation mechanism runs live:check on the dogfood application and the checker and engine cases for FORM-009 and LIVE-031
+- c7c12fdd  live: the component cases name the dialog, sheet and drawer fixtures literally and mark their step deadline as a failure-only watchdog, as the correctness-delay scanner requires

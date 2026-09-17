@@ -125,7 +125,12 @@ components in waves, the advanced components last, the datatable closing.
    fields never submitted (`live.md` LIVE-028 to LIVE-030,
    `docs/commitments/live-protocol-bounds.md`).
 
-12. live-library-review-remediation - the adversarial review of Live and
+12. live-library-review-remediation - DONE 2026-09-17 (built between
+   `5fc3d651` and `c7c12fdd`, receipts `92e2703b`, review `53309c54`; an
+   independent review of the build found three more defects, fixed in the
+   same build, and `live:check` learned to expand a control's rendered state
+   once so a library form stays under its branch limit) - the adversarial
+   review of Live and
    the component library before the 2.1.0 release found eighteen defects,
    among them a combobox that freezes the page, form macros that render no
    island state, undecodable proposals dropped with an accepted outcome, and
