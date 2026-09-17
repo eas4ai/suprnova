@@ -1,0 +1,24 @@
+mechanism: ui-dogfood-tests
+commit: 76268c32c889bb29a460aef298d6894031beab29
+inputs_digest: sha256:4ce338dcd4348269d47b33d4d31a87bfd40ac99c45aaa940c604b7bcf9406c37
+mechanism_digest: sha256:5fc7489c76fd4b262f0bba01e6a9523a3409a30f7cac397add595e73edb89223
+kernel_digest: sha256:160c9a5b8ec13386549cffdd26241209b59c4eb8645da1fe5f13eff7bb81e37c
+inputs_detail: .cairn/evidence/runs/20260917T161136230Z-2991424.inputs.json
+command: sh -c 'env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p app --test live_dogfood && env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E "test(library_namespace::)"'
+cwd: .
+exit: 0
+output_digest: sha256:843bae2988a9aaf6d1e28e3245d23f3803fe977a4e150ac295fa89fa179b5035
+output: .cairn/evidence/runs/20260917T161136230Z-2991424.out
+stderr_output: .cairn/evidence/runs/20260917T161136230Z-2991424.err
+stderr_digest: sha256:843bae2988a9aaf6d1e28e3245d23f3803fe977a4e150ac295fa89fa179b5035
+signal: none
+execution_error: null
+recorded: 2026-09-17T16:11:41.800Z
+results:
+  - UI-006 pass exit sha256:53c8207608c6b47905dc08d647afa558f2f313a599a4b5c0907c62c214a90542 27 sha256:7cc82ed7af87724bb183ec5d29a3f11e6c45b63badac067b5c069f0d27c6c2a0
+  - UI-015 pass exit sha256:06f3694e32420558233b81e70b062b4adf09c669f695cbbc5056338a35baca24 27 sha256:d4ebf2860d53e0ceee2e898461b782aeb220ddf38a2b6ac8914d570fa33636bf
+  - FORM-004 pass exit sha256:afb8d6b6675a7a8a486dba418b3dccf1576feaf5bdea85c5ee78659904e5b651 27 sha256:92f6e0c2c05f40fab458518ba35ecdd62eb4aad01e5b9a30995ba808903d3ff2
+  - FDB-003 pass exit sha256:2d69ea32122119986ee16ad1e5ae9fd4106006978a801076fab8d766faa63891 21 sha256:473ae101ca1cbc489efd4a046d19959ce18a4f1c00dbf8f243d788a3c0154e76
+  - DATA-005 pass exit sha256:e954c5ff4fc4a467cf49e2d4ae5ef7b4ae93a265fc8393817fbbadeff829b457 20 sha256:45dd477550cc8c27f689f43f708dda256e5696665aaaf116f88623dbe05dcb99
+  - FORM-005 pass exit sha256:31ba2a8372a58cd021b4a586d403031d7b7716751637d24607817d38298ab8e0 19 sha256:b1c49f76706ef6775b0d631786328a1097f10615fb98cce094edd130d62168fa
+  - NAV-005 pass exit sha256:b97e70b24cae366ada8f82461c826c3b66eee0a8881883383363c2d6a419df3a 19 sha256:60d6e23ed5bf75f2f0f1e8eb01bae995d5592f6d5f883bdac8df1dbb747e6c7e
