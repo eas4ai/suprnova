@@ -168,7 +168,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "app"
-version = "2.0.2"
+version = "2.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7436,7 +7436,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "suprnova"
-version = "2.0.2"
+version = "2.1.0"
 dependencies = [
  "aes-gcm",
  "ammonia",
@@ -7558,7 +7558,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-cli"
-version = "2.0.2"
+version = "2.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -7588,7 +7588,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-live"
-version = "2.0.2"
+version = "2.1.0"
 dependencies = [
  "askama",
  "askama_parser",
@@ -7618,7 +7618,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-live-macro-fixture"
-version = "2.0.2"
+version = "2.1.0"
 dependencies = [
  "askama",
  "suprnova-live",
@@ -7627,7 +7627,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-live-test-support"
-version = "2.0.2"
+version = "2.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -7648,7 +7648,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-macros"
-version = "2.0.2"
+version = "2.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7663,7 +7663,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-magnetar"
-version = "2.0.2"
+version = "2.1.0"
 dependencies = [
  "aes-gcm",
  "apple",
@@ -7696,7 +7696,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-payments-nowpayments"
-version = "2.0.2"
+version = "2.1.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7720,7 +7720,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-payments-paddle"
-version = "2.0.2"
+version = "2.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7738,7 +7738,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-payments-stripe"
-version = "2.0.2"
+version = "2.1.0"
 dependencies = [
  "async-stripe",
  "async-stripe-client-core",
@@ -7765,7 +7765,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-web-push"
-version = "2.0.2"
+version = "2.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",

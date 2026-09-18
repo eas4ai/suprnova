@@ -392,7 +392,7 @@ recebem de graça:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.0.2" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0" }
 
 [dev-dependencies]
 # `testing` vem ligada transitivamente pela dependência acima - nada extra.
@@ -414,10 +414,10 @@ você publica:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.0.2", default-features = false, features = ["..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0", default-features = false, features = ["..."] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.0.2", features = ["testing", "..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0", features = ["testing", "..."] }
 ```
 
 Isto é um aperto, não uma correção - a validação no boot fecha o

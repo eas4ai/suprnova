@@ -397,7 +397,7 @@ obtiennent gratuitement :
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.0.2" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0" }
 
 [dev-dependencies]
 # `testing` est activée transitivement par la dépendance ci-dessus - rien de plus.
@@ -420,10 +420,10 @@ que ce que vous livrez :
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.0.2", default-features = false, features = ["..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0", default-features = false, features = ["..."] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.0.2", features = ["testing", "..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0", features = ["testing", "..."] }
 ```
 
 C'est un resserrage, pas un correctif - la validation au démarrage
