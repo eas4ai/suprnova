@@ -1,7 +1,7 @@
 # Review - upload-store-write-completion
 
 commitment: upload-store-write-completion
-commit: 12a7df56
+commit: 5dd1441c
 examined:
   - LIVE-038 against the built tree: `write_all_fragmented` in `crates/suprnova-live/crates/suprnova-live-test-support/src/file_quarantine_store.rs`, which now flushes the tokio file before the operation completes, and the store's read and sync paths, which open their own handles and therefore depend on that flush.
   - The provider's side of the contract: `wait_store` in `crates/suprnova-live/src/upload/provider.rs` awaits each operation in full, and each store call is a detached task, so the provider's ordering holds only if completion means the bytes landed.
