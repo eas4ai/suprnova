@@ -320,7 +320,13 @@ async fn write_all_fragmented(
         maximum_observed.fetch_max(written, Ordering::SeqCst);
         bytes = &bytes[written..];
     }
-    Ok(())
+    // A tokio file holds the last write in its own buffer and performs it on a
+    // blocking task; dropping the file neither waits for that task nor reports
+    // its error. Without this flush, an operation the provider has awaited can
+    // still be in flight, so a later read of the same object sees the bytes of
+    // an earlier attempt, or fewer bytes than were written. Completion has to
+    // mean the bytes reached the file.
+    file.flush().await.map_err(provider_error)
 }
 
 fn provider_error(_error: std::io::Error) -> UploadError {
