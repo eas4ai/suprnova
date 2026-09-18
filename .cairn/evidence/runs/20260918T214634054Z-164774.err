@@ -1,0 +1,14 @@
+   Compiling app v2.1.0 (/home/shawn/workspace2/suprnova/app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.71s
+────────────
+ Nextest run ID 596174e4-b03a-4fae-b388-a51326e513dd with nextest profile: default
+    Starting 19 tests across 1 binary
+────────────
+     Summary [   0.187s] 19 tests run: 19 passed, 0 skipped
+   Compiling suprnova v2.1.0 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.06s
+────────────
+ Nextest run ID 7f9f0cb2-2471-41c4-adee-61ab3c7dd8f5 with nextest profile: default
+    Starting 1 test across 1 binary (112 tests skipped)
+────────────
+     Summary [   0.006s] 1 test run: 1 passed, 112 skipped

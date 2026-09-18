@@ -1,0 +1,18 @@
+mechanism: ui-live-add
+commit: 782f5981426503cc9da538bd03fede857bbf69e7
+inputs_digest: sha256:4046f19256186ca7cd9bf75c4367cc8f9be2b39810a7b294fe409092d185924f
+mechanism_digest: sha256:0690f511bd14d8e901f0ad01e88d21e656e4c2abe5a7e31b305fc1e0d5b2cb34
+kernel_digest: sha256:24ec9309c12d7ddb5b8693ffc74f3aad4a3ea660e4a42980c57ad2031d6f6f05
+inputs_detail: .cairn/evidence/runs/20260918T214838869Z-164774.inputs.json
+command: env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova-cli --test live_add
+cwd: .
+exit: 0
+output_digest: sha256:395650b8a1fe2b5087512e3979518c9f46e418fc79eec5411e6f70d06698caac
+output: .cairn/evidence/runs/20260918T214838869Z-164774.out
+stderr_output: .cairn/evidence/runs/20260918T214838869Z-164774.err
+stderr_digest: sha256:395650b8a1fe2b5087512e3979518c9f46e418fc79eec5411e6f70d06698caac
+signal: none
+execution_error: null
+recorded: 2026-09-18T21:49:47.749Z
+results:
+  - UI-017 pass exit sha256:16e167e95b723e592f08be810698dff13d97ed168c4e3c5ae05e9c2e7e1d32e7 23 sha256:d3f908b29674dc45a9ef94de0f3b1412cf2bd9310b4577b7c46d18af846ff208

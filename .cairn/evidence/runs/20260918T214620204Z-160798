@@ -1,0 +1,23 @@
+mechanism: ui-tokens
+commit: 782f5981426503cc9da538bd03fede857bbf69e7
+inputs_digest: sha256:c8bfef29a45936798347aad5ca64a4268b577b8403cd69225b52a94eeee1bf5a
+mechanism_digest: sha256:ca8fb41c4b569927ed87c647911b23f26bb405ba652427ddbd76e0d207182a05
+kernel_digest: sha256:24ec9309c12d7ddb5b8693ffc74f3aad4a3ea660e4a42980c57ad2031d6f6f05
+inputs_detail: .cairn/evidence/runs/20260918T214620204Z-160798.inputs.json
+command: node .cairn/tools/ui-tokens.mjs crates/suprnova-live/browser/src/styles/suprnova-ui.css app/templates/suprnova-ui crates/suprnova-live/browser/src/styles/suprnova-ui.tailwind.css crates/suprnova-live/components manual
+cwd: .
+exit: 0
+output_digest: sha256:b7c78c7f4900cc0b9ca22736ccec6d7d33f69d794b3fe092c7248d2081318138
+output: .cairn/evidence/runs/20260918T214620204Z-160798.out
+stderr_output: .cairn/evidence/runs/20260918T214620204Z-160798.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-18T21:46:25.186Z
+results:
+  - UI-001 pass line sha256:aed425a76ef3330f271aec0d62f64f73788c5fbc6f308bf59b76a2cebc20f6ca 37 sha256:6cfe2f6062f4b199e29b5f930233da9871fdc66f27d63b04b8ac2c4813f84b69
+  - UI-002 pass line sha256:07eb5b469928fd3928664d2ece74ee9f6762732b52036327ddb8856bef8227a2 37 sha256:56efb50b6bffdc5c191c8e2b8c7a324068d7152a8a727af1c0ac5ceab8b82caf
+  - UI-003 pass line sha256:a5d32981c8cccb5e5ad96156d88f632076403dab2e8ce0dde67b5f6feaae4045 37 sha256:7854160e56b236ac1a4a977b5b15f6cb7ee5a3a5dc57362cb33ed71bc3360a64
+  - UI-004 pass line sha256:70a89f36024e1fb7c67286126e5138973cba81595f9a7134a83edf51b1c45074 37 sha256:1b668e6d5b8e8ae45094fcecac14a55d472385c0c6dec313cc9d7231197958de
+  - UI-005 pass line sha256:7936f826c9ccddd2c4135ae150991a99d6e4f2696bbd83c0bd8014f1f0a1b04c 37 sha256:f3658bc2f2652eedcde83405d3c28dc9f6689f9d601068051e7900e817910128
+  - UI-007 pass line sha256:a0def64e5d8c3d1c5066790f0ff2dcf332c6301eeb748a26d769f7080798ec51 37 sha256:21f7a03588cf3756bc74f2467866c1766215f7fd7adaff49144356cc87ae2eba

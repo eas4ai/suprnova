@@ -1,0 +1,18 @@
+mechanism: live-upload-store-flush
+commit: 782f5981426503cc9da538bd03fede857bbf69e7
+inputs_digest: sha256:8712ab4e4f788c04569f076e0c0253ad138237d8ae501258449c423d39c9d597
+mechanism_digest: sha256:6ae81e1eb5a84081421bc204e07815d5beaea95fed829fd5a423f84d5b05c9b4
+kernel_digest: sha256:24ec9309c12d7ddb5b8693ffc74f3aad4a3ea660e4a42980c57ad2031d6f6f05
+inputs_detail: .cairn/evidence/runs/20260918T214602588Z-154556.inputs.json
+command: sh -c 'set -e; env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 cargo test -q -p suprnova-live --test upload_file_provider --no-run; binary=$(env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 cargo test -p suprnova-live --test upload_file_provider --no-run --message-format json 2>/dev/null | node -e "let d=\"\";process.stdin.on(\"data\",c=>d+=c).on(\"end\",()=>{for(const l of d.split(\"\\n\")){if(!l.trim())continue;const m=JSON.parse(l);if(m.target&&m.target.name===\"upload_file_provider\"&&m.executable)console.log(m.executable);}})" | tail -1); for run in $(seq 1 60); do if "$binary" > /dev/null 2>&1; then echo "run $run: ok"; else echo "run $run: failed"; "$binary" 2>&1 | tail -20; exit 1; fi; done'
+cwd: .
+exit: 0
+output_digest: sha256:370eeb1b2c8232e7e4519b2f022820e7ca050d7e2263e3926ad67801036f4f70
+output: .cairn/evidence/runs/20260918T214602588Z-154556.out
+stderr_output: .cairn/evidence/runs/20260918T214602588Z-154556.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-18T21:46:05.450Z
+results:
+  - LIVE-038 pass exit sha256:de3d45f36f565dd5fd67e93163703ed8d326b95ba6c5f16139a96d1569aa2178 2 sha256:1bbd8728f20ac7137a063b5778111e5c2df0a178f6c74e54db53f46a821fc200
