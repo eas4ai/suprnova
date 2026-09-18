@@ -12,4 +12,6 @@ Chosen 2026-09-17 by the developer, in chat at 21:46 and 21:47 EDT: "fix the fuc
 
 ## Realized by
 
-(none yet: recorded, not built)
+- 24e0a408  cairn: escalate live-010, whether to promote the upload provider's flaky retry tests
+- 12a7df56  live: the quarantine store the gate runs completes a write only once the bytes have reached the file (LIVE-038)
+- 5dd1441c  cairn: live-010 answered instead; promote the store's write completion into upload-store-write-completion (LIVE-038), roadmap item 15 current, mechanism declared
