@@ -1,0 +1,23 @@
+mechanism: ui-tokens
+commit: 5dd1441c2efa48c01907e20d79ae8150be49c749
+inputs_digest: sha256:5d240e75cb5a0cff05195c815cc16cf10eb7805bd7cc834c1750a7051d51557a
+mechanism_digest: sha256:ca8fb41c4b569927ed87c647911b23f26bb405ba652427ddbd76e0d207182a05
+kernel_digest: sha256:160c9a5b8ec13386549cffdd26241209b59c4eb8645da1fe5f13eff7bb81e37c
+inputs_detail: .cairn/evidence/runs/20260918T015321063Z-1729303.inputs.json
+command: node .cairn/tools/ui-tokens.mjs crates/suprnova-live/browser/src/styles/suprnova-ui.css app/templates/suprnova-ui crates/suprnova-live/browser/src/styles/suprnova-ui.tailwind.css crates/suprnova-live/components manual
+cwd: .
+exit: 0
+output_digest: sha256:b7c78c7f4900cc0b9ca22736ccec6d7d33f69d794b3fe092c7248d2081318138
+output: .cairn/evidence/runs/20260918T015321063Z-1729303.out
+stderr_output: .cairn/evidence/runs/20260918T015321063Z-1729303.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-18T01:53:26.044Z
+results:
+  - UI-001 pass line sha256:aed425a76ef3330f271aec0d62f64f73788c5fbc6f308bf59b76a2cebc20f6ca 35 sha256:c3aaf9d7290ae8859ea84a9ee4afed0c2f8794f58dcd33c09a0ba6c262ca74e8
+  - UI-002 pass line sha256:07eb5b469928fd3928664d2ece74ee9f6762732b52036327ddb8856bef8227a2 35 sha256:00a85691e3ba65a0f274f389887615753011cf906f880f566eb1f43e502994c3
+  - UI-003 pass line sha256:a5d32981c8cccb5e5ad96156d88f632076403dab2e8ce0dde67b5f6feaae4045 35 sha256:1fb13257babe5f6f7e2a4f003302500e3cb9e2018d4e3ab58721ca157c750486
+  - UI-004 pass line sha256:70a89f36024e1fb7c67286126e5138973cba81595f9a7134a83edf51b1c45074 35 sha256:3548844565dcee92ac64255fbc69118d0d82b90d43f4c93ba0f08a090b65e572
+  - UI-005 pass line sha256:7936f826c9ccddd2c4135ae150991a99d6e4f2696bbd83c0bd8014f1f0a1b04c 35 sha256:77680426db0ef462549124751b24319ae77f11efc03b06db3ec4b3a9be78cc38
+  - UI-007 pass line sha256:a0def64e5d8c3d1c5066790f0ff2dcf332c6301eeb748a26d769f7080798ec51 35 sha256:8a844af19c5201890cc4e1d8237fc2342eb186e5a57ddb70c8ea331884411b04
