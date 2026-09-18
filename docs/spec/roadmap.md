@@ -164,7 +164,10 @@ components in waves, the advanced components last, the datatable closing.
    (`component-library-overlays.md` OVL-002 revised and OVL-008,
    `docs/commitments/tooltip-dismissal.md`).
 
-15. upload-store-write-completion - the store the Live gate runs the upload provider
+15. upload-store-write-completion - DONE 2026-09-17 (fixed at `12a7df56`,
+   receipts `b5dcccb0`, review `89c54fd4`; six failures in sixty runs without
+   the flush, none in a hundred and twenty with it, and the Live gate green on
+   the first run after it) - the store the Live gate runs the upload provider
    against completed a write while the bytes were still in a tokio file's
    buffer, so the provider's own tests failed about one whole-file run in
    fifteen and four gate runs went red on 2026-09-17; promoted on the
