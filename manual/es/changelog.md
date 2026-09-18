@@ -6,7 +6,7 @@ versión se lanza cuando su commit de versión y la etiqueta
 `v<version>` correspondiente se publican de forma atómica. Las más
 recientes primero.
 
-## 2.0.2 - 2026-09-14
+## 2.1.0 - 2026-09-18
 
 ### Añadido
 
@@ -84,16 +84,6 @@ recientes primero.
 
 ### Cambiado
 
-- **Los endpoints de Live no llevan segmento de versión.**
-  `/__live/v1/action`, `/__live/v1/upload`, `/__live/v1/assets/*` y la familia
-  `/__live/v1/async/*` viven ahora en las mismas rutas sin `/v1`:
-  `/__live/action`, `/__live/upload`, `/__live/assets/*`, `/__live/async/*`.
-  La versión de Suprnova es el tag de git y el runtime del navegador se
-  publica al mismo paso que el framework, así que una segunda versión dentro
-  del espacio de URLs prometía un camino de evolución que nunca se usaría. Las
-  aplicaciones no se ven afectadas: el framework registra estas rutas y el
-  runtime construye cada URL; las referencias escritas a mano a rutas
-  `/__live/` nunca estuvieron soportadas.
 - **La base de navegadores soportada por Live es Chrome y Edge 114, Firefox 128
   y Safari 17.** El mínimo sube desde Chrome y Edge 111 y Safari 16.4 a las
   primeras versiones que traen el atributo nativo `popover`, con el que los
@@ -145,18 +135,6 @@ recientes primero.
   más de 127 campos de modelo, y una petición rechazada por un límite se
   informa como límite de recursos que muestra la retroalimentación de error
   de la acción.
-- **Cada emisión que admite el límite por scope de Live responde con una
-  suscripción que conecta.** Las emisiones concurrentes de un scope en el
-  mismo milisegundo acuñan descriptores idénticos, y el almacén de
-  credenciales del host conservaba solo el último secreto acuñado para un
-  descriptor, así que las peticiones anteriores respondían 403
-  `async_authority_invalid` desde el connect que realiza la emisión. Además,
-  alrededor de una emisión de cada quinientas respondía 503
-  `async_unavailable`, porque los claims que publicaba mientras se construía
-  su contexto de sobre compartían una sola ranura con todas las emisiones
-  concurrentes. Un descriptor ahora conserva cada secreto no consumido hasta
-  que se consume o expira, y los claims en construcción se indexan por id de
-  suscripción.
 - **El combobox sigue respondiendo y muestra lo que respondió el servidor.**
   Un texto con el que no coincidía ninguna opción congelaba la página, porque
   el observador del elemento vigilaba atributos que su propio renderizado
@@ -265,6 +243,36 @@ recientes primero.
   vuelve a mostrarla. La burbuja se sigue mostrando sin ningún script en la
   página; el nuevo elemento `sn-tooltip` lleva el cierre a solas, y
   `live:add tooltip` lo instala.
+
+## 2.0.2 - 2026-09-14
+
+### Cambiado
+
+- **Los endpoints de Live no llevan segmento de versión.**
+  `/__live/v1/action`, `/__live/v1/upload`, `/__live/v1/assets/*` y la familia
+  `/__live/v1/async/*` viven ahora en las mismas rutas sin `/v1`:
+  `/__live/action`, `/__live/upload`, `/__live/assets/*`, `/__live/async/*`.
+  La versión de Suprnova es el tag de git y el runtime del navegador se
+  publica al mismo paso que el framework, así que una segunda versión dentro
+  del espacio de URLs prometía un camino de evolución que nunca se usaría. Las
+  aplicaciones no se ven afectadas: el framework registra estas rutas y el
+  runtime construye cada URL; las referencias escritas a mano a rutas
+  `/__live/` nunca estuvieron soportadas.
+
+### Corregido
+
+- **Cada emisión que admite el límite por scope de Live responde con una
+  suscripción que conecta.** Las emisiones concurrentes de un scope en el
+  mismo milisegundo acuñan descriptores idénticos, y el almacén de
+  credenciales del host conservaba solo el último secreto acuñado para un
+  descriptor, así que las peticiones anteriores respondían 403
+  `async_authority_invalid` desde el connect que realiza la emisión. Además,
+  alrededor de una emisión de cada quinientas respondía 503
+  `async_unavailable`, porque los claims que publicaba mientras se construía
+  su contexto de sobre compartían una sola ranura con todas las emisiones
+  concurrentes. Un descriptor ahora conserva cada secreto no consumido hasta
+  que se consume o expira, y los claims en construcción se indexan por id de
+  suscripción.
 
 ### Seguridad
 

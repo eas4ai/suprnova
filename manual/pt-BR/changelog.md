@@ -5,7 +5,7 @@ versão é o registro de lançamento daquela versão. Uma versão é
 lançada quando seu commit de versão e a tag `v<version>` correspondente
 são enviados atomicamente. Mais recentes primeiro.
 
-## 2.0.2 - 2026-09-14
+## 2.1.0 - 2026-09-18
 
 ### Adicionado
 
@@ -82,15 +82,6 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ### Alterado
 
-- **Os endpoints do Live não carregam segmento de versão.**
-  `/__live/v1/action`, `/__live/v1/upload`, `/__live/v1/assets/*` e a família
-  `/__live/v1/async/*` agora vivem nos mesmos caminhos sem `/v1`:
-  `/__live/action`, `/__live/upload`, `/__live/assets/*`, `/__live/async/*`. A
-  versão do Suprnova é a tag do git e o runtime do navegador sai em sincronia
-  com o framework, então uma segunda versão dentro do espaço de URLs prometia
-  um caminho de evolução que nunca seria usado. As aplicações não são
-  afetadas: o framework registra essas rotas e o runtime constrói cada URL;
-  referências escritas à mão a caminhos `/__live/` nunca foram suportadas.
 - **A base de navegadores suportada pelo Live é Chrome e Edge 114, Firefox 128
   e Safari 17.** O piso sobe de Chrome e Edge 111 e Safari 16.4 para as
   primeiras versões que trazem o atributo nativo `popover`, com o qual os
@@ -139,17 +130,6 @@ são enviados atomicamente. Mais recentes primeiro.
   formulário `live:submit` com mais de 127 campos de modelo, e uma requisição
   recusada por um limite é relatada como limite de recursos que mostra o
   feedback de erro da ação.
-- **Toda emissão que o limite por escopo do Live admite responde com uma
-  assinatura que conecta.** Emissões concorrentes de um escopo no mesmo
-  milissegundo cunham descritores idênticos, e o armazenamento de credenciais
-  do host guardava apenas o último segredo cunhado para um descritor, de modo
-  que as requisições anteriores respondiam 403 `async_authority_invalid` a
-  partir do connect que a emissão realiza. Cerca de uma emissão em quinhentas
-  também respondia 503 `async_unavailable`, porque os claims que ela publicava
-  enquanto seu contexto de envelope era construído compartilhavam um único
-  slot com todas as emissões concorrentes. Um descritor agora guarda cada
-  segredo não consumido até que seja consumido ou expire, e os claims em
-  construção são indexados por id de assinatura.
 - **O combobox continua responsivo e mostra o que o servidor respondeu.** Um
   texto com o qual nenhuma opção correspondia travava a página, porque o
   observer do elemento observava atributos que a sua própria renderização
@@ -253,6 +233,34 @@ são enviados atomicamente. Mais recentes primeiro.
   o mostra de novo. O balão continua aparecendo sem nenhum script na página;
   o novo elemento `sn-tooltip` carrega o fechamento sozinho, e
   `live:add tooltip` o instala.
+
+## 2.0.2 - 2026-09-14
+
+### Alterado
+
+- **Os endpoints do Live não carregam segmento de versão.**
+  `/__live/v1/action`, `/__live/v1/upload`, `/__live/v1/assets/*` e a família
+  `/__live/v1/async/*` agora vivem nos mesmos caminhos sem `/v1`:
+  `/__live/action`, `/__live/upload`, `/__live/assets/*`, `/__live/async/*`. A
+  versão do Suprnova é a tag do git e o runtime do navegador sai em sincronia
+  com o framework, então uma segunda versão dentro do espaço de URLs prometia
+  um caminho de evolução que nunca seria usado. As aplicações não são
+  afetadas: o framework registra essas rotas e o runtime constrói cada URL;
+  referências escritas à mão a caminhos `/__live/` nunca foram suportadas.
+
+### Corrigido
+
+- **Toda emissão que o limite por escopo do Live admite responde com uma
+  assinatura que conecta.** Emissões concorrentes de um escopo no mesmo
+  milissegundo cunham descritores idênticos, e o armazenamento de credenciais
+  do host guardava apenas o último segredo cunhado para um descritor, de modo
+  que as requisições anteriores respondiam 403 `async_authority_invalid` a
+  partir do connect que a emissão realiza. Cerca de uma emissão em quinhentas
+  também respondia 503 `async_unavailable`, porque os claims que ela publicava
+  enquanto seu contexto de envelope era construído compartilhavam um único
+  slot com todas as emissões concorrentes. Um descritor agora guarda cada
+  segredo não consumido até que seja consumido ou expire, e os claims em
+  construção são indexados por id de assinatura.
 
 ### Segurança
 

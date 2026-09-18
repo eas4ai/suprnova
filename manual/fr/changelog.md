@@ -6,7 +6,7 @@ Une version est publiée quand son commit de version et le tag
 `v<version>` correspondant sont poussés atomiquement. Les plus récentes
 en premier.
 
-## 2.0.2 - 2026-09-14
+## 2.1.0 - 2026-09-18
 
 ### Ajouté
 
@@ -85,16 +85,6 @@ en premier.
 
 ### Modifié
 
-- **Les endpoints Live ne portent aucun segment de version.**
-  `/__live/v1/action`, `/__live/v1/upload`, `/__live/v1/assets/*` et la
-  famille `/__live/v1/async/*` vivent désormais aux mêmes chemins sans `/v1` :
-  `/__live/action`, `/__live/upload`, `/__live/assets/*`, `/__live/async/*`.
-  La version de Suprnova est le tag git, et le runtime navigateur paraît au
-  même rythme que le framework - une seconde version dans l'espace d'URL
-  promettait un chemin d'évolution qui n'aurait jamais servi. Les applications
-  ne sont pas concernées : le framework enregistre ces routes et le runtime
-  construit chaque URL ; les références écrites à la main vers des chemins
-  `/__live/` n'ont jamais été prises en charge.
 - **La base de navigateurs prise en charge par Live est Chrome et Edge 114,
   Firefox 128 et Safari 17.** Le plancher monte de Chrome et Edge 111 et Safari
   16.4 aux premières versions qui livrent l'attribut natif `popover`, avec
@@ -145,18 +135,6 @@ en premier.
   serveur, `live:check` refuse un formulaire `live:submit` de plus de 127
   champs de modèle, et une requête refusée pour une limite est signalée comme
   une limite de ressources qui affiche le retour d'erreur de l'action.
-- **Chaque émission que la limite par scope de Live admet répond avec un
-  abonnement qui se connecte.** Des émissions concurrentes d'un même scope
-  dans la même milliseconde frappent des descripteurs identiques, et le
-  magasin de credentials de l'hôte ne conservait que le dernier secret frappé
-  pour un descripteur, si bien que les requêtes antérieures répondaient 403
-  `async_authority_invalid` depuis le connect que l'émission effectue. Environ
-  une émission sur cinq cents répondait aussi 503 `async_unavailable`, parce
-  que les claims qu'elle publiait pendant la construction de son contexte
-  d'enveloppe partageaient un seul emplacement avec toutes les émissions
-  concurrentes. Un descripteur conserve désormais chaque secret non consommé
-  jusqu'à ce qu'il soit consommé ou expire, et les claims en construction sont
-  indexés par identifiant d'abonnement.
 - **La combobox reste réactive et affiche ce que le serveur a répondu.** Un
   texte auquel aucune option ne correspondait figeait la page, parce que
   l'observateur de l'élément surveillait des attributs que son propre rendu
@@ -272,6 +250,36 @@ en premier.
   focus de ce déclencheur l'affiche de nouveau. La bulle s'affiche toujours
   sans aucun script dans la page ; le nouvel élément `sn-tooltip` porte la
   fermeture à lui seul, et `live:add tooltip` l'installe.
+
+## 2.0.2 - 2026-09-14
+
+### Modifié
+
+- **Les endpoints Live ne portent aucun segment de version.**
+  `/__live/v1/action`, `/__live/v1/upload`, `/__live/v1/assets/*` et la
+  famille `/__live/v1/async/*` vivent désormais aux mêmes chemins sans `/v1` :
+  `/__live/action`, `/__live/upload`, `/__live/assets/*`, `/__live/async/*`.
+  La version de Suprnova est le tag git, et le runtime navigateur paraît au
+  même rythme que le framework - une seconde version dans l'espace d'URL
+  promettait un chemin d'évolution qui n'aurait jamais servi. Les applications
+  ne sont pas concernées : le framework enregistre ces routes et le runtime
+  construit chaque URL ; les références écrites à la main vers des chemins
+  `/__live/` n'ont jamais été prises en charge.
+
+### Corrigé
+
+- **Chaque émission que la limite par scope de Live admet répond avec un
+  abonnement qui se connecte.** Des émissions concurrentes d'un même scope
+  dans la même milliseconde frappent des descripteurs identiques, et le
+  magasin de credentials de l'hôte ne conservait que le dernier secret frappé
+  pour un descripteur, si bien que les requêtes antérieures répondaient 403
+  `async_authority_invalid` depuis le connect que l'émission effectue. Environ
+  une émission sur cinq cents répondait aussi 503 `async_unavailable`, parce
+  que les claims qu'elle publiait pendant la construction de son contexte
+  d'enveloppe partageaient un seul emplacement avec toutes les émissions
+  concurrentes. Un descripteur conserve désormais chaque secret non consommé
+  jusqu'à ce qu'il soit consommé ou expire, et les claims en construction sont
+  indexés par identifiant d'abonnement.
 
 ### Sécurité
 

@@ -4,7 +4,7 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
-## 2.0.2 - 2026-09-14
+## 2.1.0 - 2026-09-18
 
 ### Added
 
@@ -77,15 +77,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
-- **The Live endpoints carry no version segment.** `/__live/v1/action`,
-  `/__live/v1/upload`, `/__live/v1/assets/*`, and the `/__live/v1/async/*`
-  family now live at the same paths without `/v1`: `/__live/action`,
-  `/__live/upload`, `/__live/assets/*`, `/__live/async/*`. Suprnova's version
-  is the git tag and the browser runtime ships in lockstep with the framework,
-  so a second version inside the URL space promised an evolution path that
-  would never be used. Applications are unaffected: the framework registers
-  these routes and the runtime builds every URL, and hand-written references
-  to `/__live/` paths were never supported.
 - **Live's supported browser baseline is Chrome and Edge 114, Firefox 128, and
   Safari 17.** The floor rises from Chrome and Edge 111 and Safari 16.4 to the
   first releases that ship the native `popover` attribute the component
@@ -129,16 +120,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   admits the server's counts, `live:check` refuses a `live:submit` form of
   more than 127 model fields, and a request refused for a limit is reported as
   a resource limit that shows the action's error feedback.
-- **Every issuance the Live per-scope limit admits answers with a subscription
-  that connects.** Concurrent issuances of one scope in the same millisecond
-  mint identical descriptors, and the host's credential store kept only the
-  last secret minted for a descriptor, so the earlier requests answered 403
-  `async_authority_invalid` from the connect that issuance performs. About one
-  issuance in five hundred also answered 503 `async_unavailable`, because the
-  claims it published while its envelope context was built shared one slot
-  with every concurrent issuance. A descriptor now keeps every unconsumed
-  secret until each is consumed or expires, and the claims under construction
-  are keyed by subscription id.
 - **The combobox stays responsive and shows what the server answered.** Text
   that no option matched froze the page, because the element's observer
   watched attributes its own render rewrote even when nothing changed. The
@@ -230,6 +211,33 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   neither moved, and the next hover or focus of that trigger shows it again.
   The bubble still shows with no script in the page; the new `sn-tooltip`
   element carries the dismissal alone, and `live:add tooltip` installs it.
+
+## 2.0.2 - 2026-09-14
+
+### Changed
+
+- **The Live endpoints carry no version segment.** `/__live/v1/action`,
+  `/__live/v1/upload`, `/__live/v1/assets/*`, and the `/__live/v1/async/*`
+  family now live at the same paths without `/v1`: `/__live/action`,
+  `/__live/upload`, `/__live/assets/*`, `/__live/async/*`. Suprnova's version
+  is the git tag and the browser runtime ships in lockstep with the framework,
+  so a second version inside the URL space promised an evolution path that
+  would never be used. Applications are unaffected: the framework registers
+  these routes and the runtime builds every URL, and hand-written references
+  to `/__live/` paths were never supported.
+
+### Fixed
+
+- **Every issuance the Live per-scope limit admits answers with a subscription
+  that connects.** Concurrent issuances of one scope in the same millisecond
+  mint identical descriptors, and the host's credential store kept only the
+  last secret minted for a descriptor, so the earlier requests answered 403
+  `async_authority_invalid` from the connect that issuance performs. About one
+  issuance in five hundred also answered 503 `async_unavailable`, because the
+  claims it published while its envelope context was built shared one slot
+  with every concurrent issuance. A descriptor now keeps every unconsumed
+  secret until each is consumed or expires, and the claims under construction
+  are keyed by subscription id.
 
 ### Security
 

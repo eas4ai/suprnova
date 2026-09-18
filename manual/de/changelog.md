@@ -5,7 +5,7 @@ geändert hat. Jeder Versionsabschnitt ist der Freigabe-Datensatz dieser
 Version. Eine Version wird freigegeben, wenn ihr Versions-Commit und
 der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
-## 2.0.2 - 2026-09-14
+## 2.1.0 - 2026-09-18
 
 ### Hinzugefügt
 
@@ -86,15 +86,6 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Geändert
 
-- **Die Live-Endpunkte tragen kein Versionssegment.** `/__live/v1/action`,
-  `/__live/v1/upload`, `/__live/v1/assets/*` und die
-  `/__live/v1/async/*`-Familie liegen jetzt auf denselben Pfaden ohne `/v1`:
-  `/__live/action`, `/__live/upload`, `/__live/assets/*`, `/__live/async/*`.
-  Suprnovas Version ist das Git-Tag, und die Browser-Laufzeit erscheint im
-  Gleichschritt mit dem Framework - eine zweite Version im URL-Raum versprach
-  einen Entwicklungspfad, der nie benutzt worden wäre. Anwendungen sind nicht
-  betroffen: das Framework registriert diese Routen und die Laufzeit baut jede
-  URL; von Hand geschriebene `/__live/`-Pfade waren nie unterstützt.
 - **Die unterstützte Browser-Basis von Live ist Chrome und Edge 114, Firefox
   128 und Safari 17.** Die Untergrenze steigt von Chrome und Edge 111 und
   Safari 16.4 auf die ersten Versionen, die das native `popover`-Attribut
@@ -146,18 +137,6 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   Servers zu, `live:check` weist ein `live:submit`-Formular mit mehr als 127
   Model-Feldern ab, und eine wegen eines Limits abgewiesene Anfrage wird als
   Ressourcenlimit gemeldet, das das Fehler-Feedback der Aktion anzeigt.
-- **Jede Ausgabe, die das Live-Limit pro Scope zulässt, antwortet mit einer
-  Subscription, die sich verbinden lässt.** Gleichzeitige Ausgaben eines
-  Scopes in derselben Millisekunde prägen identische Deskriptoren, und der
-  Credential-Speicher des Hosts behielt nur das zuletzt für einen Deskriptor
-  erzeugte Secret, sodass die früheren Anfragen aus dem Connect, den die
-  Ausgabe durchführt, mit 403 `async_authority_invalid` antworteten. Etwa eine
-  Ausgabe von fünfhundert antwortete außerdem mit 503 `async_unavailable`,
-  weil die Claims, die sie während des Aufbaus ihres Envelope-Kontexts
-  veröffentlichte, sich einen Platz mit jeder gleichzeitigen Ausgabe teilten.
-  Ein Deskriptor behält jetzt jedes nicht verbrauchte Secret, bis es
-  verbraucht wird oder abläuft, und die Claims im Aufbau sind nach
-  Subscription-Id abgelegt.
 - **Die Combobox bleibt reaktionsfähig und zeigt, was der Server geantwortet
   hat.** Text, auf den keine Option passte, ließ die Seite einfrieren, weil
   der Observer des Elements Attribute beobachtete, die sein eigenes Rendern
@@ -272,6 +251,35 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   Die Sprechblase erscheint weiterhin auch ohne Skript auf der Seite; das
   neue Element `sn-tooltip` trägt das Schließen allein, und
   `live:add tooltip` installiert es.
+
+## 2.0.2 - 2026-09-14
+
+### Geändert
+
+- **Die Live-Endpunkte tragen kein Versionssegment.** `/__live/v1/action`,
+  `/__live/v1/upload`, `/__live/v1/assets/*` und die
+  `/__live/v1/async/*`-Familie liegen jetzt auf denselben Pfaden ohne `/v1`:
+  `/__live/action`, `/__live/upload`, `/__live/assets/*`, `/__live/async/*`.
+  Suprnovas Version ist das Git-Tag, und die Browser-Laufzeit erscheint im
+  Gleichschritt mit dem Framework - eine zweite Version im URL-Raum versprach
+  einen Entwicklungspfad, der nie benutzt worden wäre. Anwendungen sind nicht
+  betroffen: das Framework registriert diese Routen und die Laufzeit baut jede
+  URL; von Hand geschriebene `/__live/`-Pfade waren nie unterstützt.
+
+### Behoben
+
+- **Jede Ausgabe, die das Live-Limit pro Scope zulässt, antwortet mit einer
+  Subscription, die sich verbinden lässt.** Gleichzeitige Ausgaben eines
+  Scopes in derselben Millisekunde prägen identische Deskriptoren, und der
+  Credential-Speicher des Hosts behielt nur das zuletzt für einen Deskriptor
+  erzeugte Secret, sodass die früheren Anfragen aus dem Connect, den die
+  Ausgabe durchführt, mit 403 `async_authority_invalid` antworteten. Etwa eine
+  Ausgabe von fünfhundert antwortete außerdem mit 503 `async_unavailable`,
+  weil die Claims, die sie während des Aufbaus ihres Envelope-Kontexts
+  veröffentlichte, sich einen Platz mit jeder gleichzeitigen Ausgabe teilten.
+  Ein Deskriptor behält jetzt jedes nicht verbrauchte Secret, bis es
+  verbraucht wird oder abläuft, und die Claims im Aufbau sind nach
+  Subscription-Id abgelegt.
 
 ### Sicherheit
 
