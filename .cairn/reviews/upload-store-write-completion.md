@@ -1,7 +1,7 @@
 # Review - upload-store-write-completion
 
 commitment: upload-store-write-completion
-commit: 782f5981
+commit: e8cacd75
 examined:
   - LIVE-038 against the built tree: `write_all_fragmented` in `crates/suprnova-live/crates/suprnova-live-test-support/src/file_quarantine_store.rs`, which now flushes the tokio file before the operation completes, and the store's read and sync paths, which open their own handles and therefore depend on that flush.
   - The provider's side of the contract: `wait_store` in `crates/suprnova-live/src/upload/provider.rs` awaits each operation in full, and each store call is a detached task, so the provider's ordering holds only if completion means the bytes landed.
@@ -12,7 +12,7 @@ examined:
 findings:
   - resolved: The Live gate was red twice while the evidence was refreshed on this tree, each time for a reason outside this commitment: a clippy internal compiler error evaluating a `Send` obligation on `sea_query::ColumnType`, and one webkit case, `production WebSocket and Rust polling routes remain physical`, which passes five times of five alone. The run after them is green. They are recorded here rather than in the backlog, following the developer's ruling on escalation live-030.
   - resolved: The failures read as provider defects, a checksum mismatch and an incomplete transfer, but the provider was correct: the store told it a write was done while the bytes were still in a tokio file's buffer, waiting on a blocking task that dropping the file neither awaits nor reports. Two of the three failing tests write the same range twice, which is why an earlier attempt's bytes could reach the file after a later one's.
-  - resolved: No shipped code writes through a tokio file this way; a search over `framework/src`, `crates/*/src` and `suprnova-cli/src` finds only reads, so the defect was confined to the store the tests and the reference host run against.
+  - resolved: No shipped code carries this defect, though not for the reason first recorded here: `framework/src/live/ports/upload_provider.rs` `write_at` and `framework/src/http/upload/mod.rs` `collect_part` do write through tokio files, and both already flush before they hand the object on, the provider's flush having landed in `e63a68d5`. `suprnova-live-test-support` is `publish = false` and a dev-dependency alone, so the defect was confined to the store the tests and the reference host run against. The independent report at `.cairn/reviews/upload-store-write-completion.independent.md` caught the earlier sentence, which claimed the search found only reads.
 
 ## Build review, 2026-09-17
 
