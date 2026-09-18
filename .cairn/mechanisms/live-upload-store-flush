@@ -1,0 +1,7 @@
+command: sh -c 'set -e; env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 cargo test -q -p suprnova-live --test upload_file_provider --no-run; binary=$(env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 cargo test -p suprnova-live --test upload_file_provider --no-run --message-format json 2>/dev/null | node -e "let d=\"\";process.stdin.on(\"data\",c=>d+=c).on(\"end\",()=>{for(const l of d.split(\"\\n\")){if(!l.trim())continue;const m=JSON.parse(l);if(m.target&&m.target.name===\"upload_file_provider\"&&m.executable)console.log(m.executable);}})" | tail -1); for run in $(seq 1 60); do if "$binary" > /dev/null 2>&1; then echo "run $run: ok"; else echo "run $run: failed"; "$binary" 2>&1 | tail -20; exit 1; fi; done'
+inputs:
+  - crates/suprnova-live/crates/suprnova-live-test-support/src/
+  - crates/suprnova-live/src/upload/
+  - crates/suprnova-live/tests/upload_file_provider.rs
+requirements:
+  - LIVE-038

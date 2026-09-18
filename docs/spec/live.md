@@ -429,3 +429,18 @@ Refines: Live spec 11, dirty state compares the current browser proposal
 to the last accepted server-authoritative value, and a response updates
 accepted server state without overwriting a newer unsent local edit.
 Status: Agreed 2026-09-17 by promotion a-render-that-changes-a-bound-control-becomes-the-baseline-its-next-edit-is-compared-with
+
+[LIVE-038] A store the Live gate runs the upload provider against MUST
+complete a write operation only once the written bytes have reached the
+object, so a read the provider issues afterwards observes them.
+Falsifier: sixty consecutive whole-file runs of
+`crates/suprnova-live/tests/upload_file_provider.rs` report a checksum
+mismatch or an incomplete transfer in any run.
+Evidence: `write_all_fragmented` in
+`crates/suprnova-live/crates/suprnova-live-test-support/src/file_quarantine_store.rs`
+wrote through a tokio file and never flushed it, so a write the provider
+had awaited could still be in that file's buffer; six of sixty runs failed
+on an idle machine, and four Live gate runs on 2026-09-17 were red.
+Mechanism: `.cairn/mechanisms/live-upload-store-flush`.
+Refines: LIVE-010, the Live gate proves the engine's upload behavior.
+Status: Agreed 2026-09-17 by promotion the-quarantine-store-the-live-gate-runs-completes-a-write-only-when-the-bytes-have-reached-the-file
