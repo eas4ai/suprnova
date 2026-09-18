@@ -1,12 +1,13 @@
 # Review - upload-store-write-completion
 
 commitment: upload-store-write-completion
-commit: 5dd1441c
+commit: 45d9557f
 examined:
   - LIVE-038 against the built tree: `write_all_fragmented` in `crates/suprnova-live/crates/suprnova-live-test-support/src/file_quarantine_store.rs`, which now flushes the tokio file before the operation completes, and the store's read and sync paths, which open their own handles and therefore depend on that flush.
   - The provider's side of the contract: `wait_store` in `crates/suprnova-live/src/upload/provider.rs` awaits each operation in full, and each store call is a detached task, so the provider's ordering holds only if completion means the bytes landed.
   - The measurement: sixty whole-file runs of `crates/suprnova-live/tests/upload_file_provider.rs` with the flush removed failed six times, in three different tests, with a checksum mismatch or an incomplete transfer; a hundred and twenty runs with the flush passed.
   - The Live gate, which had been red on four consecutive runs, green on the first run after the fix.
+  - The tree at `45d9557f`, which adds the release's changelog split to `5dd1441c`: the thirty entries written since the v2.0.2 tag move to a 2.1.0 section in the English changelog and its six locale mirrors, no entry's text changes, and the translation lock is stamped for them. No requirement's subject is touched, and `ui-tokens`, the mechanism that reads those files, passes UI-001 to UI-007 on this tree.
 findings:
   - resolved: The failures read as provider defects, a checksum mismatch and an incomplete transfer, but the provider was correct: the store told it a write was done while the bytes were still in a tokio file's buffer, waiting on a blocking task that dropping the file neither awaits nor reports. Two of the three failing tests write the same range twice, which is why an earlier attempt's bytes could reach the file after a later one's.
   - resolved: No shipped code writes through a tokio file this way; a search over `framework/src`, `crates/*/src` and `suprnova-cli/src` finds only reads, so the defect was confined to the store the tests and the reference host run against.

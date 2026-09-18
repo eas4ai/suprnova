@@ -1,0 +1,23 @@
+mechanism: ui-tokens
+commit: 45d9557f5bd49f99973abc0da3405d11568c493f
+inputs_digest: sha256:4cb4415ff3c17dc6d4eacbd094c001ec071ddb2a08dd379e2685d1ace61a6102
+mechanism_digest: sha256:ca8fb41c4b569927ed87c647911b23f26bb405ba652427ddbd76e0d207182a05
+kernel_digest: sha256:160c9a5b8ec13386549cffdd26241209b59c4eb8645da1fe5f13eff7bb81e37c
+inputs_detail: .cairn/evidence/runs/20260918T094453885Z-292917.inputs.json
+command: node .cairn/tools/ui-tokens.mjs crates/suprnova-live/browser/src/styles/suprnova-ui.css app/templates/suprnova-ui crates/suprnova-live/browser/src/styles/suprnova-ui.tailwind.css crates/suprnova-live/components manual
+cwd: .
+exit: 0
+output_digest: sha256:b7c78c7f4900cc0b9ca22736ccec6d7d33f69d794b3fe092c7248d2081318138
+output: .cairn/evidence/runs/20260918T094453885Z-292917.out
+stderr_output: .cairn/evidence/runs/20260918T094453885Z-292917.err
+stderr_digest: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+signal: none
+execution_error: null
+recorded: 2026-09-18T09:45:00.035Z
+results:
+  - UI-001 pass line sha256:aed425a76ef3330f271aec0d62f64f73788c5fbc6f308bf59b76a2cebc20f6ca 36 sha256:76affab91643f5134a3c2e21cfa383c2008fadf490168f96771356effd209870
+  - UI-002 pass line sha256:07eb5b469928fd3928664d2ece74ee9f6762732b52036327ddb8856bef8227a2 36 sha256:55cc49e56f6e69fd8a039002f8e49c6ccabf529267fdb1ceb143ade325de6eee
+  - UI-003 pass line sha256:a5d32981c8cccb5e5ad96156d88f632076403dab2e8ce0dde67b5f6feaae4045 36 sha256:27774af0e8ea6614b13a3dcd794a1e6d642d661e8cac8dbb5f08e1feea4d5c80
+  - UI-004 pass line sha256:70a89f36024e1fb7c67286126e5138973cba81595f9a7134a83edf51b1c45074 36 sha256:5810e3ee1e719290fea0141c60f1268387764423681b0ba90b7759fb2f358d92
+  - UI-005 pass line sha256:7936f826c9ccddd2c4135ae150991a99d6e4f2696bbd83c0bd8014f1f0a1b04c 36 sha256:c4181faff5f65a210dfb68c36dbcbe3efe0d7a6ac269756278fd0009a2a5094c
+  - UI-007 pass line sha256:a0def64e5d8c3d1c5066790f0ff2dcf332c6301eeb748a26d769f7080798ec51 36 sha256:1a020e117b29cd3143286c608cbf3ee84fdbc18594fff07c12bc39380b8396c8
