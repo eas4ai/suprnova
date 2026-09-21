@@ -20,9 +20,13 @@ fn project_dir() -> TempDir {
 }
 
 fn fixture_root() -> PathBuf {
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../target"));
+    // The target directory cargo compiled this test under, whether it came
+    // from the environment or from `build.target-dir` in a config file; an
+    // in-tree `target/` fallback wrote workspaces into the checkout instead.
+    let target = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .parent()
+        .expect("CARGO_TARGET_TMPDIR sits inside the target directory")
+        .to_path_buf();
     let root = target.join("test-workspaces");
     fs::create_dir_all(&root).expect("create CLI test workspace");
     root
