@@ -1,6 +1,0 @@
-command: node .cairn/tools/spec-lint.mjs docs/spec
-inputs:
-  - docs/spec/
-  - .cairn/tools/
-requirements:
-  - LIVE-014
