@@ -46,10 +46,7 @@ impl Counter {
   推导出 `<package>.<kebab>`。
 - `view` 是相对于模板根目录的模板标识。
 - `#[public]` 字段会被渲染并携带在签名快照中。`#[model]` 字段还通过 `live:model`
-  接受来自浏览器的提议。
-  模型字段在属性上声明其时机，例如 `#[model(debounce = 250)]`；防抖时长为 100、250 或 500 毫秒，即 `live:model.debounce.<n>ms` 接受的时长，其他任何值都无法编译。
-  以 `live:submit` 提交的表单会在一个请求中提出其中每个模型控件，该请求除动作外最多携带 127 个字段；更大的表单会被 `live:check` 拒绝。
-  字段无法解码的提议，例如 `u64` 字段收到的空数字，是该字段上的校验错误：动作不会执行，字段保留其值，并由 `live:error` 显示该错误。
+  接受来自浏览器的提议。模型字段在属性上声明其时机，例如 `#[model(debounce = 250)]`；防抖时长为 100、250 或 500 毫秒，即 `live:model.debounce.<n>ms` 接受的时长，其他任何值都无法编译。以 `live:submit` 提交的表单会在一个请求中提出其中每个模型控件，该请求除动作外最多携带 127 个字段；更大的表单会被 `live:check` 拒绝。字段无法解码的提议，例如 `u64` 字段收到的空数字，是该字段上的校验错误：动作不会执行，字段保留其值，并由 `live:error` 显示该错误。
 - `#[action]` 方法是浏览器唯一可以调用的入口。它们接收经过验证的参数，并可返回重定向或 flash 等类型化结果。
 
 每个字段类型都必须实现 `Default`；除非挂载钩子另有指定，新岛屿从这些默认值开始。
@@ -456,7 +453,7 @@ live-native 家族是最后一个家族：只有在运行中的运行时之上�
 
 实时信息流和通知铃铛位于由流支撑的孤岛上。运行时在孤岛根上写入 `data-live-stream-state`，并把每次变化播报到宏渲染的 `[data-live-stream-status]` 元素中 (Updates disconnected, Connecting to updates, Updates current, Updates degraded, Reconnecting to updates, Updates closed)，因此降级、重连中或已关闭的流会如实说明，只有 current 状态读作最新。信息流条目经过 `live_key`。账户菜单是一个由锚点和注销表单组成的 `details` 折叠元素，注销表单携带会话的 CSRF 令牌提交；它是 RenderCache 下的拼接槽，所以应用把它挂载为自己的身份绑定孤岛，共享外壳从不包含主体的名字。
 
-自定义元素层增强它从不替换的原生控件。每个元素都是仅由自身的 vendored 文件定义的 light DOM `HTMLElement` 子类，带有 `sn-` 前缀，且不持有表单值，因为其中的原生输入才是控件：阻止脚本后，表单仍提交相同的值。OTP 输入是绑定到临时模型的单个原生输入 (`inputmode="numeric"`、`autocomplete="one-time-code"`、长度模式)，`sn-input-otp` 把键入的字符镜像到 `aria-hidden` 的格子中。日期选择器是一个 `type="date"` 输入，其年、月、日条带是 CSS scroll-snap 容器内由原生单选按钮组成的 fieldset，因此点按、点击和方向键无需脚本即可选择；`sn-date-picker` 把完整的选择合成到输入中。组合框是建立在原生输入之上的无障碍组合框模式 (`role="combobox"`、`aria-expanded`、`aria-activedescendant`、由选项组成的 `role="listbox"`)，并为无脚本情形提供 `datalist`，`sn-combobox` 负责移动活动选项并选择。默认情况下，选项是服务器对查询的应答：每次渲染时都为模型字段渲染这些选项，只要它们所应答的查询就是输入的文本，元素就会全部显示，无论搜索匹配了什么，并把对旧文本的应答保持隐藏，因此过期结果永远不会替换更新查询的结果。对于固定列表，传入 `remote=false`，元素会按键入的文本过滤它:
+自定义元素层增强它从不替换的原生控件。每个元素都是仅由自身的 vendored 文件定义的 light DOM `HTMLElement` 子类，带有 `sn-` 前缀，且不持有表单值，因为其中的原生输入才是控件：阻止脚本后，表单仍提交相同的值。OTP 输入是绑定到临时模型的单个原生输入（`inputmode="numeric"`、`autocomplete="one-time-code"`、长度模式），`sn-input-otp` 把键入的字符镜像到 `aria-hidden` 的格子中。日期选择器是一个 `type="date"` 输入，其年、月、日条带是 CSS scroll-snap 容器内由原生单选按钮组成的 fieldset，因此点按、点击和方向键无需脚本即可选择；`sn-date-picker` 把完整的选择合成到输入中。组合框是建立在原生输入之上的无障碍组合框模式（`role="combobox"`、`aria-expanded`、`aria-activedescendant`、由选项组成的 `role="listbox"`），并为无脚本情形提供 `datalist`，`sn-combobox` 负责移动活动选项并选择。默认情况下，选项是服务器对查询的应答：每次渲染时都为模型字段渲染这些选项，只要它们所应答的查询就是输入的文本，元素就会全部显示，无论搜索匹配了什么，并把对旧文本的应答保持隐藏，因此过期结果永远不会替换更新查询的结果。对于固定列表，传入 `remote=false`，元素会按键入的文本过滤它:
 
 ```html
 {% call otp::input_otp("code", "One-time code") %}{% for index in cells %}{% call otp::otp_cell(index) %}{% endcall %}{% endfor %}{% endcall %}
@@ -464,7 +461,7 @@ live-native 家族是最后一个家族：只有在运行中的运行时之上�
 {% call combo::combobox("country", "Country", countries, query=country, placeholder="Type a country") %}{% endcall %}
 ```
 
-### 为什么 Suprnova 与众不同
+### 为什么 Suprnova 有所不同
 
 Laravel 随附 Blade 组件和入门套件的标记；Suprnova 则通过框架本身、基于 Live 自己的词汇来提供这个库，不让任何客户端应用拥有页面。皮肤默认开启，去掉它也不会破坏任何东西，这正是这里“无头”的含义。
 

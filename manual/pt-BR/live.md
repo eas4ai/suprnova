@@ -683,7 +683,7 @@ A camada de elementos personalizados aprimora controles nativos que nunca substi
 {% call combo::combobox("country", "Country", countries, query=country, placeholder="Type a country") %}{% endcall %}
 ```
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 O Laravel traz componentes Blade e a marcação de um kit inicial; o Suprnova
 entrega a biblioteca pelo próprio framework, no vocabulário do Live, sem que
