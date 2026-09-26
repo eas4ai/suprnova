@@ -1,16 +1,15 @@
 //! Fenced, bounded cleanup reconciliation for temporary uploads.
 
 use std::fmt;
-use std::future::poll_fn;
 use std::mem::size_of;
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::task::Poll;
 use std::time::Duration;
 
 use crate::clock::Clock;
 use crate::identity::UnixMillis;
+use crate::isolation::run_isolated;
 use crate::limits::UploadLimits;
 use crate::resource::{CancellationFlag, PermitPool, ResourceBounds, ResourceOwner};
 
@@ -837,21 +836,12 @@ async fn run_upload_future<'a, T: Send + 'a>(
     operation: impl FnOnce() -> UploadFuture<'a, Result<T, UploadError>>,
     panic_kind: UploadErrorKind,
 ) -> Result<T, UploadError> {
-    let mut future =
-        catch_unwind(AssertUnwindSafe(operation)).map_err(|_| UploadError::new(panic_kind))?;
-    let result =
-        poll_fn(
-            |context| match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(context))) {
-                Ok(Poll::Ready(result)) => Poll::Ready(result),
-                Ok(Poll::Pending) => Poll::Pending,
-                Err(_) => Poll::Ready(Err(UploadError::new(panic_kind))),
-            },
-        )
-        .await;
-    if catch_unwind(AssertUnwindSafe(|| drop(future))).is_err() {
-        return Err(UploadError::new(panic_kind));
-    }
-    result
+    run_isolated(
+        operation,
+        |error| error,
+        move || UploadError::new(panic_kind),
+    )
+    .await
 }
 
 impl fmt::Display for CleanupLeaseId {

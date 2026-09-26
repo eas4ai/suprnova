@@ -4,14 +4,13 @@ use std::any::Any;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
-use std::future::{Future, poll_fn};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::future::Future;
 use std::pin::Pin;
-use std::task::Poll;
 
 use crate::component::ComponentError;
 use crate::host::HostCapabilities;
 use crate::identity::{ActionName, ComponentName};
+use crate::isolation::catch_isolated;
 use crate::limits::InputLimits;
 use crate::metadata::ActionMetadata;
 
@@ -325,27 +324,11 @@ fn catch_action_future<'a, T>(
 where
     T: Send + 'a,
 {
-    let future = catch_unwind(AssertUnwindSafe(operation))
-        .map_err(|_| ActionError::new(ActionErrorKind::Panicked))?;
-    Ok(poll_action_future(future))
-}
-
-async fn poll_action_future<T>(
-    mut future: ActionFuture<'_, Result<T, ActionError>>,
-) -> Result<T, ActionError> {
-    let result =
-        poll_fn(
-            |context| match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(context))) {
-                Ok(Poll::Ready(result)) => Poll::Ready(result),
-                Ok(Poll::Pending) => Poll::Pending,
-                Err(_) => Poll::Ready(Err(ActionError::new(ActionErrorKind::Panicked))),
-            },
-        )
-        .await;
-    if catch_unwind(AssertUnwindSafe(|| drop(future))).is_err() {
-        return Err(ActionError::new(ActionErrorKind::Panicked));
-    }
-    result
+    catch_isolated(
+        operation,
+        |error| error,
+        || ActionError::new(ActionErrorKind::Panicked),
+    )
 }
 
 /// Converts supported authored action return values into the closed semantic contract.

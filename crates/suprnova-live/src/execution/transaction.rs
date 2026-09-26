@@ -2,11 +2,9 @@
 
 use std::error::Error;
 use std::fmt;
-use std::future::poll_fn;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::task::Poll;
 
 use crate::component::LiveFuture;
+use crate::isolation::run_isolated;
 
 /// Closed host-service failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,19 +85,5 @@ pub(crate) async fn run_host_future<'a, T: Send + 'a>(
     operation: impl FnOnce() -> LiveFuture<'a, Result<T, HostError>>,
     panic_kind: HostErrorKind,
 ) -> Result<T, HostError> {
-    let mut future =
-        catch_unwind(AssertUnwindSafe(operation)).map_err(|_| HostError::new(panic_kind))?;
-    let result =
-        poll_fn(
-            |context| match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(context))) {
-                Ok(Poll::Ready(result)) => Poll::Ready(result),
-                Ok(Poll::Pending) => Poll::Pending,
-                Err(_) => Poll::Ready(Err(HostError::new(panic_kind))),
-            },
-        )
-        .await;
-    if catch_unwind(AssertUnwindSafe(|| drop(future))).is_err() {
-        return Err(HostError::new(panic_kind));
-    }
-    result
+    run_isolated(operation, |error| error, move || HostError::new(panic_kind)).await
 }

@@ -32,6 +32,7 @@ pub mod execution;
 pub mod host;
 /// Validated protocol and snapshot identity types.
 pub mod identity;
+mod isolation;
 /// Tier-independent instance revision authority and the complete Tier 0 provider.
 pub mod ledger;
 /// Resource limits applied at external boundaries.
