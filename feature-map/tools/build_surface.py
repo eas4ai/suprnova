@@ -118,7 +118,6 @@ PATH_RULES = {
     "framework/src/timeout/": "timeout",
     "framework/src/validation/": "validation",
     "framework/src/vector/": "vector",
-    "framework/src/web_push": "web-push",
     "framework/src/workflow/": "workflows",
     "framework/src/ws/": "websockets",
     "framework/src/view/": "(no chapter) server-rendered views",
@@ -258,6 +257,12 @@ for r in kept:
 dupes = [i for i, n in ids.items() if n > 1]
 if dupes:
     raise SystemExit(f"duplicate ids across extractors: {dupes[:10]}")
+
+# A rule that claims nothing is misleading; every path rule must match a record's file.
+files = {r.get("file") or "" for r in kept}
+unused = [p for p in PATH_RULES if not any(f.startswith(p) for f in files)]
+if unused:
+    raise SystemExit(f"path rules that match no record: {unused}")
 
 chapter_of = {}
 for r in kept:

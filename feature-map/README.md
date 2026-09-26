@@ -70,6 +70,44 @@ source has moved past the commit in `meta.json`; regenerate first.
 The full record (variants, fields, implemented traits, flags, read sites,
 aliases, and so on) is in `fmap show <id>`.
 
+## Laravel parity
+
+`laravel/` holds the same kind of map for Laravel, so parity can be tracked
+item by item instead of argued row by row.
+
+| File | What it is | Who writes it |
+|---|---|---|
+| `laravel/surface.jsonl` | 21,758 records: every public piece of laravel/framework v13.33.0, filed under its Laravel docs page | `tools/laravel/generate.sh` |
+| `laravel/parity.jsonl` | for each Laravel item: the parity status, the Suprnova ids that implement it, a note | `fmap parity` only |
+| `laravel/meta.json`, `laravel/exclusions.json` | the Laravel version, the pinned docs commit, and what was left out and why | `tools/laravel/generate.sh` |
+
+The Laravel records come from Laravel's source at the release tag, read
+through PHP reflection: classes, interfaces, traits and enums with the
+methods, properties and constants each declares (public, plus protected on
+extendable types, since subclassing is how Laravel exposes them), facade
+methods from each facade's `@method` declarations, global helpers, Artisan
+commands (parsed with Laravel's own signature parser), Blade directives (the
+`compile*` methods Blade's `@` dispatch reaches, minus its own compile
+passes), validation rules, and the framework's config keys and the env vars
+they read. The docs index only names the pages records are filed under.
+
+```
+feature-map/fmap laravel summary                    parity progress per docs page
+feature-map/fmap laravel next --page queues         items with no parity decision
+feature-map/fmap laravel show 'Illuminate\Support\Facades\Cache::remember'
+feature-map/fmap parity 'Illuminate\Support\Facades\Cache::remember' --status shipped --suprnova suprnova::Cache::remember
+feature-map/fmap parity-check                       links to re-check
+feature-map/fmap exclusive --chapter cache          Suprnova items with no Laravel counterpart
+```
+
+Parity statuses: `shipped` and `diverged` (both must name the Suprnova ids
+that implement the item; every id is checked against the Suprnova surface),
+`not_yet`, `by_design_no` and `not_applicable` (the last two need a note).
+Recording a link stores both sides' signature hashes, so a link reads
+`stale` when either side changes and `broken` when a linked Suprnova item
+disappears. `fmap show <suprnova id>` lists the Laravel items linked to it.
+The parity page in the manual is the summary of this data, not its source.
+
 ## Where records come from
 
 | Family | Extracted from |
@@ -90,8 +128,15 @@ of the item they name.
 ## Regenerating
 
 ```
-feature-map/tools/generate.sh
+feature-map/tools/generate.sh             the Suprnova surface
+feature-map/tools/laravel/generate.sh     the Laravel surface (optionally a version: 13.34.0)
 ```
+
+The Laravel driver needs PHP 8.3+, Composer and git. It clones the framework
+at the release tag and the docs at the last commit on or before that
+release, and never touches `laravel/parity.jsonl`. Moving to a new Laravel
+release is a regeneration: parity links whose Laravel signature changed read
+`stale`, and new Laravel items read `unmapped`.
 
 It needs a nightly toolchain for rustdoc JSON (`rustup toolchain install
 nightly --profile minimal`); the project's pinned toolchain is unchanged. It
@@ -119,3 +164,15 @@ for removed items shows up in `fmap orphans`.
   re-export resolves to the item it names, and ids are unique.
 - A signature edit turns a done record `stale`, a body edit sets
   `body_changed`, and regeneration reproduces `surface.jsonl` byte for byte.
+- Laravel: all 1,607 `Illuminate` classes in the classmap are accounted for:
+  1,600 extracted, 1 unloadable (`Illuminate\Testing\ParallelRunner` needs the
+  optional ParaTest package) and 6 marked `@internal`, all in
+  `laravel/exclusions.json`. Blade's compile passes are derived from its own
+  pipeline, not guessed. Records carry no machine paths (the clone root reads
+  `<laravel>`), clones at different paths give identical records, and two
+  driver runs give a byte-identical `laravel/surface.jsonl`.
+- Both builds refuse a filing rule that names a missing chapter or docs page,
+  or that matches no record.
+- Parity links read `stale` after a real signature change on either side and
+  `broken` when a linked Suprnova item disappears; both clear when the
+  source is restored.

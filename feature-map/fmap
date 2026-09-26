@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fmap: query and update the Suprnova feature map.
+r"""fmap: query and update the Suprnova feature map.
 
 The surface (feature-map/surface.jsonl) is every public item extracted from
 the source, filed under the manual chapter that owns it. The state
@@ -25,6 +25,24 @@ Examples:
   fmap query "SELECT id FROM items WHERE feature LIKE '%off by default%'"
   fmap mark suprnova::Queue --children --status done --note "<where in queues.md>"
   fmap orphans                          state for items the source no longer has
+
+Laravel parity (feature-map/laravel/): every public piece of laravel/framework
+at the pinned version, filed under its docs page, and the Suprnova items that
+implement each one (recorded in laravel/parity.jsonl).
+
+  fmap laravel summary                  parity progress per Laravel docs page
+  fmap laravel next --page queues       Laravel items with no parity decision yet
+  fmap laravel show 'Illuminate\Support\Facades\Cache::remember'
+  fmap laravel search rememberForever
+  fmap parity 'Illuminate\Support\Facades\Cache::remember' --status shipped --suprnova suprnova::Cache::remember
+  fmap parity 'Illuminate\...' --status by_design_no --note "why"
+  fmap parity-check                     links whose Laravel or Suprnova side changed or vanished
+  fmap exclusive --chapter cache        Suprnova items no Laravel item maps to
+
+Parity statuses: shipped, diverged (both need --suprnova), not_yet,
+by_design_no, not_applicable (both of the last two need --note). Computed:
+unmapped (nothing recorded), stale (either side's signature changed since the
+link was recorded), broken (a linked Suprnova item no longer exists).
 """
 import argparse
 import datetime
@@ -39,6 +57,11 @@ SURFACE = HERE / "surface.jsonl"
 STATE = HERE / "state.jsonl"
 META = HERE / "meta.json"
 STATUSES = ("todo", "in_progress", "done", "skip")
+LARAVEL = HERE / "laravel"
+L_SURFACE = LARAVEL / "surface.jsonl"
+L_PARITY = LARAVEL / "parity.jsonl"
+L_META = LARAVEL / "meta.json"
+PARITY = ("shipped", "diverged", "not_yet", "by_design_no", "not_applicable")
 
 SCHEMA = """
 CREATE TABLE surface (
@@ -60,6 +83,32 @@ SELECT s.id, s.kind, s.family, s.crate, s.module, s.chapter, s.parent, s.file, s
         AND st.verified_body_hash IS NOT s.body_hash, 0) AS body_changed,
        st.note, st.verified_rev, st.updated_at
 FROM surface s LEFT JOIN state st ON st.id = s.id;
+
+CREATE TABLE lsurface (
+  id TEXT PRIMARY KEY, kind TEXT, family TEXT, component TEXT, namespace TEXT, page TEXT,
+  parent TEXT, file TEXT, line INTEGER, deprecated INTEGER, sig_hash TEXT, body_hash TEXT, record TEXT);
+CREATE TABLE parity (
+  laravel_id TEXT PRIMARY KEY, status TEXT, note TEXT, laravel_sig_hash TEXT,
+  laravel_version TEXT, suprnova_rev TEXT, updated_at TEXT);
+CREATE TABLE parity_links (laravel_id TEXT, suprnova_id TEXT, suprnova_sig_hash TEXT);
+CREATE VIEW links AS
+SELECT pl.laravel_id, pl.suprnova_id, s.id IS NULL AS missing,
+       s.id IS NOT NULL AND pl.suprnova_sig_hash IS NOT s.sig_hash AS changed
+FROM parity_links pl LEFT JOIN surface s ON s.id = pl.suprnova_id;
+CREATE VIEW laravel_items AS
+SELECT l.id, l.kind, l.family, l.component, l.namespace, l.page, l.parent, l.file, l.line, l.deprecated,
+       l.sig_hash,
+       CASE
+         WHEN p.laravel_id IS NULL THEN 'unmapped'
+         WHEN EXISTS (SELECT 1 FROM links k WHERE k.laravel_id = l.id AND k.missing) THEN 'broken'
+         WHEN p.laravel_sig_hash IS NOT l.sig_hash
+           OR EXISTS (SELECT 1 FROM links k WHERE k.laravel_id = l.id AND k.changed) THEN 'stale'
+         ELSE p.status
+       END AS parity,
+       p.status AS recorded_parity,
+       (SELECT json_group_array(suprnova_id) FROM parity_links k WHERE k.laravel_id = l.id) AS suprnova,
+       p.note AS parity_note, p.updated_at AS parity_updated_at
+FROM lsurface l LEFT JOIN parity p ON p.laravel_id = l.id;
 """
 
 
@@ -73,6 +122,21 @@ def load():
             r["id"], r["kind"], r["family"], r.get("crate"), r.get("module"), r["chapter"], r.get("parent"),
             r.get("file"), r.get("line"), r.get("feature"), int(bool(r.get("deprecated"))),
             r.get("sig_hash"), r.get("body_hash"), line))
+    if L_SURFACE.exists():
+        for line in L_SURFACE.read_text().splitlines():
+            r = json.loads(line)
+            db.execute("INSERT INTO lsurface VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+                r["id"], r["kind"], r["family"], r.get("component"), r.get("namespace"), r["page"], r.get("parent"),
+                r.get("file"), r.get("line"), int(bool(r.get("deprecated"))), r.get("sig_hash"), r.get("body_hash"), line))
+    if L_PARITY.exists():
+        for line in L_PARITY.read_text().splitlines():
+            if line.strip():
+                p = json.loads(line)
+                db.execute("INSERT INTO parity VALUES (?,?,?,?,?,?,?)", (
+                    p["laravel_id"], p["status"], p.get("note"), p.get("laravel_sig_hash"),
+                    p.get("laravel_version"), p.get("suprnova_rev"), p.get("updated_at")))
+                for sid, h in (p.get("suprnova") or {}).items():
+                    db.execute("INSERT INTO parity_links VALUES (?,?,?)", (p["laravel_id"], sid, h))
     if STATE.exists():
         for line in STATE.read_text().splitlines():
             if line.strip():
@@ -87,6 +151,19 @@ def save_state(db):
     rows = db.execute("SELECT * FROM state ORDER BY id").fetchall()
     STATE.write_text("".join(json.dumps({k: r[k] for k in r.keys() if r[k] is not None}, sort_keys=True) + "\n"
                              for r in rows))
+
+
+def save_parity(db):
+    out = []
+    for p in db.execute("SELECT * FROM parity ORDER BY laravel_id").fetchall():
+        rec = {k: p[k] for k in p.keys() if p[k] is not None}
+        links = {r[0]: r[1] for r in db.execute(
+            "SELECT suprnova_id, suprnova_sig_hash FROM parity_links WHERE laravel_id = ? ORDER BY suprnova_id",
+            [p["laravel_id"]])}
+        if links:
+            rec["suprnova"] = links
+        out.append(json.dumps(rec, sort_keys=True) + "\n")
+    L_PARITY.write_text("".join(out))
 
 
 def current_source_rev():
@@ -168,7 +245,9 @@ def cmd_show(db, a):
         sys.exit(1)
     record = json.loads(db.execute("SELECT record FROM surface WHERE id = ?", [a.id]).fetchone()[0])
     children = rows(db.execute("SELECT id, kind, file, line, status FROM items WHERE parent = ? ORDER BY id", [a.id]))
+    laravel = rows(db.execute("SELECT laravel_id FROM parity_links WHERE suprnova_id = ? ORDER BY 1", [a.id]))
     state = {k: r[k] for k in ("status", "note", "verified_rev", "updated_at")}
+    state["laravel_equivalents"] = [x["laravel_id"] for x in laravel]
     state["body_changed"] = bool(r["body_changed"])
     emit({**freshness(), "item": {**record, **state},
           "members": children})
@@ -227,6 +306,120 @@ def cmd_mark(db, a):
     emit({"marked": len(dict.fromkeys(ids)), "status": a.status})
 
 
+# ---- Laravel side and parity -------------------------------------------------------
+
+def lfresh():
+    return {"laravel": json.loads(L_META.read_text())["laravel_version"]} if L_META.exists() else {
+        "error": "no Laravel surface; run feature-map/tools/laravel/generate.sh"}
+
+
+def cmd_laravel(db, a):
+    if not L_SURFACE.exists():
+        emit(lfresh())
+        sys.exit(1)
+    if a.lcmd == "summary":
+        emit({**lfresh(), "pages": rows(db.execute("""
+            SELECT page, COUNT(*) AS items, SUM(parity='unmapped') AS unmapped, SUM(parity='shipped') AS shipped,
+                   SUM(parity='diverged') AS diverged, SUM(parity='not_yet') AS not_yet,
+                   SUM(parity='by_design_no') AS by_design_no, SUM(parity='not_applicable') AS not_applicable,
+                   SUM(parity IN ('stale','broken')) AS needs_recheck
+            FROM laravel_items GROUP BY page ORDER BY page LIKE '(%', page"""))})
+    elif a.lcmd == "next":
+        sql = "SELECT id, kind, page, file, line FROM laravel_items WHERE parent IS NULL AND parity IN ('unmapped','stale','broken')"
+        args = []
+        if a.page:
+            sql += " AND page = ?"
+            args.append(a.page)
+        if a.kind:
+            sql += " AND kind = ?"
+            args.append(a.kind)
+        emit({**lfresh(), "items": rows(db.execute(sql + " ORDER BY page, id LIMIT ?", args + [a.limit]))})
+    elif a.lcmd == "show":
+        r = db.execute("SELECT * FROM laravel_items WHERE id = ?", [a.id]).fetchone()
+        if r is None:
+            near = [x[0] for x in db.execute("SELECT id FROM lsurface WHERE id LIKE ? LIMIT 10", [f"%{a.id}%"])]
+            emit({"error": f"no Laravel item {a.id!r}", "similar": near})
+            sys.exit(1)
+        record = json.loads(db.execute("SELECT record FROM lsurface WHERE id = ?", [a.id]).fetchone()[0])
+        links = rows(db.execute("""SELECT k.suprnova_id, k.missing, k.changed, i.kind, i.file, i.line, i.chapter
+                                   FROM links k LEFT JOIN items i ON i.id = k.suprnova_id WHERE k.laravel_id = ?""", [a.id]))
+        members = rows(db.execute("SELECT id, kind, parity FROM laravel_items WHERE parent = ? ORDER BY id", [a.id]))
+        emit({**lfresh(), "item": {**record, "parity": r["parity"], "parity_note": r["parity_note"],
+                                   "suprnova": links}, "members": members})
+    elif a.lcmd == "search":
+        emit({"items": rows(db.execute("SELECT id, kind, page, parity FROM laravel_items WHERE id LIKE ? ORDER BY id LIMIT ?",
+                                       [f"%{a.text}%", a.limit]))})
+
+
+def cmd_parity(db, a):
+    if not L_SURFACE.exists():
+        emit(lfresh())
+        sys.exit(1)
+    if a.status in ("shipped", "diverged") and not a.suprnova:
+        emit({"error": f"{a.status} needs --suprnova naming the Suprnova items that implement it"})
+        sys.exit(1)
+    if a.status in ("by_design_no", "not_applicable") and not a.note:
+        emit({"error": f"{a.status} needs --note saying why"})
+        sys.exit(1)
+    if a.status in ("not_yet", "by_design_no", "not_applicable") and a.suprnova:
+        emit({"error": f"{a.status} means there is no Suprnova equivalent; drop --suprnova"})
+        sys.exit(1)
+    fresh = freshness()
+    if fresh:
+        emit({"error": fresh["warning"]})
+        sys.exit(1)
+    ids = list(a.ids)
+    bad = [i for i in ids if not db.execute("SELECT 1 FROM lsurface WHERE id = ?", [i]).fetchone()]
+    if bad:
+        emit({"error": "unknown Laravel ids", "ids": bad})
+        sys.exit(1)
+    sup = {}
+    for sid in a.suprnova or []:
+        row = db.execute("SELECT sig_hash FROM surface WHERE id = ?", [sid]).fetchone()
+        if row is None:
+            stem = sid.split("::")[-1]
+            stem = stem[:max(4, len(stem) - 2)]
+            near = [x[0] for x in db.execute("SELECT id FROM surface WHERE id LIKE ? ORDER BY length(id) LIMIT 10",
+                                             [f"%{stem}%"])]
+            emit({"error": f"unknown Suprnova id {sid!r}", "similar": near})
+            sys.exit(1)
+        sup[sid] = row[0]
+    if a.children:
+        for i in list(ids):
+            ids += [r[0] for r in db.execute("SELECT id FROM lsurface WHERE parent = ?", [i])]
+    version = json.loads(L_META.read_text())["laravel_version"]
+    rev = json.loads(META.read_text())["source_rev"]
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for i in dict.fromkeys(ids):
+        db.execute("DELETE FROM parity_links WHERE laravel_id = ?", [i])
+        if a.status == "unmapped":
+            db.execute("DELETE FROM parity WHERE laravel_id = ?", [i])
+            continue
+        lsig = db.execute("SELECT sig_hash FROM lsurface WHERE id = ?", [i]).fetchone()[0]
+        db.execute("INSERT OR REPLACE INTO parity VALUES (?,?,?,?,?,?,?)", (i, a.status, a.note, lsig, version, rev, now))
+        for sid, h in sup.items():
+            db.execute("INSERT INTO parity_links VALUES (?,?,?)", (i, sid, h))
+    save_parity(db)
+    emit({"recorded": len(dict.fromkeys(ids)), "status": a.status, "suprnova": list(sup)})
+
+
+def cmd_parity_check(db, a):
+    emit({**lfresh(), "needs_recheck": rows(db.execute(
+        "SELECT id, page, parity, recorded_parity, suprnova FROM laravel_items WHERE parity IN ('stale','broken') ORDER BY page, id"))})
+
+
+def cmd_exclusive(db, a):
+    sql = """SELECT i.id, i.kind, i.chapter FROM items i WHERE i.parent IS NULL AND i.kind != 'reexport'
+             AND NOT EXISTS (SELECT 1 FROM parity_links k WHERE k.suprnova_id = i.id
+                             OR k.suprnova_id IN (SELECT id FROM surface WHERE parent = i.id))"""
+    args = []
+    if a.chapter:
+        sql += " AND i.chapter = ?"
+        args.append(a.chapter)
+    emit({"note": "top-level Suprnova items no Laravel item links to (Suprnova-exclusive, or not mapped yet)",
+          "items": rows(db.execute(sql + " ORDER BY i.chapter, i.id LIMIT ?", args + [a.limit]))})
+
+
 def main():
     ap = argparse.ArgumentParser(prog="fmap", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -254,9 +447,31 @@ def main():
     p.add_argument("--status", required=True, choices=STATUSES)
     p.add_argument("--note")
     p.add_argument("--children", action="store_true", help="also mark every member of each id")
+    p = sub.add_parser("laravel", help="the Laravel surface: summary, next, show, search")
+    lsub = p.add_subparsers(dest="lcmd", required=True)
+    lsub.add_parser("summary", help="parity progress per Laravel docs page")
+    q = lsub.add_parser("next", help="Laravel items with no parity decision (or stale/broken ones)")
+    q.add_argument("--page")
+    q.add_argument("--kind")
+    q.add_argument("--limit", type=int, default=25)
+    q = lsub.add_parser("show", help="one Laravel item, its members, and its parity")
+    q.add_argument("id")
+    q = lsub.add_parser("search", help="Laravel ids containing a string")
+    q.add_argument("text")
+    q.add_argument("--limit", type=int, default=50)
+    p = sub.add_parser("parity", help="record the Suprnova parity of Laravel items")
+    p.add_argument("ids", nargs="+", help="Laravel ids")
+    p.add_argument("--status", required=True, choices=PARITY + ("unmapped",))
+    p.add_argument("--suprnova", nargs="+", help="Suprnova ids that implement it (shipped / diverged)")
+    p.add_argument("--note")
+    p.add_argument("--children", action="store_true", help="also record every member of each id")
+    sub.add_parser("parity-check", help="parity links whose Laravel or Suprnova side changed or vanished")
+    p = sub.add_parser("exclusive", help="Suprnova items no Laravel item maps to")
+    p.add_argument("--chapter")
+    p.add_argument("--limit", type=int, default=100)
     a = ap.parse_args()
     db = load()
-    globals()[f"cmd_{a.cmd}"](db, a)
+    globals()[f"cmd_{a.cmd.replace('-', '_')}"](db, a)
 
 
 if __name__ == "__main__":
