@@ -307,8 +307,7 @@ def render(crate, default_crate, checked, header, enabled=None):
                                       f"rustdoc says {'present' if in_default else 'absent'}")
             others = sorted("::".join(p) for p, _ in crate.public_paths[iid] if p != path)
             if others:
-                extra.append("also " + ", ".join(f"`{o}`" for o in others[:4]) +
-                             (f" (+{len(others) - 4} more)" if len(others) > 4 else ""))
+                extra.append("also " + ", ".join(f"`{o}`" for o in others))
             box = "x" if full in checked else " "
             suffix = f" ({'; '.join(extra)})" if extra else ""
             lines.append(f"- [{box}] {KIND_LABEL[k]} `{full}` · {span(it)}{suffix}")

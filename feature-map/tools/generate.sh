@@ -15,7 +15,10 @@ MAP=$(cd "$HERE/.." && pwd)
 WORK=${1:-$REPO/target/feature-map}
 J=$WORK/rustdoc
 mkdir -p "$J"
-REV=$(git -C "$REPO" rev-parse --short HEAD)
+# The commit that last touched source, not the map's own commits.
+REV=$(git -C "$REPO" log -1 --format=%h -- framework crates suprnova-cli suprnova-macros Cargo.toml)
+RAW=$WORK/raw
+mkdir -p "$RAW"
 cd "$REPO"
 
 # 1. rustdoc JSON per crate: all features, and default features for the gate cross-check.
@@ -42,14 +45,15 @@ python3 "$HERE/macro_vocab.py" "$REPO" "$WORK/kw.json" > "$WORK/vocab.json"
 python3 "$HERE/env_vars.py" "$REPO" > "$WORK/env.json"
 
 # 3. Maps.
-VOCAB="$WORK/vocab.json" "$HERE/generate_rust.sh" "$REPO" "$J" "$MAP"
-python3 "$HERE/live_surface.py" "$REPO" "$REV" "$MAP/live-templates.md"
-python3 "$HERE/config_surface.py" "$REPO" "$REV" "$WORK/env.json" "$MAP/configuration.md"
-python3 "$HERE/runtime_surface.py" "$REPO" "$REV" "$MAP/endpoints-and-tables.md"
+VOCAB="$WORK/vocab.json" REV="$REV" "$HERE/generate_rust.sh" "$REPO" "$J" "$RAW"
+python3 "$HERE/live_surface.py" "$REPO" "$REV" "$RAW/live-templates.md"
+python3 "$HERE/config_surface.py" "$REPO" "$REV" "$WORK/env.json" "$RAW/configuration.md"
+python3 "$HERE/runtime_surface.py" "$REPO" "$REV" "$RAW/endpoints-and-tables.md"
 
 # 4. CLI, read from the built binaries.
 CARGO_TARGET_DIR=$WORK/target-stable cargo build -q -p suprnova-cli -p app --bins
-python3 "$HERE/cli_surface.py" "$REPO" "$REV" "$WORK/target-stable/debug" "$MAP/cli.md"
+python3 "$HERE/cli_surface.py" "$REPO" "$REV" "$WORK/target-stable/debug" "$RAW/cli.md"
 
-rm -f "$MAP"/.*.report.json
+# 5. File every entry under its manual chapter; this is the checklist.
+python3 "$HERE/domains.py" "$RAW" "$REPO/manual" "$MAP/domains" "$REV"
 echo "feature map regenerated at $REV"

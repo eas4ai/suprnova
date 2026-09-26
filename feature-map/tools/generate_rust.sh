@@ -10,7 +10,7 @@ REPO=$1
 J=$2
 OUT=$3
 HERE=$(cd "$(dirname "$0")" && pwd)
-REV=$(git -C "$REPO" rev-parse --short HEAD)
+REV=${REV:-$(git -C "$REPO" rev-parse --short HEAD)}
 mkdir -p "$OUT"
 
 # crate-dir  lib-name  map-file  siblings (lib names whose public paths resolve trait names)
