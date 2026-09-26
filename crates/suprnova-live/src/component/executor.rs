@@ -1,9 +1,8 @@
 //! Panic-contained deterministic component lifecycle executor.
 
 use std::fmt;
-use std::future::{Future, poll_fn};
+use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::task::Poll;
 
 use crate::action::{
     ActionError, ActionErrorKind, ActionResult, RawActionArguments, TransactionPolicy,
@@ -15,6 +14,7 @@ use crate::execution::{
     NoopExecutionTrace, TransactionPort, record as record_execution_phase,
 };
 use crate::identity::ActionName;
+use crate::isolation::catch_isolated;
 use crate::limits::InputLimits;
 use crate::registry::ComponentDescriptor;
 use crate::snapshot::state::StateExposure;
@@ -1130,37 +1130,11 @@ fn catch_future<'a, T>(
 where
     T: Send + 'a,
 {
-    let future = catch_unwind(AssertUnwindSafe(operation))
-        .map_err(|_| LifecycleError::new(LifecycleErrorKind::Panicked, phase))?;
-    Ok(poll_future(future, phase))
-}
-
-async fn poll_future<T>(
-    mut future: LiveFuture<'_, Result<T, ComponentError>>,
-    phase: LifecyclePhase,
-) -> Result<T, LifecycleError> {
-    let result =
-        poll_fn(
-            |context| match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(context))) {
-                Ok(Poll::Ready(Ok(value))) => Poll::Ready(Ok(value)),
-                Ok(Poll::Ready(Err(_))) => Poll::Ready(Err(LifecycleError::new(
-                    LifecycleErrorKind::ComponentFailure,
-                    phase,
-                ))),
-                Ok(Poll::Pending) => Poll::Pending,
-                Err(_) => Poll::Ready(Err(LifecycleError::new(
-                    LifecycleErrorKind::Panicked,
-                    phase,
-                ))),
-            },
-        )
-        .await;
-    let dropped = catch_unwind(AssertUnwindSafe(|| drop(future)));
-    match (result, dropped) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Ok(_), Err(_)) => Err(LifecycleError::new(LifecycleErrorKind::Panicked, phase)),
-        (Err(error), _) => Err(error),
-    }
+    catch_isolated(
+        operation,
+        move |_| LifecycleError::new(LifecycleErrorKind::ComponentFailure, phase),
+        move || LifecycleError::new(LifecycleErrorKind::Panicked, phase),
+    )
 }
 
 fn catch_value<T>(

@@ -3,9 +3,8 @@
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
-use std::future::poll_fn;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::task::Poll;
+
+use crate::isolation::run_isolated;
 
 use super::error_bag::HARD_MAX_VALIDATION_ISSUES;
 use super::{
@@ -93,11 +92,12 @@ impl ValidationEngine {
         let issues = if matches!(request.selection(), ValidationSelection::None) {
             Vec::new()
         } else {
-            let future =
-                catch_unwind(AssertUnwindSafe(|| port.validate(request))).map_err(|_| {
-                    ValidationEngineError::new(ValidationEngineErrorKind::ProviderFailure)
-                })?;
-            poll_validation_future(future).await?
+            run_isolated(
+                || port.validate(request),
+                |_| provider_failure(),
+                provider_failure,
+            )
+            .await?
         };
         if issues.len() > self.max_issues {
             return Err(ValidationEngineError::new(
@@ -115,29 +115,8 @@ impl ValidationEngine {
     }
 }
 
-async fn poll_validation_future(
-    mut future: super::ValidationFuture<
-        '_,
-        Result<Vec<super::ValidationIssue>, super::ValidationPortError>,
-    >,
-) -> Result<Vec<super::ValidationIssue>, ValidationEngineError> {
-    let result =
-        poll_fn(
-            |context| match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(context))) {
-                Ok(Poll::Ready(Ok(issues))) => Poll::Ready(Ok(issues)),
-                Ok(Poll::Ready(Err(_))) | Err(_) => Poll::Ready(Err(ValidationEngineError::new(
-                    ValidationEngineErrorKind::ProviderFailure,
-                ))),
-                Ok(Poll::Pending) => Poll::Pending,
-            },
-        )
-        .await;
-    if catch_unwind(AssertUnwindSafe(|| drop(future))).is_err() {
-        return Err(ValidationEngineError::new(
-            ValidationEngineErrorKind::ProviderFailure,
-        ));
-    }
-    result
+fn provider_failure() -> ValidationEngineError {
+    ValidationEngineError::new(ValidationEngineErrorKind::ProviderFailure)
 }
 
 impl Default for ValidationEngine {
