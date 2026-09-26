@@ -1,4 +1,4 @@
-"""Walk a crate's rustdoc JSON and emit its public API as a checklist.
+"""Walk a crate's rustdoc JSON and emit its public API as JSON records.
 
 The walk starts at the crate root and follows every public module and
 `pub use`, so an item appears at each public path a user can name it by.
@@ -6,7 +6,7 @@ It is listed once, under its shortest public path, with the other paths
 noted. rustdoc has already removed private and `#[doc(hidden)]` items.
 
 Per type: inherent methods, associated constants and associated types each
-get a checkbox. Implemented traits defined in the same crate family are
+get their own record. Implemented traits defined in the same crate family are
 listed by name. Traits list their required and provided items, then their
 implementors. Enum variants and public struct fields are listed inline.
 
@@ -15,6 +15,7 @@ module and re-export chain; `--default` names the default-features JSON so
 the gate labels can be cross-checked against what a default build exposes.
 """
 import argparse
+import hashlib
 import json
 import re
 from collections import defaultdict
@@ -249,136 +250,173 @@ class Crate:
         return out, notes
 
 
-def render(crate, default_crate, checked, header, enabled=None):
-    groups = defaultdict(list)
-    for iid in crate.public_paths:
-        path, gates = crate.best(iid)
-        canon = crate.paths.get(iid, {}).get("path") or list(path)
-        groups[tuple(canon[:-1])].append((iid, path, gates))
+def _source_text(item, mode):
+    """Declaration ("sig") or full ("body") source text of an item, whitespace-normalised.
+
+    Comment lines are dropped so a doc edit is not an API change. For
+    functions, traits and macros the declaration stops at the body; for data
+    types, constants and aliases the whole definition is the declaration.
+    """
+    sp = item.get("span") if item else None
+    if not sp:
+        return ""
+    path = Path(sp["filename"])
+    if not path.exists():
+        return ""
+    lines = path.read_text().splitlines()[sp["begin"][0] - 1: sp["end"][0]]
+    text = "\n".join(l for l in lines if not l.strip().startswith("//"))
+    if mode == "sig" and kind(item) in ("function", "trait", "macro"):
+        depth = 0
+        for i, ch in enumerate(text):
+            if ch in "([<":
+                depth += 1
+            elif ch in ")]>":
+                depth -= 1
+            elif depth <= 0 and ch in "{;":
+                text = text[:i]
+                break
+    return " ".join(text.split())
+
+
+def digest(text):
+    return hashlib.sha256(text.encode()).hexdigest()[:16] if text else None
+
+
+def member_ids(crate, iid):
+    """Ids of a type's inherent-impl items, or a trait's items."""
+    it = crate.idx[iid]
+    k = kind(it)
+    if k == "trait":
+        return [str(m) for m in it["inner"]["trait"]["items"] if crate.item(m)]
+    if k not in ("struct", "enum", "union"):
+        return []
+    ids = []
+    for imp_id in it["inner"][k]["impls"]:
+        imp = crate.item(imp_id)
+        if imp and imp["inner"]["impl"]["trait"] is None:
+            ids += [str(m) for m in imp["inner"]["impl"]["items"] if crate.item(m)]
+    return ids
+
+
+def notes_to_details(notes):
+    """Structured form of the per-item notes members() produces."""
+    fields = {"Variants": "variants", "Public fields": "fields", "Implements": "implements",
+              "Implemented here by": "implemented_by", "Helper attributes": "helper_attributes",
+              "Form": "form", "Public tuple fields": "tuple_fields"}
+    d = {}
+    for n in notes:
+        key, _, rest = n.partition(": ")
+        field = fields[key]
+        if field == "tuple_fields":
+            d[field] = int(rest)
+        elif field == "form":
+            d[field] = rest.replace("`", "")
+        else:
+            d[field] = re.findall(r"`([^`]+)`", rest)
+    return d
+
+
+def records(crate, default_crate, enabled=None):
+    """One JSON record per public item and member. Returns (records, gate mismatches)."""
     default_paths = None
     if default_crate is not None:
-        default_paths = {"::".join(crate_p) for i in default_crate.public_paths
-                         for crate_p, _ in default_crate.public_paths[i]}
-    lines = list(header)
-    stats = defaultdict(int)
-    mismatches = []
-    # External re-exports first, they are part of the surface too.
-    if crate.external_reexports:
-        lines += ["", "## Re-exported from other crates", "",
-                  "Items from sibling Suprnova crates are mapped in those crates' files.", ""]
-        for path, src, k2, gates in sorted(crate.external_reexports):
-            g = f" (feature: {label_gates(gates, enabled)})" if gates else ""
-            box = "x" if "::".join(path) in checked else " "
-            kl = f"{k2} " if k2 else ""
-            lines.append(f"- [{box}] {kl}`{'::'.join(path)}` re-exports `{src}`{g}")
-            stats["reexport"] += 1
-    current_area = None
-    for mod_path in sorted(groups, key=lambda m: (len(m) > 1, m)):
-        area = mod_path[1] if len(mod_path) > 1 else "(crate root)"
-        if area != current_area:
-            current_area = area
-            lines += ["", f"## {area}"]
-        mod_id, mod_gates = crate.modules.get(mod_path, (None, ()))
-        title = "::".join(mod_path)
-        g = f" (feature: {label_gates(mod_gates, enabled)})" if mod_gates else ""
-        priv = "" if mod_path in crate.modules else " (private module; items are public through re-exports)"
-        lines += ["", f"### `{title}`{g}{priv}", ""]
-        entries = sorted(groups[mod_path], key=lambda e: (
-            KIND_ORDER.index(kind(crate.idx[e[0]])) if kind(crate.idx[e[0]]) in KIND_ORDER else 99,
-            e[1][-1].lower()))
-        for iid, path, gates in entries:
-            it = crate.idx[iid]
-            k = kind(it)
-            full = "::".join(path)
-            extra = []
-            item_gates = tuple(x for x in gates if x not in mod_gates)
-            if item_gates:
-                extra.append(f"feature: {label_gates(item_gates, enabled)}")
-            if it.get("deprecation"):
-                extra.append("deprecated")
-            if default_paths is not None:
-                in_default = full in default_paths
-                expected = all(gate_on(x, enabled) for x in gates)
-                if in_default and not expected:
-                    extra.append("a stub with the same name exists when the feature is off")
-                elif in_default != expected:
-                    mismatches.append(f"{full}: gates {list(dict.fromkeys(gates))} predict "
-                                      f"{'present' if expected else 'absent'} in default build, "
-                                      f"rustdoc says {'present' if in_default else 'absent'}")
-            others = sorted("::".join(p) for p, _ in crate.public_paths[iid] if p != path)
-            if others:
-                extra.append("also " + ", ".join(f"`{o}`" for o in others))
-            box = "x" if full in checked else " "
-            suffix = f" ({'; '.join(extra)})" if extra else ""
-            lines.append(f"- [{box}] {KIND_LABEL[k]} `{full}` · {span(it)}{suffix}")
-            stats[k] += 1
-            members, notes = crate.members(iid)
-            for n in notes:
-                lines.append(f"  - {n}")
-            seen = set()
-            for mem in members:
-                mk, name, sp, dep = mem[:4]
-                req = mem[4] if len(mem) > 4 else ""
-                if mk == "argument":
-                    aid = f"{full} {name}"
-                    box = "x" if aid in checked else " "
-                    lines.append(f"  - [{box}] argument {name} · {sp}")
-                    stats["member"] += 1
-                    continue
-                mpath = f"{full}::{name}"
-                if (mpath, sp) in seen:
-                    continue
-                seen.add((mpath, sp))
-                label = {"function": "fn", "assoc_const": "const", "assoc_type": "type"}[mk]
-                bits = [b for b in (req, "deprecated" if dep else "") if b]
-                box = "x" if mpath in checked else " "
-                lines.append(f"  - [{box}] {label} `{mpath}` · {sp}" +
-                             (f" ({'; '.join(bits)})" if bits else ""))
-                stats["member"] += 1
-    # Items rustdoc kept (so they are reachable from the public API, e.g. as a
-    # return type or supertrait) but that no public path names.
-    unnamed = []
+        default_paths = {"::".join(p) for i in default_crate.public_paths
+                         for p, _ in default_crate.public_paths[i]}
+    out, mismatches, ids = [], [], set()
+
+    def unique(rid):
+        base, n = rid, 2
+        while rid in ids:
+            rid, n = f"{base}#{n}", n + 1
+        ids.add(rid)
+        return rid
+
+    for path, src, k2, gates in sorted(crate.external_reexports):
+        full = "::".join(path)
+        out.append({"id": unique(full), "kind": "reexport", "parent": None, "family": "rust-api",
+                    "crate": crate.name, "module": "::".join(path[:-1]), "file": None, "line": None,
+                    "feature": label_gates(gates, enabled) or None,
+                    "details": {"target": src, "target_kind": k2 or None},
+                    "sig_hash": digest(src + "|" + "|".join(gates)), "body_hash": None})
+
+    for iid in sorted(crate.public_paths, key=lambda i: crate.best(i)[0]):
+        it = crate.idx[iid]
+        k = kind(it)
+        path, gates = crate.best(iid)
+        full = "::".join(path)
+        canon = crate.paths.get(iid, {}).get("path") or list(path)
+        mod_path = tuple(canon[:-1])
+        details = {}
+        if default_paths is not None:
+            in_default = full in default_paths
+            expected = all(gate_on(x, enabled) for x in gates)
+            if in_default and not expected:
+                details["stub_when_feature_off"] = True
+            elif in_default != expected:
+                mismatches.append(f"{full}: gates {list(dict.fromkeys(gates))} predict "
+                                  f"{'present' if expected else 'absent'} in default build, "
+                                  f"rustdoc says {'present' if in_default else 'absent'}")
+        members, notes = crate.members(iid)
+        details.update(notes_to_details(notes))
+        sp = it.get("span") or {}
+        rid = unique(full)
+        out.append({"id": rid, "kind": KIND_LABEL[k], "parent": None, "family": "rust-api",
+                    "crate": crate.name, "module": "::".join(mod_path),
+                    "module_public": mod_path in crate.modules,
+                    "file": sp.get("filename"), "line": (sp.get("begin") or [None])[0],
+                    "feature": label_gates(gates, enabled) or None,
+                    "deprecated": bool(it.get("deprecation")),
+                    "also": sorted("::".join(p) for p, _ in crate.public_paths[iid] if p != path),
+                    "details": details,
+                    "sig_hash": digest(_source_text(it, "sig")),
+                    "body_hash": digest(_source_text(it, "body"))})
+        by_name_span = {(crate.idx[m]["name"], span(crate.idx[m])): crate.idx[m] for m in member_ids(crate, iid)}
+        seen = set()
+        for mem in members:
+            mk, name, at, dep = mem[:4]
+            req = mem[4] if len(mem) > 4 else ""
+            if mk == "argument":
+                file, line = at.rsplit(":", 1)
+                src = Path(file).read_text().splitlines()[int(line) - 1].strip() if Path(file).exists() else ""
+                out.append({"id": unique(f"{rid}#arg:{name.replace('`', '')}"), "kind": "argument",
+                            "parent": rid, "family": "rust-api", "crate": crate.name,
+                            "module": "::".join(mod_path), "file": file, "line": int(line),
+                            "details": {"syntax": name.replace("`", "")},
+                            "sig_hash": digest(name + "|" + " ".join(src.split())), "body_hash": None})
+                continue
+            if (name, at) in seen:
+                continue
+            seen.add((name, at))
+            mitem = by_name_span.get((name, at))
+            file, _, line = at.rpartition(":") if at else (None, None, None)
+            label = {"function": "fn", "assoc_const": "const", "assoc_type": "type"}[mk]
+            out.append({"id": unique(f"{rid}::{name}"), "kind": label, "parent": rid, "family": "rust-api",
+                        "crate": crate.name, "module": "::".join(mod_path), "file": file or None,
+                        "line": int(line) if line else None, "deprecated": bool(dep),
+                        "details": {"trait_item": req} if req else {},
+                        "sig_hash": digest(_source_text(mitem, "sig")),
+                        "body_hash": digest(_source_text(mitem, "body"))})
+
+    # Items rustdoc kept (reachable as a return type, field or supertrait) that no public path names.
     owned = set()
     for it in crate.idx.values():
         k = kind(it)
         if k in ("impl", "trait"):
             owned.update(str(m) for m in it["inner"][k]["items"])
     for iid, it in crate.idx.items():
-        if (it["crate_id"] != 0 or kind(it) not in KIND_LABEL or iid in crate.public_paths
-                or iid in owned):
+        if it["crate_id"] != 0 or kind(it) not in KIND_LABEL or iid in crate.public_paths or iid in owned:
             continue
-        canon = "::".join(crate.paths.get(iid, {}).get("path") or [it["name"] or "?"])
-        note = "sealed trait: a supertrait that stops implementations outside the crate" if (
-            kind(it) == "trait" and it["name"] == "Sealed") else "public, but no public path names it"
-        unnamed.append((canon, kind(it), span(it), note))
-    if unnamed:
-        lines += ["", "## Public but unnameable", "",
-                  "Reachable from the public API (as a return type, field or supertrait) "
-                  "but not importable by any public path.", ""]
-        for canon, k, sp, note in sorted(unnamed):
-            box = "x" if canon in checked else " "
-            lines.append(f"- [{box}] {KIND_LABEL[k]} `{canon}` · {sp} ({note})")
-            stats["unnameable"] += 1
-    return lines, stats, mismatches
-
-
-def load_checked(existing):
-    """IDs of checked lines in an existing map, so regeneration keeps them."""
-    checked = set()
-    parent = None
-    if existing and Path(existing).exists():
-        for line in Path(existing).read_text().splitlines():
-            top = re.match(r'- \[[ x]\] (?:[a-z ]+ )?`([^`]+)`', line)
-            if top:
-                parent = top.group(1)
-            arg = re.match(r'\s+- \[x\] argument (.+) · ', line)
-            if arg and parent:
-                checked.add(f"{parent} {arg.group(1)}")
-                continue
-            m = re.match(r'\s*- \[x\] (?:[a-z ]+ )?`([^`]+)`', line)
-            if m:
-                checked.add(m.group(1))
-    return checked
+        canon = crate.paths.get(iid, {}).get("path") or [it["name"] or "?"]
+        note = ("sealed trait: a supertrait that stops implementations outside the crate"
+                if kind(it) == "trait" and it["name"] == "Sealed" else "public, but no public path names it")
+        sp = it.get("span") or {}
+        out.append({"id": unique("::".join(canon)), "kind": KIND_LABEL[kind(it)], "parent": None,
+                    "family": "rust-api", "crate": crate.name, "module": "::".join(canon[:-1]),
+                    "module_public": False, "file": sp.get("filename"),
+                    "line": (sp.get("begin") or [None])[0], "details": {"unnameable": note},
+                    "sig_hash": digest(_source_text(it, "sig")),
+                    "body_hash": digest(_source_text(it, "body"))})
+    return out, mismatches
 
 
 def main():
@@ -389,8 +427,6 @@ def main():
     ap.add_argument("--sibling", action="append")
     ap.add_argument("--vocab")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--title", required=True)
-    ap.add_argument("--source-note", required=True)
     a = ap.parse_args()
     if a.vocab:
         VOCAB.update(json.loads(Path(a.vocab).read_text())["arguments"])
@@ -402,27 +438,12 @@ def main():
                 SIBLING_PUBLIC["::".join(canon)] = "::".join(sc.best(iid)[0])
     crate = Crate(a.json)
     default_crate = Crate(a.default) if a.default else None
-    checked = load_checked(a.out)
-    header = [
-        f"# {a.title}",
-        "",
-        a.source_note,
-        "",
-        "A checked box means the documentation for that item has been remediated",
-        "against the source. Items are listed under their shortest public path;",
-        "`also` names the other paths the same item is reachable by.",
-    ]
     enabled = default_features(a.manifest) if a.manifest else None
-    lines, stats, mismatches = render(crate, default_crate, checked, header, enabled)
-    total_items = sum(v for k, v in stats.items() if k not in ("member",))
-    summary = ["", "## Counts", "",
-               f"- Top-level items (including re-exports): {total_items}",
-               f"- Members (methods, associated consts and types): {stats['member']}",
-               "- By kind: " + ", ".join(f"{k} {v}" for k, v in sorted(stats.items()) if k != "member")]
-    lines[7:7] = summary
-    Path(a.out).write_text("\n".join(lines) + "\n")
-    report = {"stats": stats, "gate_mismatches": mismatches, "checked_preserved": len(checked)}
-    print(json.dumps(report, indent=1))
+    recs, mismatches = records(crate, default_crate, enabled)
+    with open(a.out, "w") as f:
+        for r in recs:
+            f.write(json.dumps(r, sort_keys=True) + "\n")
+    print(json.dumps({"records": len(recs), "gate_mismatches": mismatches}))
 
 
 if __name__ == "__main__":

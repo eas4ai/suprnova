@@ -7,6 +7,7 @@ plus the demo app's own; commands defined under `app/src/commands` are
 excluded as demo-app code. Every subcommand's `--help` is read, so each
 flag and argument is listed exactly as clap renders it.
 """
+import hashlib
 import json
 import re
 import subprocess
@@ -14,9 +15,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(sys.argv[1])
-REV = sys.argv[2]
-BIN = Path(sys.argv[3])
-OUT = Path(sys.argv[4])
+BIN = Path(sys.argv[2])
+OUT = Path(sys.argv[3])
+EXCL = Path(sys.argv[4])
 
 
 def run(args):
@@ -112,16 +113,8 @@ def find_line(roots, name):
     return "(declaration not found)"
 
 
-checked = set()
-if OUT.exists():
-    for line in OUT.read_text().splitlines():
-        m = re.match(r'\s*- \[x\] (?:[a-z ]+ )?`([^`]+)`', line)
-        if m:
-            checked.add(m.group(1))
-
-
-def box(k):
-    return "x" if k in checked else " "
+def digest(text):
+    return hashlib.sha256(" ".join(text.split()).encode()).hexdigest()[:16]
 
 
 demo_cmds = set()
@@ -129,17 +122,11 @@ for f in (ROOT / "app/src/commands").glob("*.rs"):
     demo_cmds.update(n for n in re.findall(r'name\s*=\s*"([^"]+)"', f.read_text())
                      if re.fullmatch(r'[a-z][a-z0-9:_-]*', n))
 
-L = ["# Suprnova feature map: command line", "",
-     f"Source: binaries built from the repository at {REV}; every entry is read from the "
-     "binary's own `--help` output, and each command's declaration is cited.", "",
-     "A checked box means the documentation for that item has been remediated against the source.", ""]
-counts = {}
-body = []
+recs, counts, rejected_all = [], {}, {}
 APP_ENUM = [(n, f"framework/src/app/mod.rs:{ln}") for n, ln in enum_commands("framework/src/app/mod.rs", "Commands")]
 CLI_ENUM = [(n, f"suprnova-cli/src/main.rs:{ln}") for n, ln in enum_commands("suprnova-cli/src/main.rs", "Commands")]
-for binary, title in (("suprnova", "`suprnova` developer CLI (suprnova-cli)"),
-                      ("app", "App runner (`suprnova::Application`; the project binary)"),
-                      ("console", "Console binary (framework-registered commands)")):
+for binary in ("suprnova", "app", "console"):
+    listed = None
     if binary == "suprnova":
         cands = CLI_ENUM
     elif binary == "app":
@@ -151,37 +138,31 @@ for binary, title in (("suprnova", "`suprnova` developer CLI (suprnova-cli)"),
         listed = set(names)
         cands = [(n, find_line(["framework/src"], n)) for n in names]
         cands += [(n, at) for n, at in hidden_console_entries() if n not in names]
-    body += ["", f"## {title}", ""]
     n = 0
     rejected = []
     for name, at in cands:
-        key = f"{binary} {name}"
         sub = run([str(BIN / binary), name, "--help"])
-        sec = sections(sub)
         if "Usage:" not in sub and "USAGE" not in sub.upper():
             rejected.append(name)
             continue
-        desc = ""
+        sec = sections(sub)
         first = [l for l in sub.splitlines() if l.strip()]
-        if first and not first[0].startswith("Usage"):
-            desc = first[0].strip()
-        hidden = binary == "console" and name not in listed
-        body.append(f"- [{box(key)}] command `{key}` · {at}" +
-                    (" (hidden from `help`; dispatchable)" if hidden else ""))
-        if desc:
-            body.append(f"  - {desc}")
-        for kind in ("Arguments", "Options"):
-            for arg, adesc in entries(sec.get(kind, [])):
-                if arg.startswith("-h, --help") or arg.startswith("-V, --version"):
-                    continue
-                body.append(f"  - {kind[:-1].lower()} `{arg}`" + (f": {adesc}" if adesc else ""))
+        desc = first[0].strip() if first and not first[0].startswith("Usage") else ""
+        args = [{"spec": a_, "help": d_} for a_, d_ in entries(sec.get("Arguments", []))]
+        opts = [{"spec": a_, "help": d_} for a_, d_ in entries(sec.get("Options", []))
+                if not a_.startswith(("-h, --help", "-V, --version"))]
+        file, _, line = at.rpartition(":")
+        recs.append({"id": f"{binary} {name}", "kind": "command", "family": "cli", "parent": None,
+                     "crate": {"suprnova": "suprnova-cli"}.get(binary, "suprnova"), "module": binary,
+                     "file": file or None, "line": int(line) if line.isdigit() else None,
+                     "details": {"binary": binary, "description": desc, "arguments": args, "options": opts,
+                                 "hidden_from_help": listed is not None and name not in listed},
+                     "sig_hash": digest(sub), "body_hash": None})
         n += 1
     counts[binary] = n
-    if rejected:
-        body += ["", "Declared in source but not accepted by the built binary: " + ", ".join(f"`{r}`" for r in rejected)]
-    if binary == "console":
-        body += ["", f"Excluded as demo-app commands (`app/src/commands`): {', '.join(f'`{c}`' for c in sorted(demo_cmds))}"]
+    rejected_all[binary] = rejected
 
-L += ["## Counts", ""] + [f"- `{b}`: {n} commands" for b, n in counts.items()] + body
-OUT.write_text("\n".join(L) + "\n")
-print(json.dumps({"counts": counts, "checked_preserved": len(checked)}))
+OUT.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in recs))
+EXCL.write_text(json.dumps({"demo_app_commands": sorted(demo_cmds),
+                            "declared_but_rejected_by_binary": rejected_all}, indent=1, sort_keys=True))
+print(json.dumps({"records": len(recs), "counts": counts}))

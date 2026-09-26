@@ -44,16 +44,18 @@ python3 "$HERE/macro_keywords.py" "$REPO" > "$WORK/kw.json"
 python3 "$HERE/macro_vocab.py" "$REPO" "$WORK/kw.json" > "$WORK/vocab.json"
 python3 "$HERE/env_vars.py" "$REPO" > "$WORK/env.json"
 
-# 3. Maps.
+# 3. Records from each extractor. Work from the repo root: rustdoc spans are root-relative.
+rm -f "$RAW"/*.jsonl "$RAW"/exclusions-*.json "$RAW"/.*.report.json "$RAW"/*.md
 VOCAB="$WORK/vocab.json" REV="$REV" "$HERE/generate_rust.sh" "$REPO" "$J" "$RAW"
-python3 "$HERE/live_surface.py" "$REPO" "$REV" "$RAW/live-templates.md"
-python3 "$HERE/config_surface.py" "$REPO" "$REV" "$WORK/env.json" "$RAW/configuration.md"
-python3 "$HERE/runtime_surface.py" "$REPO" "$REV" "$RAW/endpoints-and-tables.md"
+python3 "$HERE/live_surface.py" "$REPO" "$RAW/live-templates.jsonl"
+python3 "$HERE/config_surface.py" "$REPO" "$WORK/env.json" "$RAW/configuration.jsonl" "$RAW/exclusions-config.json"
+python3 "$HERE/runtime_surface.py" "$REPO" "$RAW/endpoints-and-tables.jsonl"
 
 # 4. CLI, read from the built binaries.
 CARGO_TARGET_DIR=$WORK/target-stable cargo build -q -p suprnova-cli -p app --bins
-python3 "$HERE/cli_surface.py" "$REPO" "$REV" "$WORK/target-stable/debug" "$RAW/cli.md"
+python3 "$HERE/cli_surface.py" "$REPO" "$WORK/target-stable/debug" "$RAW/cli.jsonl" "$RAW/exclusions-cli.json"
 
-# 5. File every entry under its manual chapter; this is the checklist.
-python3 "$HERE/domains.py" "$RAW" "$REPO/manual" "$MAP/domains" "$REV"
+# 5. File every record under its manual chapter. surface.jsonl is regenerated;
+#    state.jsonl (the remediation record) is never touched here.
+python3 "$HERE/build_surface.py" "$RAW" "$REPO/manual" "$MAP/surface.jsonl" "$MAP/exclusions.json" "$REV"
 echo "feature map regenerated at $REV"

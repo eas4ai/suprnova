@@ -1,16 +1,17 @@
-"""File every map entry under the manual chapter that owns its domain.
+"""Assemble surface.jsonl: every extracted record, filed under the manual chapter that owns it.
 
-Reads the per-source maps the extractors produced (the raw directory), and
-writes one checklist per manual chapter to `feature-map/domains/`. The
-chapter only decides where an entry is filed; everything the entry says
-still comes from the source.
+Reads the extractors' raw JSONL, removes `suprnova` re-exports of sibling
+crates (noting each as an alias on the item it names), assigns each record
+a chapter, and writes one sorted record per line. The chapter only decides
+where a record is tracked; everything else in it comes from the source.
 
-Rules are explicit and ordered: Rust items are filed by the source file
-that defines them (longest prefix wins), everything else by the rule for
-its family. Entries no rule claims go to a named "no chapter" group so the
-gap stays visible. A rule naming a chapter that does not exist is a hard
-error.
+Rules are explicit and ordered: Rust items by the source file that defines
+them (longest prefix wins), members by their parent, everything else by
+the rule for its family. A record no rule claims is filed under a named
+"no chapter" group so the gap stays visible. A rule naming a chapter that
+does not exist, a duplicate id, or an unresolvable re-export stops the run.
 """
+import json
 import re
 import sys
 from collections import defaultdict
@@ -19,7 +20,8 @@ from pathlib import Path
 RAW = Path(sys.argv[1])
 MANUAL = Path(sys.argv[2])
 OUT = Path(sys.argv[3])
-REV = sys.argv[4]
+EXCL = Path(sys.argv[4])
+REV = sys.argv[5]
 
 # Source-file prefix -> chapter (longest prefix wins).
 PATH_RULES = {
@@ -195,214 +197,99 @@ for rules in (PATH_RULES.values(), LIB_RS.values(), MACROS.values(), EXTERNAL.va
         if not c.startswith("(no chapter)") and c not in chapters:
             raise SystemExit(f"rule names a chapter that does not exist: {c}")
 
-TOP = re.compile(r'^- \[([ x])\] (?:([a-z ]+?) )?`([^`]+)`(.*)$')
-AT = re.compile(r' · ([^ ]+?):(\d+)')
-
-
-def entries(md):
-    """(section heading, [lines]) for each top-level entry in a raw map file."""
-    section, cur, out = "", None, []
-    for line in md.read_text().splitlines():
-        if line.startswith("### ") or line.startswith("## "):
-            section = line.lstrip("#").strip()
-            cur = None
-            continue
-        if line.startswith("- ["):
-            cur = [line]
-            out.append((section, cur))
-        elif cur is not None and line.startswith("  "):
-            cur.append(line)
-        else:
-            cur = None
-    return out
-
 
 def by_path(path):
     best = max((p for p in PATH_RULES if path.startswith(p)), key=len, default=None)
     return PATH_RULES[best] if best else None
 
 
-def assign(source, section, lines):
-    m = TOP.match(lines[0])
-    kind, ident, rest = (m.group(2) or ""), m.group(3), m.group(4)
-    at = AT.search(rest)
-    path = at.group(1) if at else ""
-    if source == "cli.md":
-        binary, name = ident.split(" ", 1)
-        for b, pre, ch in CLI_RULES:
-            if b == binary and name.startswith(pre):
-                return ch
-    elif source == "configuration.md":
+def assign(r):
+    fam, kind, rid, path = r["family"], r["kind"], r["id"], r.get("file") or ""
+    if fam == "cli":
+        binary, name = rid.split(" ", 1)
+        return next((c for b, pre, c in CLI_RULES if b == binary and name.startswith(pre)), None)
+    if fam == "config":
         return "env-vars" if kind == "env" else "installation"
-    elif source == "live-templates.md":
+    if fam == "live-templates":
         return "live"
-    elif source == "endpoints-and-tables.md":
+    if fam == "endpoints-tables":
         if kind == "endpoint":
-            return next((c for p, c in ENDPOINT_RULES if ident.startswith(p)), None)
+            return next((c for p, c in ENDPOINT_RULES if rid.startswith(p)), None)
         return next((c for p, c in TABLE_RULES if path.startswith(p)), None)
-    elif "re-exports" in rest:
-        target = re.search(r're-exports `([a-z_0-9]+)', rest).group(1)
-        return EXTERNAL.get(target)
-    elif kind.startswith("proc"):
-        return MACROS.get(ident.split("::")[-1])
+    if kind == "reexport":
+        return EXTERNAL.get(r["details"]["target"].split("::")[0])
+    if kind == "proc macro":
+        return MACROS.get(rid.split("::")[-1])
     if path == "framework/src/lib.rs":
-        return LIB_RS.get(ident.split("::")[-1])
+        return LIB_RS.get(rid.split("::")[-1])
     if FAKE_FILES.search(path):
         return "mocking"
     return by_path(path)
 
 
-# Aliases: `suprnova::X` re-exporting a sibling crate's item is noted on that item.
-aliases = defaultdict(list)
-raw_files = sorted(RAW.glob("*.md"))
-collected = []
-for f in raw_files:
-    for section, lines in entries(f):
-        m = TOP.match(lines[0])
-        if not m:
-            continue
-        rest = m.group(4)
-        sib = re.search(r're-exports `((?:' + "|".join(SIBLINGS) + r')::[^`]+)`', rest)
-        if sib:
-            aliases[sib.group(1)].append(m.group(3))
-            continue
-        collected.append((f.name, section, lines))
+records = []
+for f in sorted(RAW.glob("*.jsonl")):
+    records += [json.loads(l) for l in f.read_text().splitlines() if l.strip()]
+raw_count = len(records)
 
-checked = set()
-parent = None
-for f in OUT.glob("*.md"):
-    for line in f.read_text().splitlines():
-        top = re.match(r'- \[[ x]\] (?:[a-z ]+? )?`([^`]+)`', line)
-        if top:
-            parent = top.group(1)
-        arg = re.match(r'\s+- \[x\] argument (.+) · ', line)
-        if arg and parent:
-            checked.add(f"{parent} {arg.group(1)}")
-            continue
-        m = re.match(r'\s*- \[x\] (?:[a-z ]+? )?`([^`]+)`', line)
-        if m:
-            checked.add(m.group(1))
-
-# Resolve each re-export target through every path its item is reachable by.
+# Every path a record is reachable by, including its defining module path,
+# so a sibling re-export (which names the defining path) resolves to it.
 by_any_path = {}
-for _, section, lines in collected:
-    m = TOP.match(lines[0])
-    by_any_path[m.group(3)] = m.group(3)
-    home = re.match(r'`([^`]+)`', section)
-    if home:  # the defining module, which is the path a re-export names
-        by_any_path.setdefault(f"{home.group(1)}::{m.group(3).split('::')[-1]}", m.group(3))
-    also = re.search(r'also ((?:`[^`]+`(?:, )?)+)', m.group(4))
-    if also:
-        for p in re.findall(r'`([^`]+)`', also.group(1)):
-            by_any_path.setdefault(p, m.group(3))
-resolved = defaultdict(list)
-for target, names in aliases.items():
-    if target not in by_any_path:
-        raise SystemExit(f"re-export target not found in any map: {target}")
-    resolved[by_any_path[target]].extend(names)
-aliases = resolved
+for r in records:
+    if r["kind"] in ("reexport", "argument") or r["parent"] is not None:
+        continue
+    for p in [r["id"], *r.get("also", []), f'{r.get("module")}::{r["id"].split("::")[-1]}']:
+        by_any_path.setdefault(p, r["id"])
 
-domains = defaultdict(lambda: defaultdict(list))
-unfiled = []
-for source, section, lines in collected:
-    ch = assign(source, section, lines)
-    if ch is None:
-        unfiled.append((source, lines[0]))
-        ch = "(no chapter) not yet classified"
-    m = TOP.match(lines[0])
-    ident = m.group(3)
-    first = lines[0]
-    if ident in aliases:
-        alias = ", ".join(f"`{a}`" for a in sorted(aliases[ident]))
-        first = first + f" (re-exported as {alias})"
-    out_lines = [first] + lines[1:]
-    # Reapply checked state by identity: arguments by "parent syntax", others by their path.
-    fixed = []
-    for line in out_lines:
-        arg = re.match(r'(\s+- \[)[ x](\] argument (.+) · .*)', line)
-        item = re.match(r'(\s*- \[)[ x](\] (?:[a-z ]+? )?`([^`]+)`.*)', line)
-        if arg:
-            line = arg.group(1) + ("x" if f"{ident} {arg.group(3)}" in checked else " ") + arg.group(2)
-        elif item:
-            line = item.group(1) + ("x" if item.group(3) in checked else " ") + item.group(2)
-        fixed.append(line)
-    label = {"cli.md": "Command line", "configuration.md": "Configuration",
-             "live-templates.md": "Live templates", "endpoints-and-tables.md": "Endpoints and tables"}.get(
-        source, f"Rust API: {source[:-3]}")
-    domains[ch][(label, section)].append(fixed)
+aliases = defaultdict(list)
+kept = []
+for r in records:
+    target = r["details"].get("target", "") if r["kind"] == "reexport" else ""
+    if target.split("::")[0] in SIBLINGS:
+        if target not in by_any_path:
+            raise SystemExit(f"re-export target not found in any record: {target}")
+        aliases[by_any_path[target]].append(r["id"])
+        continue
+    kept.append(r)
 
-OUT.mkdir(parents=True, exist_ok=True)
-for old in OUT.glob("*.md"):
-    old.unlink()
+ids = defaultdict(int)
+for r in kept:
+    ids[r["id"]] += 1
+dupes = [i for i, n in ids.items() if n > 1]
+if dupes:
+    raise SystemExit(f"duplicate ids across extractors: {dupes[:10]}")
 
+chapter_of = {}
+for r in kept:
+    if r["parent"] is None:
+        chapter_of[r["id"]] = assign(r) or "(no chapter) not yet classified"
+out = []
+for r in kept:
+    r = dict(r)
+    r["chapter"] = chapter_of[r["parent"]] if r["parent"] is not None else chapter_of[r["id"]]
+    if r["id"] in aliases:
+        r["aliases"] = sorted(aliases[r["id"]])
+    out.append(r)
+out.sort(key=lambda r: r["id"])
+OUT.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in out))
 
-def slug(ch):
-    return re.sub(r'[^a-z0-9]+', '-', ch.lower()).strip('-')
-
-
-rows = []
-for ch in sorted(domains, key=lambda c: (c.startswith("(no chapter)"), c)):
-    groups = domains[ch]
-    boxes = sum(sum(1 for e in es for l in e if re.match(r'\s*- \[[ x]\]', l)) for es in groups.values())
-    done = sum(sum(1 for e in es for l in e if re.match(r'\s*- \[x\]', l)) for es in groups.values())
-    fname = f"{ch}.md" if not ch.startswith("(no chapter)") else f"_{slug(ch)}.md"
-    title = f"`manual/{ch}.md`" if not ch.startswith("(no chapter)") else ch
-    L = [f"# Feature map: {title}", "",
-         f"Source at {REV}. Every entry below is extracted from the code; this file only groups "
-         "them under the chapter that owns their domain. A checked box means the chapter's "
-         "documentation of that item has been remediated against the source.", "",
-         f"{done} of {boxes} checked.", ""]
-    cur_label = None
-    for (label, section) in sorted(groups):
-        if label != cur_label:
-            L += [f"## {label}", ""]
-            cur_label = label
-        if section:
-            L += [f"### {section}", ""]
-        for e in groups[(label, section)]:
-            L += e
-        L.append("")
-    (OUT / fname).write_text("\n".join(L).rstrip() + "\n")
-    rows.append((ch, fname, boxes, done))
-
-empty = sorted(chapters - set(domains))
-L = ["# Feature map by manual chapter", "",
-     f"Source at {REV}. {sum(r[2] for r in rows)} items across {sum(1 for r in rows if not r[0].startswith('('))} "
-     f"chapters, plus the groups no chapter covers yet.", "",
-     "| Chapter | Items | Checked |", "|---|---|---|"]
-for ch, fname, boxes, done in rows:
-    name = f"[`{ch}`](domains/{fname})" if not ch.startswith("(") else f"[{ch}](domains/{fname})"
-    L.append(f"| {name} | {boxes} | {done} |")
-L += ["", f"Chapters with no extracted surface ({len(empty)}), narrative or reference pages whose claims "
-      "are checked against the items filed elsewhere: " + ", ".join(f"`{c}`" for c in empty), ""]
-(OUT.parent / "INDEX.md").write_text("\n".join(L) + "\n")
-print(f"{sum(r[2] for r in rows)} items, {len(rows)} domain files, {len(unfiled)} unclassified, "
-      f"{len(checked)} checks preserved")
-for src, line in unfiled[:20]:
-    print("  unclassified:", src, line[:120])
-
-# Exclusions stay visible: carry every "not listed, and why" note forward.
-X = ["# Feature map exclusions", "",
-     f"Source at {REV}. What the extractors saw and deliberately did not list, with the reason.", ""]
-conf = (RAW / "configuration.md").read_text()
-if "### Not runtime configuration" in conf:
-    block = conf.split("### Not runtime configuration", 1)[1].split("\n## ", 1)[0]
-    X += ["## Environment-like names that are not runtime configuration", "", block.strip(), ""]
-cli = (RAW / "cli.md").read_text()
-notes = [l for l in cli.splitlines() if l.startswith(("Excluded as", "Declared in source"))]
-if notes:
-    X += ["## Commands", ""] + notes + [""]
-vocab_path = RAW.parent / "vocab.json"
-if vocab_path.exists():
-    import json
-    internal = json.loads(vocab_path.read_text())["internal"]
-    X += ["## Macro parser keywords that are internal", ""]
-    X += [f"- `{k}`: {v}" for k, v in internal.items()] + [""]
-X += ["## Rust items", "",
-      "- Private, `pub(crate)` and `#[doc(hidden)]` items: rustdoc removes them before extraction.",
-      "- Implementations of external traits (`Debug`, `Clone`, `Serialize`, ...).",
-      "- Demo application code (`app/`), test-support crates and fixtures.",
-      f"- Re-exports of sibling Suprnova crates ({sum(len(v) for v in aliases.values())}): each is noted as "
-      "\"re-exported as\" on the item it names instead of being listed twice.", ""]
-(OUT.parent / "EXCLUSIONS.md").write_text("\n".join(X) + "\n")
-
+unfiled = [r["id"] for r in out if r["chapter"] == "(no chapter) not yet classified" and r["parent"] is None]
+excluded = {"source_rev": REV, "sibling_reexports_folded_into_aliases": sum(len(v) for v in aliases.values())}
+for f in sorted(RAW.glob("exclusions-*.json")):
+    excluded.update(json.loads(f.read_text()))
+vocab = RAW.parent / "vocab.json"
+if vocab.exists():
+    excluded["internal_macro_keywords"] = json.loads(vocab.read_text())["internal"]
+excluded["rust_items_not_extracted"] = [
+    "private, pub(crate) and #[doc(hidden)] items (rustdoc removes them before extraction)",
+    "implementations of external traits (Debug, Clone, Serialize, ...)",
+    "demo application code (app/), test-support crates and fixtures",
+]
+EXCL.write_text(json.dumps(excluded, indent=1, sort_keys=True) + "\n")
+(OUT.parent / "meta.json").write_text(json.dumps({
+    "source_rev": REV, "records": len(out),
+    "source_paths": ["framework", "crates", "suprnova-cli", "suprnova-macros", "Cargo.toml"],
+}, indent=1, sort_keys=True) + "\n")
+print(json.dumps({"raw": raw_count, "folded_reexports": raw_count - len(out), "records": len(out),
+                  "chapters": len({r["chapter"] for r in out if not r["chapter"].startswith("(")}),
+                  "unclassified": unfiled[:10]}))

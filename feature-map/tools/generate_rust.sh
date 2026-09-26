@@ -27,9 +27,7 @@ while read -r dir lib file sibs; do
     note="rustdoc JSON (all features), cross-checked against a default-features build."
   fi
   (cd "$REPO" && python3 "$HERE/rust_api.py" "$json" "${def[@]}" "${args[@]}" \
-    --manifest "$dir/Cargo.toml" --out "$OUT/$file.md" \
-    --title "Suprnova feature map: \`$file\` Rust API" \
-    --source-note "Source: \`$dir/\` at $REV, $note") > "$OUT/.$file.report.json"
+    --manifest "$dir/Cargo.toml" --out "$OUT/$file.jsonl") > "$OUT/.$file.report.json"
 done <<'EOF'
 framework suprnova suprnova suprnova_live magnetar suprnova_web_push suprnova_macros
 crates/suprnova-live suprnova_live suprnova-live -

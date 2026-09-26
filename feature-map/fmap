@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""fmap: query and update the Suprnova feature map.
+
+The surface (feature-map/surface.jsonl) is every public item extracted from
+the source, filed under the manual chapter that owns it. The state
+(feature-map/state.jsonl) is the remediation record: what has been checked
+against the source, when, and at which signature. Both load into an
+in-memory SQLite database on every call; nothing else is stored.
+
+Every command prints JSON. Statuses:
+
+  todo         nothing recorded yet
+  in_progress  someone is working on it
+  done         the manual matches the source for this item
+  skip         deliberately not documented (the note says why)
+  stale        was done, but the item's signature has changed since
+
+Examples:
+
+  fmap summary                          progress per chapter
+  fmap next --chapter queues --limit 20 top-level items still to do
+  fmap show suprnova::Queue             one item, its members and its state
+  fmap chapter queues --status stale    items in a chapter by status
+  fmap search retry_failed              ids containing a string
+  fmap query "SELECT id FROM items WHERE feature LIKE '%off by default%'"
+  fmap mark suprnova::Queue --children --status done --note "<where in queues.md>"
+  fmap orphans                          state for items the source no longer has
+"""
+import argparse
+import datetime
+import json
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SURFACE = HERE / "surface.jsonl"
+STATE = HERE / "state.jsonl"
+META = HERE / "meta.json"
+STATUSES = ("todo", "in_progress", "done", "skip")
+
+SCHEMA = """
+CREATE TABLE surface (
+  id TEXT PRIMARY KEY, kind TEXT, family TEXT, crate TEXT, module TEXT, chapter TEXT,
+  parent TEXT, file TEXT, line INTEGER, feature TEXT, deprecated INTEGER,
+  sig_hash TEXT, body_hash TEXT, record TEXT);
+CREATE TABLE state (
+  id TEXT PRIMARY KEY, status TEXT, note TEXT, verified_rev TEXT,
+  verified_sig_hash TEXT, verified_body_hash TEXT, updated_at TEXT);
+CREATE VIEW items AS
+SELECT s.id, s.kind, s.family, s.crate, s.module, s.chapter, s.parent, s.file, s.line,
+       s.feature, s.deprecated, s.sig_hash, s.body_hash,
+       CASE
+         WHEN st.status IS NULL THEN 'todo'
+         WHEN st.status = 'done' AND st.verified_sig_hash IS NOT s.sig_hash THEN 'stale'
+         ELSE st.status
+       END AS status,
+       COALESCE(st.status = 'done' AND st.verified_sig_hash IS s.sig_hash
+        AND st.verified_body_hash IS NOT s.body_hash, 0) AS body_changed,
+       st.note, st.verified_rev, st.updated_at
+FROM surface s LEFT JOIN state st ON st.id = s.id;
+"""
+
+
+def load():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.executescript(SCHEMA)
+    for line in SURFACE.read_text().splitlines():
+        r = json.loads(line)
+        db.execute("INSERT INTO surface VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            r["id"], r["kind"], r["family"], r.get("crate"), r.get("module"), r["chapter"], r.get("parent"),
+            r.get("file"), r.get("line"), r.get("feature"), int(bool(r.get("deprecated"))),
+            r.get("sig_hash"), r.get("body_hash"), line))
+    if STATE.exists():
+        for line in STATE.read_text().splitlines():
+            if line.strip():
+                s = json.loads(line)
+                db.execute("INSERT INTO state VALUES (?,?,?,?,?,?,?)", (
+                    s["id"], s["status"], s.get("note"), s.get("verified_rev"),
+                    s.get("verified_sig_hash"), s.get("verified_body_hash"), s.get("updated_at")))
+    return db
+
+
+def save_state(db):
+    rows = db.execute("SELECT * FROM state ORDER BY id").fetchall()
+    STATE.write_text("".join(json.dumps({k: r[k] for k in r.keys() if r[k] is not None}, sort_keys=True) + "\n"
+                             for r in rows))
+
+
+def current_source_rev():
+    meta = json.loads(META.read_text())
+    try:
+        return subprocess.run(["git", "-C", str(HERE.parent), "log", "-1", "--format=%h", "--",
+                               *meta["source_paths"]], capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def freshness():
+    """Warn when the source has moved past the commit the surface was built from."""
+    built = json.loads(META.read_text())["source_rev"]
+    now = current_source_rev()
+    if now and now != built:
+        return {"warning": f"surface built from {built} but source is now at {now}; "
+                           "run feature-map/tools/generate.sh before trusting results"}
+    return {}
+
+
+def rows(cur):
+    return [dict(r) for r in cur.fetchall()]
+
+
+def emit(obj):
+    try:
+        json.dump(obj, sys.stdout, indent=1, default=str)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    except BrokenPipeError:  # output piped into head or similar
+        sys.stdout = open("/dev/null", "w")
+
+
+def cmd_summary(db, a):
+    per = rows(db.execute("""
+        SELECT chapter, COUNT(*) AS items,
+               SUM(status='done') AS done, SUM(status='skip') AS skip, SUM(status='stale') AS stale,
+               SUM(status='in_progress') AS in_progress, SUM(status='todo') AS todo
+        FROM items GROUP BY chapter ORDER BY chapter LIKE '(%', chapter"""))
+    total = rows(db.execute("SELECT COUNT(*) AS items, SUM(status IN ('done','skip')) AS finished FROM items"))[0]
+    emit({**freshness(), "total": total, "chapters": per})
+
+
+def cmd_chapter(db, a):
+    sql = "SELECT id, kind, parent, file, line, status, feature, note FROM items WHERE chapter = ?"
+    args = [a.name]
+    if a.status:
+        sql += " AND status = ?"
+        args.append(a.status)
+    if a.top:
+        sql += " AND parent IS NULL"
+    sql += " ORDER BY module, id LIMIT ?"
+    args.append(a.limit)
+    found = rows(db.execute(sql, args))
+    if not found and not db.execute("SELECT 1 FROM items WHERE chapter = ?", [a.name]).fetchone():
+        emit({"error": f"no chapter named {a.name!r}",
+              "chapters": [r[0] for r in db.execute("SELECT DISTINCT chapter FROM items ORDER BY 1")]})
+        sys.exit(1)
+    emit({**freshness(), "chapter": a.name, "items": found})
+
+
+def cmd_next(db, a):
+    sql = "SELECT id, kind, chapter, file, line, feature FROM items WHERE parent IS NULL AND status IN ('todo','stale')"
+    args = []
+    if a.chapter:
+        sql += " AND chapter = ?"
+        args.append(a.chapter)
+    sql += " ORDER BY chapter LIKE '(%', chapter, module, id LIMIT ?"
+    args.append(a.limit)
+    emit({**freshness(), "items": rows(db.execute(sql, args))})
+
+
+def cmd_show(db, a):
+    r = db.execute("SELECT * FROM items WHERE id = ?", [a.id]).fetchone()
+    if r is None:
+        near = [x[0] for x in db.execute("SELECT id FROM items WHERE id LIKE ? LIMIT 10", [f"%{a.id}%"])]
+        emit({"error": f"no item {a.id!r}", "similar": near})
+        sys.exit(1)
+    record = json.loads(db.execute("SELECT record FROM surface WHERE id = ?", [a.id]).fetchone()[0])
+    children = rows(db.execute("SELECT id, kind, file, line, status FROM items WHERE parent = ? ORDER BY id", [a.id]))
+    state = {k: r[k] for k in ("status", "note", "verified_rev", "updated_at")}
+    state["body_changed"] = bool(r["body_changed"])
+    emit({**freshness(), "item": {**record, **state},
+          "members": children})
+
+
+def cmd_search(db, a):
+    emit({"items": rows(db.execute("SELECT id, kind, chapter, status FROM items WHERE id LIKE ? ORDER BY id LIMIT ?",
+                                   [f"%{a.text}%", a.limit]))})
+
+
+def cmd_stale(db, a):
+    sql = "SELECT id, chapter, file, line, verified_rev FROM items WHERE status = 'stale'"
+    if a.body:
+        sql += " OR body_changed"
+    emit({**freshness(), "items": rows(db.execute(sql + " ORDER BY chapter, id"))})
+
+
+def cmd_orphans(db, a):
+    emit({"orphans": rows(db.execute(
+        "SELECT st.* FROM state st LEFT JOIN surface s ON s.id = st.id WHERE s.id IS NULL ORDER BY st.id"))})
+
+
+def cmd_query(db, a):
+    if not a.sql.lstrip().lower().startswith(("select", "with")):
+        emit({"error": "query is read-only; use `fmap mark` to change state"})
+        sys.exit(1)
+    emit({"rows": rows(db.execute(a.sql))})
+
+
+def cmd_mark(db, a):
+    if a.status == "skip" and not a.note:
+        emit({"error": "skip needs --note saying why the item is not documented"})
+        sys.exit(1)
+    fresh = freshness()
+    if fresh and a.status == "done":
+        emit({"error": fresh["warning"]})
+        sys.exit(1)
+    ids = list(a.ids)
+    missing = [i for i in ids if not db.execute("SELECT 1 FROM surface WHERE id = ?", [i]).fetchone()]
+    if missing:
+        emit({"error": "unknown ids", "ids": missing})
+        sys.exit(1)
+    if a.children:
+        for i in list(ids):
+            ids += [r[0] for r in db.execute("SELECT id FROM surface WHERE parent = ?", [i])]
+    rev = json.loads(META.read_text())["source_rev"]
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for i in dict.fromkeys(ids):
+        sig, body = db.execute("SELECT sig_hash, body_hash FROM surface WHERE id = ?", [i]).fetchone()
+        if a.status == "todo":
+            db.execute("DELETE FROM state WHERE id = ?", [i])
+            continue
+        db.execute("INSERT OR REPLACE INTO state VALUES (?,?,?,?,?,?,?)", (
+            i, a.status, a.note, rev, sig, body, now))
+    save_state(db)
+    emit({"marked": len(dict.fromkeys(ids)), "status": a.status})
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="fmap", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("summary", help="progress per chapter")
+    p = sub.add_parser("chapter", help="items filed under one chapter")
+    p.add_argument("name")
+    p.add_argument("--status", choices=STATUSES + ("stale",))
+    p.add_argument("--top", action="store_true", help="top-level items only, no members")
+    p.add_argument("--limit", type=int, default=500)
+    p = sub.add_parser("next", help="top-level items still to do (todo or stale)")
+    p.add_argument("--chapter")
+    p.add_argument("--limit", type=int, default=25)
+    p = sub.add_parser("show", help="one item with its members and state")
+    p.add_argument("id")
+    p = sub.add_parser("search", help="ids containing a string")
+    p.add_argument("text")
+    p.add_argument("--limit", type=int, default=50)
+    p = sub.add_parser("stale", help="done items whose signature changed since they were verified")
+    p.add_argument("--body", action="store_true", help="also items whose body changed")
+    sub.add_parser("orphans", help="state for items the source no longer has")
+    p = sub.add_parser("query", help="read-only SQL over the `items` view")
+    p.add_argument("sql")
+    p = sub.add_parser("mark", help="record remediation status")
+    p.add_argument("ids", nargs="+")
+    p.add_argument("--status", required=True, choices=STATUSES)
+    p.add_argument("--note")
+    p.add_argument("--children", action="store_true", help="also mark every member of each id")
+    a = ap.parse_args()
+    db = load()
+    globals()[f"cmd_{a.cmd}"](db, a)
+
+
+if __name__ == "__main__":
+    main()

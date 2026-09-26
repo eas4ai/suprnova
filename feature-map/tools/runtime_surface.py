@@ -5,14 +5,14 @@ registration and migration code. Every entry names a file and a needle
 string; the line is looked up at generation time and a missing needle is a
 hard error, so an entry cannot silently outlive the code it describes.
 """
+import hashlib
 import json
 import re
 import sys
 from pathlib import Path
 
 ROOT = Path(sys.argv[1])
-REV = sys.argv[2]
-OUT = Path(sys.argv[3])
+OUT = Path(sys.argv[2])
 
 ENDPOINTS = [
     # (path, methods, installed by, file, needle)
@@ -88,40 +88,31 @@ def locate(rel, needle):
     return text[:i].count("\n") + 1
 
 
-checked = set()
-if OUT.exists():
-    for line in OUT.read_text().splitlines():
-        m = re.match(r'\s*- \[x\] (?:[a-z ]+ )?`([^`]+)`', line)
-        if m:
-            checked.add(m.group(1))
+def digest(text):
+    return hashlib.sha256(" ".join(text.split()).encode()).hexdigest()[:16]
 
 
-def box(k):
-    return "x" if k in checked else " "
+def needle_line(rel, needle):
+    """The source line holding the needle, whose text is the entry's fingerprint."""
+    n = locate(rel, needle)
+    return n, (ROOT / rel).read_text().splitlines()[n - 1]
 
 
-L = ["# Suprnova feature map: HTTP endpoints and database tables", "",
-     f"Source: repository at {REV}. Curated from the route-registration and migration code; "
-     "each entry's line is looked up from a code excerpt at generation time.", "",
-     "A checked box means the documentation for that item has been remediated against the source.", "",
-     "## Counts", "", f"- Framework-owned endpoints: {len(ENDPOINTS)}",
-     f"- Tables: {len(TABLES)} entries ({len({t[0] for t in TABLES})} distinct names)", "",
-     "## HTTP endpoints the framework owns", "",
-     "\"Live methods\" is the fixed set `LIVE_HTTP_METHODS` in `framework/src/live/routes.rs`.", ""]
+recs = []
 for path, methods, how, f, needle in ENDPOINTS:
-    L.append(f"- [{box(path)}] endpoint `{path}` · {f}:{locate(f, needle)}")
-    L.append(f"  - {methods}; {how}")
-
-L += ["", "## Database tables", ""]
-group = None
+    n, text = needle_line(f, needle)
+    recs.append({"id": path, "kind": "endpoint", "family": "endpoints-tables", "parent": None,
+                 "crate": "suprnova", "module": "endpoints", "file": f, "line": n,
+                 "details": {"methods": methods, "installed_by": how},
+                 "sig_hash": digest(text), "body_hash": None})
 for t, g, f, needle in TABLES:
-    if g != group:
-        group = g
-        L += ["", f"### {g}", ""]
     tag = ("scaffold" if g.startswith("`suprnova new`") else "magnetar" if g.startswith("Magnetar")
            else "operator" if g.startswith("operator") else "framework")
-    key = f"{t} ({tag})"
-    L.append(f"- [{box(key)}] table `{key}` · {f}:{locate(f, needle)}")
+    n, text = needle_line(f, needle)
+    recs.append({"id": f"{t} ({tag})", "kind": "table", "family": "endpoints-tables", "parent": None,
+                 "crate": "suprnova", "module": f"tables: {tag}", "file": f, "line": n,
+                 "details": {"table": t, "created_by": g.replace("`", "")},
+                 "sig_hash": digest(text), "body_hash": None})
 
-OUT.write_text("\n".join(L) + "\n")
-print(json.dumps({"endpoints": len(ENDPOINTS), "tables": len(TABLES), "checked_preserved": len(checked)}))
+OUT.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in recs))
+print(json.dumps({"records": len(recs), "endpoints": len(ENDPOINTS), "tables": len(TABLES)}))
