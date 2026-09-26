@@ -112,13 +112,14 @@ impl RelationKindAttr {
 
 /// One inline option declared inside `Kind<...> { ... }`.
 ///
-/// T1 ships the AST + parser. T2-T7 consume the variants when emitting
-/// concrete relation methods (e.g. `WithDefault` lands on `BelongsTo`
-/// in T2; `WithPivot` / `WithTimestamps` on `BelongsToMany` in T4).
-/// The `#[allow(dead_code)]` keeps the variants quiet until the
-/// downstream tasks wire them up.
+/// Every variant is consumed by `relations.rs` when emitting the
+/// concrete relation methods (e.g. `WithDefault` lands on `BelongsTo`;
+/// `WithPivot` / `WithTimestamps` on `BelongsToMany`).
+///
+/// Per-relation query filtering is a runtime concern, expressed with
+/// `Builder::with_where(("posts", |q| q.filter(...)))` rather than an
+/// inline option here.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum RelationOpt {
     /// `fk = "owner_id"` - override the column on the child table.
     ForeignKey(String),
@@ -133,8 +134,6 @@ pub enum RelationOpt {
     /// `with_default = || User { ... }` - closure producing a default
     /// value when `BelongsTo` finds no row.
     WithDefault(Expr),
-    /// `scope = |q| q.filter(...)` - apply a filter at query time.
-    Scope(Expr),
     /// `morph_name = "commentable"` - sets the morph family name on
     /// `MorphOne`/`MorphMany`/`MorphToMany`/`MorphedByMany`. For
     /// `MorphTo`, the family name comes from the declared relation
@@ -1172,10 +1171,6 @@ fn parse_relation_options(input: ParseStream, kind: RelationKindAttr) -> Result<
                     let expr: Expr = content.parse()?;
                     out.push(RelationOpt::WithDefault(expr));
                 }
-                "scope" => {
-                    let expr: Expr = content.parse()?;
-                    out.push(RelationOpt::Scope(expr));
-                }
                 "name" | "morph_name" => {
                     let s: LitStr = content.parse()?;
                     let v = s.value();
@@ -1248,7 +1243,7 @@ fn parse_relation_options(input: ParseStream, kind: RelationKindAttr) -> Result<
                         key.span(),
                         format!(
                             "unknown relation option `{other}`. Expected one of: fk, lk, \
-                             with_pivot, with_timestamps, with_default, scope, name, targets, \
+                             with_pivot, with_timestamps, with_default, name, targets, \
                              first_key, second_key, second_local_key, pivot_table, \
                              pivot_foreign_key, pivot_related_key, related_key, \
                              target_morph_type.",
@@ -2111,6 +2106,22 @@ mod tests {
     fn parse_relations_rejects_unknown_option() {
         let result = ModelInput::parse(
             quote! { relations = { posts: HasMany<Post> { not_a_thing = "x" } } },
+            quote! { pub struct User { pub id: i64 } },
+        );
+        let err = match result {
+            Ok(_) => panic!("expected error, got Ok"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("unknown relation option"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_relations_rejects_scope_option() {
+        // Per-relation filtering is a runtime concern
+        // (`Builder::with_where`), so `scope = |q| ...` is not a
+        // declaration-site option.
+        let result = ModelInput::parse(
+            quote! { relations = { posts: HasMany<Post> { scope = |q| q.filter("a", 1) } } },
             quote! { pub struct User { pub id: i64 } },
         );
         let err = match result {
