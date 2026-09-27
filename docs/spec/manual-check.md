@@ -121,6 +121,9 @@ Each finding is remediated by this table (MAN-102):
 
 A kept passage may still be corrected where its details are wrong about the
 intended behavior; it is not weakened to describe what the code does today.
+Where stating the intended behavior would mean naming API the issue has not
+settled, the passage keeps its accurate description of the gap, tied to the
+issue by its verdict, until the fix names it.
 
 The first row is for a slip: the manual names the right thing wrongly. When
 the manual's form is a different shape from anything the code offers, and
@@ -201,7 +204,7 @@ verification.
 [MAN-107] Every claim in the manual about the code's state in time - a
 limitation, a gap, a plan, a version-scoped caveat, or a sentence marked
 today, for now, currently, not yet, at the moment, follow-up, planned,
-known seam, will land, lands in, in a future, or v1 - MUST be verified against the source as the
+known seam, will land, lands in, in a future, yet, or v1 - MUST be verified against the source as the
 pass reaches it, and MUST carry a verdict. A stale claim is the manual's
 error: the text is corrected or cut. A true gap the code should close is a
 `code_bug` with an issue, and the manual states the intended behavior. A
@@ -251,10 +254,8 @@ When the hold began, one chapter was past its mirrors: `filesystem.md`,
 by one table row (the S3-compatible examples added on
 `eas4ai/nice-lamport-lhxidv`).
 
-## Open questions
+## Resolved questions
 
-- Several chapters carry framework-contributor material: the render cache
-  test-seam tables in `render-cache-operations.md`, the "where the code
-  lives" tables in `eloquent-serialization.md`. Under MAN-104 their hidden
-  names go. Does that material belong in the manual at all, or in the
-  crates' own docs?
+- Framework-contributor material (test and bench environment variables,
+  "where the code lives" tables) stays in the manual when accurate;
+  MAN-104 still takes the internal names out. Decided 2026-09-27.
