@@ -55,7 +55,7 @@ fn prompt_for_services(with_mailpit: bool, with_minio: bool) -> (bool, bool) {
 
     ui::br();
     ui::header("Optional Services");
-    ui::hint("MySQL and Redis are included by default.");
+    ui::hint("PostgreSQL and Redis are included by default.");
     ui::br();
 
     let include_mailpit = Confirm::with_theme(&ColorfulTheme::default())
