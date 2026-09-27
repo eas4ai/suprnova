@@ -59,6 +59,13 @@
    "fix": "#[suprnova::async_trait] (framework/src/lib.rs:557)",
    "gap": "none"
   },
+  "(Generalising the cursor shape to non-`i64` keys is on the follow-up list.)": {
+   "class": "code_bug",
+   "evidence": "Intended, by the developer's ruling of 2026-09-27; the cursor is an Option<i64> today (framework/src/eloquent/builder.rs:4264, lazy_by_id :4456) and a non-i64 key fails after the first batch (:4287-4292). eas4ai/suprnova#69.",
+   "fix": "State that chunk_by_id / lazy_by_id work with any orderable primary key; drop 'on the follow-up list'.",
+   "gap": "issue",
+   "issue": 69
+  },
   "**not yet** :: Genuinely planned, not yet on disk": {
    "class": "error",
    "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
@@ -189,6 +196,12 @@
    "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
    "gap": "none"
   },
+  "Inertia checkout components :: Ready-made billing pages are a planned starter-kit addition (Starter Kits)": {
+   "class": "error",
+   "evidence": "Stale: ready-made payment pages ship in the Directory starter (the developer, 2026-09-27; manual/starter-kits.md:52-60 describes its paid publication). The kits live in their own repositories.",
+   "fix": "Point to the Directory starter's payment pages instead of calling billing pages planned.",
+   "gap": "none"
+  },
   "Inertia::clearHistory()": {
    "class": "noise",
    "evidence": "Laravel / Inertia-Laravel / Laravel-Data names in a comparison column or labelled as Laravel's."
@@ -253,6 +266,13 @@
    "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
    "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
    "gap": "none"
+  },
+  "Numeric and boolean attributes are a planned enhancement; format them as strings at the call site for now.": {
+   "class": "code_bug",
+   "evidence": "Intended, by the developer's ruling of 2026-09-27; attributes are &[(&'static str, &str)] today and converted to string KeyValues (framework/src/telemetry/metrics.rs:36-40, :83, :98, :114). eas4ai/suprnova#70.",
+   "fix": "State typed attribute values (string, integer, float, boolean); drop 'planned enhancement' and 'for now'.",
+   "gap": "issue",
+   "issue": 70
   },
   "OutputFormat::Avif": {
    "class": "noise",
