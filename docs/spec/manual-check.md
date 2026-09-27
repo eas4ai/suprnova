@@ -192,14 +192,16 @@ said eager loads bypass the active transaction and a "Coverage scope"
 section said Eloquent reads do not fire `QueryExecuted`, and both had
 already been fixed and pinned by regression tests
 (`framework/tests/eloquent/relations_tx.rs`,
-`framework/tests/eloquent/read_instrumentation.rs`). On 2026-09-27 the
-manual held 99 such phrases across 47 chapters, and the developer ruled
-that day that every one of them requires inline verification.
+`framework/tests/eloquent/read_instrumentation.rs`). On 2026-09-27 a line
+search for the markers MAN-107 lists matched 193 lines in 58 chapters,
+not all of them claims (a bare `v1` is often an API version), and the
+developer ruled that day that every such claim requires inline
+verification.
 
 [MAN-107] Every claim in the manual about the code's state in time - a
 limitation, a gap, a plan, a version-scoped caveat, or a sentence marked
 today, for now, currently, not yet, at the moment, follow-up, planned,
-known seam, will land, or v1 - MUST be verified against the source as the
+known seam, will land, lands in, in a future, or v1 - MUST be verified against the source as the
 pass reaches it, and MUST carry a verdict. A stale claim is the manual's
 error: the text is corrected or cut. A true gap the code should close is a
 `code_bug` with an issue, and the manual states the intended behavior. A
