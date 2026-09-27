@@ -141,6 +141,10 @@ checked by hand against the source: `error`, `wrong_path`, `internal`,
 one can't pass unreviewed. The `extra` list holds problems the checker
 cannot see, such as a real API used wrongly.
 
+What the check must guarantee, and how a finding is remediated (the gap
+check before a cut, which findings become GitHub issues against the code),
+is specified in `docs/spec/manual-check.md`.
+
 ## Where records come from
 
 | Family | Extracted from |

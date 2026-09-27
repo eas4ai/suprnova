@@ -115,6 +115,7 @@ rather than duplicates.
 | CLI and scaffolding | - | none yet | `manual/installation.md`, `manual/artisan.md` |
 | Testing surfaces | - | none yet | `manual/testing.md`, `manual/http-tests.md`, `manual/database-testing.md`, `manual/mocking.md` |
 | Release and distribution | - | none yet | `README.md` (Distribution model), `CHANGELOG.md` |
+| The manual checked against the code, and remediating what the check finds | MAN | manual-check.md | Draft; tooling in `feature-map/`, commands in `feature-map/README.md` |
 
 Manual chapter names above are the published reference for each domain;
 where a chapter is named differently in `manual/documentation.md`, that
