@@ -346,6 +346,16 @@
     "payments-paddle.md:444"
    ],
    "ref": "PaddleProvider::archive_customer archives a customer"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: chained without_global_scope / without_global_scopes only set a mask that apply_to reads when the builder is built, so on a builder from Model::query() they do nothing (framework/src/eloquent/builder.rs:1957, :1985). eas4ai/suprnova#111. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 111,
+   "locations": [
+    "eloquent.md:1264"
+   ],
+   "ref": "chained without_global_scope removes the scope"
   }
  ],
  "verdicts": {

@@ -1261,12 +1261,11 @@ let all_tenants = Article::without_global_scope::<TenantScope>().get().await?;
 let everything = Article::without_global_scopes().get().await?;
 ```
 
-**Important:** the opt-out helpers must be the entry point. Chaining
-`.without_global_scope::<S>()` onto a builder already returned by
-`Model::query()` doesn't undo scopes that have already run -
-`Model::query()` applies scopes eagerly at construction time, so the
-mask is set too late. Use the per-model static helpers (above) for
-correct semantics.
+The opt-outs also chain: `Model::query().without_global_scope::<S>()`
+and `Model::query().without_global_scopes()` return the same rows as the
+static helpers. `Model::query()` applies scopes when it builds the
+query, and the builder remembers which constraint each scope added, so
+removing a scope afterwards takes its constraint back out.
 
 ### Where global scopes apply
 

@@ -1,7 +1,11 @@
 # Manual check - comparing the manual with the code
 
-Status: Draft
+Status: Agreed 2026-09-27
 Prefix: MAN
+
+Every requirement below was confirmed as Agreed on 2026-09-27 by the agent
+running the fix pass, under the developer's explicit delegation of that
+approval.
 
 The manual states how Suprnova should work; the code is checked against
 it, and so is the manual's own accuracy. The feature map (`feature-map/surface.jsonl`) is generated from the source at a
@@ -38,13 +42,15 @@ anyone's memory of the API MUST NOT establish it. Whether the manual or the
 code is wrong where they disagree MUST be decided by the gap check
 (MAN-101), not by assuming either side.
 Falsifier: A verdict's evidence cites no source location, or cites only the manual or the CHANGELOG for what the code does.
-Status: Draft
+Mechanism: review: every verdict cites source by file and line; `feature-map/tools/manual_triage.py` refuses a verdict without evidence.
+Status: Agreed 2026-09-27
 
 [MAN-002] The check MUST run against a surface built from the current
 source. When `feature-map/meta.json`'s `source_rev` is not the last commit
 that touched the source paths, the check MUST refuse to run.
 Falsifier: `manual_check.py` produces findings while `source_rev` lags the source.
-Status: Draft
+Mechanism: `feature-map/tools/manual_check.py` refuses a map stamped behind the source.
+Status: Agreed 2026-09-27
 
 [MAN-003] Every English chapter under `manual/` MUST be read through a
 CommonMark parser, and every Rust fenced block through tree-sitter-rust.
@@ -53,26 +59,30 @@ Every inline code span and every fenced block in `rust`, `bash`, `sh`,
 `svelte` MUST yield its references. Fences in any other language are not
 checked; that is a known hole, not coverage.
 Falsifier: A code reference in a checked context produces no row in the check output.
-Status: Draft
+Mechanism: `feature-map/tools/manual_check.py`.
+Status: Agreed 2026-09-27
 
 [MAN-004] Every extracted reference MUST receive exactly one outcome from
 the set `manual_check.py`'s docstring defines, and that docstring MUST stay
 the single definition of each outcome.
 Falsifier: A row carries an outcome outside the set, or a second definition of an outcome disagrees with the docstring.
-Status: Draft
+Mechanism: `feature-map/tools/manual_check.py` (the docstring is the outcome set).
+Status: Agreed 2026-09-27
 
 [MAN-005] Every reference with outcome `missing`, `wrong_path` or `hidden`
 MUST have a verdict in `manual-triage-verdicts.json`, with a class and
 evidence that cites the source by file and line. The triage run MUST fail
 while any such reference lacks one.
 Falsifier: `manual_triage.py` exits 0 while a `missing`, `wrong_path` or `hidden` finding has no verdict.
-Status: Draft
+Mechanism: `feature-map/tools/manual_triage.py` exits non-zero on an unreviewed reference.
+Status: Agreed 2026-09-27
 
 [MAN-006] A change that fixes or removes the manual text a verdict
 describes MUST remove that verdict in the same commit. A committed triage
 run MUST report no stale verdicts.
 Falsifier: `manual_triage.py` reports a non-empty `stale_verdicts` at a committed state.
-Status: Draft
+Mechanism: `feature-map/tools/manual_triage.py` exits non-zero on a stale verdict.
+Status: Agreed 2026-09-27
 
 [MAN-007] A problem the check cannot see - a wrong default, a real API
 used wrongly, a wrong claim about behavior - MUST be recorded under
@@ -80,13 +90,15 @@ used wrongly, a wrong claim about behavior - MUST be recorded under
 An `extra` entry does not go stale on its own; the change that fixes it
 MUST remove it.
 Falsifier: A hand-found manual error is neither fixed nor listed in `extra`.
-Status: Draft
+Mechanism: `feature-map/tools/manual_triage.py` checks `extra` entries under the verdict rules; review finds them.
+Status: Agreed 2026-09-27
 
 [MAN-008] The comparison covers the English chapters only. Translations,
 `README.md`, rustdoc and the CHANGELOG are outside it, and no report MUST
 claim otherwise.
 Falsifier: A report or commit message presents a translation or the README as checked.
-Status: Draft
+Mechanism: review.
+Status: Agreed 2026-09-27
 
 [MAN-009] The check MUST NOT presume a reference is the reader's own code
 without something in the manual backing that presumption. A `Type::member`
@@ -94,7 +106,8 @@ reference whose `Type` no Suprnova record has counts as the reader's own
 type only when a Rust block somewhere in the manual defines or imports
 `Type`; otherwise its outcome is `missing` and it goes to triage.
 Falsifier: A `Type::member` reference whose type neither a surface record nor any Rust block in the manual defines or imports receives the outcome `weak_missing`.
-Status: Draft
+Mechanism: `feature-map/tools/manual_check.py` (the MAN-009 pass after the walk).
+Status: Agreed 2026-09-27
 
 ## Remediation
 
@@ -152,14 +165,16 @@ names what was searched, and the `gap` field is `none` or `issue`. Where
 the gap check leaves doubt whether the manual's form was intended, the
 finding MUST be treated as intended.
 Falsifier: An `error` or `code_bug` verdict has no `gap` field, its evidence names no search, or an `error` verdict's evidence records doubt about intent.
-Status: Draft
+Mechanism: `feature-map/tools/manual_triage.py` requires `gap` on `error` and `code_bug` verdicts.
+Status: Agreed 2026-09-27
 
 [MAN-102] Each finding MUST be remediated by the table above. The manual
 MUST NOT describe anything nobody intended, and a passage the gap check tied
 to an issue MUST NOT be cut or rewritten to fit the code while that issue is
 open.
 Falsifier: A `gap: none` passage remains in the manual, or a passage tied to an open issue is cut or rewritten around the code's current behavior.
-Status: Draft
+Mechanism: review.
+Status: Agreed 2026-09-27
 
 [MAN-103] An issue filed under MAN-102 MUST describe the code: its title
 names the code's defect or missing capability, and its body gives what
@@ -169,7 +184,8 @@ MUST NOT ask for a manual change; the documentation pass makes that
 change. Existing issues MUST be searched first, and the verdict MUST record
 the issue number in `issue`.
 Falsifier: An issue's requested change is to the manual, or a `gap: issue` verdict has no `issue` number.
-Status: Draft
+Mechanism: `feature-map/tools/manual_triage.py` requires `issue` when `gap` is `issue`.
+Status: Agreed 2026-09-27
 
 [MAN-104] A `hidden` verdict MUST say who the item serves.
 Framework-internal - a test seam for the framework's own suite
@@ -181,21 +197,24 @@ keeps it and an issue asks for it to become supported API. A public
 equivalent exists: the manual switches to it and the verdict is `error`,
 as with `#[suprnova::__async_trait]` for `#[suprnova::async_trait]`.
 Falsifier: A `hidden` verdict does not say which of the three the item is.
-Status: Draft
+Mechanism: `feature-map/tools/manual_triage.py` requires `audience` on `hidden` verdicts.
+Status: Agreed 2026-09-27
 
 [MAN-105] A remediation change MUST do only what its findings need.
 Manual fixes go in the documentation pass; code changes go through their
 issue, in their own change, unless the developer rules otherwise. A
 documentation pass MUST NOT add features, services or infrastructure.
 Falsifier: A documentation-pass commit changes behavior under `framework/`, `crates/`, `suprnova-cli/` or `suprnova-macros/`.
-Status: Draft
+Mechanism: review.
+Status: Agreed 2026-09-27
 
 [MAN-106] Every change to the manual MUST re-run the check and the triage
 in the same change and commit with no unreviewed findings and no stale
 verdicts. A change that also touches source MUST regenerate the surface
 and restamp `source_rev` first.
 Falsifier: Re-running the check and triage on a committed state disagrees with the committed triage output.
-Status: Draft
+Mechanism: `feature-map/tools/manual_triage.py` exits non-zero on unreviewed findings and stale verdicts.
+Status: Agreed 2026-09-27
 
 Claims about the code's state in time are where the manual goes stale
 first, and the name check cannot see them: a "Limitations (v1)" section
@@ -223,11 +242,11 @@ record of the plan (`docs/spec`, `docs/commitments`, `docs/decisions`, the
 CHANGELOG) or the developer's word; the source cannot show intent, and
 without either the claim is the manual's error.
 Falsifier: A time-marked claim in an English chapter has no verdict, or a verdict that cites no source, or a claim that something is planned is kept with no plan record and no ruling from the developer.
-Status: Draft
+Mechanism: `feature-map/tools/manual_check.py` extracts `time_claim` findings; `feature-map/tools/manual_triage.py` requires a verdict for each.
+Status: Agreed 2026-09-27
 
 ## Mechanisms
 
-No block here names a mechanism yet; each gets one when it is agreed.
 What exists:
 
 - MAN-002, MAN-003, MAN-004, MAN-009: `feature-map/tools/manual_check.py`,
