@@ -210,6 +210,18 @@ already scopes the check to English). `.manual-translations.lock` keeps
 recording which English chapters moved past their mirrors, which is the
 list to retranslate when the hold lifts.
 
+While the hold stands, the translation gate has to stand down with it.
+The full local gate blocks on any English edit until the mirrors are
+re-stamped (`docs/recon.md`), and a stale mirror blocks a release
+(`overview.md`). That step lives in the gate scripts on the developer's
+machine (`local/gate-infra`), not in this repository, so it is turned off
+or made non-blocking there; otherwise every English edit in the pass fails
+the gate. Translation on suprnova.app is disabled in the site's own
+repository. When the hold began, the ledger already showed two chapters
+past their mirrors: `filesystem.md` (the S3-compatible table row on
+`eas4ai/nice-lamport-lhxidv`) and `CHANGELOG.md` (already drifted on
+`main`).
+
 ## Open questions
 
 - Several chapters carry framework-contributor material: the render cache
