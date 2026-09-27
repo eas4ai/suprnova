@@ -3,7 +3,7 @@
 Suprnova ships two CLI commands that generate Docker artifacts you can
 adopt verbatim or modify. `docker:init` writes a multi-stage `Dockerfile` + `.dockerignore` for production. `docker:compose` writes a
 `docker-compose.yml` for local development services (database, cache, and
-optionally Mailpit + RustFS). Both commands write into the current project
+optionally Mailpit + MinIO). Both commands write into the current project
 root; neither tries to drive your container runtime.
 
 ## docker:init
@@ -112,7 +112,7 @@ per-developer overrides locally without committing them.
 | Option | Description |
 |--------|-------------|
 | `--with-mailpit` | Include the Mailpit email-testing service |
-| `--with-rustfs` | Include RustFS (S3-compatible object storage). `--with-minio` is accepted as an alias. |
+| `--with-minio` | Include MinIO (S3-compatible object storage) |
 
 If you pass neither flag, the command prompts interactively for both.
 Passing either flag skips the prompt and uses the flag values you gave.
@@ -138,15 +138,12 @@ When you opt in:
 | Service | Default ports | Image |
 |---------|--------------:|-------|
 | Mailpit | 1025 (SMTP), 8025 (UI) | `axllent/mailpit:latest` |
-| RustFS | 9000 (S3 API), 9001 (Console) | `rustfs/rustfs:latest` |
+| MinIO | 9000 (S3 API), 9001 (Console) | `minio/minio:latest` |
 
 Mailpit defaults to accepting any SMTP auth so you don't have to
 configure credentials during development; the web UI at
-`http://localhost:8025` shows every email your app sends. RustFS's access
-key defaults to `suprnova`; its secret key is generated per project,
-written into `docker-compose.yml`, and printed once by `docker:compose`.
-Override either with `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY`. The console
-is at `http://localhost:9001`.
+`http://localhost:8025` shows every email your app sends. MinIO's
+default credentials are `minioadmin` / `minioadmin`.
 
 ### Running the stack
 
@@ -178,26 +175,14 @@ REDIS_URL=redis://localhost:6379
 MAIL_DRIVER=smtp
 MAIL_HOST=localhost
 MAIL_PORT=1025
-```
 
-A generated project reads no storage env vars on its own. To use RustFS,
-create a bucket in its console, then register an S3 disk against it at
-boot:
-
-```rust
-use suprnova::{S3Config, Storage};
-
-Storage::register_s3(
-    "uploads",
-    S3Config {
-        bucket: "uploads".into(),
-        region: Some("us-east-1".into()),
-        endpoint: Some("http://127.0.0.1:9000".into()),
-        access_key_id: Some("suprnova".into()),
-        secret_access_key: std::env::var("RUSTFS_SECRET_KEY").ok(),
-        root: None,
-    },
-)?;
+# MinIO (if enabled)
+FILESYSTEM_DISK=s3
+S3_ENDPOINT=http://localhost:9000
+S3_ACCESS_KEY=minioadmin
+S3_SECRET_KEY=minioadmin
+S3_BUCKET=local
+S3_REGION=us-east-1
 ```
 
 To override a port (e.g. because 5432 is already in use), set the
@@ -215,8 +200,8 @@ The full set of overridable ports:
 | `REDIS_PORT` | Redis | 6379 |
 | `MAILPIT_SMTP_PORT` | Mailpit SMTP | 1025 |
 | `MAILPIT_UI_PORT` | Mailpit UI | 8025 |
-| `RUSTFS_API_PORT` | RustFS S3 API | 9000 |
-| `RUSTFS_CONSOLE_PORT` | RustFS Console | 9001 |
+| `MINIO_API_PORT` | MinIO S3 | 9000 |
+| `MINIO_CONSOLE_PORT` | MinIO Console | 9001 |
 
 ### Customising the compose file
 
@@ -258,7 +243,7 @@ and the platform guides for fully-worked examples:
 | Command | Writes | When to use |
 |---------|--------|-------------|
 | `suprnova docker:init` | `Dockerfile`, `.dockerignore` | Building production images |
-| `suprnova docker:compose` | `docker-compose.yml` | Bringing up local Postgres/Redis/Mailpit/RustFS |
+| `suprnova docker:compose` | `docker-compose.yml` | Bringing up local Postgres/Redis/Mailpit/MinIO |
 
 ## Next
 

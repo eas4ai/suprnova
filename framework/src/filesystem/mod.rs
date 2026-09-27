@@ -139,7 +139,7 @@ pub struct S3Config {
     pub bucket: String,
     /// AWS region (e.g. `"us-east-1"`).
     pub region: Option<String>,
-    /// Custom endpoint, for S3-compatible services (RustFS, MinIO, R2, etc.).
+    /// Custom endpoint, for S3-compatible services (MinIO, R2, etc.).
     pub endpoint: Option<String>,
     /// Static access key id. Leave `None` to use the default provider chain.
     pub access_key_id: Option<String>,

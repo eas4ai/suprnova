@@ -41,7 +41,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-{mailpit_service}{rustfs_service}
+{mailpit_service}{minio_service}
 volumes:
   postgres_data:
   redis_data:{additional_volumes}

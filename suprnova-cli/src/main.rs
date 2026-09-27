@@ -303,9 +303,9 @@ enum Commands {
         /// Include Mailpit email testing service
         #[arg(long)]
         with_mailpit: bool,
-        /// Include RustFS S3-compatible storage service
-        #[arg(long, alias = "with-minio")]
-        with_rustfs: bool,
+        /// Include MinIO S3-compatible storage service
+        #[arg(long)]
+        with_minio: bool,
     },
     /// Run all due scheduled tasks once (typically called by cron every minute)
     #[command(name = "schedule:run")]
@@ -508,9 +508,9 @@ fn main() {
         }
         Commands::DockerCompose {
             with_mailpit,
-            with_rustfs,
+            with_minio,
         } => {
-            commands::docker_compose::run(with_mailpit, with_rustfs);
+            commands::docker_compose::run(with_mailpit, with_minio);
         }
         Commands::ScheduleRun => {
             commands::schedule_run::run();
