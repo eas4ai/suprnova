@@ -30,6 +30,37 @@
     "console.md:210"
    ],
    "ref": "console.md: the global CLI deliberately does not run app tasks like db:seed"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: MorphTo::morph_id is i64 (framework/src/eloquent/relations/morph.rs:490). eas4ai/suprnova#78. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 78,
+   "locations": [
+    "eloquent.md:1774"
+   ],
+   "ref": "eloquent.md: MorphTo targets take any primary key type"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: the eager dispatcher refuses nested morph paths (framework/src/eloquent/relations/eager.rs:32-35). eas4ai/suprnova#79. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 79,
+   "locations": [
+    "eloquent.md:1777",
+    "eloquent.md:1958"
+   ],
+   "ref": "eloquent.md: nested eager loading through MorphTo"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: the keyset cursor is an Option<i64> (framework/src/eloquent/builder.rs:4264, :4456). eas4ai/suprnova#69. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 69,
+   "locations": [
+    "eloquent.md:2228"
+   ],
+   "ref": "eloquent.md: chunk_by_id works with any orderable primary key"
   }
  ],
  "verdicts": {
@@ -75,26 +106,9 @@
    "fix": "#[suprnova::async_trait] (framework/src/lib.rs:557)",
    "gap": "none"
   },
-  "(Generalising the cursor shape to non-`i64` keys is on the follow-up list.)": {
-   "class": "code_bug",
-   "evidence": "Intended, by the developer's ruling of 2026-09-27; the cursor is an Option<i64> today (framework/src/eloquent/builder.rs:4264, lazy_by_id :4456) and a non-i64 key fails after the first batch (:4287-4292). eas4ai/suprnova#69.",
-   "fix": "State that chunk_by_id / lazy_by_id work with any orderable primary key; drop 'on the follow-up list'.",
-   "gap": "issue",
-   "issue": 69
-  },
   "A Channel variant where the server tracks who is currently subscribed and emits join/leave events with each member's metadata.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
-  },
-  "A follow-up sweep will adapt the trait to the dispatch helper.": {
-   "class": "error",
-   "evidence": "Stale: every relation leaf routes through the active transaction (26 ExecutorChoice resolutions in suprnova-macros/src/model/relations.rs, none direct), pinned by framework/tests/eloquent/relations_tx.rs.",
-   "fix": "Cut the eager-load bullet of 'Limitations (v1)'; keep the MySQL DDL implicit-commit caveat as a plain statement.",
-   "gap": "none"
-  },
-  "A handful of things the v1 surface holds off on.": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
   },
   "A panic in a handler is caught and turned into a structured 500 response; the backtrace lands in your logs without taking the server down.": {
    "class": "noise",
@@ -260,11 +274,6 @@
    "class": "hidden",
    "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Internal executor dispatch (framework/src/database/transaction.rs:367-371)."
   },
-  "ExecutorChoice::resolve_read": {
-   "audience": "framework-internal",
-   "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Internal routing step (framework/src/database/transaction.rs:447-455); the precedence it implements is what readers need."
-  },
   "FAKE_GUARDS": {
    "class": "internal",
    "evidence": "Private statics in the fake/testing modules (framework/src/*/testing.rs, container/testing.rs)."
@@ -280,12 +289,6 @@
   "For non-GET Inertia visits, the framework auto-converts the response to `303 See Other` when `Inertia303Middleware` is installed, so the browser issues a clean follow-up GET instead of re-submitting the original PUT/PATCH/DELETE to the redirect target.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
-  },
-  "For now, scope tx work to direct `Model::*` / `Builder::*` / `DB::table(...)` calls; defer relation loads until after the outer write lands (or before `DB::begin_transaction` on the manual path).": {
-   "class": "error",
-   "evidence": "Stale: every relation leaf routes through the active transaction (26 ExecutorChoice resolutions in suprnova-macros/src/model/relations.rs, none direct), pinned by framework/tests/eloquent/relations_tx.rs.",
-   "fix": "Cut the eager-load bullet of 'Limitations (v1)'; keep the MySQL DDL implicit-commit caveat as a plain statement.",
-   "gap": "none"
   },
   "For outgoing multipart uploads today, drop down to `reqwest::Client` directly via the same escape route.": {
    "class": "restate",
@@ -331,12 +334,6 @@
    "class": "internal",
    "evidence": "Private static (framework/src/config/env.rs:28)."
   },
-  "Limitations (v1)": {
-   "class": "error",
-   "evidence": "Stale: every relation leaf routes through the active transaction (26 ExecutorChoice resolutions in suprnova-macros/src/model/relations.rs, none direct), pinned by framework/tests/eloquent/relations_tx.rs.",
-   "fix": "Cut the eager-load bullet of 'Limitations (v1)'; keep the MySQL DDL implicit-commit caveat as a plain statement.",
-   "gap": "none"
-  },
   "MARIADB_URL": {
    "class": "code_bug",
    "evidence": "database-testing.md uses these as the reader's own convention (correct there). vector.md:324 says env-vars.md documents QDRANT_URL / MARIADB_URL as driver env contracts: the framework reads neither outside its own tests (framework/tests/vector/*), and env-vars.md lists neither. PINECONE_API_KEY is real (framework/src/vector/pinecone.rs:230) but also absent from env-vars.md. Treated as intended (the Pinecone driver already reads its env; vector.md names these as the drivers' env contracts); eas4ai/suprnova#74.",
@@ -360,12 +357,6 @@
    "class": "hidden",
    "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Macro plumbing for `appends` (framework/src/eloquent/model.rs:205-211)."
   },
-  "Model::global_scope::<GS>()": {
-   "class": "error",
-   "evidence": "No `global_scope` method exists; global scopes register with `ScopeRegistry::register::<M, _>(scope)`, as eloquent.md itself shows further down. Slip: the real form is documented as the way in eloquent.md (`ScopeRegistry::register::<M, _>(scope)`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "ScopeRegistry::register::<M, _>(scope)",
-   "gap": "none"
-  },
   "Model::scope_name(args)": {
    "class": "noise",
    "evidence": "Generated per scope by `#[scopes]` (suprnova-macros/src/scopes.rs:268)."
@@ -380,12 +371,6 @@
    "class": "verified",
    "evidence": "A plan claim standing on the developer's word: on 2026-09-27 the developer confirmed more starter kits are planned. The kits live in their own repositories."
   },
-  "Nested eager loading through MorphTo is also not supported in v1 - `with([\"commentable.user\"])` where `commentable` is a `MorphTo` returns an error from the recurse-eager-load dispatcher.": {
-   "class": "code_bug",
-   "evidence": "The eager dispatcher refuses nested paths through MorphTo (framework/src/eloquent/relations/eager.rs:32-35); treated as intended (Laravel resolves them). eas4ai/suprnova#79.",
-   "gap": "issue",
-   "issue": 79
-  },
   "Nothing retires the fallback automatically: `Crypt::encrypt_string(CryptPurpose::Cookie, ...)` still mints v1, and the un-contexted entry point is superseded with removal scheduled for 1.4.0.": {
    "class": "code_bug",
    "evidence": "Intended removal on record (CHANGELOG.md:2155, :2560-2569), but 1.4.0 was never released and the fallback survived into 2.x (framework/src/http/cookie.rs:496-505, framework/src/crypto/mod.rs:341-345). eas4ai/suprnova#77.",
@@ -399,10 +384,6 @@
    "fix": "State typed attribute values (string, integer, float, boolean); drop 'planned enhancement' and 'for now'.",
    "gap": "issue",
    "issue": 70
-  },
-  "Observer structs the macro inspects must be zero-sized (no fields) in v1.": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
   },
   "Out of v1 Scope": {
    "class": "restate",
@@ -701,10 +682,6 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
-  "The relation kinds shipped today:": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
-  },
   "The row never lands in the database - cancel is a true abort, not a \"delete after the fact\".": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
@@ -724,12 +701,6 @@
   "The version middleware re-flashes the session before bouncing the client, so a flashed error survives the follow-up full-page GET; it can only do that inside a session scope.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
-  },
-  "This is a known seam - the routing helper (`ExecutorChoice`) is already in place at every SQL leaf; the blocker is `EagerLoadDispatch::eager_load` taking `&DatabaseConnection` (concrete), which the macro emits for every relation kind.": {
-   "class": "error",
-   "evidence": "Stale: every relation leaf routes through the active transaction (26 ExecutorChoice resolutions in suprnova-macros/src/model/relations.rs, none direct), pinned by framework/tests/eloquent/relations_tx.rs.",
-   "fix": "Cut the eager-load bullet of 'Limitations (v1)'; keep the MySQL DDL implicit-commit caveat as a plain statement.",
-   "gap": "none"
   },
   "This is the canonical pattern when one model's id needs to flow into a follow-up insert.": {
    "class": "noise",
@@ -800,10 +771,6 @@
    "evidence": "WebP is encoded lossless only, so quality is a no-op (framework/src/media/driver.rs:35-36); treated as intended. eas4ai/suprnova#83.",
    "gap": "issue",
    "issue": 83
-  },
-  "What's not in v1": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
   },
   "When `MAIL_FILE_PATH` is unset, mail lands in `storage_path(\"mail\")` - the same path family every other `storage/` consumer uses, so the directory stays inside the application base even when a service manager starts the process from somewhere else.": {
    "class": "noise",
@@ -1155,10 +1122,6 @@
    "evidence": "Intended (the manual states v2 generalises the morph id); MorphTo::morph_id is i64 (framework/src/eloquent/relations/morph.rs:490). eas4ai/suprnova#78.",
    "gap": "issue",
    "issue": 78
-  },
-  "v1 restrictions": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
   },
   "where!()": {
    "class": "code_bug",
