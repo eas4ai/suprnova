@@ -186,6 +186,29 @@ and restamp `source_rev` first.
 Falsifier: Re-running the check and triage on a committed state disagrees with the committed triage output.
 Status: Draft
 
+Claims about the code's state in time are where the manual goes stale
+first, and the name check cannot see them: a "Limitations (v1)" section
+said eager loads bypass the active transaction and a "Coverage scope"
+section said Eloquent reads do not fire `QueryExecuted`, and both had
+already been fixed and pinned by regression tests
+(`framework/tests/eloquent/relations_tx.rs`,
+`framework/tests/eloquent/read_instrumentation.rs`). On 2026-09-27 the
+manual held 99 such phrases across 47 chapters, and the developer ruled
+that day that every one of them requires inline verification.
+
+[MAN-107] Every claim in the manual about the code's state in time - a
+limitation, a gap, a plan, a version-scoped caveat, or a sentence marked
+today, for now, currently, not yet, at the moment, follow-up, planned,
+known seam, will land, or v1 - MUST be verified against the source as the
+pass reaches it, and MUST carry a verdict. A stale claim is the manual's
+error: the text is corrected or cut. A true gap the code should close is a
+`code_bug` with an issue, and the manual states the intended behavior. A
+true constraint that is intended, such as a database's own behavior or a
+design choice, stays, stated as how Suprnova works rather than as a
+moment in its history.
+Falsifier: A time-marked claim in an English chapter has no verdict, or a verdict that cites no source.
+Status: Draft
+
 ## Mechanisms
 
 No block here names a mechanism yet; each gets one when it is agreed.
@@ -199,6 +222,9 @@ What exists and what is still to build:
 - MAN-006: to build. `manual_triage.py` reports stale verdicts but exits 0.
 - MAN-101, MAN-103: to build. `manual_triage.py` should require `gap` on
   `error` and `code_bug` verdicts, and `issue` when `gap` is `issue`.
+- MAN-107: to build. `manual_check.py` extracts time-marked prose
+  sentences as findings, and `manual_triage.py` requires a verdict for
+  each, so a claim cannot pass unverified.
 - MAN-001, MAN-007, MAN-008, MAN-102, MAN-104, MAN-105, MAN-106: review.
 
 ## Translations
