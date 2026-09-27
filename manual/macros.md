@@ -106,7 +106,7 @@ and uploaded files in one struct, with per-field type-level validators.
 
 ```rust
 use suprnova::{MultipartRequest};
-use suprnova::http::upload::{ImageFile, MaxSize, UploadedFile};
+use suprnova::{ImageFile, MaxSize, UploadedFile};
 
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
@@ -696,7 +696,7 @@ fields:
 
 ```rust
 use suprnova::{validate, ValidationErrors};
-use suprnova::validation::rules::*;
+use suprnova::rules::*;
 
 fn validate_form(self_ref: &SignupForm) -> Result<(), ValidationErrors> {
     validate! { self_ref =>
@@ -712,7 +712,7 @@ fn validate_form(self_ref: &SignupForm) -> Result<(), ValidationErrors> {
 attributes (e.g. `#[validate(email)]`) come from `validator` and run
 through `FormRequest`'s sync path. Use `validate!` when you need
 contextual / cross-field rules, async rules, or rules from the
-`suprnova::validation::rules` palette. See [Validation](validation.md).
+`suprnova::rules` palette. See [Validation](validation.md).
 
 ## Factories
 

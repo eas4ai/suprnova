@@ -61,6 +61,47 @@
     "eloquent.md:2228"
    ],
    "ref": "eloquent.md: chunk_by_id works with any orderable primary key"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: the base endpoint shadows them (framework/src/telemetry/init.rs:33-36). eas4ai/suprnova#80. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 80,
+   "locations": [
+    "observability.md:310"
+   ],
+   "ref": "observability.md: per-signal OTLP endpoints take precedence"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: attributes are &[(&'static str, &str)] (framework/src/telemetry/metrics.rs:36-40). eas4ai/suprnova#70. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 70,
+   "locations": [
+    "observability.md:350"
+   ],
+   "ref": "observability.md: metric attribute values are typed"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: one process-global driver (framework/src/queue/mod.rs:60). eas4ai/suprnova#81. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 81,
+   "locations": [
+    "queues.md:746"
+   ],
+   "ref": "queues.md: a job connection selects its driver"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: WebP is lossless only (framework/src/media/driver.rs:35-36). eas4ai/suprnova#83. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 83,
+   "locations": [
+    "images.md:149",
+    "images.md:162"
+   ],
+   "ref": "images.md: quality() switches WebP to lossy"
   }
  ],
  "verdicts": {
@@ -79,21 +120,9 @@
    "evidence": "`#[factory(...)]` accepts only `name` (suprnova-macros/src/factory.rs); there is no `model` key. Slip: the real form is documented as the way in the factory surface: `#[derive(Factory)]` on the model, whose `#[factory(...)]` takes only `name` (suprnova-macros/src/factory.rs:58-74). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
    "gap": "none"
   },
-  "#[fillable]": {
-   "class": "error",
-   "evidence": "No `fillable` / `guarded` attribute and no `Fillable` trait; they are `fillable = [...]` / `guarded = [...]` arguments of `#[model]` (suprnova-macros/src/model/parse.rs:774). Slip: the real form is documented as the way in seven chapters (`fillable = [...]` / `guarded = [...]` inside `#[model]`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "fillable = [...] / guarded = [...] inside #[model(...)]",
-   "gap": "none"
-  },
   "#[global_scope]": {
    "class": "noise",
    "evidence": "The manual states these do NOT exist, which is correct."
-  },
-  "#[guarded]": {
-   "class": "error",
-   "evidence": "No `fillable` / `guarded` attribute and no `Fillable` trait; they are `fillable = [...]` / `guarded = [...]` arguments of `#[model]` (suprnova-macros/src/model/parse.rs:774). Slip: the real form is documented as the way in seven chapters (`fillable = [...]` / `guarded = [...]` inside `#[model]`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "fillable = [...] / guarded = [...] inside #[model(...)]",
-   "gap": "none"
   },
   "#[scope]": {
    "class": "noise",
@@ -137,28 +166,9 @@
    "class": "verified",
    "evidence": "A dated historical fact: API stability from 1.0.0; releases are git tags (CHANGELOG.md)."
   },
-  "BackoffSchedule::exponential": {
-   "class": "error",
-   "evidence": "`BackoffSchedule` is an enum with variants Fixed, Exponential, Sequence; there are no `linear` / `exponential` constructors. Slip: the real form is documented as the way in queues.md:693 (the `BackoffSchedule` enum variants; a linear schedule is `Sequence`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "BackoffSchedule::Fixed / Exponential / Sequence",
-   "gap": "none"
-  },
-  "BackoffSchedule::linear": {
-   "class": "error",
-   "evidence": "`BackoffSchedule` is an enum with variants Fixed, Exponential, Sequence; there are no `linear` / `exponential` constructors. Slip: the real form is documented as the way in queues.md:693 (the `BackoffSchedule` enum variants; a linear schedule is `Sequence`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "BackoffSchedule::Fixed / Exponential / Sequence",
-   "gap": "none"
-  },
   "Both are idempotent against an already-applied database (the v1 uses `CREATE TABLE IF NOT EXISTS`; the v2 is a column add).": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
-  },
-  "Builder::without_global_scope": {
-   "audience": "public-equivalent",
-   "class": "error",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. The builder method is silently ineffective after Model::query() (framework/src/eloquent/builder.rs:1925-1957); the macro-emitted static helper is the public surface.",
-   "fix": "Model::without_global_scope::<S>(), the static helper #[model] emits (suprnova-macros/src/model/derive_eloquent.rs:1319)",
-   "gap": "none"
   },
   "CACHE_REDIS_TEST_URL": {
    "class": "test_suite",
@@ -187,11 +197,6 @@
   "Confirm the exact field path against your Paddle API version when shipping this - the SDK does not currently model the `status` enum directly.": {
    "class": "unverified",
    "evidence": "A claim about paddle_rust_sdk 0.18's type coverage (Cargo.lock: 0.18.0); an external crate this repository cannot settle."
-  },
-  "ConnectionRegistry::clear()": {
-   "audience": "framework-internal",
-   "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Called by TestContainerGuard::drop (framework/src/database/connection_registry.rs:190-198); \"Production code does not call this.\""
   },
   "Cross-thread reads see the scope of the task currently running on that thread, not whatever scope was installed last.": {
    "class": "noise",
@@ -269,11 +274,6 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
-  "ExecutorChoice": {
-   "audience": "framework-internal",
-   "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Internal executor dispatch (framework/src/database/transaction.rs:367-371)."
-  },
   "FAKE_GUARDS": {
    "class": "internal",
    "evidence": "Private statics in the fake/testing modules (framework/src/*/testing.rs, container/testing.rs)."
@@ -281,10 +281,6 @@
   "FAKE_SERIAL": {
    "class": "internal",
    "evidence": "Private statics in the fake/testing modules (framework/src/*/testing.rs, container/testing.rs)."
-  },
-  "Five formats are read and written today: PNG, JPEG, WebP, GIF, and BMP.": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
   },
   "For non-GET Inertia visits, the framework auto-converts the response to `303 See Other` when `Inertia303Middleware` is installed, so the browser issues a clean follow-up GET instead of re-submitting the original PUT/PATCH/DELETE to the redirect target.": {
    "class": "noise",
@@ -378,13 +374,6 @@
    "gap": "issue",
    "issue": 77
   },
-  "Numeric and boolean attributes are a planned enhancement; format them as strings at the call site for now.": {
-   "class": "code_bug",
-   "evidence": "Intended, by the developer's ruling of 2026-09-27; attributes are &[(&'static str, &str)] today and converted to string KeyValues (framework/src/telemetry/metrics.rs:36-40, :83, :98, :114). eas4ai/suprnova#70.",
-   "fix": "State typed attribute values (string, integer, float, boolean); drop 'planned enhancement' and 'for now'.",
-   "gap": "issue",
-   "issue": 70
-  },
   "Out of v1 Scope": {
    "class": "restate",
    "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
@@ -401,12 +390,6 @@
    "class": "noise",
    "evidence": "The reader's own env-var convention for their tests (database-testing.md); correct as written."
   },
-  "Per-signal endpoint overrides (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `_METRICS_ENDPOINT`, `_LOGS_ENDPOINT`) are currently shadowed by the base endpoint - all three signals go to `OTEL_EXPORTER_OTLP_ENDPOINT`.": {
-   "class": "code_bug",
-   "evidence": "Per-signal OTLP endpoints are shadowed by the explicit base endpoint (framework/src/telemetry/init.rs:33-36, :284, :306, :335). eas4ai/suprnova#80.",
-   "gap": "issue",
-   "issue": 80
-  },
   "Pointing it at the database - via `/_suprnova/health/ready` or the older `/_suprnova/health?db=true` - means a database blip restarts every replica at the moment the database can least afford a reconnect storm.": {
    "class": "verified",
    "evidence": "Both /_suprnova/health/ready and /_suprnova/health?db=true exist (framework/src/config/providers/server.rs:104, :351)."
@@ -415,27 +398,11 @@
    "class": "noise",
    "evidence": "Laravel / Inertia-Laravel / Laravel-Data names in a comparison column or labelled as Laravel's."
   },
-  "Prunable::prunable_query()": {
-   "class": "error",
-   "evidence": "`Prunable` has `prunable` and `pruning`; there is no `prunable_query`. Slip: the real form is documented as the way in eloquent.md and macros.md (`Prunable::prunable`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "Prunable::prunable",
-   "gap": "none"
-  },
   "QDRANT_URL": {
    "class": "code_bug",
    "evidence": "database-testing.md uses these as the reader's own convention (correct there). vector.md:324 says env-vars.md documents QDRANT_URL / MARIADB_URL as driver env contracts: the framework reads neither outside its own tests (framework/tests/vector/*), and env-vars.md lists neither. PINECONE_API_KEY is real (framework/src/vector/pinecone.rs:230) but also absent from env-vars.md. Treated as intended (the Pinecone driver already reads its env; vector.md names these as the drivers' env contracts); eas4ai/suprnova#74.",
    "gap": "issue",
    "issue": 74
-  },
-  "Queue::bootstrap_default()": {
-   "class": "wrong_path",
-   "evidence": "Free functions `suprnova::queue::bootstrap_from_env` / `bootstrap_default` (framework/src/queue/mod.rs:1269,1292), not methods on `Queue`.",
-   "fix": "suprnova::queue::bootstrap_from_env()"
-  },
-  "Queue::bootstrap_from_env()": {
-   "class": "wrong_path",
-   "evidence": "Free functions `suprnova::queue::bootstrap_from_env` / `bootstrap_default` (framework/src/queue/mod.rs:1269,1292), not methods on `Queue`.",
-   "fix": "suprnova::queue::bootstrap_from_env()"
   },
   "REDIS_TEST_URL": {
    "class": "test_suite",
@@ -582,28 +549,6 @@
    "fix": "Server::run",
    "gap": "none"
   },
-  "So HEIC ingestion works today: install ImageMagick with libheif through your package manager and flip the env var.": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
-  },
-  "Suprnova::Notifications::Failed": {
-   "class": "error",
-   "evidence": "Notification events are `NotificationSending`, `NotificationSent`, `NotificationFailed` (framework/src/notifications/events.rs:32,51,73). The same table row for Mail uses PHP namespace syntax (`Suprnova\\Mail\\...`). Slip: the real form is documented as the way in notifications.md, observability.md and web-push.md (`NotificationSending` / `NotificationSent` / `NotificationFailed`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "NotificationSending / NotificationSent / NotificationFailed; fix the Mail row too",
-   "gap": "none"
-  },
-  "Suprnova::Notifications::Sending": {
-   "class": "error",
-   "evidence": "Notification events are `NotificationSending`, `NotificationSent`, `NotificationFailed` (framework/src/notifications/events.rs:32,51,73). The same table row for Mail uses PHP namespace syntax (`Suprnova\\Mail\\...`). Slip: the real form is documented as the way in notifications.md, observability.md and web-push.md (`NotificationSending` / `NotificationSent` / `NotificationFailed`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "NotificationSending / NotificationSent / NotificationFailed; fix the Mail row too",
-   "gap": "none"
-  },
-  "Suprnova::Notifications::Sent": {
-   "class": "error",
-   "evidence": "Notification events are `NotificationSending`, `NotificationSent`, `NotificationFailed` (framework/src/notifications/events.rs:32,51,73). The same table row for Mail uses PHP namespace syntax (`Suprnova\\Mail\\...`). Slip: the real form is documented as the way in notifications.md, observability.md and web-push.md (`NotificationSending` / `NotificationSent` / `NotificationFailed`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "NotificationSending / NotificationSent / NotificationFailed; fix the Mail row too",
-   "gap": "none"
-  },
   "Sync gates work transparently from the async path (`Gate::allows_async` dispatches them without an `.await`), so a codebase can register sync gates today and migrate individual abilities to async later without changing call sites.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
@@ -619,12 +564,6 @@
   "That's why every generator prints a `Created src/.../mod.rs` or `Updated src/.../mod.rs` line - the wiring is part of the work, not a follow-up step you remember on your own.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
-  },
-  "The Eloquent ORM (`Builder<M>::get` / `first` / `count`, model CRUD) matches the `ExecutorChoice` `Tx` / `Pool` arms directly today rather than calling through the instrumented helpers - adopting the helpers (and therefore the observation hook) lands in the Eloquent module.": {
-   "class": "error",
-   "evidence": "Stale: Eloquent reads go through the instrumented executor and fire QueryExecuted (framework/src/eloquent/builder.rs:3710-3719), pinned by framework/tests/eloquent/read_instrumentation.rs. No plan needed; the gap is closed.",
-   "fix": "State that every query, ORM included, fires QueryExecuted; drop 'today' and the ExecutorChoice name.",
-   "gap": "none"
   },
   "The Vite output lands in `frontend/dist/`.": {
    "class": "noise",
@@ -660,12 +599,6 @@
    "fix": "Name the current release, or describe pinning a tag without a hardcoded version.",
    "gap": "none"
   },
-  "The connection resolves the connection name carried on the `JobQueueing` / `JobQueued` lifecycle events, which is what listeners and dashboards see; one process-global driver still receives every push, so routing a job's connection does not yet select a different driver.": {
-   "class": "code_bug",
-   "evidence": "One process-global queue driver receives every push (framework/src/queue/mod.rs:60, :1228); the manual states per-connection drivers will land. eas4ai/suprnova#81.",
-   "gap": "issue",
-   "issue": 81
-  },
   "The file lands in `frontend/src/pages/` with the per-frontend extension: `AboutPage.svelte` for Svelte, `AboutPage.tsx` for React, `AboutPage.vue` for Vue.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
@@ -691,12 +624,6 @@
    "evidence": "Stale release numbers: the current release is 2.1.0 (CHANGELOG.md:7).",
    "fix": "Name the current release, or describe pinning a tag without a hardcoded version.",
    "gap": "none"
-  },
-  "The two dimensions run at different depths today.": {
-   "class": "code_bug",
-   "evidence": "One process-global queue driver receives every push (framework/src/queue/mod.rs:60, :1228); the manual states per-connection drivers will land. eas4ai/suprnova#81.",
-   "gap": "issue",
-   "issue": 81
   },
   "The version middleware re-flashes the session before bouncing the client, so a flashed error survives the follow-up full-page GET; it can only do that inside a session scope.": {
    "class": "noise",
@@ -734,12 +661,6 @@
    "class": "restate",
    "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
   },
-  "Today, `QueryExecuted` fires for every query that goes through the instrumented `ExecutorChoice` helpers:": {
-   "class": "error",
-   "evidence": "Stale: Eloquent reads go through the instrumented executor and fire QueryExecuted (framework/src/eloquent/builder.rs:3710-3719), pinned by framework/tests/eloquent/read_instrumentation.rs. No plan needed; the gap is closed.",
-   "fix": "State that every query, ORM included, fires QueryExecuted; drop 'today' and the ExecutorChoice name.",
-   "gap": "none"
-  },
   "Under the embedded profile, where L1 is disabled unless `RENDER_CACHE_L1_DIR` names a directory, declaring the layer changes nothing; under the Database profile the entry lands in `suprnova_render_entries` and a second process finds it there.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
@@ -759,18 +680,6 @@
   "WS_TASKS": {
    "class": "internal",
    "evidence": "Private static (framework/src/server.rs:52)."
-  },
-  "WebP :: no effect today": {
-   "class": "code_bug",
-   "evidence": "WebP is encoded lossless only, so quality is a no-op (framework/src/media/driver.rs:35-36); treated as intended. eas4ai/suprnova#83.",
-   "gap": "issue",
-   "issue": 83
-  },
-  "WebP is written losslessly, so `quality()` currently has no effect on WebP output.": {
-   "class": "code_bug",
-   "evidence": "WebP is encoded lossless only, so quality is a no-op (framework/src/media/driver.rs:35-36); treated as intended. eas4ai/suprnova#83.",
-   "gap": "issue",
-   "issue": 83
   },
   "When `MAIL_FILE_PATH` is unset, mail lands in `storage_path(\"mail\")` - the same path family every other `storage/` consumer uses, so the directory stays inside the application base even when a service manager starts the process from somewhere else.": {
    "class": "noise",
@@ -908,9 +817,8 @@
    "evidence": "Placeholders, wildcards, example user commands or parse artifacts, not command claims."
   },
   "derive(Event)": {
-   "class": "error",
-   "evidence": "No derive named Event exists; `suprnova::Event` is a trait users implement by hand. Slip: the real form is documented as the way in events.md:28 and :76 (`impl Event for ...`); events.md:55 is the chapter correctly saying there is no derive, so only parity.md:99 is wrong. Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "gap": "none"
+   "class": "noise",
+   "evidence": "events.md:55 correctly says there is no #[derive(Event)]; the one wrong use (parity.md:99) is fixed."
   },
   "derive(Notification)": {
    "class": "noise",
@@ -934,11 +842,6 @@
   "dynamic loading (too much complexity for v1)": {
    "class": "restate",
    "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
-  },
-  "middleware!(Auth)": {
-   "class": "error",
-   "evidence": "No `middleware!` macro exists. Slip: the real form is documented as the way in 17 chapters (`.middleware(...)` on a route or group). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "gap": "none"
   },
   "registry::assert_no_duplicates": {
    "audience": "reader-needed",
@@ -1049,16 +952,6 @@
    "class": "noise",
    "evidence": "A tracing target string (`target: \"suprnova::eloquent::lock\"`), not a Rust path."
   },
-  "suprnova::ok": {
-   "class": "error",
-   "evidence": "No `ok!` macro and no `suprnova::ok` item exist. Slip: the real form is documented as the way in 21 chapters (`HttpResponse::ok()` / `json_response!`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "gap": "none"
-  },
-  "suprnova::ok!": {
-   "class": "error",
-   "evidence": "No `ok!` macro and no `suprnova::ok` item exist. Slip: the real form is documented as the way in 21 chapters (`HttpResponse::ok()` / `json_response!`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "gap": "none"
-  },
   "suprnova::payments::entities::transaction::Entity::find": {
    "class": "noise",
    "evidence": "Third-party names: SQL keyword, browser error, tokio macro, clap derive (the stub uses `clap::Parser`), SeaORM `EntityTrait::find` on a real entity."
@@ -1069,11 +962,6 @@
    "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#63.",
    "gap": "issue",
    "issue": 63
-  },
-  "suprnova::validation::rules": {
-   "class": "wrong_path",
-   "evidence": "The module is `suprnova::validation::rule::rules`, also re-exported as `suprnova::rules`; `suprnova::validation::rules` does not exist.",
-   "fix": "use suprnova::rules::*"
   },
   "task_local!": {
    "class": "noise",
@@ -1096,26 +984,11 @@
    "evidence": "Public path is `suprnova::when_loaded`; `suprnova::data` does not export it.",
    "fix": "use suprnova::when_loaded"
   },
-  "use suprnova::http::upload::ImageFile": {
-   "class": "wrong_path",
-   "evidence": "Public paths are `suprnova::ImageFile` / `suprnova::MaxSize`; `suprnova::http::upload` is not public.",
-   "fix": "use suprnova::{ImageFile, MaxSize}"
-  },
-  "use suprnova::http::upload::MaxSize": {
-   "class": "wrong_path",
-   "evidence": "Public paths are `suprnova::ImageFile` / `suprnova::MaxSize`; `suprnova::http::upload` is not public.",
-   "fix": "use suprnova::{ImageFile, MaxSize}"
-  },
   "use suprnova::sea_orm_migration::prelude::*": {
    "class": "error",
    "evidence": "Suprnova does not re-export sea_orm_migration; generated migrations use `use sea_orm_migration::prelude::*;` (suprnova-cli/src/templates/files/backend/migrations/*.rs.tpl, app/src/migrations/*). Slip: the real form is documented as the way in the scaffold, which depends on `sea-orm-migration` directly (suprnova-cli/src/templates/files/backend/Cargo.toml.tpl:33). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
    "fix": "use sea_orm_migration::prelude::*;",
    "gap": "none"
-  },
-  "use suprnova::validation::rules::*": {
-   "class": "wrong_path",
-   "evidence": "The module is `suprnova::validation::rule::rules`, also re-exported as `suprnova::rules`; `suprnova::validation::rules` does not exist.",
-   "fix": "use suprnova::rules::*"
   },
   "v1 restriction: `MorphTo` is `i64`-only": {
    "class": "code_bug",

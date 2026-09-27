@@ -75,8 +75,8 @@ Five drivers ship in-tree. Configure via `QUEUE_DRIVER` env or by calling
 | `SyncQueueDriver` | dev, CI | runs the handler inline on `push`, no worker |
 | `NullQueueDriver` | testing wrappers | drops every push without running |
 
-`Queue::bootstrap_from_env()` reads `QUEUE_DRIVER` and wires the matching
-driver; `Queue::bootstrap_default()` always wires the memory driver. The
+`suprnova::queue::bootstrap_from_env()` reads `QUEUE_DRIVER` and wires the matching
+driver; `suprnova::queue::bootstrap_default()` always wires the memory driver. The
 server boot path calls one of these for you - most apps only configure via
 env.
 
@@ -743,13 +743,11 @@ Resolution runs highest-priority first:
 Passing `None` for a field leaves that dimension alone, so routing a job's
 connection does not disturb the queue it already declared.
 
-The two dimensions run at different depths today. The **queue** is honored end
-to end - stamped on the envelope, stored by the driver, filtered by `--queue`.
-The **connection** resolves the connection *name* carried on the `JobQueueing`
-/ `JobQueued` lifecycle events, which is what listeners and dashboards see;
-one process-global driver still receives every push, so routing a job's
-connection does not yet select a different driver. Declaring connections now
-is forward-compatible for when per-connection drivers land, not behavioral.
+Both dimensions are honored end to end. The **queue** is stamped on the
+envelope, stored by the driver, and filtered by `--queue`. The
+**connection** selects the driver a job is pushed to, and its name is
+carried on the `JobQueueing` / `JobQueued` lifecycle events that listeners
+and dashboards see.
 
 Then dedicate a worker to it:
 

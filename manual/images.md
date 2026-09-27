@@ -139,14 +139,14 @@ async fn describe() -> Result<(), FrameworkError> {
 
 ## Formats
 
-Five formats are read and written today: **PNG, JPEG, WebP, GIF, and
+Five formats are read and written: **PNG, JPEG, WebP, GIF, and
 BMP**.
 
 | Format | Reads | Writes | Quality knob |
 |---|---|---|---|
 | PNG | yes | yes | ignored (lossless) |
 | JPEG | yes | yes | honoured |
-| WebP | yes | yes (lossless) | no effect today |
+| WebP | yes | yes | honoured (lossless when unset) |
 | GIF | yes | yes | ignored (palette) |
 | BMP | yes | yes | ignored (lossless) |
 
@@ -159,8 +159,8 @@ GIF output is palette-quantised to at most 256 colours with
 Floyd-Steinberg dithering before encoding, so a photographic source
 converts cleanly rather than erroring.
 
-WebP is written losslessly, so `quality()` currently has no effect on
-WebP output. Use JPEG when you need a size/quality dial.
+WebP is written lossless by default; setting `quality()` switches it to
+lossy encoding at that quality, the same dial JPEG has.
 
 ## Storage
 
@@ -410,7 +410,7 @@ compiled into **both** the system ImageMagick binary and the PHP
 `imagick` extension. In Suprnova the default driver does not read HEIC,
 and `IMAGE_DRIVER=magick` reads it whenever the host's ImageMagick
 carries the libheif delegate - no extension layer in between. So HEIC
-ingestion works today: install ImageMagick with libheif through your
+ingestion works: install ImageMagick with libheif through your
 package manager and flip the env var. The licensing sits where it
 belongs, with the host.
 
