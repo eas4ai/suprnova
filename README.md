@@ -99,7 +99,7 @@ The Laravel-13 parity surface plus the Rust-native wins:
 | **Notifications** | Mail / database / broadcast / Web Push channels, anonymous notifications, deferred dispatch |
 | **Mail** | SMTP, Mailgun, Postmark, SendGrid, Resend, SES, log + in-memory transports, Markdown templates via Tera, fake() helper, queued mail |
 | **Broadcasting & WebSocket** | Channels (public / private / presence), `BroadcastHub` trait, sea-streamer fanout adapter, JSON-envelope protocol, supervised heartbeats with auto-restart |
-| **Filesystem** | Local + S3 (R2 / B2 / MinIO compatible) via OpenDAL, path-traversal guard, atomic copy |
+| **Filesystem** | Local + S3 (R2 / B2 / RustFS / MinIO compatible) via OpenDAL, path-traversal guard, atomic copy |
 | **Vector** | Memory, **Qdrant**, **Pinecone**, **MariaDB native `VECTOR(N)`** (HNSW + cosine/euclid/L1/L2) - first-class trait + drivers, no Postgres-only gatekeeping |
 | **Payments** | Generic `Payment` / `Subscription` / `CustomerStore` / `WebhookHandler` traits + DB mirror; **Stripe** and **Paddle** reference adapters; webhook UNIQUE idempotency |
 | **Validation** | `Required`, `Email`, `Min`/`Max`/`Between`, `RequiredIf`/`With`/`WithAll`/`Unless`, `Unique` (async), `Confirmed`, custom rules via traits, `validator` derive integration |

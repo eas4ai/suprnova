@@ -1698,14 +1698,14 @@ pub struct GeneratedCompose {
     pub yaml: String,
     /// Postgres password baked in as the `DB_PASSWORD` default.
     pub db_password: String,
-    /// MinIO root password, when the MinIO service was included.
-    pub minio_password: Option<String>,
+    /// RustFS secret key, when the RustFS service was included.
+    pub rustfs_password: Option<String>,
 }
 
 pub fn docker_compose_template(
     project_name: &str,
     include_mailpit: bool,
-    include_minio: bool,
+    include_rustfs: bool,
 ) -> GeneratedCompose {
     let mailpit_service = if include_mailpit {
         include_str!("files/docker/mailpit.service.tpl").replace("{project_name}", project_name)
@@ -1713,21 +1713,21 @@ pub fn docker_compose_template(
         String::new()
     };
 
-    let minio_password = if include_minio {
+    let rustfs_password = if include_rustfs {
         Some(crate::commands::key_generate::generate_service_password())
     } else {
         None
     };
 
-    let minio_service = match &minio_password {
-        Some(password) => include_str!("files/docker/minio.service.tpl")
+    let rustfs_service = match &rustfs_password {
+        Some(password) => include_str!("files/docker/rustfs.service.tpl")
             .replace("{project_name}", project_name)
-            .replace("{minio_password}", password),
+            .replace("{rustfs_password}", password),
         None => String::new(),
     };
 
-    let additional_volumes = if include_minio {
-        "\n  minio_data:".to_string()
+    let additional_volumes = if include_rustfs {
+        "\n  rustfs_data:".to_string()
     } else {
         String::new()
     };
@@ -1738,13 +1738,13 @@ pub fn docker_compose_template(
         .replace("{project_name}", project_name)
         .replace("{db_password}", &db_password)
         .replace("{mailpit_service}", &mailpit_service)
-        .replace("{minio_service}", &minio_service)
+        .replace("{rustfs_service}", &rustfs_service)
         .replace("{additional_volumes}", &additional_volumes);
 
     GeneratedCompose {
         yaml,
         db_password,
-        minio_password,
+        rustfs_password,
     }
 }
 

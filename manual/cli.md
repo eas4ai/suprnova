@@ -155,7 +155,7 @@ See [Inertia SSR](frontend.md) for the production setup.
 | Command | Description |
 |---|---|
 | `suprnova docker:init` | Emit a multi-stage production `Dockerfile` + `.dockerignore`. |
-| `suprnova docker:compose [--with-mailpit] [--with-minio]` | Emit a `docker-compose.yml` for local development. Postgres + Redis always included; Mailpit and MinIO opt in. |
+| `suprnova docker:compose [--with-mailpit] [--with-rustfs]` | Emit a `docker-compose.yml` for local development. Postgres + Redis always included; Mailpit and RustFS opt in. |
 
 See [Docker](cli-docker.md) and the [Deployment](deployment.md) chapter.
 

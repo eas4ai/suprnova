@@ -412,7 +412,7 @@ fn scaffold_env_ships_the_required_mail_from_key() {
 /// Collect every `ports:` publish line across the compose templates.
 ///
 /// Reads the raw templates rather than the rendered output so a service
-/// that is off by default (mailpit, minio) is still covered - the point
+/// that is off by default (mailpit, rustfs) is still covered - the point
 /// is that no template can reintroduce a wide bind, including one nobody
 /// enables in the default scaffold.
 fn compose_publish_lines() -> Vec<(String, String)> {
@@ -420,7 +420,7 @@ fn compose_publish_lines() -> Vec<(String, String)> {
     for name in [
         "docker-compose.yml.tpl",
         "mailpit.service.tpl",
-        "minio.service.tpl",
+        "rustfs.service.tpl",
     ] {
         let body = read(&format!("src/templates/files/docker/{name}"));
         for line in body.lines() {
@@ -444,7 +444,7 @@ fn compose_publish_lines() -> Vec<(String, String)> {
 /// on a shared network, or any cloud VM without a firewall, `suprnova new`
 /// followed by `docker compose up` then publishes a development database,
 /// an unauthenticated Redis, an open SMTP relay (Mailpit accepts any
-/// credentials), and MinIO - to the internet.
+/// credentials), and the object store - to the internet.
 #[test]
 fn compose_publishes_every_port_on_loopback() {
     for (file, line) in compose_publish_lines() {
@@ -461,15 +461,15 @@ fn compose_publishes_every_port_on_loopback() {
 }
 
 /// The compose templates shipped `suprnova_secret` and `minioadmin/minioadmin`
-/// as literal defaults. A known password is only a development convenience
+/// as literal defaults, and RustFS's stock pair is `rustfsadmin/rustfsadmin`. A known password is only a development convenience
 /// while the port is closed; combined with a wide bind it is a public
 /// database. Passwords are now minted per project by
 /// `generate_service_password`, so no literal may come back.
 #[test]
 fn compose_templates_carry_no_literal_credentials() {
-    for name in ["docker-compose.yml.tpl", "minio.service.tpl"] {
+    for name in ["docker-compose.yml.tpl", "rustfs.service.tpl"] {
         let body = read(&format!("src/templates/files/docker/{name}"));
-        for literal in ["suprnova_secret", "minioadmin"] {
+        for literal in ["suprnova_secret", "minioadmin", "rustfsadmin"] {
             assert!(
                 !body.contains(literal),
                 "{name} still ships the literal credential `{literal}`; \
@@ -485,10 +485,57 @@ fn compose_templates_carry_no_literal_credentials() {
         compose.contains("{db_password}"),
         "docker-compose.yml.tpl must carry the {{db_password}} placeholder"
     );
-    let minio = read("src/templates/files/docker/minio.service.tpl");
+    let rustfs = read("src/templates/files/docker/rustfs.service.tpl");
     assert!(
-        minio.contains("{minio_password}"),
-        "minio.service.tpl must carry the {{minio_password}} placeholder"
+        rustfs.contains("{rustfs_password}"),
+        "rustfs.service.tpl must carry the {{rustfs_password}} placeholder"
+    );
+}
+
+/// With the object store on, the rendered compose must name the RustFS
+/// service and its volume, carry the generated secret, and leave no
+/// placeholder behind; with it off, none of that may appear.
+#[test]
+fn rendered_compose_wires_rustfs_only_when_asked() {
+    let on = suprnova_cli::templates::docker_compose_template("my_app", false, true);
+    let secret = on
+        .rustfs_password
+        .as_deref()
+        .expect("a secret is generated for RustFS");
+    for needle in [
+        "image: rustfs/rustfs:",
+        "my_app_rustfs",
+        "rustfs_data:/data",
+        "\n  rustfs_data:",
+        secret,
+    ] {
+        assert!(
+            on.yaml.contains(needle),
+            "rendered compose lacks {needle:?}:\n{}",
+            on.yaml
+        );
+    }
+    for placeholder in [
+        "{rustfs_password}",
+        "{rustfs_service}",
+        "{additional_volumes}",
+        "{project_name}",
+    ] {
+        assert!(
+            !on.yaml.contains(placeholder),
+            "placeholder {placeholder} left unsubstituted"
+        );
+    }
+    assert!(
+        secret.len() >= 8,
+        "RustFS refuses a secret key shorter than 8 characters"
+    );
+
+    let off = suprnova_cli::templates::docker_compose_template("my_app", false, false);
+    assert!(off.rustfs_password.is_none());
+    assert!(
+        !off.yaml.contains("rustfs"),
+        "RustFS leaked into a compose that did not ask for it"
     );
 }
 
@@ -872,7 +919,7 @@ const KNOWN_TEMPLATE_KEYS: &[&str] = &[
     "framework_tag",
     "description",
     "db_password",
-    "minio_password",
+    "rustfs_password",
     "app_key",
     "frontend",
     "frontend_variant",

@@ -8,7 +8,7 @@ use crate::commands::cargo_meta;
 use crate::templates;
 use crate::ui;
 
-pub fn run(with_mailpit: bool, with_minio: bool) {
+pub fn run(with_mailpit: bool, with_rustfs: bool) {
     if !Path::new("Cargo.toml").exists() {
         ui::error("Cargo.toml not found");
         ui::hint("Make sure you're in a Suprnova project root directory.");
@@ -24,10 +24,10 @@ pub fn run(with_mailpit: bool, with_minio: bool) {
         std::process::exit(0);
     }
 
-    let (include_mailpit, include_minio) = prompt_for_services(with_mailpit, with_minio);
+    let (include_mailpit, include_rustfs) = prompt_for_services(with_mailpit, with_rustfs);
 
     let generated =
-        templates::docker_compose_template(&project_name, include_mailpit, include_minio);
+        templates::docker_compose_template(&project_name, include_mailpit, include_rustfs);
     if let Err(e) = fs::write(compose_path, &generated.yaml) {
         ui::error(&format!("Failed to write docker-compose.yml: {}", e));
         std::process::exit(1);
@@ -36,7 +36,7 @@ pub fn run(with_mailpit: bool, with_minio: bool) {
 
     update_gitignore();
 
-    print_instructions(&generated, include_mailpit, include_minio);
+    print_instructions(&generated, include_mailpit, include_rustfs);
 }
 
 fn get_project_name() -> String {
@@ -48,14 +48,14 @@ fn get_project_name() -> String {
     })
 }
 
-fn prompt_for_services(with_mailpit: bool, with_minio: bool) -> (bool, bool) {
-    if with_mailpit || with_minio {
-        return (with_mailpit, with_minio);
+fn prompt_for_services(with_mailpit: bool, with_rustfs: bool) -> (bool, bool) {
+    if with_mailpit || with_rustfs {
+        return (with_mailpit, with_rustfs);
     }
 
     ui::br();
     ui::header("Optional Services");
-    ui::hint("MySQL and Redis are included by default.");
+    ui::hint("PostgreSQL and Redis are included by default.");
     ui::br();
 
     let include_mailpit = Confirm::with_theme(&ColorfulTheme::default())
@@ -64,15 +64,15 @@ fn prompt_for_services(with_mailpit: bool, with_minio: bool) -> (bool, bool) {
         .interact()
         .unwrap_or(false);
 
-    let include_minio = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("Include MinIO (S3-compatible storage)?")
+    let include_rustfs = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Include RustFS (S3-compatible storage)?")
         .default(false)
         .interact()
         .unwrap_or(false);
 
     ui::br();
 
-    (include_mailpit, include_minio)
+    (include_mailpit, include_rustfs)
 }
 
 fn update_gitignore() {
@@ -100,7 +100,11 @@ fn update_gitignore() {
     }
 }
 
-fn print_instructions(generated: &templates::GeneratedCompose, has_mailpit: bool, has_minio: bool) {
+fn print_instructions(
+    generated: &templates::GeneratedCompose,
+    has_mailpit: bool,
+    has_rustfs: bool,
+) {
     ui::br();
 
     // Every port is published on 127.0.0.1 by the template, so naming
@@ -113,9 +117,9 @@ fn print_instructions(generated: &templates::GeneratedCompose, has_mailpit: bool
         services.push("Mailpit SMTP ·· 127.0.0.1:1025".to_string());
         services.push("Mailpit UI ···· http://127.0.0.1:8025".to_string());
     }
-    if has_minio {
-        services.push("MinIO API ····· 127.0.0.1:9000".to_string());
-        services.push("MinIO Console · http://127.0.0.1:9001".to_string());
+    if has_rustfs {
+        services.push("RustFS API ···· 127.0.0.1:9000".to_string());
+        services.push("RustFS Console  http://127.0.0.1:9001".to_string());
     }
     let service_refs: Vec<&str> = services.iter().map(String::as_str).collect();
     ui::panel("Services", &service_refs);
@@ -132,10 +136,10 @@ fn print_instructions(generated: &templates::GeneratedCompose, has_mailpit: bool
         "DATABASE_URL=postgres://suprnova:{}@127.0.0.1:5432/suprnova_db",
         generated.db_password
     ));
-    if let Some(minio_password) = &generated.minio_password {
+    if let Some(rustfs_password) = &generated.rustfs_password {
         ui::br();
-        ui::hint("MinIO root credentials (also in docker-compose.yml):");
-        ui::command(&format!("suprnova / {minio_password}"));
+        ui::hint("RustFS access key / secret key (also in docker-compose.yml):");
+        ui::command(&format!("suprnova / {rustfs_password}"));
     }
     ui::br();
     ui::hint("Services are published on 127.0.0.1 only. To reach them from");
