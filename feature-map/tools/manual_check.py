@@ -9,7 +9,8 @@ Outcomes per reference:
   found          resolves to a Suprnova record (the matched id is reported)
   hidden         resolves to a `#[doc(hidden)]` record: it exists, but is not public API by intent
   missing        names a Suprnova API that does not exist
-  laravel_only   not in Suprnova, but is a Laravel name (expected in parity/from-laravel)
+  laravel_only   not in Suprnova, but is a Laravel name (expected in parity/from-laravel); never a
+                 command run through a Suprnova binary, which is a claim about Suprnova
   weak_found     a bare method call whose name exists on some Suprnova type
   weak_missing   a bare method call no Suprnova type has (may be user code); `Type::member` stays
                  here only when some Rust block in the manual defines or imports `Type`, else it
@@ -393,6 +394,10 @@ def check_macro(name, locals_=frozenset()):
     return "missing", None
 
 
+CARGO_VALUE_FLAGS = {"--bin", "-p", "--package", "--features", "-F", "--example", "--manifest-path",
+                     "--profile", "--target", "--target-dir", "-j", "--jobs", "--config", "-Z"}
+
+
 def check_command(line):
     """A shell line -> list of (ref, outcome, match) for Suprnova binaries."""
     parts = re.split(r"\s(?:&&|\|\||;|\|)\s", line)
@@ -407,12 +412,23 @@ def check_command(line):
         binary, rest = "suprnova", toks[1:]
     elif toks[0] in ("./app", "app"):
         binary, rest = "app", toks[1:]
-    elif toks[:2] == ["cargo", "run"] and "--" in toks:
-        bin_ = toks[toks.index("--bin") + 1] if "--bin" in toks else "app"
-        binary, rest = ("console" if bin_ == "console" else "app"), toks[toks.index("--") + 1:]
+    elif toks[:2] == ["cargo", "run"]:
+        # Cargo's own flags come first; the command starts after `--`, or at the first bare word.
+        i, bin_ = 2, "app"
+        while i < len(toks) and toks[i].startswith("-"):
+            if toks[i] == "--":
+                i += 1
+                break
+            if toks[i] in CARGO_VALUE_FLAGS:
+                if toks[i] == "--bin" and i + 1 < len(toks):
+                    bin_ = toks[i + 1]
+                i += 2
+            else:
+                i += 1
+        binary, rest = ("console" if bin_ == "console" else "app"), toks[i:]
     elif toks[0] in ("./console", "console"):
         binary, rest = "console", toks[1:]
-    if not binary or not rest or rest[0].startswith("-"):
+    if not binary or not rest or rest[0].startswith(("-", "<", "{", "[")):  # a flag or a placeholder
         return out
     name = rest[0]
     recs = [r for r in commands.get(name, []) if r["details"]["binary"] == binary]
@@ -421,9 +437,8 @@ def check_command(line):
         if other:
             out.append((f"{binary} {name}", "missing",
                         f"exists as `{other[0]['id']}` instead"))
-        elif name in laravel_names:
-            out.append((f"{binary} {name}", "laravel_only", None))
         else:
+            # Run through a Suprnova binary, a Laravel command name is still a claim about Suprnova.
             out.append((f"{binary} {name}", "missing", None))
         return out
     rec = recs[0]
