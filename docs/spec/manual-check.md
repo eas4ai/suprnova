@@ -278,7 +278,26 @@ repository.
 
 When the hold began, one chapter was past its mirrors: `filesystem.md`,
 by one table row (the S3-compatible examples added on
-`eas4ai/nice-lamport-lhxidv`).
+`eas4ai/nice-lamport-lhxidv`). At the end of the fix pass, 56 English
+chapters on that branch are past their mirrors (none on `main`), which is
+the retranslation list when the hold lifts:
+
+`authorization.md`, `broadcasting.md`, `bus.md`, `cli-docker.md`,
+`cli.md`, `console.md`, `database.md`, `database-testing.md`,
+`data.md`, `deployment-digital-ocean.md`, `deployment-railway.md`,
+`development.md`, `eloquent-factories.md`, `eloquent.md`,
+`eloquent-relationships.md`, `eloquent-serialization.md`,
+`encryption.md`, `env-vars.md`, `events.md`, `filesystem.md`,
+`from-laravel.md`, `from-rust-web.md`, `frontend-inertia-responses.md`,
+`frontend-pages.md`, `glossary.md`, `hashing.md`, `http-client.md`,
+`idempotency.md`, `images.md`, `installation.md`, `introduction.md`,
+`live.md`, `logging.md`, `macros.md`, `mail.md`, `mocking.md`,
+`notifications.md`, `observability.md`, `parity.md`,
+`payments-frontend.md`, `payments.md`, `payments-paddle.md`,
+`queries.md`, `queues.md`, `render-cache-generations.md`,
+`responses.md`, `seeding.md`, `starter-kits.md`, `structure.md`,
+`supervisors.md`, `testing.md`, `timeout.md`,
+`tutorial-inertia-crud.md`, `urls.md`, `vector.md`, `websockets.md`.
 
 ## Resolved questions
 
