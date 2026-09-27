@@ -207,8 +207,11 @@ error: the text is corrected or cut. A true gap the code should close is a
 `code_bug` with an issue, and the manual states the intended behavior. A
 true constraint that is intended, such as a database's own behavior or a
 design choice, stays, stated as how Suprnova works rather than as a
-moment in its history.
-Falsifier: A time-marked claim in an English chapter has no verdict, or a verdict that cites no source.
+moment in its history. A claim that something is planned MUST stand on a
+record of the plan (`docs/spec`, `docs/commitments`, `docs/decisions`, the
+CHANGELOG) or the developer's word; the source cannot show intent, and
+without either the claim is the manual's error.
+Falsifier: A time-marked claim in an English chapter has no verdict, or a verdict that cites no source, or a claim that something is planned is kept with no plan record and no ruling from the developer.
 Status: Draft
 
 ## Mechanisms
