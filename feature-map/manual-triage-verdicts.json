@@ -2,8 +2,9 @@
  "extra": [
   {
    "class": "error",
-   "evidence": "`suprnova::Response` is `Result<HttpResponse, HttpResponse>` (framework/src/http/response.rs:56), so `.ok()` is `Result::ok(self)`; `suprnova::Response::ok().json(&order)` does not compile. The check reads it as an external method.",
+   "evidence": "`suprnova::Response` is `Result<HttpResponse, HttpResponse>` (framework/src/http/response.rs:56), so `.ok()` is `Result::ok(self)`; `suprnova::Response::ok().json(&order)` does not compile. The check reads it as an external method. Slip: the real form is documented as the way in 21 chapters (`HttpResponse::ok()`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
    "fix": "Ok(HttpResponse::ok().json(&order)) or the json helper",
+   "gap": "none",
    "locations": [
     "logging.md:216"
    ],
@@ -11,8 +12,9 @@
   },
   {
    "class": "error",
-   "evidence": "The generated MinIO service uses MINIO_ROOT_USER (default `suprnova`) and a per-project generated MINIO_ROOT_PASSWORD (suprnova-cli/src/templates/files/docker/minio.service.tpl), not minioadmin. The *_HOST_BIND and MINIO_ROOT_* variables are undocumented.",
+   "evidence": "The generated MinIO service uses MINIO_ROOT_USER (default `suprnova`) and a per-project generated MINIO_ROOT_PASSWORD (suprnova-cli/src/templates/files/docker/minio.service.tpl), not minioadmin. The *_HOST_BIND and MINIO_ROOT_* variables are undocumented. Slip: the real form is documented as the way in the compose template, which generates per-project credentials (minio.service.tpl). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
    "fix": "Document MINIO_ROOT_USER / MINIO_ROOT_PASSWORD and the *_HOST_BIND overrides",
+   "gap": "none",
    "locations": [
     "cli-docker.md:182",
     "cli-docker.md:183"
@@ -27,17 +29,20 @@
   },
   "#[cast]": {
    "class": "error",
-   "evidence": "No `cast` attribute or helper exists; casts are declared in `#[model(casts = { field = AsHashed })]`.",
-   "fix": "Use `casts = { field = AsHashed }` inside `#[model(...)]`."
+   "evidence": "No `cast` attribute or helper exists; casts are declared in `#[model(casts = { field = AsHashed })]`. Slip: the real form is documented as the way in eloquent.md, eloquent-mutators.md and encryption.md (`casts = {...}` inside `#[model]`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "Use `casts = { field = AsHashed }` inside `#[model(...)]`.",
+   "gap": "none"
   },
   "#[factory(model)]": {
    "class": "error",
-   "evidence": "`#[factory(...)]` accepts only `name` (suprnova-macros/src/factory.rs); there is no `model` key."
+   "evidence": "`#[factory(...)]` accepts only `name` (suprnova-macros/src/factory.rs); there is no `model` key. Slip: the real form is documented as the way in the factory surface: `#[derive(Factory)]` on the model, whose `#[factory(...)]` takes only `name` (suprnova-macros/src/factory.rs:58-74). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "gap": "none"
   },
   "#[fillable]": {
    "class": "error",
-   "evidence": "No `fillable` / `guarded` attribute and no `Fillable` trait; they are `fillable = [...]` / `guarded = [...]` arguments of `#[model]` (suprnova-macros/src/model/parse.rs:774).",
-   "fix": "fillable = [...] / guarded = [...] inside #[model(...)]"
+   "evidence": "No `fillable` / `guarded` attribute and no `Fillable` trait; they are `fillable = [...]` / `guarded = [...]` arguments of `#[model]` (suprnova-macros/src/model/parse.rs:774). Slip: the real form is documented as the way in seven chapters (`fillable = [...]` / `guarded = [...]` inside `#[model]`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "fillable = [...] / guarded = [...] inside #[model(...)]",
+   "gap": "none"
   },
   "#[global_scope]": {
    "class": "noise",
@@ -45,8 +50,9 @@
   },
   "#[guarded]": {
    "class": "error",
-   "evidence": "No `fillable` / `guarded` attribute and no `Fillable` trait; they are `fillable = [...]` / `guarded = [...]` arguments of `#[model]` (suprnova-macros/src/model/parse.rs:774).",
-   "fix": "fillable = [...] / guarded = [...] inside #[model(...)]"
+   "evidence": "No `fillable` / `guarded` attribute and no `Fillable` trait; they are `fillable = [...]` / `guarded = [...]` arguments of `#[model]` (suprnova-macros/src/model/parse.rs:774). Slip: the real form is documented as the way in seven chapters (`fillable = [...]` / `guarded = [...]` inside `#[model]`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "fillable = [...] / guarded = [...] inside #[model(...)]",
+   "gap": "none"
   },
   "#[scope]": {
    "class": "noise",
@@ -86,13 +92,15 @@
   },
   "BackoffSchedule::exponential": {
    "class": "error",
-   "evidence": "`BackoffSchedule` is an enum with variants Fixed, Exponential, Sequence; there are no `linear` / `exponential` constructors.",
-   "fix": "BackoffSchedule::Fixed / Exponential / Sequence"
+   "evidence": "`BackoffSchedule` is an enum with variants Fixed, Exponential, Sequence; there are no `linear` / `exponential` constructors. Slip: the real form is documented as the way in queues.md:693 (the `BackoffSchedule` enum variants; a linear schedule is `Sequence`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "BackoffSchedule::Fixed / Exponential / Sequence",
+   "gap": "none"
   },
   "BackoffSchedule::linear": {
    "class": "error",
-   "evidence": "`BackoffSchedule` is an enum with variants Fixed, Exponential, Sequence; there are no `linear` / `exponential` constructors.",
-   "fix": "BackoffSchedule::Fixed / Exponential / Sequence"
+   "evidence": "`BackoffSchedule` is an enum with variants Fixed, Exponential, Sequence; there are no `linear` / `exponential` constructors. Slip: the real form is documented as the way in queues.md:693 (the `BackoffSchedule` enum variants; a linear schedule is `Sequence`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "BackoffSchedule::Fixed / Exponential / Sequence",
+   "gap": "none"
   },
   "Builder::without_global_scope": {
    "audience": "public-equivalent",
@@ -231,9 +239,10 @@
    "evidence": "Private static (framework/src/config/env.rs:28)."
   },
   "MARIADB_URL": {
-   "class": "error",
-   "evidence": "database-testing.md uses these as the reader's own convention (correct there). vector.md:324 says env-vars.md documents QDRANT_URL / MARIADB_URL as driver env contracts: the framework reads neither outside its own tests (framework/tests/vector/*), and env-vars.md lists neither. PINECONE_API_KEY is real (framework/src/vector/pinecone.rs:230) but also absent from env-vars.md.",
-   "fix": "vector.md:324: drop QDRANT_URL / MARIADB_URL; document PINECONE_API_KEY in env-vars.md"
+   "class": "code_bug",
+   "evidence": "database-testing.md uses these as the reader's own convention (correct there). vector.md:324 says env-vars.md documents QDRANT_URL / MARIADB_URL as driver env contracts: the framework reads neither outside its own tests (framework/tests/vector/*), and env-vars.md lists neither. PINECONE_API_KEY is real (framework/src/vector/pinecone.rs:230) but also absent from env-vars.md. Treated as intended (the Pinecone driver already reads its env; vector.md names these as the drivers' env contracts); eas4ai/suprnova#74.",
+   "gap": "issue",
+   "issue": 74
   },
   "MYSQL_TEST_URL": {
    "class": "noise",
@@ -254,8 +263,9 @@
   },
   "Model::global_scope::<GS>()": {
    "class": "error",
-   "evidence": "No `global_scope` method exists; global scopes register with `ScopeRegistry::register::<M, _>(scope)`, as eloquent.md itself shows further down.",
-   "fix": "ScopeRegistry::register::<M, _>(scope)"
+   "evidence": "No `global_scope` method exists; global scopes register with `ScopeRegistry::register::<M, _>(scope)`, as eloquent.md itself shows further down. Slip: the real form is documented as the way in eloquent.md (`ScopeRegistry::register::<M, _>(scope)`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "ScopeRegistry::register::<M, _>(scope)",
+   "gap": "none"
   },
   "Model::scope_name(args)": {
    "class": "noise",
@@ -298,8 +308,9 @@
   },
   "Prunable::prunable_query()": {
    "class": "error",
-   "evidence": "`Prunable` has `prunable` and `pruning`; there is no `prunable_query`.",
-   "fix": "Prunable::prunable"
+   "evidence": "`Prunable` has `prunable` and `pruning`; there is no `prunable_query`. Slip: the real form is documented as the way in eloquent.md and macros.md (`Prunable::prunable`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "Prunable::prunable",
+   "gap": "none"
   },
   "Pulse (perf dashboard) :: Same: OTel surface today, dashboard later": {
    "class": "error",
@@ -326,9 +337,10 @@
    "gap": "none"
   },
   "QDRANT_URL": {
-   "class": "error",
-   "evidence": "database-testing.md uses these as the reader's own convention (correct there). vector.md:324 says env-vars.md documents QDRANT_URL / MARIADB_URL as driver env contracts: the framework reads neither outside its own tests (framework/tests/vector/*), and env-vars.md lists neither. PINECONE_API_KEY is real (framework/src/vector/pinecone.rs:230) but also absent from env-vars.md.",
-   "fix": "vector.md:324: drop QDRANT_URL / MARIADB_URL; document PINECONE_API_KEY in env-vars.md"
+   "class": "code_bug",
+   "evidence": "database-testing.md uses these as the reader's own convention (correct there). vector.md:324 says env-vars.md documents QDRANT_URL / MARIADB_URL as driver env contracts: the framework reads neither outside its own tests (framework/tests/vector/*), and env-vars.md lists neither. PINECONE_API_KEY is real (framework/src/vector/pinecone.rs:230) but also absent from env-vars.md. Treated as intended (the Pinecone driver already reads its env; vector.md names these as the drivers' env contracts); eas4ai/suprnova#74.",
+   "gap": "issue",
+   "issue": 74
   },
   "Queue::bootstrap_default()": {
    "class": "wrong_path",
@@ -358,13 +370,15 @@
   },
   "RateLimiter::for_signature": {
    "class": "error",
-   "evidence": "`RateLimiter` has no `for_signature`; the named-limiter API is `RateLimiter::for` (Laravel's `for`) plus `define`.",
-   "fix": "RateLimiter::for"
+   "evidence": "`RateLimiter` has no `for_signature`; the named-limiter API is `RateLimiter::for` (Laravel's `for`) plus `define`. Slip: the real form is documented as the way in rate-limiting.md (`RateLimiter::for`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "RateLimiter::for",
+   "gap": "none"
   },
   "RateLimiter::for_signature(...)": {
    "class": "error",
-   "evidence": "`RateLimiter` has no `for_signature`; the named-limiter API is `RateLimiter::for` (Laravel's `for`) plus `define`.",
-   "fix": "RateLimiter::for"
+   "evidence": "`RateLimiter` has no `for_signature`; the named-limiter API is `RateLimiter::for` (Laravel's `for`) plus `define`. Slip: the real form is documented as the way in rate-limiting.md (`RateLimiter::for`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "RateLimiter::for",
+   "gap": "none"
   },
   "RenderCache::clear_l0_for_test()": {
    "audience": "reader-needed",
@@ -428,27 +442,34 @@
    "evidence": "The reader's own types in example code."
   },
   "S3_ACCESS_KEY": {
-   "class": "error",
-   "evidence": "No S3_ACCESS_KEY / S3_SECRET_KEY / S3_REGION anywhere in the source. The only S3 wiring is the dogfood app (app/src/bootstrap.rs:402), reading S3_BUCKET, S3_ENDPOINT, S3_ROOT, AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY; scaffolded projects contain no S3 wiring at all.",
-   "fix": "Describe what a generated project actually reads (nothing, for S3) and what the MinIO service exposes."
+   "class": "code_bug",
+   "evidence": "No S3_ACCESS_KEY / S3_SECRET_KEY / S3_REGION anywhere in the source. The only S3 wiring is the dogfood app (app/src/bootstrap.rs:402), reading S3_BUCKET, S3_ENDPOINT, S3_ROOT, AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY; scaffolded projects contain no S3 wiring at all. Treated as intended (mail, queue and rate limiting each bootstrap from env and the dogfood app hand-rolls S3 from env); eas4ai/suprnova#73.",
+   "gap": "issue",
+   "issue": 73
   },
   "S3_BUCKET": {
-   "class": "error",
-   "evidence": "Read only by the dogfood app (app/src/bootstrap.rs:402-411); a project generated by `suprnova new` / `docker:compose` reads neither, so the cli-docker .env block does nothing."
+   "class": "code_bug",
+   "evidence": "Read only by the dogfood app (app/src/bootstrap.rs:402-411); a project generated by `suprnova new` / `docker:compose` reads neither, so the cli-docker .env block does nothing. Treated as intended (mail, queue and rate limiting each bootstrap from env and the dogfood app hand-rolls S3 from env); eas4ai/suprnova#73.",
+   "gap": "issue",
+   "issue": 73
   },
   "S3_ENDPOINT": {
-   "class": "error",
-   "evidence": "Read only by the dogfood app (app/src/bootstrap.rs:402-411); a project generated by `suprnova new` / `docker:compose` reads neither, so the cli-docker .env block does nothing."
+   "class": "code_bug",
+   "evidence": "Read only by the dogfood app (app/src/bootstrap.rs:402-411); a project generated by `suprnova new` / `docker:compose` reads neither, so the cli-docker .env block does nothing. Treated as intended (mail, queue and rate limiting each bootstrap from env and the dogfood app hand-rolls S3 from env); eas4ai/suprnova#73.",
+   "gap": "issue",
+   "issue": 73
   },
   "S3_REGION": {
-   "class": "error",
-   "evidence": "No S3_ACCESS_KEY / S3_SECRET_KEY / S3_REGION anywhere in the source. The only S3 wiring is the dogfood app (app/src/bootstrap.rs:402), reading S3_BUCKET, S3_ENDPOINT, S3_ROOT, AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY; scaffolded projects contain no S3 wiring at all.",
-   "fix": "Describe what a generated project actually reads (nothing, for S3) and what the MinIO service exposes."
+   "class": "code_bug",
+   "evidence": "No S3_ACCESS_KEY / S3_SECRET_KEY / S3_REGION anywhere in the source. The only S3 wiring is the dogfood app (app/src/bootstrap.rs:402), reading S3_BUCKET, S3_ENDPOINT, S3_ROOT, AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY; scaffolded projects contain no S3 wiring at all. Treated as intended (mail, queue and rate limiting each bootstrap from env and the dogfood app hand-rolls S3 from env); eas4ai/suprnova#73.",
+   "gap": "issue",
+   "issue": 73
   },
   "S3_SECRET_KEY": {
-   "class": "error",
-   "evidence": "No S3_ACCESS_KEY / S3_SECRET_KEY / S3_REGION anywhere in the source. The only S3 wiring is the dogfood app (app/src/bootstrap.rs:402), reading S3_BUCKET, S3_ENDPOINT, S3_ROOT, AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY; scaffolded projects contain no S3 wiring at all.",
-   "fix": "Describe what a generated project actually reads (nothing, for S3) and what the MinIO service exposes."
+   "class": "code_bug",
+   "evidence": "No S3_ACCESS_KEY / S3_SECRET_KEY / S3_REGION anywhere in the source. The only S3 wiring is the dogfood app (app/src/bootstrap.rs:402), reading S3_BUCKET, S3_ENDPOINT, S3_ROOT, AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY; scaffolded projects contain no S3 wiring at all. Treated as intended (mail, queue and rate limiting each bootstrap from env and the dogfood app hand-rolls S3 from env); eas4ai/suprnova#73.",
+   "gap": "issue",
+   "issue": 73
   },
   "SUPRNOVA_LIVE_BENCH_RESULT": {
    "class": "test_suite",
@@ -488,8 +509,9 @@
   },
   "Server::serve": {
    "class": "error",
-   "evidence": "`Server` has no `serve`; its members are new, from_config, try_from_config_with_routes(_async), run, host, port, middleware, max_connections, header_read_timeout.",
-   "fix": "Server::run"
+   "evidence": "`Server` has no `serve`; its members are new, from_config, try_from_config_with_routes(_async), run, host, port, middleware, max_connections, header_read_timeout. Slip: the real form is documented as the way in eight chapters (`Server::run`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "Server::run",
+   "gap": "none"
   },
   "Starter Kits :: Two kits ship today - Nebula is the Breeze equivalent; Pulsar adds docs, blog, community, and RBAC.": {
    "class": "error",
@@ -499,18 +521,21 @@
   },
   "Suprnova::Notifications::Failed": {
    "class": "error",
-   "evidence": "Notification events are `NotificationSending`, `NotificationSent`, `NotificationFailed` (framework/src/notifications/events.rs:32,51,73). The same table row for Mail uses PHP namespace syntax (`Suprnova\\Mail\\...`).",
-   "fix": "NotificationSending / NotificationSent / NotificationFailed; fix the Mail row too"
+   "evidence": "Notification events are `NotificationSending`, `NotificationSent`, `NotificationFailed` (framework/src/notifications/events.rs:32,51,73). The same table row for Mail uses PHP namespace syntax (`Suprnova\\Mail\\...`). Slip: the real form is documented as the way in notifications.md, observability.md and web-push.md (`NotificationSending` / `NotificationSent` / `NotificationFailed`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "NotificationSending / NotificationSent / NotificationFailed; fix the Mail row too",
+   "gap": "none"
   },
   "Suprnova::Notifications::Sending": {
    "class": "error",
-   "evidence": "Notification events are `NotificationSending`, `NotificationSent`, `NotificationFailed` (framework/src/notifications/events.rs:32,51,73). The same table row for Mail uses PHP namespace syntax (`Suprnova\\Mail\\...`).",
-   "fix": "NotificationSending / NotificationSent / NotificationFailed; fix the Mail row too"
+   "evidence": "Notification events are `NotificationSending`, `NotificationSent`, `NotificationFailed` (framework/src/notifications/events.rs:32,51,73). The same table row for Mail uses PHP namespace syntax (`Suprnova\\Mail\\...`). Slip: the real form is documented as the way in notifications.md, observability.md and web-push.md (`NotificationSending` / `NotificationSent` / `NotificationFailed`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "NotificationSending / NotificationSent / NotificationFailed; fix the Mail row too",
+   "gap": "none"
   },
   "Suprnova::Notifications::Sent": {
    "class": "error",
-   "evidence": "Notification events are `NotificationSending`, `NotificationSent`, `NotificationFailed` (framework/src/notifications/events.rs:32,51,73). The same table row for Mail uses PHP namespace syntax (`Suprnova\\Mail\\...`).",
-   "fix": "NotificationSending / NotificationSent / NotificationFailed; fix the Mail row too"
+   "evidence": "Notification events are `NotificationSending`, `NotificationSent`, `NotificationFailed` (framework/src/notifications/events.rs:32,51,73). The same table row for Mail uses PHP namespace syntax (`Suprnova\\Mail\\...`). Slip: the real form is documented as the way in notifications.md, observability.md and web-push.md (`NotificationSending` / `NotificationSent` / `NotificationFailed`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "NotificationSending / NotificationSent / NotificationFailed; fix the Mail row too",
+   "gap": "none"
   },
   "Telescope (debug dashboard) :: not yet": {
    "class": "error",
@@ -529,8 +554,10 @@
    "evidence": "The manual states these do NOT exist, which is correct."
   },
   "ThrottleRequestsMiddleware::default": {
-   "class": "error",
-   "evidence": "`ThrottleRequestsMiddleware` does not implement Default; its constructors are `by_name`, `with`, `with_limits`."
+   "class": "code_bug",
+   "evidence": "`ThrottleRequestsMiddleware` does not implement Default; its constructors are `by_name`, `with`, `with_limits`. Treated as intended (the manual's form is what a reader expects; the code needs an explicit limit and prefix); eas4ai/suprnova#75.",
+   "gap": "issue",
+   "issue": 75
   },
   "User::from": {
    "class": "noise",
@@ -549,13 +576,16 @@
    "evidence": "Private static (framework/src/server.rs:52)."
   },
   "WsSocket::split()": {
-   "class": "error",
-   "evidence": "`WsSocket` has no `split`; members are recv, recv_text, send_text, send_binary, close, from_stream(_with_heartbeat)."
+   "class": "code_bug",
+   "evidence": "`WsSocket` has no `split`; members are recv, recv_text, send_text, send_binary, close, from_stream(_with_heartbeat). Treated as intended (a missing capability: send and recv both take &mut self); eas4ai/suprnova#71.",
+   "gap": "issue",
+   "issue": 71
   },
   "apiResource!": {
    "class": "error",
-   "evidence": "Resource routes are methods, not macros: `Router::resource` / `Router::api_resource` (framework/src/routing/resource.rs).",
-   "fix": "Router::resource / Router::api_resource"
+   "evidence": "Resource routes are methods, not macros: `Router::resource` / `Router::api_resource` (framework/src/routing/resource.rs). Slip: the real form is documented as the way in routing.md and authorization.md (`Router::resource` / `Router::api_resource`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "Router::resource / Router::api_resource",
+   "gap": "none"
   },
   "app #": {
    "class": "noise",
@@ -603,11 +633,13 @@
   },
   "derive(Config)": {
    "class": "error",
-   "evidence": "No `derive(Config)`; typed config is `Config::register` / `Config::resolve` on hand-written structs."
+   "evidence": "No `derive(Config)`; typed config is `Config::register` / `Config::resolve` on hand-written structs. Slip: the real form is documented as the way in configuration.md and five other chapters (`Config::register` on a hand-written struct). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "gap": "none"
   },
   "derive(Event)": {
    "class": "error",
-   "evidence": "No derive named Event exists; `suprnova::Event` is a trait users implement by hand."
+   "evidence": "No derive named Event exists; `suprnova::Event` is a trait users implement by hand. Slip: the real form is documented as the way in events.md:28 and :76 (`impl Event for ...`); events.md:55 is the chapter correctly saying there is no derive, so only parity.md:99 is wrong. Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "gap": "none"
   },
   "derive(Notification)": {
    "class": "noise",
@@ -619,15 +651,18 @@
   },
   "derive(Resource)": {
    "class": "error",
-   "evidence": "No derive named Resource exists in suprnova-macros or any re-export."
+   "evidence": "No derive named Resource exists in suprnova-macros or any re-export. Slip: the real form is documented as the way in eloquent-resources.md (`#[derive(Data)]` with `#[json_resource(\"type\")]`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "gap": "none"
   },
   "derive(Task)": {
    "class": "error",
-   "evidence": "No derive named Task exists; scheduled work is registered with `Schedule::call` / the schedule builder."
+   "evidence": "No derive named Task exists; scheduled work is registered with `Schedule::call` / the schedule builder. Slip: the real form is documented as the way in scheduling (`Schedule::call`, `schedule_task!`); `make:task` generates `impl ScheduledTask` (suprnova-cli/src/templates/files/backend/tasks/mod.rs.tpl), a trait no chapter documents yet (a coverage gap for the pass). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "gap": "none"
   },
   "middleware!(Auth)": {
    "class": "error",
-   "evidence": "No `middleware!` macro exists."
+   "evidence": "No `middleware!` macro exists. Slip: the real form is documented as the way in 17 chapters (`.middleware(...)` on a route or group). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "gap": "none"
   },
   "registry::assert_no_duplicates": {
    "audience": "reader-needed",
@@ -638,8 +673,9 @@
   },
   "resource!(\"posts\", PostController)": {
    "class": "error",
-   "evidence": "Resource routes are methods, not macros: `Router::resource` / `Router::api_resource` (framework/src/routing/resource.rs).",
-   "fix": "Router::resource / Router::api_resource"
+   "evidence": "Resource routes are methods, not macros: `Router::resource` / `Router::api_resource` (framework/src/routing/resource.rs). Slip: the real form is documented as the way in routing.md and authorization.md (`Router::resource` / `Router::api_resource`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "Router::resource / Router::api_resource",
+   "gap": "none"
   },
   "seed::clear()": {
    "audience": "reader-needed",
@@ -653,9 +689,10 @@
    "evidence": "Placeholders, wildcards, example user commands or parse artifacts, not command claims."
   },
   "suprnova db:seed": {
-   "class": "error",
-   "evidence": "The `suprnova` CLI has no db:seed; it is a console-binary builtin (`cargo run --bin console -- db:seed`).",
-   "fix": "console db:seed"
+   "class": "code_bug",
+   "evidence": "The `suprnova` CLI has no db:seed; it is a console-binary builtin (`cargo run --bin console -- db:seed`). Treated as intended (the CLI forwards the sibling console commands; same shape as #60); eas4ai/suprnova#72.",
+   "gap": "issue",
+   "issue": 72
   },
   "suprnova key:generate --show)`": {
    "class": "noise",
@@ -674,9 +711,10 @@
    "evidence": "Placeholders, wildcards, example user commands or parse artifacts, not command claims."
   },
   "suprnova model:prune": {
-   "class": "error",
-   "evidence": "The `suprnova` CLI has no model:prune; it is a console-binary builtin (`cargo run --bin console -- model:prune`).",
-   "fix": "console model:prune"
+   "class": "code_bug",
+   "evidence": "The `suprnova` CLI has no model:prune; it is a console-binary builtin (`cargo run --bin console -- model:prune`). Treated as intended (the CLI forwards the sibling console commands; same shape as #60); eas4ai/suprnova#72.",
+   "gap": "issue",
+   "issue": 72
   },
   "suprnova new --help": {
    "class": "noise",
@@ -698,8 +736,9 @@
   },
   "suprnova::Event::listen": {
    "class": "error",
-   "evidence": "`suprnova::Event` is the event trait (event_name, queued); listeners register through `EventFacade::listen` / `EventDispatcher::listen`.",
-   "fix": "suprnova::EventFacade::listen"
+   "evidence": "`suprnova::Event` is the event trait (event_name, queued); listeners register through `EventFacade::listen` / `EventDispatcher::listen`. Slip: the real form is documented as the way in 14 chapters (`EventFacade::listen`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "suprnova::EventFacade::listen",
+   "gap": "none"
   },
   "suprnova::FrameworkError::forbidden": {
    "class": "wrong_path",
@@ -742,11 +781,13 @@
   },
   "suprnova::ok": {
    "class": "error",
-   "evidence": "No `ok!` macro and no `suprnova::ok` item exist."
+   "evidence": "No `ok!` macro and no `suprnova::ok` item exist. Slip: the real form is documented as the way in 21 chapters (`HttpResponse::ok()` / `json_response!`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "gap": "none"
   },
   "suprnova::ok!": {
    "class": "error",
-   "evidence": "No `ok!` macro and no `suprnova::ok` item exist."
+   "evidence": "No `ok!` macro and no `suprnova::ok` item exist. Slip: the real form is documented as the way in 21 chapters (`HttpResponse::ok()` / `json_response!`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "gap": "none"
   },
   "suprnova::payments::entities::transaction::Entity::find": {
    "class": "noise",
@@ -770,13 +811,15 @@
   },
   "use suprnova::Json": {
    "class": "error",
-   "evidence": "Suprnova exports no `Json` or `Query` extractor; the snippet is axum-shaped and does not compile against Suprnova.",
-   "fix": "Rewrite the handler with suprnova::Request / HttpResponse."
+   "evidence": "Suprnova exports no `Json` or `Query` extractor; the snippet is axum-shaped and does not compile against Suprnova. Slip: the real form is documented as the way in requests.md and four other chapters (the `Request` API; the snippet is axum-shaped). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "Rewrite the handler with suprnova::Request / HttpResponse.",
+   "gap": "none"
   },
   "use suprnova::Query": {
    "class": "error",
-   "evidence": "Suprnova exports no `Json` or `Query` extractor; the snippet is axum-shaped and does not compile against Suprnova.",
-   "fix": "Rewrite the handler with suprnova::Request / HttpResponse."
+   "evidence": "Suprnova exports no `Json` or `Query` extractor; the snippet is axum-shaped and does not compile against Suprnova. Slip: the real form is documented as the way in requests.md and four other chapters (the `Request` API; the snippet is axum-shaped). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "Rewrite the handler with suprnova::Request / HttpResponse.",
+   "gap": "none"
   },
   "use suprnova::data::when_loaded": {
    "class": "wrong_path",
@@ -795,8 +838,9 @@
   },
   "use suprnova::sea_orm_migration::prelude::*": {
    "class": "error",
-   "evidence": "Suprnova does not re-export sea_orm_migration; generated migrations use `use sea_orm_migration::prelude::*;` (suprnova-cli/src/templates/files/backend/migrations/*.rs.tpl, app/src/migrations/*).",
-   "fix": "use sea_orm_migration::prelude::*;"
+   "evidence": "Suprnova does not re-export sea_orm_migration; generated migrations use `use sea_orm_migration::prelude::*;` (suprnova-cli/src/templates/files/backend/migrations/*.rs.tpl, app/src/migrations/*). Slip: the real form is documented as the way in the scaffold, which depends on `sea-orm-migration` directly (suprnova-cli/src/templates/files/backend/Cargo.toml.tpl:33). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "fix": "use sea_orm_migration::prelude::*;",
+   "gap": "none"
   },
   "use suprnova::validation::rules::*": {
    "class": "wrong_path",
@@ -804,8 +848,10 @@
    "fix": "use suprnova::rules::*"
   },
   "where!()": {
-   "class": "error",
-   "evidence": "No `where!` macro and no route-constraint API exist; routing is matchit (framework/src/routing/router.rs:41). The same parity cell's `{id?}` optional params also need a runtime test."
+   "class": "code_bug",
+   "evidence": "No `where!` macro and no route-constraint API exist; routing is matchit (framework/src/routing/router.rs:41). The same parity cell's `{id?}` optional params also need a runtime test. Treated as intended (Laravel readers expect optional params and constraints, and parity marks them shipped); eas4ai/suprnova#76.",
+   "gap": "issue",
+   "issue": 76
   }
  }
 }
