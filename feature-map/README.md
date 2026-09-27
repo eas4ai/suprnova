@@ -13,11 +13,13 @@ a record is filed under decides only where it is tracked, never what it says.
 
 | File | What it is | Who writes it |
 |---|---|---|
-| `surface.jsonl` | 10,561 records, one per line, sorted by `id` | `tools/generate.sh` (never edit by hand) |
+| `surface.jsonl` | 10,866 records, one per line, sorted by `id` | `tools/generate.sh` (never edit by hand) |
 | `state.jsonl` | remediation status per record | `fmap mark` only |
 | `meta.json` | the source commit the surface was built from | `tools/generate.sh` |
 | `exclusions.json` | what the extractors saw and deliberately left out, with the reason | `tools/generate.sh` |
 | `fmap` | the query and update tool | |
+| `manual-triage-verdicts.json` | a hand-verified verdict, with source evidence, for every reference the manual check could not resolve | by hand, from the source |
+| `manual-triage.jsonl` | those verdicts joined with where each reference sits in the manual | `tools/manual_triage.py` |
 
 ## Using it (agents)
 
@@ -65,6 +67,7 @@ source has moved past the commit in `meta.json`; regenerate first.
 | `parent` | the owning item for methods, macro arguments and component macros |
 | `file`, `line` | where it is defined |
 | `feature` | the Cargo feature it needs, noting when that feature is off by default |
+| `hidden` | 1 for a `#[doc(hidden)]` item (or one reachable only through a hidden module or `use`): public, but not API by intent |
 | `status`, `body_changed`, `note`, `verified_rev`, `updated_at` | remediation state |
 
 The full record (variants, fields, implemented traits, flags, read sites,
@@ -108,15 +111,45 @@ Recording a link stores both sides' signature hashes, so a link reads
 disappears. `fmap show <suprnova id>` lists the Laravel items linked to it.
 The parity page in the manual is the summary of this data, not its source.
 
+## Checking the manual against the map
+
+`tools/manual_check.py` reads every English chapter with a CommonMark parser
+and every Rust code block with tree-sitter, and resolves each code reference
+(paths, method calls, attributes, derives, macros, commands and flags, env
+vars) against `surface.jsonl`. Nothing is matched by regex over raw markdown.
+
+```
+feature-map/tools/manual_check_env.sh             one-time venv (markdown-it-py, tree-sitter, tree-sitter-rust)
+target/feature-map/venv/bin/python feature-map/tools/manual_check.py . target/feature-map/manual-check.jsonl
+python3 feature-map/tools/manual_triage.py target/feature-map/manual-check.jsonl \
+  feature-map/manual-triage-verdicts.json feature-map/manual-triage.jsonl
+```
+
+Each reference gets an outcome (`found`, `hidden`, `missing`, `wrong_path`,
+`ambiguous`, `laravel_only`, `external`, `local`, `weak_found`,
+`weak_missing`, `unresolved`; the script's docstring defines each).
+`Type::default()` and other std trait methods are found only when the type
+really implements that trait; a method on a type alias is resolved on what
+the alias names.
+
+A checker can't tell a correct "there is no `X`" from a wrong "use `X`", or
+a reader's own `User` from the framework's. So every `missing`, `wrong_path`
+and `hidden` reference has a verdict in `manual-triage-verdicts.json`,
+checked by hand against the source: `error`, `wrong_path`, `internal`,
+`hidden`, `test_suite`, `code_bug`, `noise` (the manual is right) or
+`unverified`. `manual_triage.py` fails if a finding has no verdict, so a new
+one can't pass unreviewed. The `extra` list holds problems the checker
+cannot see, such as a real API used wrongly.
+
 ## Where records come from
 
 | Family | Extracted from |
 |---|---|
-| Rust API of all eight crates | rustdoc JSON with all features, cross-checked against a default-features build |
+| Rust API of all eight crates | rustdoc JSON with all features and `#[doc(hidden)]` items kept (flagged `hidden`), cross-checked against a default-features build |
 | Proc-macro arguments | each macro's own parser |
 | Live directives, vocabularies, runtime features, components | the directive grammar contract, runtime-features contract, component manifests and templates |
 | Commands and flags | each binary's clap definitions, confirmed by the built binary's `--help` |
-| Environment variables, Cargo features | reads traced to their literal or constant; crate manifests |
+| Environment variables, Cargo features | reads traced to their literal or constant, in the crates and in the code `suprnova new` scaffolds; `${VAR}` interpolations in the docker templates; crate manifests |
 | Endpoints, tables | route registration and migration code, curated, each line looked up from a code excerpt |
 
 Filing rules live in `tools/build_surface.py`: Rust items by the source file

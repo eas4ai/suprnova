@@ -43,17 +43,37 @@ def sections(help_text):
 
 
 def entries(lines):
-    """(name, description) pairs from a clap two-column section."""
+    """(spec, description) pairs from a clap two-column section.
+
+    clap indents a long-only flag (`      --frontend <X>`) deeper than one with a short form
+    (`  -f, --force`), so indentation cannot tell an entry from a wrapped description. An entry
+    is a line whose text starts with a flag or argument spec; anything else continues the
+    previous entry's description.
+    """
     items = []
     for line in lines:
-        m = re.match(r'^  (\S.*?)(?:\s{2,}(.*))?$', line)
-        if not m:
+        text = line.strip()
+        if not text:
             continue
-        if line.startswith("    ") or line.startswith("\t"):
-            if items:
-                items[-1] = (items[-1][0], (items[-1][1] + " " + line.strip()).strip())
-            continue
-        items.append((m.group(1).strip(), (m.group(2) or "").strip()))
+        m = re.match(r'^((?:-\S|--|<|\[)\S*(?:,? \S+)*?)(?:\s{2,}(.*))?$', text)
+        # `[NAME]` is an optional positional; `[default: x]`, `[possible values: ...]` are annotations.
+        starts_entry = m and (text.startswith(("-", "<")) or re.match(r"^\[[A-Z][A-Z0-9_]*\](\.\.\.)?(\s|$)", text))
+        if starts_entry:
+            items.append((m.group(1).strip(), (m.group(2) or "").strip()))
+        elif items:
+            items[-1] = (items[-1][0], (items[-1][1] + " " + text).strip())
+    return items
+
+
+def command_entries(lines):
+    """(name, description) pairs from a clap `Commands:` section: names sit at two spaces."""
+    items = []
+    for line in lines:
+        m = re.match(r"^  (\S+)(?:\s{2,}(.*))?$", line)
+        if m:
+            items.append((m.group(1), (m.group(2) or "").strip()))
+        elif items and line.strip():
+            items[-1] = (items[-1][0], (items[-1][1] + " " + line.strip()).strip())
     return items
 
 
@@ -133,7 +153,7 @@ for binary in ("suprnova", "app", "console"):
         cands = APP_ENUM
     else:
         top = run([str(BIN / binary), "help"]) + run([str(BIN / binary), "--help"])
-        names = [c[0].split(",")[0].split()[0] for c in entries(sections(top).get("Commands", []))]
+        names = [c[0].split(",")[0] for c in command_entries(sections(top).get("Commands", []))]
         names = [n for n in dict.fromkeys(names) if n != "help" and n not in demo_cmds]
         listed = set(names)
         cands = [(n, find_line(["framework/src"], n)) for n in names]

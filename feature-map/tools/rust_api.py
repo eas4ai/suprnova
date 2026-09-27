@@ -3,12 +3,18 @@
 The walk starts at the crate root and follows every public module and
 `pub use`, so an item appears at each public path a user can name it by.
 It is listed once, under its shortest public path, with the other paths
-noted. rustdoc has already removed private and `#[doc(hidden)]` items.
+noted. rustdoc has already removed private items. The JSON is built with
+`--document-hidden-items`, so `#[doc(hidden)]` items are kept and flagged
+`hidden`: a path is hidden when the item, or any module or `use` on the way
+to it, carries the attribute, and an item is hidden only when every public
+path to it is.
 
 Per type: inherent methods, associated constants and associated types each
 get their own record. Implemented traits defined in the same crate family are
-listed by name. Traits list their required and provided items, then their
-implementors. Enum variants and public struct fields are listed inline.
+listed by name, and std or third-party traits by their last segment
+(`Default`, `From`), so `Type::default()` can be checked. Traits list their
+required and provided items, then their implementors. Enum variants and
+public struct fields are listed inline.
 
 Feature gates come from rustdoc's CfgTrace attributes, inherited down the
 module and re-export chain; `--default` names the default-features JSON so
@@ -34,6 +40,11 @@ KIND_LABEL = {"proc_macro": "proc macro", "macro": "macro", "function": "fn", "s
 VOCAB = {}  # proc macro name -> [{"syntax", "at"}], from macro_vocab.py
 SIBLING_PUBLIC = {}  # canonical path in a sibling crate -> its shortest public path
 CFG = re.compile(r'CfgTrace\((.*)\)\]')
+HIDDEN = re.compile(r'^#\[doc\((?:[^)]*,\s*)?hidden\b')
+
+
+def is_hidden(item):
+    return any(isinstance(a, dict) and HIDDEN.match(a.get("other", "")) for a in item.get("attrs") or [])
 
 
 def default_features(manifest):
@@ -99,9 +110,10 @@ class Crate:
         self.root = str(d["root"])
         self.name = self.idx[self.root]["name"]
         self.public_paths = defaultdict(set)   # item id -> {(path tuple, gates tuple)}
-        self.external_reexports = []           # (path, source, gates)
+        self.hidden_paths = set()              # path tuples reached through a #[doc(hidden)] item
+        self.external_reexports = []           # (path, source, kind, gates, hidden)
         self.modules = {}                      # path tuple -> (id, gates)
-        self._walk(self.root, (self.name,), (), set())
+        self._walk(self.root, (self.name,), (), False, set())
 
     def resolve_external(self, u):
         """Defining crate path and kind of an external re-export target."""
@@ -117,18 +129,21 @@ class Crate:
     def item(self, i):
         return self.idx.get(str(i))
 
-    def _walk(self, mod_id, path, gates, seen):
+    def _walk(self, mod_id, path, gates, hidden, seen):
         key = (mod_id, path)
         if key in seen:
             return
         seen.add(key)
         mod = self.idx[mod_id]
         self.modules.setdefault(path, (mod_id, gates))
+        if hidden:
+            self.hidden_paths.add(path)
         for iid in mod["inner"]["module"]["items"]:
             it = self.item(iid)
             if it is None:
                 continue
             g = gates + tuple(cfg_of(it))
+            h = hidden or is_hidden(it)
             k = kind(it)
             if k == "use":
                 u = it["inner"]["use"]
@@ -136,26 +151,35 @@ class Crate:
                 if target is None:
                     src, k2 = self.resolve_external(u)
                     name = u["name"] if not u["is_glob"] else "*"
-                    self.external_reexports.append((path + (name,), src, k2, g))
+                    self.external_reexports.append((path + (name,), src, k2, g, h))
                     continue
                 g2 = g + tuple(cfg_of(target))
+                h2 = h or is_hidden(target)
                 if u["is_glob"]:
                     if kind(target) == "module":
-                        self._walk(str(u["id"]), path, g2, seen)
+                        self._walk(str(u["id"]), path, g2, h2, seen)
                     continue
                 if kind(target) == "module":
-                    self._walk(str(u["id"]), path + (u["name"],), g2, seen)
+                    self._walk(str(u["id"]), path + (u["name"],), g2, h2, seen)
                 else:
-                    self.public_paths[str(u["id"])].add((path + (u["name"],), g2))
+                    self._add(str(u["id"]), path + (u["name"],), g2, h2)
             elif k == "module":
-                self._walk(str(iid), path + (it["name"],), g, seen)
+                self._walk(str(iid), path + (it["name"],), g, h, seen)
             elif k in KIND_LABEL:
-                self.public_paths[str(iid)].add((path + (it["name"],), g))
+                self._add(str(iid), path + (it["name"],), g, h)
+
+    def _add(self, iid, path, gates, hidden):
+        self.public_paths[iid].add((path, gates))
+        if hidden:
+            self.hidden_paths.add(path)
+
+    def hidden(self, iid):
+        return all(p in self.hidden_paths for p, _ in self.public_paths[iid])
 
     # ---- presentation -------------------------------------------------
     def best(self, iid):
-        """Shortest public path, and the union-free gate set of that path."""
-        cands = sorted(self.public_paths[iid], key=lambda pg: (len(pg[0]), pg[0]))
+        """Shortest visible public path (hidden ones only as a last resort), and its gate set."""
+        cands = sorted(self.public_paths[iid], key=lambda pg: (pg[0] in self.hidden_paths, len(pg[0]), pg[0]))
         return cands[0]
 
     def trait_name(self, trait_ref):
@@ -189,7 +213,7 @@ class Crate:
                     n = sum(1 for f in sk["tuple"] if f is not None)
                     if n:
                         notes.append(f"Public tuple fields: {n}")
-            local_traits = set()
+            local_traits, other_traits = set(), set()
             for imp_id in inner["impls"]:
                 imp = self.item(imp_id)
                 if imp is None:
@@ -204,15 +228,20 @@ class Crate:
                             continue
                         mk = kind(m)
                         if mk in ("function", "assoc_const", "assoc_type"):
-                            out.append((mk, m["name"], span(m), m.get("deprecation")))
+                            out.append((mk, m["name"], span(m), m.get("deprecation"), "",
+                                        is_hidden(m) or is_hidden(imp)))
                 else:
                     crate, tname = self.trait_name(im["trait"])
                     if tname and tname in SIBLING_PUBLIC:
                         tname = SIBLING_PUBLIC[tname]
                     if crate in LOCAL_CRATES and tname:
                         local_traits.add(tname if tname.split("::")[0] in LOCAL_CRATES else f"{crate}::{tname}")
+                    elif tname:
+                        other_traits.add(tname.split("::")[-1])
             if local_traits:
                 notes.append("Implements: " + ", ".join(f"`{t}`" for t in sorted(local_traits)))
+            if other_traits:
+                notes.append("Implements (std and third-party): " + ", ".join(f"`{t}`" for t in sorted(other_traits)))
         elif k == "proc_macro":
             pm = it["inner"]["proc_macro"]
             nm = it["name"]
@@ -233,7 +262,7 @@ class Crate:
                 req = ""
                 if mk == "function":
                     req = "provided" if m["inner"]["function"]["has_body"] else "required"
-                out.append((mk, m["name"], span(m), m.get("deprecation"), req))
+                out.append((mk, m["name"], span(m), m.get("deprecation"), req, is_hidden(m)))
             impls = []
             for imp_id in inner["implementations"]:
                 imp = self.item(imp_id)
@@ -301,7 +330,7 @@ def member_ids(crate, iid):
 def notes_to_details(notes):
     """Structured form of the per-item notes members() produces."""
     fields = {"Variants": "variants", "Public fields": "fields", "Implements": "implements",
-              "Implemented here by": "implemented_by", "Helper attributes": "helper_attributes",
+              "Implemented here by": "implemented_by", "Implements (std and third-party)": "implements_external", "Helper attributes": "helper_attributes",
               "Form": "form", "Public tuple fields": "tuple_fields"}
     d = {}
     for n in notes:
@@ -331,9 +360,9 @@ def records(crate, default_crate, enabled=None):
         ids.add(rid)
         return rid
 
-    for path, src, k2, gates in sorted(crate.external_reexports):
+    for path, src, k2, gates, hidden in sorted(crate.external_reexports):
         full = "::".join(path)
-        out.append({"id": unique(full), "kind": "reexport", "parent": None, "family": "rust-api",
+        out.append({"id": unique(full), "kind": "reexport", "parent": None, "family": "rust-api", "hidden": hidden,
                     "crate": crate.name, "module": "::".join(path[:-1]), "file": None, "line": None,
                     "feature": label_gates(gates, enabled) or None,
                     "details": {"target": src, "target_kind": k2 or None},
@@ -358,9 +387,14 @@ def records(crate, default_crate, enabled=None):
                                   f"rustdoc says {'present' if in_default else 'absent'}")
         members, notes = crate.members(iid)
         details.update(notes_to_details(notes))
+        if k == "type_alias":
+            target = it["inner"]["type_alias"]["type"].get("resolved_path")
+            if target:
+                details["alias_of"] = target["path"]
         sp = it.get("span") or {}
         rid = unique(full)
-        out.append({"id": rid, "kind": KIND_LABEL[k], "parent": None, "family": "rust-api",
+        hidden = crate.hidden(iid)
+        out.append({"id": rid, "kind": KIND_LABEL[k], "parent": None, "family": "rust-api", "hidden": hidden,
                     "crate": crate.name, "module": "::".join(mod_path),
                     "module_public": mod_path in crate.modules,
                     "file": sp.get("filename"), "line": (sp.get("begin") or [None])[0],
@@ -375,11 +409,12 @@ def records(crate, default_crate, enabled=None):
         for mem in members:
             mk, name, at, dep = mem[:4]
             req = mem[4] if len(mem) > 4 else ""
+            mem_hidden = hidden or (mem[5] if len(mem) > 5 else False)
             if mk == "argument":
                 file, line = at.rsplit(":", 1)
                 src = Path(file).read_text().splitlines()[int(line) - 1].strip() if Path(file).exists() else ""
                 out.append({"id": unique(f"{rid}#arg:{name.replace('`', '')}"), "kind": "argument",
-                            "parent": rid, "family": "rust-api", "crate": crate.name,
+                            "parent": rid, "family": "rust-api", "hidden": hidden, "crate": crate.name,
                             "module": "::".join(mod_path), "file": file, "line": int(line),
                             "details": {"syntax": name.replace("`", "")},
                             "sig_hash": digest(name + "|" + " ".join(src.split())), "body_hash": None})
@@ -391,6 +426,7 @@ def records(crate, default_crate, enabled=None):
             file, _, line = at.rpartition(":") if at else (None, None, None)
             label = {"function": "fn", "assoc_const": "const", "assoc_type": "type"}[mk]
             out.append({"id": unique(f"{rid}::{name}"), "kind": label, "parent": rid, "family": "rust-api",
+                        "hidden": mem_hidden,
                         "crate": crate.name, "module": "::".join(mod_path), "file": file or None,
                         "line": int(line) if line else None, "deprecated": bool(dep),
                         "details": {"trait_item": req} if req else {},
@@ -411,7 +447,7 @@ def records(crate, default_crate, enabled=None):
                 if kind(it) == "trait" and it["name"] == "Sealed" else "public, but no public path names it")
         sp = it.get("span") or {}
         out.append({"id": unique("::".join(canon)), "kind": KIND_LABEL[kind(it)], "parent": None,
-                    "family": "rust-api", "crate": crate.name, "module": "::".join(canon[:-1]),
+                    "family": "rust-api", "hidden": is_hidden(it), "crate": crate.name, "module": "::".join(canon[:-1]),
                     "module_public": False, "file": sp.get("filename"),
                     "line": (sp.get("begin") or [None])[0], "details": {"unnameable": note},
                     "sig_hash": digest(_source_text(it, "sig")),

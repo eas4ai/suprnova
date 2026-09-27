@@ -66,14 +66,14 @@ PARITY = ("shipped", "diverged", "not_yet", "by_design_no", "not_applicable")
 SCHEMA = """
 CREATE TABLE surface (
   id TEXT PRIMARY KEY, kind TEXT, family TEXT, crate TEXT, module TEXT, chapter TEXT,
-  parent TEXT, file TEXT, line INTEGER, feature TEXT, deprecated INTEGER,
+  parent TEXT, file TEXT, line INTEGER, feature TEXT, deprecated INTEGER, hidden INTEGER,
   sig_hash TEXT, body_hash TEXT, record TEXT);
 CREATE TABLE state (
   id TEXT PRIMARY KEY, status TEXT, note TEXT, verified_rev TEXT,
   verified_sig_hash TEXT, verified_body_hash TEXT, updated_at TEXT);
 CREATE VIEW items AS
 SELECT s.id, s.kind, s.family, s.crate, s.module, s.chapter, s.parent, s.file, s.line,
-       s.feature, s.deprecated, s.sig_hash, s.body_hash,
+       s.feature, s.deprecated, s.hidden, s.sig_hash, s.body_hash,
        CASE
          WHEN st.status IS NULL THEN 'todo'
          WHEN st.status = 'done' AND st.verified_sig_hash IS NOT s.sig_hash THEN 'stale'
@@ -118,9 +118,9 @@ def load():
     db.executescript(SCHEMA)
     for line in SURFACE.read_text().splitlines():
         r = json.loads(line)
-        db.execute("INSERT INTO surface VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+        db.execute("INSERT INTO surface VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
             r["id"], r["kind"], r["family"], r.get("crate"), r.get("module"), r["chapter"], r.get("parent"),
-            r.get("file"), r.get("line"), r.get("feature"), int(bool(r.get("deprecated"))),
+            r.get("file"), r.get("line"), r.get("feature"), int(bool(r.get("deprecated"))), int(bool(r.get("hidden"))),
             r.get("sig_hash"), r.get("body_hash"), line))
     if L_SURFACE.exists():
         for line in L_SURFACE.read_text().splitlines():

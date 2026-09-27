@@ -158,12 +158,15 @@ EXTERNAL = {
     "sea_orm": "eloquent", "sea_orm_macros": "eloquent", "sea_query": "queries", "sea_query_derive": "queries",
     "validator": "validation", "validator_derive": "validation", "serde": "data", "http": "requests",
     "hyper": "lifecycle", "tokio": "lifecycle", "opendal": "filesystem", "iso_currency": "payments",
-    "fake": "eloquent-factories", "dummy": "eloquent-factories", "async_trait": "(no chapter) re-exported utility crates", "webauthn_rs": "oauth",
+    "fake": "eloquent-factories", "dummy": "eloquent-factories", "webauthn_rs": "oauth",
     "webauthn_rs_core": "oauth", "webauthn_rs_proto": "oauth", "opentelemetry_http": "observability",
     "featureflag": "feature-flags", "secrecy": "encryption", "askama": "(no chapter) server-rendered views",
     "chrono": "(no chapter) re-exported utility crates", "chrono_tz": "(no chapter) re-exported utility crates",
     "indexmap": "(no chapter) re-exported utility crates", "async_trait": "(no chapter) re-exported utility crates",
     "strum": "(no chapter) re-exported utility crates", "magnetar": "(no chapter) Magnetar engine API",
+    # Doc-hidden re-exports that generated code names, so user crates need not depend on them.
+    "clap": "console", "tera": "notifications",
+    "inventory": "(no chapter) doc-hidden macro support", "serde_json": "(no chapter) doc-hidden macro support",
 }
 SIBLINGS = ("suprnova_live", "suprnova_macros", "suprnova_web_push", "magnetar")
 CLI_RULES = [  # (binary, command prefix, chapter)
@@ -287,7 +290,7 @@ if vocab.exists():
     excluded["internal_macro_keywords"] = json.loads(vocab.read_text())["internal"]
 excluded["rust_items_not_extracted"] = [
     "private, pub(crate) and #[doc(hidden)] items (rustdoc removes them before extraction)",
-    "implementations of external traits (Debug, Clone, Serialize, ...)",
+    "methods of external trait impls (Debug, Clone, Serialize, ...); the traits themselves are listed in each type's implements_external",
     "demo application code (app/), test-support crates and fixtures",
 ]
 EXCL.write_text(json.dumps(excluded, indent=1, sort_keys=True) + "\n")

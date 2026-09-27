@@ -23,7 +23,9 @@ cd "$REPO"
 
 # 1. rustdoc JSON per crate: all features, and default features for the gate cross-check.
 export CARGO_TARGET_DIR=$WORK/target-nightly
-RD=(-Z unstable-options --output-format json)
+# Hidden items are kept (and flagged) so a reference to one reads as hidden, not missing.
+# Their docs may link to private items, which the crates deny; cap that to a warning.
+RD=(-Z unstable-options --output-format json --document-hidden-items --cap-lints warn)
 for spec in suprnova:suprnova suprnova-live:suprnova_live suprnova-magnetar:magnetar \
             suprnova-payments-stripe:suprnova_payments_stripe \
             suprnova-payments-paddle:suprnova_payments_paddle \

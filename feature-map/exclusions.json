@@ -51,9 +51,9 @@
  },
  "rust_items_not_extracted": [
   "private, pub(crate) and #[doc(hidden)] items (rustdoc removes them before extraction)",
-  "implementations of external traits (Debug, Clone, Serialize, ...)",
+  "methods of external trait impls (Debug, Clone, Serialize, ...); the traits themselves are listed in each type's implements_external",
   "demo application code (app/), test-support crates and fixtures"
  ],
- "sibling_reexports_folded_into_aliases": 222,
+ "sibling_reexports_folded_into_aliases": 297,
  "source_rev": "d03b4f1"
 }

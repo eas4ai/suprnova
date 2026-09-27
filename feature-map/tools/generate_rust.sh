@@ -4,7 +4,7 @@
 # Usage: generate_rust.sh <repo> <rustdoc-json-dir> <map-dir>
 # The JSON dir holds <lib>.all.json and <lib>.default.json per crate and
 # suprnova_macros.json, produced by `cargo +nightly rustdoc -p <crate>
-# [--all-features] -- -Z unstable-options --output-format json`.
+# [--all-features] -- -Z unstable-options --output-format json --document-hidden-items`.
 set -euo pipefail
 REPO=$1
 J=$2

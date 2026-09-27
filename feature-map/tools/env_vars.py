@@ -3,8 +3,9 @@
 Candidates are every SCREAMING_SNAKE string literal in non-test source.
 A candidate is confirmed when it reaches an env-reading call: it sits on
 the same logical statement as a callee whose name mentions env/var, or it is
-the value of a constant that does. Every rejected candidate is reported, so
-nothing is dropped silently.
+the value of a constant that does. Code the CLI scaffolds counts too, and so
+do `${VAR}` interpolations in the docker templates it writes. Every rejected
+candidate is reported, so nothing is dropped silently.
 """
 import json
 import re
@@ -108,6 +109,9 @@ for crate, src in CRATES.items():
         if is_test_path(f):
             continue
         files.append((crate, f, strip_tests(f.read_text())))
+# Code that `suprnova new` generates reads env vars too; users configure those the same way.
+for f in sorted((ROOT / "suprnova-cli/src/templates").rglob("*.rs.tpl")):
+    files.append(("suprnova-cli (scaffold)", f, strip_tests(f.read_text())))
 
 for crate, f, text in files:
     for m in CONST.finditer(text):
@@ -137,6 +141,15 @@ for crate, f, text in files:
         if key in const_hits and LIT.fullmatch(f'"{value}"'):
             ln = text[: m.start()].count("\n") + 1
             found.setdefault(value, set()).add((crate, str(rel), ln))
+
+# Generated compose files read `${VAR}` / `${VAR:-default}` from the shell or .env.
+COMPOSE_VAR = re.compile(r'\$\{([A-Z][A-Z0-9_]*)(?::?-[^}]*)?\}')
+for f in sorted((ROOT / "suprnova-cli/src/templates").rglob("*.tpl")):
+    if f.name.endswith(".rs.tpl"):
+        continue
+    for ln, text in enumerate(f.read_text().splitlines(), 1):
+        for m in COMPOSE_VAR.finditer(text):
+            found.setdefault(m.group(1), set()).add(("suprnova-cli (docker)", str(f.relative_to(ROOT)), ln))
 
 for name in list(rejected):
     if name in found:
