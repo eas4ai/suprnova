@@ -39,7 +39,7 @@ implement each one (recorded in laravel/parity.jsonl).
   fmap parity-check                     links whose Laravel or Suprnova side changed or vanished
   fmap exclusive --chapter cache        Suprnova items no Laravel item maps to
 
-Parity statuses: shipped, diverged (both need --suprnova), not_yet,
+Parity statuses: shipped, diverged (both need --suprnova), not_built,
 by_design_no, not_applicable (both of the last two need --note). Computed:
 unmapped (nothing recorded), stale (either side's signature changed since the
 link was recorded), broken (a linked Suprnova item no longer exists).
@@ -61,7 +61,7 @@ LARAVEL = HERE / "laravel"
 L_SURFACE = LARAVEL / "surface.jsonl"
 L_PARITY = LARAVEL / "parity.jsonl"
 L_META = LARAVEL / "meta.json"
-PARITY = ("shipped", "diverged", "not_yet", "by_design_no", "not_applicable")
+PARITY = ("shipped", "diverged", "not_built", "by_design_no", "not_applicable")
 
 SCHEMA = """
 CREATE TABLE surface (
@@ -320,7 +320,7 @@ def cmd_laravel(db, a):
     if a.lcmd == "summary":
         emit({**lfresh(), "pages": rows(db.execute("""
             SELECT page, COUNT(*) AS items, SUM(parity='unmapped') AS unmapped, SUM(parity='shipped') AS shipped,
-                   SUM(parity='diverged') AS diverged, SUM(parity='not_yet') AS not_yet,
+                   SUM(parity='diverged') AS diverged, SUM(parity='not_built') AS not_built,
                    SUM(parity='by_design_no') AS by_design_no, SUM(parity='not_applicable') AS not_applicable,
                    SUM(parity IN ('stale','broken')) AS needs_recheck
             FROM laravel_items GROUP BY page ORDER BY page LIKE '(%', page"""))})
@@ -361,7 +361,7 @@ def cmd_parity(db, a):
     if a.status in ("by_design_no", "not_applicable") and not a.note:
         emit({"error": f"{a.status} needs --note saying why"})
         sys.exit(1)
-    if a.status in ("not_yet", "by_design_no", "not_applicable") and a.suprnova:
+    if a.status in ("not_built", "by_design_no", "not_applicable") and a.suprnova:
         emit({"error": f"{a.status} means there is no Suprnova equivalent; drop --suprnova"})
         sys.exit(1)
     fresh = freshness()
@@ -401,6 +401,64 @@ def cmd_parity(db, a):
             db.execute("INSERT INTO parity_links VALUES (?,?,?)", (i, sid, h))
     save_parity(db)
     emit({"recorded": len(dict.fromkeys(ids)), "status": a.status, "suprnova": list(sup)})
+
+
+def cmd_parity_import(db, a):
+    """Apply a JSONL file of parity decisions, one {laravel_id, status, suprnova?, note?} per line,
+    under the same rules as `fmap parity`. Every problem is reported; nothing is written unless
+    the whole file is valid."""
+    if not L_SURFACE.exists():
+        emit(lfresh())
+        sys.exit(1)
+    fresh = freshness()
+    if fresh:
+        emit({"error": fresh["warning"]})
+        sys.exit(1)
+    recs = [json.loads(l) for l in Path(a.file).read_text().splitlines() if l.strip()]
+    problems, plan = [], []
+    for n, r in enumerate(recs, 1):
+        lid, st, sup, note = r.get("laravel_id"), r.get("status"), r.get("suprnova") or [], r.get("note")
+        err = None
+        if st not in PARITY:
+            err = f"unknown status {st!r}"
+        elif not db.execute("SELECT 1 FROM lsurface WHERE id = ?", [lid]).fetchone():
+            err = "unknown Laravel id"
+        elif st in ("shipped", "diverged") and not sup:
+            err = f"{st} needs suprnova ids"
+        elif st in ("by_design_no", "not_applicable") and not note:
+            err = f"{st} needs a note"
+        elif st in ("not_built", "by_design_no", "not_applicable") and sup:
+            err = f"{st} takes no suprnova ids"
+        links = {}
+        for sid in sup:
+            row = db.execute("SELECT sig_hash FROM surface WHERE id = ?", [sid]).fetchone()
+            if row is None:
+                err = err or f"unknown Suprnova id {sid!r}"
+            else:
+                links[sid] = row[0]
+        if err:
+            problems.append({"line": n, "laravel_id": lid, "error": err})
+        else:
+            plan.append((lid, st, note, links))
+    dup = [lid for lid, c in __import__("collections").Counter(p[0] for p in plan).items() if c > 1]
+    problems += [{"laravel_id": lid, "error": "decided more than once"} for lid in dup]
+    if problems:
+        emit({"error": f"{len(problems)} invalid records; nothing written", "problems": problems})
+        sys.exit(1)
+    if a.dry_run:
+        emit({"valid": len(plan), "by_status": dict(__import__("collections").Counter(p[1] for p in plan))})
+        return
+    version = json.loads(L_META.read_text())["laravel_version"]
+    rev = json.loads(META.read_text())["source_rev"]
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for lid, st, note, links in plan:
+        db.execute("DELETE FROM parity_links WHERE laravel_id = ?", [lid])
+        lsig = db.execute("SELECT sig_hash FROM lsurface WHERE id = ?", [lid]).fetchone()[0]
+        db.execute("INSERT OR REPLACE INTO parity VALUES (?,?,?,?,?,?,?)", (lid, st, note, lsig, version, rev, now))
+        for sid, h in links.items():
+            db.execute("INSERT INTO parity_links VALUES (?,?,?)", (lid, sid, h))
+    save_parity(db)
+    emit({"recorded": len(plan), "by_status": dict(__import__("collections").Counter(p[1] for p in plan))})
 
 
 def cmd_parity_check(db, a):
@@ -465,6 +523,9 @@ def main():
     p.add_argument("--suprnova", nargs="+", help="Suprnova ids that implement it (shipped / diverged)")
     p.add_argument("--note")
     p.add_argument("--children", action="store_true", help="also record every member of each id")
+    p = sub.add_parser("parity-import", help="apply a JSONL file of parity decisions (all-or-nothing)")
+    p.add_argument("file")
+    p.add_argument("--dry-run", action="store_true", help="validate only; write nothing")
     sub.add_parser("parity-check", help="parity links whose Laravel or Suprnova side changed or vanished")
     p = sub.add_parser("exclusive", help="Suprnova items no Laravel item maps to")
     p.add_argument("--chapter")

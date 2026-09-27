@@ -105,7 +105,7 @@ feature-map/fmap exclusive --chapter cache          Suprnova items with no Larav
 
 Parity statuses: `shipped` and `diverged` (both must name the Suprnova ids
 that implement the item; every id is checked against the Suprnova surface),
-`not_yet`, `by_design_no` and `not_applicable` (the last two need a note).
+`not_built`, `by_design_no` and `not_applicable` (the last two need a note).
 Recording a link stores both sides' signature hashes, so a link reads
 `stale` when either side changes and `broken` when a linked Suprnova item
 disappears. `fmap show <suprnova id>` lists the Laravel items linked to it.
