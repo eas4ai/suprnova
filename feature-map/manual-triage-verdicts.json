@@ -298,10 +298,6 @@
    "gap": "issue",
    "issue": 77
   },
-  "OutputFormat::Avif": {
-   "class": "noise",
-   "evidence": "The manual states these do NOT exist, which is correct."
-  },
   "PG_TEST_URL": {
    "class": "test_suite",
    "evidence": "Read by the framework's bench scripts (crates/suprnova-live/scripts, benches), not by an app."
