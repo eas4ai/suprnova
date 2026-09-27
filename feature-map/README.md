@@ -141,7 +141,10 @@ really implements that trait; a method on a type alias is resolved on what
 the alias names.
 
 A checker can't tell a correct "there is no `X`" from a wrong "use `X`", or
-a reader's own `User` from the framework's. So every `missing`, `wrong_path`,
+a reader's own `User` from the framework's. A `Type::member` on a type no
+Suprnova record has is presumed to be the reader's own (`weak_missing`) only
+when some Rust block in the manual defines or imports `Type`; otherwise it is
+`missing` (MAN-009). So every `missing`, `wrong_path`,
 `hidden` and `time_claim` finding has a verdict in
 `manual-triage-verdicts.json`, checked by hand against the source: `error`,
 `wrong_path`, `internal`, `hidden`, `test_suite`, `code_bug`, `restate`,

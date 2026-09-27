@@ -11,7 +11,9 @@ Outcomes per reference:
   missing        names a Suprnova API that does not exist
   laravel_only   not in Suprnova, but is a Laravel name (expected in parity/from-laravel)
   weak_found     a bare method call whose name exists on some Suprnova type
-  weak_missing   a bare method call no Suprnova type has (may be user code)
+  weak_missing   a bare method call no Suprnova type has (may be user code); `Type::member` stays
+                 here only when some Rust block in the manual defines or imports `Type`, else it
+                 is `missing`
   external       std or a third-party crate
   local          defined or imported by the snippet itself
   unresolved     a bare type or word the check cannot attribute (often example code)
@@ -438,6 +440,9 @@ def node_text(src, n):
     return src[n.start_byte:n.end_byte].decode()
 
 
+MANUAL_NAMES = set()  # every name a Rust block anywhere in the manual defines or imports
+
+
 def check_rust_block(code, start_line):
     src = code.encode()
     tree = RUST.parse(src)
@@ -472,6 +477,7 @@ def check_rust_block(code, start_line):
                 outcome, match = resolve_path(path.replace("::*", "").replace("::self", ""))
                 refs.append((n.start_point[0], f"use {path}", outcome, match))
     names = locals_ | set(imported)
+    MANUAL_NAMES.update(names)
     for n in nodes:
         line = n.start_point[0]
         if n.type in ("scoped_identifier", "scoped_type_identifier") and n.parent.type not in (
@@ -601,7 +607,7 @@ def check_inline(s):
 # ---- Time claims (MAN-107) ----------------------------------------------------------------------
 # Matched against prose only: code spans are left out, so `/v1/...` in a span is not a claim.
 TIME_MARKERS = re.compile(r"\b(today|for now|currently|not yet|at the moment|follow-up|planned|known seam|"
-                          r"will land|lands in|in a future|v1|yet)\b", re.I)
+                          r"will land|lands in|in a future|v1|yet|time of writing)\b", re.I)
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z`*(\[])")
 
 
@@ -688,6 +694,14 @@ for f in sorted((ROOT / "manual").glob("*.md")):
                 findings.append({"chapter": chapter, "line": line, "section": section,
                                  "context": "table cell" if in_table else "prose",
                                  "ref": sentence, "outcome": "time_claim", "match": None})
+
+# `Type::member` on a type no Suprnova record has is assumed to be the reader's own type. When no Rust
+# block anywhere in the manual defines or imports `Type` either, nothing backs that assumption: the
+# reference goes to triage as `missing` (`FilesystemRegistry::set_default` was an invented API).
+for x in findings:
+    m = re.fullmatch(r"([A-Z]\w*)::\w+(\(.*\))?", x["ref"])
+    if x["outcome"] == "weak_missing" and m and m.group(1) not in MANUAL_NAMES:
+        x["outcome"] = "missing"
 
 # A reference that resolves to a `#[doc(hidden)]` record exists, but is not public API by intent.
 hidden_ids = {r["id"] for r in surface if r.get("hidden")}

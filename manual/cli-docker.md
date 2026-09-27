@@ -180,7 +180,6 @@ MAIL_HOST=localhost
 MAIL_PORT=1025
 
 # MinIO (if enabled)
-FILESYSTEM_DISK=s3
 S3_ENDPOINT=http://localhost:9000
 S3_ACCESS_KEY=suprnova
 S3_SECRET_KEY=<MinIO root password from docker:compose>

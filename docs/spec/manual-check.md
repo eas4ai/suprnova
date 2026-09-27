@@ -88,6 +88,14 @@ claim otherwise.
 Falsifier: A report or commit message presents a translation or the README as checked.
 Status: Draft
 
+[MAN-009] The check MUST NOT presume a reference is the reader's own code
+without something in the manual backing that presumption. A `Type::member`
+reference whose `Type` no Suprnova record has counts as the reader's own
+type only when a Rust block somewhere in the manual defines or imports
+`Type`; otherwise its outcome is `missing` and it goes to triage.
+Falsifier: A `Type::member` reference whose type neither a surface record nor any Rust block in the manual defines or imports receives the outcome `weak_missing`.
+Status: Draft
+
 ## Remediation
 
 The manual states how Suprnova should work. A passage that describes
@@ -204,7 +212,7 @@ verification.
 [MAN-107] Every claim in the manual about the code's state in time - a
 limitation, a gap, a plan, a version-scoped caveat, or a sentence marked
 today, for now, currently, not yet, at the moment, follow-up, planned,
-known seam, will land, lands in, in a future, yet, or v1 - MUST be verified against the source as the
+known seam, will land, lands in, in a future, yet, v1, or time of writing - MUST be verified against the source as the
 pass reaches it, and MUST carry a verdict. A stale claim is the manual's
 error: the text is corrected or cut. A true gap the code should close is a
 `code_bug` with an issue, and the manual states the intended behavior. A
@@ -220,20 +228,19 @@ Status: Draft
 ## Mechanisms
 
 No block here names a mechanism yet; each gets one when it is agreed.
-What exists and what is still to build:
+What exists:
 
-- MAN-003, MAN-004: `feature-map/tools/manual_check.py`.
-- MAN-005: `feature-map/tools/manual_triage.py` exits non-zero and lists
-  the unreviewed references.
-- MAN-002: to build. `fmap` warns through `freshness()`;
-  `manual_check.py` has no guard.
-- MAN-006: to build. `manual_triage.py` reports stale verdicts but exits 0.
-- MAN-101, MAN-103: to build. `manual_triage.py` should require `gap` on
-  `error` and `code_bug` verdicts, and `issue` when `gap` is `issue`.
-- MAN-107: to build. `manual_check.py` extracts time-marked prose
-  sentences as findings, and `manual_triage.py` requires a verdict for
+- MAN-002, MAN-003, MAN-004, MAN-009: `feature-map/tools/manual_check.py`,
+  which refuses a map stamped behind the source.
+- MAN-005, MAN-006: `feature-map/tools/manual_triage.py` exits non-zero
+  and lists the unreviewed references and the stale verdicts.
+- MAN-101, MAN-103, MAN-104: `manual_triage.py` requires `gap` on `error`
+  and `code_bug` verdicts, `issue` when `gap` is `issue`, and `audience`
+  on `hidden` verdicts.
+- MAN-107: `manual_check.py` extracts time-marked prose sentences as
+  `time_claim` findings, and `manual_triage.py` requires a verdict for
   each, so a claim cannot pass unverified.
-- MAN-001, MAN-007, MAN-008, MAN-102, MAN-104, MAN-105, MAN-106: review.
+- MAN-001, MAN-007, MAN-008, MAN-102, MAN-105, MAN-106: review.
 
 ## Translations
 

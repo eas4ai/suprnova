@@ -1063,6 +1063,94 @@
    "evidence": "No `where!` macro and no route-constraint API exist; routing is matchit (framework/src/routing/router.rs:41). The same parity cell's `{id?}` optional params also need a runtime test. Treated as intended (Laravel readers expect optional params and constraints, and parity marks them shipped); eas4ai/suprnova#76.",
    "gap": "issue",
    "issue": 76
+  },
+  "AppUploadFinalizer::default": {
+   "class": "noise",
+   "evidence": "The reader's own finalizer type in the example (the dogfood app's is app/src/live/providers/upload_finalizer.rs); it implements Default there."
+  },
+  "Cashier::webhookHandler": {
+   "class": "noise",
+   "evidence": "Laravel / Inertia-Laravel / Laravel-Data names in a comparison column or labelled as Laravel's."
+  },
+  "URL::forceRootUrl()": {
+   "class": "noise",
+   "evidence": "Laravel / Inertia-Laravel / Laravel-Data names in a comparison column or labelled as Laravel's."
+  },
+  "CloseCode::is_allowed()": {
+   "class": "noise",
+   "evidence": "A third-party type used as documented; `tungstenite::protocol::frame::coding::CloseCode::is_allowed, called by WsSocket::close at framework/src/ws/socket.rs:300-301`. Not a Suprnova API."
+  },
+  "EffectiveFrom::NextBillingPeriod": {
+   "class": "noise",
+   "evidence": "A third-party type used as documented; `paddle-rust-sdk 0.18 EffectiveFrom, passed to subscription_cancel at crates/suprnova-payments-paddle/src/subscription.rs:91`. Not a Suprnova API."
+  },
+  "MaximumVariance::default()": {
+   "class": "noise",
+   "evidence": "A third-party type used as documented; `paddle-rust-sdk 0.18 webhooks::MaximumVariance, Default is 5 seconds (src/webhooks.rs:27-31); used at crates/suprnova-payments-paddle/src/webhook.rs:322`. Not a Suprnova API."
+  },
+  "Paddle::unmarshal": {
+   "class": "noise",
+   "evidence": "A third-party type used as documented; `paddle-rust-sdk 0.18 Paddle::unmarshal, called at crates/suprnova-payments-paddle/src/webhook.rs:318`. Not a Suprnova API."
+  },
+  "ForeignKeyAction::Cascade": {
+   "class": "noise",
+   "evidence": "A third-party type used as documented; `sea-query's ForeignKeyAction, re-exported through sea-orm-migration's prelude in migration code`. Not a Suprnova API."
+  },
+  "Posts::Content": {
+   "class": "noise",
+   "evidence": "The reader's own DeriveIden migration enum (sea-orm-migration idiom); the snippet elides its definition."
+  },
+  "Posts::CreatedAt": {
+   "class": "noise",
+   "evidence": "The reader's own DeriveIden migration enum (sea-orm-migration idiom); the snippet elides its definition."
+  },
+  "Posts::Id": {
+   "class": "noise",
+   "evidence": "The reader's own DeriveIden migration enum (sea-orm-migration idiom); the snippet elides its definition."
+  },
+  "Posts::Table": {
+   "class": "noise",
+   "evidence": "The reader's own DeriveIden migration enum (sea-orm-migration idiom); the snippet elides its definition."
+  },
+  "Posts::Title": {
+   "class": "noise",
+   "evidence": "The reader's own DeriveIden migration enum (sea-orm-migration idiom); the snippet elides its definition."
+  },
+  "Posts::UserId": {
+   "class": "noise",
+   "evidence": "The reader's own DeriveIden migration enum (sea-orm-migration idiom); the snippet elides its definition."
+  },
+  "JoinSet::abort_all": {
+   "class": "noise",
+   "evidence": "A third-party type used as documented; `tokio::task::JoinSet::abort_all, the supervisor drain fallback at framework/src/supervisor/mod.rs:295`. Not a Suprnova API."
+  },
+  "JsonValue::from_query_result": {
+   "class": "noise",
+   "evidence": "A third-party type used as documented; `sea-orm's impl FromQueryResult for JsonValue (src/query/json.rs:5), which raw DB::select rows go through`. Not a Suprnova API."
+  },
+  "Operator::presign_read": {
+   "class": "noise",
+   "evidence": "A third-party type used as documented; `opendal's Operator::presign_read; Storage::disk returns an opendal Operator (framework/src/filesystem/mod.rs:387)`. Not a Suprnova API."
+  },
+  "Status::Error": {
+   "class": "noise",
+   "evidence": "A third-party type used as documented; `opentelemetry::trace::Status::Error`. Not a Suprnova API."
+  },
+  "OnnxEmbedding::load_from_disk": {
+   "class": "noise",
+   "evidence": "The reader's own embedding type in a container binding example; not presented as a Suprnova API."
+  },
+  "ReqwestClient::with_timeout": {
+   "class": "noise",
+   "evidence": "The reader's own HTTP client wrapper in a container binding example; not presented as a Suprnova API."
+  },
+  "PlanTier::Pro": {
+   "class": "noise",
+   "evidence": "The reader's own enum in a Context example; not presented as a Suprnova API."
+  },
+  "UserFactor::admn()": {
+   "class": "noise",
+   "evidence": "A deliberate typo illustrating that a misspelled factory state method is a compile error."
   }
  }
 }

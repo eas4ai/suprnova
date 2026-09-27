@@ -338,7 +338,7 @@ like `ts=1716000000,h1=abcdef…`. The adapter delegates verification to
 - Parses the header
 - Recomputes the HMAC using your `PADDLE_WEBHOOK_KEY`
 - Rejects signatures whose timestamp is outside `MaximumVariance::default()`
-  (5 seconds at time of writing - replays older than that are dropped)
+  (5 seconds in paddle-rust-sdk 0.18, the version the adapter pins - replays older than that are dropped)
 
 The framework's `webhook_routes` handler calls `verify` before doing
 anything else; a failure returns `401 invalid-signature` with no body

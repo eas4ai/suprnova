@@ -101,11 +101,12 @@ QUEUE_DB_TABLE=jobs
 
 The database driver validates `QUEUE_DB_TABLE` as a SQL identifier at
 construction, so a malformed env value fails boot rather than reaching SQL
-composition. Redis uses sea-streamer-redis under the hood with
-`AutoCommit::Disabled`; the visibility timeout is fixed at consumer-group
-construction time, so the per-pop `visibility_timeout` argument is ignored
-on Redis (a documented divergence from the trait contract imposed by
-Redis Streams).
+composition. Redis uses Streams consumer groups directly (`XREADGROUP`
+for new work, `XAUTOCLAIM` to reclaim unacknowledged entries, Redis 6.2 or
+newer). The visibility timeout is the `XAUTOCLAIM` idle threshold, set once
+per connection, so the per-pop `visibility_timeout` argument is ignored on
+Redis (a documented divergence from the trait contract imposed by Redis
+Streams).
 
 ### Why Suprnova diverges
 
