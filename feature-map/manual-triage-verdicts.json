@@ -283,6 +283,16 @@
     "eloquent-factories.md:570"
    ],
    "ref": "observers fire for UserFactory::new().create()"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: the middleware priority list (framework/src/middleware/aliases.rs:373-400) is recorded but no chain is ever sorted by it, so middleware runs in registration order. eas4ai/suprnova#113. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 113,
+   "locations": [
+    "middleware.md:434"
+   ],
+   "ref": "middleware priority sorts the chain"
   }
  ],
  "verdicts": {
