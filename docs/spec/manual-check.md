@@ -201,6 +201,15 @@ What exists and what is still to build:
   `error` and `code_bug` verdicts, and `issue` when `gap` is `issue`.
 - MAN-001, MAN-007, MAN-008, MAN-102, MAN-104, MAN-105, MAN-106: review.
 
+## Translations
+
+On hold, by the developer's ruling of 2026-09-27: upcoming changes would
+make the translation work redundant, so the pass works on the English
+manual alone and the locale mirrors are not updated alongside it (MAN-008
+already scopes the check to English). `.manual-translations.lock` keeps
+recording which English chapters moved past their mirrors, which is the
+list to retranslate when the hold lifts.
+
 ## Open questions
 
 - Several chapters carry framework-contributor material: the render cache
@@ -208,5 +217,3 @@ What exists and what is still to build:
   lives" tables in `eloquent-serialization.md`. Under MAN-104 their hidden
   names go. Does that material belong in the manual at all, or in the
   crates' own docs?
-- When an English passage is cut or rewritten, what happens to the six
-  translations?
