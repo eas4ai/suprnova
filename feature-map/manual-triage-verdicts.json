@@ -471,6 +471,12 @@
    "evidence": "`Server` has no `serve`; its members are new, from_config, try_from_config_with_routes(_async), run, host, port, middleware, max_connections, header_read_timeout.",
    "fix": "Server::run"
   },
+  "Starter Kits :: Two kits ship today - Nebula is the Breeze equivalent; Pulsar adds docs, blog, community, and RBAC.": {
+   "class": "error",
+   "evidence": "Stale count: three kits ship. The developer confirmed on 2026-09-27 that the Directory starter was added recently; manual/starter-kits.md:52-54 documents it (github.com/eas4ai/suprnova-directory-starter). The kits live in their own repositories, so this repository's source cannot settle it.",
+   "fix": "Three kits: Nebula (the Breeze equivalent), Pulsar (docs, blog, community, RBAC) and the Directory starter (listings, moderation, paid publication), without 'today'.",
+   "gap": "none"
+  },
   "Suprnova::Notifications::Failed": {
    "class": "error",
    "evidence": "Notification events are `NotificationSending`, `NotificationSent`, `NotificationFailed` (framework/src/notifications/events.rs:32,51,73). The same table row for Mail uses PHP namespace syntax (`Suprnova\\Mail\\...`).",
