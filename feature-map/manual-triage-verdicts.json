@@ -277,6 +277,10 @@
    "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
    "gap": "none"
   },
+  "More kits are planned; watch the releases or open an issue if there's one you want.": {
+   "class": "verified",
+   "evidence": "A plan claim standing on the developer's word: on 2026-09-27 the developer confirmed more starter kits are planned. The kits live in their own repositories."
+  },
   "Numeric and boolean attributes are a planned enhancement; format them as strings at the call site for now.": {
    "class": "code_bug",
    "evidence": "Intended, by the developer's ruling of 2026-09-27; attributes are &[(&'static str, &str)] today and converted to string KeyValues (framework/src/telemetry/metrics.rs:36-40, :83, :98, :114). eas4ai/suprnova#70.",

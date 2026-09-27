@@ -28,6 +28,7 @@ Verdict classes:
   test_suite  describes the framework's own test or bench setup, not an app's
   code_bug    the manual states intended behavior the code lacks (keep the manual, issue filed)
   restate     a true, intended constraint worded as a moment in time: restate it as how Suprnova works
+  verified    a time claim checked against the source or the developer, true and kept as written
   noise       the checker's mistake: the manual is correct here
   unverified  a claim about an external tool the source cannot settle
 """
@@ -35,8 +36,8 @@ import json
 import sys
 from collections import Counter, defaultdict
 
-CLASSES = {"error", "wrong_path", "internal", "hidden", "test_suite", "code_bug", "restate", "noise",
-           "unverified"}
+CLASSES = {"error", "wrong_path", "internal", "hidden", "test_suite", "code_bug", "restate", "verified",
+           "noise", "unverified"}
 AUDIENCES = {"framework-internal", "reader-needed", "public-equivalent"}
 REVIEWED = ("missing", "wrong_path", "hidden", "time_claim")
 

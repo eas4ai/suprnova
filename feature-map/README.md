@@ -145,7 +145,7 @@ a reader's own `User` from the framework's. So every `missing`, `wrong_path`,
 `hidden` and `time_claim` finding has a verdict in
 `manual-triage-verdicts.json`, checked by hand against the source: `error`,
 `wrong_path`, `internal`, `hidden`, `test_suite`, `code_bug`, `restate`,
-`noise` (the manual is right) or `unverified`. An `error` or `code_bug`
+`verified`, `noise` (the manual is right) or `unverified`. An `error` or `code_bug`
 verdict carries `gap` (`none`, or `issue` with the GitHub `issue` number),
 and a `hidden` one carries `audience` (`framework-internal`,
 `reader-needed` or `public-equivalent`). The `extra` list holds problems
