@@ -150,10 +150,7 @@ BMP**.
 | GIF | yes | yes | ignored (palette) |
 | BMP | yes | yes | ignored (lossless) |
 
-AVIF is neither read nor written yet. The in-house AV1 encoder it
-depends on has not published, and shipping an `OutputFormat::Avif` that
-always failed would be a promise the framework could not keep. It
-arrives with that publish, as a new enum variant and nothing else.
+AVIF is neither read nor written. WebP is the modern-format path.
 
 GIF output is palette-quantised to at most 256 colours with
 Floyd-Steinberg dithering before encoding, so a photographic source
@@ -417,10 +414,6 @@ belongs, with the host.
 When the `oxideav` driver meets a HEIC file it says so by name, points
 at this chapter, and names both ways forward, rather than returning a
 generic "unsupported format".
-
-**AVIF is pending, not skipped.** It is royalty-free and it is the
-modern-format answer we want; the in-house AV1 encoder simply has not
-published yet. WebP is the modern-format path in the meantime.
 
 **No base64 or URL constructors.** Laravel's `ImageManager` has
 `->read($base64)` and `->read($url)`. `from_bytes` composes with
