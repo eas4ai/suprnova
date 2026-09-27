@@ -601,7 +601,7 @@ def check_inline(s):
 # ---- Time claims (MAN-107) ----------------------------------------------------------------------
 # Matched against prose only: code spans are left out, so `/v1/...` in a span is not a claim.
 TIME_MARKERS = re.compile(r"\b(today|for now|currently|not yet|at the moment|follow-up|planned|known seam|"
-                          r"will land|lands in|in a future|v1)\b", re.I)
+                          r"will land|lands in|in a future|v1|yet)\b", re.I)
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z`*(\[])")
 
 

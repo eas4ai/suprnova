@@ -201,16 +201,15 @@ capped at 30 seconds. Full jitter, not exponential-backoff-plus-fixed-
 sleep, so many workers retrying the same outage don't synchronize into
 a thundering herd.
 
-`.retry()` retries transport failures for every method. If a response
-arrives, it retries a 5xx status unless the method is `POST` or `PATCH`.
-It returns 4xx and 2xx/3xx responses as-is. After exhausting retries,
-the last response or transport error is returned to the caller.
+`.retry()` retries only idempotent methods (`GET`, `PUT`, `DELETE`): a
+transport failure (connect, timeout, DNS) or a 5xx status triggers another
+attempt. 4xx and 2xx/3xx responses are returned as-is. After exhausting
+retries, the last response or transport error is returned to the caller.
 
-This distinction matters for writes. A `POST` or `PATCH` transport failure
-can mean the server committed the write but the response was lost, yet the
-current contract still retries that failure. A received 5xx response for
-those methods is returned after one attempt unless the caller uses
-`.retry_non_idempotent(...)`.
+`POST` and `PATCH` are sent once, whatever the failure. A transport failure
+on a write can mean the server committed it but the response was lost, so
+retrying could apply it twice. Opt in with `.retry_non_idempotent(...)`
+when the upstream is protected by an idempotency key.
 
 ### `.retry_non_idempotent(...)` - opt-in for POST/PATCH
 

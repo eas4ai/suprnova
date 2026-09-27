@@ -504,9 +504,9 @@ Quick lookup if you know what you're after but not where it lives:
 | Cashier (Paddle) | [Payments: Paddle](payments-paddle.md) |
 | Sanctum / Passport | Magnetar bearer sessions through `BearerTokenMiddleware`; no separate Sanctum or Passport API |
 | Horizon | Queue inspection is built into the framework; no Horizon dashboard |
-| Telescope / Pulse | (deferred to v2+) |
+| Telescope / Pulse | not built |
 
-Things Laravel has that Suprnova doesn't (yet):
+Things Laravel has that Suprnova doesn't:
 
 - Telescope / Pulse dashboards. Basic [observability](observability.md) ships.
 - Sanctum / Passport package APIs. Magnetar bearer sessions and

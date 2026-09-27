@@ -150,7 +150,8 @@ BMP**.
 | GIF | yes | yes | ignored (palette) |
 | BMP | yes | yes | ignored (lossless) |
 
-AVIF is neither read nor written. WebP is the modern-format path.
+AVIF is neither read nor written: there is no AVIF encoder crate with a
+license compatible with Suprnova's. WebP is the modern-format path.
 
 GIF output is palette-quantised to at most 256 colours with
 Floyd-Steinberg dithering before encoding, so a photographic source

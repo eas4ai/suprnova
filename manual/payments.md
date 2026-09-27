@@ -581,7 +581,7 @@ pub enum StablecoinAsset {
 }
 ```
 
-The named operators and assets are the ones we've enumerated. The `Custom { ... }` variants on each cover regional operators and stablecoins we haven't pinned yet, so adding support for one doesn't force a framework release.
+The named operators and assets are the ones we've enumerated. The `Custom { ... }` variants on each cover regional operators and stablecoins the enums don't name, so adding support for one doesn't force a framework release.
 
 `PhoneNumber` and `CountryCode` are validated DTOs in `suprnova::payments` - they reject malformed input at construction time, which is where you want the failure rather than at the provider call.
 

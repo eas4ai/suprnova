@@ -124,6 +124,10 @@
    "gap": "issue",
    "issue": 77
   },
+  "A workflow's body runs once; each step's output is persisted; a retry resumes from the first step that hasn't completed yet.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
   "AI (Laravel ships native today; we don't gatekeep)": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
@@ -151,6 +155,10 @@
   "CURRENT_TIMESTAMP": {
    "class": "noise",
    "evidence": "Third-party names: SQL keyword, browser error, tokio macro, clap derive (the stub uses `clap::Parser`), SeaORM `EntityTrait::find` on a real entity."
+  },
+  "Channels that already succeeded are not rolled back; channels that haven't run yet are not attempted.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
   },
   "Check state with `Queue::is_paused(&connection, \"billing\").await?` (true if either key is set) or `Queue::paused_queues(&connection, &queues).await?` (which of `queues` are currently paused).": {
    "class": "noise",
@@ -206,9 +214,25 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
+  "Do not declare them yet.": {
+   "class": "code_bug",
+   "evidence": "True as written and a real gap: the three variants have no producer and bypass the cache (framework/src/render_cache/middleware.rs:1205-1213). The passage stays accurate until the issue settles the API. eas4ai/suprnova#88.",
+   "gap": "issue",
+   "issue": 88
+  },
   "ERR_CERT_AUTHORITY_INVALID": {
    "class": "noise",
    "evidence": "Third-party names: SQL keyword, browser error, tokio macro, clap derive (the stub uses `clap::Parser`), SeaORM `EntityTrait::find` on a real entity."
+  },
+  "Each path is passed only when it exists, because cargo-watch refuses to start on a `-w` path that doesn't - a project that hasn't been built yet has no `Cargo.lock`, and it's picked up on the next `serve`.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "Each rides a single shared job type (`SendMailJob` / `SendNotificationJob`), and there is no `ShouldQueueAfterCommit` equivalent on `Mailable` or `Notification` yet, so a `Mail::queue` or `Notify::queue` call inside a transaction reaches the driver immediately.": {
+   "class": "code_bug",
+   "evidence": "True as written and a real gap: SendNotificationJob leaves after_commit unset (framework/src/notifications/mod.rs:544-547); mail has the same shape. The passage stays accurate until the issue settles the API. eas4ai/suprnova#85.",
+   "gap": "issue",
+   "issue": 85
   },
   "Emits a `#[derive(Data, Validate)]` struct in `app/src/props/` (not `src/props/` - the `app/` prefix is hardcoded so the file lands in the workspace's example/host app):": {
    "class": "noise",
@@ -234,13 +258,33 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
+  "Existing targets resolve every symlink component; for a path that does not exist yet, the guard walks up to and canonicalizes the nearest existing ancestor.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
   "For non-GET Inertia visits, the framework auto-converts the response to `303 See Other` when `Inertia303Middleware` is installed, so the browser issues a clean follow-up GET instead of re-submitting the original PUT/PATCH/DELETE to the redirect target.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
+  "If a dependency hasn't been registered yet, the entry defers to the next iteration.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "If you don't have an `APP_KEY` yet:": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "If you haven't picked a frontend yet, Frontend Overview and Page Components come first; this chapter assumes the SPA bridge is wired and focuses on what your handler returns.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
   "If you write a driver whose follow-up write and acknowledgement share a transaction domain, implement `settle`.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
+  },
+  "In practice, a running consumer's background read-ahead task tends to claim a newly pushed entry within milliseconds of the push, well before an application ever calls `pop` - so `pending_jobs` mostly reflects work pushed while no consumer for that stream is actively polling, not \"any envelope nobody has explicitly popped yet\".": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
   },
   "Inertia versions the asset manifest so a long-lived client doesn't try to mount a page from yesterday's bundle against today's server.": {
    "class": "noise",
@@ -270,6 +314,14 @@
    "class": "noise",
    "evidence": "Laravel / Inertia-Laravel / Laravel-Data names in a comparison column or labelled as Laravel's."
   },
+  "Installs `cargo-watch` via `cargo install --locked --version \"^8.5\" cargo-watch` if it isn't on the PATH yet (one-time, with an \"Installing...\" notice).": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "Laravel's `Response::resolvePartialProperties` walks the dotted path through the raw, not-yet-resolved prop array, so a path into a `LazyProp` or `DeferProp` degrades to `null` - the walk hits an unresolved closure and stops (`inertia-laravel-2.0.25/src/Response.php:273-297`).": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
   "MARIADB_URL": {
    "class": "code_bug",
    "evidence": "database-testing.md uses these as the reader's own convention (correct there). vector.md:324 says env-vars.md documents QDRANT_URL / MARIADB_URL as driver env contracts: the framework reads neither outside its own tests (framework/tests/vector/*), and env-vars.md lists neither. PINECONE_API_KEY is real (framework/src/vector/pinecone.rs:230) but also absent from env-vars.md. Treated as intended (the Pinecone driver already reads its env; vector.md names these as the drivers' env contracts); eas4ai/suprnova#74.",
@@ -292,11 +344,23 @@
    "class": "verified",
    "evidence": "A plan claim standing on the developer's word: on 2026-09-27 the developer confirmed more starter kits are planned. The kits live in their own repositories."
   },
+  "Nothing has touched the database yet.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "Nothing has touched the disk yet.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
   "Nothing retires the fallback automatically: `Crypt::encrypt_string(CryptPurpose::Cookie, ...)` still mints v1, and the un-contexted entry point is superseded and scheduled for removal.": {
    "class": "code_bug",
    "evidence": "'v1' names the un-contexted cookie AAD format, and the sentence states the intended removal of it; the removal target is unset since 1.4.0 was never released (framework/src/http/cookie.rs:496-505). eas4ai/suprnova#77.",
    "gap": "issue",
    "issue": 77
+  },
+  "On a client's first-ever load of that prop (nothing cached yet) the pruned field is genuinely absent, since there's no cache to fall back to - the \"restores from cache\" behavior only applies to a page the client has already seen.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
   },
   "PG_TEST_URL": {
    "class": "test_suite",
@@ -309,6 +373,12 @@
   "Pointing it at the database - via `/_suprnova/health/ready` or the older `/_suprnova/health?db=true` - means a database blip restarts every replica at the moment the database can least afford a reconnect storm.": {
    "class": "verified",
    "evidence": "Both /_suprnova/health/ready and /_suprnova/health?db=true exist (framework/src/config/providers/server.rs:104, :351)."
+  },
+  "Polymorphic (`MorphTo`) owners aren't touchable yet.": {
+   "class": "code_bug",
+   "evidence": "True as written and a real gap: touches accepts only BelongsTo (suprnova-macros/src/model/derive_eloquent.rs:56). The passage stays accurate until the issue settles the API. eas4ai/suprnova#87.",
+   "gap": "issue",
+   "issue": 87
   },
   "ProvidesScrollMetadata::getPageName": {
    "class": "noise",
@@ -397,6 +467,10 @@
    "class": "noise",
    "evidence": "Laravel / Inertia-Laravel / Laravel-Data names in a comparison column or labelled as Laravel's."
   },
+  "Returns a lazy wrapper carrying `self.id` plus FK metadata; no SQL runs yet.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
   "Role::Admin": {
    "class": "noise",
    "evidence": "The reader's own types in example code."
@@ -404,6 +478,10 @@
   "Role::Member": {
    "class": "noise",
    "evidence": "The reader's own types in example code."
+  },
+  "Runs `npm install` in `frontend/` if `node_modules` doesn't exist yet.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
   },
   "S3_ACCESS_KEY": {
    "class": "code_bug",
@@ -459,6 +537,10 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
+  "Surfacing them as `Failed` is the conservative default - your app treats the charge as not-yet-confirmed until you upgrade the adapter.": {
+   "class": "verified",
+   "evidence": "The non_exhaustive fallback to Failed is intentional (manual/payments-stripe.md:241-243 and the adapter's status mapping); 'not-yet-confirmed' describes the charge, not the code."
+  },
   "Sync gates work transparently from the async path (`Gate::allows_async` dispatches them without an `.await`), so a codebase can register sync gates today and migrate individual abilities to async later without changing call sites.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
@@ -483,6 +565,12 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
+  "The `Retry-After` hint is logged but not (yet) fed back into the queue's delay computation; if you need that, hook a `NotificationFailed` listener that re-queues with the hinted delay.": {
+   "class": "code_bug",
+   "evidence": "True as written and a real gap: retry_after is parsed and carried on PushServiceRejected (crates/suprnova-web-push/src/error.rs:29-35) but never reaches the queue's delay. The passage stays accurate until the issue settles the API. eas4ai/suprnova#86.",
+   "gap": "issue",
+   "issue": 86
+  },
   "The `id` field supplies the JSON:API `id` member (stringified per spec); every other field lands in `attributes` and is subject to sparse-fieldset filtering - a request that names `?fields[todos]=title,done` gets back only those two attributes, without any handler-side work.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
@@ -502,6 +590,10 @@
   "The closure runs against a clone of the currently-bound set (or the empty default if no middleware has bound one).": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
+  },
+  "The default resolver hashes the Vite manifest and falls back to `MANIFEST_VERSION_FALLBACK` when no manifest exists yet - assert against that constant rather than a hardcoded `\"1.0\"` in a test that hasn't built a frontend:": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
   },
   "The file lands in `frontend/src/pages/` with the per-frontend extension: `AboutPage.svelte` for Svelte, `AboutPage.tsx` for React, `AboutPage.vue` for Vue.": {
    "class": "noise",
@@ -523,6 +615,10 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
+  "This is `stderr` rather than `tracing::warn!` because the subscriber hasn't been installed yet - a `warn!` would be silently dropped.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
   "This is the canonical pattern when one model's id needs to flow into a follow-up insert.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
@@ -536,6 +632,10 @@
   "Under the embedded profile, where L1 is disabled unless `RENDER_CACHE_L1_DIR` names a directory, declaring the layer changes nothing; under the Database profile the entry lands in `suprnova_render_entries` and a second process finds it there.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
+  },
+  "Use it when you have not customised them yet, or when you have a backup.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
   },
   "User::from": {
    "class": "noise",
@@ -553,6 +653,18 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
+  "When you later add Mollie, or wire up a regional gateway that doesn't exist yet, you implement the same five traits and the rest of your app does not move.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "When you only want the keys and haven't loaded the rows yet, use the builder terminal instead - `User::query().model_keys().await?` projects the key column without hydrating anything.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "While the primary holds the path, the fallback's copy is unreachable through this disk, so removing it first changes nothing you can observe - and if the delete fails, nothing has moved yet.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
   "WsSocket::split()": {
    "class": "code_bug",
    "evidence": "`WsSocket` has no `split`; members are recv, recv_text, send_text, send_binary, close, from_stream(_with_heartbeat). Treated as intended (a missing capability: send and recv both take &mut self); eas4ai/suprnova#71.",
@@ -562,6 +674,10 @@
   "You opt routes and groups in explicitly; everything else keeps working exactly as it does today.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
+  },
+  "[ ] You've stress-tested the subscription-arrival webhook: there is a window where the customer has paid but the mirror has no row yet": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
   },
   "`--force` proves intent at the moment you typed the command.": {
    "class": "noise",
@@ -581,6 +697,10 @@
    "gap": "issue",
    "issue": 77
   },
+  "`InProgress` is the case worth thinking about: a duplicate arrived while the first caller's body was still executing, so there's no recorded result to hand back yet.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
   "`Subscription::cancel(id, at_period_end)` accepts the bool for trait compatibility but always behaves as scheduled cancellation - Paddle's `EffectiveFrom` enum is private in `paddle_rust_sdk` 0.18, so immediate cancel is not viable in v1.": {
    "class": "verified",
    "evidence": "Cargo.lock pins paddle-rust-sdk 0.18.0; the adapter's cancel path is scheduled-only."
@@ -588,6 +708,10 @@
   "`auth_user_id()` returns the currently-authenticated user id (consulting request-scoped auth state first, falling back to the persisted session field):": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
+  },
+  "`console --help`, `console --version`, missing-subcommand, and parse-error paths all skip it - so `console --help` works on a fresh checkout that doesn't have `DATABASE_URL` set yet.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
   },
   "`count: \"3\"` sends a string, which can only match a literal variant key - it will land on your `*[other]` default.": {
    "class": "noise",
@@ -616,6 +740,10 @@
   "`reflash()` - re-flash everything currently visible for one more turn": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
+  },
+  "`scrollProps` has one extra condition on top of the lists: a `.scroll().defer()` prop announces its merge instruction on a non-partial visit but ships no cursor there, because nothing is on screen yet for a cursor to describe.": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
   },
   "app #": {
    "class": "noise",
