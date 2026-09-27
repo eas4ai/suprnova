@@ -20,6 +20,16 @@
     "cli-docker.md:183"
    ],
    "ref": "minioadmin credentials"
+  },
+  {
+   "class": "error",
+   "evidence": "Stale design statement. The suprnova CLI already forwards app tasks through the app binary (migrate, migrate:*, db:sync, schedule:*; suprnova-cli/src/main.rs:267-318, suprnova-cli/src/commands/schedule_list.rs:14), and the developer ruled on 2026-09-27 that it should cover db:seed and model:prune too (eas4ai/suprnova#72).",
+   "fix": "Rewrite 'Why Suprnova diverges': the suprnova CLI forwards app tasks to the app's console binary; custom #[command]s run through the console binary.",
+   "gap": "none",
+   "locations": [
+    "console.md:210"
+   ],
+   "ref": "console.md: the global CLI deliberately does not run app tasks like db:seed"
   }
  ],
  "verdicts": {
