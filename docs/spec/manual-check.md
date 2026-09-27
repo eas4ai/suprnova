@@ -126,8 +126,13 @@ The first row is for a slip: the manual names the right thing wrongly. When
 the manual's form is a different shape from anything the code offers, and
 it is the form a reader would expect - the code reaches the same result
 only another way, or with more ceremony - the finding is treated as
-intended: `code_bug`, issue, the passage stays. Doubt goes to an issue,
-never to a cut.
+intended: `code_bug`, the passage stays, and the code gets an issue.
+Doubt keeps the passage; it never cuts it.
+
+The two columns are two streams of work. The documentation pass changes
+only the manual. Issues change only the code, each in its own change
+(MAN-105); the pass files them as the gap check finds them, and does not
+make them.
 
 [MAN-101] Before a finding is classified `error` or `code_bug`, and before
 any manual text is changed for it, the gap check MUST run in the order
