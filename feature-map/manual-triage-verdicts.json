@@ -53,8 +53,11 @@
    "evidence": "The manual states these do NOT exist, which is correct."
   },
   "#[suprnova::__async_trait]": {
-   "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "audience": "public-equivalent",
+   "class": "error",
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Public equivalent: `suprnova::async_trait` (framework/src/lib.rs:557); `__async_trait` is the crate path macros expand to, not an attribute.",
+   "fix": "#[suprnova::async_trait] (framework/src/lib.rs:557)",
+   "gap": "none"
   },
   "BackoffSchedule::exponential": {
    "class": "error",
@@ -67,8 +70,11 @@
    "fix": "BackoffSchedule::Fixed / Exponential / Sequence"
   },
   "Builder::without_global_scope": {
-   "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "audience": "public-equivalent",
+   "class": "error",
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. The builder method is silently ineffective after Model::query() (framework/src/eloquent/builder.rs:1925-1957); the macro-emitted static helper is the public surface.",
+   "fix": "Model::without_global_scope::<S>(), the static helper #[model] emits (suprnova-macros/src/model/derive_eloquent.rs:1319)",
+   "gap": "none"
   },
   "CACHE_REDIS_TEST_URL": {
    "class": "test_suite",
@@ -87,12 +93,16 @@
    "evidence": "`CURRENT_TX` is pub(crate) (framework/src/database)."
   },
   "ConnectionRegistry::clear()": {
+   "audience": "framework-internal",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Called by TestContainerGuard::drop (framework/src/database/connection_registry.rs:190-198); \"Production code does not call this.\""
   },
   "Crypt::decrypt_string_for_inner": {
+   "audience": "reader-needed",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#67.",
+   "gap": "issue",
+   "issue": 67
   },
   "Data::exceptWhen($field, $condition)": {
    "class": "noise",
@@ -111,8 +121,11 @@
    "evidence": "Laravel / Inertia-Laravel / Laravel-Data names in a comparison column or labelled as Laravel's."
   },
   "DbConnection::observe_statements_for_test": {
+   "audience": "reader-needed",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#68.",
+   "gap": "issue",
+   "issue": 68
   },
   "ERR_CERT_AUTHORITY_INVALID": {
    "class": "noise",
@@ -123,12 +136,14 @@
    "evidence": "Laravel / Inertia-Laravel / Laravel-Data names in a comparison column or labelled as Laravel's."
   },
   "ExecutorChoice": {
+   "audience": "framework-internal",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Internal executor dispatch (framework/src/database/transaction.rs:367-371)."
   },
   "ExecutorChoice::resolve_read": {
+   "audience": "framework-internal",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Internal routing step (framework/src/database/transaction.rs:447-455); the precedence it implements is what readers need."
   },
   "FAKE_GUARDS": {
    "class": "internal",
@@ -184,8 +199,9 @@
    "evidence": "Laravel / Inertia-Laravel / Laravel-Data names in a comparison column or labelled as Laravel's."
   },
   "Model::__append_accessor": {
+   "audience": "framework-internal",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Macro plumbing for `appends` (framework/src/eloquent/model.rs:205-211)."
   },
   "Model::global_scope::<GS>()": {
    "class": "error",
@@ -237,12 +253,16 @@
    "evidence": "Read by the framework's bench scripts (crates/suprnova-live/scripts, benches), not by an app."
   },
   "RateLimitMiddleware::connections_per_ip": {
-   "class": "error",
-   "evidence": "`RateLimitMiddleware` has no `ip_based` or `connections_per_ip` constructor."
+   "class": "code_bug",
+   "evidence": "`RateLimitMiddleware` has no `ip_based` or `connections_per_ip` constructor. Intended: the manual states the control; no per-IP connection cap exists. eas4ai/suprnova#62.",
+   "gap": "issue",
+   "issue": 62
   },
   "RateLimitMiddleware::ip_based": {
-   "class": "error",
-   "evidence": "`RateLimitMiddleware` has no `ip_based` or `connections_per_ip` constructor."
+   "class": "code_bug",
+   "evidence": "`RateLimitMiddleware` has no `ip_based` or `connections_per_ip` constructor. Intended: the manual form is the one a reader expects; the code reaches it only through RateLimitMiddleware::new or a named limiter. eas4ai/suprnova#66.",
+   "gap": "issue",
+   "issue": 66
   },
   "RateLimiter::for_signature": {
    "class": "error",
@@ -255,32 +275,53 @@
    "fix": "RateLimiter::for"
   },
   "RenderCache::clear_l0_for_test()": {
+   "audience": "reader-needed",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#68.",
+   "gap": "issue",
+   "issue": 68
   },
   "RenderCache::inspect_l1_for_test(pattern, params, login)": {
+   "audience": "reader-needed",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#68.",
+   "gap": "issue",
+   "issue": 68
   },
   "RenderCache::inspect_route_for_test": {
+   "audience": "reader-needed",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#68.",
+   "gap": "issue",
+   "issue": 68
   },
   "RenderCache::inspect_route_for_test(pattern)": {
+   "audience": "reader-needed",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#68.",
+   "gap": "issue",
+   "issue": 68
   },
   "RenderCache::key_for_route_at_epoch_for_test(pattern, params, login, epoch)": {
+   "audience": "reader-needed",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#68.",
+   "gap": "issue",
+   "issue": 68
   },
   "RenderCache::key_for_route_for_test": {
+   "audience": "reader-needed",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#68.",
+   "gap": "issue",
+   "issue": 68
   },
   "RenderCache::key_for_route_for_test(pattern, params, login)": {
+   "audience": "reader-needed",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#68.",
+   "gap": "issue",
+   "issue": 68
   },
   "Response::resolvePartialProperties": {
    "class": "noise",
@@ -455,8 +496,11 @@
    "evidence": "No `middleware!` macro exists."
   },
   "registry::assert_no_duplicates": {
+   "audience": "reader-needed",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#65.",
+   "gap": "issue",
+   "issue": 65
   },
   "resource!(\"posts\", PostController)": {
    "class": "error",
@@ -464,8 +508,11 @@
    "fix": "Router::resource / Router::api_resource"
   },
   "seed::clear()": {
+   "audience": "reader-needed",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#63.",
+   "gap": "issue",
+   "issue": 63
   },
   "suprnova 0.x.x": {
    "class": "noise",
@@ -503,7 +550,9 @@
   },
   "suprnova schedule:list --timezone": {
    "class": "code_bug",
-   "evidence": "`app schedule:list --timezone` exists but the `suprnova` wrapper rejects the flag (suprnova-cli/src/commands/schedule_list.rs:14). Filed as eas4ai/suprnova#60."
+   "evidence": "`app schedule:list --timezone` exists but the `suprnova` wrapper rejects the flag (suprnova-cli/src/commands/schedule_list.rs:14). Filed as eas4ai/suprnova#60.",
+   "gap": "issue",
+   "issue": 60
   },
   "suprnova serve --help": {
    "class": "noise",
@@ -533,16 +582,25 @@
    "evidence": "The reader's model; `query()` is generated by `#[model]`."
   },
   "suprnova::__async_trait": {
-   "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "audience": "public-equivalent",
+   "class": "error",
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Public equivalent: `suprnova::async_trait` (framework/src/lib.rs:557); `__async_trait` is the crate path macros expand to, not an attribute.",
+   "fix": "#[suprnova::async_trait] (framework/src/lib.rs:557)",
+   "gap": "none"
   },
   "suprnova::__fake": {
+   "audience": "reader-needed",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#64.",
+   "gap": "issue",
+   "issue": 64
   },
   "suprnova::crypto::_test_encrypt_with": {
+   "audience": "reader-needed",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#67.",
+   "gap": "issue",
+   "issue": 67
   },
   "suprnova::eloquent::lock": {
    "class": "noise",
@@ -561,8 +619,11 @@
    "evidence": "Third-party names: SQL keyword, browser error, tokio macro, clap derive (the stub uses `clap::Parser`), SeaORM `EntityTrait::find` on a real entity."
   },
   "suprnova::seed::clear": {
+   "audience": "reader-needed",
    "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call."
+   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#63.",
+   "gap": "issue",
+   "issue": 63
   },
   "suprnova::validation::rules": {
    "class": "wrong_path",
