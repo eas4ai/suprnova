@@ -91,6 +91,166 @@
     "payments-paddle.md:281"
    ],
    "ref": "payments-paddle.md: update with new_price_refs replaces items, prorated"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (per-request scoped container bindings). eas4ai/suprnova#95. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 95,
+   "locations": [
+    "parity.md:33"
+   ],
+   "ref": "parity.md:33: per-request scoped container bindings"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (optional route params and where!() constraints). eas4ai/suprnova#76. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 76,
+   "locations": [
+    "parity.md:56"
+   ],
+   "ref": "parity.md:56: optional route params and where!() constraints"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (route group .name() / .controller()). eas4ai/suprnova#94. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 94,
+   "locations": [
+    "parity.md:58"
+   ],
+   "ref": "parity.md:58: route group .name() / .controller()"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (throttle:60,1 string middleware). eas4ai/suprnova#93. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 93,
+   "locations": [
+    "parity.md:62"
+   ],
+   "ref": "parity.md:62: throttle:60,1 string middleware"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (middleware looked up by string name in routes). eas4ai/suprnova#93. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 93,
+   "locations": [
+    "parity.md:64"
+   ],
+   "ref": "parity.md:64: middleware looked up by string name in routes"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (Context carried into queue / mail / events). eas4ai/suprnova#89. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 89,
+   "locations": [
+    "parity.md:97"
+   ],
+   "ref": "parity.md:97: Context carried into queue / mail / events"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (Storage url() for public files). eas4ai/suprnova#90. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 90,
+   "locations": [
+    "parity.md:100"
+   ],
+   "ref": "parity.md:100: Storage url() for public files"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (Schedule::command). eas4ai/suprnova#101. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 101,
+   "locations": [
+    "parity.md:126"
+   ],
+   "ref": "parity.md:126: Schedule::command"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (custom guard registration). eas4ai/suprnova#91. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 91,
+   "locations": [
+    "parity.md:152"
+   ],
+   "ref": "parity.md:152: custom guard registration"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (RBAC layered on Gate/Policy). eas4ai/suprnova#97. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 97,
+   "locations": [
+    "parity.md:164"
+   ],
+   "ref": "parity.md:164: RBAC layered on Gate/Policy"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (Laravel-shape paginator JSON). eas4ai/suprnova#96. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 96,
+   "locations": [
+    "parity.md:184"
+   ],
+   "ref": "parity.md:184: Laravel-shape paginator JSON"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (lazy-loading prevention). eas4ai/suprnova#92. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 92,
+   "locations": [
+    "parity.md:205"
+   ],
+   "ref": "parity.md:205: lazy-loading prevention"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (load_missing on a single model). eas4ai/suprnova#104. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 104,
+   "locations": [
+    "parity.md:208"
+   ],
+   "ref": "parity.md:208: load_missing on a single model"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (console output assertions). eas4ai/suprnova#100. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 100,
+   "locations": [
+    "parity.md:253"
+   ],
+   "ref": "parity.md:253: console output assertions"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (Queue::fake / Bus::fake). eas4ai/suprnova#98. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 98,
+   "locations": [
+    "parity.md:256"
+   ],
+   "ref": "parity.md:256: Queue::fake / Bus::fake"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "Parity verification 2026-09-27: the row states intended behavior the code lacks (test clock controls). eas4ai/suprnova#99. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 99,
+   "locations": [
+    "parity.md:258"
+   ],
+   "ref": "parity.md:258: test clock controls"
   }
  ],
  "verdicts": {
