@@ -273,6 +273,16 @@
     "events.md:301"
    ],
    "ref": "DatabaseBusy fired by the framework"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: factory create() persists through persist_via_seaorm (framework/src/factory/persist.rs:80), a bare SeaORM insert that dispatches no model event, so observers never run for factory rows. eas4ai/suprnova#109. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 109,
+   "locations": [
+    "eloquent-factories.md:570"
+   ],
+   "ref": "observers fire for UserFactory::new().create()"
   }
  ],
  "verdicts": {
