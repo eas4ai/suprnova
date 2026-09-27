@@ -3,8 +3,8 @@
 Status: Draft
 Prefix: MAN
 
-The manual is checked against the code, not the other way round. The
-feature map (`feature-map/surface.jsonl`) is generated from the source at a
+The manual states how Suprnova should work; the code is checked against
+it, and so is the manual's own accuracy. The feature map (`feature-map/surface.jsonl`) is generated from the source at a
 recorded commit; `feature-map/tools/manual_check.py` resolves every code
 reference in the English manual against it; `feature-map/tools/manual_triage.py`
 joins each unresolved reference with a verdict a person or agent checked by
@@ -12,11 +12,14 @@ hand against the source. `feature-map/README.md` documents the commands, the
 outcomes and the verdict classes. This file owns the contract: what the
 comparison must guarantee, and how a finding is remediated.
 
-Two rulings from the developer, in conversation on 2026-09-27, shape the
-remediation half: "Nonexistent features need to be cut from the manual....
+Three rulings from the developer, in conversation on 2026-09-27, shape the
+remediation half. "Nonexistent features need to be cut from the manual....
 it is a manual", with the proviso that each cut is checked, as it is made,
-for a feature that may be mistakenly unimplemented; and those gaps are filed
-as GitHub issues about the code ("Not the docs the code").
+for a feature that may be mistakenly unimplemented. Those gaps are filed as
+GitHub issues about the code ("Not the docs the code"). And "The manual
+should contain only direction on how it SHOULD work. It is our
+responsibility to make sure it does": a passage describing intended
+behavior the code lacks stays, and the issue makes the code match it.
 
 Terms. A *reference* is one code span, or one name inside a fenced block,
 that the check extracts. An *outcome* is what the check concluded about it.
@@ -27,10 +30,11 @@ is a finding whose fix belongs in the code.
 
 ## The comparison
 
-[MAN-001] The source at the surface's recorded commit MUST be the
-authority. A disagreement between the manual and the code MUST be settled
-by reading the source; the manual, the CHANGELOG, a spec, or anyone's
-memory of the API MUST NOT settle it.
+[MAN-001] What the code does MUST be established by reading the source at
+the surface's recorded commit; the manual, the CHANGELOG, a spec, or
+anyone's memory of the API MUST NOT establish it. Whether the manual or the
+code is wrong where they disagree MUST be decided by the gap check
+(MAN-101), not by assuming either side.
 Falsifier: A verdict's evidence cites no source location, or cites only the manual or the CHANGELOG for what the code does.
 Status: Draft
 
@@ -84,9 +88,12 @@ Status: Draft
 
 ## Remediation
 
-The manual documents what a reader can do at the recorded commit. What the
-code should do but does not is tracked as an issue against the code, never
-as manual text.
+The manual states how Suprnova should work. A passage that describes
+something nobody intended is the manual's error and is cut or corrected. A
+passage that describes intended behavior the code lacks is the code's
+defect: the passage stays, an issue is filed against the code, and fixing
+the code is ours to do. The gap check decides which of the two a finding
+is.
 
 The gap check (MAN-101) searches, in this order:
 
@@ -102,26 +109,29 @@ The gap check (MAN-101) searches, in this order:
 
 Each finding is remediated by this table (MAN-102):
 
-| Finding | Manual | Code |
-|---|---|---|
-| Wrong name or path; the public equivalent exists | use the real name or path | nothing |
-| Does not exist; no evidence it was meant to, and no gap worth filing | cut the passage | nothing; `gap: none` |
-| Does not exist, and the gap check found intent (shipped, agreed, or pointed at by the code's docs) or a real gap (security, a Laravel equivalent that parity claims) | cut the passage, or rewrite it around what works today | issue; `gap: issue` |
-| Exists but is broken (`code_bug`) | describe what works today, or cut | issue; `gap: issue` |
-| Exists, public but `#[doc(hidden)]`, and a reader needs it (MAN-104) | leave it | issue to make it supported API |
+| Finding | Verdict | Manual | Code |
+|---|---|---|---|
+| Wrong name or path; the public equivalent exists | `error` or `wrong_path`, `gap: none` | use the real name or path | nothing |
+| Does not exist; no evidence it was meant to, and no gap worth filing | `error`, `gap: none` | cut the passage | nothing |
+| Does not exist, and the gap check found intent (shipped, agreed, or pointed at by the code's docs) or a real gap (security, a Laravel equivalent that parity claims) | `code_bug`, `gap: issue` | keep the passage | issue; the code is made to match |
+| Exists but is broken | `code_bug`, `gap: issue` | keep the passage | issue; the code is made to match |
+| Exists, public but `#[doc(hidden)]`, and a reader needs it (MAN-104) | `hidden`, `gap: issue` | keep the passage | issue to make it supported API |
 
-When an issue is fixed, the change that fixes it restores the manual text.
+A kept passage may still be corrected where its details are wrong about the
+intended behavior; it is not weakened to describe what the code does today.
 
-[MAN-101] Before the manual text for a reference the source does not have
-is changed, the gap check MUST run in the order listed above, and its
-result MUST be recorded in the verdict: the evidence names what was
-searched, and the `gap` field is `none` or `issue`.
+[MAN-101] Before a finding is classified `error` or `code_bug`, and before
+any manual text is changed for it, the gap check MUST run in the order
+listed above, and its result MUST be recorded in the verdict: the evidence
+names what was searched, and the `gap` field is `none` or `issue`.
 Falsifier: An `error` or `code_bug` verdict has no `gap` field, or its evidence names no search.
 Status: Draft
 
-[MAN-102] The manual MUST NOT describe anything a reader cannot use at the
-recorded commit, and each finding MUST be remediated by the table above.
-Falsifier: A manual passage shows a call, flag, macro or setting that fails at the recorded commit.
+[MAN-102] Each finding MUST be remediated by the table above. The manual
+MUST NOT describe anything nobody intended, and a passage the gap check tied
+to an issue MUST NOT be cut or rewritten to fit the code while that issue is
+open.
+Falsifier: A `gap: none` passage remains in the manual, or a passage tied to an open issue is cut or rewritten around the code's current behavior.
 Status: Draft
 
 [MAN-103] An issue filed under MAN-102 MUST describe the code: its title

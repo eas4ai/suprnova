@@ -10,12 +10,12 @@ holds problems found by hand that the check cannot see (a real API used
 wrongly, a wrong default value); those carry their own locations.
 
 Verdict classes:
-  error       the manual names something the source does not have (fix the manual)
+  error       the manual names something the source does not have and nobody intended (fix the manual)
   wrong_path  the item exists at a different path than the manual writes
   internal    names a private or pub(crate) item: true, but not API a reader can use
   hidden      names a #[doc(hidden)] item: public, but not API by intent
   test_suite  describes the framework's own test or bench setup, not an app's
-  code_bug    the manual matches intent, the code is wrong (issue filed)
+  code_bug    the manual states intended behavior the code lacks (keep the manual, issue filed)
   noise       the checker's mistake: the manual is correct here
   unverified  a claim about an external tool the source cannot settle
 """
