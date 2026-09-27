@@ -262,6 +262,17 @@
     "queues.md:813"
    ],
    "ref": "queue:retry presented as a Suprnova command"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: DatabaseBusy is listed among the framework's database events, but nothing dispatches it (framework/src/database/events.rs:204-220, 'not emitted by the framework itself'). eas4ai/suprnova#108. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 108,
+   "locations": [
+    "database.md:692",
+    "events.md:301"
+   ],
+   "ref": "DatabaseBusy fired by the framework"
   }
  ],
  "verdicts": {
