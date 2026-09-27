@@ -19,12 +19,18 @@ Outcomes per reference:
                  trait has it: usually the reader's own model sharing a framework type's name
   external_unverified  a lowercase crate the check doesn't know, assumed third-party
   wrong_path     the item exists, but not at the path written (the match is its real public path)
+  time_claim     a prose sentence that states the code's state in time ("today", "not yet", "v1", ...):
+                 the ref is the sentence itself, so editing it invalidates its verdict (MAN-107)
+
+Refuses to run when feature-map/meta.json's source_rev is not the last commit that touched
+the source paths: findings against a stale surface would be wrong (MAN-002).
 
 Usage: manual_check.py <repo> <out.jsonl>
 Needs the venv from tools/manual_check_env.sh (markdown-it-py, tree-sitter, tree-sitter-rust).
 """
 import json
 import re
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -93,6 +99,14 @@ STD_MACROS = {"println", "print", "eprintln", "format", "vec", "assert", "assert
               "anyhow", "bail", "ensure", "lazy_static", "thread_local", "compile_error", "file", "line",
               "column", "module_path", "option_env", "include_bytes", "format_args", "submit"}
 
+
+# ---- Refuse a stale surface ---------------------------------------------------------------
+meta = json.loads((ROOT / "feature-map/meta.json").read_text())
+head = subprocess.run(["git", "-C", str(ROOT), "log", "-1", "--format=%h", "--", *meta["source_paths"]],
+                      capture_output=True, text=True, check=True).stdout.strip()
+if head != meta["source_rev"]:
+    sys.exit(f"surface built from {meta['source_rev']} but source is now at {head}; "
+             "run feature-map/tools/generate.sh first")
 
 # ---- The Suprnova (and Laravel) name index ------------------------------------------------
 surface = [json.loads(l) for l in (ROOT / "feature-map/surface.jsonl").read_text().splitlines()]
@@ -584,6 +598,37 @@ def check_inline(s):
     return []
 
 
+# ---- Time claims (MAN-107) ----------------------------------------------------------------------
+# Matched against prose only: code spans are left out, so `/v1/...` in a span is not a claim.
+TIME_MARKERS = re.compile(r"\b(today|for now|currently|not yet|at the moment|follow-up|planned|known seam|"
+                          r"will land|lands in|in a future|v1)\b", re.I)
+SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z`*(\[])")
+
+
+def time_claims(children):
+    """Sentences of one inline token whose prose carries a time marker. Each sentence comes back
+    whole, code spans included, with whitespace collapsed: that text is the verdict key."""
+    full, prose = [], []
+    for c in children:
+        if c.type == "code_inline":
+            full.append(f"`{c.content}`")
+            prose.append("\0" * (len(c.content) + 2))
+        elif c.type in ("softbreak", "hardbreak"):
+            full.append(" ")
+            prose.append(" ")
+        elif c.type == "text":
+            full.append(c.content)
+            prose.append(c.content)
+    full, prose = "".join(full), "".join(prose)
+    out, start = [], 0
+    for m in list(SENTENCE_END.finditer(full)) + [None]:
+        end = m.start() if m else len(full)
+        if TIME_MARKERS.search(prose[start:end]):
+            out.append(" ".join(full[start:end].split()))
+        start = m.end() if m else end
+    return out
+
+
 # ---- Walk the manual ----------------------------------------------------------------------------
 md = MarkdownIt("commonmark").enable("table")
 findings = []
@@ -591,7 +636,10 @@ for f in sorted((ROOT / "manual").glob("*.md")):
     chapter = f.stem
     tokens = md.parse(f.read_text())
     heading = []
+    row_subject = None  # a table row's first cell: what a claim in its other cells is about
     for i, t in enumerate(tokens):
+        if t.type == "tr_open":
+            row_subject = None
         if t.type == "heading_open":
             level = int(t.tag[1])
             heading = heading[:level - 1] + [tokens[i + 1].content]
@@ -632,6 +680,14 @@ for f in sorted((ROOT / "manual").glob("*.md")):
                         findings.append({"chapter": chapter, "line": line, "section": section,
                                          "context": "table cell" if in_table else "prose",
                                          "ref": ref, "outcome": outcome, "match": match})
+            if in_table and row_subject is None:
+                row_subject = " ".join(t.content.split())
+            for sentence in time_claims(t.children):
+                if in_table and sentence != row_subject:
+                    sentence = f"{row_subject} :: {sentence}"
+                findings.append({"chapter": chapter, "line": line, "section": section,
+                                 "context": "table cell" if in_table else "prose",
+                                 "ref": sentence, "outcome": "time_claim", "match": None})
 
 # A reference that resolves to a `#[doc(hidden)]` record exists, but is not public API by intent.
 hidden_ids = {r["id"] for r in surface if r.get("hidden")}

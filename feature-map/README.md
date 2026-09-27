@@ -122,24 +122,39 @@ vars) against `surface.jsonl`. Nothing is matched by regex over raw markdown.
 feature-map/tools/manual_check_env.sh             one-time venv (markdown-it-py, tree-sitter, tree-sitter-rust)
 target/feature-map/venv/bin/python feature-map/tools/manual_check.py . target/feature-map/manual-check.jsonl
 python3 feature-map/tools/manual_triage.py target/feature-map/manual-check.jsonl \
-  feature-map/manual-triage-verdicts.json feature-map/manual-triage.jsonl
+  feature-map/manual-triage-verdicts.json feature-map/manual-triage.jsonl \
+  target/feature-map/triage-worklist.json
 ```
+
+The check refuses to run when `meta.json`'s `source_rev` is behind the
+source: regenerate the map first.
 
 Each reference gets an outcome (`found`, `hidden`, `missing`, `wrong_path`,
 `ambiguous`, `laravel_only`, `external`, `local`, `weak_found`,
-`weak_missing`, `unresolved`; the script's docstring defines each).
+`weak_missing`, `unresolved`, `time_claim`; the script's docstring defines
+each). A `time_claim` is a prose sentence stating the code's state in time
+("today", "not yet", "v1", ...). Its reference is the sentence itself,
+prefixed with the row's first cell inside a table, so editing the sentence
+leaves its old verdict stale and forces a fresh check.
 `Type::default()` and other std trait methods are found only when the type
 really implements that trait; a method on a type alias is resolved on what
 the alias names.
 
 A checker can't tell a correct "there is no `X`" from a wrong "use `X`", or
-a reader's own `User` from the framework's. So every `missing`, `wrong_path`
-and `hidden` reference has a verdict in `manual-triage-verdicts.json`,
-checked by hand against the source: `error`, `wrong_path`, `internal`,
-`hidden`, `test_suite`, `code_bug`, `noise` (the manual is right) or
-`unverified`. `manual_triage.py` fails if a finding has no verdict, so a new
-one can't pass unreviewed. The `extra` list holds problems the checker
-cannot see, such as a real API used wrongly.
+a reader's own `User` from the framework's. So every `missing`, `wrong_path`,
+`hidden` and `time_claim` finding has a verdict in
+`manual-triage-verdicts.json`, checked by hand against the source: `error`,
+`wrong_path`, `internal`, `hidden`, `test_suite`, `code_bug`, `restate`,
+`noise` (the manual is right) or `unverified`. An `error` or `code_bug`
+verdict carries `gap` (`none`, or `issue` with the GitHub `issue` number),
+and a `hidden` one carries `audience` (`framework-internal`,
+`reader-needed` or `public-equivalent`). The `extra` list holds problems
+the checker cannot see, such as a real API used wrongly.
+
+`manual_triage.py` fails, and writes nothing, on a finding without a
+verdict, a stale verdict, or a verdict missing a required field. It
+reports every problem, and with a fourth argument writes them all out as a
+worklist.
 
 What the check must guarantee, and how a finding is remediated (the gap
 check before a cut, which findings become GitHub issues against the code),
