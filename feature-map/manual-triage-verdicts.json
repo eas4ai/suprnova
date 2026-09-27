@@ -293,6 +293,16 @@
     "middleware.md:434"
    ],
    "ref": "middleware priority sorts the chain"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: DatabaseConfig::database_type (framework/src/database/config.rs:163-174) knows only mysql://, and sea-orm 2.0.2 accepts only the mysql scheme, so a mariadb:// DATABASE_URL fails to connect. eas4ai/suprnova#114. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 114,
+   "locations": [
+    "env-vars.md:124"
+   ],
+   "ref": "mariadb:// selects the MySQL driver"
   }
  ],
  "verdicts": {
