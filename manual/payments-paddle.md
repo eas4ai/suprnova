@@ -285,7 +285,7 @@ rest work, with the noted caveats.
 | `CustomerStore::create_customer` | Works. |
 | `CustomerStore::update_customer` | Works. |
 | `CustomerStore::get_customer` | Works. |
-| `CustomerStore::delete_customer` | `NotSupported`. Use `update_customer` with `archived` status if needed. |
+| `CustomerStore::delete_customer` | `NotSupported`. Archive with `PaddleProvider::archive_customer`. |
 | `Payment::*` | Trait is not implemented. `provider.as_payment()` returns `None`. |
 | `WebhookHandler::*` | Works. |
 
@@ -309,25 +309,21 @@ your own `subscription.status != Canceled && subscription.cancel_at_period_end =
 flag and update the UI right after `cancel()` returns - the next webhook
 will confirm.
 
-### Customer deletion is "archive via update"
+### Customer deletion is "archive"
 
 `delete_customer` returns `PaymentError::NotSupported` because Paddle's
-public API does not expose a delete endpoint at all. If you need to
-suppress a customer record in Paddle, call `update_customer` with the
-`archived` status. The framework adapter does not wrap this directly -
-the metadata field is the escape hatch:
+public API does not expose a delete endpoint at all. Archiving is Paddle's
+only way to take a customer out of use, and the Paddle provider exposes it
+directly:
 
 ```rust
-provider.update_customer(UpdateCustomerRequest {
-    provider_customer_id: customer_id,
-    email: None,
-    name: None,
-    metadata: Some(serde_json::json!({ "status": "archived" })),
-}).await?;
+paddle.archive_customer(&customer_id).await?;
 ```
 
-Confirm the exact field path against your Paddle API version when shipping
-this - the SDK does not currently model the `status` enum directly.
+This sets the customer's Paddle `status` to `archived`: it keeps its history
+and can't be used for new checkouts. Don't try to archive through
+`update_customer`'s `metadata`: that field is Paddle's `custom_data`, so a
+`"status"` key there is stored as data and changes nothing.
 
 ## Webhook signature verification
 
@@ -435,7 +431,7 @@ Each `NotSupported` error message points at the supported workflow:
 
 - `subscribe`: "use `Checkout::start_session` with `SessionMode::Subscription`
   and await the `SubscriptionCreated` webhook"
-- `delete_customer`: "use `UpdateCustomer` with `archived` status"
+- `delete_customer`: "archive with `PaddleProvider::archive_customer`"
 
 Branch on this error explicitly when you're writing provider-agnostic
 domain code:
@@ -444,13 +440,8 @@ domain code:
 match provider.delete_customer(&cus_id).await {
     Ok(()) => { /* Stripe path */ }
     Err(PaymentError::NotSupported(_)) => {
-        // Paddle path - archive via update instead
-        provider.update_customer(UpdateCustomerRequest {
-            provider_customer_id: cus_id,
-            email: None,
-            name: None,
-            metadata: Some(serde_json::json!({ "status": "archived" })),
-        }).await?;
+        // Paddle path - archive instead
+        paddle.archive_customer(&cus_id).await?;
     }
     Err(e) => return Err(e),
 }

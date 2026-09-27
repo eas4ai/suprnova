@@ -336,16 +336,16 @@ land in `form.errors` automatically; the callbacks are for side effects:
 
 ```ts
 form.post('/posts', {
-  onSuccess: async () => { await refreshDrafts() },  // awaited since Inertia 3.4
+  onSuccess: async () => { await refreshDrafts() },  // awaited
   onError: (errors) => console.warn(errors),
   onFinish: () => form.reset('content'),
 })
 ```
 
-As of Inertia 3.4 an async `onSuccess` is awaited before the submission
-settles, so `form.processing` stays `true` until your callback resolves -
-handy when a successful submit kicks off follow-up work you don't want the
-UI to race past.
+An async `onSuccess` is awaited before the submission settles, so
+`form.processing` stays `true` until your callback resolves - handy when a
+successful submit kicks off follow-up work you don't want the UI to race
+past.
 
 ## Polling
 

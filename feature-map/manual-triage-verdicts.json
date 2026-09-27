@@ -335,6 +335,17 @@
     "parity.md:111"
    ],
    "ref": "chained links keep Job::delay()"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: the Paddle provider has no archive_customer (crates/suprnova-payments-paddle/src/customer.rs). eas4ai/suprnova#116. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 116,
+   "locations": [
+    "payments-paddle.md:320",
+    "payments-paddle.md:444"
+   ],
+   "ref": "PaddleProvider::archive_customer archives a customer"
   }
  ],
  "verdicts": {
@@ -376,10 +387,6 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
-  "As of Inertia 3.4 an async `onSuccess` is awaited before the submission settles, so `form.processing` stays `true` until your callback resolves - handy when a successful submit kicks off follow-up work you don't want the UI to race past.": {
-   "class": "unverified",
-   "evidence": "A claim about Inertia 3.4's client behavior; this repository's source cannot settle it."
-  },
   "As of v1.0.0 the public API is stable: apps pin a release tag (`tag = \"v<version>\"` - the tag is the release; there is no crates.io publish), and a breaking change lands only behind a version bump whose CHANGELOG section says so.": {
    "class": "verified",
    "evidence": "A dated historical fact: API stability from 1.0.0; releases are git tags (CHANGELOG.md)."
@@ -391,10 +398,6 @@
   "CACHE_REDIS_TEST_URL": {
    "class": "test_suite",
    "evidence": "Read only by the framework's own tests (framework/tests/cache/*, idempotency); cache.md describes running the framework's test suite."
-  },
-  "CARGO_WATCH_IGNORE": {
-   "class": "unverified",
-   "evidence": "Not read anywhere in Suprnova. `suprnova serve` runs `cargo watch` with its own fixed arguments (suprnova-cli/src/commands/serve.rs:814); whether cargo-watch honours this variable is not settled by this source."
   },
   "CURRENT_TIMESTAMP": {
    "class": "noise",
@@ -411,10 +414,6 @@
   "Compose it after `AuthMiddleware` and the chain blocks any request whose user has not yet completed the verify step.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
-  },
-  "Confirm the exact field path against your Paddle API version when shipping this - the SDK does not currently model the `status` enum directly.": {
-   "class": "unverified",
-   "evidence": "A claim about paddle_rust_sdk 0.18's type coverage (Cargo.lock: 0.18.0); an external crate this repository cannot settle."
   },
   "Cross-thread reads see the scope of the task currently running on that thread, not whatever scope was installed last.": {
    "class": "noise",
@@ -1241,6 +1240,16 @@
    "evidence": "No queue:failed command in any binary; the failed-job API exists in code (Queue::failed_store, FailedJobStore::all at framework/src/queue/failed.rs:65). Treated as intended; eas4ai/suprnova#105.",
    "gap": "issue",
    "issue": 105
+  },
+  "PaddleProvider::archive_customer": {
+   "class": "code_bug",
+   "gap": "issue",
+   "issue": 116,
+   "evidence": "No archive_customer on the Paddle provider; delete_customer returns NotSupported pointing at an update path UpdateCustomerRequest cannot express (crates/suprnova-payments-paddle/src/customer.rs:133-141). Treated as intended (developer delegation, 2026-09-27); eas4ai/suprnova#116."
+  },
+  "An async `onSuccess` is awaited before the submission settles, so `form.processing` stays `true` until your callback resolves - handy when a successful submit kicks off follow-up work you don't want the UI to race past.": {
+   "class": "verified",
+   "evidence": "Matched on 'follow-up' (follow-up work), not a time claim. The behavior holds in the pinned @inertiajs 3.6.1 (and already in 3.3.1): core awaits requestParams.onSuccess before Request.finish fires onFinish, and useForm clears processing in onFinish (@inertiajs/core dist/index.js:2493, 2915-2935; @inertiajs/react dist/index.js:814-841)."
   }
  }
 }
