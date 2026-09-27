@@ -1275,6 +1275,7 @@ correct semantics.
 | `Model::query()` | Yes - the canonical scoped entry point |
 | `Model::without_global_scope::<S>()` | Yes, minus `S` |
 | `Model::without_global_scopes()` | No |
+| `Model::with_trashed()` / `Model::only_trashed()` | Yes - only the soft-delete filter is lifted |
 | `Model::find(id)` | No - PK lookup goes through SeaORM directly |
 | `Model::find_many([...])` | No - same reason |
 | `Model::all()` | No - same reason |
@@ -1294,10 +1295,10 @@ through the typed scope registry. Both layers compose:
 - `Model::without_global_scopes()` drops registered scopes but
   preserves the soft-delete filter - admin tooling that wants to read
   every column-set still excludes trashed rows by default.
-- `Model::with_trashed()` and `Model::only_trashed()` skip soft-delete
-  filtering and also bypass the registry (they build a fresh unscoped
-  builder). Pair with `.without_global_scope::<S>()` if you need
-  scope-aware reads over trashed rows.
+- `Model::with_trashed()` and `Model::only_trashed()` lift only the
+  soft-delete filter. Every registered scope still runs, so a tenant
+  scope keeps trashed reads inside the tenant, as Laravel's
+  `withTrashed()` does.
 
 ## Relationships
 
@@ -3838,7 +3839,10 @@ fire per-row model events. Use them when scope-narrowing is sufficient
 and you don't need lifecycle hooks; for per-row hooks iterate with
 `.get()` and call `.update()` / `.delete()` per row.
 `delete_all` always targets the model's static `M::TABLE`; runtime table
-names are not accepted as executable SQL.
+names are not accepted as executable SQL. On a `soft_deletes` model it
+soft-deletes: one `UPDATE` sets the deleted-at column across the scope,
+as Laravel's builder `delete()` does. `force_delete_all` removes the rows
+for good.
 Explicit null attributes are emitted as SQL `NULL`, so nullable bigint,
 integer, boolean, timestamp, and other non-text columns retain their database
 type on PostgreSQL. Every non-null attribute remains parameter-bound. Upsert

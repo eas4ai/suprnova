@@ -303,6 +303,38 @@
     "env-vars.md:124"
    ],
    "ref": "mariadb:// selects the MySQL driver"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: both views are built from a bare Builder::new() that never runs ScopeRegistry::apply_to (suprnova-macros/src/model/derive_eloquent.rs:833-843), so every global scope is dropped. eas4ai/suprnova#115. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 115,
+   "locations": [
+    "eloquent.md:1298",
+    "eloquent.md:1278"
+   ],
+   "ref": "with_trashed/only_trashed keep global scopes"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: Builder::delete_all always issues a SQL DELETE, and there is no force_delete_all (framework/src/eloquent/builder.rs, about line 4790). eas4ai/suprnova#110. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 110,
+   "locations": [
+    "eloquent.md:3842"
+   ],
+   "ref": "delete_all soft-deletes on soft_deletes models"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: ChainLink::from_job does not capture delay() and to_envelope_with_id sets available_at to now (framework/src/queue/chain.rs). eas4ai/suprnova#112. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 112,
+   "locations": [
+    "queues.md:1338",
+    "parity.md:111"
+   ],
+   "ref": "chained links keep Job::delay()"
   }
  ],
  "verdicts": {

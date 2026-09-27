@@ -1335,7 +1335,9 @@ Queue::chain()
 
 The first envelope is pushed immediately; the rest travel on its
 `chain_remaining` payload field. On every successful settlement the
-worker pops the next entry and dispatches it. A failure breaks the
+worker pops the next entry and dispatches it. A link whose job declares
+`Job::delay()` becomes available that long after its predecessor
+settles, as it would after a direct push. A failure breaks the
 chain - subsequent links are never enqueued.
 
 ### Terminal settlement
