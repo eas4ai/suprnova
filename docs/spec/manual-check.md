@@ -216,10 +216,9 @@ a release on a stale mirror (`docs/recon.md`, `overview.md`); it lives in
 the gate scripts on Shawn's machine (`local/gate-infra`), not in this
 repository.
 
-When the hold began, the ledger already showed two chapters past their
-mirrors: `filesystem.md` (the S3-compatible table row on
-`eas4ai/nice-lamport-lhxidv`) and `CHANGELOG.md` (already drifted on
-`main`).
+When the hold began, one chapter was past its mirrors: `filesystem.md`,
+by one table row (the S3-compatible examples added on
+`eas4ai/nice-lamport-lhxidv`).
 
 ## Open questions
 
