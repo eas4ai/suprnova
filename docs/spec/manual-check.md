@@ -19,7 +19,9 @@ for a feature that may be mistakenly unimplemented. Those gaps are filed as
 GitHub issues about the code ("Not the docs the code"). And "The manual
 should contain only direction on how it SHOULD work. It is our
 responsibility to make sure it does": a passage describing intended
-behavior the code lacks stays, and the issue makes the code match it.
+behavior the code lacks stays, and the issue makes the code match it. On
+doubt: "if it smells wrong to you, we should make it smell right. That's
+why a filed issue is important to get it fixed."
 
 Terms. A *reference* is one code span, or one name inside a fenced block,
 that the check extracts. An *outcome* is what the check concluded about it.
@@ -120,11 +122,20 @@ Each finding is remediated by this table (MAN-102):
 A kept passage may still be corrected where its details are wrong about the
 intended behavior; it is not weakened to describe what the code does today.
 
+The first row is for a slip: the manual names the right thing wrongly. When
+the manual's form is a different shape from anything the code offers, and
+it is the form a reader would expect - the code reaches the same result
+only another way, or with more ceremony - the finding is treated as
+intended: `code_bug`, issue, the passage stays. Doubt goes to an issue,
+never to a cut.
+
 [MAN-101] Before a finding is classified `error` or `code_bug`, and before
 any manual text is changed for it, the gap check MUST run in the order
 listed above, and its result MUST be recorded in the verdict: the evidence
-names what was searched, and the `gap` field is `none` or `issue`.
-Falsifier: An `error` or `code_bug` verdict has no `gap` field, or its evidence names no search.
+names what was searched, and the `gap` field is `none` or `issue`. Where
+the gap check leaves doubt whether the manual's form was intended, the
+finding MUST be treated as intended.
+Falsifier: An `error` or `code_bug` verdict has no `gap` field, its evidence names no search, or an `error` verdict's evidence records doubt about intent.
 Status: Draft
 
 [MAN-102] Each finding MUST be remediated by the table above. The manual
