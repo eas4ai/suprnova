@@ -183,14 +183,13 @@ The sync variants are for tests, CLI tools, and other non-async contexts where b
 
 ## Eloquent integration: `AsHashed` cast
 
-The `#[cast(AsHashed)]` eloquent cast hashes a plaintext field on write using the active driver, and is **idempotent across all drivers** - saving a model whose `password` column already contains a recognised hash (bcrypt or argon) passes the value through unchanged. Without this guard, `User::find(id).await?.save().await?` would hash the existing hash on every save, breaking authentication.
+The `AsHashed` eloquent cast hashes a plaintext field on write using the active driver, and is **idempotent across all drivers** - saving a model whose `password` column already contains a recognised hash (bcrypt or argon) passes the value through unchanged. Without this guard, `User::find(id).await?.save().await?` would hash the existing hash on every save, breaking authentication.
 
 ```rust
 use suprnova::eloquent::casts::AsHashed;
 
-#[suprnova::model]
+#[suprnova::model(casts = { password = AsHashed })]
 struct User {
-    #[cast(AsHashed)]
     pub password: String,
     // ...
 }
@@ -210,6 +209,6 @@ The idempotence check uses `hashing::is_hashed`, so flipping `HASH_DRIVER` mid-p
 
 - [Authentication](authentication.md) - `Auth::attempt`, the user-provider trait, and how hashing integrates with login
 - [Auth flows](auth-flows.md) - `PasswordReset::complete` rotates the stored password hash through the active driver; remember-me tokens are hashed before storage via `hash_async`
-- [Eloquent](eloquent.md) - `#[cast(AsHashed)]` reference and the broader cast surface
+- [Eloquent](eloquent.md) - `casts = { password = AsHashed }` reference and the broader cast surface
 - [Encryption](encryption.md) - two-way authenticated encryption for at-rest data; the complement to one-way hashing
 - [Error Model](error-model.md) - what `FrameworkError::param` looks like when a hashing config value is rejected

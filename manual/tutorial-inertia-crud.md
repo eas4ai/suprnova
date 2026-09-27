@@ -33,7 +33,7 @@ suprnova make:migration create_todos_table
 Open the new migration under `src/migrations/`:
 
 ```rust
-use suprnova::sea_orm_migration::prelude::*;
+use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;

@@ -127,7 +127,7 @@ order:
    finds the test connection.
 2. If this was the *last* live `TestContainerGuard` in the process,
    the named [`ConnectionRegistry`](database.md#named-connections)
-   is wiped. (A refcount over `FAKE_GUARDS` guarantees an inner
+   is wiped. (A refcount over live guards guarantees an inner
    test's drop cannot erase a connection name a concurrent outer
    test still depends on - the standing trap that prompted the
    refcount.)

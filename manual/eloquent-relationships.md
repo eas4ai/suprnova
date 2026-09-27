@@ -377,26 +377,12 @@ plus the key setters (`first_key` / `second_key` / `local_key` /
 can't chain `.filter(...)` or `.order_by(...)`. If you need to filter
 across the join, fall back to two explicit relation hops.
 
-### Through soft-deletes (v1)
+### Through soft-deletes
 
-Through relations use raw `INNER JOIN` SQL rather than the
-`Builder<C>` pipeline, so the global soft-delete scope that
-`C::query()` would install (`WHERE c.deleted_at IS NULL`) is **not**
-applied. Trashed intermediates and trashed targets both participate
-in the JOIN.
-
-This diverges from Laravel, where `hasManyThrough` filters both `B`
-and `C` by `deleted_at IS NULL` when the models declare `SoftDeletes`.
-Until the fix lands, callers needing scoped Through reads should chain
-the two relations explicitly:
-
-```rust
-// Instead of country.posts().get():
-let users = country.users().get().await?;
-let user_ids: Vec<i64> = users.iter().map(|u| u.id).collect();
-let posts = Post::query().filter_in("user_id", user_ids).get().await?;
-// Both User and Post soft-delete scopes apply.
-```
+Through relations filter both the intermediate and the target by their
+soft-delete column when those models declare `#[model(soft_deletes)]`,
+matching Laravel's `hasManyThrough`: trashed rows on either side stay
+out of the join.
 
 ## Polymorphic relations
 
@@ -492,14 +478,11 @@ makes the family explicit. The benefits beat the typing cost:
   declaration tells you every type that can sit on the other end. No
   database query required to enumerate them.
 
-### v1 restriction: `MorphTo` is `i64`-only
+### `MorphTo` keys
 
-`MorphTo::morph_id` is hard-coded to `i64`. Polymorphic targets must
-therefore use `i64` primary keys, and the morph table's `<name>_id`
-column must also be `i64`. Models whose PK is `String` or
-`Uuid`-via-string cannot be `MorphTo` targets in v1. v2 will
-parameterise the morph ID type so the full PK lattice (`i64` /
-`String` / `Uuid`) is accepted.
+A `MorphTo` target can use any primary key type the model declares:
+`i64`, `String`, UUID or ULID. The morph table's `<name>_id` column takes
+the same type as its targets' keys.
 
 This is a polymorphic-inverse-only restriction. `MorphOne` /
 `MorphMany` / `MorphToMany` / `MorphedByMany` work fine with any PK

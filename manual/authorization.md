@@ -140,7 +140,7 @@ impl PostPolicy {
 }
 ```
 
-Each method becomes one `inventory::submit!`. `Server::serve` drains the
+Each method becomes one `inventory::submit!`. `Server::run` drains the
 inventory via `init_policies()` at boot, so by the time the first request
 arrives every action is registered (see [Bootstrap](bootstrap.md) for where
 this slots into the boot sequence). `init_policies()` lives at

@@ -122,7 +122,7 @@ Design around it. A cached route backed by a table your application writes
 to constantly will rebuild constantly, whatever its freshness window says. A
 cached route backed by a table that changes when an editor publishes
 something will sit still for hours. If you need finer granularity than the
-table, the honest answer today is that you do not have it.
+table, the honest answer is that you do not have it.
 
 ## What the framework cannot see
 

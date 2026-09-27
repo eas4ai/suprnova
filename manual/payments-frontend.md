@@ -402,24 +402,22 @@ The `SessionPayload` type shown in each example above is a discriminated union m
 Wire a small status endpoint that reads the mirror `payments_transactions` table by `provider_transaction_id`. The webhook handler installed by `webhook_routes(db)` keeps the row's status column current; your endpoint just reflects it back:
 
 ```rust,ignore
-use suprnova::{Json, Query, json_response};
+use suprnova::{handler, json_response, AppError, FrameworkError, Request, Response, DB};
 use suprnova::payments::entities::transaction;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-#[derive(serde::Deserialize)]
-pub struct StatusQuery {
-    pub transaction_id: String,
-}
-
-pub async fn status(Query(q): Query<StatusQuery>) -> Json<serde_json::Value> {
-    let db = suprnova::db().await;
+#[handler]
+pub async fn status(req: Request) -> Response {
+    let id = req
+        .query_param("transaction_id")
+        .ok_or_else(|| AppError::bad_request("transaction_id is required"))?;
     let row = transaction::Entity::find()
-        .filter(transaction::Column::ProviderTransactionId.eq(q.transaction_id))
-        .one(&db)
+        .filter(transaction::Column::ProviderTransactionId.eq(id))
+        .one(&*DB::get()?)
         .await
-        .unwrap();
+        .map_err(FrameworkError::from)?;
     let status = row.map(|r| r.status).unwrap_or_else(|| "pending".into());
-    Json(serde_json::json!({ "status": status }))
+    json_response!({ "status": status })
 }
 ```
 

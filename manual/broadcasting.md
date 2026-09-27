@@ -774,7 +774,7 @@ configurations from that chapter apply unchanged - extend them to
 cover the `/ws/broadcast` path.
 
 Active WebSocket handler tasks (including broadcasting connections)
-are tracked in the framework's `WS_TASKS` set and drained on
+are tracked by the server and drained on
 graceful shutdown, so in-flight event deliveries complete before the
 process exits.
 
@@ -831,7 +831,7 @@ the event itself - see [Events](events.md#testing--eventfacadefake).
 | `Broadcast::fake()` | `RecordingBroadcastHub` bound as `dyn BroadcastHub` |
 | `assertBroadcasted` | `RecordingBroadcastHub::assert_broadcast(channel, event)` |
 | Pusher / Reverb / Ably driver | `InMemoryBroadcastHub` (single-process) or `SeaStreamerBroadcastHub` (cross-process: Redis / Kafka / file / stdio) |
-| Echo client library | not shipped - wire the JSON envelope protocol from the browser by hand for now |
+| Echo client library | no client library - wire the JSON envelope protocol from the browser by hand |
 
 ## Reference
 

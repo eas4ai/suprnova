@@ -336,9 +336,8 @@ on a fake response - there's no underlying `reqwest::Response` in that
 case. The response-body cap also no longer applies once you take the
 raw response; you own the read from there.
 
-For outgoing multipart uploads today, drop down to `reqwest::Client`
-directly via the same escape route. A future release may add a
-`.multipart(...)` builder when the demand pattern shapes itself.
+For outgoing multipart uploads, drop down to `reqwest::Client`
+directly via the same escape route.
 
 ## Testing with `Http::fake`
 
@@ -593,7 +592,7 @@ make a `POST` or `PATCH` 5xx response eligible under plain `.retry()`.
 
 ## Edge cases and small print
 
-- **`Http::*` is closed for v1.** We deliberately don't expose the
+- **`Http::*` is closed.** We deliberately don't expose the
   underlying `reqwest::Client`. To grow the surface, add a method to
   the facade rather than reaching for `reqwest` directly - except via
   the documented `into_inner()` escape hatch on a real response.

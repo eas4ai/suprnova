@@ -83,8 +83,8 @@ Dockerfile layer cache and run much faster.
 
 ### Add a scheduler worker
 
-Scheduled tasks (`#[derive(Task)]` handlers registered via
-`Schedule::call`) need a long-lived process. Add a Worker component
+Scheduled tasks (`impl Task` handlers and `Schedule::call`
+closures) need a long-lived process. Add a Worker component
 that runs the same image with a different command:
 
 1. **Create** -> **Add Resource** -> **Detect from source code**, select

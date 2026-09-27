@@ -37,7 +37,7 @@ The Mailable serializes to JSON, which becomes the Tera context for the template
 
 ## Configuration
 
-`Server::serve` calls `suprnova::mail::boot::bootstrap_from_env()` once at startup. It reads `MAIL_DRIVER` and binds the matching transport. Defaults to the `log` driver when unset.
+`Server::run` calls `suprnova::mail::boot::bootstrap_from_env()` once at startup. It reads `MAIL_DRIVER` and binds the matching transport. Defaults to the `log` driver when unset.
 
 | `MAIL_DRIVER` | Behavior |
 |---------------|----------|
@@ -427,7 +427,7 @@ One smaller divergence is deliberate hardening. Laravel is content to leave `MAI
 
 ### Register factories at boot, not per-request
 
-`Mail::queue` and `Mail::later` push a `SendMailJob` carrying the mailable's name and JSON payload - the worker rebuilds the concrete type via `mailable_registry`. Register every queueable `Mailable` once at `Server::serve` time:
+`Mail::queue` and `Mail::later` push a `SendMailJob` carrying the mailable's name and JSON payload - the worker rebuilds the concrete type via `mailable_registry`. Register every queueable `Mailable` once at `Server::run` time:
 
 ```rust
 // bootstrap.rs

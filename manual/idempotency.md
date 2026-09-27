@@ -118,7 +118,7 @@ arrives *while* the first is still running gets `Replay::InProgress`.
 ```rust
 use std::time::Duration;
 use suprnova::{
-    handler, Auth, FrameworkError, HttpResponse, Idempotency, Replay, Request, Response,
+    handler, AppError, Auth, FrameworkError, HttpResponse, Idempotency, Replay, Request, Response,
 };
 
 #[handler]
@@ -131,7 +131,7 @@ pub async fn create_charge(req: Request) -> Response {
 
     let user = Auth::user_as::<User>()
         .await?
-        .ok_or_else(|| FrameworkError::unauthorized("login required"))?;
+        .ok_or_else(|| AppError::unauthorized("login required"))?;
 
     let form: ChargeForm = req.json().await?;
 

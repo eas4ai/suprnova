@@ -177,7 +177,7 @@ Four convenience constructors cover common patterns:
   `Cookie::read_encrypted_for(name, wire)` using the same name.
   `Cookie::read_encrypted(wire)` is the deprecated, un-contexted v1
   reader; it cannot decrypt current `Cookie::encrypted` output and is
-  scheduled for removal in 1.4.0 together with the v1 fallback. Requires
+  scheduled for removal together with the v1 fallback. Requires
   `APP_KEY` to be set at boot. See [Encryption](encryption.md).
 
 Removing several cookies at once - the usual logout shape - is

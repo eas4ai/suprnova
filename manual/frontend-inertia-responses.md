@@ -660,7 +660,7 @@ The trait runs once per Inertia response with access to the request
 **and** the page component name - Laravel's `RenderContext` (`component`,
 `request`), passed as a plain parameter rather than a wrapper struct
 since the request already covers the other half. Implementations need
-`async_trait` (re-exported as `suprnova::__async_trait`) and `IndexMap`
+`async_trait` (re-exported as `suprnova::async_trait`) and `IndexMap`
 (re-exported as `suprnova::indexmap`):
 
 ```rust
@@ -672,7 +672,7 @@ use std::sync::Arc;
 
 pub struct AuthShare;
 
-#[suprnova::__async_trait]
+#[suprnova::async_trait]
 impl InertiaSharedData for AuthShare {
     async fn share(
         &self,

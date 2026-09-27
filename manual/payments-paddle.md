@@ -278,7 +278,7 @@ rest work, with the noted caveats.
 | `Checkout::session_status` | Retrieves the transaction and reports collection state. |
 | `Subscription::subscribe` | Always `NotSupported`. Subscriptions are born from checkout completion + webhook. |
 | `Subscription::update(cancel_at_period_end: Some(true), new_price_refs: None)` | Works. Wires to `subscription_cancel` with default `EffectiveFrom::NextBillingPeriod`. |
-| `Subscription::update(new_price_refs: Some(...))` | `NotSupported` in v1. Paddle reserves price-set replacement for its own migration flows. |
+| `Subscription::update(new_price_refs: Some(...))` | Works. Replaces the subscription's items with the new prices, prorated. |
 | `Subscription::update` (no-op) | Works. Re-fetches current state via `subscription_get`. |
 | `Subscription::cancel` | Works, but `at_period_end` is **ignored** - always schedules to next billing period. See [below](#cancellation-is-always-scheduled). |
 | `Subscription::get` | Works. |
@@ -435,8 +435,6 @@ Each `NotSupported` error message points at the supported workflow:
 
 - `subscribe`: "use `Checkout::start_session` with `SessionMode::Subscription`
   and await the `SubscriptionCreated` webhook"
-- `update` with `new_price_refs`: "Paddle price-set replacement on existing
-  subscription not in v1"
 - `delete_customer`: "use `UpdateCustomer` with `archived` status"
 
 Branch on this error explicitly when you're writing provider-agnostic

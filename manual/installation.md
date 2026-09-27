@@ -7,7 +7,7 @@ scaffolded project. If you're already there, jump to the
 ## Requirements
 
 - **Rust 1.94.0+** for current `main` (the workspace uses the 2024 edition).
-  The tagged v1.3.2 release has the same Rust 1.94.0 floor. Install via
+  Tagged releases have the same Rust 1.94.0 floor. Install via
   [rustup](https://rustup.rs/):
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -33,7 +33,7 @@ The dependency upgrade requires no application data migration.
 
 Suprnova is distributed as a Cargo project, and the CLI installer pulls
 the framework from git rather than crates.io (see the [Pre-launch
-note](#pre-launch-note) below). The command installs the tagged v1.2.4 release:
+note](#pre-launch-note) below). The command installs the tagged v2.1.0 release:
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v2.1.0 suprnova-cli

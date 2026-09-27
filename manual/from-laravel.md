@@ -390,7 +390,7 @@ use std::sync::Arc;
 
 pub async fn register() {
     suprnova::App::bind::<dyn MyService>(Arc::new(MyServiceImpl::new()));
-    suprnova::Event::listen::<OrderShipped, _>(Arc::new(SendShipmentNotification)).await;
+    suprnova::EventFacade::listen::<OrderShipped, _>(Arc::new(SendShipmentNotification)).await;
     crate::observers::register();
 }
 ```

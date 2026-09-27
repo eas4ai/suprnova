@@ -1,37 +1,6 @@
 {
  "extra": [
   {
-   "class": "error",
-   "evidence": "`suprnova::Response` is `Result<HttpResponse, HttpResponse>` (framework/src/http/response.rs:56), so `.ok()` is `Result::ok(self)`; `suprnova::Response::ok().json(&order)` does not compile. The check reads it as an external method. Slip: the real form is documented as the way in 21 chapters (`HttpResponse::ok()`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "Ok(HttpResponse::ok().json(&order)) or the json helper",
-   "gap": "none",
-   "locations": [
-    "logging.md:216"
-   ],
-   "ref": "suprnova::Response::ok()"
-  },
-  {
-   "class": "error",
-   "evidence": "The generated MinIO service uses MINIO_ROOT_USER (default `suprnova`) and a per-project generated MINIO_ROOT_PASSWORD (suprnova-cli/src/templates/files/docker/minio.service.tpl), not minioadmin. The *_HOST_BIND and MINIO_ROOT_* variables are undocumented. Slip: the real form is documented as the way in the compose template, which generates per-project credentials (minio.service.tpl). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "Document MINIO_ROOT_USER / MINIO_ROOT_PASSWORD and the *_HOST_BIND overrides",
-   "gap": "none",
-   "locations": [
-    "cli-docker.md:182",
-    "cli-docker.md:183"
-   ],
-   "ref": "minioadmin credentials"
-  },
-  {
-   "class": "error",
-   "evidence": "Stale design statement. The suprnova CLI already forwards app tasks through the app binary (migrate, migrate:*, db:sync, schedule:*; suprnova-cli/src/main.rs:267-318, suprnova-cli/src/commands/schedule_list.rs:14), and the developer ruled on 2026-09-27 that it should cover db:seed and model:prune too (eas4ai/suprnova#72).",
-   "fix": "Rewrite 'Why Suprnova diverges': the suprnova CLI forwards app tasks to the app's console binary; custom #[command]s run through the console binary.",
-   "gap": "none",
-   "locations": [
-    "console.md:210"
-   ],
-   "ref": "console.md: the global CLI deliberately does not run app tasks like db:seed"
-  },
-  {
    "class": "code_bug",
    "evidence": "The manual states intended behavior the code lacks: MorphTo::morph_id is i64 (framework/src/eloquent/relations/morph.rs:490). eas4ai/suprnova#78. Remove this entry when the issue is fixed.",
    "gap": "issue",
@@ -102,23 +71,32 @@
     "images.md:162"
    ],
    "ref": "images.md: quality() switches WebP to lossy"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: MorphTo::morph_id is i64 (framework/src/eloquent/relations/morph.rs:490). eas4ai/suprnova#78. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 78,
+   "locations": [
+    "eloquent-relationships.md:483"
+   ],
+   "ref": "eloquent-relationships.md: MorphTo targets take any primary key type"
+  },
+  {
+   "class": "code_bug",
+   "evidence": "The manual states intended behavior the code lacks: the Paddle adapter returns NotSupported (crates/suprnova-payments-paddle/src/subscription.rs:28-35). eas4ai/suprnova#82. Remove this entry when the issue is fixed.",
+   "gap": "issue",
+   "issue": 82,
+   "locations": [
+    "payments-paddle.md:281"
+   ],
+   "ref": "payments-paddle.md: update with new_price_refs replaces items, prorated"
   }
  ],
  "verdicts": {
   "#[AutoWhenLoadedLazy]": {
    "class": "noise",
    "evidence": "Laravel / Inertia-Laravel / Laravel-Data names in a comparison column or labelled as Laravel's."
-  },
-  "#[cast]": {
-   "class": "error",
-   "evidence": "No `cast` attribute or helper exists; casts are declared in `#[model(casts = { field = AsHashed })]`. Slip: the real form is documented as the way in eloquent.md, eloquent-mutators.md and encryption.md (`casts = {...}` inside `#[model]`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "Use `casts = { field = AsHashed }` inside `#[model(...)]`.",
-   "gap": "none"
-  },
-  "#[factory(model)]": {
-   "class": "error",
-   "evidence": "`#[factory(...)]` accepts only `name` (suprnova-macros/src/factory.rs); there is no `model` key. Slip: the real form is documented as the way in the factory surface: `#[derive(Factory)]` on the model, whose `#[factory(...)]` takes only `name` (suprnova-macros/src/factory.rs:58-74). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "gap": "none"
   },
   "#[global_scope]": {
    "class": "noise",
@@ -127,13 +105,6 @@
   "#[scope]": {
    "class": "noise",
    "evidence": "The manual states these do NOT exist, which is correct."
-  },
-  "#[suprnova::__async_trait]": {
-   "audience": "public-equivalent",
-   "class": "error",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Public equivalent: `suprnova::async_trait` (framework/src/lib.rs:557); `__async_trait` is the crate path macros expand to, not an attribute.",
-   "fix": "#[suprnova::async_trait] (framework/src/lib.rs:557)",
-   "gap": "none"
   },
   "A Channel variant where the server tracks who is currently subscribed and emits join/leave events with each member's metadata.": {
    "class": "noise",
@@ -147,10 +118,9 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
-  "A v1 cookie from one cookie slot can still be replayed into another slot while the un-contexted fallback exists; the name-binding benefit begins when that fallback is removed in 1.4.0.": {
+  "A v1 cookie from one cookie slot can still be replayed into another slot while the un-contexted fallback exists; the name-binding benefit begins when that fallback is removed.": {
    "class": "code_bug",
-   "evidence": "Intended removal on record (CHANGELOG.md:2155, :2560-2569), but 1.4.0 was never released and the fallback survived into 2.x (framework/src/http/cookie.rs:496-505, framework/src/crypto/mod.rs:341-345). eas4ai/suprnova#77.",
-   "fix": "Name the real removal target once #77 sets it.",
+   "evidence": "'v1' names the un-contexted cookie AAD format, and the sentence states the intended removal of it; the removal target is unset since 1.4.0 was never released (framework/src/http/cookie.rs:496-505). eas4ai/suprnova#77.",
    "gap": "issue",
    "issue": 77
   },
@@ -181,10 +151,6 @@
   "CURRENT_TIMESTAMP": {
    "class": "noise",
    "evidence": "Third-party names: SQL keyword, browser error, tokio macro, clap derive (the stub uses `clap::Parser`), SeaORM `EntityTrait::find` on a real entity."
-  },
-  "CURRENT_TX": {
-   "class": "internal",
-   "evidence": "`CURRENT_TX` is pub(crate) (framework/src/database)."
   },
   "Check state with `Queue::is_paused(&connection, \"billing\").await?` (true if either key is set) or `Queue::paused_queues(&connection, &queues).await?` (which of `queues` are currently paused).": {
    "class": "noise",
@@ -244,12 +210,6 @@
    "class": "noise",
    "evidence": "Third-party names: SQL keyword, browser error, tokio macro, clap derive (the stub uses `clap::Parser`), SeaORM `EntityTrait::find` on a real entity."
   },
-  "Echo client library :: not shipped - wire the JSON envelope protocol from the browser by hand for now": {
-   "class": "error",
-   "evidence": "'for now' implies a planned Echo-style client; no plan record names one (CHANGELOG.md, docs/). Suprnova ships no client library; state that and keep the protocol pointer.",
-   "fix": "Drop 'for now'.",
-   "gap": "none"
-  },
   "Emits a `#[derive(Data, Validate)]` struct in `app/src/props/` (not `src/props/` - the `app/` prefix is hardcoded so the file lands in the workspace's example/host app):": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
@@ -274,25 +234,9 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
-  "FAKE_GUARDS": {
-   "class": "internal",
-   "evidence": "Private statics in the fake/testing modules (framework/src/*/testing.rs, container/testing.rs)."
-  },
-  "FAKE_SERIAL": {
-   "class": "internal",
-   "evidence": "Private statics in the fake/testing modules (framework/src/*/testing.rs, container/testing.rs)."
-  },
   "For non-GET Inertia visits, the framework auto-converts the response to `303 See Other` when `Inertia303Middleware` is installed, so the browser issues a clean follow-up GET instead of re-submitting the original PUT/PATCH/DELETE to the redirect target.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
-  },
-  "For outgoing multipart uploads today, drop down to `reqwest::Client` directly via the same escape route.": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
-  },
-  "If you need finer granularity than the table, the honest answer today is that you do not have it.": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
   },
   "If you write a driver whose follow-up write and acknowledgement share a transaction domain, implement `settle`.": {
    "class": "noise",
@@ -326,10 +270,6 @@
    "class": "noise",
    "evidence": "Laravel / Inertia-Laravel / Laravel-Data names in a comparison column or labelled as Laravel's."
   },
-  "LOADED_KEYS": {
-   "class": "internal",
-   "evidence": "Private static (framework/src/config/env.rs:28)."
-  },
   "MARIADB_URL": {
    "class": "code_bug",
    "evidence": "database-testing.md uses these as the reader's own convention (correct there). vector.md:324 says env-vars.md documents QDRANT_URL / MARIADB_URL as driver env contracts: the framework reads neither outside its own tests (framework/tests/vector/*), and env-vars.md lists neither. PINECONE_API_KEY is real (framework/src/vector/pinecone.rs:230) but also absent from env-vars.md. Treated as intended (the Pinecone driver already reads its env; vector.md names these as the drivers' env contracts); eas4ai/suprnova#74.",
@@ -340,43 +280,23 @@
    "class": "noise",
    "evidence": "The reader's own env-var convention for their tests (database-testing.md); correct as written."
   },
-  "Mail::current_transport": {
-   "class": "internal",
-   "evidence": "pub(crate) fn (framework/src/mail/mod.rs:239)."
-  },
   "Middleware::resolveValidationErrors": {
    "class": "noise",
    "evidence": "Laravel / Inertia-Laravel / Laravel-Data names in a comparison column or labelled as Laravel's."
-  },
-  "Model::__append_accessor": {
-   "audience": "framework-internal",
-   "class": "hidden",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Macro plumbing for `appends` (framework/src/eloquent/model.rs:205-211)."
   },
   "Model::scope_name(args)": {
    "class": "noise",
    "evidence": "Generated per scope by `#[scopes]` (suprnova-macros/src/scopes.rs:268)."
   },
-  "Models whose PK is `String` or `Uuid`-via-string cannot be `MorphTo` targets in v1. v2 will parameterise the morph ID type so the full PK lattice (`i64` / `String` / `Uuid`) is accepted.": {
-   "class": "code_bug",
-   "evidence": "Intended (the manual states v2 generalises the morph id); MorphTo::morph_id is i64 (framework/src/eloquent/relations/morph.rs:490). eas4ai/suprnova#78.",
-   "gap": "issue",
-   "issue": 78
-  },
   "More kits are planned; watch the releases or open an issue if there's one you want.": {
    "class": "verified",
    "evidence": "A plan claim standing on the developer's word: on 2026-09-27 the developer confirmed more starter kits are planned. The kits live in their own repositories."
   },
-  "Nothing retires the fallback automatically: `Crypt::encrypt_string(CryptPurpose::Cookie, ...)` still mints v1, and the un-contexted entry point is superseded with removal scheduled for 1.4.0.": {
+  "Nothing retires the fallback automatically: `Crypt::encrypt_string(CryptPurpose::Cookie, ...)` still mints v1, and the un-contexted entry point is superseded and scheduled for removal.": {
    "class": "code_bug",
-   "evidence": "Intended removal on record (CHANGELOG.md:2155, :2560-2569), but 1.4.0 was never released and the fallback survived into 2.x (framework/src/http/cookie.rs:496-505, framework/src/crypto/mod.rs:341-345). eas4ai/suprnova#77.",
-   "fix": "Name the real removal target once #77 sets it.",
+   "evidence": "'v1' names the un-contexted cookie AAD format, and the sentence states the intended removal of it; the removal target is unset since 1.4.0 was never released (framework/src/http/cookie.rs:496-505). eas4ai/suprnova#77.",
    "gap": "issue",
    "issue": 77
-  },
-  "Out of v1 Scope": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
   },
   "OutputFormat::Avif": {
    "class": "noise",
@@ -543,12 +463,6 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
-  "Server::serve": {
-   "class": "error",
-   "evidence": "`Server` has no `serve`; its members are new, from_config, try_from_config_with_routes(_async), run, host, port, middleware, max_connections, header_read_timeout. Slip: the real form is documented as the way in eight chapters (`Server::run`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "Server::run",
-   "gap": "none"
-  },
   "Sync gates work transparently from the async path (`Gate::allows_async` dispatches them without an `.await`), so a codebase can register sync gates today and migrate individual abilities to async later without changing call sites.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
@@ -593,12 +507,6 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
-  "The command installs the tagged v1.2.4 release:": {
-   "class": "error",
-   "evidence": "Stale release numbers: the current release is 2.1.0 (CHANGELOG.md:7).",
-   "fix": "Name the current release, or describe pinning a tag without a hardcoded version.",
-   "gap": "none"
-  },
   "The file lands in `frontend/src/pages/` with the per-frontend extension: `AboutPage.svelte` for Svelte, `AboutPage.tsx` for React, `AboutPage.vue` for Vue.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
@@ -606,10 +514,6 @@
   "The first build typically takes several minutes (cold Rust cache); follow-up builds are much faster thanks to Docker layer caching.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
-  },
-  "The form family today: field, label, input, textarea, number input, slider, search input, password input with reveal, checkbox and checkbox group, radio group, switch, select, button and link button, button group, fieldset, form actions, validation summary, and file input.": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
   },
   "The generated file lands in `migrations/`.": {
    "class": "noise",
@@ -619,12 +523,6 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
-  "The tagged v1.3.2 release has the same Rust 1.94.0 floor.": {
-   "class": "error",
-   "evidence": "Stale release numbers: the current release is 2.1.0 (CHANGELOG.md:7).",
-   "fix": "Name the current release, or describe pinning a tag without a hardcoded version.",
-   "gap": "none"
-  },
   "The version middleware re-flashes the session before bouncing the client, so a flashed error survives the follow-up full-page GET; it can only do that inside a session scope.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
@@ -633,33 +531,11 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
-  "Three kits ship today, modelled on Laravel's lineage.": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
-  },
   "ThrottleRequestsMiddleware::default": {
    "class": "code_bug",
    "evidence": "`ThrottleRequestsMiddleware` does not implement Default; its constructors are `by_name`, `with`, `with_limits`. Treated as intended (the manual's form is what a reader expects; the code needs an explicit limit and prefix); eas4ai/suprnova#75.",
    "gap": "issue",
    "issue": 75
-  },
-  "Through soft-deletes (v1)": {
-   "class": "error",
-   "evidence": "Stale: Through relations now filter both intermediate and target by the soft-delete column when the models opt in (framework/src/eloquent/relations/through.rs:16-26, :221).",
-   "fix": "Cut the 'Through soft-deletes (v1)' section; state that Through relations honour soft deletes.",
-   "gap": "none"
-  },
-  "Today the optional family covers `String` and `i64`.": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
-  },
-  "Today's baseline is Laravel 13.x and every shipped subsystem has been audited against it.": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
-  },
-  "Today, WebSocket upgrades take a separate server path that doesn't run global middleware at all, so this guard is defence in depth - it keeps the timeout from ever bounding a long-lived bidirectional channel the day that changes.": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
   },
   "Under the embedded profile, where L1 is disabled unless `RENDER_CACHE_L1_DIR` names a directory, declaring the layer changes nothing; under the Database profile the entry lands in `suprnova_render_entries` and a second process finds it there.": {
    "class": "noise",
@@ -676,10 +552,6 @@
   "User::with_where_posts(|q| q.filter(\"published\", true))": {
    "class": "noise",
    "evidence": "Generated by `#[model]` per relation (suprnova-macros/src/model/relations.rs:442)."
-  },
-  "WS_TASKS": {
-   "class": "internal",
-   "evidence": "Private static (framework/src/server.rs:52)."
   },
   "When `MAIL_FILE_PATH` is unset, mail lands in `storage_path(\"mail\")` - the same path family every other `storage/` consumer uses, so the directory stays inside the application base even when a service manager starts the process from somewhere else.": {
    "class": "noise",
@@ -707,32 +579,15 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
-  "`Cookie::read_encrypted(wire)` is the deprecated, un-contexted v1 reader; it cannot decrypt current `Cookie::encrypted` output and is scheduled for removal in 1.4.0 together with the v1 fallback.": {
+  "`Cookie::read_encrypted(wire)` is the deprecated, un-contexted v1 reader; it cannot decrypt current `Cookie::encrypted` output and is scheduled for removal together with the v1 fallback.": {
    "class": "code_bug",
-   "evidence": "Intended removal on record (CHANGELOG.md:2155, :2560-2569), but 1.4.0 was never released and the fallback survived into 2.x (framework/src/http/cookie.rs:496-505, framework/src/crypto/mod.rs:341-345). eas4ai/suprnova#77.",
-   "fix": "Name the real removal target once #77 sets it.",
+   "evidence": "'v1' names the un-contexted cookie AAD format, and the sentence states the intended removal of it; the removal target is unset since 1.4.0 was never released (framework/src/http/cookie.rs:496-505). eas4ai/suprnova#77.",
    "gap": "issue",
    "issue": 77
-  },
-  "`Http::*` is closed for v1.": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
   },
   "`Subscription::cancel(id, at_period_end)` accepts the bool for trait compatibility but always behaves as scheduled cancellation - Paddle's `EffectiveFrom` enum is private in `paddle_rust_sdk` 0.18, so immediate cancel is not viable in v1.": {
    "class": "verified",
    "evidence": "Cargo.lock pins paddle-rust-sdk 0.18.0; the adapter's cancel path is scheduled-only."
-  },
-  "`Subscription::update(new_price_refs: Some(...))` :: `NotSupported` in v1.": {
-   "class": "code_bug",
-   "evidence": "update with new_price_refs returns NotSupported on Paddle (crates/suprnova-payments-paddle/src/subscription.rs:28-35) and Stripe (crates/suprnova-payments-stripe/src/subscription.rs:176-179). eas4ai/suprnova#82.",
-   "gap": "issue",
-   "issue": 82
-  },
-  "`async_trait` is also re-exported (`use suprnova::async_trait`) because the trait method returns a future and Rust does not yet allow `async fn` in traits without it.": {
-   "class": "error",
-   "evidence": "Stale reason: Rust has allowed async fn in traits since 1.75 (this repo's toolchain is 1.94). Seeder is #[async_trait] (framework/src/seed/mod.rs:108-109) because the registry stores each seeder as fn() -> BoxFuture<'static, ...> (framework/src/seed/mod.rs:93-95), a boxed Send future, which async_trait produces; the language itself is not the blocker.",
-   "fix": "Give the real reason async_trait is re-exported.",
-   "gap": "none"
   },
   "`auth_user_id()` returns the currently-authenticated user id (consulting request-scoped auth state first, falling back to the persisted session field):": {
    "class": "noise",
@@ -766,17 +621,7 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
-  "`update` with `new_price_refs`: \"Paddle price-set replacement on existing subscription not in v1\"": {
-   "class": "code_bug",
-   "evidence": "update with new_price_refs returns NotSupported on Paddle (crates/suprnova-payments-paddle/src/subscription.rs:28-35) and Stripe (crates/suprnova-payments-stripe/src/subscription.rs:176-179). eas4ai/suprnova#82.",
-   "gap": "issue",
-   "issue": 82
-  },
   "app #": {
-   "class": "noise",
-   "evidence": "Placeholders, wildcards, example user commands or parse artifacts, not command claims."
-  },
-  "app ...": {
    "class": "noise",
    "evidence": "Placeholders, wildcards, example user commands or parse artifacts, not command claims."
   },
@@ -827,21 +672,6 @@
   "derive(Parser)": {
    "class": "noise",
    "evidence": "Third-party names: SQL keyword, browser error, tokio macro, clap derive (the stub uses `clap::Parser`), SeaORM `EntityTrait::find` on a real entity."
-  },
-  "derive(Resource)": {
-   "class": "error",
-   "evidence": "No derive named Resource exists in suprnova-macros or any re-export. Slip: the real form is documented as the way in eloquent-resources.md (`#[derive(Data)]` with `#[json_resource(\"type\")]`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "gap": "none"
-  },
-  "derive(Task)": {
-   "class": "error",
-   "evidence": "No derive named Task exists. Slip: scheduled work is `impl suprnova::Task for ...` (framework/src/schedule/task.rs:137, re-exported at framework/src/lib.rs:403), which make:task generates (suprnova-cli/src/templates/mod.rs:1820) and scheduling.md:67 documents, alongside Schedule::call. Gap check: no plan record names a Task derive (CHANGELOG.md and docs/ have no mention). Separately, the scaffold's tasks/mod.rs.tpl doc comment names a nonexistent `ScheduledTask` trait (eas4ai/suprnova#84).",
-   "fix": "impl Task for ... (and Schedule::call)",
-   "gap": "none"
-  },
-  "dynamic loading (too much complexity for v1)": {
-   "class": "restate",
-   "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
   },
   "registry::assert_no_duplicates": {
    "audience": "reader-needed",
@@ -907,32 +737,9 @@
    "class": "noise",
    "evidence": "Placeholders, wildcards, example user commands or parse artifacts, not command claims."
   },
-  "suprnova::Event::listen": {
-   "class": "error",
-   "evidence": "`suprnova::Event` is the event trait (event_name, queued); listeners register through `EventFacade::listen` / `EventDispatcher::listen`. Slip: the real form is documented as the way in 14 chapters (`EventFacade::listen`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "suprnova::EventFacade::listen",
-   "gap": "none"
-  },
-  "suprnova::FrameworkError::forbidden": {
-   "class": "wrong_path",
-   "evidence": "`FrameworkError` has no forbidden/unauthorized; they are on `AppError`.",
-   "fix": "suprnova::AppError::forbidden / unauthorized"
-  },
-  "suprnova::FrameworkError::unauthorized": {
-   "class": "wrong_path",
-   "evidence": "`FrameworkError` has no forbidden/unauthorized; they are on `AppError`.",
-   "fix": "suprnova::AppError::forbidden / unauthorized"
-  },
   "suprnova::User::query": {
    "class": "noise",
    "evidence": "The reader's model; `query()` is generated by `#[model]`."
-  },
-  "suprnova::__async_trait": {
-   "audience": "public-equivalent",
-   "class": "error",
-   "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Public equivalent: `suprnova::async_trait` (framework/src/lib.rs:557); `__async_trait` is the crate path macros expand to, not an attribute.",
-   "fix": "#[suprnova::async_trait] (framework/src/lib.rs:557)",
-   "gap": "none"
   },
   "suprnova::__fake": {
    "audience": "reader-needed",
@@ -966,35 +773,6 @@
   "task_local!": {
    "class": "noise",
    "evidence": "Third-party names: SQL keyword, browser error, tokio macro, clap derive (the stub uses `clap::Parser`), SeaORM `EntityTrait::find` on a real entity."
-  },
-  "use suprnova::Json": {
-   "class": "error",
-   "evidence": "Suprnova exports no `Json` or `Query` extractor; the snippet is axum-shaped and does not compile against Suprnova. Slip: the real form is documented as the way in requests.md and four other chapters (the `Request` API; the snippet is axum-shaped). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "Rewrite the handler with suprnova::Request / HttpResponse.",
-   "gap": "none"
-  },
-  "use suprnova::Query": {
-   "class": "error",
-   "evidence": "Suprnova exports no `Json` or `Query` extractor; the snippet is axum-shaped and does not compile against Suprnova. Slip: the real form is documented as the way in requests.md and four other chapters (the `Request` API; the snippet is axum-shaped). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "Rewrite the handler with suprnova::Request / HttpResponse.",
-   "gap": "none"
-  },
-  "use suprnova::data::when_loaded": {
-   "class": "wrong_path",
-   "evidence": "Public path is `suprnova::when_loaded`; `suprnova::data` does not export it.",
-   "fix": "use suprnova::when_loaded"
-  },
-  "use suprnova::sea_orm_migration::prelude::*": {
-   "class": "error",
-   "evidence": "Suprnova does not re-export sea_orm_migration; generated migrations use `use sea_orm_migration::prelude::*;` (suprnova-cli/src/templates/files/backend/migrations/*.rs.tpl, app/src/migrations/*). Slip: the real form is documented as the way in the scaffold, which depends on `sea-orm-migration` directly (suprnova-cli/src/templates/files/backend/Cargo.toml.tpl:33). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "use sea_orm_migration::prelude::*;",
-   "gap": "none"
-  },
-  "v1 restriction: `MorphTo` is `i64`-only": {
-   "class": "code_bug",
-   "evidence": "Intended (the manual states v2 generalises the morph id); MorphTo::morph_id is i64 (framework/src/eloquent/relations/morph.rs:490). eas4ai/suprnova#78.",
-   "gap": "issue",
-   "issue": 78
   },
   "where!()": {
    "class": "code_bug",

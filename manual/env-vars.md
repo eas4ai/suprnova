@@ -473,7 +473,7 @@ overrides both for secrets that should never land in a committed
 file.
 
 See [Configuration](configuration.md#how-env-loading-works) for the
-exact loader behaviour and the `LOADED_KEYS` tracking that prevents
+exact loader behaviour and the tracking of loaded keys that prevents
 stale `.env` values from promoting into the "real system env" tier
 across reloads.
 

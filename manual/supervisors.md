@@ -191,9 +191,9 @@ Suprnova runs on Tokio inside a single long-lived process. Always-on background 
 
 `Queue` workers (which Laravel has) still ship - see [Queues](queues.md) - for discrete-job work. Supervisors cover the "always tick" case that Laravel pushes out of the framework boundary entirely.
 
-## Out of v1 Scope
+## Out of scope
 
-The following items are intentionally deferred:
+The following are intentionally left out:
 
 - **Supervisor trees (parent/child).** There is no hierarchy - all supervisors are peers under the single `SupervisorRegistry`. Structured supervision (where one supervisor owns and restarts child supervisors) is orchestrator territory.
 

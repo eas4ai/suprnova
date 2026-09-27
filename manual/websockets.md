@@ -403,7 +403,7 @@ Enable WebSocket support on the listener rule (AWS ALB does this automatically w
 
 ## Graceful shutdown
 
-Every spawned WebSocket handler is tracked in the server's `WS_TASKS` `JoinSet`. On `Ctrl-C` or an external shutdown signal, the listener stops accepting new connections and `Server::run` drains the set before the process exits. The handler future doesn't resolve until the close handshake has been flushed: after the user's `handle` returns, the framework awaits the forwarder so the final Close(1000) or Close(1011) frame is written to the wire before the connection's task is reported done. In a clean shutdown peers see a normal close, not a TCP reset.
+Every spawned WebSocket handler is tracked by the server. On `Ctrl-C` or an external shutdown signal, the listener stops accepting new connections and `Server::run` drains the set before the process exits. The handler future doesn't resolve until the close handshake has been flushed: after the user's `handle` returns, the framework awaits the forwarder so the final Close(1000) or Close(1011) frame is written to the wire before the connection's task is reported done. In a clean shutdown peers see a normal close, not a TCP reset.
 
 Completed handles are reaped opportunistically during the lifetime of the server, so the `JoinSet` doesn't grow unbounded under long-running operation.
 

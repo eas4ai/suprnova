@@ -268,7 +268,7 @@ Note: lazy-bearing structs suppress `Serialize`, `Deserialize`, and `FormRequest
 Mirrors Laravel-Data's `#[AutoWhenLoadedLazy]`. The user's `From<Entity>` impl decides whether the relation was preloaded:
 
 ```rust
-use suprnova::data::{when_loaded, IsRelationLoaded};
+use suprnova::{when_loaded, IsRelationLoaded};
 
 impl From<&AlbumEntity> for AlbumDto {
     fn from(album: &AlbumEntity) -> Self {
@@ -317,5 +317,5 @@ Emits a `#[derive(Data, Validate)]` skeleton instead of the legacy `#[derive(Ine
 - [Validation](validation.md) - `#[derive(Validate)]`, async validators, and how `FormRequest` calls into them
 - [Requests](requests.md) - the request extractor surface that `FormRequest` plugs into
 - [Inertia Responses](frontend-inertia-responses.md) - the `Inertia::data` path and how lazy props become partial-reload-eligible
-- [Eloquent Resources](eloquent-resources.md) - `#[derive(Resource)]` for JSON:API outputs (sibling of `Data` for serialization-only payloads)
+- [Eloquent Resources](eloquent-resources.md) - `#[derive(Data)]` with `#[json_resource]` for JSON:API outputs (sibling of `Data` for serialization-only payloads)
 - [Error Model](error-model.md) - how `unknown_field` rejection becomes a 422 and how `FormRequest` failures travel back as `ValidationErrors`
