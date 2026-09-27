@@ -82,27 +82,9 @@
    "gap": "issue",
    "issue": 69
   },
-  "**not yet** :: Genuinely planned, not yet on disk": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "Redefine the status: Suprnova has no first-party version and none is planned; the Notes column gives the route.",
-   "gap": "none"
-  },
-  "**not yet** :: not yet": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "Redefine the status: Suprnova has no first-party version and none is planned; the Notes column gives the route.",
-   "gap": "none"
-  },
   "A Channel variant where the server tracks who is currently subscribed and emits join/leave events with each member's metadata.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
-  },
-  "A consolidated list of every not yet above, so you can see the shape of the gap in one place:": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "Frame the section as what Suprnova does not have, without implying a plan.",
-   "gap": "none"
   },
   "A follow-up sweep will adapt the trait to the dispatch helper.": {
    "class": "error",
@@ -269,12 +251,6 @@
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
   },
-  "Every row in the not yet column is intended work, not a refusal.": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "Drop the claim that these rows are intended work.",
-   "gap": "none"
-  },
   "Every send during the guard's lifetime lands in an in-memory buffer instead of going out:": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
@@ -315,18 +291,6 @@
    "class": "restate",
    "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
   },
-  "Horizon (queue dashboard) :: not yet": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
-   "gap": "none"
-  },
-  "Horizon :: not yet": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
-   "gap": "none"
-  },
   "If you need finer granularity than the table, the honest answer today is that you do not have it.": {
    "class": "restate",
    "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
@@ -334,12 +298,6 @@
   "If you write a driver whose follow-up write and acknowledgement share a transaction domain, implement `settle`.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
-  },
-  "Inertia checkout components :: Ready-made billing pages are a planned starter-kit addition (Starter Kits)": {
-   "class": "error",
-   "evidence": "Stale: ready-made payment pages ship in the Directory starter (the developer, 2026-09-27; manual/starter-kits.md:52-60 describes its paid publication). The kits live in their own repositories.",
-   "fix": "Point to the Directory starter's payment pages instead of calling billing pages planned.",
-   "gap": "none"
   },
   "Inertia versions the asset manifest so a long-lived client doesn't try to mount a page from yesterday's bundle against today's server.": {
    "class": "noise",
@@ -418,12 +376,6 @@
    "gap": "issue",
    "issue": 78
   },
-  "MongoDB :: not yet": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
-   "gap": "none"
-  },
   "More kits are planned; watch the releases or open an issue if there's one you want.": {
    "class": "verified",
    "evidence": "A plan claim standing on the developer's word: on 2026-09-27 the developer confirmed more starter kits are planned. The kits live in their own repositories."
@@ -468,12 +420,6 @@
    "class": "noise",
    "evidence": "The reader's own env-var convention for their tests (database-testing.md); correct as written."
   },
-  "Passport :: not yet": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
-   "gap": "none"
-  },
   "Per-signal endpoint overrides (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `_METRICS_ENDPOINT`, `_LOGS_ENDPOINT`) are currently shadowed by the base endpoint - all three signals go to `OTEL_EXPORTER_OTLP_ENDPOINT`.": {
    "class": "code_bug",
    "evidence": "Per-signal OTLP endpoints are shadowed by the explicit base endpoint (framework/src/telemetry/init.rs:33-36, :284, :306, :335). eas4ai/suprnova#80.",
@@ -492,30 +438,6 @@
    "class": "error",
    "evidence": "`Prunable` has `prunable` and `pruning`; there is no `prunable_query`. Slip: the real form is documented as the way in eloquent.md and macros.md (`Prunable::prunable`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
    "fix": "Prunable::prunable",
-   "gap": "none"
-  },
-  "Pulse (perf dashboard) :: Same: OTel surface today, dashboard later": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
-   "gap": "none"
-  },
-  "Pulse (perf dashboard) :: not yet": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
-   "gap": "none"
-  },
-  "Pulse :: OTel today, dashboard later": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
-   "gap": "none"
-  },
-  "Pulse :: not yet": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
    "gap": "none"
   },
   "QDRANT_URL": {
@@ -549,18 +471,6 @@
    "evidence": "`RateLimitMiddleware` has no `ip_based` or `connections_per_ip` constructor. Intended: the manual form is the one a reader expects; the code reaches it only through RateLimitMiddleware::new or a named limiter. eas4ai/suprnova#66.",
    "gap": "issue",
    "issue": 66
-  },
-  "RateLimiter::for_signature": {
-   "class": "error",
-   "evidence": "`RateLimiter` has no `for_signature`; the named-limiter API is `RateLimiter::for` (Laravel's `for`) plus `define`. Slip: the real form is documented as the way in rate-limiting.md (`RateLimiter::for`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "RateLimiter::for",
-   "gap": "none"
-  },
-  "RateLimiter::for_signature(...)": {
-   "class": "error",
-   "evidence": "`RateLimiter` has no `for_signature`; the named-limiter API is `RateLimiter::for` (Laravel's `for`) plus `define`. Slip: the real form is documented as the way in rate-limiting.md (`RateLimiter::for`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "RateLimiter::for",
-   "gap": "none"
   },
   "Reach for it when you're building anything that talks to the public internet, anything that fans out to third-party APIs, or anything where \"the database might be slow today\" is a realistic Tuesday.": {
    "class": "noise",
@@ -677,30 +587,6 @@
    "class": "test_suite",
    "evidence": "Read by the framework's bench scripts (crates/suprnova-live/scripts, benches), not by an app."
   },
-  "Scout (full-text search) :: not yet": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
-   "gap": "none"
-  },
-  "Search (Scout - keyword) :: Roll your own with `meilisearch-sdk` / `elasticsearch` until shipped; Vector handles semantic search today": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
-   "gap": "none"
-  },
-  "Search (Scout) :: Vector search ships today via Vector; keyword-search Scout-equivalent is planned": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
-   "gap": "none"
-  },
-  "Search (Scout) :: not yet": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
-   "gap": "none"
-  },
   "Sends a `presence.here` event frame to the new subscriber with `data: { \"members\": [...] }` - a snapshot of all currently tracked members (excluding the newly joining one).": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
@@ -718,12 +604,6 @@
   "So HEIC ingestion works today: install ImageMagick with libheif through your package manager and flip the env var.": {
    "class": "restate",
    "evidence": "Verified true against the source and intended as design (a deliberate deferral, a scope boundary, or a current list), but worded as a moment in time ('today', 'v1', 'currently', 'a future release may'). Restate as how Suprnova works; drop the version and time framing."
-  },
-  "Starter Kits :: Two kits ship today - Nebula is the Breeze equivalent; Pulsar adds docs, blog, community, and RBAC.": {
-   "class": "error",
-   "evidence": "Stale count: three kits ship. The developer confirmed on 2026-09-27 that the Directory starter was added recently; manual/starter-kits.md:52-54 documents it (github.com/eas4ai/suprnova-directory-starter). The kits live in their own repositories, so this repository's source cannot settle it.",
-   "fix": "Three kits: Nebula (the Breeze equivalent), Pulsar (docs, blog, community, RBAC) and the Directory starter (listings, moderation, paid publication), without 'today'.",
-   "gap": "none"
   },
   "Suprnova::Notifications::Failed": {
    "class": "error",
@@ -746,18 +626,6 @@
   "Sync gates work transparently from the async path (`Gate::allows_async` dispatches them without an `.await`), so a codebase can register sync gates today and migrate individual abilities to async later without changing call sites.": {
    "class": "noise",
    "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
-  },
-  "Telescope (debug dashboard) :: not yet": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
-   "gap": "none"
-  },
-  "Telescope :: not yet": {
-   "class": "error",
-   "evidence": "No plan exists: the developer ruled on 2026-09-27 that these features are not issues and not on the roadmap, and no plan record names them (docs/spec, docs/commitments, docs/decisions and CHANGELOG.md have no mention of Horizon, Telescope, Pulse, Passport, Scout or MongoDB). The code has none of them (no client crate in Cargo.lock).",
-   "fix": "State that Suprnova has no first-party version, keep the workaround, drop 'not yet' / 'planned' / 'later' / 'until shipped'.",
-   "gap": "none"
   },
   "TestDatabase::postgres()": {
    "class": "noise",
@@ -1028,12 +896,6 @@
    "gap": "issue",
    "issue": 82
   },
-  "apiResource!": {
-   "class": "error",
-   "evidence": "Resource routes are methods, not macros: `Router::resource` / `Router::api_resource` (framework/src/routing/resource.rs). Slip: the real form is documented as the way in routing.md and authorization.md (`Router::resource` / `Router::api_resource`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "Router::resource / Router::api_resource",
-   "gap": "none"
-  },
   "app #": {
    "class": "noise",
    "evidence": "Placeholders, wildcards, example user commands or parse artifacts, not command claims."
@@ -1078,11 +940,6 @@
    "class": "noise",
    "evidence": "Placeholders, wildcards, example user commands or parse artifacts, not command claims."
   },
-  "derive(Config)": {
-   "class": "error",
-   "evidence": "No `derive(Config)`; typed config is `Config::register` / `Config::resolve` on hand-written structs. Slip: the real form is documented as the way in configuration.md and five other chapters (`Config::register` on a hand-written struct). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "gap": "none"
-  },
   "derive(Event)": {
    "class": "error",
    "evidence": "No derive named Event exists; `suprnova::Event` is a trait users implement by hand. Slip: the real form is documented as the way in events.md:28 and :76 (`impl Event for ...`); events.md:55 is the chapter correctly saying there is no derive, so only parity.md:99 is wrong. Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
@@ -1103,7 +960,8 @@
   },
   "derive(Task)": {
    "class": "error",
-   "evidence": "No derive named Task exists; scheduled work is registered with `Schedule::call` / the schedule builder. Slip: the real form is documented as the way in scheduling (`Schedule::call`, `schedule_task!`); `make:task` generates `impl ScheduledTask` (suprnova-cli/src/templates/files/backend/tasks/mod.rs.tpl), a trait no chapter documents yet (a coverage gap for the pass). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
+   "evidence": "No derive named Task exists. Slip: scheduled work is `impl suprnova::Task for ...` (framework/src/schedule/task.rs:137, re-exported at framework/src/lib.rs:403), which make:task generates (suprnova-cli/src/templates/mod.rs:1820) and scheduling.md:67 documents, alongside Schedule::call. Gap check: no plan record names a Task derive (CHANGELOG.md and docs/ have no mention). Separately, the scaffold's tasks/mod.rs.tpl doc comment names a nonexistent `ScheduledTask` trait (eas4ai/suprnova#84).",
+   "fix": "impl Task for ... (and Schedule::call)",
    "gap": "none"
   },
   "dynamic loading (too much complexity for v1)": {
@@ -1121,12 +979,6 @@
    "evidence": "Public but #[doc(hidden)] (surface.jsonl `hidden: true`). Whether the manual should document it is a policy call. Reader-needed: apps have to name it and no public alternative exists; eas4ai/suprnova#65.",
    "gap": "issue",
    "issue": 65
-  },
-  "resource!(\"posts\", PostController)": {
-   "class": "error",
-   "evidence": "Resource routes are methods, not macros: `Router::resource` / `Router::api_resource` (framework/src/routing/resource.rs). Slip: the real form is documented as the way in routing.md and authorization.md (`Router::resource` / `Router::api_resource`). Gap check: no plan record names the manual's form (CHANGELOG.md and docs/ have no mention).",
-   "fix": "Router::resource / Router::api_resource",
-   "gap": "none"
   },
   "seed::clear()": {
    "audience": "reader-needed",
