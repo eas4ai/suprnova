@@ -230,6 +230,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   from the lockout store when they recorded a failed attempt, so a store fault
   during an attack left no trace. Each now logs a warning with the error; the
   rejection itself is unchanged.
+- **Magnetar's Redis abuse limiter says why Redis failed.** Every client error
+  became `shared abuse-limiter backend failed`, so a refused connection, a
+  timeout and a script error read the same in the log of a limiter that fails
+  sign-in closed. The message now ends with the Redis client's own description
+  of the fault.
 
 ## 2.0.2 - 2026-09-14
 

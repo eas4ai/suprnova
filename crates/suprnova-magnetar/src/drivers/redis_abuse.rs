@@ -156,7 +156,7 @@ impl RedisConnection {
             .get_multiplexed_async_connection()
             .await
             .map(Self::new)
-            .map_err(|_| dependency_unavailable())
+            .map_err(dependency_unavailable)
     }
 }
 
@@ -171,9 +171,9 @@ impl RedisAbuseConnection for RedisConnection {
             .arg(milliseconds)
             .invoke_async(&mut connection)
             .await
-            .map_err(|_| dependency_unavailable())?;
+            .map_err(dependency_unavailable)?;
         if count < 0 {
-            return Err(dependency_unavailable());
+            return Err(invalid_window_state());
         }
         Ok(RedisPermitState {
             count: count as u64,
@@ -182,7 +182,22 @@ impl RedisAbuseConnection for RedisConnection {
     }
 }
 
-fn dependency_unavailable() -> Error {
+/// The limiter guards authentication and fails closed, so an operator
+/// diagnoses a Redis fault from this message alone: it carries the client's
+/// own description (refused connection, timeout, script error), as the
+/// database helpers in this crate carry theirs.
+#[cfg(feature = "redis")]
+fn dependency_unavailable(error: redis::RedisError) -> Error {
+    Error::DependencyUnavailable {
+        dependency: "redis".to_owned(),
+        message: format!("shared abuse-limiter backend failed: {error}"),
+    }
+}
+
+/// The window script answered with a negative count, which no Redis fault
+/// explains; there is no source error to carry.
+#[cfg(feature = "redis")]
+fn invalid_window_state() -> Error {
     Error::DependencyUnavailable {
         dependency: "redis".to_owned(),
         message: "shared abuse-limiter backend failed".to_owned(),

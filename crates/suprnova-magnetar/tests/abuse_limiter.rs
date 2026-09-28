@@ -116,6 +116,36 @@ fn redis_keys_hash_route_and_normalized_identity_without_raw_values() {
 }
 
 #[cfg(feature = "redis")]
+#[tokio::test]
+async fn a_refused_redis_connection_reports_the_clients_own_error() {
+    use magnetar::drivers::redis_abuse::RedisConnection;
+
+    // Port 1 is reserved and nothing listens on it, so the client is refused
+    // at once and the test needs no Redis server.
+    let client = redis::Client::open("redis://127.0.0.1:1/").expect("a well-formed URL");
+    let error = RedisConnection::connect(&client)
+        .await
+        .err()
+        .expect("no server listens on port 1");
+
+    let magnetar::Error::DependencyUnavailable {
+        dependency,
+        message,
+    } = error
+    else {
+        panic!("a refused connection is a dependency failure, got {error:?}");
+    };
+    assert_eq!(dependency, "redis");
+    let detail = message
+        .strip_prefix("shared abuse-limiter backend failed: ")
+        .expect("the message carries the client's error after the fixed prefix");
+    assert!(
+        !detail.trim().is_empty(),
+        "the client's error text is empty: {message:?}"
+    );
+}
+
+#[cfg(feature = "redis")]
 mod redis_driver_tests {
     use super::*;
     use magnetar::drivers::redis_abuse::{
