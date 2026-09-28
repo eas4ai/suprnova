@@ -311,6 +311,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   not repeat the URL. `S3_PUBLIC_URL` gives the disk of the environment its
   base. The function takes the name of the disk, because `Storage::disk`
   returns the `opendal` operator itself, which carries no name.
+- **`DB::monitor(max)` and the `db:monitor` command dispatch `DatabaseBusy`.**
+  The event was public, exported from the crate root and listed with the
+  database events the framework fires, and no code dispatched it: an
+  application that listened for it to alert on a database that runs out of
+  connections waited for an event that never came. `DB::monitor(max)` asks the
+  server of each connection, the default one and every named one, how many
+  connections it has from every client, and dispatches `DatabaseBusy` for a
+  server with `max` or more. PostgreSQL counts `pg_stat_activity`, and MySQL
+  and MariaDB give `threads_connected`, the way Laravel's `db:monitor` asks.
+  SQLite has no server and is never busy. The server does the counting, so the
+  answer is the same from every process, and the check can run on the
+  schedule: `schedule.command("db:monitor --max 80").every_minute()`. Nothing
+  runs it by itself. `DB::connection_counts()` returns the numbers and
+  `DbConnection::server_connections()` the number of one connection.
+  `DbConnection::connections_in_use()` is the other number, the connections of
+  this process's own pool that are out of it now.
 
 ### Changed
 

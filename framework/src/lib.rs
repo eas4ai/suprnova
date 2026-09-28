@@ -156,9 +156,9 @@ pub use data::{
     current_include_set, scope_include_set, with_include_overrides,
 };
 pub use database::{
-    AutoRouteBinding, ConnectionEstablished, ConnectionRegistry, DB, Database, DatabaseBusy,
-    DatabaseConfig, DatabaseType, DbConnection, DbTableBuilder, DynamicRow, EntityExt,
-    EntityExtMut, PRIMARY_CONNECTION_NAME, QueryExecuted, QueryListener,
+    AutoRouteBinding, ConnectionCount, ConnectionEstablished, ConnectionRegistry, DB, Database,
+    DatabaseBusy, DatabaseConfig, DatabaseType, DbConnection, DbTableBuilder, DynamicRow,
+    EntityExt, EntityExtMut, PRIMARY_CONNECTION_NAME, QueryExecuted, QueryListener,
     READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, RouteParam, Transaction,
     TransactionBeginning, TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource,
 };

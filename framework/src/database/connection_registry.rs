@@ -150,6 +150,19 @@ impl ConnectionRegistry {
             .ok_or_else(|| FrameworkError::database(format!("connection '{name}' not registered")))
     }
 
+    /// Every registered connection with its name, in no order.
+    ///
+    /// # Errors
+    ///
+    /// An `Internal` error when the registry lock is poisoned, as
+    /// [`Self::get`] returns.
+    pub(crate) async fn all() -> Result<Vec<(String, DbConnection)>, FrameworkError> {
+        let r = crate::lock::read(reg(), "connection registry")?;
+        Ok(r.iter()
+            .map(|(name, connection)| (name.clone(), connection.clone()))
+            .collect())
+    }
+
     /// Whether `name` is registered. Used by the read-replica auto-
     /// routing path in [`crate::database::transaction::ExecutorChoice`].
     ///

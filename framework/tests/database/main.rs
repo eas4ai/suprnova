@@ -7,6 +7,7 @@ pub mod facade;
 pub mod identifier_validation;
 pub mod mariadb_scheme;
 pub mod medium_audit;
+pub mod monitor;
 pub mod multiconnection;
 pub mod observability;
 pub mod pool_liveness;
