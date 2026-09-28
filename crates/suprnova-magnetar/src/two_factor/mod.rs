@@ -202,10 +202,16 @@ impl TwoFactorService {
             )
             .await?
         {
-            let _ = self
+            if let Err(error) = self
                 .lockout
                 .record_failed_attempt(&identity, Some("two-factor re-enroll"))
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    error = %error,
+                    "lockout failed-attempt accounting failed after a rejected two-factor re-enrollment"
+                );
+            }
             return Err(invalid_proof("re-enrollment"));
         }
         if self.lockout.reset_attempts(&identity).await.is_err() {
@@ -228,10 +234,16 @@ impl TwoFactorService {
         };
         let secret = self.decrypt_secret(&row)?;
         if totp::matched_step(&secret, code, Utc::now())?.is_none() {
-            let _ = self
+            if let Err(error) = self
                 .lockout
                 .record_failed_attempt(&identity, Some("two-factor confirm"))
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    error = %error,
+                    "lockout failed-attempt accounting failed after a rejected two-factor confirmation"
+                );
+            }
             return Err(Error::InvalidInput {
                 field: "code".to_owned(),
                 message: "invalid 2FA code".to_owned(),
@@ -286,13 +298,7 @@ impl TwoFactorService {
             let Some(expected) = row.recovery_codes else {
                 return Ok(false);
             };
-            let plaintext = self
-                .encryptor
-                .decrypt(CryptoPurpose::TwoFactorRecovery, &expected)?;
-            let plaintext = String::from_utf8(plaintext).map_err(|_| Error::Internal {
-                message: "stored recovery blob is not UTF-8".to_owned(),
-            })?;
-            let mut codes: Vec<String> = plaintext.lines().map(String::from).collect();
+            let mut codes = self.decode_recovery_codes(&expected)?;
             let Some(index) = recovery::find_constant_time(&codes, code) else {
                 return Ok(false);
             };
@@ -351,10 +357,16 @@ impl TwoFactorService {
             .regenerate_recovery_codes(actor, claim, &ciphertext)
             .await?
         {
-            let _ = self
+            if let Err(error) = self
                 .lockout
                 .record_failed_attempt(&identity, Some("two-factor recovery-rotate"))
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    error = %error,
+                    "lockout failed-attempt accounting failed after a rejected two-factor recovery-code rotation"
+                );
+            }
             return Err(invalid_proof("recovery-code regeneration"));
         }
         if self.lockout.reset_attempts(&identity).await.is_err() {
@@ -420,13 +432,7 @@ impl TwoFactorService {
         let Some(expected_ciphertext) = row.recovery_codes else {
             return Ok(ProofMaterial::Invalid);
         };
-        let plaintext = self
-            .encryptor
-            .decrypt(CryptoPurpose::TwoFactorRecovery, &expected_ciphertext)?;
-        let plaintext = String::from_utf8(plaintext).map_err(|_| Error::Internal {
-            message: "stored recovery blob is not UTF-8".to_owned(),
-        })?;
-        let mut codes: Vec<String> = plaintext.lines().map(String::from).collect();
+        let mut codes = self.decode_recovery_codes(&expected_ciphertext)?;
         let Some(index) = recovery::find_constant_time(&codes, proof) else {
             return Ok(ProofMaterial::Invalid);
         };
@@ -494,6 +500,19 @@ impl TwoFactorService {
         } else {
             PreparedFactorProof::invalid(prepared)
         })
+    }
+
+    /// Decrypt the stored recovery-code blob into its codes, one per line.
+    /// Both the recovery sign-in and the proof inspection read the blob
+    /// through here, so they cannot disagree on its format.
+    fn decode_recovery_codes(&self, blob: &[u8]) -> Result<Vec<String>> {
+        let plaintext = self
+            .encryptor
+            .decrypt(CryptoPurpose::TwoFactorRecovery, blob)?;
+        let plaintext = String::from_utf8(plaintext).map_err(|_| Error::Internal {
+            message: "stored recovery blob is not UTF-8".to_owned(),
+        })?;
+        Ok(plaintext.lines().map(String::from).collect())
     }
 
     fn decrypt_secret(&self, row: &TwoFactorRow) -> Result<SecretString> {

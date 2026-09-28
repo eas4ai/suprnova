@@ -217,6 +217,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   beside it logged its error. The status path now logs `lockout status
   unavailable; failing closed` with the store's error; the response is
   unchanged.
+- **Magnetar logs a failure to record a rejected two-factor attempt.**
+  Re-enrollment, confirmation and recovery-code rotation discarded the error
+  from the lockout store when they recorded a failed attempt, so a store fault
+  during an attack left no trace. Each now logs a warning with the error; the
+  rejection itself is unchanged.
 
 ## 2.0.2 - 2026-09-14
 
