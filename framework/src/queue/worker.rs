@@ -2003,6 +2003,7 @@ mod tests {
             fail_on_timeout: false,
             backoff: BackoffSchedule::default(),
             queue: None,
+            delay_secs: None,
         }
     }
 

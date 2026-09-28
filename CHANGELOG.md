@@ -307,6 +307,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   an in-memory queue taken by mistake loses every job at the next restart;
   elsewhere it still falls back to memory, and the warning lists the accepted
   names.
+- **A chained job's `Job::delay()` applies.** A chain built each link's
+  envelope with `available_at` set to now, so a job that declares a delay ran
+  at once when it was a link of a chain, head or not. `ChainLink` now records
+  the delay at build time, as it records the queue, and the link becomes
+  available that long after it is reified: at dispatch for the head, and when
+  the link before it completes for every other link. `ChainLink` gains the
+  public field `delay_secs`, so code that builds one with a struct literal has
+  to name it. Chain payloads written before the field existed decode as links
+  with no delay.
 
 ### Security
 

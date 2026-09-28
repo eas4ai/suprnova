@@ -43,6 +43,15 @@ pub struct ChainLink {
     /// behave exactly as they did: a registered route or the driver default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
+    /// Delay the job declared for itself via [`Job::delay`], in seconds,
+    /// captured at chain-build time for the same reason as `queue`. The
+    /// link becomes available this long after it is reified, which for a
+    /// link after the head is when the link before it completed. The serde
+    /// attributes keep an undeclared delay off the wire and keep chain
+    /// payloads written before this field existed decoding, as links with
+    /// no delay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_secs: Option<u64>,
 }
 
 impl ChainLink {
@@ -59,6 +68,7 @@ impl ChainLink {
             fail_on_timeout: J::fail_on_timeout(),
             backoff: J::backoff(),
             queue: J::queue().map(str::to_owned),
+            delay_secs: J::delay().map(|delay| delay.as_secs()),
         })
     }
 
@@ -111,6 +121,17 @@ impl ChainLink {
 
     fn to_envelope_with_id(&self, id: uuid::Uuid) -> Envelope {
         let now = chrono::Utc::now();
+        // The job's own `delay()`, as a direct push applies it. A delay too
+        // large for the clock saturates instead of wrapping into the past.
+        let available_at = self
+            .delay_secs
+            .and_then(|secs| i64::try_from(secs).ok())
+            .and_then(chrono::Duration::try_seconds)
+            .and_then(|delay| now.checked_add_signed(delay))
+            .unwrap_or(match self.delay_secs {
+                Some(_) => chrono::DateTime::<chrono::Utc>::MAX_UTC,
+                None => now,
+            });
         // Mirrors `routing::resolve_queue`: a centrally registered route
         // wins, then the queue the job declared for itself (captured into
         // `self.queue` at chain-build time, because the job is stored
@@ -141,7 +162,7 @@ impl ChainLink {
             queue,
             payload: self.payload.clone(),
             dispatched_at: now,
-            available_at: now,
+            available_at,
             attempts: 0,
             max_tries: self.max_tries,
             backoff: self.backoff.clone(),

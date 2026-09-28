@@ -322,3 +322,78 @@ fn legacy_chain_link_without_queue_decodes_to_none() {
         .expect("pre-queue chain link must decode under serde(default)");
     assert_eq!(link.queue, None);
 }
+
+// ---- A chained job keeps its own delay ----------------------------------
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Reminder {
+    note: String,
+}
+
+#[async_trait]
+impl Job for Reminder {
+    fn job_name() -> &'static str {
+        "queue_chains::Reminder"
+    }
+    fn delay() -> Option<Duration> {
+        Some(Duration::from_secs(300))
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_chained_job_becomes_available_after_its_own_delay() {
+    use suprnova::queue::ChainLink;
+
+    let delayed = ChainLink::from_job(Reminder {
+        note: "follow up".into(),
+    })
+    .unwrap();
+    let immediate = ChainLink::from_job(ChainStep { label: 1 }).unwrap();
+
+    // The head link, as `Chain::dispatch` reifies it, and a later link, as
+    // the worker reifies it after the link before it completed.
+    for envelope in [
+        delayed.to_envelope(),
+        delayed.to_envelope_after(uuid::Uuid::new_v4()),
+    ] {
+        assert_eq!(
+            envelope.available_at - envelope.dispatched_at,
+            chrono::Duration::seconds(300),
+            "the link waits the five minutes the job declares"
+        );
+    }
+    let envelope = immediate.to_envelope();
+    assert_eq!(
+        envelope.available_at, envelope.dispatched_at,
+        "a job that declares no delay is available at once"
+    );
+}
+
+#[test]
+fn a_link_serialized_before_the_delay_existed_still_decodes() {
+    use suprnova::queue::ChainLink;
+
+    let written_earlier = serde_json::json!({
+        "job_name": "queue_chains::ChainStep",
+        "payload": { "label": 7 },
+        "max_tries": 3,
+        "timeout_secs": null,
+        "fail_on_timeout": false
+    });
+
+    let link: ChainLink = serde_json::from_value(written_earlier).unwrap();
+
+    assert_eq!(link.delay_secs, None);
+    let envelope = link.to_envelope();
+    assert_eq!(envelope.available_at, envelope.dispatched_at);
+    assert!(
+        serde_json::to_value(ChainLink::from_job(ChainStep { label: 1 }).unwrap())
+            .unwrap()
+            .get("delay_secs")
+            .is_none(),
+        "an undeclared delay stays off the wire"
+    );
+}
