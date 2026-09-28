@@ -596,6 +596,42 @@ async fn malformed_large_timeout_and_redirect_responses_are_bounded_without_retr
 }
 
 #[tokio::test]
+async fn http_boundary_failures_name_their_cause_and_never_the_request_url() {
+    let server = Server::new(vec![Reply {
+        body: "not-json".into(),
+        ..Reply::json(json!({}))
+    }])
+    .await;
+    let Err(PaymentError::Provider(message)) = server.provider().payment_status("5745459419").await
+    else {
+        panic!("a body that is not JSON is a provider failure");
+    };
+    let detail = message
+        .strip_prefix("NOWPayments returned invalid JSON: ")
+        .expect("the parser's error follows the fixed prefix");
+    assert!(!detail.is_empty(), "{message:?}");
+
+    // Nothing listens on port 1, so the connection is refused at once.
+    let mut unreachable = provider();
+    unreachable.api_url = Url::parse("http://127.0.0.1:1/v1/").unwrap();
+    let Err(PaymentError::Provider(message)) = unreachable.payment_status("5745459419").await
+    else {
+        panic!("a refused connection is a provider failure");
+    };
+    let detail = message
+        .strip_prefix("NOWPayments request failed or timed out: ")
+        .expect("the transport's error follows the fixed prefix");
+    assert!(
+        detail.to_ascii_lowercase().contains("connect"),
+        "the cause beneath reqwest's first line is carried: {message:?}"
+    );
+    assert!(
+        !message.contains("5745459419") && !message.contains("/v1/payment"),
+        "the request URL and the payment id stay out of the message: {message:?}"
+    );
+}
+
+#[tokio::test]
 async fn payment_lookup_authenticates_validates_identity_and_keeps_invoice_separate() {
     let server = Server::new(vec![
         Reply::json(payment("finished")),

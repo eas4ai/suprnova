@@ -253,6 +253,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   server answered `500 Live request preparation failed` and logged nothing. It
   now logs the error with the route pattern and the stage, on the HTTP path
   and on the WebSocket upgrade path; the response is unchanged.
+- **The NOWPayments adapter's HTTP failures name their cause.** A failed
+  request, an unreadable response body and a body that is not JSON each became
+  a fixed `PaymentError::Provider` message. Each now ends with the underlying
+  error, down to the refused connection or elapsed deadline for a transport
+  failure, and never includes the request URL, which carries the payment id.
 
 ## 2.0.2 - 2026-09-14
 
