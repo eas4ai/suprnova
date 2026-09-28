@@ -10,9 +10,14 @@
 //! 2. **Builder extension**: `Builder<Model>::active(args...)` -
 //!    chainable extension method.
 //!
-//! Methods that don't match the scope signature pass through unchanged
-//! so users can mix scopes and ordinary inherent methods in the same
-//! impl block.
+//! A method that has nothing to do with a builder passes through
+//! unchanged, so scopes and ordinary inherent methods can share one impl
+//! block. A method that takes or returns a `Builder` in any other form
+//! than the scope shape is a scope written wrong, and is a compile error
+//! that names the accepted shape: left alone it would become an ordinary
+//! method, no `.name()` would reach the builder, and the first sign would
+//! be an error at some distant call site. A helper that legitimately
+//! handles a builder says so with `#[not_scope]`.
 //!
 //! # Why impl-block-level, not per-method
 //!
@@ -107,52 +112,80 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     // ---- Parse the impl block -------------------------------------------
-    let mut input = parse_macro_input!(item as ItemImpl);
+    let input = parse_macro_input!(item as ItemImpl);
 
-    // ---- Walk impl items, splitting scope methods from passthroughs ----
-    //
-    // For each `ImplItem::Fn` we determine whether the signature matches
-    // the scope shape. Non-matching items (including non-fn items like
-    // associated constants) pass through unchanged.
+    match expand_impl(input, &model_ty, &model_ident) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// The expansion over `proc_macro2` types, which is what the unit tests
+/// drive: walk the impl items and split scope methods from passthroughs.
+fn expand_impl(
+    mut input: ItemImpl,
+    model_ty: &Type,
+    model_ident: &syn::Ident,
+) -> syn::Result<TokenStream2> {
     let mut module_emissions: Vec<TokenStream2> = Vec::new();
     let mut new_impl_items: Vec<ImplItem> = Vec::with_capacity(input.items.len());
 
     for item in input.items.drain(..) {
         match item {
-            ImplItem::Fn(mut f) => match try_expand_scope_fn(&mut f, &model_ty, &model_ident) {
-                ScopeExpand::Skip => {
-                    // Not a scope - pass through unchanged.
+            ImplItem::Fn(mut f) => {
+                if take_not_scope_marker(&mut f) {
+                    // The author said it is not a scope: no check, no rewrite.
                     new_impl_items.push(ImplItem::Fn(f));
+                    continue;
                 }
-                ScopeExpand::Rewrite(rewrite) => {
-                    // The renamed `__scope_<name>` inner fn stays in the
-                    // impl block. We append it plus the static helper.
-                    let ScopeRewrite {
-                        static_helper,
-                        module_items,
-                    } = *rewrite;
-                    new_impl_items.push(ImplItem::Fn(f));
-                    new_impl_items.push(ImplItem::Fn(static_helper));
-                    module_emissions.push(module_items);
+                match try_expand_scope_fn(&mut f, model_ty, model_ident) {
+                    ScopeExpand::Skip => {
+                        // Not a scope - pass through unchanged.
+                        new_impl_items.push(ImplItem::Fn(f));
+                    }
+                    ScopeExpand::Rewrite(rewrite) => {
+                        // The renamed `__scope_<name>` inner fn stays in the
+                        // impl block. We append it plus the static helper.
+                        let ScopeRewrite {
+                            static_helper,
+                            module_items,
+                        } = *rewrite;
+                        new_impl_items.push(ImplItem::Fn(f));
+                        new_impl_items.push(ImplItem::Fn(static_helper));
+                        module_emissions.push(module_items);
+                    }
+                    ScopeExpand::Error(e) => return Err(e),
                 }
-                ScopeExpand::Error(e) => {
-                    return e.to_compile_error().into();
-                }
-            },
+            }
             other => new_impl_items.push(other),
         }
     }
 
     input.items = new_impl_items;
 
-    let output = quote! {
+    Ok(quote! {
         #input
 
         #(#module_emissions)*
-    };
-
-    output.into()
+    })
 }
+
+/// Remove a `#[not_scope]` marker from `f` and say whether it was there.
+/// The marker is this macro's own: it is stripped so the compiler never
+/// sees an attribute it does not know.
+fn take_not_scope_marker(f: &mut ImplItemFn) -> bool {
+    let before = f.attrs.len();
+    f.attrs.retain(|attr| !attr.path().is_ident("not_scope"));
+    f.attrs.len() != before
+}
+
+/// What a near miss is told. Spanned on the signature that caused it.
+const SCOPE_SHAPE: &str = "this method handles a `Builder` but does not have the scope \
+     signature, so `#[suprnova::scopes]` would leave it an ordinary method and no \
+     scope would reach the builder. A scope is \
+     `fn name(query: Builder<Self>, ...) -> Builder<Self>`: it takes the builder by \
+     value as its first parameter, names the model as `Self`, and returns the \
+     builder. Mark a helper that is not a scope with `#[not_scope]`";
 
 /// Result of the per-fn classifier.
 ///
@@ -188,24 +221,34 @@ fn try_expand_scope_fn(
     // `Builder<Self>` (with or without leading `suprnova::` /
     // `::suprnova::` qualifier).
     let inputs = &f.sig.inputs;
-    let first = match inputs.first() {
-        Some(FnArg::Typed(t)) => t,
-        // No params at all, or first param is `self` - not a scope.
-        _ => return ScopeExpand::Skip,
-    };
-    if !is_builder_self_type(&first.ty) {
-        return ScopeExpand::Skip;
-    }
-
+    let first_is_builder_self = matches!(
+        inputs.first(),
+        Some(FnArg::Typed(t)) if is_builder_self_type(&t.ty)
+    );
     // Rule 2: return type must be `Builder<Self>` (same accepted
     // qualifiers).
+    let return_is_builder_self = matches!(
+        &f.sig.output,
+        ReturnType::Type(_, t) if is_builder_self_type(t)
+    );
+
+    if !(first_is_builder_self && return_is_builder_self) {
+        // Either it has nothing to do with a builder, and is a helper, or
+        // it handles one in the wrong form, and is a scope written wrong.
+        let handles_a_builder = inputs.iter().any(|arg| match arg {
+            FnArg::Typed(t) => mentions_builder(&t.ty),
+            FnArg::Receiver(_) => false,
+        }) || matches!(&f.sig.output, ReturnType::Type(_, t) if mentions_builder(t));
+        return if handles_a_builder {
+            ScopeExpand::Error(syn::Error::new_spanned(&f.sig, SCOPE_SHAPE))
+        } else {
+            ScopeExpand::Skip
+        };
+    }
     let return_ty = match &f.sig.output {
         ReturnType::Type(_, t) => t.clone(),
-        ReturnType::Default => return ScopeExpand::Skip,
+        ReturnType::Default => unreachable!("the return type was just matched"),
     };
-    if !is_builder_self_type(&return_ty) {
-        return ScopeExpand::Skip;
-    }
 
     // At this point we're committed to treating this as a scope.
     // Subsequent issues (pattern args, etc.) become compile errors.
@@ -332,6 +375,26 @@ fn is_builder_self_type(ty: &Type) -> bool {
     )
 }
 
+/// Whether a type names a `Builder` anywhere in it: `&mut Builder<User>`,
+/// `Builder<User>`, `Option<Builder<Self>>`. Read from the type's tokens,
+/// so a path qualifier or a reference in front does not hide it.
+fn mentions_builder(ty: &Type) -> bool {
+    quote!(#ty)
+        .into_iter()
+        .any(|token| contains_builder_ident(&token))
+}
+
+fn contains_builder_ident(token: &proc_macro2::TokenTree) -> bool {
+    match token {
+        proc_macro2::TokenTree::Ident(ident) => ident == "Builder",
+        proc_macro2::TokenTree::Group(group) => group
+            .stream()
+            .into_iter()
+            .any(|inner| contains_builder_ident(&inner)),
+        _ => false,
+    }
+}
+
 /// Extract the final path segment ident of a model type so it can be
 /// used as a suffix on the per-model trait name. Returns `None` for
 /// types that aren't named (tuples, references, fn pointers, etc.).
@@ -347,4 +410,99 @@ fn last_path_segment_ident(ty: &Type) -> Option<syn::Ident> {
 /// keeps the structure obvious in error messages.
 fn scope_trait_ident(scope_name: &syn::Ident, model_ident: &syn::Ident) -> syn::Ident {
     format_ident!("HasScope_{}_{}", scope_name, model_ident)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expand_block(block: ItemImpl) -> syn::Result<String> {
+        let model_ty: Type = parse_quote!(User);
+        let model_ident = last_path_segment_ident(&model_ty).unwrap();
+        expand_impl(block, &model_ty, &model_ident).map(|tokens| tokens.to_string())
+    }
+
+    #[test]
+    fn a_scope_gains_its_static_and_chainable_forms() {
+        let emitted = expand_block(parse_quote! {
+            impl User {
+                pub fn active(query: Builder<Self>) -> Builder<Self> {
+                    query.filter("active", true)
+                }
+            }
+        })
+        .unwrap();
+
+        assert!(emitted.contains("__scope_active"), "{emitted}");
+        assert!(emitted.contains("HasScope_active_User"), "{emitted}");
+    }
+
+    #[test]
+    fn a_method_that_handles_no_builder_passes_through() {
+        let emitted = expand_block(parse_quote! {
+            impl User {
+                pub fn display_name(&self) -> String {
+                    self.name.clone()
+                }
+                fn slug(name: &str) -> String {
+                    name.to_lowercase()
+                }
+            }
+        })
+        .unwrap();
+
+        assert!(emitted.contains("display_name"), "{emitted}");
+        assert!(!emitted.contains("HasScope_"), "{emitted}");
+    }
+
+    #[test]
+    fn a_scope_written_in_any_other_form_is_refused() {
+        let near_misses: [ItemImpl; 5] = [
+            parse_quote! { impl User {
+                fn active(query: &mut Builder<User>) { query.filter("active", true); }
+            } },
+            parse_quote! { impl User {
+                fn active(query: Builder<User>) -> Builder<User> { query }
+            } },
+            parse_quote! { impl User {
+                fn active(query: Builder<Self>) { let _ = query; }
+            } },
+            parse_quote! { impl User {
+                fn active(query: Builder<Self>) -> suprnova::Builder<User> { query }
+            } },
+            parse_quote! { impl User {
+                fn active(limit: u64, query: Builder<Self>) -> Builder<Self> { query.limit(limit) }
+            } },
+        ];
+
+        for block in near_misses {
+            let shown = quote!(#block).to_string();
+            let error = expand_block(block).expect_err(&shown).to_string();
+            assert!(
+                error.contains("fn name(query: Builder<Self>, ...) -> Builder<Self>"),
+                "{shown} is refused with the accepted shape named, got: {error}"
+            );
+            assert!(error.contains("#[not_scope]"), "{error}");
+        }
+    }
+
+    #[test]
+    fn not_scope_marks_a_helper_that_handles_a_builder() {
+        let emitted = expand_block(parse_quote! {
+            impl User {
+                #[not_scope]
+                fn describe(query: &Builder<User>) -> String {
+                    query.to_sql()
+                }
+            }
+        })
+        .unwrap();
+
+        assert!(emitted.contains("describe"), "{emitted}");
+        assert!(
+            !emitted.contains("not_scope"),
+            "the marker is stripped before the compiler sees it: {emitted}"
+        );
+        assert!(!emitted.contains("HasScope_"), "{emitted}");
+    }
 }

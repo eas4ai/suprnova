@@ -106,6 +106,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `with_trashed()`. `force_delete_all()` is the explicit hard delete.
   `Builder::without_global_scope::<S>()` and
   `Builder::without_global_scopes()` are supported chain methods.
+- **`#[scopes]` refuses a scope written in the wrong form.** A method in a
+  `#[scopes]` block that took `&mut Builder<User>`, named the model instead of
+  `Self`, or returned nothing was left an ordinary method, and no scope
+  reached the builder. It is now a compile error on the signature that names
+  the accepted shape, `fn name(query: Builder<Self>, ...) -> Builder<Self>`. A
+  method that handles no builder still passes through unchanged, and
+  `#[not_scope]` marks a helper that does handle one.
 
 ### Fixed
 
