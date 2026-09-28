@@ -1,7 +1,9 @@
 //! Length-aware paginator - knows the total row count, so it can
 //! compute `last_page` and emit a numeric page UI.
 
+use super::links::{NEXT_LABEL, ON_EACH_SIDE, PREVIOUS_LABEL, PageLink, page_window};
 use serde::Serialize;
+use serde::ser::SerializeMap;
 
 /// Paginator that knows the total number of rows.
 ///
@@ -11,37 +13,57 @@ use serde::Serialize;
 ///
 /// ## JSON shape
 ///
-/// The derived `Serialize` impl emits the data slice plus the offset/
-/// counter fields:
+/// The paginator serialises to the shape of Laravel's
+/// `LengthAwarePaginator::toArray()`, so a front end that was written
+/// for Laravel's paginator reads it:
 ///
 /// ```json
 /// {
+///   "current_page": 2,
 ///   "data": [...],
-///   "current_page": 1,
+///   "first_page_url": "/api/users?page=1",
+///   "from": 11,
 ///   "last_page": 3,
+///   "last_page_url": "/api/users?page=3",
+///   "links": [
+///     {"url": "/api/users?page=1", "label": "&laquo; Previous", "page": 1, "active": false},
+///     {"url": "/api/users?page=1", "label": "1", "page": 1, "active": false},
+///     {"url": "/api/users?page=2", "label": "2", "page": 2, "active": true},
+///     {"url": "/api/users?page=3", "label": "3", "page": 3, "active": false},
+///     {"url": "/api/users?page=3", "label": "Next &raquo;", "page": 3, "active": false}
+///   ],
+///   "next_page_url": "/api/users?page=3",
+///   "path": "/api/users",
 ///   "per_page": 10,
-///   "total": 25,
-///   "from": 1,
-///   "to": 10,
-///   "path": "/api/users"
+///   "prev_page_url": "/api/users?page=1",
+///   "to": 20,
+///   "total": 25
 /// }
 /// ```
 ///
-/// `path` is omitted when unset.
+/// A URL is the `path` and the page parameter. The `path` is used as
+/// it is written, and a `path` that has a query string keeps it, so the
+/// filters of a listing are given with the path:
+/// `with_path("/api/users?role=admin")`. A page parameter that the
+/// `path` has already is replaced, so the path and the query string of
+/// the current request are a `path`. With no path the URLs are
+/// relative, `?page=2`, and `path` is left out of the JSON, where
+/// Laravel's is `/`.
 ///
-/// This shape is **not** identical to Laravel's
-/// `LengthAwarePaginator::toArray()` - Laravel additionally emits
-/// `first_page_url`, `last_page_url`, `next_page_url`,
-/// `prev_page_url`, and a `links` array of `{url, label, page,
-/// active}` descriptors. Suprnova's URL generation lives on the
-/// response-shape constructors that own URL context:
-/// [`Inertia::paginate`](crate::inertia::Inertia::paginate) (Inertia
-/// scroll metadata - page identifiers, not absolute URLs) and
-/// [`Resource::paginated`](crate::resources::Resource::paginated)
-/// (JSON:API `links.{self,first,last,prev,next}`). The raw `Serialize`
-/// shape is for explicit-shape consumers (custom JSON envelopes, test
-/// assertions, telemetry payloads) that don't need URL fields.
-#[derive(Debug, Clone, Serialize)]
+/// Give the path and the query string, and not a URL with a host. The
+/// `path` is in every URL of the JSON as it is written, and the host
+/// of a request is what its `Host` header says, which is the client's
+/// to choose.
+///
+/// A paginator with no rows is where the JSON is not Laravel's:
+/// `last_page` is `0` and `links` has the link to the page before and
+/// the link to the page behind and no page between them, where Laravel
+/// has a `last_page` of `1` and a link to page 1. `last_page_url` is
+/// the URL of page 1 then, as Laravel's is.
+/// [`Inertia::paginate`](crate::inertia::Inertia::paginate) and
+/// [`Resource::paginated`](crate::resources::Resource::paginated) have
+/// shapes of their own.
+#[derive(Debug, Clone)]
 pub struct LengthAwarePaginator<T> {
     /// The rows on the current page.
     pub data: Vec<T>,
@@ -64,18 +86,37 @@ pub struct LengthAwarePaginator<T> {
     /// When `url_for_page` is called and `path` is set, the URL is
     /// `{path}?<page_name>=N`; otherwise it falls back to
     /// `?<page_name>=N`.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// Query-string parameter name used by [`Self::url_for_page`] when
     /// constructing page URLs. `None` resolves to `"page"`. Not
-    /// serialized - clients receive `current_page` and reconstruct
-    /// the URL on their side using whatever param name they've been
-    /// instructed to use. Set automatically by
+    /// serialized by itself: it is in every URL of the JSON. Set
+    /// automatically by
     /// [`Builder::paginate_using`](crate::eloquent::Builder::paginate_using)
     /// so `url_for_page` produces a URL with the same query key the
     /// paginator was driven from.
-    #[serde(skip)]
     pub page_name: Option<String>,
+}
+
+impl<T: Serialize> Serialize for LengthAwarePaginator<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("current_page", &self.current_page)?;
+        map.serialize_entry("data", &self.data)?;
+        map.serialize_entry("first_page_url", &self.url_for_page(1))?;
+        map.serialize_entry("from", &self.from)?;
+        map.serialize_entry("last_page", &self.last_page)?;
+        map.serialize_entry("last_page_url", &self.url_for_page(self.last_page.max(1)))?;
+        map.serialize_entry("links", &self.links())?;
+        map.serialize_entry("next_page_url", &self.next_page_url())?;
+        if let Some(path) = &self.path {
+            map.serialize_entry("path", path)?;
+        }
+        map.serialize_entry("per_page", &self.per_page)?;
+        map.serialize_entry("prev_page_url", &self.previous_page_url())?;
+        map.serialize_entry("to", &self.to)?;
+        map.serialize_entry("total", &self.total)?;
+        map.end()
+    }
 }
 
 impl<T> LengthAwarePaginator<T> {
@@ -169,19 +210,63 @@ impl<T> LengthAwarePaginator<T> {
         self.with_path(base_url)
     }
 
-    /// Generate the URL for a specific page number by appending the page
-    /// query parameter to the configured `path`. Falls back to a bare
-    /// `?<page_name>=N` when no `path` is set. `page_name` defaults to
-    /// `"page"` when unset.
+    /// The URL of a page: the configured `path` with the page parameter
+    /// in its query string, and a bare `?<page_name>=N` when no `path` is
+    /// set. `page_name` defaults to `"page"` when unset.
     ///
-    /// The separator is `&` when `path` already carries a query string and
-    /// `?` otherwise, so a path like `/users?sort=name` yields
-    /// `/users?sort=name&page=2` rather than a malformed double-`?`. The
-    /// page parameter name is percent-encoded (the value is a numeric page),
-    /// so a custom name with reserved characters can't corrupt the URL.
+    /// What the `path` has in its query string stays, so a path like
+    /// `/users?sort=name` yields `/users?sort=name&page=2`. A page
+    /// parameter that the `path` has already is replaced, and a fragment
+    /// of the `path` stays at the end. The page parameter name is
+    /// percent-encoded (the value is a numeric page), so a custom name
+    /// with reserved characters can't corrupt the URL.
     pub fn url_for_page(&self, page: u64) -> String {
         let key = self.page_name.as_deref().unwrap_or("page");
         crate::pagination::build_query_url(self.path.as_deref(), key, &page.to_string())
+    }
+
+    /// The URL of the page behind the current one, and `None` on the
+    /// last page. Laravel's `nextPageUrl`.
+    pub fn next_page_url(&self) -> Option<String> {
+        self.has_more_pages()
+            .then(|| self.url_for_page(self.current_page.saturating_add(1)))
+    }
+
+    /// The URL of the page before the current one, and `None` on the
+    /// first page. Laravel's `previousPageUrl`.
+    pub fn previous_page_url(&self) -> Option<String> {
+        (self.current_page > 1).then(|| self.url_for_page(self.current_page - 1))
+    }
+
+    /// The row of links a pagination component draws: the link to the
+    /// page before, the pages by their number with three dots where
+    /// pages are left out, and the link to the page behind. Laravel's
+    /// `linkCollection`, with the same window of pages and the same
+    /// labels, so a component that was written for Laravel's JSON draws
+    /// this one.
+    pub fn links(&self) -> Vec<PageLink> {
+        let mut links = vec![PageLink::step(
+            PREVIOUS_LABEL,
+            (self.current_page > 1).then(|| self.current_page - 1),
+            self.previous_page_url(),
+        )];
+        links.extend(
+            page_window(self.current_page, self.last_page, ON_EACH_SIDE)
+                .into_iter()
+                .map(|page| match page {
+                    Some(page) => {
+                        PageLink::to_page(page, self.url_for_page(page), page == self.current_page)
+                    }
+                    None => PageLink::dots(),
+                }),
+        );
+        links.push(PageLink::step(
+            NEXT_LABEL,
+            self.has_more_pages()
+                .then(|| self.current_page.saturating_add(1)),
+            self.next_page_url(),
+        ));
+        links
     }
 
     /// `true` when there is a next page to fetch.
@@ -331,8 +416,7 @@ mod tests {
 
     #[test]
     fn page_name_not_serialized() {
-        // `page_name` is `#[serde(skip)]` - clients receive
-        // `current_page` and reconstruct the URL on their side.
+        // The name is in the URLs of the JSON and is no field of it.
         let p = LengthAwarePaginator::new(vec![1, 2], 20, 10, 1).with_page_name("posts_page");
         let json = serde_json::to_value(&p).unwrap();
         assert!(json.get("page_name").is_none());

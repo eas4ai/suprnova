@@ -334,7 +334,7 @@ pub use middleware::{
     registered_terminables, resolve_middleware_alias, resolve_middleware_group, terminable_count,
 };
 pub use pagination::{
-    CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, Paginated,
+    CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, PageLink, Paginated,
     Pagination, Paginator,
 };
 pub use queue::{

@@ -458,6 +458,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   alone, which is a default feature, so a test suite needs no change. A build
   with `default-features = false` and without `testing` no longer has the
   function.
+- **The paginators serialise to Laravel's JSON shape.** `LengthAwarePaginator`
+  had `data`, the counters and `path`, and no URL of a page and no `links`;
+  the simple paginator had `has_more`, and the cursor paginator had the
+  cursors and no URL. A front end that was written for Laravel's paginator
+  JSON, the pagination components of the Inertia starter kits among them,
+  could not read them. The three now have the fields of Laravel's `toArray()`:
+  `first_page_url`, `last_page_url`, `next_page_url`, `prev_page_url` and
+  `links` on the paginator with a total, `current_page_url`, `first_page_url`,
+  `next_page_url`, `prev_page_url`, `from` and `to` on the simple one, and
+  `next_page_url` and `prev_page_url` on the cursor paginator. `links` has the
+  window of pages and the labels of Laravel. A URL is the `path` and the page
+  parameter, and a `path` with a query string keeps it. Every field that was
+  there is still there, and `path` is still left out when it is not set.
+  `LengthAwarePaginator::links()`, `next_page_url()` and `previous_page_url()`
+  return the same values in Rust, and the other two paginators have their own.
+  A page parameter that the `path` has already is replaced, so the URL of the
+  current request can be given as the `path`, and a fragment of the `path`
+  stays at the end of the URL.
 
 ### Fixed
 
