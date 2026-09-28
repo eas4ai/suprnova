@@ -371,6 +371,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   a pagination cursor, and of the casts `AsEncryptedArray`,
   `AsEncryptedObject` and `AsEncryptedCollection`, whose error is a validation
   error and was shown to the client with the decrypted value in it.
+- **Metric attributes have types.** `inc_with`, `record_with` and `set_with`
+  took `&[(&'static str, &str)]` and sent every value as a text, so a status
+  `404` matched no filter on a number and no range, and the attributes the
+  semantic conventions type as a number or as yes and no arrived as the wrong
+  type. A value is now anything that becomes an `AttrValue`: a text, a whole
+  number, a number with a fraction, or a `bool`.
+  `counter.inc_with(&[("http.response.status_code", 404)])` sends a number.
+  Values of one type are written as they are, and values of several types are
+  each made an `AttrValue`: `("route", AttrValue::from("/posts")), ("error",
+  AttrValue::from(true))`. Every call that passes texts compiles as before. A
+  `u64` or `usize` that no `i64` holds is sent as the largest `i64`. A text is
+  also a reference to what holds one, `&String`, `&&str`, `&Box<str>`,
+  `&Arc<str>`, `&Rc<str>` and `&Cow<str>`, as it was when the values were
+  `&str`. Two calls have to be written another way: an empty list,
+  `inc_with(&[])`, is `inc()`, and a value that is `.as_ref()` names its type,
+  `.as_str()`. `AttrValue` is `#[non_exhaustive]`.
 
 ### Changed
 

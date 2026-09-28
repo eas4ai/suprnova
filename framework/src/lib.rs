@@ -425,7 +425,7 @@ pub use sse::{EndSignal, SseEvent, StreamedEvent};
 pub use static_files::StaticFiles;
 pub use supervisor::{RestartPolicy, Supervisor, SupervisorEntry, SupervisorRegistry};
 pub use telemetry::{
-    CounterHandle, GaugeHandle, HistogramHandle, Metrics, OtelConfig, TelemetryGuard,
+    AttrValue, CounterHandle, GaugeHandle, HistogramHandle, Metrics, OtelConfig, TelemetryGuard,
     init_telemetry,
 };
 pub use timeout::TimeoutMiddleware;

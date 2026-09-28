@@ -24,6 +24,29 @@ fn metrics_api_compiles_and_noops_before_init() {
     g.set_with(7.0, &[("queue", "default")]);
 }
 
+/// Attribute values with a type compile with the feature and without
+/// it, as the values that are a text do.
+#[test]
+fn typed_attribute_values_compile_and_noop_before_init() {
+    use suprnova::AttrValue;
+
+    let c = Metrics::counter("gate.test.typed.requests");
+    c.inc_with(&[("http.response.status_code", 404)]);
+    c.inc_with(&[("error", true)]);
+    c.inc_with(&[
+        ("route", AttrValue::from("/health")),
+        ("http.response.status_code", AttrValue::from(200_u16)),
+        ("error", AttrValue::from(false)),
+    ]);
+
+    let route = String::from("/posts/{id}");
+    let h = Metrics::histogram("gate.test.typed.duration");
+    h.record_with(2.5, &[("route", &route)]);
+
+    let g = Metrics::gauge("gate.test.typed.depth");
+    g.set_with(7.0, &[("ratio", 0.5)]);
+}
+
 #[test]
 fn otel_config_api_compiles() {
     let cfg = OtelConfig::disabled();

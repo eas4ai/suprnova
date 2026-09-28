@@ -23,4 +23,4 @@ pub mod metrics;
 pub mod propagation;
 
 pub use init::{OtelConfig, TelemetryGuard, init_telemetry};
-pub use metrics::{CounterHandle, GaugeHandle, HistogramHandle, Metrics};
+pub use metrics::{AttrValue, CounterHandle, GaugeHandle, HistogramHandle, Metrics};
