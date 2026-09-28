@@ -14,13 +14,18 @@ use suprnova::Redirect;
 use suprnova::routing::register_route_name;
 use suprnova::session::{new_session_slot_for_test, session, session_mut, session_scope_for_test};
 
-fn into_response_url(r: impl Into<suprnova::Response>) -> String {
-    let resp: suprnova::Response = r.into();
-    let http = match resp {
-        Ok(r) => r,
+/// A redirect converts to an `Ok` response; anything else fails the test
+/// here, with one message.
+fn into_http(r: impl Into<suprnova::Response>) -> suprnova::HttpResponse {
+    match r.into() {
+        Ok(http) => http,
         Err(_) => panic!("redirect conversion produced Err"),
-    };
-    http.into_hyper()
+    }
+}
+
+fn into_response_url(r: impl Into<suprnova::Response>) -> String {
+    into_http(r)
+        .into_hyper()
         .headers()
         .get("Location")
         .and_then(|v| v.to_str().ok())
@@ -138,20 +143,14 @@ async fn without_fragment_strips_anchor() {
 #[tokio::test]
 async fn status_setter_emits_chosen_code() {
     let resp: suprnova::Response = Redirect::to("/login").status(303).into();
-    let http = match resp {
-        Ok(r) => r,
-        Err(_) => panic!("redirect conversion produced Err"),
-    };
+    let http = into_http(resp);
     assert_eq!(http.status_code(), 303);
 }
 
 #[tokio::test]
 async fn permanent_emits_301() {
     let resp: suprnova::Response = Redirect::to("/new-home").permanent().into();
-    let http = match resp {
-        Ok(r) => r,
-        Err(_) => panic!("redirect conversion produced Err"),
-    };
+    let http = into_http(resp);
     assert_eq!(http.status_code(), 301);
 }
 
@@ -161,10 +160,7 @@ async fn header_attaches_to_redirect_response() {
         .header("X-Test", "yes")
         .header("X-Other", "true")
         .into();
-    let http = match resp {
-        Ok(r) => r,
-        Err(_) => panic!("redirect conversion produced Err"),
-    };
+    let http = into_http(resp);
     let h = http.into_hyper();
     assert_eq!(h.headers().get("X-Test").unwrap(), "yes");
     assert_eq!(h.headers().get("X-Other").unwrap(), "true");
@@ -175,10 +171,7 @@ async fn with_headers_iter_attaches_all() {
     let resp: suprnova::Response = Redirect::to("/x")
         .with_headers([("X-A", "1"), ("X-B", "2")])
         .into();
-    let http = match resp {
-        Ok(r) => r,
-        Err(_) => panic!("redirect conversion produced Err"),
-    };
+    let http = into_http(resp);
     let h = http.into_hyper();
     assert_eq!(h.headers().get("X-A").unwrap(), "1");
     assert_eq!(h.headers().get("X-B").unwrap(), "2");
@@ -188,10 +181,7 @@ async fn with_headers_iter_attaches_all() {
 async fn cookie_attaches_set_cookie_header() {
     let cookie = suprnova::Cookie::new("session", "abc");
     let resp: suprnova::Response = Redirect::to("/x").cookie(cookie).into();
-    let http = match resp {
-        Ok(r) => r,
-        Err(_) => panic!("redirect conversion produced Err"),
-    };
+    let http = into_http(resp);
     let h = http.into_hyper();
     let sc = h.headers().get("Set-Cookie").unwrap().to_str().unwrap();
     assert!(sc.contains("session=abc"), "got: {sc}");
@@ -205,10 +195,7 @@ async fn with_cookies_iterator_attaches_all() {
             suprnova::Cookie::new("b", "2"),
         ])
         .into();
-    let http = match resp {
-        Ok(r) => r,
-        Err(_) => panic!("redirect conversion produced Err"),
-    };
+    let http = into_http(resp);
     let h = http.into_hyper();
     let cookies: Vec<&str> = h
         .headers()
@@ -335,10 +322,7 @@ async fn route_builder_with_fragment() {
         .with("id", "7")
         .with_fragment("details")
         .into();
-    let http = match resp {
-        Ok(r) => r,
-        Err(_) => panic!("redirect conversion produced Err"),
-    };
+    let http = into_http(resp);
     let url = http
         .into_hyper()
         .headers()
@@ -354,10 +338,7 @@ async fn route_builder_with_fragment() {
 async fn route_builder_status_setter() {
     register_route_name("_test_redirect_status", "/things");
     let resp: suprnova::Response = Redirect::route("_test_redirect_status").status(307).into();
-    let http = match resp {
-        Ok(r) => r,
-        Err(_) => panic!("redirect conversion produced Err"),
-    };
+    let http = into_http(resp);
     assert_eq!(http.status_code(), 307);
 }
 
@@ -368,10 +349,7 @@ async fn route_builder_cookies_and_headers() {
         .cookie(suprnova::Cookie::new("welcome", "yes"))
         .header("X-Trace", "abc")
         .into();
-    let http = match resp {
-        Ok(r) => r,
-        Err(_) => panic!("redirect conversion produced Err"),
-    };
+    let http = into_http(resp);
     let h = http.into_hyper();
     let sc = h.headers().get("Set-Cookie").unwrap().to_str().unwrap();
     assert!(sc.contains("welcome=yes"));
