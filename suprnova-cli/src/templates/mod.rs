@@ -271,7 +271,11 @@ impl TypedCommand for {struct_name} {{
         // TODO: implement the command body. Self's fields are the
         // parsed args; reach for shared services via the framework's
         // facades (`DB::connection()`, `Mail::to(...)`, etc.).
-        println!("{command_name}: not yet implemented");
+        //
+        // Print with `suprnova::console::line`, not `println!`: a test
+        // that runs the command with `suprnova::console::test` can then
+        // read what it printed.
+        suprnova::console::line("{command_name}: not yet implemented");
         Ok(())
     }}
 }}

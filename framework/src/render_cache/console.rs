@@ -89,7 +89,7 @@ fn run_epoch_advance_command(
     _matches: &clap::ArgMatches,
 ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send>> {
     Box::pin(async move {
-        println!("{}", epoch_advance_report().await?);
+        crate::console::line(epoch_advance_report().await?);
         Ok(())
     })
 }
@@ -159,7 +159,7 @@ fn run_inspect_command(
         .cloned()
         .unwrap_or_default();
     Box::pin(async move {
-        println!("{}", inspect_report(&key).await?);
+        crate::console::line(inspect_report(&key).await?);
         Ok(())
     })
 }

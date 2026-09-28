@@ -228,6 +228,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   as well. A pattern with an optional parameter and an empty segment, and a
   second route for one form of an optional route, are refused when they are
   registered.
+- **Console commands can be tested for what they print and ask:
+  `console::test`.** `dispatch_argv` returns a `Result` and nothing else, so a
+  test could tell that a command ran and not what it said, and a command that
+  asks a question waited on the standard input of the test runner.
+  `console::test(["users:purge", "--days", "30"]).expects_question("Delete 12
+  users?", "yes").run().await` runs the command through the dispatcher the
+  console binary uses and returns a `ConsoleRun` with `output()`, `errors()`,
+  `exit_code()`, `error()` and `unasked_questions()`, and with
+  `assert_successful`, `assert_failed`, `assert_output_contains`,
+  `assert_errors_contain` and `assert_every_question_was_asked`. Help, the
+  version, parse errors and the error of a failed command are collected as
+  well. A command prints with `console::line` and `console::error_line` and
+  asks with `console::ask` and `console::confirm`; what it prints with
+  `println!` a test cannot see. Questions have to come in the order the test
+  gave them, and a question with no prepared answer fails the command. The
+  framework's own commands, `db:seed` and `model:prune` among them, print
+  through the console now, and `make:command` generates a command that does.
 
 ### Changed
 

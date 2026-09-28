@@ -32,10 +32,14 @@ use std::pin::Pin;
 use std::sync::OnceLock;
 
 pub mod builtins;
+mod io;
 pub mod output;
+pub mod testing;
 mod typed;
 
+pub use io::{ask, confirm, error_line, line};
 pub use output::{DETAIL_WIDTH, two_column_detail};
+pub use testing::{ConsoleRun, ConsoleTest, test};
 pub use typed::TypedCommand;
 
 /// fn-pointer-compatible boxed-future returned by every command
@@ -62,10 +66,6 @@ pub struct CommandEntry {
     pub handler: CommandHandler,
 }
 
-inventory::collect!(CommandEntry);
-
-/// Version string surfaced via `--version` and in `--help` output.
-/// Set once at app boot via [`set_version`]; not set ⇒ clap omits
 impl CommandEntry {
     /// The text the console's help shows for this command, and `None`
     /// when it shows none.
@@ -84,6 +84,10 @@ impl CommandEntry {
     }
 }
 
+inventory::collect!(CommandEntry);
+
+/// Version string surfaced via `--version` and in `--help` output.
+/// Set once at app boot via [`set_version`]; not set ⇒ clap omits
 /// the `--version` flag entirely (typing it errors as an unknown
 /// argument, which is the honest behavior when no version was
 /// declared).
@@ -181,7 +185,7 @@ where
             if let Err(ref e) = result
                 && !e.is_silent()
             {
-                eprintln!("error: {}", e.message());
+                io::error_line(format!("error: {}", e.message()));
             }
             return result;
         }
@@ -215,7 +219,18 @@ fn handle_clap_error(err: clap::Error) -> Result<(), FrameworkError> {
     // failures the returned Err carries an empty message; the binary
     // skips its own eprintln and just translates to a non-zero
     // ExitCode.
-    let _ = err.print();
+    if io::is_captured() {
+        // A test reads the text. `render` is the text `print` writes,
+        // and `use_stderr` is the stream `print` writes it to.
+        let text = err.render().to_string();
+        if err.use_stderr() {
+            io::write_errors(&text);
+        } else {
+            io::write_output(&text);
+        }
+    } else {
+        let _ = err.print();
+    }
     match err.kind() {
         ErrorKind::DisplayHelp
         | ErrorKind::DisplayVersion
