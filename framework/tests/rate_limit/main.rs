@@ -5,6 +5,7 @@ pub mod default_key;
 #[path = "../support/env_lock.rs"]
 mod env_lock;
 pub mod identity_key;
+pub mod ip_based;
 pub mod middleware;
 pub mod production_fail_closed;
 pub mod rate_limit;

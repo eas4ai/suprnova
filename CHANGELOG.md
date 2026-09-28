@@ -173,6 +173,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `DEFAULT_DECAY_SECONDS`. The user's bucket follows the user across routes,
   and the address's bucket is shared by every route; `.prefix(...)` gives a
   group of routes a budget of its own.
+- **`RateLimitMiddleware::ip_based(max_requests, window)`.** The per-IP limit
+  that every login form and public API needs took a backend `Arc`, a
+  `SlidingWindowConfig` and a hand-written key closure, and the manual used an
+  `ip_based` that did not exist. It uses the rate limiter the application
+  installed, the one `RATE_LIMIT_DRIVER` selects, looked up when a request
+  arrives, so the middleware can be built where routes are registered. The key
+  is the address `Request::ip()` resolves through the trusted proxies, and it
+  names the limit as well, so two limits with different numbers share no
+  bucket. A request with no address to resolve gets a bucket of its own.
+  `on_backend_error`, `only_when` and `key_reads_body` chain onto it; when no
+  limiter is installed the backend error policy decides.
 
 ### Changed
 
