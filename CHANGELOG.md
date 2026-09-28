@@ -211,6 +211,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   neither moved, and the next hover or focus of that trigger shows it again.
   The bubble still shows with no script in the page; the new `sn-tooltip`
   element carries the dismissal alone, and `live:add tooltip` installs it.
+- **Magnetar logs a lockout status failure before the sign-in fails closed.**
+  The password plugin answered `503` when the lockout store could not report
+  an identity's status and logged nothing, while the failed-attempt path
+  beside it logged its error. The status path now logs `lockout status
+  unavailable; failing closed` with the store's error; the response is
+  unchanged.
 
 ## 2.0.2 - 2026-09-14
 
