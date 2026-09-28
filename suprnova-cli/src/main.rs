@@ -316,7 +316,11 @@ enum Commands {
     ScheduleWork,
     /// List all registered scheduled tasks
     #[command(name = "schedule:list")]
-    ScheduleList,
+    ScheduleList {
+        /// IANA timezone the listing should be read in (default: UTC)
+        #[arg(long)]
+        timezone: Option<String>,
+    },
     /// List the failed queue jobs
     #[command(name = "queue:failed")]
     QueueFailed,
@@ -549,8 +553,8 @@ fn main() {
         Commands::ScheduleWork => {
             commands::schedule_work::run();
         }
-        Commands::ScheduleList => {
-            commands::schedule_list::run();
+        Commands::ScheduleList { timezone } => {
+            commands::schedule_list::run(timezone.as_deref());
         }
         Commands::QueueFailed => {
             commands::queue_failed::run(FailedJobs::List);
@@ -753,6 +757,32 @@ mod tests {
             "the curated help screen names the same commands as clap but not \
              the same number of times; a duplicated line is the usual cause"
         );
+    }
+
+    /// `schedule:list` takes the flag the application's own command
+    /// takes. It was a unit variant, so the CLI refused `--timezone` with
+    /// exit code 2 before the application could see it.
+    #[test]
+    fn schedule_list_takes_the_timezone_the_application_takes() {
+        for argv in [
+            vec!["suprnova", "schedule:list", "--timezone=Asia/Tokyo"],
+            vec!["suprnova", "schedule:list", "--timezone", "Asia/Tokyo"],
+        ] {
+            let cli = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("`{}` must parse: {e}", argv.join(" ")));
+            match cli.command {
+                Some(Commands::ScheduleList { timezone }) => {
+                    assert_eq!(timezone.as_deref(), Some("Asia/Tokyo"));
+                }
+                _ => panic!("`{}` must be schedule:list", argv.join(" ")),
+            }
+        }
+
+        let cli = Cli::try_parse_from(["suprnova", "schedule:list"]).expect("the flag is optional");
+        match cli.command {
+            Some(Commands::ScheduleList { timezone }) => assert_eq!(timezone, None),
+            _ => panic!("`suprnova schedule:list` must be schedule:list"),
+        }
     }
 
     /// A subcommand invoked without a help flag still parses, or the

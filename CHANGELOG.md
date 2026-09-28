@@ -531,6 +531,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `CommandEntry::about()` returns the text the help shows, whichever of the
   three it came from; `CommandEntry::description` stays the attribute's text
   and is empty when the attribute has none.
+- **`suprnova schedule:list --timezone=<zone>` is accepted.** The
+  application's own `schedule:list` has taken `--timezone` since the flag
+  shipped, and the manual shows it through the CLI, but the CLI's subcommand
+  took no arguments and ended with `unexpected argument '--timezone'` and exit
+  code 2. The CLI now takes the flag and hands it to the application, which
+  checks the zone name.
 
 ### Security
 
