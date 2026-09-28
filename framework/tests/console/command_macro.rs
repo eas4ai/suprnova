@@ -60,6 +60,11 @@ async fn macro_omits_description_when_attribute_absent() {
         entry.description, "",
         "missing description defaults to empty string"
     );
+    assert_eq!(
+        entry.about(),
+        None,
+        "a function has no other about text, so the help shows none"
+    );
 }
 
 #[tokio::test]

@@ -493,6 +493,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   middleware boxed by hand with `into_boxed` and added with
   `.middleware_boxed(...)` keeps its place. An empty list costs one read per
   request.
+- **`#[derive(Command)]` without a `description` keeps clap's own about
+  text.** The derive called `.about("")` when `#[console(description =
+  "...")]` was left out, which replaced the about text clap had taken from the
+  struct's doc comment or from `#[command(about = "...")]`. A command
+  described the way clap users describe one showed an empty line in the
+  console's list of commands. The derive now sets the about text only when a
+  `description` is given, and a `description` still overrides the doc comment.
+  `CommandEntry::about()` returns the text the help shows, whichever of the
+  three it came from; `CommandEntry::description` stays the attribute's text
+  and is empty when the attribute has none.
 
 ### Security
 

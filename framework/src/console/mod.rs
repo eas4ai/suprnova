@@ -51,7 +51,10 @@ pub type CommandHandler =
 pub struct CommandEntry {
     /// Subcommand name as it appears in argv (e.g. `make:controller`).
     pub name: &'static str,
-    /// Human-readable description, shown under `--help`.
+    /// The `description` the attribute declared, and empty when it declared
+    /// none. The text `--help` shows is [`Self::about`]: a
+    /// `#[derive(Command)]` struct with no `description` is described by
+    /// its doc comment.
     pub description: &'static str,
     /// Function that builds the clap subcommand definition.
     pub clap_builder: fn() -> clap::Command,
@@ -63,6 +66,24 @@ inventory::collect!(CommandEntry);
 
 /// Version string surfaced via `--version` and in `--help` output.
 /// Set once at app boot via [`set_version`]; not set ⇒ clap omits
+impl CommandEntry {
+    /// The text the console's help shows for this command, and `None`
+    /// when it shows none.
+    ///
+    /// It is read from the clap command this entry builds, so it is what
+    /// `--help` prints, whichever of these it came from: the `description`
+    /// of the attribute, the doc comment of a `#[derive(Command)]` struct,
+    /// or its `#[command(about = "...")]`. A listing of commands that
+    /// read [`Self::description`] would show an empty line for a command
+    /// that is described by its doc comment.
+    pub fn about(&self) -> Option<String> {
+        (self.clap_builder)()
+            .get_about()
+            .map(ToString::to_string)
+            .filter(|about| !about.is_empty())
+    }
+}
+
 /// the `--version` flag entirely (typing it errors as an unknown
 /// argument, which is the honest behavior when no version was
 /// declared).
