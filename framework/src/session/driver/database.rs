@@ -67,14 +67,29 @@ impl SessionStore for DatabaseSessionDriver {
                 .unwrap_or(chrono::NaiveDateTime::MAX);
 
             if now > expiry {
-                // Session expired, clean it up
-                let _ = self.destroy(id).await;
+                // Session expired, clean it up. The read already answers
+                // "no session"; a failed delete only leaves the row for
+                // `gc`, so it is logged and not returned.
+                if let Err(error) = self.destroy(id).await {
+                    tracing::warn!(
+                        error = %error,
+                        "expired session row could not be deleted; garbage collection will remove it"
+                    );
+                }
                 return Ok(None);
             }
 
-            // Parse the payload
-            let data: HashMap<String, serde_json::Value> =
-                serde_json::from_str(&session.payload).unwrap_or_default();
+            // Parse the payload. A payload that does not parse reads as an
+            // empty session, which signs the visitor out; the log says why,
+            // without the session id, which is a bearer credential.
+            let data: HashMap<String, serde_json::Value> = serde_json::from_str(&session.payload)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(
+                        error = %error,
+                        "stored session payload failed to parse; treating the session as empty"
+                    );
+                    HashMap::default()
+                });
 
             Ok(Some(SessionData {
                 id: session.id,

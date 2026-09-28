@@ -235,6 +235,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   timeout and a script error read the same in the log of a limiter that fails
   sign-in closed. The message now ends with the Redis client's own description
   of the fault.
+- **A stored session payload that fails to parse is logged.** The database
+  session driver read a damaged payload as an empty session, which signs the
+  visitor out, and logged nothing. It now logs a warning with the parse error
+  and without the session id. A failed delete of an expired session row is
+  logged as well.
 
 ## 2.0.2 - 2026-09-14
 

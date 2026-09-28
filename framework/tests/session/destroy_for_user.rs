@@ -159,6 +159,37 @@ async fn legacy_store_atomic_migration_default_fails_before_mutation() {
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
+async fn a_stored_payload_that_does_not_parse_reads_as_empty_and_is_logged() {
+    let db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
+    let mut session = SessionData::new("damaged-sess".into(), "csrf".into());
+    session
+        .data
+        .insert("cart_items".into(), serde_json::json!(3));
+    driver.write(&session).await.unwrap();
+    db.execute_unprepared("UPDATE sessions SET payload = '{not json' WHERE id = 'damaged-sess'")
+        .await
+        .unwrap();
+
+    let read = driver
+        .read("damaged-sess")
+        .await
+        .expect("a damaged payload is not a store failure")
+        .expect("the row is still a session");
+
+    assert!(read.data.is_empty(), "nothing of the damaged payload survives");
+    assert!(
+        logs_contain("stored session payload failed to parse; treating the session as empty"),
+        "the reason the visitor lost their session is in the log"
+    );
+    assert!(
+        !logs_contain("damaged-sess"),
+        "the session id is a bearer credential and stays out of the log"
+    );
+}
+
+#[tokio::test]
 async fn destroy_for_user_removes_only_that_users_rows() {
     let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
 
