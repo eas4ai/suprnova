@@ -11,10 +11,9 @@
 //!
 //! ## When scopes are applied
 //!
-//! When the query runs, not when it is built. [`resolve_scopes`] is the
-//! one place that does it: it sets the caller's terms aside, adds the
-//! soft-delete filter, runs the registry, and appends the caller's terms
-//! after them. The statement therefore reads
+//! When the query runs, not when it is built. One resolver does it: it
+//! sets the caller's terms aside, adds the soft-delete filter, runs the
+//! registry, and appends the caller's terms after them. The statement therefore reads
 //! `<scopes> AND <caller's terms>`, with a caller's `OR` group as one
 //! atom, so no `or_where` can widen a query past a scope.
 //!
