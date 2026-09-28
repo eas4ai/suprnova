@@ -74,6 +74,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   that waits past the bound answers `503` with `Retry-After`. Without it,
   two concurrent requests on one session wrote back last-writer-wins, so a
   flash set by a redirect could be lost to a request that started earlier.
+- **`FrameworkError::Timeout` tells a passed deadline from a failure.**
+  `WorkflowHandle::wait_with_timeout` documented a timeout error that did not
+  exist and returned `FrameworkError::Internal`, so a caller could not tell a
+  workflow that is still running from a failed status query. The variant
+  carries the deadline and what was awaited, `FrameworkError::timeout(elapsed,
+  message)` builds one, `is_timeout()` asks for it, and it renders as `504
+  Gateway Timeout`. `wait_with_timeout` and `wait_with_options` return it when
+  the deadline fires.
 
 ### Changed
 

@@ -925,6 +925,21 @@ pub enum FrameworkError {
         message: String,
     },
 
+    /// A deadline passed before the awaited work finished.
+    ///
+    /// The work is not cancelled by this error: a caller waiting on a
+    /// workflow learns only that the wait ended. Matching on this variant,
+    /// or asking [`Self::is_timeout`], is how a caller tells "still running"
+    /// from a failure of the work or of the status query. It renders as
+    /// `504 Gateway Timeout` when it reaches a response.
+    #[error("Timed out after {elapsed:?}: {message}")]
+    Timeout {
+        /// The deadline that passed.
+        elapsed: std::time::Duration,
+        /// What was being waited on.
+        message: String,
+    },
+
     /// A failure originating outside the framework, carrying the original
     /// error as a [`std::error::Error::source`].
     ///
@@ -983,6 +998,20 @@ impl FrameworkError {
         Self::Internal {
             message: message.into(),
         }
+    }
+
+    /// Create a [`Self::Timeout`]: `elapsed` is the deadline that passed and
+    /// `message` names what was being waited on.
+    pub fn timeout(elapsed: std::time::Duration, message: impl Into<String>) -> Self {
+        Self::Timeout {
+            elapsed,
+            message: message.into(),
+        }
+    }
+
+    /// Whether this error is a [`Self::Timeout`].
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::Timeout { .. })
     }
 
     /// CLI sentinel: returns a [`Self::AlreadyReported`] variant signaling
@@ -1135,6 +1164,7 @@ impl FrameworkError {
             Self::PrecognitionFailure(_) => 422,
             Self::AlreadyReported => 500,
             Self::RateLimited { .. } => 429,
+            Self::Timeout { .. } => 504,
             Self::External { .. } => 500,
         }
     }
@@ -1277,6 +1307,7 @@ impl FrameworkError {
             Self::PrecognitionFailure(_) => "Precognition validation failed",
             Self::AlreadyReported => "",
             Self::RateLimited { message, .. } => message,
+            Self::Timeout { message, .. } => message,
             Self::External { message, .. } => message,
         }
     }
@@ -1358,6 +1389,12 @@ impl FrameworkError {
                 message,
             } => Self::RateLimited {
                 retry_after,
+                message: format!("{}: {}", prefix, message),
+            },
+            // A contexted timeout stays a timeout, so a caller further up
+            // can still match on it.
+            Self::Timeout { elapsed, message } => Self::Timeout {
+                elapsed,
                 message: format!("{}: {}", prefix, message),
             },
             // Variants whose body is fully fixed by the variant itself

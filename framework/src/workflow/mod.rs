@@ -1827,6 +1827,11 @@ mod tests {
             .expect_err("wait_with_timeout must error on a stuck workflow");
         let elapsed = start.elapsed();
 
+        assert!(
+            err.is_timeout(),
+            "a deadline that fires is FrameworkError::Timeout, got: {err:?}"
+        );
+        assert_eq!(err.status_code(), 504);
         let msg = err.to_string();
         assert!(
             msg.to_lowercase().contains("timed out") || msg.to_lowercase().contains("timeout"),
