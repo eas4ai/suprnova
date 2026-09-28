@@ -264,6 +264,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `--class=UserSeeder` runs one. `suprnova model:prune` takes `--model=<Name>`
   and `--pretend`. Both run the project's console binary, which checks the
   names.
+- **`QdrantVectorDriver::from_env()` and `MariaDbVectorDriver::from_env()`.**
+  Only the Pinecone driver read its configuration from the environment, so
+  choosing the vector store by environment needed hand-written `std::env::var`
+  code for the other two. The Qdrant driver reads `QDRANT_URL` and, when it is
+  set, `QDRANT_API_KEY`. The MariaDB driver reads `MARIADB_URL`, and
+  `DATABASE_URL` when that is not set and names a MariaDB or a MySQL database,
+  which is the setup with one engine for rows and vectors. A `DATABASE_URL` of
+  another engine is not taken. A `mysql://` URL is taken as well, because a
+  MariaDB is written that way too. The Qdrant client is built without its
+  version check, which connects and blocks while the application boots. A
+  variable that is missing is named in the error at boot, and the error never
+  shows a URL.
 
 ### Changed
 

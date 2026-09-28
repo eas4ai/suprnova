@@ -143,6 +143,52 @@ impl QdrantVectorDriver {
         Ok(Self::from_client(client))
     }
 
+    /// Construct from the environment:
+    ///
+    /// - `QDRANT_URL` (required) - the gRPC URL, by default port 6334
+    /// - `QDRANT_API_KEY` (optional) - the key of Qdrant Cloud, or of a
+    ///   self-hosted instance that asks for one
+    ///
+    /// With this the vector store of an application is chosen by its
+    /// environment, as it is with the Pinecone driver's `from_env`.
+    ///
+    /// The client is built without the version check of the Qdrant
+    /// client. The check connects to the server and blocks the thread
+    /// until it has an answer, and this runs while the application
+    /// boots. The first request is what connects.
+    ///
+    /// # Errors
+    ///
+    /// When `QDRANT_URL` is not set or is blank, and when the client
+    /// cannot be built from it. A variable that is missing has to name
+    /// itself at boot, not at the first search. The error names the
+    /// variable and does not repeat its value.
+    pub fn from_env() -> Result<Self, FrameworkError> {
+        Self::from_variables(|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::from_env`] with the variables looked up by `variable`.
+    fn from_variables(variable: impl Fn(&str) -> Option<String>) -> Result<Self, FrameworkError> {
+        let set = |name: &str| {
+            variable(name)
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        let url = set("QDRANT_URL").ok_or_else(|| {
+            FrameworkError::param("QDRANT_URL is not set; the Qdrant driver needs it")
+        })?;
+        let mut client = Qdrant::from_url(&url).skip_compatibility_check();
+        if let Some(api_key) = set("QDRANT_API_KEY") {
+            client = client.api_key(api_key);
+        }
+        let client = client.build().map_err(|e| {
+            FrameworkError::internal(format!(
+                "QDRANT_URL is no URL the Qdrant client can be built from: {e}"
+            ))
+        })?;
+        Ok(Self::from_client(client))
+    }
+
     /// When `false`, the driver requires the collection to exist
     /// before any upsert (returns `not_found` otherwise). Default: `true`.
     pub fn with_auto_create(mut self, on: bool) -> Self {
@@ -466,6 +512,53 @@ impl VectorDriver for QdrantVectorDriver {
             Err(e) => Err(FrameworkError::internal(format!(
                 "qdrant count on '{store}': {e}"
             ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod from_env_tests {
+    use super::QdrantVectorDriver;
+
+    fn variables(set: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            set.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
+
+    // `from_env` builds the client without its version check, so nothing
+    // connects here. The channel of the client is made in a runtime.
+    #[tokio::test]
+    async fn the_url_alone_is_enough() {
+        let driver = QdrantVectorDriver::from_variables(variables(&[(
+            "QDRANT_URL",
+            "http://127.0.0.1:6334",
+        )]));
+        assert!(driver.is_ok(), "{:?}", driver.err());
+    }
+
+    #[tokio::test]
+    async fn the_key_is_taken_when_it_is_set() {
+        let driver = QdrantVectorDriver::from_variables(variables(&[
+            ("QDRANT_URL", " http://127.0.0.1:6334 "),
+            ("QDRANT_API_KEY", "a-key"),
+        ]));
+        assert!(driver.is_ok(), "{:?}", driver.err());
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_blank_url_names_the_variable() {
+        for set in [
+            variables(&[]),
+            variables(&[("QDRANT_URL", "")]),
+            variables(&[("QDRANT_URL", "   "), ("QDRANT_API_KEY", "a-key")]),
+        ] {
+            let error = QdrantVectorDriver::from_variables(set)
+                .err()
+                .expect("there is no URL");
+            assert!(error.to_string().contains("QDRANT_URL"), "{error}");
         }
     }
 }
