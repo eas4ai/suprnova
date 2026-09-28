@@ -316,6 +316,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   public field `delay_secs`, so code that builds one with a struct literal has
   to name it. Chain payloads written before the field existed decode as links
   with no delay.
+- **Batches, chains and failed-job retries go through the queue fake.** Only
+  the `Queue::push` family checked `Queue::fake()`.
+  `Queue::batch().dispatch()` and `Queue::chain().dispatch()` went to the
+  driver, so a faked test failed with "queue driver not initialized" when no
+  driver was installed and pushed real jobs when one was.
+  `Queue::retry_failed` and `Queue::retry_all_failed` did the same. All four
+  record in the fake now and write to no driver. A batch is still stored in
+  the batch repository, so the id the caller receives names a batch.
+  `queue::testing` gains `batched()`, `assert_batched`, `assert_batch_count`,
+  `assert_nothing_batched`, `chained()`, `assert_chained` and
+  `assert_nothing_chained`, with the records `FakedBatch` and `FakedChain`.
+  The jobs of a batch and the head of a chain are recorded as pushes too, so
+  `assert_pushed` sees them.
 
 ### Security
 

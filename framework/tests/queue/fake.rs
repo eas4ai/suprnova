@@ -1,12 +1,17 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
+use serial_test::serial;
+use std::sync::Arc;
 use std::time::Duration;
 use suprnova::events::{EventFacade, dispatched};
 use suprnova::queue::events::JobQueued;
 use suprnova::queue::testing::{
-    assert_pushed, assert_pushed_later, assert_pushed_on_connection, assert_pushed_on_queue,
-    install_fake, pushed_with_available_at, pushed_with_id, pushed_with_overrides,
+    assert_batch_count, assert_batched, assert_chained, assert_nothing_batched,
+    assert_nothing_chained, assert_pushed, assert_pushed_later, assert_pushed_on_connection,
+    assert_pushed_on_queue, batched, chained, install_fake, pushed, pushed_with_available_at,
+    pushed_with_id, pushed_with_overrides,
 };
+use suprnova::queue::{FailedJobStore, MemoryFailedJobStore, MemoryQueueDriver, QueueDriver};
 use suprnova::{EnvelopeOverrides, FrameworkError, Job, Queue, async_trait};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -361,4 +366,250 @@ async fn assert_pushed_on_queue_panics_when_nothing_matches() {
     .unwrap();
 
     assert_pushed_on_queue::<Greet>("notifications");
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Farewell {
+    name: String,
+}
+
+#[async_trait]
+impl Job for Farewell {
+    fn job_name() -> &'static str {
+        "Farewell"
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+/// Install a real driver the fake must never write to, and hand it back so
+/// the test can count what reached it.
+fn real_driver() -> Arc<MemoryQueueDriver> {
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    driver
+}
+
+#[tokio::test]
+#[serial]
+async fn a_faked_batch_is_recorded_and_reaches_no_driver() {
+    let driver = real_driver();
+    let _guard = Queue::fake();
+
+    let id = Queue::batch()
+        .name("welcome")
+        .add(Greet { name: "Ada".into() })
+        .add(Farewell {
+            name: "Grace".into(),
+        })
+        .add(Greet { name: "Lin".into() })
+        .dispatch()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        driver.size().await.unwrap(),
+        0,
+        "a faked batch must not write to the driver"
+    );
+
+    assert_batch_count(1);
+    assert_batched(|batch| batch.id == id && batch.name == "welcome" && batch.jobs.len() == 3);
+    let recorded = &batched()[0];
+    let names: Vec<&str> = recorded.jobs.iter().map(|job| job.name.as_str()).collect();
+    assert_eq!(names, ["Greet", "Farewell", "Greet"]);
+    let greeted: Vec<String> = recorded
+        .jobs_of::<Greet>()
+        .into_iter()
+        .map(|job| job.name)
+        .collect();
+    assert_eq!(greeted, ["Ada", "Lin"]);
+
+    // Each job of the batch is a push as well, so a test that only asks
+    // whether the job was queued passes whichever path queued it.
+    assert_pushed::<Greet>(|job| job.name == "Lin");
+    assert_pushed::<Farewell>(|job| job.name == "Grace");
+
+    // The id the caller was handed still names a batch.
+    let stored = Queue::batch_repository()
+        .unwrap()
+        .find(&id)
+        .await
+        .unwrap()
+        .expect("a faked batch is stored in the repository");
+    assert_eq!(stored.total_jobs, 3);
+    assert_eq!(stored.pending_jobs, 3);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_faked_chain_is_recorded_and_reaches_no_driver() {
+    let driver = real_driver();
+    let _guard = Queue::fake();
+
+    Queue::chain()
+        .add(Greet { name: "Ada".into() })
+        .unwrap()
+        .add(Farewell {
+            name: "Grace".into(),
+        })
+        .unwrap()
+        .add(Greet { name: "Lin".into() })
+        .unwrap()
+        .dispatch()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        driver.size().await.unwrap(),
+        0,
+        "a faked chain must not write to the driver"
+    );
+
+    assert_chained(&["Greet", "Farewell", "Greet"]);
+    let recorded = &chained()[0];
+    assert_eq!(
+        recorded.link::<Farewell>(1).map(|job| job.name).as_deref(),
+        Some("Grace")
+    );
+    assert_eq!(
+        recorded.link::<Greet>(2).map(|job| job.name).as_deref(),
+        Some("Lin")
+    );
+    assert!(
+        recorded.link::<Greet>(1).is_none(),
+        "the second link is a Farewell"
+    );
+    assert!(recorded.link::<Greet>(3).is_none(), "the chain has 3 links");
+    assert!(
+        recorded.links[0].id.is_some(),
+        "the head is the one link with an envelope"
+    );
+    assert!(recorded.links[1].id.is_none());
+
+    // Only the head is on the queue at dispatch, so only the head is a push.
+    let greeted: Vec<String> = pushed::<Greet>().into_iter().map(|job| job.name).collect();
+    assert_eq!(greeted, ["Ada"]);
+    assert!(pushed::<Farewell>().is_empty());
+}
+
+/// The case the fake exists for: this test installs no driver. Every test
+/// runs in its own process under nextest, so there is none to find, and
+/// both dispatches used to fail with "queue driver not initialized".
+#[tokio::test]
+async fn a_faked_batch_and_chain_need_no_driver() {
+    let _guard = Queue::fake();
+
+    Queue::batch()
+        .name("no-driver")
+        .add(Greet { name: "Ada".into() })
+        .dispatch()
+        .await
+        .expect("a faked batch needs no driver");
+    Queue::chain()
+        .add(Greet {
+            name: "Grace".into(),
+        })
+        .unwrap()
+        .dispatch()
+        .await
+        .expect("a faked chain needs no driver");
+
+    assert_batched(|batch| batch.name == "no-driver");
+    assert_chained(&["Greet"]);
+}
+
+#[tokio::test]
+async fn an_empty_chain_records_nothing() {
+    let _guard = Queue::fake();
+    Queue::chain().dispatch().await.unwrap();
+    assert_nothing_chained();
+    assert!(pushed::<Greet>().is_empty());
+}
+
+#[tokio::test]
+async fn a_plain_push_is_neither_a_batch_nor_a_chain() {
+    let _guard = Queue::fake();
+    Queue::push(Greet { name: "Ada".into() }).await.unwrap();
+    assert_nothing_batched();
+    assert_nothing_chained();
+}
+
+#[tokio::test]
+#[serial]
+async fn a_faked_retry_is_recorded_and_reaches_no_driver() {
+    // Put a real envelope in the failed-job store: push it, reserve it, and
+    // log what the driver handed back.
+    let source = real_driver();
+    Queue::push(Greet { name: "Ada".into() }).await.unwrap();
+    Queue::push(Greet { name: "Lin".into() }).await.unwrap();
+    let store = Arc::new(MemoryFailedJobStore::new());
+    Queue::set_failed_store(store.clone());
+    let mut failed_ids = Vec::new();
+    for _ in 0..2 {
+        let reserved = source
+            .pop(Duration::from_secs(5))
+            .await
+            .unwrap()
+            .expect("the pushed job is reservable");
+        failed_ids.push(
+            store
+                .log("memory", "default", &reserved.envelope, "boom")
+                .await
+                .unwrap(),
+        );
+    }
+
+    let driver = real_driver();
+    let _guard = Queue::fake();
+
+    assert!(Queue::retry_failed(failed_ids[0]).await.unwrap());
+    assert_eq!(Queue::retry_all_failed(None).await.unwrap(), 1);
+
+    assert_eq!(
+        driver.size().await.unwrap(),
+        0,
+        "a faked retry must not write to the driver"
+    );
+    assert_eq!(
+        store.count().await.unwrap(),
+        0,
+        "a retried record leaves the store under the fake too"
+    );
+    let mut retried: Vec<String> = pushed::<Greet>().into_iter().map(|job| job.name).collect();
+    retried.sort();
+    assert_eq!(retried, ["Ada", "Lin"]);
+}
+
+#[tokio::test]
+#[should_panic(expected = "expected a chain of")]
+async fn assert_chained_panics_when_the_order_differs() {
+    let _guard = Queue::fake();
+    Queue::chain()
+        .add(Greet { name: "Ada".into() })
+        .unwrap()
+        .add(Farewell {
+            name: "Grace".into(),
+        })
+        .unwrap()
+        .dispatch()
+        .await
+        .unwrap();
+
+    assert_chained(&["Farewell", "Greet"]);
+}
+
+#[tokio::test]
+#[should_panic(expected = "expected at least one batch to match")]
+async fn assert_batched_panics_when_nothing_matches() {
+    let _guard = Queue::fake();
+    Queue::batch()
+        .name("welcome")
+        .add(Greet { name: "Ada".into() })
+        .dispatch()
+        .await
+        .unwrap();
+
+    assert_batched(|batch| batch.name == "goodbye");
 }

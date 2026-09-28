@@ -1116,6 +1116,9 @@ impl Queue {
     ///
     /// Returns `Ok(true)` when the record was retried, `Ok(false)` when
     /// the id had no record in the store.
+    ///
+    /// Under [`Queue::fake`] the envelope is recorded as a push and no
+    /// driver is written to. The record still leaves the store.
     pub async fn retry_failed(id: Uuid) -> Result<bool, FrameworkError> {
         let store = failed::current().ok_or_else(|| {
             FrameworkError::internal(
@@ -1132,8 +1135,14 @@ impl Queue {
         env.available_at = Utc::now();
         env.idempotency_key = None;
         env.unique_lock_owner = None;
-        let drv = current_driver()?;
-        drv.push(env).await?;
+        if testing::is_active() {
+            // A retry is a push like any other: under the fake it is
+            // recorded, and the record leaves the store the same way.
+            testing::record_envelope(&env);
+        } else {
+            let drv = current_driver()?;
+            drv.push(env).await?;
+        }
         store.forget(id).await?;
         Ok(true)
     }
@@ -1142,6 +1151,9 @@ impl Queue {
     /// than `before`). Returns the number of records retried. Mirrors
     /// `php artisan queue:retry all` plus `queue:flush` semantics: each
     /// retried envelope is pushed AND removed from the store.
+    ///
+    /// Under [`Queue::fake`] each envelope is recorded as a push and no
+    /// driver is written to. The records still leave the store.
     pub async fn retry_all_failed(
         before: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<u64, FrameworkError> {
@@ -1152,7 +1164,14 @@ impl Queue {
             )
         })?;
         let records = store.all().await?;
-        let drv = current_driver()?;
+        // `None` under the fake, which records each retry and has no driver
+        // to resolve. Resolved before the loop otherwise, so a missing
+        // driver is reported even when there is nothing to retry.
+        let drv = if testing::is_active() {
+            None
+        } else {
+            Some(current_driver()?)
+        };
         let mut count: u64 = 0;
         for record in records {
             if let Some(cutoff) = before
@@ -1167,7 +1186,10 @@ impl Queue {
             env.available_at = Utc::now();
             env.idempotency_key = None;
             env.unique_lock_owner = None;
-            drv.push(env).await?;
+            match &drv {
+                Some(drv) => drv.push(env).await?,
+                None => testing::record_envelope(&env),
+            }
             store.forget(record.id).await?;
             count += 1;
         }

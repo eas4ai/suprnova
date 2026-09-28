@@ -1341,6 +1341,16 @@ impl PendingBatch {
     ///
     /// The caller gets the original push error either way.
     ///
+    /// # Under the queue fake
+    ///
+    /// Under [`Queue::fake`](crate::queue::Queue::fake) no job is pushed.
+    /// The batch is recorded for
+    /// [`assert_batched`](crate::queue::testing::assert_batched) and each of
+    /// its jobs for [`assert_pushed`](crate::queue::testing::assert_pushed).
+    /// The batch is still stored in the repository, so code that looks up
+    /// the id it was handed finds the batch. No job runs, so that batch
+    /// stays pending.
+    ///
     /// [`SkipIfBatchCancelled`]: crate::queue::SkipIfBatchCancelled
     pub async fn dispatch(self) -> Result<String, FrameworkError> {
         if !self.debounce_rejected.is_empty() {
@@ -1376,6 +1386,22 @@ impl PendingBatch {
             finished_at: None,
         };
         repo.store(batch).await?;
+
+        // The fake comes before the driver lookup, as it does in the
+        // `Queue::push` funnel: a faked test has no driver to find, and one
+        // that has must not be written to.
+        if crate::queue::testing::is_active() {
+            let envelopes: Vec<Envelope> = self
+                .envelopes
+                .into_iter()
+                .map(|mut env| {
+                    env.batch_id = Some(id.clone());
+                    env
+                })
+                .collect();
+            crate::queue::testing::record_batch(&id, &self.name, &envelopes);
+            return Ok(id);
+        }
 
         let driver = crate::queue::current_driver()?;
         let mut remaining = self.envelopes.into_iter();

@@ -235,16 +235,25 @@ impl PendingChain {
 
     /// Dispatch the chain. The first link is pushed immediately; the rest
     /// travel on its `chain_remaining` payload field.
+    ///
+    /// Under [`Queue::fake`](crate::queue::Queue::fake) nothing is pushed.
+    /// The chain is recorded for
+    /// [`assert_chained`](crate::queue::testing::assert_chained), and its
+    /// head for [`assert_pushed`](crate::queue::testing::assert_pushed).
     pub async fn dispatch(self) -> Result<(), FrameworkError> {
-        if self.links.is_empty() {
+        let mut links = self.links.into_iter();
+        let Some(head) = links.next() else {
+            return Ok(());
+        };
+        let mut env = head.to_envelope();
+        env.chain_remaining = links.collect();
+        // The fake comes before the driver lookup, as it does in the
+        // `Queue::push` funnel: a faked test has no driver to find, and one
+        // that has must not be written to.
+        if crate::queue::testing::is_active() {
+            crate::queue::testing::record_chain(&env);
             return Ok(());
         }
-        let driver = crate::queue::current_driver()?;
-        let mut iter = self.links.into_iter();
-        let head = iter.next().unwrap();
-        let tail: Vec<ChainLink> = iter.collect();
-        let mut env = head.to_envelope();
-        env.chain_remaining = tail;
-        driver.push(env).await
+        crate::queue::current_driver()?.push(env).await
     }
 }
