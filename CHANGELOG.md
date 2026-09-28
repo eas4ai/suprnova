@@ -511,6 +511,34 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `increment_each` resolve the same way, so a mass write reaches only the rows
   a read would return. A scope that reads per-request state reads it when the
   query runs.
+- **Behind a proxy, `Request::ip()` is the address the proxy saw, and no
+  longer one the client wrote.** A proxy adds the address it saw to the right
+  end of `X-Forwarded-For` and leaves what was there, and `ip()` returned the
+  left end. Behind nginx, Traefik, HAProxy or a cloud load balancer, a client
+  that sent the header itself chose the address the application saw: a new
+  rate-limit bucket with every request, and the address of a payment provider
+  for a webhook that checks `remote_addr`. `ip()` now reads the header from
+  the right and returns the first address that is no trusted proxy. It reads
+  every line of the header as one list, reads an entry with a port
+  (`203.0.113.5:54321`, `[2001:db8::5]:443`) as its address, and ends at an
+  entry it cannot read, where the answer is the proxy that wrote that entry.
+  `X-Real-IP` is read only when the request has no `X-Forwarded-For` at all.
+  **What to check when you upgrade:** every proxy between the client and the
+  application has to be in `APP_TRUSTED_PROXIES`, not the last one alone. A
+  proxy that is not listed is taken for the client, and all of its clients
+  share one address; that includes the address a load balancer adds behind the
+  client's, as the external Application Load Balancer of Google Cloud does.
+  `APP_TRUSTED_PROXIES` takes ranges in CIDR form for that,
+  `10.0.0.5,173.245.48.0/20,2400:cb00::/32`, which is how the edge of a
+  content delivery network is listed; in code it is
+  `TrustedProxiesConfig::and_networks` with `ProxyNetwork`. A range must hold
+  proxies and nothing else, because a client that connects from a trusted
+  address is believed like a proxy, and the range of every address
+  (`0.0.0.0/0`) is refused. A proxy that writes `X-Real-IP` alone has to
+  remove the `X-Forwarded-For` of the client. An IPv4 address that is written
+  as an IPv6 one (`::ffff:10.0.0.5`) is the IPv4 address, in the headers and
+  for the peer. `Request::ips()` still returns the whole chain and is a
+  record, nothing to decide by.
 
 ## 2.0.2 - 2026-09-14
 

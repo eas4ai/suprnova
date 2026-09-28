@@ -12,7 +12,7 @@ use hyper::service::service_fn;
 use std::convert::Infallible;
 use std::net::IpAddr;
 use suprnova::Request;
-use suprnova::http::TrustedProxiesConfig;
+use suprnova::http::{ProxyNetwork, TrustedProxiesConfig};
 use suprnova::routing::register_route_name;
 
 /// Trusted-proxy config that lists `127.0.0.1` - paired with a
@@ -238,18 +238,290 @@ async fn secure_ignores_x_forwarded_proto_from_untrusted_peer() {
     assert_eq!(req.scheme(), "http");
 }
 
+/// A request that came in through the loopback proxy with these
+/// `X-Forwarded-For` lines, and `trusted` for its allowlist.
+async fn forwarded(lines: &[&str], trusted: TrustedProxiesConfig) -> Request {
+    let mut builder = hyper::Request::builder().uri("/");
+    for line in lines {
+        builder = builder.header("X-Forwarded-For", *line);
+    }
+    build_request(builder, "")
+        .await
+        .with_peer_addr(IpAddr::from([127, 0, 0, 1]))
+        .with_trusted_proxies(trusted)
+}
+
+fn trust(entries: &str) -> TrustedProxiesConfig {
+    let mut addresses = Vec::new();
+    let mut networks = Vec::new();
+    for entry in entries.split(',').map(str::trim) {
+        if entry.contains('/') {
+            networks.push(entry.parse::<ProxyNetwork>().expect("a range"));
+        } else {
+            addresses.push(entry.parse::<IpAddr>().expect("an address"));
+        }
+    }
+    TrustedProxiesConfig::with_ips(addresses).and_networks(networks)
+}
+
 #[tokio::test]
-async fn ip_reads_x_forwarded_for_first_hop() {
+async fn ip_is_the_address_the_trusted_proxy_wrote() {
+    // The proxy added `203.0.113.5`, the address it saw, to the right
+    // end. `198.51.100.66` was in the header when the request reached the
+    // proxy: the client wrote it.
+    let req = forwarded(&["198.51.100.66, 203.0.113.5"], trust_loopback()).await;
+    assert_eq!(req.ip().as_deref(), Some("203.0.113.5"));
+}
+
+#[tokio::test]
+async fn a_client_behind_a_proxy_that_adds_to_the_header_cannot_choose_its_address() {
+    // With the left end read, each of these requests had an address of
+    // its own, and so a rate-limit bucket of its own.
+    for claimed in ["198.51.100.1", "198.51.100.2", "10.0.0.7", "127.0.0.1"] {
+        let line = format!("{claimed}, 203.0.113.5");
+        let req = forwarded(&[&line], trust_loopback()).await;
+        assert_eq!(
+            req.ip().as_deref(),
+            Some("203.0.113.5"),
+            "the client claimed {claimed}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ip_reads_past_every_proxy_of_the_allowlist() {
+    // `198.51.100.66` is what the client sent. The first proxy added the
+    // address of the client, and the others added the proxy in front.
+    let line = "198.51.100.66, 203.0.113.5, 10.0.0.1, 10.0.0.2";
+
+    let each_listed = forwarded(&[line], trust("127.0.0.1, 10.0.0.1, 10.0.0.2")).await;
+    assert_eq!(each_listed.ip().as_deref(), Some("203.0.113.5"));
+
+    let by_range = forwarded(&[line], trust("127.0.0.1, 10.0.0.0/8")).await;
+    assert_eq!(by_range.ip().as_deref(), Some("203.0.113.5"));
+}
+
+#[tokio::test]
+async fn a_proxy_that_is_not_in_the_allowlist_is_taken_for_the_client() {
+    // Nothing says that `10.0.0.2` is a proxy, so what it wrote to the
+    // left of itself is not believed.
+    let req = forwarded(&["203.0.113.5, 10.0.0.1, 10.0.0.2"], trust_loopback()).await;
+    assert_eq!(req.ip().as_deref(), Some("10.0.0.2"));
+}
+
+#[tokio::test]
+async fn the_lines_of_the_header_are_one_list() {
+    // A proxy that adds a line of its own leaves the line of the client
+    // in front of it. The first line alone is what the client wrote.
+    let req = forwarded(&["198.51.100.66", "203.0.113.5"], trust_loopback()).await;
+    assert_eq!(req.ip().as_deref(), Some("203.0.113.5"));
+    assert_eq!(
+        req.ips(),
+        vec!["198.51.100.66", "203.0.113.5", "127.0.0.1"],
+        "the chain holds every line"
+    );
+
+    let chain = forwarded(
+        &["198.51.100.66, 203.0.113.5", "10.0.0.1"],
+        trust("127.0.0.1, 10.0.0.1"),
+    )
+    .await;
+    assert_eq!(chain.ip().as_deref(), Some("203.0.113.5"));
+}
+
+#[tokio::test]
+async fn a_request_of_a_trusted_proxy_itself_is_the_furthest_one() {
+    let req = forwarded(&["10.0.0.1, 10.0.0.2"], trust("127.0.0.1, 10.0.0.0/8")).await;
+    assert_eq!(req.ip().as_deref(), Some("10.0.0.1"));
+}
+
+#[tokio::test]
+async fn the_walk_ends_at_an_entry_it_cannot_read() {
+    // `unknown` stands where the trusted peer writes, so the peer named
+    // its client in a form that is no address. What is to the left of it
+    // is what that client sent, and the proxy is all that is known.
+    let req = forwarded(&["198.51.100.66, 203.0.113.5, unknown"], trust_loopback()).await;
+    assert_eq!(req.ip().as_deref(), Some("127.0.0.1"));
+
+    // Behind a chain, the proxy that wrote the entry is the last one the
+    // walk has read.
+    let chain = forwarded(
+        &["198.51.100.66, unknown, 10.0.0.1"],
+        trust("127.0.0.1, 10.0.0.1"),
+    )
+    .await;
+    assert_eq!(chain.ip().as_deref(), Some("10.0.0.1"));
+}
+
+#[tokio::test]
+async fn what_the_client_sent_cannot_end_the_walk_before_the_entry_of_the_proxy() {
+    // An empty entry, an entry that is no address, an empty line: all of
+    // it stands to the left of what the proxy added.
+    for lines in [
+        vec!["6.6.6.6,, 203.0.113.5"],
+        vec!["6.6.6.6, , 203.0.113.5"],
+        vec![", 203.0.113.5"],
+        vec!["unknown, 203.0.113.5"],
+        vec!["", "203.0.113.5"],
+        vec!["6.6.6.6,", "203.0.113.5"],
+    ] {
+        let req = forwarded(&lines, trust_loopback()).await;
+        assert_eq!(req.ip().as_deref(), Some("203.0.113.5"), "{lines:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_entry_of_the_proxy_that_is_almost_an_address_ends_the_walk() {
+    for entry in [
+        "1.2.3.4:",
+        "1.2.3.4:99999",
+        "[1.2.3.4]:80",
+        "[::1",
+        "1.2.3.4.",
+        "127.1",
+    ] {
+        let line = format!("6.6.6.6, {entry}");
+        let req = forwarded(&[&line], trust_loopback()).await;
+        assert_eq!(
+            req.ip().as_deref(),
+            Some("127.0.0.1"),
+            "`{entry}` is no address, so the proxy is all that is known"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_entry_with_a_port_is_read_as_its_address() {
+    // Read past, the entry of the proxy would leave the entry of the
+    // client for the answer.
+    let v4 = forwarded(&["6.6.6.6, 203.0.113.5:54321"], trust_loopback()).await;
+    assert_eq!(v4.ip().as_deref(), Some("203.0.113.5"));
+
+    let v6 = forwarded(&["6.6.6.6, [2001:db8::5]:443"], trust_loopback()).await;
+    assert_eq!(v6.ip().as_deref(), Some("2001:db8::5"));
+
+    let bracketed = forwarded(&["6.6.6.6, [2001:db8::5]"], trust_loopback()).await;
+    assert_eq!(bracketed.ip().as_deref(), Some("2001:db8::5"));
+
+    let proxy_with_port = forwarded(
+        &["6.6.6.6, 203.0.113.5:54321, 10.0.0.1:443"],
+        trust("127.0.0.1, 10.0.0.1"),
+    )
+    .await;
+    assert_eq!(proxy_with_port.ip().as_deref(), Some("203.0.113.5"));
+}
+
+#[tokio::test]
+async fn a_byte_that_is_no_text_does_not_take_the_entry_of_the_proxy_with_it() {
+    // The proxy adds its entry to the line of the client. Read as a
+    // whole, a line with such a byte is no text, and the entry of the
+    // proxy would be gone with it.
+    let line = hyper::header::HeaderValue::from_bytes(b"\x80, 203.0.113.5")
+        .expect("a header value may hold the byte");
     let req = build_request(
         hyper::Request::builder()
             .uri("/")
-            .header("X-Forwarded-For", "203.0.113.5, 10.0.0.1, 10.0.0.2"),
+            .header("X-Forwarded-For", line)
+            .header("X-Real-IP", "198.51.100.7"),
         "",
     )
     .await
     .with_peer_addr(IpAddr::from([127, 0, 0, 1]))
     .with_trusted_proxies(trust_loopback());
+
     assert_eq!(req.ip().as_deref(), Some("203.0.113.5"));
+}
+
+#[tokio::test]
+async fn x_real_ip_is_not_read_while_the_request_has_x_forwarded_for() {
+    // The proxy wrote `X-Forwarded-For`. Nothing says that it wrote
+    // `X-Real-IP` as well, and a proxy passes on what it does not write.
+    for forwarded_for in ["203.0.113.5", "unknown", ""] {
+        let req = build_request(
+            hyper::Request::builder()
+                .uri("/")
+                .header("X-Forwarded-For", forwarded_for)
+                .header("X-Real-IP", "198.51.100.7"),
+            "",
+        )
+        .await
+        .with_peer_addr(IpAddr::from([127, 0, 0, 1]))
+        .with_trusted_proxies(trust_loopback());
+
+        let expected = if forwarded_for == "203.0.113.5" {
+            "203.0.113.5"
+        } else {
+            "127.0.0.1"
+        };
+        assert_eq!(
+            req.ip().as_deref(),
+            Some(expected),
+            "X-Forwarded-For: `{forwarded_for}`"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_last_line_of_x_real_ip_is_the_one_the_proxy_wrote() {
+    let req = build_request(
+        hyper::Request::builder()
+            .uri("/")
+            .header("X-Real-IP", "198.51.100.66")
+            .header("X-Real-IP", "203.0.113.5"),
+        "",
+    )
+    .await
+    .with_peer_addr(IpAddr::from([127, 0, 0, 1]))
+    .with_trusted_proxies(trust_loopback());
+
+    assert_eq!(req.ip().as_deref(), Some("203.0.113.5"));
+}
+
+#[tokio::test]
+async fn an_ipv4_address_written_as_ipv6_is_the_ipv4_address() {
+    let proxy = forwarded(
+        &["198.51.100.66, 203.0.113.5, ::ffff:10.0.0.1"],
+        trust("127.0.0.1, 10.0.0.1"),
+    )
+    .await;
+    assert_eq!(proxy.ip().as_deref(), Some("203.0.113.5"));
+
+    let client = forwarded(&["::ffff:203.0.113.5"], trust_loopback()).await;
+    assert_eq!(
+        client.ip().as_deref(),
+        Some("203.0.113.5"),
+        "one client has one address, however it is written"
+    );
+    assert_eq!(client.ips(), vec!["203.0.113.5", "127.0.0.1"]);
+
+    let peer = build_request(hyper::Request::builder().uri("/"), "")
+        .await
+        .with_peer_addr("::ffff:192.0.2.9".parse().expect("an address"));
+    assert_eq!(peer.ip().as_deref(), Some("192.0.2.9"));
+    assert_eq!(peer.ips(), vec!["192.0.2.9"]);
+}
+
+#[tokio::test]
+async fn a_client_inside_a_trusted_range_is_believed_like_a_proxy() {
+    // This is why a range must hold proxies and nothing else. `10.3.4.5`
+    // is a client, the range says that it is a proxy, and so what it
+    // wrote in front of its own address is taken for its client.
+    let req = forwarded(&["6.6.6.6, 10.3.4.5"], trust("127.0.0.1, 10.0.0.0/8")).await;
+    assert_eq!(req.ip().as_deref(), Some("6.6.6.6"));
+}
+
+#[tokio::test]
+async fn the_header_of_a_peer_that_is_no_trusted_proxy_is_not_read() {
+    let req = build_request(
+        hyper::Request::builder()
+            .uri("/")
+            .header("X-Forwarded-For", "198.51.100.66, 203.0.113.5"),
+        "",
+    )
+    .await
+    .with_peer_addr(IpAddr::from([192, 0, 2, 9]))
+    .with_trusted_proxies(trust_loopback());
+    assert_eq!(req.ip().as_deref(), Some("192.0.2.9"));
 }
 
 #[tokio::test]

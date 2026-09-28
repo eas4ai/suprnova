@@ -88,6 +88,37 @@ pub struct Request {
     render_cache_prepared: Option<Box<crate::render_cache::stitch::PreparedHit>>,
 }
 
+/// The address one entry of `X-Forwarded-For` names, in its canonical
+/// form, so an IPv4 address written as an IPv6 one is the IPv4 address.
+///
+/// A proxy may write the port of its client behind the address, as the
+/// Azure Application Gateway does: `203.0.113.5:54321`. The entry names
+/// the address, and the port is left out. An IPv6 address with a port
+/// is read in brackets, `[2001:db8::5]:443`, which is the form an
+/// address with a port has. Without the brackets `2001:db8::5:443` is
+/// an IPv6 address of its own, and it is read as that. `None` when the
+/// entry is no address.
+fn forwarded_address(entry: &str) -> Option<std::net::IpAddr> {
+    let entry = entry.trim();
+    entry
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .or_else(|| {
+            entry
+                .parse::<std::net::SocketAddr>()
+                .ok()
+                .map(|with_port| with_port.ip())
+        })
+        .or_else(|| {
+            entry
+                .strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(']'))
+                .and_then(|address| address.parse::<std::net::Ipv6Addr>().ok())
+                .map(std::net::IpAddr::V6)
+        })
+        .map(|address| address.to_canonical())
+}
+
 impl Request {
     /// Wrap a hyper request, splitting off the streaming body. Used by
     /// the server's request pipeline; in-process tests construct via
@@ -642,12 +673,14 @@ impl Request {
         if self.secure() { "https" } else { "http" }
     }
 
-    /// Get the connecting peer IP address.
+    /// The address of the client.
     ///
     /// Resolution order:
-    /// 1. `X-Forwarded-For` - first non-empty comma-split value (only
-    ///    when the TCP peer is in the trusted-proxy allowlist).
-    /// 2. `X-Real-IP` - single value (same trusted-proxy gating).
+    /// 1. `X-Forwarded-For`, read from the right: the first address that
+    ///    is no trusted proxy. Only when the TCP peer is in the
+    ///    trusted-proxy allowlist.
+    /// 2. `X-Real-IP` (same trusted-proxy gating), and only when the
+    ///    request has no `X-Forwarded-For` at all.
     /// 3. The TCP peer address recorded by the server
     ///    ([`Request::with_peer_addr`]) - the fail-safe fallback used
     ///    whenever the proxy headers are absent or the peer is not a
@@ -655,76 +688,170 @@ impl Request {
     ///
     /// Returns `None` only when the peer-addr accessor is absent
     /// (e.g. tests that construct a `Request` directly from
-    /// `Request::new(...)` without threading the peer) AND the
-    /// configured proxy headers cannot be honoured. Mirrors Laravel's
-    /// `Request::ip()` / `Symfony Request::getClientIp()`.
+    /// `Request::new(...)` without threading the peer).
+    ///
+    /// The order is the one of Laravel's `Request::ip()` and Symfony's
+    /// `Request::getClientIp()`. Two things differ: those read no
+    /// `X-Real-IP`, and Symfony reads past an entry that is no address,
+    /// where this ends the walk.
+    ///
+    /// # Why from the right
+    ///
+    /// A proxy adds the address it saw to the right end of
+    /// `X-Forwarded-For`, and leaves what was there. What the client sent
+    /// is therefore at the left end, and the client chooses it. The
+    /// address a trusted proxy wrote is the one that can be believed: the
+    /// last entry was written by the peer, the one in front of it by the
+    /// proxy the last entry names, and so on for as long as the entries
+    /// name proxies of the allowlist. The first entry that names none is
+    /// the client, and nothing to the left of it was written by a proxy
+    /// that is trusted.
+    ///
+    /// The walk ends at an entry it cannot read, and the answer is then
+    /// the proxy that wrote that entry. Such an entry stands where only
+    /// trusted proxies write, so it is a proxy that named its client in
+    /// a form that is no address. Reading past it would take the next
+    /// entry to the left for the client, and that one the client wrote.
+    /// An entry with a port, `203.0.113.5:54321` or `[2001:db8::5]:443`,
+    /// is read as its address.
+    ///
+    /// So the clients of a proxy that writes something that is no
+    /// address share the address of that proxy, and one limit. nginx
+    /// writes `unix:` for a client on a Unix socket, and Squid can be set
+    /// to write `unknown`.
+    ///
+    /// When every entry names a trusted proxy, the request came from one
+    /// of them, and the entry furthest from the application is returned.
     ///
     /// # Security note
     ///
     /// `X-Forwarded-For` and `X-Real-IP` are client-controlled headers -
     /// any inbound request can carry them. They are honoured only
-    /// when the TCP peer matches an address listed in
+    /// when the TCP peer matches an entry of
     /// [`AppConfig::trusted_proxies`](crate::config::AppConfig::trusted_proxies)
     /// (configurable via `APP_TRUSTED_PROXIES`). With the default
     /// empty allowlist, this method always returns the TCP peer.
+    ///
+    /// Every proxy of the chain has to be in the allowlist. One that is
+    /// not is taken for the client, and all of its clients share its
+    /// address. A range of the allowlist must hold proxies and nothing
+    /// else: a client that connects from an address of the allowlist is
+    /// believed like a proxy, and chooses the address this returns.
+    ///
+    /// A trusted proxy has to write `X-Forwarded-For` itself: one that
+    /// passes the header of the client on as it came lets the client
+    /// write all of it. That holds for a proxy that writes `X-Real-IP`
+    /// as well, which has to remove the `X-Forwarded-For` of the client.
     pub fn ip(&self) -> Option<String> {
-        if self.peer_is_trusted_proxy() {
-            if let Some(xff) = self.header("X-Forwarded-For") {
-                // Return the first hop that parses as an IP and emit its
-                // normalised form. A trusted proxy can still append a garbage
-                // token, and never surfacing an unvalidated string also stops a
-                // client from rotating rate-limit buckets with junk XFF values.
-                if let Some(ip) = xff
-                    .split(',')
-                    .filter_map(|p| p.trim().parse::<std::net::IpAddr>().ok())
-                    .next()
-                {
-                    return Some(ip.to_string());
-                }
-            }
-            if let Some(real) = self.header("X-Real-IP")
-                && let Ok(ip) = real.trim().parse::<std::net::IpAddr>()
-            {
-                return Some(ip.to_string());
-            }
+        let peer = self.peer_addr?.to_canonical();
+        if !self.peer_is_trusted_proxy() {
+            return Some(peer.to_string());
         }
-        self.peer_addr.map(|ip| ip.to_string())
+        let forwarded = self.forwarded_entries();
+        let client = if forwarded.is_empty() {
+            // No `X-Forwarded-For` at all. With one in the request,
+            // `X-Real-IP` is not read: the proxy wrote the one header,
+            // and nothing says that it wrote the other as well.
+            self.real_ip().unwrap_or(peer)
+        } else {
+            self.forwarded_client(&forwarded, peer)
+        };
+        Some(client.to_string())
     }
 
-    /// Full client IP chain, parsed from `X-Forwarded-For` plus the
-    /// recorded peer address. Order: leftmost (originating client) →
-    /// rightmost (closest hop). Mirrors Laravel's `Request::ips()` /
-    /// `Symfony Request::getClientIps()`.
+    /// Every entry of `X-Forwarded-For`, from the left to the right.
+    /// `None` stands for an entry that is no address.
+    ///
+    /// The header may come as several lines, which stand for one list in
+    /// the order of the lines. A proxy that adds a line of its own, as
+    /// HAProxy does, leaves the line of the client in front of it, so
+    /// reading the first line alone reads what the client wrote.
+    ///
+    /// A line is split as bytes, before anything is read as text. One
+    /// byte that is no ASCII makes a line no text, and a proxy that adds
+    /// to the line of the client puts its entry into that line: read as
+    /// a whole, the line would be gone with the entry of the proxy in it.
+    fn forwarded_entries(&self) -> Vec<Option<std::net::IpAddr>> {
+        self.parts
+            .headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .flat_map(|line| line.as_bytes().split(|byte| *byte == b','))
+            .map(|entry| std::str::from_utf8(entry).ok().and_then(forwarded_address))
+            .collect()
+    }
+
+    /// The client `entries` name: from the right, the first address that
+    /// is no trusted proxy. See [`Request::ip`].
+    fn forwarded_client(
+        &self,
+        entries: &[Option<std::net::IpAddr>],
+        peer: std::net::IpAddr,
+    ) -> std::net::IpAddr {
+        // The proxy that wrote the entry the walk is at.
+        let mut written_by = peer;
+        for entry in entries.iter().rev() {
+            match entry {
+                // A trusted proxy named its client in a form that is no
+                // address. The proxy is the last address that is known.
+                None => return written_by,
+                Some(address) if !self.trusted_proxies.trusts(Some(*address)) => {
+                    return *address;
+                }
+                Some(proxy) => written_by = *proxy,
+            }
+        }
+        written_by
+    }
+
+    /// The address in `X-Real-IP`. The last line is read: a proxy that
+    /// adds a line of its own leaves the line of the client in front.
+    fn real_ip(&self) -> Option<std::net::IpAddr> {
+        self.parts
+            .headers
+            .get_all("x-real-ip")
+            .iter()
+            .next_back()
+            .and_then(|line| line.to_str().ok())
+            .and_then(forwarded_address)
+    }
+
+    /// Every address the request names. Order: the entries of
+    /// `X-Forwarded-For` from the left to the right, then `X-Real-IP`,
+    /// then the TCP peer. An address that is in the chain already is not
+    /// added a second time.
+    ///
+    /// This is a record of what the request said, for a log line or a
+    /// support screen. Do not decide anything by it: the entries to the
+    /// left of the one [`Request::ip`] returns were written by the client
+    /// or by a proxy that is not trusted. [`Request::ip`] is the address
+    /// to key a limit on and to check against an allowlist.
     ///
     /// `X-Forwarded-For` / `X-Real-IP` contribute to the chain only
     /// when the TCP peer matches the trusted-proxy allowlist - see
-    /// [`Request::ip`] for the security rationale. The peer address
-    /// itself is always appended (it is the only authoritative hop).
+    /// [`Request::ip`] for the security rationale. The peer address is
+    /// the only hop the server saw itself.
     pub fn ips(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         if self.peer_is_trusted_proxy() {
-            if let Some(xff) = self.header("X-Forwarded-For") {
-                for piece in xff.split(',') {
-                    // Validate each hop as an IP and emit the normalised form;
-                    // drop anything that doesn't parse so a spoofed header can't
-                    // inject arbitrary strings (e.g. markup) into the chain a
-                    // consumer might render or log.
-                    if let Ok(ip) = piece.trim().parse::<std::net::IpAddr>() {
-                        out.push(ip.to_string());
-                    }
-                }
-            }
-            if let Some(real) = self.header("X-Real-IP")
-                && let Ok(ip) = real.trim().parse::<std::net::IpAddr>()
-            {
-                let s = ip.to_string();
+            // Entries that are no address are dropped, so a spoofed
+            // header cannot put a text of its choice (markup, for one)
+            // into a chain a consumer might render or log.
+            out.extend(
+                self.forwarded_entries()
+                    .into_iter()
+                    .flatten()
+                    .map(|address| address.to_string()),
+            );
+            if let Some(real) = self.real_ip() {
+                let s = real.to_string();
                 if !out.iter().any(|v| v == &s) {
                     out.push(s);
                 }
             }
         }
         if let Some(peer) = self.peer_addr {
-            let s = peer.to_string();
+            let s = peer.to_canonical().to_string();
             if !out.iter().any(|v| v == &s) {
                 out.push(s);
             }
@@ -1796,8 +1923,9 @@ mod url_helper_tests {
                 "127.0.0.1".to_string(),
             ],
         );
-        // `ip()` returns the first parseable forwarded hop.
-        assert_eq!(req.ip().as_deref(), Some("1.2.3.4"));
+        // `ip()` reads from the right: the last entry is the address the
+        // trusted peer saw, and it names no trusted proxy.
+        assert_eq!(req.ip().as_deref(), Some("5.6.7.8"));
     }
 
     #[test]
