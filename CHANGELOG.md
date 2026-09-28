@@ -414,6 +414,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   at 24 hours (`queue::retry::RETRY_HINT_CEILING`). Every other failure keeps
   the job's backoff. `queue::retry::delay_after_failure` is the function the
   worker calls.
+- **The middleware priority list orders the chain.**
+  `append_middleware_priority` and `prepend_middleware_priority` recorded a
+  list that nothing read, so middleware ran in the order it was registered
+  whatever the list said, and an application that relied on the documented
+  order could run authentication before the session was loaded. A chain is now
+  put in the order of the list when it runs, for a matched route, the
+  fallback, an unrouted request and a WebSocket upgrade alike. A middleware
+  the list names moves in front of any middleware the list places after it.
+  Every other middleware keeps its place, so one registered after
+  `AuthMiddleware` still runs after it. The list orders global, group and
+  route middleware together. It sees the middleware registered by type; a
+  middleware boxed by hand with `into_boxed` and added with
+  `.middleware_boxed(...)` keeps its place. An empty list costs one read per
+  request.
 
 ### Security
 

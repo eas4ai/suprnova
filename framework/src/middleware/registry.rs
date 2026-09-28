@@ -3,7 +3,7 @@
 //! Configure global middleware in `bootstrap.rs` using the `global_middleware!` macro,
 //! or use `Server::middleware()` for manual configuration.
 
-use super::{BoxedMiddleware, Middleware, into_boxed};
+use super::{BoxedMiddleware, Middleware, boxed_as};
 use std::any::TypeId;
 use std::sync::{OnceLock, RwLock};
 
@@ -86,7 +86,7 @@ fn insert_unique_global<M: Middleware + 'static>(
         );
         return false;
     }
-    registered.push((type_id, into_boxed(middleware)));
+    registered.push((type_id, boxed_as(middleware)));
     true
 }
 
@@ -133,7 +133,7 @@ pub fn prepend_global_middleware<M: Middleware + 'static>(middleware: M) {
         );
         return;
     }
-    vec.insert(0, (tid, into_boxed(middleware)));
+    vec.insert(0, (tid, boxed_as(middleware)));
 }
 
 /// Whether a global middleware of this concrete type has been
@@ -264,7 +264,7 @@ impl MiddlewareRegistry {
     /// # ;
     /// ```
     pub fn append<M: Middleware + 'static>(mut self, middleware: M) -> Self {
-        self.global.push(into_boxed(middleware));
+        self.global.push(boxed_as(middleware));
         self
     }
 
@@ -274,7 +274,7 @@ impl MiddlewareRegistry {
     /// Use when an embedder needs to wrap the entire chain (e.g. a
     /// tracing probe that must outerly time the rest of the stack).
     pub fn prepend<M: Middleware + 'static>(mut self, middleware: M) -> Self {
-        self.global.insert(0, into_boxed(middleware));
+        self.global.insert(0, boxed_as(middleware));
         self
     }
 

@@ -3,3 +3,4 @@
 
 pub mod maintenance_middleware;
 pub mod panic_safety;
+pub mod priority;

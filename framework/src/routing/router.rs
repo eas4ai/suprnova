@@ -35,7 +35,7 @@
 
 use crate::FrameworkError;
 use crate::http::{Request, Response};
-use crate::middleware::{BoxedMiddleware, Middleware, into_boxed};
+use crate::middleware::{BoxedMiddleware, Middleware, boxed_as};
 use crate::ws::BoxedWebSocketHandler;
 use hyper::Method;
 use matchit::Router as MatchitRouter;
@@ -2047,7 +2047,7 @@ impl RouteBuilder {
         let method = self.last_method.clone();
         let path = self.last_path.clone();
         self.router
-            .add_middleware(method, &path, into_boxed(middleware));
+            .add_middleware(method, &path, boxed_as(middleware));
         self
     }
 
@@ -2336,7 +2336,7 @@ impl MultiMethodRouteBuilder {
     /// entries in the route-middleware map so each per-method route
     /// inherits the same instance.
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
-        let boxed = into_boxed(middleware);
+        let boxed = boxed_as(middleware);
         for method in &self.methods {
             self.router
                 .add_middleware(method.clone(), &self.path, boxed.clone());

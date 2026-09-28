@@ -4,7 +4,7 @@ use super::macros::{convert_route_params, join_paths};
 use super::{BoxedHandler, RouteBuilder, Router};
 use crate::FrameworkError;
 use crate::http::{Request, Response};
-use crate::middleware::{BoxedMiddleware, Middleware, into_boxed};
+use crate::middleware::{BoxedMiddleware, Middleware, boxed_as};
 use crate::session::SessionBlock;
 use crate::session::blocking::register_route_block;
 use hyper::Method;
@@ -87,7 +87,7 @@ impl GroupBuilder {
     ///     .middleware(ApiMiddleware);
     /// ```
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
-        self.middleware.push(into_boxed(middleware));
+        self.middleware.push(boxed_as(middleware));
         self
     }
 

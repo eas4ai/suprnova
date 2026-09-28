@@ -9,18 +9,21 @@
 //! - **`middlewareGroups`** - string-keyed bundles of middleware that
 //!   expand at resolution time. Laravel's `web` and `api` groups are the
 //!   canonical examples.
-//! - **`middlewarePriority`** - an ordered list of TypeIds the registry
-//!   should sort to the front of the chain regardless of registration
-//!   order. The Laravel kernel ships a built-in priority list ensuring
-//!   `SubstituteBindings` always runs after `StartSession`, etc.
+//! - **`middlewarePriority`** - an ordered list of middleware types. A
+//!   chain is put in the order of the list when it runs, whatever order
+//!   its middleware were registered in. The Laravel kernel ships a built-in
+//!   priority list ensuring `SubstituteBindings` always runs after
+//!   `StartSession`, etc.
 //!
 //! These three registries are intentionally separate from
 //! [`MiddlewareRegistry`] - they're lookup tables, not execution slots.
-//! The registry consults them at boot time when materialising its global
-//! chain. They are also process-global so the bootstrap macros can write
-//! into them without having to thread a config object through.
+//! Aliases and groups are read when a route is registered, and the
+//! priority list when a chain runs
+//! ([`MiddlewareChain::execute`](crate::middleware::MiddlewareChain::execute)).
+//! They are also process-global so the bootstrap macros can write into
+//! them without having to thread a config object through.
 
-use super::{BoxedMiddleware, Middleware, into_boxed};
+use super::{BoxedMiddleware, Middleware, boxed_as};
 use std::any::TypeId;
 use std::sync::{OnceLock, RwLock};
 
@@ -94,7 +97,7 @@ where
     F: Fn() -> M + Send + Sync + 'static,
     M: Middleware + 'static,
 {
-    let factory: MiddlewareFactory = std::sync::Arc::new(move || into_boxed(factory()));
+    let factory: MiddlewareFactory = std::sync::Arc::new(move || boxed_as(factory()));
     let lock = alias_lock();
     let mut guard = match lock.write() {
         Ok(g) => g,
@@ -367,9 +370,10 @@ pub fn clear_all_middleware_groups_for_test() {
     guard.clear();
 }
 
-/// Prepend a middleware type to the priority list. Types earlier in
-/// the list sort to the front of the chain. Laravel's
-/// `prependToMiddlewarePriority`.
+/// Prepend a middleware type to the priority list, in front of every type
+/// the list holds. Laravel's `prependToMiddlewarePriority`.
+///
+/// See [`append_middleware_priority`] for what the list does to a chain.
 pub fn prepend_middleware_priority<M: Middleware + 'static>() {
     let tid = TypeId::of::<M>();
     let lock = priority_lock();
@@ -396,7 +400,8 @@ pub fn append_middleware_priority<M: Middleware + 'static>() {
     }
 }
 
-/// Read the current priority list as a snapshot of TypeIds.
+/// Read the current priority list as a snapshot of TypeIds, first in the
+/// list first.
 pub fn middleware_priority() -> Vec<TypeId> {
     let lock = priority_lock();
     let guard = match lock.read() {
@@ -492,6 +497,42 @@ mod tests {
     #[test]
     fn group_expands_to_underlying_aliases() {
         let _guard = SERIAL_TEST_LOCK.lock().unwrap();
+///
+/// The list gives order-dependent middleware a safe order when global,
+/// group and route registrations interleave: the session before
+/// authentication, authentication before the bindings.
+///
+/// ```rust,no_run
+/// # use suprnova::middleware::append_middleware_priority;
+/// # use suprnova::{async_trait, Middleware, Next, Request, Response};
+/// # struct SessionMiddleware;
+/// # #[async_trait]
+/// # impl Middleware for SessionMiddleware {
+/// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+/// # }
+/// # struct AuthMiddleware;
+/// # #[async_trait]
+/// # impl Middleware for AuthMiddleware {
+/// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+/// # }
+/// // The session runs before authentication on every route, whichever
+/// // of the two was registered first.
+/// append_middleware_priority::<SessionMiddleware>();
+/// append_middleware_priority::<AuthMiddleware>();
+/// ```
+///
+/// # What moves
+///
+/// When a chain runs, a middleware the list names is moved in front of any
+/// middleware that the list places after it and that stands before it in
+/// the chain. Nothing else moves. A middleware the list does not name keeps
+/// its place behind the middleware it was registered after, so a middleware
+/// registered after `AuthMiddleware` still runs after it.
+///
+/// The list sees the middleware registered by type: `.middleware(M)` on a
+/// route or a group, `global_middleware!`, an alias. A middleware boxed by
+/// hand and added with `.middleware_boxed(...)` has no type the list could
+/// name, and it keeps its place.
         reset_all();
 
         register_middleware_alias("auth", || AuthMw);

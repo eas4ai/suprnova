@@ -49,7 +49,7 @@ pub const fn validate_route_path(path: &'static str) -> &'static str {
     }
     path
 }
-use crate::middleware::{BoxedMiddleware, Middleware, into_boxed};
+use crate::middleware::{BoxedMiddleware, Middleware, boxed_as};
 use crate::routing::router::{BoxedHandler, Router, register_route_name};
 use crate::session::SessionBlock;
 use crate::session::blocking::register_route_block;
@@ -229,7 +229,7 @@ where
 
     /// Add middleware to this route
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
-        self.middlewares.push(into_boxed(middleware));
+        self.middlewares.push(boxed_as(middleware));
         self
     }
 
@@ -616,7 +616,7 @@ where
     /// Attach middleware that runs for every method the `any!` route
     /// was registered against.
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
-        self.middlewares.push(into_boxed(middleware));
+        self.middlewares.push(boxed_as(middleware));
         self
     }
 
@@ -753,7 +753,7 @@ impl WsRouteDef {
     /// A non-2xx response from any middleware (e.g. `AuthMiddleware`
     /// returning 401) short-circuits the upgrade.
     pub fn middleware<M: Middleware + 'static>(mut self, m: M) -> Self {
-        self.middleware.push(into_boxed(m));
+        self.middleware.push(boxed_as(m));
         self
     }
 
@@ -831,7 +831,7 @@ where
 
     /// Add middleware to this fallback route
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
-        self.middlewares.push(into_boxed(middleware));
+        self.middlewares.push(boxed_as(middleware));
         self
     }
 
@@ -1049,7 +1049,7 @@ impl GroupDef {
     /// }).middleware(AuthMiddleware).middleware(RateLimitMiddleware);
     /// ```
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
-        self.group_middlewares.push(into_boxed(middleware));
+        self.group_middlewares.push(boxed_as(middleware));
         self
     }
 

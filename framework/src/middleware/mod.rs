@@ -25,6 +25,7 @@
 
 mod aliases;
 mod chain;
+mod identity;
 mod pipeline;
 mod registry;
 mod terminable;
@@ -107,7 +108,14 @@ pub trait Middleware: Send + Sync {
 }
 
 /// Convert a Middleware trait object into a BoxedMiddleware
+pub(crate) use identity::boxed_as;
+
 pub fn into_boxed<M: Middleware + 'static>(middleware: M) -> BoxedMiddleware {
+///
+/// The box does not remember which middleware type it wraps, so the
+/// middleware priority list leaves it where it stands in a chain. The
+/// registration methods, such as `.middleware(M)` on a route and
+/// `global_middleware!`, register the type as well.
     let middleware = Arc::new(middleware);
     Arc::new(move |req, next| {
         let mw = middleware.clone();
