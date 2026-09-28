@@ -97,7 +97,6 @@ impl<S: OpaqueSessionStore> OpaqueSessionProvider<S> {
     }
 
     /// Internal issuance effect. The gate supplies the only approval witness.
-    #[allow(dead_code)]
     pub(crate) async fn issue_after_gate(
         &self,
         approval: GateApproval,
@@ -218,14 +217,12 @@ fn active(session: StoredSession, now: DateTime<Utc>) -> Result<VerifiedSession>
     ))
 }
 
-#[allow(dead_code)]
 fn new_id() -> String {
     let mut bytes = [0_u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-#[allow(dead_code)]
 fn new_token() -> SecretString {
     let mut bytes = [0_u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
