@@ -243,7 +243,12 @@ impl UploadCleanupRunner {
                     () = wake.notified() => {}
                     () = tokio::time::sleep(Duration::from_secs(30)) => {}
                 }
-                let _ = cleanup.run_once(lease.clone()).await;
+                if let Err(error) = cleanup.run_once(lease.clone()).await {
+                    tracing::warn!(
+                        error = %error,
+                        "Live upload cleanup run failed; retrying on the next interval"
+                    );
+                }
             }
         });
         *self

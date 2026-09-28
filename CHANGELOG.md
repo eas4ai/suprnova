@@ -258,6 +258,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   a fixed `PaymentError::Provider` message. Each now ends with the underlying
   error, down to the refused connection or elapsed deadline for a transport
   failure, and never includes the request URL, which carries the payment id.
+- **A failed Live upload cleanup run is logged.** The background loop that
+  retires expired uploads discarded the result of every run, so a store that
+  kept failing left the uploads in place with nothing in the log. A failed run
+  now logs a warning, and the loop retries on its next interval as before.
 
 ## 2.0.2 - 2026-09-14
 
