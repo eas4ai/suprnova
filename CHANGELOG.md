@@ -744,6 +744,38 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   arrangement that cached before: a group whose policy declared one of the
   three, with a patch on every route that replaced the dimensions. The group
   is refused now, and the dimension is to be taken out of its policy.
+- **Telemetry is exported, each signal to its own path, and a signal can have
+  an endpoint of its own.** With the `otel` feature the OTLP exporters had no
+  HTTP client: each one failed to build with `no http client specified`, no
+  trace, metric or log left the process, and the error was logged before a log
+  subscriber existed, so nothing showed it. The exporters have the blocking
+  `reqwest` client now, and an exporter that cannot be built is reported after
+  the subscriber is installed. `init_telemetry` also gave the base
+  `OTEL_EXPORTER_OTLP_ENDPOINT` to the exporter of each signal, and the
+  exporter uses an endpoint it is given in code as it is written, so the URL
+  of every signal was the root of the collector, where a collector has
+  nothing, and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
+  `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` and `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`
+  had no effect. Each signal is now sent to its own path under the base,
+  `/v1/traces`, `/v1/metrics` and `/v1/logs`, and a signal with a variable of
+  its own is sent to that URL as it is written, as the OTLP specification
+  says. Traces can go to one collector and metrics to another. The base
+  endpoint is still what turns telemetry on. `OtelConfig` has the three
+  endpoints as fields, `traces_endpoint`, `metrics_endpoint` and
+  `logs_endpoint`, which `from_env` reads, so code that builds an `OtelConfig`
+  with every field named has three more to name. A signal whose endpoint is no
+  URL is left out and reported, and the other signals are exported; the report
+  never has the endpoint in it, which can carry a password or a token. A base
+  endpoint that was given a path of a signal to make up for the missing one,
+  such as `http://collector:4318/v1/traces`, is to be the base again: the path
+  is added to it. An endpoint is a URL with the scheme `http` or `https` and a
+  host: a blank base endpoint does not turn telemetry on, and a signal whose
+  endpoint is a path alone is left out and reported, where it was built and
+  sent nothing. `OTEL_EXPORTER_OTLP_COMPRESSION=gzip` works; `zstd` is not
+  compiled in and leaves the signals out, with the reason in the log. What the
+  exporters log about their own requests is printed and not exported, so a
+  process at debug level does not send lines about its own sending without
+  end.
 
 ### Security
 

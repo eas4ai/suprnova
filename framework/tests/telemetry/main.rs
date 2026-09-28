@@ -3,3 +3,4 @@
 
 pub mod feature_gate;
 pub mod integration;
+pub mod signal_paths;
