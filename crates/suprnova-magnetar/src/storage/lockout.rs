@@ -28,6 +28,15 @@ pub struct AttemptStats {
     pub latest_at: Option<DateTime<Utc>>,
 }
 
+impl AttemptStats {
+    /// Count one failed attempt and keep the latest timestamp seen. Every
+    /// counting path goes through here so the three of them cannot drift.
+    fn record(&mut self, at: DateTime<Utc>) {
+        self.count = self.count.saturating_add(1);
+        self.latest_at = Some(self.latest_at.map_or(at, |latest| latest.max(at)));
+    }
+}
+
 /// Result of atomically reserving capacity for one verification attempt.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AttemptReservation {
@@ -340,12 +349,7 @@ where
                     if attempted_at >= window_start {
                         capacity_count = capacity_count.saturating_add(1);
                         if !is_pending_reservation::<S>(row) {
-                            stats.count = stats.count.saturating_add(1);
-                            stats.latest_at = Some(
-                                stats
-                                    .latest_at
-                                    .map_or(attempted_at, |latest| latest.max(attempted_at)),
-                            );
+                            stats.record(attempted_at);
                         }
                     }
                 }
@@ -420,8 +424,7 @@ where
                 }
 
                 if max_attempts.is_none() && at >= window_start {
-                    stats.count = stats.count.saturating_add(1);
-                    stats.latest_at = Some(stats.latest_at.map_or(at, |latest| latest.max(at)));
+                    stats.record(at);
                 }
                 Ok(AttemptReservation {
                     admitted: true,
@@ -565,12 +568,7 @@ where
                     }
                     let attempted_at = S::Lockout::read_attempted_at(row);
                     if attempted_at >= window_start {
-                        stats.count = stats.count.saturating_add(1);
-                        stats.latest_at = Some(
-                            stats
-                                .latest_at
-                                .map_or(attempted_at, |latest| latest.max(attempted_at)),
-                        );
+                        stats.record(attempted_at);
                     }
                 }
 
@@ -754,6 +752,29 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn attempt_stats_record_counts_and_keeps_the_latest_timestamp() {
+        use chrono::TimeZone;
+
+        let early = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let late = chrono::Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap();
+        let mut stats = super::AttemptStats::default();
+
+        stats.record(late);
+        stats.record(early);
+
+        assert_eq!(stats.count, 2);
+        assert_eq!(
+            stats.latest_at,
+            Some(late),
+            "an older attempt never moves it back"
+        );
+
+        stats.count = u32::MAX;
+        stats.record(late);
+        assert_eq!(stats.count, u32::MAX, "the count saturates");
+    }
     #[cfg(feature = "seaorm-postgres")]
     use chrono::TimeZone;
     #[cfg(feature = "seaorm-postgres")]
