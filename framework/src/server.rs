@@ -943,19 +943,12 @@ async fn handle_request_inner(
             if let Some(metadata) = live_metadata {
                 let runtime = match crate::live::LiveRuntime::bind() {
                     Ok(runtime) => runtime,
-                    Err(_) => {
-                        return HttpResponse::text("Live request preparation failed")
-                            .status(500)
-                            .into_hyper();
+                    Err(error) => {
+                        return live_preparation_failed(&error, &pattern, "bind");
                     }
                 };
-                if runtime
-                    .prepare_request(&mut request, metadata.operation())
-                    .is_err()
-                {
-                    return HttpResponse::text("Live request preparation failed")
-                        .status(500)
-                        .into_hyper();
+                if let Err(error) = runtime.prepare_request(&mut request, metadata.operation()) {
+                    return live_preparation_failed(&error, &pattern, "prepare");
                 }
             }
 
@@ -1275,19 +1268,12 @@ async fn handle_ws_upgrade(
     if let Some(metadata) = live_metadata {
         let runtime = match crate::live::LiveRuntime::bind() {
             Ok(runtime) => runtime,
-            Err(_) => {
-                return HttpResponse::text("Live request preparation failed")
-                    .status(500)
-                    .into_hyper();
+            Err(error) => {
+                return live_preparation_failed(&error, &pattern, "bind");
             }
         };
-        if runtime
-            .prepare_request(&mut initial_request, metadata.operation())
-            .is_err()
-        {
-            return HttpResponse::text("Live request preparation failed")
-                .status(500)
-                .into_hyper();
+        if let Err(error) = runtime.prepare_request(&mut initial_request, metadata.operation()) {
+            return live_preparation_failed(&error, &pattern, "prepare");
         }
         initial_request.record_live_security_check_before_chain(
             crate::live::attestation::SecurityCheck::Origin,
@@ -1666,6 +1652,25 @@ async fn handle_ws_upgrade(
     }
 
     convert_response_body(response)
+}
+
+/// A Live request that cannot be prepared ends as a closed 500. The visitor
+/// learns nothing from it; the log names the route, the stage and the error,
+/// so an operator can tell a missing provider from a clock fault.
+fn live_preparation_failed(
+    error: &crate::error::FrameworkError,
+    pattern: &str,
+    stage: &'static str,
+) -> hyper::Response<ServerBody> {
+    tracing::error!(
+        error = %error,
+        route = %pattern,
+        stage,
+        "Live request preparation failed"
+    );
+    HttpResponse::text("Live request preparation failed")
+        .status(500)
+        .into_hyper()
 }
 
 fn bad_request_text(msg: &str) -> hyper::Response<ServerBody> {
@@ -2190,6 +2195,20 @@ mod tests {
     //! `.unwrap()` fails loudly.
     use super::*;
     use crate::routing::Router;
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn a_live_preparation_failure_is_logged_with_its_route_stage_and_cause() {
+        let error = crate::error::FrameworkError::internal("no ledger provider is registered");
+
+        let response = live_preparation_failed(&error, "/orders/{id}", "bind");
+
+        assert_eq!(response.status(), hyper::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(logs_contain("Live request preparation failed"));
+        assert!(logs_contain("no ledger provider is registered"));
+        assert!(logs_contain("/orders/{id}"));
+        assert!(logs_contain("bind"));
+    }
 
     #[test]
     fn invalid_host_returns_typed_error_not_panic() {

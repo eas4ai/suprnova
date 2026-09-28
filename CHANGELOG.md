@@ -240,6 +240,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   visitor out, and logged nothing. It now logs a warning with the parse error
   and without the session id. A failed delete of an expired session row is
   logged as well.
+- **A Live request that cannot be prepared says why in the log.** When the
+  Live runtime could not be bound or a request could not be prepared, the
+  server answered `500 Live request preparation failed` and logged nothing. It
+  now logs the error with the route pattern and the stage, on the HTTP path
+  and on the WebSocket upgrade path; the response is unchanged.
 
 ## 2.0.2 - 2026-09-14
 
