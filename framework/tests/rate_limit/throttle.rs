@@ -425,3 +425,98 @@ async fn colliding_deferred_clauses_debit_once_on_both_response_branches() {
         assert_eq!(get_with_headers(addr, "/quota").await.0, 418);
     }
 }
+
+// --- The default limit --------------------------------------------------------
+
+/// Signs in the user the `x-test-user` header names, for this request only,
+/// the way the session middleware does for a signed-in visitor.
+struct SignsIn;
+
+#[suprnova::async_trait]
+impl suprnova::Middleware for SignsIn {
+    async fn handle(&self, request: suprnova::Request, next: suprnova::Next) -> suprnova::Response {
+        if let Some(user) = request.header("x-test-user") {
+            suprnova::Auth::set_user(Arc::new(suprnova::auth::GenericUser::new(
+                user.to_owned(),
+                None,
+                serde_json::Map::new(),
+            )));
+        }
+        next(request).await
+    }
+}
+
+async fn get_as(addr: SocketAddr, user: Option<&str>) -> u16 {
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut sender, conn) =
+        hyper::client::conn::http1::handshake::<_, Full<Bytes>>(TokioIo::new(stream))
+            .await
+            .unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let mut request = hyper::Request::builder()
+        .method("GET")
+        .uri("/api")
+        .header("Host", "localhost")
+        .header("Content-Length", "0");
+    if let Some(user) = user {
+        request = request.header("x-test-user", user);
+    }
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        sender.send_request(request.body(Full::new(Bytes::new())).unwrap()),
+    )
+    .await
+    .expect("send_request timeout")
+    .expect("hyper send_request");
+    let status = response.status().as_u16();
+    let _ = response.into_body().collect().await.unwrap();
+    status
+}
+
+#[tokio::test]
+async fn the_default_limit_is_sixty_a_minute_for_each_user_and_for_each_address() {
+    let _g = install_test_cache();
+    let router = Router::new()
+        .get("/api", |_req| async { text("ok") })
+        .middleware(SignsIn)
+        .middleware(ThrottleRequestsMiddleware::default());
+    let limit = ThrottleRequestsMiddleware::DEFAULT_MAX_ATTEMPTS;
+    assert_eq!(limit, 60);
+    let addr = spawn_server(router, 70).await;
+
+    for request in 1..=limit {
+        assert_eq!(
+            get_as(addr, Some("ada")).await,
+            200,
+            "request {request} of {limit} is inside the limit"
+        );
+    }
+    assert_eq!(
+        get_as(addr, Some("ada")).await,
+        429,
+        "request 61 is over the limit"
+    );
+
+    assert_eq!(
+        get_as(addr, Some("grace")).await,
+        200,
+        "another user has a bucket of her own"
+    );
+    assert_eq!(
+        get_as(addr, None).await,
+        200,
+        "and so has the address, for a request nobody is signed in for"
+    );
+}
+
+#[tokio::test]
+async fn the_throttle_alias_can_be_registered_with_the_default() {
+    suprnova::middleware::register_middleware_alias(
+        "throttle-default-test",
+        ThrottleRequestsMiddleware::default,
+    );
+    assert!(suprnova::middleware::resolve_middleware_alias("throttle-default-test").is_some());
+    suprnova::middleware::clear_middleware_alias("throttle-default-test");
+}

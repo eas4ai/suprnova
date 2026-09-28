@@ -163,6 +163,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   context, and the `Debug` output of `ContextSnapshot` and `ContextStore`
   names hidden keys only, and that of `FailedJob` gives the size of the
   envelope and not its text.
+- **`ThrottleRequestsMiddleware::default()`.** The plain `throttle` alias had
+  no limit to register: every constructor asked for a limit, a window and a
+  key prefix, and the manual registered the alias with a `default()` that did
+  not exist. The default is 60 requests a minute, counted for each signed-in
+  user and for each client IP when nobody is signed in, the shape of Laravel's
+  default `api` limiter. The numbers are
+  `ThrottleRequestsMiddleware::DEFAULT_MAX_ATTEMPTS` and
+  `DEFAULT_DECAY_SECONDS`. The user's bucket follows the user across routes,
+  and the address's bucket is shared by every route; `.prefix(...)` gives a
+  group of routes a budget of its own.
 
 ### Changed
 

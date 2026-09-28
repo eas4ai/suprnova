@@ -2,8 +2,11 @@
 //! Cache-backed [`RateLimiter`] facade. Mirrors
 //! `Illuminate\Routing\Middleware\ThrottleRequests`.
 //!
-//! Construct one of three ways:
+//! Construct one of four ways:
 //!
+//! - [`ThrottleRequestsMiddleware::default`] - 60 requests a minute for
+//!   each signed-in user, and for each client IP when nobody is signed in.
+//!   The limit of the plain `throttle` alias.
 //! - [`ThrottleRequestsMiddleware::by_name`] - resolve a named limiter
 //!   registered via [`RateLimiter::define`]. The named callback receives
 //!   the `&Request` and returns a [`LimitResult`] (single limit, list of
@@ -57,6 +60,63 @@ enum Mode {
         decay_seconds: u64,
     },
     Limits(Vec<Limit>),
+    /// The [`Default`] limit: one bucket for each signed-in user, and one
+    /// for each client IP when nobody is signed in.
+    PerUserOrIp {
+        max_attempts: i64,
+        decay_seconds: u64,
+    },
+}
+
+impl ThrottleRequestsMiddleware {
+    /// Requests the [`Default`] limit allows in one
+    /// [`DEFAULT_DECAY_SECONDS`](Self::DEFAULT_DECAY_SECONDS) window.
+    pub const DEFAULT_MAX_ATTEMPTS: i64 = 60;
+
+    /// Length of the [`Default`] limit's window, in seconds.
+    pub const DEFAULT_DECAY_SECONDS: u64 = 60;
+}
+
+impl Default for ThrottleRequestsMiddleware {
+    /// The limit of the plain `throttle` alias: 60 requests a minute
+    /// ([`DEFAULT_MAX_ATTEMPTS`](Self::DEFAULT_MAX_ATTEMPTS) in
+    /// [`DEFAULT_DECAY_SECONDS`](Self::DEFAULT_DECAY_SECONDS)), counted for
+    /// each signed-in user, and for each client IP when nobody is signed
+    /// in. It is the shape of Laravel's default `api` limiter,
+    /// `Limit::perMinute(60)->by($request->user()?->id ?: $request->ip())`.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::middleware::register_middleware_alias;
+    /// use suprnova::rate_limit::ThrottleRequestsMiddleware;
+    ///
+    /// register_middleware_alias("throttle", ThrottleRequestsMiddleware::default);
+    /// ```
+    ///
+    /// # What the bucket is
+    ///
+    /// The user's bucket follows the user across routes and across
+    /// addresses, and the address's bucket is shared by every route, as
+    /// they are in Laravel. [`ThrottleRequestsMiddleware::with`] differs:
+    /// it counts per address and per path. Use [`Self::prefix`] to give a
+    /// group of routes a budget of its own.
+    ///
+    /// The user is the one the default guard signed in, so the session
+    /// middleware has to run before this one for a signed-in user to be
+    /// counted as a user. The address is [`Request::ip`], which resolves
+    /// through the trusted proxies.
+    ///
+    /// The limit reads who is asking, as `Auth::id()` does. Where the
+    /// render cache stores the route, that read counts as a read of the
+    /// principal.
+    fn default() -> Self {
+        Self {
+            mode: Mode::PerUserOrIp {
+                max_attempts: Self::DEFAULT_MAX_ATTEMPTS,
+                decay_seconds: Self::DEFAULT_DECAY_SECONDS,
+            },
+            prefix: String::new(),
+        }
+    }
 }
 
 impl ThrottleRequestsMiddleware {
@@ -303,6 +363,28 @@ fn independent_keys(limits: &[Limit], mode: &Mode, prefix: &str) -> Vec<Option<S
             let identity = (
                 limit.max_attempts,
                 limit.decay_seconds(),
+        Mode::PerUserOrIp {
+            max_attempts,
+            decay_seconds,
+        } => ResolvedLimits::Ok(vec![
+            Limit::new(
+                *max_attempts,
+                std::time::Duration::from_secs(*decay_seconds),
+            )
+            .by(user_or_ip_key(request)),
+        ]),
+    }
+}
+
+/// The bucket of the [`Default`] limit: the signed-in user, else the
+/// client IP. The two are spelled apart, so a user whose id reads like an
+/// address shares no bucket with that address.
+fn user_or_ip_key(request: &Request) -> String {
+    match crate::session::auth_user_id() {
+        Some(user) => format!("user:{user}"),
+        // `unknown` is the key of a request with no peer, which is an
+        // in-process request. See `default_request_key`.
+        None => format!("ip:{}", request.ip().unwrap_or_else(|| "unknown".into())),
                 limit.after_callback.is_some(),
             );
             let occurrence = occurrences.entry(identity).or_insert(0_usize);
