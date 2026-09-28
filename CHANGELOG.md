@@ -545,6 +545,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   took no arguments and ended with `unexpected argument '--timezone'` and exit
   code 2. The CLI now takes the flag and hands it to the application, which
   checks the zone name.
+- **The scaffolded `src/tasks/mod.rs` shows a task that compiles.** Its
+  example implemented a `ScheduledTask` trait with `name` and `schedule`
+  methods. The trait is `Task`, its only method is `handle`, and the name and
+  the times a task runs at are set where it is registered. Every new project
+  received the wrong example, and copying it gave an unresolved import. The
+  comment now shows what `make:task` generates, with the registration in
+  `src/schedule.rs`.
 
 ### Security
 

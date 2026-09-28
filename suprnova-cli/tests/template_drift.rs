@@ -2027,3 +2027,120 @@ fn the_scaffold_wires_email_verification_and_password_reset() {
         "the reset link must land on the reset form; got:\n{reset}"
     );
 }
+
+/// The names a comment imports from the crate root of `suprnova`, one
+/// `(line number, name)` for each.
+///
+/// Only a name that starts with an uppercase letter is returned: a type or
+/// a trait, which the crate root names in a `pub use`. A lowercase name is
+/// a module, a function or a macro, and a `#[macro_export]` macro is at the
+/// crate root without the crate root naming it. A path with a module in
+/// front, `suprnova::http::Request`, is not an import from the crate root.
+fn crate_root_names_imported_in_comments(template: &str) -> Vec<(usize, String)> {
+    let mut found = Vec::new();
+    for (index, line) in template.lines().enumerate() {
+        let line = line.trim();
+        if !line.starts_with("//") {
+            continue;
+        }
+        let Some((_, imported)) = line.split_once("use suprnova::") else {
+            continue;
+        };
+        let imported = imported.trim_end().trim_end_matches(';');
+        let names: Vec<&str> = match imported.strip_prefix('{') {
+            Some(group) => group.trim_end_matches('}').split(',').collect(),
+            None => vec![imported],
+        };
+        for name in names {
+            let name = name.trim();
+            let is_a_type = name.starts_with(|c: char| c.is_ascii_uppercase())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if is_a_type {
+                found.push((index + 1, name.to_owned()));
+            }
+        }
+    }
+    found
+}
+
+/// Whether the framework's crate root names `name` outside a comment.
+fn crate_root_names(crate_root: &str, name: &str) -> bool {
+    code_only(crate_root)
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|word| word == name)
+}
+
+/// A name that a template's comment imports from `suprnova` is a name the
+/// crate root has.
+///
+/// `scaffold_snapshot` compiles what a template's code imports. It does
+/// not compile a comment, and a comment is where a scaffold teaches: the
+/// `tasks/mod.rs` every new project received showed `impl ScheduledTask`,
+/// with `name` and `schedule` methods, for a trait that is named `Task` and
+/// has neither. A developer who copied the example from their own project
+/// got an unresolved import.
+#[test]
+fn every_name_a_template_comment_imports_is_at_the_crate_root() {
+    let crate_root = read_from_repo("framework/src/lib.rs");
+    let mut checked = 0;
+    let mut unknown = Vec::new();
+
+    visit(
+        &cli_root().join("src/templates/files"),
+        &mut |path, body| {
+            for (line, name) in crate_root_names_imported_in_comments(body) {
+                checked += 1;
+                if !crate_root_names(&crate_root, &name) {
+                    unknown.push(format!("{}:{line}: {name}", path.display()));
+                }
+            }
+        },
+    );
+
+    assert!(
+        checked > 0,
+        "no template comment imports from `suprnova`, so this test checks \
+         nothing; the walk or the parser is broken"
+    );
+    assert!(
+        unknown.is_empty(),
+        "template comments import names the crate root of `suprnova` does \
+         not have:\n{}",
+        unknown.join("\n")
+    );
+}
+
+/// The parser behind the test above finds what it is there to find.
+#[test]
+fn the_comment_import_parser_reads_groups_and_single_names() {
+    let template = "\
+//! use suprnova::{ScheduledTask, CronExpression, FrameworkError};
+/// use suprnova::Task;
+// use suprnova::http::Request;
+//! use suprnova::{routes, get};
+use suprnova::Schedule;
+";
+    let names: Vec<(usize, String)> = crate_root_names_imported_in_comments(template);
+    assert_eq!(
+        names,
+        [
+            (1, "ScheduledTask".to_owned()),
+            (1, "CronExpression".to_owned()),
+            (1, "FrameworkError".to_owned()),
+            (2, "Task".to_owned()),
+        ],
+        "a module path, a lowercase name and an import in code are not \
+         crate-root type names in a comment"
+    );
+
+    let crate_root = "// ScheduledTask was the old name\npub use schedule::{Task, TaskResult};\n";
+    assert!(crate_root_names(crate_root, "Task"));
+    assert!(
+        !crate_root_names(crate_root, "ScheduledTask"),
+        "a name in a comment of the crate root is not an export"
+    );
+    assert!(
+        !crate_root_names(crate_root, "Tas"),
+        "a part of a name is not the name"
+    );
+}
