@@ -31,11 +31,12 @@ mod registry;
 mod terminable;
 
 pub use aliases::{
-    MiddlewareFactory, MiddlewareResolveError, append_middleware_priority, clear_middleware_alias,
-    clear_middleware_group, has_middleware_alias, has_middleware_group, middleware_priority,
-    prepend_middleware_priority, register_middleware_alias, register_middleware_group,
+    MiddlewareArgumentsFactory, MiddlewareFactory, MiddlewareResolveError,
+    append_middleware_priority, clear_middleware_alias, clear_middleware_group,
+    has_middleware_alias, has_middleware_group, middleware_priority, prepend_middleware_priority,
+    register_middleware_alias, register_middleware_alias_with_args, register_middleware_group,
     registered_middleware_aliases, registered_middleware_groups, resolve_middleware_alias,
-    resolve_middleware_group,
+    resolve_middleware_group, resolve_named_middleware, try_resolve_middleware_alias,
 };
 pub use chain::MiddlewareChain;
 pub use pipeline::Pipeline;
@@ -107,15 +108,15 @@ pub trait Middleware: Send + Sync {
     async fn handle(&self, request: Request, next: Next) -> Response;
 }
 
-/// Convert a Middleware trait object into a BoxedMiddleware
 pub(crate) use identity::boxed_as;
 
-pub fn into_boxed<M: Middleware + 'static>(middleware: M) -> BoxedMiddleware {
+/// Convert a Middleware trait object into a BoxedMiddleware
 ///
 /// The box does not remember which middleware type it wraps, so the
 /// middleware priority list leaves it where it stands in a chain. The
 /// registration methods, such as `.middleware(M)` on a route and
 /// `global_middleware!`, register the type as well.
+pub fn into_boxed<M: Middleware + 'static>(middleware: M) -> BoxedMiddleware {
     let middleware = Arc::new(middleware);
     Arc::new(move |req, next| {
         let mw = middleware.clone();

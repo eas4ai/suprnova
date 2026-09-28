@@ -91,6 +91,29 @@ impl GroupBuilder {
         self
     }
 
+    /// Add the middleware a name stands for: an alias registered with
+    /// [`register_middleware_alias`](crate::middleware::register_middleware_alias),
+    /// an alias with arguments such as `"throttle:60,1"`, or a group, which
+    /// adds every middleware of the group in order.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not registered, or the alias refuses the
+    /// arguments. That is when the route is registered, which is at boot,
+    /// and never on a request. Use [`Self::try_middleware_named`] to get
+    /// the error instead.
+    pub fn middleware_named(self, name: &str) -> Self {
+        self.try_middleware_named(name)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::middleware_named`].
+    pub fn try_middleware_named(mut self, name: &str) -> Result<Self, FrameworkError> {
+        self.middleware
+            .extend(crate::middleware::resolve_named_middleware(name)?);
+        Ok(self)
+    }
+
     /// Serialize the requests that carry one session on every route in
     /// this group (SESS-001); see [`RouteBuilder::block_session`].
     pub fn block_session(mut self, block: SessionBlock) -> Self {

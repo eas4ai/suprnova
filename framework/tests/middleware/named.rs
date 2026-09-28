@@ -1,0 +1,224 @@
+//! Middleware applied by name: `.middleware_named("auth")`, an alias with
+//! arguments, and a group, on a route, on a group of routes and on the
+//! macro builders. The name is resolved when the route is registered, so
+//! an unknown name stops the boot and never a request.
+
+use std::convert::Infallible;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Incoming;
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
+use serial_test::serial;
+use suprnova::http::text;
+use suprnova::middleware::{
+    clear_all_middleware_aliases_for_test, clear_all_middleware_groups_for_test,
+    register_middleware_alias, register_middleware_alias_with_args, register_middleware_group,
+    resolve_middleware_alias, try_resolve_middleware_alias,
+};
+use suprnova::{
+    FrameworkError, Middleware, MiddlewareRegistry, Next, Request, Response, Router, handle_request,
+};
+
+/// What ran for the request of the test that is running, in order.
+static RAN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Records the label it was built with.
+struct Records(String);
+
+#[async_trait]
+impl Middleware for Records {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        RAN.lock().unwrap().push(self.0.clone());
+        next(request).await
+    }
+}
+
+/// Aliases and groups are process-wide. Each test starts from none and
+/// leaves none behind, passed or not.
+struct Names;
+
+impl Names {
+    fn none() -> Self {
+        clear_all_middleware_aliases_for_test();
+        clear_all_middleware_groups_for_test();
+        RAN.lock().unwrap().clear();
+        Self
+    }
+}
+
+impl Drop for Names {
+    fn drop(&mut self) {
+        clear_all_middleware_aliases_for_test();
+        clear_all_middleware_groups_for_test();
+    }
+}
+
+fn register_the_usual_names() {
+    register_middleware_alias("auth", || Records("auth".into()));
+    register_middleware_alias("verified", || Records("verified".into()));
+    register_middleware_alias_with_args("role", |arguments| match arguments {
+        [] => Err(FrameworkError::internal("role needs the role to require")),
+        roles => Ok(Records(format!("role:{}", roles.join("+")))),
+    });
+    register_middleware_group("members", ["auth".to_string(), "verified".to_string()]);
+}
+
+async fn run(router: impl Into<Router>, path: &str) -> Vec<String> {
+    let router = Arc::new(router.into());
+    let registry = Arc::new(MiddlewareRegistry::new());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind an ephemeral listener");
+    let addr: SocketAddr = listener.local_addr().expect("local_addr");
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let service = service_fn(move |request: hyper::Request<Incoming>| {
+            let router = router.clone();
+            let registry = registry.clone();
+            async move { Ok::<_, Infallible>(handle_request(router, registry, request).await) }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await;
+    });
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut sender, conn) =
+        hyper::client::conn::http1::handshake::<_, Full<Bytes>>(TokioIo::new(stream))
+            .await
+            .unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let request = hyper::Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("Host", "localhost")
+        .header("Content-Length", "0")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(5), sender.send_request(request))
+        .await
+        .expect("the request timed out")
+        .expect("the request failed");
+    assert_eq!(response.status().as_u16(), 200);
+    let _ = response.into_body().collect().await.unwrap();
+    RAN.lock().unwrap().clone()
+}
+
+#[tokio::test]
+#[serial]
+async fn a_route_names_an_alias_an_alias_with_arguments_and_a_group() {
+    let _names = Names::none();
+    register_the_usual_names();
+
+    let router = Router::new()
+        .get("/reports", |_req: Request| async { text("ok") })
+        .middleware_named("members")
+        .middleware_named("role:admin,auditor");
+
+    assert_eq!(
+        run(router, "/reports").await,
+        ["auth", "verified", "role:admin+auditor"]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_group_of_routes_names_its_middleware() {
+    let _names = Names::none();
+    register_the_usual_names();
+
+    let router = Router::new()
+        .group("/admin", |routes| {
+            routes.get("/users", |_req: Request| async { text("ok") })
+        })
+        .middleware_named("auth")
+        .middleware_named("role: admin ");
+
+    assert_eq!(run(router, "/admin/users").await, ["auth", "role:admin"]);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_name_that_is_not_registered_fails_when_the_route_is_registered() {
+    let _names = Names::none();
+    register_the_usual_names();
+
+    let error = Router::new()
+        .get("/reports", |_req: Request| async { text("ok") })
+        .try_middleware_named("atuh")
+        .err()
+        .expect("a typo must not become a route without its middleware");
+
+    assert!(
+        error
+            .to_string()
+            .contains("middleware alias `atuh` is not registered"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+#[should_panic(expected = "middleware alias `atuh` is not registered")]
+async fn the_infallible_spelling_stops_the_boot() {
+    let _names = Names::none();
+    let _router = Router::new()
+        .get("/reports", |_req: Request| async { text("ok") })
+        .middleware_named("atuh");
+}
+
+#[test]
+#[serial]
+fn an_alias_says_why_it_has_no_middleware_to_give() {
+    let _names = Names::none();
+    register_the_usual_names();
+
+    let given_arguments = try_resolve_middleware_alias("auth:admin")
+        .err()
+        .expect("`auth` reads no arguments");
+    assert!(
+        given_arguments
+            .to_string()
+            .contains("`auth` takes no arguments"),
+        "{given_arguments}"
+    );
+
+    let refused = try_resolve_middleware_alias("role")
+        .err()
+        .expect("`role` needs one");
+    assert!(
+        refused
+            .to_string()
+            .contains("role needs the role to require"),
+        "the factory's own reason must reach the caller: {refused}"
+    );
+
+    assert!(resolve_middleware_alias("auth").is_some());
+    assert!(resolve_middleware_alias("role:admin").is_some());
+    assert!(resolve_middleware_alias("auth:admin").is_none());
+    assert!(
+        resolve_middleware_alias("role:").is_none(),
+        "a colon with nothing after it gives no arguments"
+    );
+}
+
+#[test]
+#[serial]
+fn a_group_may_list_an_alias_with_arguments() {
+    let _names = Names::none();
+    register_the_usual_names();
+    register_middleware_group("admins", ["members".to_string(), "role:admin".to_string()]);
+
+    let resolved = suprnova::middleware::resolve_named_middleware("admins").unwrap();
+
+    assert_eq!(resolved.len(), 3, "auth, verified and role:admin");
+}

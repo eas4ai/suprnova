@@ -184,6 +184,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   bucket. A request with no address to resolve gets a bucket of its own.
   `on_backend_error`, `only_when` and `key_reads_body` chain onto it; when no
   limiter is installed the backend error policy decides.
+- **Middleware by name on routes.** Aliases and groups could be registered and
+  resolved, but no route took a name: every `.middleware(...)` wanted a type,
+  and nothing parsed `throttle:60,1`. Routes, groups of routes and the macro
+  builders now have `.middleware_named("auth")`, which takes an alias, an
+  alias with arguments, or a group that adds every middleware of the group in
+  order. The name is resolved when the route is registered, so a name that is
+  not registered stops the boot and never a request;
+  `.try_middleware_named(...)` returns the error.
+  `register_middleware_alias_with_args(name, |arguments| ...)` registers an
+  alias that reads the arguments after the colon, and a group may list such an
+  alias. `try_resolve_middleware_alias` says why an alias gave no middleware.
+  `ThrottleRequestsMiddleware::from_alias_args` is the factory for the
+  `throttle` alias: `throttle`, `throttle:60`, `throttle:60,5`,
+  `throttle:60,5,prefix` and `throttle:api` for a named limiter.
 
 ### Changed
 

@@ -32,6 +32,7 @@
 //! }
 //! ```
 
+use crate::FrameworkError;
 use crate::http::{Request, Response};
 
 /// Const function to validate route paths start with '/'
@@ -231,6 +232,29 @@ where
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.middlewares.push(boxed_as(middleware));
         self
+    }
+
+    /// Add the middleware a name stands for: an alias registered with
+    /// [`register_middleware_alias`](crate::middleware::register_middleware_alias),
+    /// an alias with arguments such as `"throttle:60,1"`, or a group, which
+    /// adds every middleware of the group in order.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not registered, or the alias refuses the
+    /// arguments. That is when the route is registered, which is at boot,
+    /// and never on a request. Use [`Self::try_middleware_named`] to get
+    /// the error instead.
+    pub fn middleware_named(self, name: &str) -> Self {
+        self.try_middleware_named(name)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::middleware_named`].
+    pub fn try_middleware_named(mut self, name: &str) -> Result<Self, FrameworkError> {
+        self.middlewares
+            .extend(crate::middleware::resolve_named_middleware(name)?);
+        Ok(self)
     }
 
     /// Serialize the requests that carry one session on this route
@@ -620,6 +644,29 @@ where
         self
     }
 
+    /// Add the middleware a name stands for: an alias registered with
+    /// [`register_middleware_alias`](crate::middleware::register_middleware_alias),
+    /// an alias with arguments such as `"throttle:60,1"`, or a group, which
+    /// adds every middleware of the group in order.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not registered, or the alias refuses the
+    /// arguments. That is when the route is registered, which is at boot,
+    /// and never on a request. Use [`Self::try_middleware_named`] to get
+    /// the error instead.
+    pub fn middleware_named(self, name: &str) -> Self {
+        self.try_middleware_named(name)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::middleware_named`].
+    pub fn try_middleware_named(mut self, name: &str) -> Result<Self, FrameworkError> {
+        self.middlewares
+            .extend(crate::middleware::resolve_named_middleware(name)?);
+        Ok(self)
+    }
+
     /// Register this `any` route against the router. Drives
     /// [`Router::any`] then fans the middleware list across every
     /// method, then applies the optional name once.
@@ -757,6 +804,29 @@ impl WsRouteDef {
         self
     }
 
+    /// Add the middleware a name stands for: an alias registered with
+    /// [`register_middleware_alias`](crate::middleware::register_middleware_alias),
+    /// an alias with arguments such as `"throttle:60,1"`, or a group, which
+    /// adds every middleware of the group in order.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not registered, or the alias refuses the
+    /// arguments. That is when the route is registered, which is at boot,
+    /// and never on a request. Use [`Self::try_middleware_named`] to get
+    /// the error instead.
+    pub fn middleware_named(self, name: &str) -> Self {
+        self.try_middleware_named(name)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::middleware_named`].
+    pub fn try_middleware_named(mut self, name: &str) -> Result<Self, FrameworkError> {
+        self.middleware
+            .extend(crate::middleware::resolve_named_middleware(name)?);
+        Ok(self)
+    }
+
     /// Override the default [`WsConfig`] for this route. Use to set
     /// per-route `ping_interval`, `max_message_size`, `max_frame_size`,
     /// or `max_missed_pings`. Routes without `.config(...)` use the
@@ -833,6 +903,29 @@ where
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.middlewares.push(boxed_as(middleware));
         self
+    }
+
+    /// Add the middleware a name stands for: an alias registered with
+    /// [`register_middleware_alias`](crate::middleware::register_middleware_alias),
+    /// an alias with arguments such as `"throttle:60,1"`, or a group, which
+    /// adds every middleware of the group in order.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not registered, or the alias refuses the
+    /// arguments. That is when the route is registered, which is at boot,
+    /// and never on a request. Use [`Self::try_middleware_named`] to get
+    /// the error instead.
+    pub fn middleware_named(self, name: &str) -> Self {
+        self.try_middleware_named(name)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::middleware_named`].
+    pub fn try_middleware_named(mut self, name: &str) -> Result<Self, FrameworkError> {
+        self.middlewares
+            .extend(crate::middleware::resolve_named_middleware(name)?);
+        Ok(self)
     }
 
     /// Register this fallback definition with a router
@@ -1078,6 +1171,29 @@ impl GroupDef {
     ///
     /// # Middleware Inheritance
     ///
+    /// Add the middleware a name stands for: an alias registered with
+    /// [`register_middleware_alias`](crate::middleware::register_middleware_alias),
+    /// an alias with arguments such as `"throttle:60,1"`, or a group, which
+    /// adds every middleware of the group in order.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not registered, or the alias refuses the
+    /// arguments. That is when the route is registered, which is at boot,
+    /// and never on a request. Use [`Self::try_middleware_named`] to get
+    /// the error instead.
+    pub fn middleware_named(self, name: &str) -> Self {
+        self.try_middleware_named(name)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::middleware_named`].
+    pub fn try_middleware_named(mut self, name: &str) -> Result<Self, FrameworkError> {
+        self.group_middlewares
+            .extend(crate::middleware::resolve_named_middleware(name)?);
+        Ok(self)
+    }
+
     /// Parent group middleware is applied before child group middleware,
     /// which is applied before route-specific middleware.
     pub fn register(self, mut router: Router) -> Router {

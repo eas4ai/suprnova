@@ -5,7 +5,9 @@
 //!
 //! - **`middlewareAliases`** - string-keyed lookups so consumers can refer
 //!   to `"auth"` / `"throttle"` instead of a fully-qualified type. Laravel
-//!   uses the alias map in `Kernel::$middlewareAliases`.
+//!   uses the alias map in `Kernel::$middlewareAliases`. A route names one
+//!   with `.middleware_named("auth")`, and gives it arguments after a colon,
+//!   as in `.middleware_named("throttle:60,1")`.
 //! - **`middlewareGroups`** - string-keyed bundles of middleware that
 //!   expand at resolution time. Laravel's `web` and `api` groups are the
 //!   canonical examples.
@@ -24,8 +26,9 @@
 //! them without having to thread a config object through.
 
 use super::{BoxedMiddleware, Middleware, boxed_as};
+use crate::error::FrameworkError;
 use std::any::TypeId;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 /// A factory closure that produces a fresh `BoxedMiddleware`. Used by
 /// the alias and group registries because a `Middleware: 'static` trait
@@ -33,10 +36,25 @@ use std::sync::{OnceLock, RwLock};
 /// instantiate per registration site via a factory instead.
 pub type MiddlewareFactory = std::sync::Arc<dyn Fn() -> BoxedMiddleware + Send + Sync>;
 
+/// A factory that builds a middleware from the arguments a route wrote
+/// after the alias name: `["60", "1"]` for `"throttle:60,1"`. Registered
+/// with [`register_middleware_alias_with_args`].
+pub type MiddlewareArgumentsFactory =
+    Arc<dyn Fn(&[&str]) -> Result<BoxedMiddleware, FrameworkError> + Send + Sync>;
+
+/// What an alias name is bound to.
+#[derive(Clone)]
+enum AliasFactory {
+    /// Takes no arguments: `"auth"`.
+    Plain(MiddlewareFactory),
+    /// Reads the arguments after the colon: `"throttle:60,1"`.
+    WithArguments(MiddlewareArgumentsFactory),
+}
+
 /// Stored shape of the alias registry - extracted to a `type` alias so
 /// the `OnceLock<RwLock<...>>` declaration below doesn't trip
 /// `clippy::type_complexity`.
-type AliasMap = Vec<(String, MiddlewareFactory)>;
+type AliasMap = Vec<(String, AliasFactory)>;
 
 /// Stored shape of the named-group registry. Each entry maps a group
 /// name to its ordered list of alias names. Aliased for the same
@@ -97,35 +115,123 @@ where
     F: Fn() -> M + Send + Sync + 'static,
     M: Middleware + 'static,
 {
-    let factory: MiddlewareFactory = std::sync::Arc::new(move || boxed_as(factory()));
+    store_alias(
+        name,
+        AliasFactory::Plain(Arc::new(move || boxed_as(factory()))),
+    );
+}
+
+/// Register a named middleware alias that reads arguments.
+///
+/// A route writes the arguments after the name, separated by commas:
+/// `"throttle:60,1"` calls the factory with `["60", "1"]`, and the bare
+/// `"throttle"` calls it with none. The factory decides what they mean, and
+/// returns an error for arguments it cannot use. The route that named the
+/// alias then fails to register, which is at boot and not on a request.
+///
+/// Registration is last-wins for the same name, as it is for
+/// [`register_middleware_alias`], and an alias is one or the other: the
+/// later registration replaces the earlier whichever kind it was.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use suprnova::middleware::register_middleware_alias_with_args;
+/// use suprnova::rate_limit::ThrottleRequestsMiddleware;
+///
+/// register_middleware_alias_with_args("throttle", ThrottleRequestsMiddleware::from_alias_args);
+/// ```
+pub fn register_middleware_alias_with_args<F, M>(name: &str, factory: F)
+where
+    F: Fn(&[&str]) -> Result<M, FrameworkError> + Send + Sync + 'static,
+    M: Middleware + 'static,
+{
+    store_alias(
+        name,
+        AliasFactory::WithArguments(Arc::new(move |arguments| factory(arguments).map(boxed_as))),
+    );
+}
+
+fn store_alias(name: &str, factory: AliasFactory) {
     let lock = alias_lock();
     let mut guard = match lock.write() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    let name_owned = name.to_string();
-    if let Some(slot) = guard.iter_mut().find(|(n, _)| n == &name_owned) {
+    if let Some(slot) = guard.iter_mut().find(|(n, _)| n == name) {
         slot.1 = factory;
     } else {
-        guard.push((name_owned, factory));
+        guard.push((name.to_string(), factory));
     }
 }
 
 /// Look up a registered alias and produce a fresh `BoxedMiddleware` from
-/// its factory. Returns `None` if no alias with that name was registered.
-///
-/// Used by the router / group builder when consumers refer to middleware
-/// by name (`.middleware_alias("auth")`) instead of by type.
+/// its factory. `name` may carry arguments, as in `"throttle:60,1"`.
+/// Returns `None` if no alias with that name was registered, or if the
+/// alias did not accept the arguments; [`try_resolve_middleware_alias`]
+/// says which.
 pub fn resolve_middleware_alias(name: &str) -> Option<BoxedMiddleware> {
-    let lock = alias_lock();
-    let guard = match lock.read() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
+    try_resolve_middleware_alias(name).ok()
+}
+
+/// [`resolve_middleware_alias`], with the reason when there is no
+/// middleware to return: the alias is not registered, it takes no
+/// arguments and was given some, or its factory refused the arguments.
+pub fn try_resolve_middleware_alias(spec: &str) -> Result<BoxedMiddleware, FrameworkError> {
+    let (name, arguments) = split_alias(spec);
+    // Cloned out, so the factory runs without the registry lock: a factory
+    // may register or resolve an alias of its own.
+    let factory = {
+        let lock = alias_lock();
+        let guard = match lock.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, factory)| factory.clone())
     };
-    guard
-        .iter()
-        .find(|(n, _)| n == name)
-        .map(|(_, factory)| factory())
+    match factory {
+        None => Err(FrameworkError::internal(format!(
+            "middleware alias `{name}` is not registered. Register it with \
+             register_middleware_alias before the routes that name it"
+        ))),
+        Some(AliasFactory::Plain(factory)) if arguments.is_empty() => Ok(factory()),
+        Some(AliasFactory::Plain(_)) => Err(FrameworkError::internal(format!(
+            "middleware alias `{name}` takes no arguments, and `{spec}` gives it {}. \
+             Register it with register_middleware_alias_with_args to read them",
+            arguments.len()
+        ))),
+        Some(AliasFactory::WithArguments(factory)) => factory(&arguments).map_err(|e| {
+            FrameworkError::internal(format!("middleware alias `{spec}` was refused: {e}"))
+        }),
+    }
+}
+
+/// Split `"throttle:60,1"` into the alias name and its arguments. A name
+/// with no colon, or with nothing after it, has no arguments.
+fn split_alias(spec: &str) -> (&str, Vec<&str>) {
+    match spec.split_once(':') {
+        Some((name, arguments)) if !arguments.trim().is_empty() => {
+            (name.trim(), arguments.split(',').map(str::trim).collect())
+        }
+        Some((name, _)) => (name.trim(), Vec::new()),
+        None => (spec.trim(), Vec::new()),
+    }
+}
+
+/// Resolve what a route named with `.middleware_named(...)`: a group, which
+/// gives every middleware of the group in order, or an alias, with or
+/// without arguments, which gives one.
+///
+/// A group wins over an alias of the same name, as it does inside a group.
+pub fn resolve_named_middleware(name: &str) -> Result<Vec<BoxedMiddleware>, FrameworkError> {
+    if is_registered_group(name.trim()) {
+        return resolve_middleware_group(name.trim())
+            .map_err(|e| FrameworkError::internal(e.to_string()));
+    }
+    try_resolve_middleware_alias(name).map(|middleware| vec![middleware])
 }
 
 /// Whether an alias by this name has been registered.
@@ -388,6 +494,42 @@ pub fn prepend_middleware_priority<M: Middleware + 'static>() {
 
 /// Append a middleware type to the priority list. Laravel's
 /// `appendToMiddlewarePriority`.
+///
+/// The list gives order-dependent middleware a safe order when global,
+/// group and route registrations interleave: the session before
+/// authentication, authentication before the bindings.
+///
+/// ```rust,no_run
+/// # use suprnova::middleware::append_middleware_priority;
+/// # use suprnova::{async_trait, Middleware, Next, Request, Response};
+/// # struct SessionMiddleware;
+/// # #[async_trait]
+/// # impl Middleware for SessionMiddleware {
+/// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+/// # }
+/// # struct AuthMiddleware;
+/// # #[async_trait]
+/// # impl Middleware for AuthMiddleware {
+/// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+/// # }
+/// // The session runs before authentication on every route, whichever
+/// // of the two was registered first.
+/// append_middleware_priority::<SessionMiddleware>();
+/// append_middleware_priority::<AuthMiddleware>();
+/// ```
+///
+/// # What moves
+///
+/// When a chain runs, a middleware the list names is moved in front of any
+/// middleware that the list places after it and that stands before it in
+/// the chain. Nothing else moves. A middleware the list does not name keeps
+/// its place behind the middleware it was registered after, so a middleware
+/// registered after `AuthMiddleware` still runs after it.
+///
+/// The list sees the middleware registered by type: `.middleware(M)` on a
+/// route or a group, `global_middleware!`, an alias. A middleware boxed by
+/// hand and added with `.middleware_boxed(...)` has no type the list could
+/// name, and it keeps its place.
 pub fn append_middleware_priority<M: Middleware + 'static>() {
     let tid = TypeId::of::<M>();
     let lock = priority_lock();
@@ -497,42 +639,6 @@ mod tests {
     #[test]
     fn group_expands_to_underlying_aliases() {
         let _guard = SERIAL_TEST_LOCK.lock().unwrap();
-///
-/// The list gives order-dependent middleware a safe order when global,
-/// group and route registrations interleave: the session before
-/// authentication, authentication before the bindings.
-///
-/// ```rust,no_run
-/// # use suprnova::middleware::append_middleware_priority;
-/// # use suprnova::{async_trait, Middleware, Next, Request, Response};
-/// # struct SessionMiddleware;
-/// # #[async_trait]
-/// # impl Middleware for SessionMiddleware {
-/// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
-/// # }
-/// # struct AuthMiddleware;
-/// # #[async_trait]
-/// # impl Middleware for AuthMiddleware {
-/// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
-/// # }
-/// // The session runs before authentication on every route, whichever
-/// // of the two was registered first.
-/// append_middleware_priority::<SessionMiddleware>();
-/// append_middleware_priority::<AuthMiddleware>();
-/// ```
-///
-/// # What moves
-///
-/// When a chain runs, a middleware the list names is moved in front of any
-/// middleware that the list places after it and that stands before it in
-/// the chain. Nothing else moves. A middleware the list does not name keeps
-/// its place behind the middleware it was registered after, so a middleware
-/// registered after `AuthMiddleware` still runs after it.
-///
-/// The list sees the middleware registered by type: `.middleware(M)` on a
-/// route or a group, `global_middleware!`, an alias. A middleware boxed by
-/// hand and added with `.middleware_boxed(...)` has no type the list could
-/// name, and it keeps its place.
         reset_all();
 
         register_middleware_alias("auth", || AuthMw);

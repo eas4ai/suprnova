@@ -2,5 +2,6 @@
 //! one former top-level test file per submodule (folded 2026-09-05).
 
 pub mod maintenance_middleware;
+pub mod named;
 pub mod panic_safety;
 pub mod priority;

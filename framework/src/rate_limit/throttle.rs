@@ -168,6 +168,71 @@ impl ThrottleRequestsMiddleware {
         self.prefix = prefix.into();
         self
     }
+
+    /// Build the middleware from the arguments of a `throttle` alias, the
+    /// way Laravel reads `throttle:60,1`. It is the factory to register the
+    /// alias with:
+    ///
+    /// ```rust,no_run
+    /// use suprnova::middleware::register_middleware_alias_with_args;
+    /// use suprnova::rate_limit::ThrottleRequestsMiddleware;
+    ///
+    /// register_middleware_alias_with_args("throttle", ThrottleRequestsMiddleware::from_alias_args);
+    /// ```
+    ///
+    /// | A route writes | It gets |
+    /// |---|---|
+    /// | `throttle` | [`Self::default`] |
+    /// | `throttle:60` | 60 requests a minute, [`Self::with`] |
+    /// | `throttle:60,5` | 60 requests in 5 minutes |
+    /// | `throttle:60,5,uploads` | the same, with the key prefix `uploads` |
+    /// | `throttle:api` | the limiter named `api`, [`Self::by_name`] |
+    ///
+    /// # Errors
+    ///
+    /// A number that does not parse where one is expected, a limit or a
+    /// window of zero, and more than three arguments.
+    pub fn from_alias_args(arguments: &[&str]) -> Result<Self, crate::FrameworkError> {
+        let refused = |what: String| crate::FrameworkError::internal(what);
+        let Some(first) = arguments.first() else {
+            return Ok(Self::default());
+        };
+        if arguments.len() > 3 {
+            return Err(refused(format!(
+                "throttle takes a limit, a window in minutes and a key prefix, \
+                 and was given {} arguments",
+                arguments.len()
+            )));
+        }
+        // A first argument that is no number names a limiter.
+        let Ok(max_attempts) = first.parse::<i64>() else {
+            if arguments.len() > 1 {
+                return Err(refused(format!(
+                    "throttle:{first} names a limiter, which takes no further arguments"
+                )));
+            }
+            return Ok(Self::by_name(*first));
+        };
+        if max_attempts < 1 {
+            return Err(refused(format!(
+                "a throttle limit of {max_attempts} would refuse every request"
+            )));
+        }
+        let decay_minutes = match arguments.get(1) {
+            None => 1,
+            Some(minutes) => minutes
+                .parse::<u64>()
+                .ok()
+                .filter(|m| *m > 0)
+                .ok_or_else(|| {
+                    refused(format!(
+                        "`{minutes}` is not a throttle window: a whole number of minutes, 1 or more"
+                    ))
+                })?,
+        };
+        let prefix = arguments.get(2).copied().unwrap_or_default();
+        Ok(Self::with(max_attempts, decay_minutes, prefix))
+    }
 }
 
 #[async_trait]
@@ -298,6 +363,28 @@ fn resolve_limits(mode: &Mode, request: &Request) -> ResolvedLimits {
             ])
         }
         Mode::Limits(limits) => ResolvedLimits::Ok(limits.clone()),
+        Mode::PerUserOrIp {
+            max_attempts,
+            decay_seconds,
+        } => ResolvedLimits::Ok(vec![
+            Limit::new(
+                *max_attempts,
+                std::time::Duration::from_secs(*decay_seconds),
+            )
+            .by(user_or_ip_key(request)),
+        ]),
+    }
+}
+
+/// The bucket of the [`Default`] limit: the signed-in user, else the
+/// client IP. The two are spelled apart, so a user whose id reads like an
+/// address shares no bucket with that address.
+fn user_or_ip_key(request: &Request) -> String {
+    match crate::session::auth_user_id() {
+        Some(user) => format!("user:{user}"),
+        // `unknown` is the key of a request with no peer, which is an
+        // in-process request. See `default_request_key`.
+        None => format!("ip:{}", request.ip().unwrap_or_else(|| "unknown".into())),
     }
 }
 
@@ -363,28 +450,6 @@ fn independent_keys(limits: &[Limit], mode: &Mode, prefix: &str) -> Vec<Option<S
             let identity = (
                 limit.max_attempts,
                 limit.decay_seconds(),
-        Mode::PerUserOrIp {
-            max_attempts,
-            decay_seconds,
-        } => ResolvedLimits::Ok(vec![
-            Limit::new(
-                *max_attempts,
-                std::time::Duration::from_secs(*decay_seconds),
-            )
-            .by(user_or_ip_key(request)),
-        ]),
-    }
-}
-
-/// The bucket of the [`Default`] limit: the signed-in user, else the
-/// client IP. The two are spelled apart, so a user whose id reads like an
-/// address shares no bucket with that address.
-fn user_or_ip_key(request: &Request) -> String {
-    match crate::session::auth_user_id() {
-        Some(user) => format!("user:{user}"),
-        // `unknown` is the key of a request with no peer, which is an
-        // in-process request. See `default_request_key`.
-        None => format!("ip:{}", request.ip().unwrap_or_else(|| "unknown".into())),
                 limit.after_callback.is_some(),
             );
             let occurrence = occurrences.entry(identity).or_insert(0_usize);

@@ -520,3 +520,40 @@ async fn the_throttle_alias_can_be_registered_with_the_default() {
     assert!(suprnova::middleware::resolve_middleware_alias("throttle-default-test").is_some());
     suprnova::middleware::clear_middleware_alias("throttle-default-test");
 }
+
+// --- The throttle alias and its arguments ------------------------------------
+
+#[tokio::test]
+async fn the_throttle_alias_reads_its_arguments_the_way_laravel_does() {
+    let _g = install_test_cache();
+    let two_a_minute = ThrottleRequestsMiddleware::from_alias_args(&["2", "1", "alias-test"])
+        .expect("throttle:2,1,alias-test");
+    let router = Router::new()
+        .get("/ping", |_req| async { text("pong") })
+        .middleware(two_a_minute);
+    let addr = spawn_server(router, 4).await;
+
+    assert_eq!(get_with_headers(addr, "/ping").await.0, 200);
+    assert_eq!(get_with_headers(addr, "/ping").await.0, 200);
+    assert_eq!(get_with_headers(addr, "/ping").await.0, 429);
+}
+
+#[test]
+fn the_throttle_alias_refuses_arguments_it_cannot_use() {
+    let refused = |arguments: &[&str]| {
+        ThrottleRequestsMiddleware::from_alias_args(arguments)
+            .err()
+            .unwrap_or_else(|| panic!("throttle:{} must be refused", arguments.join(",")))
+            .to_string()
+    };
+
+    assert!(refused(&["0"]).contains("would refuse every request"));
+    assert!(refused(&["60", "soon"]).contains("`soon` is not a throttle window"));
+    assert!(refused(&["60", "0"]).contains("`0` is not a throttle window"));
+    assert!(refused(&["60", "1", "a", "b"]).contains("was given 4 arguments"));
+    assert!(refused(&["api", "1"]).contains("names a limiter"));
+
+    assert!(ThrottleRequestsMiddleware::from_alias_args(&[]).is_ok());
+    assert!(ThrottleRequestsMiddleware::from_alias_args(&["60"]).is_ok());
+    assert!(ThrottleRequestsMiddleware::from_alias_args(&["api"]).is_ok());
+}
