@@ -198,6 +198,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `ThrottleRequestsMiddleware::from_alias_args` is the factory for the
   `throttle` alias: `throttle`, `throttle:60`, `throttle:60,5`,
   `throttle:60,5,prefix` and `throttle:api` for a named limiter.
+- **Route groups take a name prefix and a controller.** Every route in an
+  `admin.` group had to spell its full name, and every handler its full path.
+  `group!(...).name("admin.users.")` now puts the prefix in front of the name
+  of every route in the group, and a group inside adds its own after it; a
+  route without a name stays without one. `group!("/admin/users", controller =
+  controllers::admin::users, { get!("/", index), post!("/", store) })` names
+  the module the handlers live in, so a route names its handler by function
+  alone. A handler written as a path is taken as it is written, and a group
+  inside names its own controller. The path prefix stays the first argument of
+  the macro.
 
 ### Changed
 

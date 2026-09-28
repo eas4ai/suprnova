@@ -1075,6 +1075,9 @@ pub trait IntoGroupItem {
 /// ```
 pub struct GroupDef {
     prefix: &'static str,
+    /// What [`GroupDef::name`] put in front of the name of every route in
+    /// the group. Empty when the group names nothing.
+    name_prefix: &'static str,
     items: Vec<GroupItem>,
     group_middlewares: Vec<BoxedMiddleware>,
     group_block: Option<SessionBlock>,
@@ -1088,10 +1091,32 @@ impl GroupDef {
     pub fn __new_unchecked(prefix: &'static str) -> Self {
         Self {
             prefix,
+            name_prefix: "",
             items: Vec::new(),
             group_middlewares: Vec::new(),
             group_block: None,
         }
+    }
+
+    /// Put `prefix` in front of the name of every route in this group.
+    /// Mirrors Laravel's `Route::name('admin.')->group(...)`.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{get, group, Request, Response};
+    /// # async fn index(_req: Request) -> Response { suprnova::http::text("ok") }
+    /// # async fn show(_req: Request) -> Response { suprnova::http::text("ok") }
+    /// group!("/admin/users", {
+    ///     get!("/", index).name("index"),        // admin.users.index
+    ///     get!("/{id}", show).name("show"),      // admin.users.show
+    /// }).name("admin.users.");
+    /// ```
+    ///
+    /// The prefix is used as it is written, so end it with the separator
+    /// the names use. A group inside this one adds its own prefix after
+    /// this one, and a route without a name stays without one.
+    pub fn name(mut self, prefix: &'static str) -> Self {
+        self.name_prefix = prefix;
+        self
     }
 
     /// Add an item (route or nested group) to this group
@@ -1146,6 +1171,29 @@ impl GroupDef {
         self
     }
 
+    /// Add the middleware a name stands for: an alias registered with
+    /// [`register_middleware_alias`](crate::middleware::register_middleware_alias),
+    /// an alias with arguments such as `"throttle:60,1"`, or a group, which
+    /// adds every middleware of the group in order.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not registered, or the alias refuses the
+    /// arguments. That is when the route is registered, which is at boot,
+    /// and never on a request. Use [`Self::try_middleware_named`] to get
+    /// the error instead.
+    pub fn middleware_named(self, name: &str) -> Self {
+        self.try_middleware_named(name)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::middleware_named`].
+    pub fn try_middleware_named(mut self, name: &str) -> Result<Self, FrameworkError> {
+        self.group_middlewares
+            .extend(crate::middleware::resolve_named_middleware(name)?);
+        Ok(self)
+    }
+
     /// Serialize the requests that carry one session on every route in
     /// this group, nested groups included (SESS-001); see
     /// [`crate::routing::RouteBuilder::block_session`]. A nested group or
@@ -1171,47 +1219,27 @@ impl GroupDef {
     ///
     /// # Middleware Inheritance
     ///
-    /// Add the middleware a name stands for: an alias registered with
-    /// [`register_middleware_alias`](crate::middleware::register_middleware_alias),
-    /// an alias with arguments such as `"throttle:60,1"`, or a group, which
-    /// adds every middleware of the group in order.
-    ///
-    /// # Panics
-    ///
-    /// When the name is not registered, or the alias refuses the
-    /// arguments. That is when the route is registered, which is at boot,
-    /// and never on a request. Use [`Self::try_middleware_named`] to get
-    /// the error instead.
-    pub fn middleware_named(self, name: &str) -> Self {
-        self.try_middleware_named(name)
-            .unwrap_or_else(|e| panic!("{e}"))
-    }
-
-    /// Fallible sibling of [`Self::middleware_named`].
-    pub fn try_middleware_named(mut self, name: &str) -> Result<Self, FrameworkError> {
-        self.group_middlewares
-            .extend(crate::middleware::resolve_named_middleware(name)?);
-        Ok(self)
-    }
-
     /// Parent group middleware is applied before child group middleware,
     /// which is applied before route-specific middleware.
     pub fn register(self, mut router: Router) -> Router {
-        self.register_with_inherited(&mut router, "", &[], None);
+        self.register_with_inherited(&mut router, "", "", &[], None);
         router
     }
 
-    /// Internal recursive registration with inherited prefix, middleware
-    /// and session block
+    /// Internal recursive registration with inherited prefix, name prefix,
+    /// middleware and session block
     fn register_with_inherited(
         self,
         router: &mut Router,
         parent_prefix: &str,
+        parent_name_prefix: &str,
         inherited_middleware: &[BoxedMiddleware],
         inherited_block: Option<SessionBlock>,
     ) {
         // The nearest block wins: this group's own, else the parent's.
         let group_block = self.group_block.or(inherited_block);
+        // Name prefixes concatenate outside in: `admin.` then `users.`.
+        let name_prefix = format!("{parent_name_prefix}{}", self.name_prefix);
         // Build the full prefix for this group. join_paths keeps the
         // `/` boundary canonical so a root parent (`group!("/")`) or a
         // trailing-slash prefix can't smuggle `//` into child routes.
@@ -1269,7 +1297,7 @@ impl GroupDef {
 
                     // Register route name if present
                     if let Some(name) = route.name {
-                        register_route_name(name, full_path);
+                        register_route_name(&format!("{name_prefix}{name}"), full_path);
                     }
 
                     // Apply combined middleware (inherited + group), then route-specific.
@@ -1312,7 +1340,7 @@ impl GroupDef {
                     // the same URL no matter which method the caller
                     // is looking up.
                     if let Some(name) = any_route.name {
-                        register_route_name(name, full_path);
+                        register_route_name(&format!("{name_prefix}{name}"), full_path);
                     }
 
                     // Fan combined (inherited + group) middleware AND
@@ -1347,6 +1375,7 @@ impl GroupDef {
                     nested.register_with_inherited(
                         router,
                         &full_prefix,
+                        &name_prefix,
                         &combined_middleware,
                         group_block,
                     );
@@ -1474,11 +1503,58 @@ where
 /// Middleware applied to a parent group is automatically inherited by all nested groups.
 /// The execution order is: parent middleware -> child middleware -> route middleware.
 ///
+/// # Names
+///
+/// `.name("admin.")` on the group puts the prefix in front of the name of
+/// every route in it, and a group inside adds its own after it. See
+/// [`GroupDef::name`].
+///
+/// # A controller for the group
+///
+/// `controller = path::to::module` names the module the handlers of the
+/// group live in. A route in the group then names its handler by function
+/// alone. Mirrors Laravel's `Route::controller(X::class)->group(...)`.
+///
+/// ```rust,no_run
+/// use suprnova::{routes, get, post, group};
+/// # mod controllers {
+/// #     pub mod admin { pub mod users {
+/// #         use suprnova::{Request, Response};
+/// #         pub async fn index(_req: Request) -> Response { suprnova::http::text("ok") }
+/// #         pub async fn store(_req: Request) -> Response { suprnova::http::text("ok") }
+/// #     } }
+/// #     pub mod health {
+/// #         use suprnova::{Request, Response};
+/// #         pub async fn check(_req: Request) -> Response { suprnova::http::text("ok") }
+/// #     }
+/// # }
+///
+/// routes! {
+///     group!("/admin/users", controller = controllers::admin::users, {
+///         get!("/", index).name("index"),    // controllers::admin::users::index
+///         post!("/", store).name("store"),   // controllers::admin::users::store
+///         // A handler written as a path is taken as it is written.
+///         get!("/health", controllers::health::check),
+///     }).name("admin.users."),
+/// }
+/// ```
+///
+/// A group inside a controller group is an item like any other and names
+/// its own controller, or none.
+///
 /// # Compile Error
 ///
 /// Fails to compile if prefix doesn't start with '/'.
 #[macro_export]
 macro_rules! group {
+    ($prefix:expr, controller = $($controller:ident)::+, { $( $items:tt )* }) => {{
+        const _: &str = $crate::validate_route_path($prefix);
+        $crate::__group_controller_items!(
+            $crate::GroupDef::__new_unchecked($prefix),
+            [$($controller)::+],
+            $( $items )*
+        )
+    }};
     ($prefix:expr, { $( $item:expr ),* $(,)? }) => {{
         const _: &str = $crate::validate_route_path($prefix);
         let mut group = $crate::GroupDef::__new_unchecked($prefix);
@@ -1487,6 +1563,47 @@ macro_rules! group {
         )*
         group
     }};
+}
+
+/// Adds the items of a `group!(..., controller = ..., { ... })` to the
+/// group, one at a time. A route macro whose handler is one bare name gets
+/// the controller's path put in front of the name. Every other item is
+/// added as it is written.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __group_controller_items {
+    ($group:expr, [$($controller:tt)+], ) => { $group };
+    (
+        $group:expr, [$($controller:tt)+],
+        $method:ident ! ( $path:expr , $handler:ident )
+        $( . $call:ident ( $( $argument:tt )* ) )*
+        , $( $rest:tt )*
+    ) => {
+        $crate::__group_controller_items!(
+            $group.add(
+                $crate::$method!($path, $($controller)+ :: $handler)
+                $( . $call ( $( $argument )* ) )*
+            ),
+            [$($controller)+],
+            $( $rest )*
+        )
+    };
+    (
+        $group:expr, [$($controller:tt)+],
+        $method:ident ! ( $path:expr , $handler:ident )
+        $( . $call:ident ( $( $argument:tt )* ) )*
+    ) => {
+        $group.add(
+            $crate::$method!($path, $($controller)+ :: $handler)
+            $( . $call ( $( $argument )* ) )*
+        )
+    };
+    ($group:expr, [$($controller:tt)+], $item:expr , $( $rest:tt )*) => {
+        $crate::__group_controller_items!($group.add($item), [$($controller)+], $( $rest )*)
+    };
+    ($group:expr, [$($controller:tt)+], $item:expr) => {
+        $group.add($item)
+    };
 }
 
 /// Define routes with a clean, Laravel-like syntax
