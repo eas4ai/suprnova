@@ -178,7 +178,10 @@ async fn a_stored_payload_that_does_not_parse_reads_as_empty_and_is_logged() {
         .expect("a damaged payload is not a store failure")
         .expect("the row is still a session");
 
-    assert!(read.data.is_empty(), "nothing of the damaged payload survives");
+    assert!(
+        read.data.is_empty(),
+        "nothing of the damaged payload survives"
+    );
     assert!(
         logs_contain("stored session payload failed to parse; treating the session as empty"),
         "the reason the visitor lost their session is in the log"
