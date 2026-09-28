@@ -1,0 +1,24 @@
+[package]
+name = "suprnova-macros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Procedural macros for Suprnova framework"
+repository = "https://github.com/eas4ai/suprnova"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
+regex = "1"
+
+[dev-dependencies]
+suprnova = { path = "../framework" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+validator = { version = "0.20", features = ["derive"] }
+trybuild = "=1.0.120"

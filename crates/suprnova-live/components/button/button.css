@@ -1,0 +1,29 @@
+.sn-button[data-sn-variant="secondary"] {
+  background: var(--sn-color-surface);
+  border-color: var(--sn-color-border-strong);
+  color: var(--sn-color-text);
+}
+
+.sn-button[data-sn-variant="secondary"]:hover {
+  background: var(--sn-color-surface-raised);
+  border-color: var(--sn-color-border-strong);
+  color: var(--sn-color-text);
+}
+
+.sn-button[data-sn-variant="danger"] {
+  background: var(--sn-color-danger);
+  border-color: var(--sn-color-danger);
+  color: var(--sn-color-primary-contrast);
+}
+
+.sn-button[data-sn-variant="ghost"] {
+  background: transparent;
+  border-color: transparent;
+  color: var(--sn-color-link);
+}
+
+.sn-button[data-sn-variant="ghost"]:hover {
+  background: var(--sn-color-surface-raised);
+  border-color: transparent;
+  color: var(--sn-color-link-hover);
+}

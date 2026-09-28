@@ -1,0 +1,21 @@
+.sn-popover {
+  max-inline-size: 24rem;
+  padding: var(--sn-space-4);
+  border: var(--sn-state-border-width) solid var(--sn-color-border);
+  border-radius: var(--sn-radius-md);
+  background: var(--sn-color-surface);
+  color: var(--sn-color-text);
+  box-shadow: var(--sn-shadow-md);
+}
+
+@supports (position-area: block-end) {
+  .sn-popover {
+    margin: var(--sn-space-1) 0 0;
+    position-area: block-end span-inline-end;
+    position-try-fallbacks: flip-block, flip-inline;
+  }
+}
+
+.sn-popover > :last-child {
+  margin-block-end: 0;
+}

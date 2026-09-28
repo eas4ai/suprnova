@@ -1,0 +1,4663 @@
+# Changelog
+
+A readable, per-version log of what changed in Suprnova. Each version
+section is that version's release record. A version is released when its
+version commit and matching `v<version>` tag are pushed atomically. Newest first.
+
+## 2.1.0 - 2026-09-18
+
+### Added
+
+- **Live ships the foundations of its component library.** A token stylesheet
+  with a base layer arrives as the `ui-styles` runtime artifact when a
+  document opts in with `with_suprnova_ui()`; every rule sits in the
+  `suprnova-ui` cascade layer and every visual value is a `--sn-` token with
+  light and dark values, so the skin is removable with nothing breaking.
+  `live:add` installs a component as one directory under
+  `templates/suprnova-ui/` from its manifest, keeps files you edited, and
+  accepts a third-party manifest under its own root; the framework serves the
+  vendored stylesheet and script at `/suprnova-ui/<component>/<file>`. The
+  form family ships as Askama macros the checker now expands, so a library
+  view passes `live:check` like any other. The `suprnova.` namespace is
+  reserved to the library and the registry refuses it from any other crate.
+- **The Live component library gains its overlay family.** Tooltip, collapsible
+  and accordion, popover, a single-level dropdown menu, dialog, sheet, and
+  drawer install with `live:add` beside the form family. Each owns its open
+  state through the native primitive (`details`, the `popover` attribute,
+  `dialog`) before any script, makes no Live request to open or close, returns
+  focus to its trigger on close, and keeps its open state across a morph under
+  a stable key with `live:preserve.self`.
+- **The Live component library gains its feedback and navigation families.**
+  Alert, skeleton, spinner, progress, empty state, toast region and flash
+  region; header bar, footer, sidebar, breadcrumbs, tabs, pagination and load
+  more install with `live:add` beside the form and overlay families. Feedback
+  presents state the server or runtime holds: an alert's role follows its
+  variant with a non-color cue, loading presentation is bound through
+  `live:loading` and shows on the runtime's own timing, progress is the native
+  element with a label and readout, the empty state's reason is server state,
+  and a toast announces once without taking focus while a critical error also
+  renders as an alert. Navigation keeps route semantics: anchors with real
+  URLs, `aria-current` from the server, an explicit local or route mode for
+  tabs and pagination, Live pagination reflected with `history.replaceState`
+  and no history entry, and load more as a keyed append from a button. The
+  `live_key` view filter lands with them: a `live:key` inside a `{% for %}`
+  loop passes through it, and it enforces at render time the key rule the
+  checker enforces on literal keys.
+- **The Live component library gains its data display family, and with it
+  the built-in set is complete.** Separator, scroll area, aspect image, card,
+  badge, avatar and avatar group, list group, description list and stat card
+  install with `live:add` beside the earlier families; every one keeps
+  document order and native semantics, and every status carries text. The
+  chart renders on the server through `charts-rs`: `render_chart` in
+  `suprnova::live::charts` draws bar or line marks from bounded typed series
+  as trusted SVG, and the macro places a summary and a data table beside it,
+  so no charting script reaches the browser. The datatable is a native table
+  with one island per table whose sort, filter and page are `#[url]` fields
+  reflected into a shareable URL after every action.
+- **The Live component library gains its live-native family, the last one.**
+  The upload widget renders the shipped upload protocol's states from the
+  runtime's progress root and claims nothing durable before the finalizing
+  action; the live feed and notification bell carry the runtime's stream
+  status announcements, so a degraded, reconnecting or closed stream says
+  so; the account menu is a details disclosure with a CSRF-protected
+  sign-out form and a documented stitch slot under RenderCache. The
+  custom-element tier, input OTP, date picker and combobox, enhances native
+  controls it never replaces: each `sn-` element is a light-DOM
+  `HTMLElement` defined by its own vendored file and holds no form value, so
+  the form submits the same value with the script blocked. The combobox
+  refuses a listbox rendered for an older query.
+- **Session blocking serializes the requests that carry one session.**
+  `SESSION_BLOCK=true`, or `SessionConfig::block(SessionBlock::default())`,
+  makes the session middleware hold a cache lock for the session from load
+  to write, and `block_session` on a route or group enables it for those
+  routes alone. Both bounds are yours, the hold and the wait, and a request
+  that waits past the bound answers `503` with `Retry-After`. Without it,
+  two concurrent requests on one session wrote back last-writer-wins, so a
+  flash set by a redirect could be lost to a request that started earlier.
+
+### Changed
+
+- **Live's supported browser baseline is Chrome and Edge 114, Firefox 128, and
+  Safari 17.** The floor rises from Chrome and Edge 111 and Safari 16.4 to the
+  first releases that ship the native `popover` attribute the component
+  library's overlays own their open state with. The compatibility matrix's
+  minimum slots move with it; Firefox stays at 128.
+
+### Fixed
+
+- **A template's `live:key` reaches the Live runtime.** The checker validated
+  `live:key` and the manual named it, but the browser runtime's morph
+  identity, morph controls and preservation scopes read only the engine's
+  `data-suprnova-live-key`, so a keyed control written as the checker
+  requires had no effect and every library component wrote the key twice.
+  The runtime now reads `live:key`, keeps the engine spelling for the roots
+  it renders, refuses an element carrying both with different values, and
+  the components write `live:key` alone. The form gallery's save form also
+  gained the `.prevent` modifier it lacked, so a Live submit no longer
+  reloads the page from the form's own query.
+- **A Live form holding an empty number input or an unselected select
+  submits.** The runtime read such a control's null value as a mismatch with
+  itself and refused the whole submit, so the action never ran and the
+  browser submitted the form natively. The search input's model binding also
+  used a debounce the runtime does not accept; it now uses 250 ms.
+- **`live:check` checks every element a view renders.** A view that called a
+  macro splicing `caller()` with an empty call block, as the validation summary
+  is called, rendered no content after that call to the checker, so the
+  component proved clean while the rest of the view went unchecked. The empty
+  call is now empty content, and a view that renders nothing fails the check.
+  Fixing it exposed errors the dogfood form gallery had hidden.
+- **A declared model debounce is 100, 250, or 500 milliseconds.**
+  `#[model(debounce = N)]` accepted 1 to 60000 ms, but the directive grammar
+  the checker and the browser runtime share lists three durations, so any
+  other value could never be bound by a template; it now fails to compile.
+  `live:error` also accepts an action as its target, as a validation summary
+  names one, matching what the runtime resolves.
+- **A Live form of more than seven model fields submits.** The browser runtime
+  refused any request carrying more than eight operations or model proposals,
+  and any response with more than sixteen validation entries or eight events,
+  though the framework's server accepts 128 of each; the refused submit never
+  left the browser and was reported as a network failure. The browser now
+  admits the server's counts, `live:check` refuses a `live:submit` form of
+  more than 127 model fields, and a request refused for a limit is reported as
+  a resource limit that shows the action's error feedback.
+- **The combobox stays responsive and shows what the server answered.** Text
+  that no option matched froze the page, because the element's observer
+  watched attributes its own render rewrote even when nothing changed. The
+  element also filtered the server's options by substring, hiding results a
+  server search matched another way, such as an accent-insensitive or code
+  match. It now writes only what changed, shows every option while the
+  listbox answers the input's current text, keeps an answer to older text
+  hidden, and filters by the typed text only for a fixed list, which
+  `remote=false` selects.
+- **A library custom element binds once however a morph moves it.** The
+  combobox, input OTP, date picker, and password input bound their listeners
+  on every connection, and the dialog, sheet, and drawer guarded on an
+  attribute a morph removes, so a moved element answered one click twice and
+  the password reveal toggled back at once. Every element now binds per
+  connection, releases its listeners and observers when it leaves the
+  document, and keeps them across an atomic move.
+- **A toast holds while the pointer is anywhere on it or focus is inside it.**
+  The region resumed its timers when the pointer left any child element, so
+  moving from a toast's text to its padding let it time out under the
+  pointer, and a toast could hide while its dismiss button had focus.
+- **Nested tabs act on their own tabs.** A local tabs instance selected every
+  tab below it and handled the events of a nested instance, so a click on an
+  inner tab hid the outer panel.
+- **The tooltip bubble stays open while the pointer moves onto it.** The
+  bubble ignored the pointer, so it hid as the pointer left the trigger and
+  its text could not be read or selected.
+- **The select's dropdown indicator follows the text color.** It was a
+  data-URI SVG, whose `currentColor` does not inherit the document's color, so
+  it drew black on the dark scheme's surface.
+- **The form controls show the island's values.** No form macro took a value,
+  so a number input mounted at 1 rendered empty and a submit that changed
+  nothing proposed an empty value. Each value control now takes `value=`,
+  `checked=`, or `selected=`, radio and checkbox group inputs are keyed by
+  value so a choice the user has not sent survives a re-render, and
+  `authority=` marks the render that must replace what the user typed.
+- **A checkbox group proposes the list of checked values.** The runtime read
+  every checkbox as a boolean, so a group whose boxes disagreed could not be
+  submitted. A checkbox group of any size, and any field that more than one
+  checkbox binds, now proposes the checked values in document order; a single
+  checkbox stays a boolean.
+- **A model proposal its field cannot decode is a validation error on that
+  field.** A proposal such as null for a `u64` field or a boolean for a list
+  field was dropped silently: the action ran and the response carried no
+  validation. The field now reports the error through `live:error` and keeps
+  its value, and the action does not run.
+- **The checker, the `live_key` filter, and the runtime accept one key
+  alphabet.** The checker and the filter accepted a key beginning with `_`,
+  `-`, `.`, or `:`, which the runtime refuses, so the island's first morph
+  failed. A key now begins with an ASCII letter or digit everywhere, and
+  `live:check` holds the element ids inside an island to the rule the runtime
+  checks, refusing an invalid id (`invalid_element_id`) and a repeated one
+  (`duplicate_element_id`), a literal id inside a loop included.
+- **`live_key_digest` keys any value.** `live_key` fails the island's render
+  for a value outside the key alphabet, so a row keyed by an email address
+  failed the island for every viewer. The new filter turns any value into a
+  stable key, one value always yielding the same key.
+- **`live:check` checks a loop or match binding as that binding.** Inside a
+  macro body, a name that a `for`, a `match` arm, or an `if let` bound was
+  checked as the macro parameter of the same name, so a literal argument
+  proved a directive that the loop's own values render.
+- **`render_chart` returns an error for a value beyond 1e9.** The renderer's
+  axis arithmetic overflowed and panicked from about 1e12; a value whose
+  magnitude exceeds 1e9 is now an input error.
+- **An application that cannot read its vendored components refuses to
+  start.** `try_live_ui_assets()` reads `templates/suprnova-ui/` under the
+  application base path on each request, so an application started
+  elsewhere, such as from a container image that holds only the binary,
+  answered 404 for every component stylesheet and script and started
+  cleanly. Installing the route now fails and names the directory.
+- **`live:add` replaces a file you never edited.** It compared bytes only, so
+  after a library update it kept every installed file and reported it edited
+  locally. It now records each file's digest beside the component and
+  replaces a file whose bytes still match the record; a file you edited, or
+  one no record vouches for, is kept and reported.
+- **`live:add --manifest` refuses a file that is a symbolic link.** Each
+  third-party file was read through links, so a component could install the
+  bytes of any readable file as a template. A named file must be a regular
+  file inside the manifest's directory.
+- **A model edit that a render replaced is sent when it is typed again.** The
+  browser compared each edit with the value it last proposed, so after a
+  refused value and a render that replaced it, such as a reset, typing the same
+  value again sent nothing: the control showed it with no error while the
+  island held another value. The render an island applies is now the baseline
+  the next edit is compared with, and a field's dirty state compares with the
+  value that render gave its control.
+- **A tooltip can be dismissed where it is shown.** A bubble that covers
+  content could be dismissed only by moving the pointer or focus away, which
+  WCAG 2.2 success criterion 1.4.13 does not accept. Escape now hides it with
+  neither moved, and the next hover or focus of that trigger shows it again.
+  The bubble still shows with no script in the page; the new `sn-tooltip`
+  element carries the dismissal alone, and `live:add tooltip` installs it.
+
+## 2.0.2 - 2026-09-14
+
+### Changed
+
+- **The Live endpoints carry no version segment.** `/__live/v1/action`,
+  `/__live/v1/upload`, `/__live/v1/assets/*`, and the `/__live/v1/async/*`
+  family now live at the same paths without `/v1`: `/__live/action`,
+  `/__live/upload`, `/__live/assets/*`, `/__live/async/*`. Suprnova's version
+  is the git tag and the browser runtime ships in lockstep with the framework,
+  so a second version inside the URL space promised an evolution path that
+  would never be used. Applications are unaffected: the framework registers
+  these routes and the runtime builds every URL, and hand-written references
+  to `/__live/` paths were never supported.
+
+### Fixed
+
+- **Every issuance the Live per-scope limit admits answers with a subscription
+  that connects.** Concurrent issuances of one scope in the same millisecond
+  mint identical descriptors, and the host's credential store kept only the
+  last secret minted for a descriptor, so the earlier requests answered 403
+  `async_authority_invalid` from the connect that issuance performs. About one
+  issuance in five hundred also answered 503 `async_unavailable`, because the
+  claims it published while its envelope context was built shared one slot
+  with every concurrent issuance. A descriptor now keeps every unconsumed
+  secret until each is consumed or expires, and the claims under construction
+  are keyed by subscription id.
+
+### Security
+
+- **The lockfile takes the rustls TLS 1.3 handshake fix.** `rustls` 0.23.45
+  replaces 0.23.40, which accepted TLS 1.3 handshake messages across
+  encryption level boundaries (RUSTSEC-2026-0285, published on the release
+  day); `aws-lc-rs` and `rustls-webpki` move with it. Every HTTPS client in
+  the framework, from the HTTP facade to the Qdrant and payment adapters,
+  resolves the fixed release.
+- **A Live stream ends with the session that opened it.** An asynchronous
+  membership was re-authorized against its Gate before every delivery but
+  never against its session: a browser that logged out, or whose session was
+  revoked, kept receiving events until the stream itself closed. Destroying a
+  session on a node now retires every membership it opened there at once, for
+  a plain logout, session invalidation, id regeneration, and "log out
+  everywhere" alike, and delivery re-checks each membership's session against
+  the session store at most once per ten seconds, so a session destroyed on
+  another node stops receiving events within that interval.
+- **A request's `Cache-Control` directives are honored by RenderCache.** A
+  request carrying `no-cache` was answered from storage with `Age`, and a cold
+  request carrying `no-store` seeded the cache for the next request.
+  `no-store` now bypasses lookup and publication alike, and `no-cache` skips
+  the lookup so the request is answered by a fresh render. Found by the
+  2026-09-13 adversarial audit (ASTRA-13).
+- **A render without a snapshot is never published.** When the snapshot
+  transaction could not open, RenderCache rendered without a read view and
+  still published if the generation reread agreed, so a render that
+  interleaved with a concurrent multi-row write could store a mix of two
+  database states. Such a render is now served but not stored (decline reason
+  `snapshot_unavailable`), and its rebuild lease is released. Found by the
+  2026-09-13 adversarial audit (ASTRA-08).
+- **A cached response replays its `Content-Encoding`.** A pre-compressed body
+  was stored without its content coding, so a hit served gzip bytes as plain
+  text. The coding is stored with the body and replayed on every hit. Found by
+  the 2026-09-13 adversarial audit (ASTRA-04).
+- **A HEAD request never seeds the GET representation.** A cold HEAD on a
+  route that renders nothing for HEAD stored an empty body under the key every
+  GET shares, so later GETs answered zero bytes. A HEAD miss is now served as
+  rendered and not stored (decline reason `head_render`). Found by the
+  2026-09-13 adversarial audit (ASTRA-03).
+- **The Live per-scope subscription limit holds under concurrency.** Issuance
+  counted a scope's subscriptions, released the lock, awaited the authorizer,
+  and inserted afterwards, so a burst of concurrent requests could all pass
+  the count and all be admitted once authorization returned, well past the
+  advertised limit of 512 per scope. The slot is now reserved under the same
+  lock as the count, released on every error path, and handed to the record
+  when it lands. Found by the 2026-09-13 adversarial audit (ASTRA-07).
+- **A Live subscription stops receiving events once its Gate denies.** An
+  existing asynchronous membership kept receiving newly published events after
+  the stream's authorization Gate was redefined to deny the principal, because
+  delivery compared the subscription's own retained authorization memo with
+  itself. New subscriptions were correctly refused; the old stream was not.
+  The runtime now records the principal a subscription was issued to, asks the
+  Gate again before every delivery, and retires a membership the Gate no
+  longer allows. Found by the 2026-09-13 adversarial audit (ASTRA-01).
+- **A Live action declaring `transaction = "required"` is refused at
+  registration.** The host's transaction port is a documented no-op, so the
+  policy promised atomicity it never provided: each write committed on its own
+  and nothing rolled back when a later stage failed. `LiveRegistry` now fails
+  with `RegistryErrorKind::RequiredTransactionUnsupported` for such a
+  component until the port installs a real ambient transaction; actions
+  without the policy register as before. Found by the 2026-09-13 adversarial
+  audit (ASTRA-05).
+- **A cached route's named-connection reads stay on their connection.** A
+  RenderCache miss renders inside a snapshot transaction on the primary
+  database, and query routing preferred that transaction over a query's own
+  `on("name")` or a model's declared connection, so opting a route into the
+  cache changed which database its code read from. A tenant or auxiliary
+  database read could return the primary's row, fail on a table the primary
+  lacks, or publish the wrong content under a valid key. Reads bound for
+  another connection now run there even inside an ambient transaction, and a
+  render that read outside its snapshot is served but not stored (decline
+  reason `foreign_connection_read`). Found by the 2026-09-13 adversarial audit
+  (ASTRA-06).
+- **A data write and its RenderCache invalidation commit together.** On the
+  autocommit path, a model save, a query-builder write, or a raw statement
+  landed its row first and advanced the dependency generations in a second
+  transaction afterwards. When that second transaction failed, the row was
+  durable, the API returned an error, and every cached page that depended on
+  the row kept passing its coherence check and serving the pre-write content:
+  a visibility, entitlement, or deletion change could stay invisible until the
+  next successful invalidation. Every write terminal now runs the row write
+  and its advancement inside one transaction opened for the purpose, so both
+  commit or neither does. A ledger table that vanishes after RenderCache
+  decided it was present now fails the write instead of being skipped with a
+  warning. A write bound for a named connection, whose ledger lives on the
+  primary, keeps its separate advancement; if that advancement fails, the
+  process stops serving stored entries until one succeeds. Found by the
+  2026-09-13 adversarial audit (ASTRA-10).
+- **A handler's `Vary` contract is enforced before RenderCache stores.** A
+  handler that varied its body on a request header of its own and said so with
+  `Vary` was stored under a key built from the route policy alone, so the
+  first variant's body was served to every other variant, with the `Vary`
+  header missing from the hit. Wherever that header selected user, device, or
+  experiment-specific content, one request's content reached another's.
+  RenderCache now parses the response's `Vary` before publication and declines
+  to store when it names `*` or a field the policy does not declare as a key
+  dimension (decline reason `vary_undeclared`). Found by the 2026-09-13
+  adversarial audit (ASTRA-09).
+- **A handler's `Cache-Control: no-store` is honored by RenderCache.** A route
+  opted into the cache stored a response whose handler said `no-store` and
+  replayed it under the policy's own `public, max-age=60, s-maxage=60`, so a
+  handler's "do not store" was ignored on the server and rewritten for every
+  browser and proxy downstream. The eligibility check now reads the response's
+  `Cache-Control` and declines storage on the `no-store` token (decline reason
+  `no_store_directive`), and the declined response goes out exactly as the
+  handler built it. Found by the 2026-09-13 adversarial audit (ASTRA-02).
+- **A per-response CSP nonce is never replayed from the cache.** A public page
+  that minted a nonce on every render and named it in
+  `Content-Security-Policy` was stored as an ordinary complete entry, so every
+  later hit carried the first render's nonce in both the header and the inline
+  script. A nonce is the authorization token for inline script in one
+  response; replaying it made that token readable to anyone who could fetch
+  the page. RenderCache now declines to store such a response (decline reason
+  `nonce_source_policy`); a hash-based policy caches as before, and stitched
+  Live documents keep issuing a fresh nonce per hit. Found by the 2026-09-13
+  adversarial audit (ASTRA-12).
+- **A cached response keeps its isolation and execution headers.** RenderCache
+  stored a response's `Content-Disposition`, `Cross-Origin-Opener-Policy`,
+  `Cross-Origin-Embedder-Policy`, `Cross-Origin-Resource-Policy`,
+  `Permissions-Policy`, and `X-Frame-Options` nowhere, so a cache hit served
+  the same bytes without them. An HTML export that downloaded as an attachment
+  on the first request rendered inline under the application's origin on the
+  second, where any markup it carried ran with same-origin authority. The six
+  headers now replay byte for byte from the stored representation. Found by
+  the 2026-09-13 adversarial audit (ASTRA-11).
+- **The lockfile sheds one unsound and three yanked dependency releases.**
+  `event-listener` 5.4.2 replaces 5.4.1, whose stack-allocated listener was
+  unconditionally `Send`/`Sync` and let a `!Send` tag cross threads in safe
+  code (RUSTSEC-2026-0221); Suprnova's dependencies only use untagged events,
+  so the unsound path was never exercised here. `spin` 0.9.9 and 0.10.1 and
+  `chacha20` 0.10.2 replace releases their publishers had yanked, and
+  `concurrent-queue` leaves the tree entirely.
+
+## 2.0.1 - 2026-09-12
+
+### Fixed
+
+- **A `redis://` URL with a database index selects that database everywhere.**
+  The queue driver and the fanout broadcast hub each carry a sea-streamer
+  producer beside their direct redis connections, and sea-streamer does not
+  read the logical database from the URL's path - so a queue pointed at
+  `redis://host:6379/3` pushed jobs into database `0` while its consumer half
+  waited on database `3`, and the fanout hub operated on `0` outright. Both
+  now carry the index across explicitly, with the same parsing rule the redis
+  client applies. A URL without a path keeps selecting database `0`, so
+  nothing changes for the common form.
+- **`suprnova generate-types` ends its output with one newline.** The blank
+  line that separates one interface from the next was also written after the
+  last one, so a project that enforces `git diff --check` failed with `new
+  blank line at EOF` on a file it could not correct by hand: the next
+  regeneration wrote the blank line straight back. Only the end of the file
+  changes; the blank lines between declarations stay.
+
+- **A scaffolded login or registration form shows its validation errors.**
+  The generated auth controller declared an `errors` prop on `LoginProps`
+  and `RegisterProps` and sent it as `None`. The framework seeds `errors` on
+  every Inertia page from the session-flashed validation bag, and an
+  explicit prop of the same name replaces that seed, so the page received
+  `errors: null` and invalid credentials returned to a form that displayed
+  nothing. Both props are now empty, the Login and Register pages of all
+  three frontends read `useForm().errors`, and the scaffold's
+  `inertia-props.ts` is the byte-exact output of `suprnova generate-types`
+  for the scaffold's controllers, so a project's first regeneration no
+  longer rewrites a file nobody edited.
+
+- **A scaffolded application serves its built frontend.** The generated
+  `routes.rs` registered no static-file fallback, so once Vite's dev server
+  was not running every `/assets/*` URL in the HTML shell answered `404`,
+  including inside the production image the scaffold's `Dockerfile` builds.
+  `routes.rs` now ends with `fallback!(StaticFiles::public().handler())`:
+  declared routes still win, dotfiles such as
+  `public/assets/.vite/manifest.json` and path traversal are refused, and
+  an unknown URL still renders the Inertia `Error` page.
+
+- **A scaffolded application verifies email addresses and resets
+  passwords.** Registration created and signed in the user without sending
+  verification mail, and no route offered email verification or password
+  recovery, although the generated `User` already implemented
+  `MustVerifyEmail` and `CanResetPassword` and the `auth_flow_tokens`
+  migration already shipped. Registration now mails a verification link
+  through `EmailVerification::send_link` and continues to `/verify-email`,
+  which shows the notice, resends the link, and consumes it on
+  `/verify-email/verify` for the signed-in owner only. `/forgot-password`
+  mails a reset link to a verified address (an unknown or unverified
+  address gets the same answer and no mail) and `/reset-password` rotates
+  the password through `PasswordReset::complete_with_outcome`, refusing to
+  finish while the account's other sessions or remember-me tokens could
+  not be revoked. The Vue, React and Svelte starters ship the
+  `ForgotPassword`, `ResetPassword` and `VerifyEmail` pages and a "Forgot
+  your password?" link on the login page. Links are built with `url::to`,
+  so `APP_URL` must name the address users reach the application at, and
+  registration needs a working mail transport: the `.env` the scaffold
+  writes points `MAIL_DRIVER=smtp` at a local catcher on port 1025 (the
+  Mailpit that `suprnova docker:compose --with-mailpit` adds), or set
+  `MAIL_DRIVER=log` to print each message, link included, to the server log.
+
+- **A fresh Svelte scaffold builds against `@inertiajs/svelte` 3.7.** The
+  generated `main.ts` declared an `async setup`, and `@inertiajs/svelte` 3.7
+  types `setup` as returning `SvelteRenderResult | void`, so a project
+  scaffolded today (the template asks for `^3.6.1`, which now resolves to
+  3.7.1) failed `svelte-check` inside `npm run build` before a single page
+  had been written. `setup` is synchronous now and chains the translation
+  catalog load onto the mount, so the ordering the template describes is
+  unchanged.
+
+### Documentation
+
+- **The six locale mirrors of the 2.0.0 chapters follow the manual's own
+  conventions.** The chapters translated since 1.3.7 wrapped Japanese and
+  Simplified Chinese prose mid-sentence (1,653 line breaks that rendered as
+  stray spaces), rendered 59 terms differently from the rest of their
+  locale, translated 9 repeated headings a second way, and left 2 quotes
+  unpaired. All of that is aligned with the older chapters, so a reader of
+  any locale sees one vocabulary and unbroken sentences across the manual.
+
+### Upgrading
+
+- **These are scaffold fixes; an application generated with 2.0.0 keeps
+  its generated files.** Upgrading the framework crate changes nothing in
+  `src/` or `frontend/`. To pick the fixes up in an existing project, make
+  the same edits by hand: drop the `errors` field from `LoginProps` and
+  `RegisterProps` and read `useForm().errors` in the pages; add
+  `fallback!(StaticFiles::public().handler())` as the last entry of
+  `routes!`; and copy the `email_verification` and `password_reset`
+  controllers, their routes, and the three auth pages from a project
+  generated with 2.0.1. The `generate-types` output changes only at the
+  end of the file.
+
+## 2.0.0 - 2026-09-10
+
+### Security
+
+- **A bearer token and a web session are now separate identities.** The
+  request-scoped user cache kept one current-user slot that everything wrote
+  to and everything read from, so a browser session hydrated by
+  `SessionMiddleware` satisfied a `TokenGuard` on the same request, and a user
+  resolved for the web guard was handed back to code that had asked for the
+  API guard. Bearer credentials now carry their own provenance in that cache:
+  `BearerTokenMiddleware` records the identifier it validated in a bearer slot
+  of its own, `TokenGuard` resolves and caches the full user there, and only
+  something that arrived through a bearer credential can satisfy a token
+  guard. Session guards are cached per guard name in the same place, so
+  `Auth::guard("admin").user()` and `Auth::guard("web").user()` in one request
+  no longer resolve to whichever of them ran first. The generic slots remain
+  as a compatibility view for the static `Auth` facade, mirrored from the
+  configured default guard alone, so `Auth::id()`, `Auth::check()` and
+  `AuthMiddleware` behave exactly as they did for an application with one
+  guard and for a token-only request that never installs a session.
+
+- **A named guard keeps its own principal, its own remember-me credential, and
+  its own revocation.** Logging in through `Auth::guard("admin")` wrote the
+  identifier into the same session key the default guard uses, so two guards
+  in one application shared one principal and signing out of either signed out
+  of both. In the persisted session each guard now owns its entry under the
+  `_auth_guards` map, and the remember-me cookie carries a guard-tagged carrier
+  (`suprnova.remember.v1:` followed by the guard name and the credential) so a
+  cookie issued for one guard cannot re-authenticate another. A cookie without
+  that prefix is read as the default guard's, which is exactly what a cookie
+  issued by an earlier release is, so nobody is signed out by the upgrade; a
+  carrier naming a version this build does not understand is refused rather
+  than guessed at. Revocation follows the same boundary: signing out, and the
+  middleware's own rotation path, retire the exact selector the owning guard
+  issued rather than every credential the user holds.
+
+- **`BasicAuthMiddleware` no longer accepts a stale session slot as proof.**
+  Its non-stateless form skipped the `Authorization` header whenever
+  `Auth::check()` was true, and `Auth::check()` reads the request-scoped
+  current-user slot, which anything earlier in the chain could have populated.
+  It now asks for the persisted session principal of the guard it was
+  configured with, and refuses outright when that guard is absent or is not a
+  stateful guard, so a request is admitted without credentials only when a
+  real session row says who it belongs to. The stateless form always re-read
+  the header and is unchanged.
+
+- **Remember-me credentials rotate as one atomic replacement.** Rotation used
+  to remove the accepted credential and insert its successor as two writes: a
+  failure between them consumed a valid credential and left the visitor with
+  no way back in, and a crash left both rows live. The default schema now
+  replaces one exact, still-valid row with its prepared successor in a single
+  operation, and a store that cannot make the conditional removal and the
+  replacement insert atomic fails closed rather than performing them
+  separately. Selector matching is exact, so a credential is never retired by
+  a prefix collision, and a synchronous identity transition inside a handler
+  queues the exact credential it invalidated for revocation at the end of the
+  request instead of leaving it live.
+
+- **Two-factor admission is serialized, and a lockout write that fails takes
+  the request down with it.** Two workers proving the same code could each
+  read the attempt counter before either wrote it, so a brute-force budget
+  admitted more attempts than it allowed. Verification now reserves attempt
+  capacity inside the same serialized store operation that admits the
+  attempt, returning both the reservation and any finalized-failure state
+  observed in that one decision; a ceremony that cannot commit cancels its
+  prepared proof, and the cancel path's default fails closed so an existing
+  verifier implementation cannot silently leak reserved capacity. A lockout
+  counter write that errors is no longer swallowed: the attempt is refused.
+  Promoting a session that is waiting on a second factor is one atomic
+  migration, and the bearer credential is suppressed before the storage call
+  is awaited, so a timeout or a backend failure can never leave a credential
+  attached to a session the framework did not commit.
+
+- **Session rotation fails closed.** Rotating a session id destroys the old
+  row and writes a new one. A destroy that errored was logged and stepped
+  over, which left the previous authenticated row replayable by anyone
+  holding the old cookie. The middleware now returns before writing the
+  replacement and before issuing the new id, and expires the browser's old
+  credential on the way out. Separately, the cookie that carries a fresh or
+  rotated session is built before the row is committed: a cookie that cannot
+  be constructed used to leave a session in the store that no browser could
+  ever present, and now leaves nothing behind at all.
+
+- **A session that outlives its user stops authorizing, and revoking a user's
+  sessions reaches the named guards.** `AuthMiddleware` treated the presence
+  of a persisted identifier as proof of an identity, so a deleted or
+  soft-deleted user kept passing every guarded route until the session
+  expired. It now resolves the user through the provider and clears the stale
+  slot when the provider finds nothing; an application with no user provider
+  bound at all keeps the identifier-only fast path, recognized by its own
+  error rather than by matching message text, and every other provider
+  failure is an error rather than a pass. `destroy_all_for_user` matched only
+  the indexed `user_id` column, which is null for a session authenticated
+  through a named guard alone, so those sessions survived a
+  "sign out everywhere". It now compares the guard identities inside each
+  surviving payload as well.
+
+- **Device-authorization ceremonies transition atomically and are validated
+  before consumption.** Approving a device code read the ceremony, then
+  consumed it, then wrote the grant, so a replacement issued under the same
+  selector between the read and the consume could be consumed instead of the
+  record that was actually approved. The store contract now binds the
+  consuming transaction to the exact record a prior read observed, and
+  transitions one ceremony while consuming another in a single atomic step.
+  Both methods default to failing closed, so an external store implementation
+  stays source-compatible without silently getting the weaker behaviour.
+
+- **A provider-token refresh whose outcome is unknown is fenced, not
+  retried.** A linked-account refresh that started and then lost its answer
+  left an ordinary claim that expired on schedule, so a second worker
+  refreshed the same grant and one of the two results was discarded, taking a
+  single-use refresh token with it. Starting an exchange now replaces the
+  claim's owner with a reserved exchange owner while preserving the original
+  deadline, so followers can tell a live exchange from an abandoned one, and
+  a store must never reclaim a row whose owner is in that reserved namespace.
+  Stores that do not implement the fence fail closed.
+
+- **Web Push refuses to send through a transport that might follow a
+  redirect.** `EndpointPolicy::Strict` validates the subscription endpoint
+  URL, but validation only ever covered the initial URL: a client that
+  follows redirects turns a validated endpoint into a `3xx` to anywhere, and
+  reqwest follows redirects by default. A client this crate builds now has
+  redirects forcibly disabled, and the new
+  `WebPushClient::with_client_builder` applies every option a caller wants
+  (proxy, TLS pinning, timeouts) while overriding the redirect policy.
+  `WebPushClient::with_client`, which takes an already-built client whose
+  redirect policy cannot be inspected, now refuses to send under `Strict`
+  with `WebPushError::UnconfinedRedirects`, before encryption and before any
+  request. `WebPushClient::allow_unconfined_redirects` is the explicit opt-out
+  for a caller who knows their client is safe.
+
+- **A signed URL is bound to the exact path it was signed for.** Signing and
+  verification both trimmed a trailing slash before hashing, which made
+  `/orders/1` and `/orders/1/` one signature, and made a proxy that appends a
+  slash indistinguishable from a client that edits the path. The path is now
+  hashed exactly as it appears, so a signature covers one path and one path
+  only.
+
+- **A cache key can no longer address a lock or a tag index.** Redis lock,
+  tag, and key-tag records lived under a NUL sentinel after the configured
+  prefix, and a caller-supplied key beginning with that sentinel landed in
+  the same space, so a `Cache::forget` could release a distributed lock
+  somebody else was holding. Values and each internal record type now carry
+  distinct namespace components ahead of the caller's key, so the two spaces
+  cannot meet. An ordinary key is stored exactly where it was before, so
+  nothing already cached is orphaned. The in-memory driver got the same
+  separation.
+
+- **Payment webhooks reject what they cannot identify and classify duplicates
+  by the database, not by message text.** A provider event with a missing,
+  non-string, or whitespace-only identifier used to enter the shared
+  idempotency namespace under a blank key, where it collided with every other
+  such event; it is now rejected before any state is written. A concurrent
+  duplicate is recognized from SeaORM's structured unique-violation code
+  rather than from human-readable error text an unrelated failure can also
+  contain, and only a re-read of a committed `processed_at` is acknowledged
+  as one, so a mirror-write failure stays retryable. Stripe's signature
+  timestamp is compared with an unsigned absolute difference, so an extreme
+  `t=` value returns a signature error instead of overflowing, and a negative
+  configured tolerance accepts only an exact match. The webhook route
+  preserves the typed status of a body it refused, so an over-cap body is
+  still a `413` rather than a flattened `400`.
+
+- **A non-idempotent HTTP request is no longer replayed after a transport
+  error.** The retry policy already required the explicit
+  `retry_non_idempotent` opt-in before replaying a `POST` or `PATCH` that
+  answered `5xx`, but the transport-error branch beside it did not check,
+  so a request whose connection dropped after the server had accepted it was
+  sent again. Both branches now apply the same rule.
+
+- **Session lifetimes cannot overflow into mass expiry.** `SESSION_LIFETIME`
+  and `SESSION_REMEMBER_LIFETIME` are minutes multiplied by sixty and then
+  added to a stored timestamp in date arithmetic that panics on overflow, so
+  an oversized value either aborted the process or wrapped into a deadline in
+  the past that expired every session at once. Both are clamped to
+  `MAX_SESSION_LIFETIME_MINUTES` before the multiplication, the database
+  driver caps the same way for a configuration built in code, and a garbage
+  collection cutoff that cannot be represented is skipped rather than sent to
+  the database, which is the difference between collecting nothing and
+  collecting everything.
+
+- **Machine-to-machine cache identities are unambiguous.** The token broker's
+  cache key concatenated the provider, the client, and the normalized scope
+  set, so two different requests whose components happened to run together
+  into the same string shared one cached token. The key is now a versioned
+  domain with length-prefixed components, which no combination of inputs can
+  make collide.
+
+- **An idempotency lease is proven still held before its result is reported as
+  fenced.** The lease refreshed periodically while the body ran, and a
+  transient refresh error was treated as loss, while a body that finished
+  between two refreshes was reported as fenced without anyone asking whether
+  the lock was still there. A transient refresh error is now retried and only
+  gives up after several consecutive failures, and one final owner-scoped
+  refresh must succeed after the body completes before the outcome is
+  reported as fenced; an error in that last check answers `FreshUnfenced`,
+  because ownership is then unknown.
+
+- **The encryption key ring is validated and installed before application
+  bootstrap.** `Crypt` was initialized by `Server::from_config`, so anything
+  that ran earlier - the bootstrap callback, a console command, a queue worker
+  entry point that never builds a server - either found no key ring or built
+  its own. `#[suprnova::main]` now loads the environment and then validates
+  and installs the ring, in that order, before your bootstrap runs. Validation
+  runs on every boot even after the ring is installed, so a production process
+  with a missing or malformed `APP_KEY` still fails closed, while the
+  process-wide key stays immutable. Laravel's `APP_PREVIOUS_KEYS` is accepted
+  as an alias for `APP_KEY_PREVIOUS`; when both are set and disagree, the
+  Suprnova name wins and the duplicate is named in a warning.
+
+- **The archived `proc-macro-error2` crate is replaced by its maintained
+  successor.** It was archived on 2026-06-07, is flagged unmaintained in
+  RUSTSEC-2026-0173, and made every build warn that a future Rust release
+  will reject it (E0365). `validator_derive` 0.20.1 moves to
+  `proc-macro-error3` 3.1.1 and `sea-bae` 0.2.2 drops the dependency, so
+  neither the advisory nor the warning appears any more. This landed on
+  main after the `v2.0.0` tag; the tagged `Cargo.lock` still resolves
+  `proc-macro-error2`.
+
+### Added
+
+- **Suprnova Live is part of the framework.** `suprnova::live` is a
+  server-driven interaction engine: a component is a Rust struct whose state
+  lives on the server, whose view is a checked Askama template, and whose
+  actions run over a signed protocol from a small browser runtime that morphs
+  the re-rendered HTML in place. There is no client-side state model to keep
+  in sync, no build tool to install to use the shipped runtime, and no inline
+  JavaScript in your documents. The engine ships as an internal crate the
+  framework depends on unconditionally, so nothing has to be enabled; the
+  browser half is published as `@suprnova/live` and its exact reviewed bytes
+  are served by the framework itself. `manual/live.md` is the
+  application-facing chapter, and a project created by `suprnova new` is Live
+  ready out of the box: it writes `src/live/mod.rs` with an empty registry and
+  a `routes()` function, binds the registry in `bootstrap.rs`, and installs
+  the routes from `cmd/main.rs`.
+
+- **Components are declared with `#[derive(LiveComponent)]` and `#[live]`.**
+  The derive names the component and its view
+  (`#[live(name = "app.counter", view = "live/counter.html")]`); the `#[live]`
+  attribute on the `impl` block marks the methods the browser may invoke. A
+  `#[public]` field is rendered and carried in the signed snapshot, a
+  `#[model]` field additionally accepts browser proposals through
+  `live:model`, and an `#[action]` method is the only entry point a request
+  can reach, receiving validated arguments and returning typed outcomes such
+  as a redirect or a flash. Every field type must implement `Default`; a fresh
+  island starts from those defaults unless a mount hook says otherwise.
+  Components are registered explicitly through `LiveRegistry::builder`, and
+  the registry is immutable once the runtime assembles - a duplicate name or
+  view, or a component whose actions need validation with no validation port
+  bound, fails registration with a typed `RegistryError`.
+
+- **`suprnova::view` is a checked server-rendered view contract for ordinary
+  routes as well as Live components.** `#[suprnova::view(path = "...")]`
+  declares a template, `TrustedHtml` is the one audited type a template may
+  emit unescaped, and the `trusted_html` filter is how it gets there;
+  `#[suprnova::view_filter]` declares a checked custom filter. Askama is the
+  substrate, but handlers depend on the framework's own contracts rather than
+  on the template engine's modules, and `TemplateFailure` is a closed,
+  redacted failure set (`MissingData`, `InvalidData`, `Failed`) rather than
+  the engine's own error text.
+
+- **The `live:` directive grammar is closed and proved against your
+  components.** A view binds behaviour with `live:click`, `live:submit`,
+  `live:model`, `live:upload`, `live:key`, `live:loading` and the rest of the
+  documented set - never an inline expression language, and never a
+  server-returned script. `suprnova live:check` builds your application and
+  runs the integrated checker over every registered view: an unknown action,
+  an unknown model field, a raw `safe` filter, or an accessibility violation
+  fails with the file, line, and column. `--allow-unproved` accepts the
+  dynamic structures the checker deliberately makes no claim about.
+
+- **`Router::try_live()` installs the reserved Live namespace once.** It
+  registers `/__live/v1/action`, `/__live/v1/upload`, the
+  `/__live/v1/async/*` control routes and WebSocket handshake, and the
+  immutable `/__live/v1/assets/*` routes, and startup fails if an application
+  route could claim `/__live`. `Router::try_live_with` takes a
+  `LiveRouteGuard` whose middleware chain is applied to the action, upload,
+  and asynchronous control routes and to the WebSocket upgrade, which is how
+  an application attaches its own authentication, tenancy, and rate limiting;
+  asset routes stay unguarded. Every reserved request carries a strict policy:
+  session, origin, CSRF, principal, tenant, and rate-limit facts must all have
+  been recorded by real middleware, and an asynchronous route that cannot see
+  the complete set is refused rather than opening an anonymous transport.
+
+- **A Live request proves its own origin, and using Live relaxes nothing
+  else.** The shipped runtime sends the Live media type and the browser's own
+  `Sec-Fetch-Site` header and carries no session token, so `CsrfMiddleware`
+  verifies that proof for a Live operation on its own, whatever origin policy
+  the application configured, and falls back to token validation for a
+  cross-site or header-less request. Ordinary routes keep the configured
+  policy, so an application no longer has to widen `OriginPolicy` for the
+  whole application to let Live work. `AuthMiddleware::optional()` is the new
+  guard form this needs: it records a principal when one exists and lets an
+  anonymous request continue, so anonymous visitors can act on a public seed
+  while an identity-bound island still refuses a request without principal
+  evidence.
+
+- **Documents place islands through `LiveDocument`.** A document route builds
+  one from the request, mounts each island with `LiveMount`, and emits the
+  bootstrap markup exactly once. `LiveMount::public_seed` declares an island
+  any visitor may render, whose state is a reusable seed promoted to a real
+  instance on the visitor's first action; `LiveMount::identity_bound` declares
+  an island that belongs to the current session and principal, so its document
+  route must authenticate. `LiveDocument::bootstrap` emits the inert
+  configuration element and the ordered script tags with integrity attributes
+  for the ESM or the classic strategy, adds the upload and asynchronous roles
+  when a mounted component needs them and the Stimulus bridge on request, and
+  rejects a second bootstrap or a mount after bootstrap.
+  `Router::try_live_mount` registers a mount, and `Router::try_live_document`
+  declares a document route with no startup mounts.
+
+- **The framework serves the exact reviewed browser artifacts.** The ten
+  deterministic build outputs are embedded and validated against their
+  manifest on first use, failing closed on any drift in digest, length, file
+  name, role, capability, or version, and are served from
+  `/__live/v1/assets/<identity>/<file>` for `GET` and `HEAD` with immutable
+  caching, strong digest validators, conditional requests, `nosniff`, and
+  closed misses. Documents contain no inline executable code, so a strict
+  `script-src 'self'` policy holds. `suprnova live:assets --out <dir>`
+  publishes the same bytes to a CDN or a static directory atomically, treats
+  an identical publication as up to date, and refuses to replace a directory
+  whose bytes differ unless you pass `--replace`.
+
+- **Live components accept file uploads under a declared, checked policy.** An
+  `#[upload(policy = ...)]` attribute on a `#[model]` field declares maximum
+  file count, declared and aggregate byte budgets, accepted media types, and
+  replacement behaviour through `UploadPolicy::builder`, and the view binds it
+  with `<input type="file" live:upload="avatar">`. The runtime creates,
+  transfers, and completes the upload through `/__live/v1/upload`; the bytes
+  wait in quarantine until the declared finalize action runs, when the
+  framework hands them to the application's `UploadFinalizer`, alongside an
+  optional `UploadScanner` and `UploadApplicationValidator`. Every control is
+  authorized through the gate as
+  `live:<component>.upload.<field>.<Control>` for each of `Create`,
+  `Reacquire`, `Status`, `Queue`, `BeginTransfer`, `PutChunk`, `Complete`,
+  `Accept`, `BeginFinalize`, `CommitFinalize`, `Cancel`, `Reject`, `Expire`,
+  and `Fail`. Every request revalidates the current mount, principal, session,
+  tenant, component, field, and document scope, a per-handle lock serializes
+  chunk, completion, cancellation, action, finalization, and cleanup races,
+  and chunk bodies reserve the shared in-flight budget before buffering.
+  `Router::try_live_upload_reacquisition` declares an
+  application-owned path outside the reserved namespace where a browser that
+  lost its transfer grant can get a fresh one, answering only the session and
+  principal that created the upload.
+
+- **Islands update asynchronously over SSE, WebSocket, or polling.** A
+  component declares the streams it listens to in the `#[live]` attribute
+  (`streams(stream(name = "activity", topics("activity"),
+  events(ActivityPosted)))`), the framework signs a bounded subscription
+  descriptor for the visitor, and the browser runtime opens a native transport
+  and falls back to polling when it cannot. Subscribing is authorized through
+  the gate ability `live:<component>.stream.<name>`; the application publishes
+  through `suprnova::live::LiveStreams`, with `refresh` telling subscribed
+  islands to fresh-render and `event::<T>` delivering a typed payload to the
+  island's registered handlers. Fanout, hop count, and per-document delivery
+  are all bounded. Polling is an ordinary fresh render, so state catches up
+  but event payloads published while a transport was unavailable are not
+  replayed, which the runtime reports as a degraded stream rather than a
+  current one.
+
+- **The browser runtime is a strict TypeScript package that ships in core and
+  optional bundles.** `@suprnova/live` bootstraps once per document, discovers
+  islands, parses the closed directive grammar, gives each island bounded work
+  and truthful pending and failed state, applies a response only after a
+  successful morph through a pinned private Idiomorph adapter, and preserves
+  focus, form state, controllers, scroll, and history across morphs and native
+  navigations. Optional `uploads`, `async`, and `stimulus` bundles attach
+  through a typed feature port, in ESM and classic forms; Stimulus is never
+  bundled into core. There is no `eval`, no `new Function`, no
+  server-returned script, and no inline expression language anywhere in it.
+
+- **Four CLI commands cover the Live workflow.** `suprnova live:make <name>`
+  scaffolds a component in `src/live/`, its view in `templates/live/`, and its
+  registration in the `registry()` builder, declares the module, validates
+  every target and refuses traversal and symlinks before writing, writes
+  atomically, never overwrites, rolls back every file a failed run had
+  written, and can report a dry run. `suprnova live:check`,
+  `suprnova live:inspect`, and `suprnova live:assets` are thin clients of a
+  hidden framework console command and a bounded, versioned JSON-lines
+  protocol, so the CLI keeps no framework or engine dependency and fails
+  closed with no writes on anything unsupported, stale, truncated, oversized,
+  or unexpected. `live:inspect` reports the bound registry, configuration
+  limits, installed upload capabilities, assembled runtime services, and the
+  asset identity as presence booleans and counts, never state or secrets.
+
+- **`suprnova::live::testing` prepares a router's runtime and mount catalog
+  for in-process tests.** `prepare_live_router_for_test` gives a test the same
+  runtime the server assembles, so a test can decode an island's snapshot from
+  its `data-suprnova-live-snapshot` attribute, post an action with a real
+  session cookie and `Sec-Fetch-Site: same-origin`, and assert on the accepted
+  render through the application's real global middleware stack.
+
+- **RenderCache stores a proven-safe copy of a route's response and serves the
+  next matching request without running the handler.** It is opt-in per route
+  and per group, it never changes what an application can do, and a route it
+  declines still renders and serves correctly. `Router::try_render_cache`
+  opts one already-registered route pattern in and
+  `Router::try_render_cache_group` opts every route under a path prefix in;
+  `RenderCache::install(router, RenderCacheConfig::from_env())` finishes the
+  wiring after every middleware registration that establishes request-scoped
+  locale, session, or identity. `RENDER_CACHE_ENABLED=false` is a real off
+  switch at install time: a disabled configuration returns the router
+  untouched, probes nothing, registers nothing, and leaves the process gate
+  shut.
+
+- **A cache policy states a representation class, a freshness policy, and how
+  the response may be shared.** `RenderCachePolicy::builder` takes a
+  `RepresentationClass` running widest to narrowest - `PublicShared`,
+  `PublicShellStitched`, `PrivateCached`, `Uncacheable` - and
+  `FreshnessPolicy::new(fresh_ms, stale_servable_ms, stale_on_error_ms)` sets
+  how long a representation is fresh and then how far past that edge a stored
+  copy may be served while a background rebuild runs or after a foreground
+  rebuild failed. `SharedCachePolicy` controls what a shared cache in front of
+  the application is told. A route inside a cached group can narrow its
+  enclosing policy with a `PolicyPatch` instead of restating it, and may only
+  make it narrower; pulling one route out of a cached group is a patch that
+  sets the class to `Uncacheable`.
+
+- **Variance is declared, never guessed.** A cached representation varies by
+  route pattern, path parameters, and application build unless a policy says
+  otherwise. `QueryPolicy::declared([...])` names the query parameters that
+  distinguish representations, and any other query parameter on a request
+  bypasses the cache for that request rather than being silently ignored.
+  `.vary(VarianceDimension::Locale | ::Host | ::Tenant | ::Principal)`
+  partitions by the negotiated locale, the request host, the current tenant,
+  or the signed-in visitor, the last two as opaque key material; a
+  `PrivateCached` route that declares neither `Principal` nor `Tenant` fails
+  to build at all. `Media` and `Encoding` are declared together with their own
+  closed set through `.vary_media(NegotiatedPolicy::declared([...],
+  default)?)` and `.vary_encoding(...)`: the middleware negotiates the
+  request's `Accept` or `Accept-Encoding` against that set per RFC 9110, with
+  the highest quality winning, equal quality keeping the header's own
+  left-to-right order, a wildcard compared as a literal token rather than
+  expanded, and a `q=0`, out-of-range, or unparsable quality excluding a
+  candidate rather than defaulting it. An absent, unmatched, or unparsable
+  header resolves to the declared default and never panics. Both the render
+  key and the `Vary` header take their value from that one resolution, so they
+  cannot disagree.
+
+- **A served hit is a real HTTP response with real validators.** It carries
+  `ETag` as a strong validator a client can send back as `If-None-Match` for a
+  `304`, plus `Cache-Control`, `Vary`, and `Age` in whole seconds since
+  publication, which is the quickest local sign that a response came out of
+  the store rather than out of a handler. A response served past its fresh
+  interval additionally carries `Warning: 110 - "Response is Stale"`.
+  Conditional requests and `HEAD` are answered from the stored entry.
+
+- **Cached output is proved current against the database, not assumed.** A
+  request-scoped collector attributes every read a handler makes to the thing
+  it read: a model, a table, a configuration value, a feature flag, an
+  authorization decision, an identity axis. Every supported write path on the
+  other side advances the generation of what it changed, in the caller's own
+  transaction where there is one - the ORM's model and bulk writes, the query
+  builder facade, raw table writes, the payments hydration path, feature flag
+  writes, and the RBAC role and permission statements including the new
+  revocations. A hit reproves the generations it depends on before serving,
+  either by rereading the ledger under `CoherenceMode::Authority` or against a
+  validation lease under `CoherenceMode::Lease`, so nothing a write has
+  invalidated can be served as current. `RenderCache::bump_permission_version`
+  is the one invalidation an application calls by hand, from the code path
+  that changes what a signed-in user may do; it advances a persisted
+  generation every principal-keyed render observes, survives a restart, and
+  joins the transaction the role change runs in.
+
+- **Authorization, feature flags, and global scopes participate honestly.** A
+  gate decision is judged by the identity axis its evaluation actually
+  consulted, so a tenant-only consult needs only `Tenant` declared while
+  anything that resolved principal material, or resolved nothing nameable at
+  all, needs `Principal`. An RBAC-gated route caches and a permission grant or
+  revocation rebuilds it, because the five role and permission tables are
+  observed rather than treated as an unknown. A feature flag read observes a
+  `Feature` generation whenever the snapshot holds that flag at any scope key,
+  `set_flag` advances it, and a flag reload advances it for every flag its own
+  diff found changed. An Eloquent `GlobalScope` declares
+  `ScopeDependency::Constant` or keeps the conservative `PerRequest` default,
+  and a per-request scope whose filter read nothing the collector can name is
+  recorded as an undeclared read and narrows the render to `Uncacheable`
+  rather than silently caching a tenant filter away.
+  `suprnova::live::current_tenant()` is the instrumented accessor a gate body
+  or a scope reaches for.
+
+- **The write side is open in every process that writes through the ORM.** A
+  queue worker, a scheduled task, or a console command writes through the same
+  ORM the server does and never calls `RenderCache::install`, so its writes
+  used to advance no generation and pages depending on them kept being served
+  stale. The write side is now a process-wide tri-state probed at most once,
+  never inside a caller's transaction, so every writing process advances the
+  same generations the server does while an application with the cache
+  disabled still issues no RenderCache SQL at all.
+
+- **Three deployment profiles decide where entries and rebuild leadership
+  live.** `RENDER_CACHE_PROFILE` selects `embedded` (a per-process file tier
+  under `RENDER_CACHE_L1_DIR`, in-process leadership), `database` (entries in
+  `suprnova_render_entries`, leases in `suprnova_render_leases`, Live instance
+  records in `suprnova_live_instances` and `suprnova_live_promotions`), or
+  `redis` (a Redis hash per key, plus a per-key publication token counter).
+  `RENDER_CACHE_L1` and `RENDER_CACHE_COORDINATOR` override either half
+  independently, so a deployment that wants its entries in the database and
+  its leases in process says exactly that. Generation truth does not move: the
+  database-backed ledger is the authority at every profile, which is what lets
+  Redis lose everything it holds without anything stale being proved current.
+  The full table is `RENDER_CACHE_ENABLED`, `RENDER_CACHE_PROFILE`,
+  `RENDER_CACHE_L1`, `RENDER_CACHE_COORDINATOR`, `RENDER_CACHE_L0_ENTRIES`,
+  `RENDER_CACHE_L0_BYTES`, `RENDER_CACHE_L1_DIR`, `RENDER_CACHE_L1_BYTES`,
+  `RENDER_CACHE_REDIS_URL`, `RENDER_CACHE_REDIS_PREFIX`,
+  `RENDER_CACHE_LEASE_MS`, `RENDER_CACHE_MAX_WAITERS`, `RENDER_CACHE_HINTS`,
+  `RENDER_CACHE_FAILURE`, and `APP_BUILD_ID`. A closed-set variable given a
+  value outside its set fails the boot with a message naming the variable and
+  never repeating the value, because an environment value can carry a secret.
+  The Live instance ledger has its own `LIVE_LEDGER_DRIVER`, `LIVE_REDIS_URL`,
+  and `LIVE_REDIS_PREFIX`, and both installs fail closed at boot on a missing
+  tier migration or an endpoint nothing answers.
+
+- **A Live document can be cached as a shared shell with per-visitor
+  islands.** A route declaring `RepresentationClass::PublicShellStitched`
+  stores the shell once as a composite entry cut from the slots
+  `LiveDocument::mount` captured, and on a hit the middleware attaches the
+  prepared entry and still calls the route chain, so the route's own guard and
+  tenant middleware decide the request before the Live completion middleware
+  re-mounts every slot under authority derived for that request alone. A
+  capture that is not exactly usable - a slot not found exactly once, a
+  document digest that does not match - declines publication and stores
+  nothing. The bounds are 32 slots, 64 nonce holes, 193 graph segments, and
+  4,096 bytes each for slot parameters and fallbacks. Because every assembly
+  is a distinct representation, no composite response answers `304` or honours
+  `If-None-Match`, and a slotted assembly is sent
+  `Cache-Control: private, no-store` while a zero-slot one keeps its class's
+  private `max-age`.
+
+- **A stored composite can name another stored entry as one of its
+  segments.** `LiveNestedSegment` is the typed declaration and
+  `Router::try_live_nested_segment` registers it. The inner entry keeps its
+  own key and its own version, so it is invalidated, republished, and fenced
+  on its own terms rather than the includer's, and each segment declares what
+  happens when it cannot be resolved: fail the document, omit it, or serve a
+  bounded fallback. Nesting is bounded to three levels and sixteen nested
+  segments, a cycle is reported as a cycle even when it would also overrun the
+  depth, and the assembled length is checked against the body bound before a
+  single byte is copied. Publication is refused for a composite naming an
+  inner segment of a wider representation class, one with a longer freshness
+  window, a transitive cycle, a graph past the depth bound, or a
+  `PrivateCached` inner segment that could never resolve. On a hit an
+  identity-bound inner segment is reauthorized for the requesting visitor; one
+  declared identity-free skips that, which is proven identity freedom rather
+  than a weakening of it.
+
+- **Nodes can tell each other that a generation just moved.**
+  `RENDER_CACHE_HINTS` turns on a Redis pub/sub channel carrying the
+  dependency digests an advance just touched, defaulting to on for the `redis`
+  profile and off for the other two, riding the same
+  `RENDER_CACHE_REDIS_URL` and `RENDER_CACHE_REDIS_PREFIX` as the cache
+  itself. A hint's only power is to make a node revalidate earlier than its
+  own lease would have: it can never extend or create a lease, prove an entry
+  current, bypass the ledger read a hit still makes, or touch the authority
+  epoch, which is why the channel is unauthenticated by design and why an
+  unreachable hint endpoint does not refuse the boot the way an unreachable
+  cache tier does. A hint carries no instant, so no clock-skew assumption
+  between nodes is needed. A deployment with hints off, one whose channel is
+  dead, and one that never had them serve the same entries and admit the same
+  rebuilds; only the moment of revalidation differs.
+
+- **Two console commands and nine telemetry counters are the operating
+  surface.** `render-cache:inspect <key>` reports one stored entry's
+  representation class, `body_bytes`, other metadata, and the current
+  authority epoch, and it reads this process's in-process tier and nothing
+  else, so on a shared profile it answers "what this node has in memory"
+  rather than "what the deployment has stored". `render-cache:epoch-advance`
+  is the emergency invalidation: it advances the authority epoch, which is
+  baked into every lookup key, so stored entries go out of reach with nothing
+  to enumerate and nothing to delete, and on the node that runs it the effect
+  is immediate. Neither ever prints a stored body or a raw dependency
+  identity, which is asserted rather than merely stated. The counters are
+  `suprnova.render_cache.lookups`, `.hits`, `.publications`, `.rebuilds`,
+  `.stitch.assemblies`, `.stitch.slots`, `.stitch.nested`, `.hints`, and
+  `.epoch_rewinds`, all with closed low-cardinality attributes that never name
+  a route, a key, a digest, a tier, or a provider.
+
+- **A declined lookup says exactly which contract refused it.**
+  `outcome="declined"` on the lookup counter now carries a `reason` attribute
+  from a closed set of thirty-eight labels, computed from a typed value at the
+  branch that actually declined rather than reconstructed from the response
+  afterwards. They are grouped by contract: eligibility (`policy_uncacheable`,
+  `method`, `status`, `streaming`, `sets_cookie`, `unsafe_header_name`),
+  observation (`observation_overflowed`, `ledger_read_failed`,
+  `handler_not_begun`), classification, key mismatch, Live document, and
+  composite build. Every label is documented in the operations chapter, and a
+  test asserts that rather than trusting the prose. `reason` is emitted only
+  beside `outcome="declined"`; a hit and a miss carry none.
+
+- **An authority epoch that goes backwards is detected, refused, and lifted
+  past.** A database restore can move the epoch to a value the deployment has
+  already used, which would let entries published under the old higher value
+  be proved current again. An entry or a lease stamped above the authority is
+  now refused at any age, before any dependency comparison, and the node that
+  detects it lifts the ledger epoch past the stamp, drops its lease, clears
+  its in-process tier, and increments
+  `suprnova.render_cache.epoch_rewinds`.
+
+- **NOWPayments joins Stripe and Paddle as a payment adapter.** The
+  `suprnova-payments-nowpayments` crate creates hosted invoices, verifies
+  payment notifications, and reads payment status with the merchant API key,
+  and registers as `nowpayments` in the ordinary provider registry through
+  `NowPaymentsProvider::from_env()`. It reads `NOWPAYMENTS_ENVIRONMENT`
+  (`sandbox` or `production`, defaulting to `sandbox`; an unknown or blank
+  value fails configuration), `NOWPAYMENTS_API_KEY`, `NOWPAYMENTS_IPN_SECRET`,
+  and `NOWPAYMENTS_IPN_CALLBACK_URL`, and refuses blank credentials before any
+  HTTP request. Its webhook endpoint is
+  `POST /webhooks/payments/nowpayments` through the shared `webhook_routes`,
+  and it needs the exact public HTTPS callback URL and request bodies that
+  reach the adapter unchanged. `manual/payments-nowpayments.md` is the
+  chapter.
+
+- **RBAC has the revoking counterpart of every granting helper.** The surface
+  exported the granting and checking halves of an access-control API and
+  nothing that took access away, so removing an administrator's role meant
+  composing statements against join tables whose semantics you had to infer -
+  during an incident, which is when you reach for revocation.
+  `remove_permission_from_role`, `remove_role_from_model` and
+  `remove_permission_from_model` are the free functions, each with the
+  `_on_guard` pairing the granting side already had, and `HasRoles::remove_role`
+  and `HasRoles::remove_permission_to` pair at the call site. A name that
+  exists on no such guard is an error, so a typo or a call aimed at the wrong
+  guard is loud; an assignment the model or role does not hold is a no-op
+  returning `Ok`, so a retry of a revocation that already landed is safe. Each
+  call removes exactly the one assignment it names, with no bulk sweep, and
+  every statement resolves its executor through the ambient transaction first,
+  so a grant-and-revoke bundle inside `DB::transaction` commits or rolls back
+  as one unit. Revocation is source-specific and does not contradict
+  `has_permission_for_model`, which resolves a direct grant before a
+  role-inherited one: taking a role away leaves a permission the model also
+  holds directly still answering true, and the rustdoc names the second call
+  that ends effective access.
+
+- **An application can build its router asynchronously.**
+  `Application::try_routes_async` takes a closure returning a future, and
+  `Server::try_from_config_with_routes_async` is the asynchronous twin of
+  `try_from_config_with_routes` that hosts it, sharing the same prologue and
+  epilogue. It exists because `RenderCache::install` has to probe for the
+  generation ledger's tables before it can assemble a runtime, and the route
+  closure is the only place with both a container and a router - neither boot
+  hook has one. `routes`, `try_routes`, and `try_routes_async` write the same
+  slot, so the last one called is the one the server builds.
+
+- **The Magnetar integration exposes what a partially completed sign-in
+  actually returned.** `SignInOutcome` is public, so a magic-link, OAuth, or
+  passkey callback that resolves to `SignInOutcome::FactorRequired` can be
+  handled rather than being reported as a failure: the framework session is
+  not bound, and the selector it carries can be completed through the retained
+  host engine. `FactorAuth` and `MagnetarFactorAuthEngine` are the types that
+  hold that continuation, and `install_magnetar_oauth_engine` and
+  `install_magnetar_oauth_engine_with_factor` install an OAuth engine with or
+  without one. Magnetar bootstrap failures now name what is missing instead of
+  reporting a generic install error.
+
+- **The queue driver contract reports whether it can honour a queue-name
+  filter.** `QueueFilterCapability` (`Supported`, `Unsupported`, `Unknown`)
+  is what `QueueDriver::queue_filter_capability` returns; the default is `Unknown`,
+  not `Unsupported`, so a third-party driver that already overrides `pop_from`
+  keeps working unchanged, and a decorator may reject a known `Unsupported`
+  connection before polling but must let an `Unknown` driver answer for
+  itself. `TerminalCallbackClaim` is the metadata a worker gets back when it
+  atomically claims a finished batch's terminal callbacks, carrying the
+  durable completion time and any cancellation visible in the same critical
+  section, so the callback decision cannot be made from a snapshot that went
+  stale before ownership was elected.
+
+- **`Schedule::try_add` is the fallible sibling of `Schedule::add`.** Task
+  name identifies a task in direct lookup and in the distributed keys used by
+  `TaskBuilder::on_one_server` and `TaskBuilder::without_overlapping`, so one
+  name cannot identify two registered entries and a schedule that registered
+  the same name twice had two tasks contending for one lock. Names are now
+  exact, case-sensitive, and unique: `add` panics on a duplicate and the
+  existing task is retained, while `try_add` returns the error for code that
+  would rather handle it.
+
+- **Session lifetime bounds and the session migration error are public.**
+  `MAX_SESSION_LIFETIME_SECS` and `MAX_SESSION_LIFETIME_MINUTES` are the
+  clamps the environment parsing and the database driver apply, and
+  `SessionMigrationError` is exported so a custom `SessionStore` can name the
+  failure it returns.
+
+- **Scaffolded projects are built in a production shape by construction.** The
+  generated `Cargo.toml` depends on the framework with default features off
+  and the nine non-`testing` defaults listed explicitly (`filesystem`,
+  `database-sqlite`, `database-postgres`, `database-mysql`, `vector-mariadb`,
+  `web-push`, `localization`, `magnetar-oauth`, `media`), and re-adds
+  `features = ["testing"]` as a dev-dependency. Cargo's resolver pulls a
+  dev-dependency's features into `cargo test` and other `--tests` builds only,
+  so `cargo build --bin app` never compiles a test seam into a shipped binary,
+  and `cargo test` is unchanged. `manual/deployment.md` documents the shape
+  for an existing application to adopt.
+
+- **The default cache build id comes from the application, not the
+  framework.** `#[suprnova::main]` records the application crate's own
+  `CARGO_PKG_VERSION` immediately after loading the environment, and
+  `RenderCacheConfig::from_env` resolves `build_id` through an explicit
+  `APP_BUILD_ID`, then that recorded application version, then this framework
+  crate's own version only for a binary that never expanded
+  `#[suprnova::main]`. `RenderCacheConfig::with_build_id` overrides whatever
+  `from_env` chose, for an application that derives its own per-deploy
+  identifier in code. Set `APP_BUILD_ID` explicitly once per deploy: it is
+  mixed into every lookup key, and a package version rarely changes when you
+  ship a template, a translation, or a handler fix.
+
+
+### Changed
+
+- **A worker on the failover queue connection now drains every connection,
+  not just the primary.** `FailoverQueueDriver` documented the Laravel
+  consequence it inherited: writes fell through the list, reads did not, so
+  whatever failed over to a fallback sat there until somebody ran a second
+  worker against that fallback directly. `pop` and `pop_from` now rotate their
+  starting connection and then scan the whole list sequentially - rotation so
+  a recovered, continuously busy primary cannot starve work that landed on a
+  fallback, sequential so one call cannot reserve several jobs and hand back
+  one. Each reservation is issued a fresh aggregate token that the driver maps
+  back to the connection that really owns it, because inner tokens are not
+  globally unique and two backends can legitimately mint the same UUID; an
+  expired or unknown aggregate token is treated as stale rather than sent to
+  an arbitrary connection. Counters and all three listings aggregate every
+  configured connection in configured order and `clear` attempts every one, so
+  what an operator inspects is the backlog this driver can actually consume.
+  A driver declares whether it can honour a queue-name filter through
+  `QueueDriver::queue_filter_capability`, which defaults to `Unknown` so an
+  existing third-party driver is unaffected.
+
+- **The minimum workflow lease is two seconds, and the first heartbeat fires
+  immediately.** The heartbeat refreshes at `max(lock_timeout / 2, 1s)`, so a
+  one-second lease was due for its first refresh at or after its own expiry:
+  any claim latency or scheduling jitter opened a window another worker could
+  walk through while the first was already running effects. The heartbeat's
+  first tick is no longer skipped, which closes the claim-to-first-refresh
+  window, and admission awaits an owned refresh before any user code runs, not
+  only inside a step. `WORKFLOW_LOCK_TIMEOUT_SECS` below two is clamped with a
+  warning that says why, and a configuration built in code that carries a
+  shorter lease fails validation.
+
+- **A payment provider without customer records can decline transaction-mirror
+  hydration.** `WebhookHandler::mirrors_payment_transactions` defaults to
+  `true`, so every existing provider behaves as it did; a provider that
+  returns `false` still has its verified events persisted and deduplicated in
+  the webhook audit log, refunds included, but no transaction mirror is
+  fabricated for orders the application owns and must reconcile against
+  authenticated provider state. `try_extract_payment_snapshot` is the fallible
+  form of `extract_payment_snapshot` the hydration path uses: returning `Err`
+  leaves the webhook pending so the provider retries it, while `Ok(None)` is
+  reserved for an event that genuinely cannot supply a complete snapshot. Both
+  are provided methods, so an existing driver compiles and behaves unchanged.
+
+- **A Paddle `transaction.billed` is no longer read as money collected.** An
+  issued invoice does not confirm collection, and treating it as a settlement
+  marked orders paid that had not been. Approved refund and dispute
+  adjustments are classified as adjustments rather than transactions, with
+  their currency taken from `data.currency_code` and their settle time from
+  the latest captured payment attempt where one is available; only
+  `WebhookHandler::parse_event` classifies them, because the decision needs
+  the payload's own action and approval status. The adapter also preserves the
+  merchant correlation it was given through checkout instead of substituting a
+  customer identifier that Paddle.js does not accept as a customer auth token,
+  encodes non-string custom data as JSON strings consistently across customer
+  and checkout requests, and gives its HTTP client the request deadline the
+  pinned SDK does not set.
+
+- **The framework crate carries three new modules and two new hard
+  dependencies.** `suprnova::live`, `suprnova::render_cache`, and
+  `suprnova::view` are unconditional, not feature-gated, so the framework now
+  depends on the internal `suprnova-live` engine crate and on `askama` in
+  every build. Neither module does anything until an application opts in:
+  `Router::try_live()` is what installs Live's reserved routes, and
+  `RenderCache::install` with a policy is what makes the cache do anything at
+  all.
+
+### Fixed
+
+- **A batch job is not acknowledged until its accounting is durable.** The
+  worker acknowledged a successful batch member and then wrote the batch
+  bookkeeping, so a failure between the two left a batch permanently short one
+  settlement and its completion callbacks never fired. The reservation is now
+  held until every accounting write succeeds; a rejected or uncertain write
+  leaves it intact so visibility expiry redelivers the job, and the
+  repository's `(batch_id, job_id)` uniqueness makes the replay safe even when
+  the first write took effect and only its response was lost. The batch
+  repository is separately installable and may address a different database,
+  which is why this cannot simply share the queue settlement's transaction.
+
+- **A batch's terminal callbacks are elected exactly once.** Two jobs
+  finishing the last two entries of a batch could both observe a pending count
+  of zero and both run the completion callbacks. Settlement rows are now the
+  source of truth and their parent batch row is locked before insertion, so
+  concurrent jobs for one batch form a total order and exactly one final
+  settlement observes zero - through row locks on PostgreSQL and MySQL, and
+  through the writer lock the serialized transaction takes on SQLite. Claiming
+  the callback bundle returns the durable completion time and any cancellation
+  visible in that same critical section, so a worker cannot choose `then` from
+  a snapshot that went stale before ownership was elected, and a non-empty
+  batch whose pending count reached zero is sealed against positive growth. A
+  cancellation already visible after an uncertain response is not restamped on
+  redelivery. Envelope-construction failures collected while building a
+  pending batch are surfaced at dispatch, which rejects the whole batch before
+  any repository or driver mutation, instead of being swallowed by an
+  infallible fluent builder.
+
+- **The Redis queue driver fences every terminal operation against the
+  delivery it was issued for.** `ack`, `nack`, `release`, and `settle` now
+  compare the stream entry's consumer owner and delivery count with the
+  generation captured by `pop`, and one Redis script applies any successor
+  publication and the `XACK` together, so a delayed response that makes the
+  caller retry finds the generation gone and the retry becomes a no-op instead
+  of a duplicate publish. Because `nack` is inherently two commands (`XADD`
+  then `XACK`), each reservation retains a per-token lifecycle that stays
+  addressable through every failed operation and is removed only after the
+  acknowledgement succeeds, so a retry resumes at the step that failed rather
+  than republishing. The driver's at-least-once contract and the requirement
+  that handlers be idempotent are now stated in the module documentation
+  rather than implied. Consumer identities are isolated per process, so two
+  workers cannot claim each other's pending entries.
+
+- **A database queue reservation lasts as long as it was asked to.**
+  `reserved_until` stores whole seconds and readers compare it with the
+  floored current time, so the current fractional second was silently taken
+  off every lease and a subsecond timeout could round to nothing. The absolute
+  expiry instant is now rounded up.
+
+- **Workflow step writes are fenced, an exhausted attempt budget terminalizes,
+  and MySQL date columns match the entities that read them.** A step write
+  from a worker that had already lost its claim could land on top of the
+  worker that now owns the workflow; writes now carry the claim's fencing
+  token. A row whose attempt budget is already exhausted could neither be
+  claimed nor left pending forever: the claim statement now terminalizes at
+  most one such row per poll, with disjoint cleanup and claim predicates so a
+  large abandoned backlog cannot turn one worker poll into an unbounded write.
+  The early workflow migrations declared MySQL date columns as `TIMESTAMP`
+  while the public entities use `chrono::NaiveDateTime`, whose MySQL storage
+  type is `DATETIME`; `NormalizeWorkflowDateTimesForMysql` is an additive
+  migration that converts them and is a no-op on PostgreSQL and SQLite.
+
+- **Cancelling a task no longer abandons a transaction's deferred effects.**
+  An aborted `DB::transaction` rolls its database work back when SeaORM drops
+  the transaction, but nothing rolled back a deferred queue push or released a
+  held uniqueness lock for it, and an after-commit callback that was already
+  running when the abort landed was dropped mid-effect. Callbacks now run as
+  awaited child tasks, in registration order, so one already in flight
+  survives its caller's cancellation, and the unstarted remainder is diverted
+  to a detached task that either runs the after-commit list (the transaction
+  did commit) or compensates (it did not). A panicking callback surfaces as an
+  error instead of skipping the callbacks behind it, and a `COMMIT` the
+  database refuses after the closure has already taken the request is handled
+  rather than panicking.
+
+- **Cross-disk copies and read-through caching clean up after a cancelled
+  task.** A mid-stream failure already discarded the partial destination
+  object, but a cancellation returns no error at all, so the writer was simply
+  dropped and a truncated object or a staged multipart upload was left behind.
+  The destination writer is now owned by a guard across the transfer: an error
+  settles inline with the same abort and delete as before, while a
+  cancellation diverts that cleanup to a detached task, and the cleanup itself
+  runs to completion even if the awaiting task is cancelled during it. Cleanup
+  never targets a published object, because another writer may have won the
+  condition. Local filesystem work is kept alive until it finishes, since
+  dropping a Tokio filesystem future does not stop the blocking work it has
+  already submitted.
+
+- **Two throttle clauses that hashed to the same storage identity no longer
+  share one counter.** A rate-limit rule with several finite clauses could
+  collide, so one clause's hits counted against another's budget. Colliding
+  clauses now reserve deterministic, unambiguous counter and timer identities,
+  computed once so the gate, the deferred hit, and the response headers all
+  use the same key, and legacy keys are kept where no collision exists.
+
+- **A sliding-window sweep no longer erases history a longer quota still
+  needs.** The in-memory limiter dropped a bucket whose last hit was older
+  than the window it was asked about, which discarded the record enforcing an
+  already-observed longer quota on the same key. A bucket is now retained
+  until its last recorded hit is older than both the supplied window and the
+  longest quota window observed for it. A decrement below the minimum amount
+  is handled rather than under-counting.
+
+- **The in-memory cache driver rejects an increment against a non-integer
+  value.** Redis `INCRBY` and `DECRBY` refuse a live non-integer and leave its
+  value and TTL alone; the memory driver overwrote it, so the same code
+  behaved differently against the two backends. It now parses before
+  inserting and leaves the entry untouched on error. Separately, Redis `add`
+  installs a missing untagged value and clears stale tag metadata in one
+  script, so a newer tagged overwrite can no longer land between the
+  conditional write and the cleanup that follows it.
+
+- **Inertia one-shot session data survives a failed response.**
+  `SessionMiddleware` ages `_flash.new.*` into `_flash.old.*` before the
+  handler runs, so a response that failed while being constructed left those
+  values to be deleted by the next request's aging pass - the user lost the
+  validation errors or the flash message that explained what went wrong. A
+  request-scoped guard now reflashes them on every uncommitted exit,
+  cancellation included, and removes them only after the complete response has
+  been built.
+
+- **Fanout broadcasting waits for the backend to say it wrote.**
+  `SeaProducer::send` only enqueues, and the returned future is what reports
+  the actual backend write, so a delivery was reported as sent when it had
+  only been queued. Every send in a pass is now polled for its receipt under
+  one deadline, which also stops an unavailable broker from holding an
+  application request open indefinitely. Membership heartbeats hold the read
+  guard until every snapshot heartbeat is enqueued, so a concurrent untrack
+  cannot be overtaken by a stale heartbeat.
+
+- **`suprnova generate-types` never leaves a stale or truncated artifact
+  behind.** A scan that ended early used to overwrite the output with whatever
+  it had, so a transient parse failure silently deleted type definitions the
+  application still used. File generation now refuses to overwrite an artifact
+  after an incomplete scan, writes atomically through a collision-free sibling
+  temporary file with bounded retries, and skips the write entirely when the
+  contents are unchanged. An output symlink keeps its previous behaviour: the
+  resolved target is replaced atomically and the link stays in place; a
+  changed read-only destination is rejected.
+
+- **Two `suprnova` command failures are reported instead of swallowed.**
+  `suprnova new` reports a failed `git init` rather than presenting a project
+  as fully created, and `suprnova workflow:install` validates the migration
+  path before creating any directory, so an invalid path fails without leaving
+  a half-made tree behind.
+
+- **A savepoint and its deferred-effect registry agree on identity.** The
+  savepoint statement and the registry mark used the caller's original
+  spelling, but names are case-insensitive and PostgreSQL additionally aliases
+  names sharing their first 63 ASCII bytes, so `ROLLBACK TO` could unwind a
+  savepoint whose deferred effects the registry had filed under a different
+  key. Both now share one validated, backend-canonical identity. The accepted
+  64-byte API limit is unchanged.
+
+- **`suprnova <command> --help` prints help instead of running the command.**
+  The CLI declared its own `help` flag and consulted it only when no
+  subcommand had been given, so every other `--help` printed the banner and
+  then executed the command anyway. `suprnova migrate:fresh --help` dropped
+  every table in the database, and the guard that would have stopped it
+  refuses only in production while `APP_ENV` defaults to `local`. Clap now
+  owns `-h` and `--help` on the top level and on every subcommand, in either
+  argument order, and the curated banner is still what the top level prints.
+  A test enumerates the subcommands from clap itself, so a subcommand added
+  later is covered without anyone remembering to add it.
+
+- **A scaffolded frontend no longer pins the CSRF token it read at boot.**
+  The generated Vue, Svelte, and React entry points read
+  `<meta name="csrf-token">` once at module load and attached that value to
+  every Inertia visit. Logging in rotates the session, the captured token
+  goes stale, and the next state-changing visit - typically the logout - was
+  refused with `419 CSRF token mismatch`. Every generated application shipped
+  with it. The hook is gone: the Inertia client reads the `XSRF-TOKEN` cookie
+  `CsrfMiddleware` sets and echoes it back in `X-XSRF-TOKEN` itself, once per
+  request, so the value that travels is the one the browser holds at that
+  moment. Server-side verification is unchanged and both header names are
+  still accepted. The manual chapter and the `suprnova::csrf` module
+  documentation named the old hook as the thing to do; both now name it as
+  the thing to avoid.
+
+- **A scaffolded application's XSRF cookie is usable over local HTTP.**
+  `CsrfMiddleware::new()` defaults the JS-readable `XSRF-TOKEN` cookie to
+  `Secure`, while the generated `env.example` sets `SESSION_SECURE=false` for
+  development, so a browser would neither store nor return the cookie over
+  `http://localhost` and every state-changing request in development was
+  refused with `419`. The generated bootstrap now passes its `SessionConfig`
+  to `CsrfMiddleware::with_session_config`, which copies the session cookie's
+  `Secure`, `SameSite`, `Domain`, `Path`, and lifetime onto the XSRF cookie
+  so the two cannot drift apart. Nothing is weakened: token validation, the
+  default origin policy, and the production guards are unchanged.
+
+- **`suprnova make:command` appears on the help screen.** The command
+  scaffolds a console command into `src/commands/` and had no line on the
+  curated screen, so the only way to learn it existed was to read the source.
+  The screen is now checked against the subcommand list clap reports, in both
+  directions, so neither a missing line nor a line naming no command can
+  survive.
+
+### Upgrading
+
+- **Most applications need no code change.** Live and RenderCache are both
+  opt-in: `suprnova::live` does nothing until a router calls
+  `Router::try_live()`, and `suprnova::render_cache` does nothing until a
+  route is opted in and `RenderCache::install` is called. Everything else in
+  this release is a fix to behaviour you already had. The version is 2.0.0
+  because the framework's surface grew by two whole subsystems and because of
+  the specific behaviour changes listed below, not because the ordinary
+  application API was rearranged: no public item in the framework crate, the
+  macro crate, or the payment, Magnetar, and Web Push adapter crates was
+  removed or renamed.
+
+- **Rebuild times and dependency footprint go up.** The framework now depends
+  on the internal `suprnova-live` engine crate and on `askama` in every build,
+  because `suprnova::live`, `suprnova::render_cache`, and `suprnova::view` are
+  unconditional modules rather than features. There is nothing to enable and
+  nothing to disable.
+
+- **An application that never uses RenderCache pays one schema probe per
+  process.** `RENDER_CACHE_ENABLED` defaults to `true`, so the first ORM write
+  a process makes outside a transaction asks once whether the RenderCache
+  migration is present; finding it absent, that process is closed for the rest
+  of its life and issues no further RenderCache SQL. Set
+  `RENDER_CACHE_ENABLED=false` to skip even that one statement. The probe
+  never runs on a caller's transaction, so it cannot poison a write you are
+  making.
+
+- **Anyone building a `WebPushClient` from an already-built `reqwest::Client`
+  must act.** `WebPushClient::with_client` now refuses to send under the
+  default `EndpointPolicy::Strict` and returns
+  `WebPushError::UnconfinedRedirects`, because an already-built client's
+  redirect policy cannot be inspected and reqwest follows redirects by
+  default. Move to `WebPushClient::with_client_builder`, which honours every
+  transport option you were setting (proxy, TLS, timeouts) and forces
+  redirects off, or call `WebPushClient::allow_unconfined_redirects` if you
+  know your client is safe. `WebPushClient::new` is unaffected.
+
+- **Signed URLs issued before the upgrade that carry a trailing slash stop
+  verifying.** Signing and verification both used to trim a trailing slash
+  before hashing; both now hash the path exactly. A URL signed as
+  `/orders/1` still verifies at `/orders/1`, and only at `/orders/1` - a proxy
+  that appends a slash now produces `SignatureVerdict::Invalid`. If a proxy or
+  a framework in front of your application normalizes paths by adding a
+  slash, sign the URL the way the request will arrive.
+
+- **A schedule with two tasks of the same name now fails at registration.**
+  `Schedule::add` panics on a duplicate, keeping the task already registered.
+  Rename one of them, or switch to `Schedule::try_add` and handle the error.
+  Names are exact and case-sensitive.
+
+- **A workflow lease shorter than two seconds is clamped or refused.**
+  `WORKFLOW_LOCK_TIMEOUT_SECS` below `2` is clamped to `2` with a warning
+  naming the reason; a `WorkflowConfig` built in code with a shorter lease
+  fails `validate`. If you were running a one-second lease deliberately, the
+  heartbeat could not refresh it before it expired.
+
+- **A MySQL application using workflows should add one migration.**
+  `suprnova::workflow::migrations::NormalizeWorkflowDateTimesForMysql`
+  converts the `workflows` and `workflow_steps` date columns from `TIMESTAMP`
+  to `DATETIME`, which is what `chrono::NaiveDateTime` actually stores. It is
+  additive, and a no-op on PostgreSQL and SQLite. MySQL may rebuild and lock
+  both tables while applying it, so schedule it accordingly. A project created
+  by `suprnova new` gets it wired automatically.
+
+- **`AuthMiddleware` now resolves the user on every guarded request.** It used
+  to accept the presence of a persisted identifier. The behaviour change is
+  that a session belonging to a deleted or soft-deleted user stops
+  authorizing. The cost is smaller than it looks: the resolved user is cached
+  for the rest of the request, so a handler that already called `Auth::user()`
+  pays nothing extra and the lookup has simply moved from the handler to the
+  middleware. Only a guarded request whose handler never resolved the user
+  gains a provider lookup it did not make before. An application with no user
+  provider bound keeps the identifier-only path unchanged.
+  `BasicAuthMiddleware` in its non-stateless
+  form now requires the guard it names to exist and to be a stateful guard.
+
+- **`destroy_all_for_user` costs more and revokes more.** It now reads the
+  surviving session rows and compares the guard identities inside each
+  payload, in addition to the indexed `user_id` match, so it reaches sessions
+  authenticated through a named guard alone. Revocation is rare enough that
+  correctness was chosen over index use; if you call it on a hot path, that is
+  worth knowing.
+
+- **A `POST` or `PATCH` retried after a transport error now needs
+  `retry_non_idempotent`.** The `5xx` branch already required it; the
+  transport-error branch did not. If you were relying on a dropped connection
+  being retried for a non-idempotent request, opt in explicitly.
+
+- **A production process with a missing or malformed `APP_KEY` now fails at
+  `#[suprnova::main]`, not at `Server::from_config`.** That includes a console
+  binary or a worker entry point that never builds a server. Local,
+  development, and testing environments still generate a transient key and
+  warn. `APP_PREVIOUS_KEYS` is accepted as an alias for `APP_KEY_PREVIOUS`;
+  if both are set with different values, the Suprnova name wins and the
+  duplicate is named in a warning you should act on.
+
+- **A worker pointed at a `failover` queue connection now drains every
+  connection in the list.** If you were running a second worker against a
+  fallback connection directly - which the 1.3.3 notes told you to do - that
+  worker and the failover worker will both be draining it. Remove the extra
+  worker, or keep it and accept the competition. Counters and listings now
+  aggregate every connection, so a dashboard reading `pending_size` on the
+  failover connection will report a larger number than it did.
+
+- **Custom store and driver implementations get fail-closed defaults, never
+  weakened behaviour.** Magnetar's provider-token, ceremony, and remember
+  stores gained methods for the atomic operations described above; each has a
+  default that refuses rather than performing the operation non-atomically, so
+  an external implementation still compiles but will report failure until it
+  implements the method. `WebhookHandler::mirrors_payment_transactions` and
+  `try_extract_payment_snapshot`, `QueueDriver::queue_filter_capability`, and
+  `GlobalScope::dependency` all have defaults that preserve the previous
+  behaviour exactly.
+
+- **To adopt Live**, bind a registry during bootstrap with
+  `App::singleton(crate::live::registry().expect("Live component registry"))`,
+  install the reserved routes with `Router::try_live_with` and a guard
+  carrying your `AuthMiddleware`,
+  `LiveTenantMiddleware`, and `RateLimitMiddleware`, and register
+  `CsrfMiddleware::new()` globally - Live verifies its own origin proof, so
+  you do not need to widen `OriginPolicy` for the whole application, and if
+  you widened it for something else, narrow it back. Use
+  `AuthMiddleware::optional()` on the Live guard if you want anonymous
+  visitors to act on public seeds; `AuthMiddleware::new()` answers `401` for
+  every anonymous request before any engine work. Then run
+  `suprnova live:make` and `suprnova live:check`. `manual/live.md` has the
+  complete walkthrough.
+
+- **To adopt RenderCache**, add
+  `suprnova::render_cache::migration::Migration` to your `Migrator` (and
+  `suprnova::render_cache::migration::TierMigration` as well if you run the
+  `database` or `redis` profile), opt routes and groups in with
+  `Router::try_render_cache` and `Router::try_render_cache_group`, and finish
+  with `RenderCache::install`. Because `install` is asynchronous - it probes
+  for the ledger's tables before assembling a runtime - the router has to be
+  built through `Application::try_routes_async` rather than `try_routes`. The
+  install has to come after every middleware that establishes request-scoped
+  locale, session, or identity, and after every route and group has been opted
+  in. A shared profile refuses to boot without its tier migration or with an
+  endpoint nothing answers, which is deliberate.
+
+- **Set `APP_BUILD_ID` once per deploy.** It is mixed into every RenderCache
+  lookup key, so changing it is what stops a new build from serving entries
+  the previous one published. Its default is your application crate's package
+  version, which does not change when you ship a template, a translation, or a
+  handler fix. A commit id works: `APP_BUILD_ID=$(git rev-parse --short HEAD)`.
+
+- **Consider moving your `Cargo.toml` to the production build shape.** Declare
+  `suprnova` with `default-features = false` plus the nine non-`testing`
+  defaults you use, and re-add `features = ["testing"]` under
+  `[dev-dependencies]`. Cargo pulls a dev-dependency's features into
+  `cargo test` and other `--tests` builds only, so your shipped binaries stop
+  carrying test seams while `cargo test` keeps working unchanged. A project
+  created by `suprnova new` is already in this shape;
+  `manual/deployment.md` documents it for an existing one.
+
+- **If you consumed the standalone `@suprnova/live` runtime or wrote your own
+  subscription host, the registered-event descriptor changed.**
+  `DESCRIPTOR_SCHEMA_VERSION` moved from 1 to 2 and the descriptor's
+  registered-event fields are now `maximum_hops`, `maximum_fanout`, and
+  `payload_contract` rather than `maximumHops`, `maximumFanout`, and
+  `payloadContract` - they were the only camelCase keys in a public JSON
+  contract that is snake_case everywhere else. A descriptor signed at schema
+  version 1 is refused with `SubscriptionErrorKind::InvalidDescriptor` rather
+  than being read with three absent fields. Nothing in a 1.3.7 Suprnova
+  application consumed this contract, so for most readers there is nothing to
+  do.
+
+## 1.3.7 - 2026-08-26
+
+### Added
+
+- **Where the Inertia error page middleware sits is now yours to choose, and documented.** `Inertia::install` registers `InertiaErrorPageMiddleware` innermost of the Inertia layer, so it covers the handler, the route middleware, and everything you register after that call - which is why the scaffold puts `CsrfMiddleware` below it. It does not cover anything registered *above* the call, because a middleware that answers without calling `next` hands its response to nothing registered inside it. The case that bites is a lapsed session posting a form: `CsrfMiddleware` registered above the install answers `419` with `{"message":"CSRF token mismatch."}` and the user gets the Inertia crash modal on the one flow they are most likely to hit; an outer rate limiter's `429` and an auth guard's `401` are the same. Registering the middleware yourself, further out, already worked in 1.3.6 - the type was public and registration is idempotent per type, so an earlier registration kept its place - but nothing said so and nothing in `install` acknowledged it, which made it an accident rather than a contract. It is a contract now: register `InertiaErrorPageMiddleware::new("Error")` after `SessionMiddleware` and `LocaleMiddleware` and before the middleware whose rejections it should cover, and `install` checks for it, logs at `debug`, and skips its own. The component you named at that registration is the one rendered, so you name the page once and `.error_page(...)` on the config becomes optional - it is still what makes `install` register a middleware for an app that does not place one itself. The two ordering rules are documented on the type and in the manual.
+
+### Fixed
+
+- **An SSR page has one `<title>`, and it is the page's own.** The HTML shell wrote its `default_title` and then the SSR worker's head verbatim, so every page rendering a title through Inertia's `Head` component produced a document with two `<title>` elements and the framework's generic one first. First is the one the browser tab, the crawler and the link preview read, so the real title never showed. A worker head carrying a title now replaces the shell's title rather than joining it - both `default_title` and a per-response `InertiaResponse::title(...)` stand down; a head without one leaves the shell's title exactly where it was.
+- **The document declares the language it is written in.** The shell hardcoded `<html lang="en">`, so a reader switched to Japanese got Japanese prose in a document claiming to be English - a screen reader picks its voice from that attribute and a search engine takes it as the page's language signal. It now carries the locale in effect for the request: what `LocaleMiddleware` detected, then a `Lang::set_locale` override, then the configured `APP_LOCALE`, in the same BCP 47 form `Locale` renders (`pt-BR`, `zh-Hans`). This holds for the error page too, which is rendered on the way out and was the case that surfaced it. Without the `localization` feature the shell keeps `en`.
+
+### Upgrading
+
+- Nothing is required. Both fixes apply to every Inertia app on upgrade, and `Inertia::install` behaves exactly as it did for an app that does not register the error-page middleware itself.
+- An app that spliced `<html lang="...">` into the finished document with a middleware of its own can delete it - the shell does it now, from the same locale that middleware was reading.
+- An app whose `CsrfMiddleware`, rate limiter, or auth guard is registered **before** `Inertia::install` should register `InertiaErrorPageMiddleware::new("Error")` after `LocaleMiddleware` and before that middleware, so its rejections render the error page instead of reaching the client as raw JSON. `install` then skips adding its own, and the component you named at the registration is the one rendered, so `.error_page("Error")` on the config is optional - keep it or drop it. The scaffolded `bootstrap.rs` registers CSRF after the install, so a project generated by `suprnova new` needs no change.
+- An app that renders its own `<title>` through Inertia's `Head` component under SSR will see the shell's title stop appearing in the document - both `InertiaConfig::default_title` and a per-response `InertiaResponse::title(...)`. That is the fix: the page's own title is the document's only one. If you were relying on the shell's title as a prefix or suffix, move it into the `Head` component where the rest of the title lives.
+
+## 1.3.6 - 2026-08-26
+
+### Added
+
+- **Framework errors can render your own Inertia page instead of the client's crash modal.** A user without a permission clicked a nav link into a guarded route and got Inertia's "All Inertia requests must receive a valid Inertia response, however a plain JSON response was received" screen: the `403` carried the framework's JSON error body and no `X-Inertia` header, so the client refused it. The same held for an unrouted `404`, a rate-limited `429`, and a failing handler's `500`. Name a page component with `InertiaConfig::error_page("Error")` and those responses render that page at their original status, with `status`, `message`, and - when the error carried one - `request_id` props. Every header the error response set survives the swap except the ones that only described the body being replaced (`Content-*`, `Transfer-Encoding`) or governed how it could be stored (`Cache-Control`, `Expires`, `Age`, `ETag`, `Last-Modified`), so `Retry-After` on a `429`, `WWW-Authenticate` on a `401`, `Vary`, and `Set-Cookie` all still reach the client. The page sets `Cache-Control: no-cache, private` for itself: it carries your shared props, so it must never be stored by a shared cache and served to a different visitor, whatever the response it replaced permitted. An Inertia visit gets the JSON page object; a hard navigation gets the full HTML shell, so pasting the URL into the address bar works too. Everything with an owner is left alone: validation `422`s still redirect back to the form, `X-Inertia-Location` bounces and responses that already are Inertia pages pass through, and a client whose `Accept` prefers JSON keeps the exact body it got before. `suprnova new` scaffolds `frontend/src/pages/Error.*` and sets `.error_page("Error")`, so new projects are covered without doing anything.
+
+### Fixed
+
+- **A local disk no longer refuses a legitimate path because another task touched it.** The path guard resolved each component of a path with two probes and combined them into one verdict, so ordinary concurrent activity could be read as a symlink escape: a component that `canonicalize` had just reported missing, and that another task then created as an ordinary file, came back as `PermissionDenied` naming a symlink that was never there. It bit hardest where writers contend by design - a losing `write_with(..).if_not_exists(true)` racer got that refusal instead of `ConditionNotMatch` whenever the winner published the key between the two probes, which under a loaded test suite was roughly a third of runs. Each component is now classified from a single pass, `symlink_metadata` first: nothing there is free space, an ordinary file or directory is resolved and confined as before, and only a symlink that still cannot be resolved is refused. A component that vanishes mid-classification is looked at once more rather than refused. Every symlink refusal is unchanged.
+
+### Upgrading
+
+- Nothing changes for an existing app until it opts in. `InertiaConfig::error_page` defaults to `None`, and `Inertia::install` registers the error-page middleware only when a component is named, so error responses keep their exact bodies. To adopt it, add a page component named `Error` beside your others (it receives `status`, `message`, and an optional `request_id`) and chain `.error_page("Error")` onto the `InertiaConfig` you pass to `Inertia::install`. A handler that **panics** stays out of scope: the panic net wraps the whole middleware chain, so its synthesized `500` is built after every middleware has unwound. Return `Err(...)` rather than panicking and the error page covers it. Note that the gate is the body's **shape**, not its author: at an error status, an empty body, a JSON object whose `message` is a string, and the router's own `404 Not Found` text are rewritten no matter which middleware built them, and only `message` and `request_id` survive into the props. A response that must keep its own JSON body should key its text as something other than `message`, or set `X-Inertia: true` on itself. And register `LocaleMiddleware` **before** `Inertia::install`: the error page is rendered on the way out, after every middleware registered inside the Inertia layer has returned, so a locale scope opened inside it is already gone and every error page would render in the app's default locale. The scaffolded `bootstrap.rs` now does this, and the same reasoning applies to any request-scoped middleware of your own whose state the page's shared props read.
+
+## 1.3.5 - 2026-08-26
+
+### Changed
+
+- **Every changelog section reads in all six manual translations.** The de, es,
+  fr, ja, pt-BR and zh-Hans manuals used to carry the 1.3.0 to 1.3.2 sections in
+  English behind a translator's note, and older sections with stray English
+  lines; every section from 1.3.5 back to 0.1.0 is now translated, and the
+  notes are gone.
+
+### Fixed
+
+- **Local-filesystem disks publish every object in one step.** `Storage::register_fs` and `register_fs_with` now stage `disk.write(...)`, `disk.writer(...)`, and `disk.copy(...)` as a temp file under `<root>/.suprnova-atomic/` and publish it onto the target with a single `rename(2)`, so none of them is ever observable at a partial length. Before this, the driver opened the target with `create + truncate` and streamed into it in place: a concurrent reader got an empty or half-written object for the whole duration of the write, and a crash mid-write left a truncated object at the live path. `abort()` on a writer now discards the staged file instead of failing with `Unsupported`.
+- **`write_with(..).if_not_exists(true)` is a true exclusive create on a local disk.** It is published with `link(2)`, which fails atomically in the kernel when the target exists, so exactly one of any number of racing callers succeeds and every other one gets `ConditionNotMatch` having written nothing. A staged write published by a plain rename would have degraded the condition to a check followed by an overwrite, silently discarding all but the last writer - which is the opposite of what the primitive is reached for.
+- **An `append` that creates the object is still an append.** Appends are the one in-place operation on a local disk, and that now holds for the first one too, so two writers appending to the same missing object both land instead of one staging its own copy and overwriting the other.
+
+- **`suprnova serve` no longer rebuilds a project nobody has touched, and
+  neither does `suprnova generate-types --watch`.** Both watchers classified a
+  filesystem event by its path alone, and the generator reads every `.rs` file
+  under the same `src/` tree they are watching - so on Linux, where the kernel
+  reports those reads, each regeneration scheduled the next one. A freshly
+  scaffolded project regenerated its types and restarted its backend every half
+  second, forever, without a single source edit. Only events that mean the bytes
+  on disk actually changed count now. `generate-types --watch` also had no
+  debounce at all, so it acted on the first file of a burst rather than the last;
+  it now shares `serve`'s 500 ms trailing edge, and both watchers share one
+  implementation so the next fix cannot land in only one of them. The generator
+  compares before it writes, so a regeneration whose output is byte-identical
+  leaves the file, and its mtime, alone.
+
+- **The backend watcher is scoped to the paths the server is built from.**
+  `cargo watch` ran with no `-w`, so it watched the whole non-gitignored project:
+  saving a Svelte component, or regenerating
+  `frontend/src/types/inertia-props.ts`, rebuilt the framework and restarted the
+  server. It now watches `src/`, `cmd/`, `Cargo.toml`, `Cargo.lock`, `.env`, and
+  `lang/` - the build inputs plus the two trees read once at boot - each included
+  only when it exists, since cargo-watch refuses a `-w` path that does not.
+  `cmd/` is where the full-stack scaffold keeps the server binary's `main.rs`.
+  The invocation also passes `--no-vcs-ignores`, because cargo-watch applies
+  `.gitignore` to explicitly named `-w` roots and the scaffold ignores `.env`,
+  which would otherwise leave `-w .env` watching nothing; `-w` has already
+  narrowed the surface, so the flag cannot widen it. Frontend edits and generated
+  `.ts` files no longer restart the backend.
+
+- **`serde_json::Value` generates as `JsonValue` instead of `unknown`.** It used to
+  degrade to `unknown` and warn that it "isn't a struct this project defines",
+  advice that is wrong for a JSON document - and the scaffold's own login and
+  register pages tripped it twice on every regeneration, so every fresh project
+  warned out of the box. It now emits a recursive `JsonValue` alias, declared once
+  at the top of the generated file and only when something references it. A bare
+  `Value` maps there too, unless the project defines a `Value` struct of its own.
+
+- **Neither `generate-types` nor `serve` reports a file it did not write as
+  generated.** Because a pass now writes only when the emitted content differs,
+  `Generated <path>` was a claim about the filesystem that was false on every
+  rerun of an unchanged project. `generate-types` says `<path> is up to date`
+  instead, in one-shot and `--watch` alike, and `serve`'s startup pass says
+  `N type(s) up to date → <path>`, keeping the count. `serve`'s file watcher
+  now stays silent on a regeneration that wrote nothing, in text and under
+  `--json` both: a `types_regenerated` event means the generated file on disk is
+  different now, so silence after a save tells you your edit did not change any
+  prop shape.
+
+### Upgrading
+
+- **`.suprnova-atomic` is reserved at the root of every local disk.** The staging directory has to live inside the root - a sibling of the root can be on a different filesystem when the root is a mount point, and every rename would fail with `EXDEV` - so the name is reserved rather than merely conventional. Any path whose first component is `.suprnova-atomic` is now refused with a permission error (read, write, delete, stat, list alike), as is any path that resolves into the directory through a symlink, and the entry is filtered out of `files`, `directories`, `all_files`, and `all_directories`. If a disk root already contains a `.suprnova-atomic` entry of your own, it is no longer reachable through that disk: move it aside before upgrading. A regular file of that name is refused at registration with a message saying so, rather than failing later inside the driver. The name is exported as `suprnova::ATOMIC_STAGING_DIR` so backup and sync tooling can exclude it.
+- **Publishing by rename replaces the target's inode.** Rewriting an object on a local disk no longer preserves its mode, owner, or hard links, and a reader holding an open descriptor keeps the old content instead of seeing the new bytes. That is the standard cost of atomic publishing, but it is a behavior change if you were relying on either.
+- **A conditional write needs a filesystem with hard links.** `if_not_exists` is published with `link(2)`, which is unsupported on FAT, exFAT, and some network filesystems. There it fails outright rather than falling back to a check followed by an overwrite, because a fallback would hand you an exclusivity guarantee that does not hold. Nothing else on the disk is affected.
+- **A first `append` that fails leaves an empty object.** An append is the one operation that is not published in a single step, so the object is created before the bytes land; a failed or aborted first append leaves it behind, exactly as an append onto an existing object always has.
+- **A dangling symlink in the disk root is refused, not overwritten.** A path whose symlink target does not exist can no longer be written, appended to, copied onto, moved onto, or deleted through the disk. `1.3.4` replaced such a link with a regular file; the guard cannot prove where an unresolvable link leads, and creating through one creates the link's target anywhere on the host, so it now refuses. Remove the link outside the disk if you meant to write there.
+- **Nothing sweeps the staging directory.** It holds in-flight temp files plus whatever a process that died mid-publish left behind, so a host in a crash loop grows it without bound. Emptying it while nothing is writing to the disk is safe; excluding it from backups is recommended.
+
+## 1.3.4 - 2026-08-25
+
+### Added
+
+- **Read-through disks take a `copy` flag and resolve `copy` / `rename` across the fallback.** Set `copy: false` on `ReadThroughConfig` to serve fallback hits without writing them through, which turns the disk into a transparent overlay and narrows each fetch to the range you asked for. `copy` and `rename` now stream a source that lives only on the fallback across to the primary destination; a `rename` also deletes the fallback source, so a later read cannot resurrect the moved object. Conditions carry across that streaming path: `if_not_exists` still refuses an existing destination, a copy's source version selects which object the fallback hands over, and a copy's `if_match` is refused with `Unsupported` rather than silently dropped. A transfer that fails partway removes only a destination it created, so it cannot destroy an object that was already there.
+- **Debounced jobs and debounced queued listeners.** `Job::debounce_for()` collapses
+  a burst of dispatches into one run, one window after the most recent one, carrying
+  the newest payload. It is the mirror of `push_unique`, which keeps the first
+  dispatch and suppresses the rest. `Job::max_debounce_wait()` stops a continuous
+  burst from deferring the work forever, and `Job::debounce_id(&self)` scopes the
+  window per entity so twenty updates to one order collapse without touching
+  another order's. `Queue::push_debounced(job, DebounceOptions)` sets the window at
+  the call site, and `DebouncedListener::new(window, build).keyed_by(...)` debounces
+  an event listener with the key derived from the event - a plain `QueuedListener`
+  already honors a window the job itself declares. Every dispatch is still enqueued;
+  the collapse is settled at the worker, which acknowledges a superseded envelope
+  and emits `JobDebounced`. Debouncing fails open: an expired or evicted window runs
+  the job rather than dropping it. Each actual run starts a fresh maximum-wait
+  window, so a burst always measures its maximum wait from its own first dispatch
+  rather than inheriting the previous burst's. A job cannot declare both
+  `debounce_for` and `unique_id`, and chains and batches refuse a debounced job -
+  a superseded link would strand the rest of its chain, and a superseded batch job
+  would leave the batch's pending count above zero forever. The envelope carries two
+  additive fields for this and stays byte-identical on the wire for every
+  non-debounced push.
+
+- **`Storage::register_read_through` composes two disks into a read-through disk.** Reads and metadata resolve against the primary first and fall back to the second disk; anything found on the fallback is written through to the primary, so a store migration completes under real traffic. Writes and listings stay on the primary, and a delete removes the object from both disks. Set `throw_on_promotion_failure` when a failed promotion must surface instead of degrading to a fallback read. A promotion is published atomically, so no reader can see a half-written object, and it carries the fallback object's content type, cache control, content disposition, content encoding, and user metadata across. A versioned or conditional read is passed through with its condition intact and served without being promoted.
+- **`Queue::forward` redirects a whole queue by name.** Where `Queue::route` is
+  keyed by job type, `Queue::forward("default", "high")` is keyed by queue name -
+  the lever for retiring a pool, absorbing a backlog, or moving work off a pool you
+  are about to take down, without touching a single job or route. It applies on
+  both sides: new pushes that resolved to `default` land on `high`, *and* a worker
+  started with `--queue=default` drains `high`, so the destination cannot collect
+  work nobody claims. Forwarding `default` catches jobs that named no queue. A
+  forward is a single lookup, never a chain, so a swap (`a -> b` with `b -> a`
+  also registered) or a longer rotation is a coherent pool exchange rather than
+  a loop - exactly like Laravel, whose resolver is the same single lookup.
+  Pausing is still evaluated on the names a worker was started with, so
+  `Queue::pause(&connection, "default")` stops that worker even while `default` is
+  forwarded. `Queue::forward_on(from, to, connection)` restricts a forward to one
+  connection name, compared against this process's connection name rather than a
+  job's declared connection, so both halves of the redirect gate on the same
+  value. `Queue::forward_for(from)` reads a forward back, and `Queue::try_forward`
+  is the fallible sibling. The inspection calls (`Queue::pending_jobs` and its
+  siblings) deliberately do not follow a forward, so a backlog left behind on a
+  forwarded queue stays visible.
+
+- **Read-shaped Redis commands retry a transient failure instead of surfacing it.**
+  The connection manager already reconnected in the background, but the command
+  that hit the dead socket still failed your call. `GET`, `EXISTS`, the `SCAN`
+  and `SSCAN` pages behind `Cache::flush` / `Cache::flush_tags`, the queue
+  driver's `XLEN` / `ZCARD` / `XPENDING` reads, and the rate limiter's
+  `Retry-After` computation now retry once after a short pause.
+  `REDIS_COMMAND_RETRIES` adds further retries on top, clamped at 10. Budget the
+  retry in seconds rather than milliseconds: the second attempt waits for the
+  replacement connection, so it costs the driver's whole connect and response
+  budget, and a timed-out command counts as transient as well as a dropped one.
+  Writes never retry at any setting: a transient error means the connection
+  failed, not that the server refused the command, so repeating a `SET`, an
+  `INCR`, a lock acquisition, a rate-limit hit, or a queue pop could run it
+  twice. Error messages are unchanged, so anything matching on them keeps working.
+- **A paused worker now tells you it is paused.** `queue:work` prints one line per
+  transition - `2026-08-25 14:03:11 Queue billing PAUSED`, and `RESUMED` on the way
+  back - and the worker emits `WorkerQueuePaused` / `WorkerQueueResumed` so you can
+  route the same signal into your own alerting. These are the worker-side pair; the
+  existing `QueuePaused` / `QueueResumed` fire in whichever process ran
+  `queue:pause`, which is never the worker, so until now a worker that went quiet
+  because somebody paused its queue was indistinguishable from a hung one. Each
+  event fires once per transition, not once per poll. Their `queue` field is
+  optional: a worker started without `--queue` drains everything and has no queue
+  names to report under `pause_all`, so it reports `None` rather than inventing a
+  name a listener could match on.
+- **`?include=` paths are capped at five segments, and `max_relationship_depth` moves the ceiling.** A cyclic relationship graph turns `?include=author.posts.author.posts...` into fan-out a client controls, bounded only by the query string. Paths are now truncated while they parse; call `suprnova::max_relationship_depth(n)` in `bootstrap::register()` to change the limit, or pass `0` to turn includes off.
+- **`Gt`, `Gte`, `Lt`, and `Lte` compare a field against a number or against another field.** `CompareWith` names the operand and the measure in one value: `Number` for a literal, `NumericField` for a numeric sibling, and `LengthField` for a sibling compared by character count. An operand the rule cannot measure fails the field instead of panicking.
+- **Three membership rules join the built-in set: `InArray`, `Contains`, and `DoesntContain`.** `InArray` checks a value against another field's list, and you pass the list directly instead of naming the field in a rule string. `Contains` and `DoesntContain` run over a JSON array and match a parameter only against a string element, so `1` and `"1"` stay distinct.
+- **The database pool now has liveness knobs.** `DB_IDLE_TIMEOUT`, `DB_MAX_LIFETIME`, `DB_ACQUIRE_TIMEOUT`, `DB_TEST_BEFORE_ACQUIRE`, and `DB_PING_AFTER_IDLE` control when the pool closes, recycles, and pings a connection, with matching `DatabaseConfig::builder()` setters. Each is unset by default, so an existing deployment's pool behaves exactly as it did. Use them when a NAT gateway or firewall drops idle connections: sqlx exposes no libpq `keepalives_*` equivalent, so pool recycling is the mechanism.
+- **`db:seed <Class>` reports its progress.** A targeted run prints a `RUNNING` line before the seeder and an elapsed-milliseconds `DONE` line after it. A bare `db:seed` stays silent. The formatter, `suprnova::two_column_detail`, is available to your own `#[command]` handlers.
+- **Many-to-many relations now filter on pivot columns.** `where_pivot`, `where_pivot_op`, `where_pivot_in`, `where_pivot_not_in`, `where_pivot_null`, `where_pivot_not_null`, `where_pivot_between`, `where_pivot_not_between`, `where_pivot_group`, and their `or_` twins constrain `get`, `first`, and `count` on `BelongsToMany`, `MorphToMany`, and `MorphedByMany`. `where_pivot_group` takes a closure and renders one parenthesised group, so it stays atomic inside a following `or_where_pivot`. Pivot filters apply to reads only: `attach`, `attach_with`, `detach`, and `sync` return an error while one is set, and eager loading does not carry them.
+- **`where_binary` compares column values byte for byte.** The family (`where_binary`, `or_where_binary`, `where_not_binary`, `or_where_not_binary`) ships on `Builder<M>`, and `where_binary` and `where_not_binary` ship on `DB::table(...)`. MySQL and MariaDB emit `= binary`; Postgres and SQLite return an error when the query renders, rather than falling back to a collation-dependent match.
+- **`Builder::try_to_sql_with_bindings_for` renders SQL for a dialect without panicking.** It is the fallible sibling of `to_sql_with_bindings_for`, for the cases where a builder legitimately cannot render for a backend.
+- **`Model::refresh_for_update` reloads a row under a `FOR UPDATE` lock.** Call it inside a transaction when you need the row's current state and the exclusive lock in one statement. SQLite has no row-level locking, so the lock clause is a no-op there.
+- **`Builder::or_where_key` and `Builder::or_where_key_not` add primary-key filters as a disjunction.** Both fold into the preceding `WHERE` clause the same way `or_where` does, and both ship `or_filter_key` and `or_filter_key_not` aliases.
+- **`Builder::in_order_of` sorts rows into an explicit sequence.** Pass a column and the values in the order you want them; rows whose value is not in the list sort last. The values bind as parameters, so they are safe to take from request data.
+
+### Fixed
+
+- **The maintenance bypass cookie now expires on the server.** The 12-hour TTL was a `max-age` the browser enforced, so a captured cookie kept working until you rotated the secret. The encrypted payload now carries the deadline, and every request re-checks it.
+- **`suprnova serve` runs a frontend-less project.** A project scaffolded with `suprnova new --api` has no `frontend/` directory, and `serve` rejected it as "No frontend directory found. Are you in a Suprnova project directory?" unless you passed `--backend-only`. It now skips the Vite pane and the TypeScript generation that feeds it, and serves the backend. `--frontend-only` still fails on such a project, with a message that says why.
+
+### Upgrading
+
+- **Bypass cookies issued before this release stop working.** The cookie's payload changed from the bare secret to a sealed `{ secret, expires_at }` object, and a payload with no deadline is refused. Visit the secret URL once after upgrading to get a new cookie. Nothing else changes: `down`, `up`, `--secret`, and `--with-secret` all behave as before.
+- **An include path longer than five segments now returns its first five relationships instead of all of them.** Nothing outside a resource's allowlist was ever reachable, so no response gains data; a deep path loses its tail. One status code changes with it: a path whose over-deep tail names a relationship the resource does not allow is truncated before anything validates it, so it now returns `200` with the segments that survived where the full path used to return `400` - adjust any client or test asserting on that rejection. Raise the ceiling with `suprnova::max_relationship_depth(n)` if your API documents paths longer than that.
+- **`DatabaseConfig` gained five public fields.** Code that builds one with a struct literal no longer compiles. Use `DatabaseConfig::from_env()` or `DatabaseConfig::builder()`, both of which fill the new fields with the defaults that preserve today's pool behavior.
+
+## 1.3.3 - 2026-08-25
+
+### Added
+
+- **Failover queue connection.** `FailoverQueueDriver` wraps an ordered list of
+  connections: a push the first one refuses is retried on the next, and so on
+  down the list. Wire it from env with `QUEUE_DRIVER=failover` plus
+  `QUEUE_FAILOVER_CONNECTIONS=redis,database` (each entry reads its own
+  driver's variables, so a `database` entry still needs `DB::init()` first and
+  still brings its failed-jobs store), or build it directly with
+  `FailoverQueueDriver::new(vec![(label, driver), ...])`. Only writes fall
+  through: `push` and `bulk_push` walk the list, while `pop`, `pop_from`,
+  `ack`, `nack`, `release`, `settle`, `clear`, all four counters and all three
+  inspection listings delegate to the first connection and no other, because a
+  reservation token is meaningful only to the driver that issued it. The
+  operational consequence is documented rather than papered over: a worker on
+  the failover connection drains the primary only, so whatever failed over to a
+  fallback needs its own worker. `bulk_push` pushes each envelope separately
+  rather than forwarding a batch, which both preserves each envelope's own
+  `available_at` (Laravel #60950) and keeps a batch the primary half-accepted
+  from being re-pushed wholesale onto the fallback. A refusal dispatches
+  `queue::events::QueueFailedOver { connection, job_name, exception }`,
+  edge-triggered: a connection reports itself once when it enters failure and
+  stays quiet until a later push succeeds on it and re-arms it, so an outage
+  produces one alert instead of one per dispatch. When every connection
+  refuses, the push returns the last connection's error. An empty connection
+  list, a missing or blank `QUEUE_FAILOVER_CONNECTIONS`, a nested `failover`
+  entry, and an entry naming a driver that doesn't exist are all boot errors -
+  the warn-and-fall-back-to-memory behaviour stays on `QUEUE_DRIVER` itself,
+  where a typo can't splice an ephemeral backend into a durable chain.
+- **Queue inspection API.** `Queue::pending_jobs(queue)` / `delayed_jobs` /
+  `reserved_jobs` list the actual envelopes behind the existing
+  `pending_size`/`delayed_size`/`reserved_size` counters, as `InspectedJob`
+  DTOs (`id`, `queue`, `name`, `attempts`, `payload`, `created_at`) - mirrors
+  Laravel's `InspectedJob`. A single `Option<&str>` queue filter collapses
+  Laravel's `pendingJobs($queue)` / `allPendingJobs()` pair (and the
+  `delayedJobs`/`reservedJobs` equivalents) into one call each. The
+  `QueueDriver` trait default is an honest `Err` - not Laravel's
+  Beanstalkd/SQS empty-collection default, which reads as "nothing queued"
+  even when there plainly is - so a driver that has not implemented
+  inspection says so; `sync`/`null` override with `Ok(vec![])` because for
+  them that really is the truth. The memory, database, and Redis drivers all
+  implement the full listing: the memory driver's delayed storage moved from
+  a bare `DelayQueue<Envelope>` (which cannot be iterated) to a
+  `DelayQueue<Uuid>` plus an id-keyed map; the database driver reuses the
+  size counters' exact predicates plus `ORDER BY available_at`, and a row
+  whose `envelope_json` fails to decode is still listed (`id: None`,
+  `payload: {"unparseable": true}`) rather than dropped, so one poison row
+  can't blind an operator to the rest of the queue; Redis's `reserved_jobs`
+  is scoped to this consumer's in-process reservations (documented), and
+  `pending_jobs` scans the stream via `XRANGE` in batches. `Queue::fake()`
+  gained matching `pending_jobs()`/`delayed_jobs()` helpers, projecting
+  recorded pushes with `attempts` always `0` and `created_at` always `None`.
+- **After-commit dispatch.** `Job::after_commit()` holds a push until the
+  surrounding `DB::transaction` commits, so a worker on another process can
+  never pop an envelope that describes rows the transaction has not made
+  durable yet. The whole push waits, not just the driver write: the envelope
+  build, `JobQueueing` and `JobQueued` all happen at commit time, so no
+  listener is ever told about a job a rollback then discards. A rollback
+  discards the push entirely; outside a transaction the push happens
+  immediately, which is what lets a job type declare the opt-in without every
+  dispatch site knowing whether its code path is transactional. Per dispatch,
+  `EnvelopeOverrides::after_commit` outranks the job: `Some(true)` (with the
+  shorthand `Queue::push_after_commit(job)`) defers a job that did not opt in,
+  and `Some(false)` is Laravel's `beforeCommit()`. A deferred `Queue::push`
+  re-resolves `Job::delay()` against the commit rather than the push, while
+  `Queue::push_later` / `later` / `later_with` carry the caller's absolute
+  timestamp through unchanged. `Queue::push_unique` takes its dedupe lock
+  immediately even when the envelope is deferred, so a duplicate inside the
+  same transaction is still suppressed, and a rollback releases that lock
+  owner-scoped. `Queue::bulk` defers as a unit. `Queue::fake()` records a push
+  immediately, deferral and all, matching Laravel's `Bus::fake`. Manual
+  `DB::begin_transaction` never defers - it installs no ambient transaction, so
+  there is no commit to hang a callback on. Every ending that leaves the commit
+  unlanded compensates identically, including a `COMMIT` the database refuses
+  and a leaked `TxHandle` that blocks one, and `Transaction::rollback_to` counts
+  as one for the scope it unwinds: a push deferred inside a savepoint is
+  discarded when that savepoint rolls back and its lock is released right then,
+  while anything registered before the savepoint is untouched. Queued mail,
+  notifications, batches and chains do not defer yet.
+- **Unique-until-processing jobs.** `Job::unique_until_processing()` releases the
+  uniqueness lock when processing begins - after the job's middleware pass,
+  immediately before the handler runs - instead of holding it for the full
+  `unique_for` window, which is what you want when the lock exists to coalesce
+  queued duplicates rather than to serialize execution. A job that a middleware
+  releases back onto the queue keeps its lock, because it has not started
+  processing; a job a middleware deletes or dead-letters gives its lock up.
+  Release is owner-scoped: `Queue::push_unique` records the cache lock's owner
+  token on the envelope (`Envelope::unique_lock_owner`, an additive field that
+  leaves the frozen wire format byte-identical for every non-unique push), and
+  the worker releases with that token, so a redelivered attempt can never
+  force-release a lock a newer dispatch now holds. The supporting idempotency
+  surface is public too: `Idempotency::commit_on_success_owned` hands the body
+  the lock owner and returns it, and `Idempotency::release_owned(key, owner)`
+  releases owner-scoped, reporting `Ok(false)` rather than an error when the
+  lock is absent or held by somebody else. Plain `unique_id` jobs are unchanged
+  and still let the `unique_for` TTL be the dedupe window.
+- **`Gate::default_denial_response` customizes the default shape of a bare denial.** Mirrors
+  Laravel's `Gate::defaultDenialResponse($response)`. Set once - typically in
+  `bootstrap::register()` - it reshapes exactly two outcomes: a bare `false` (a bool gate -
+  `Gate::define` / `Gate::define_async`, including a `#[policy]` method returning `bool` - or a
+  `before`/`after` hook that decided `false`) and an evaluation nothing else decided at all (an
+  undefined ability with no hook opinion either). All of those used to collapse to a bare
+  `Response::deny()` (a 403); now they surface as whatever `Response` the default carries, e.g.
+  `Response::deny_as_not_found()` for a 404 that hides a resource's existence application-wide
+  instead of gate by gate. The default applies to bare `false` only - a gate registered with
+  `define_with` / `define_async_with` already returned the `Response` it wanted, and that always
+  passes through `Gate::inspect` untouched, matching Laravel's own rule that the default never
+  substitutes for a returned `Response` object. A default shaped as `Response::allow()` is
+  rejected (logged, ignored) rather than silently inverting every bool gate to allowed - see
+  `Gate::default_denial_response`'s doc comment for the one place this deliberately diverges from
+  Laravel, which has no such guard.
+- **The `Password` validation rule family ships, including the Have I Been Pwned
+  `uncompromised()` check.** `Password::min(n)` plus the strength builders
+  (`.max()`, `.letters()`, `.mixed_case()`, `.numbers()`, `.symbols()`) port
+  Laravel's `Password` rule regexes verbatim - a plain space satisfies
+  `.symbols()`, matching Laravel's `\p{Z}` separator class. `.uncompromised()`
+  (or `.uncompromised_with_threshold(n)`) checks the password against Have I
+  Been Pwned's k-anonymity range API: only the first 5 characters of the
+  password's SHA-1 hash ever leave the process, and a network failure,
+  timeout, or non-2xx response fails open rather than blocking signups,
+  exactly like Laravel's `NotPwnedVerifier`. Because that check is an HTTP
+  round trip, `Password` is the one built-in rule implementing both `Rule`
+  (strength only, for sync `validate!` rows) and `AsyncRule` (strength, then
+  the HIBP check, for `after_validation_async`) - calling the sync path on a
+  `Password` configured with `uncompromised()` is a loud, developer-facing
+  error rather than a silent skip. `Password::defaults_with(...)` sets the
+  process-wide default `Password::defaults()` returns. New `HIBP_TIMEOUT_SECS`
+  env var (default 30s). `Http::fake_response_text(...)` is the new raw-body
+  sibling of `fake_response(...)` for tests against `text/plain` upstream
+  APIs like HIBP's.
+- **A scheduled task can now name the timezone its cron expression is read
+  in, and `schedule:list` can render the whole schedule in any zone.**
+  `.timezone(chrono_tz::Tz)` pins one task, `.try_timezone("Area/City")` is
+  the fallible sibling for a zone name that only exists at runtime, and
+  `Schedule::timezone(tz)` sets a default for every task registered after
+  it. Nothing changes for a task that pins no zone: it is still evaluated
+  against the process's local zone. A pinned zone affects due-ness only -
+  the scheduler still ticks once per process minute and the same-minute
+  dedup gate is untouched. Note that a zone observing daylight saving makes
+  some wall-clock minutes happen twice and others not at all, so a task
+  pinned to such a minute can run twice or be skipped; the scheduling
+  chapter carries the full warning. `schedule:list` gained a `--timezone`
+  option and two columns: the zone a printed expression is written in, and
+  the next minute the task fires. A pinned task's expression is rewritten
+  into the listing's zone, splitting into several lines when it straddles
+  midnight there, and is left exactly as written when a faithful rewrite is
+  impossible - across a daylight-saving transition, when a day rollover
+  would have to move a restricted day-of-month and day-of-week together, or
+  when it would have to decide how long February is. `chrono_tz::Tz` is
+  re-exported from the crate root, so consuming apps do not add `chrono-tz`
+  to their own `Cargo.toml`.
+- **A Laravel-shaped image subsystem, in `suprnova::media` behind the default-on
+  `media` feature.**
+  `Image::from_bytes/from_path/from_disk/from_upload/from_stream` builds a lazy
+  pipeline - `resize`, `scale`, `crop`, `cover`, `contain`, `rotate` at any
+  angle, `flip_vertically`/`flip_horizontally`, `blur`, `sharpen`, `grayscale`,
+  `to_format`, `quality` - finished with `to_bytes`, `to_response`, `save`,
+  `store`, `dimensions`, `mime_type`, or `dominant_color`. Reads and writes
+  PNG, JPEG, WebP, GIF, and BMP; AVIF output is deferred until the in-house
+  AV1 encoder publishes, at which point it is one new `OutputFormat` variant
+  and no other change. Like Laravel's `gd`/`imagick` split there are two
+  drivers: `IMAGE_DRIVER=oxideav` (the default) runs on the pure-Rust
+  [OxideAV](https://github.com/OxideAV) codec family with no native library
+  and nothing to install, and `IMAGE_DRIVER=magick` shells out to a
+  host-installed ImageMagick 7 for wider input support including HEIC.
+  Decode limits (`IMAGE_MAX_DIMENSION`, `IMAGE_MAX_ALLOC_BYTES`) are checked
+  against the input's own header before anything is allocated - including the
+  inner bitstream of an extended WebP, whose advisory canvas size cannot be
+  used to smuggle a larger frame past the gate - and all pixel work runs on a
+  blocking thread. The `magick` driver pins the input coder by name rather
+  than letting ImageMagick pick one from the bytes, and bounds every
+  invocation with `IMAGE_MAGICK_TIMEOUT_SECS`. `ImageDriver` is the trait
+  boundary for anything else. The module is named `media` because the
+  OxideAV-backed audio and video surfaces will live beside it.
+  [Images](manual/images.md)
+- **The WebP gate carries one fixed, non-configurable bound.** A WebP declares
+  its real decoded size in its innermost bitstream chunk, so the framework
+  walks the container to find it; that walk visits at most 4096 chunks per
+  level and follows two levels of nesting, and a file past either is refused
+  rather than measured. Reporting a number from an unfinished walk would be a
+  gate that enough filler chunks could step around. No `IMAGE_MAX_*` variable
+  affects it and the error says as much. A 300-frame animation is unaffected;
+  a 4100-frame one is refused. [Images](manual/images.md#one-bound-is-not-configurable)
+
+- **OAuth can now be installed without replacing an application's existing
+  password and session authority.** `MagnetarOAuthOnlyConfig` and
+  `init_magnetar_oauth_only` install the default ceremony and provider engine
+  while leaving the password and passkey slots empty. Applications with an
+  existing `users` table can call `verify_oauth_identity`, map the verified
+  provider subject themselves, and establish their normal framework session.
+
+### Changed
+
+- **`DB::transaction` can now return `Err` after a successful commit**, when an
+  after-commit callback fails: the message reads `after-commit callback failed
+  (the transaction itself committed): …`, the closure's return value is lost and
+  its writes are not. `DB::transaction_with_attempts` never retries that error,
+  however deadlock-shaped the callback's own message reads - re-running a closure
+  whose writes are already durable would apply them twice.
+- **New validation catalog key: `validation-password-unverifiable`.** A custom
+  `UncompromisedVerifier` that returns `Err` no longer puts its own error text
+  in the 422 body verbatim. That text is logged at `error` instead, and the
+  response carries this key, rendering as "The { $field } could not be checked
+  against known data leaks. Please try again." - the check did not run, which is
+  not the same as the password being bad, and infrastructure detail does not
+  belong in a client response. An app shipping its own validation catalog has to
+  add the key, or its users see the built-in English fallback.
+- **The `Image` upload validator is now `ImageFile`.** `suprnova::Image` is the
+  new image-manipulation pipeline type, matching `Illuminate\Image\Image`,
+  and the magic-byte upload rule takes the name Laravel gives the same rule
+  class, `Illuminate\Validation\Rules\ImageFile`. Migration is one line per
+  use site: `UploadedFile<(Image, MaxSize<N>)>` becomes
+  `UploadedFile<(ImageFile, MaxSize<N>)>`. Pre-1.0 churn absorbed by the
+  git-tag distribution model.
+
+### Removed
+
+- **The unused direct `image` dependency is gone.** It had been a base
+  dependency with zero use sites anywhere in the workspace, pulling JPEG, PNG,
+  WebP, and GIF codecs in for nothing; dropping it removes `gif`, `image-webp`,
+  `zune-jpeg`, `color_quant`, and `weezl` from the tree. The crate itself still
+  appears transitively, with only its `png` feature, behind `totp-rs`'s
+  QR-code rendering. The new image subsystem is built on the OxideAV crates
+  behind the `media` feature instead.
+
+### Fixed
+
+- **Installing OAuth no longer forces provider-backed applications into
+  Magnetar web-binding validation.** The full `init_magnetar` path remains
+  atomic and unchanged. The OAuth-only path reserves the engine slots during
+  construction, publishes only OAuth, and fails rather than mixing two
+  authentication authorities.
+
+### Upgrading
+
+- **`Image` is a different type now; the upload validator is `ImageFile`.**
+  Source-breaking for anyone using the magic-byte upload rule. Rename it at
+  every use site: `UploadedFile<(Image, MaxSize<N>)>` becomes
+  `UploadedFile<(ImageFile, MaxSize<N>)>`. `suprnova::Image` still resolves, but
+  it is now the image-manipulation pipeline type, so a missed rename fails to
+  compile rather than changing behaviour silently.
+- **`EnvelopeOverrides` gained a public `after_commit: Option<bool>` field.**
+  Every construction in this repo and in the scaffolded templates uses
+  `..Default::default()`, which needs no change. Code that builds an
+  `EnvelopeOverrides` with an exhaustive struct literal has to name the new
+  field; `after_commit: None` keeps today's behaviour, which is to defer to
+  `Job::after_commit()`. Nothing else changes: `after_commit()` defaults to
+  `false`, so no existing job starts waiting for a commit it did not before.
+- **`Envelope` gained a public `unique_lock_owner: Option<String>` field.** The
+  wire format is unchanged - the field is `#[serde(default)]` and skipped when
+  `None`, so envelopes round-trip byte-identically in both directions and
+  `schema_version` stays at 2 - but any code that builds an `Envelope` with a
+  struct literal now has to name it. Add `unique_lock_owner: None` unless you
+  are deliberately carrying a uniqueness lock across the push. Code that only
+  reads envelopes, or builds them through `Queue::push` and its siblings, needs
+  no change.
+
+- Use `init_magnetar_oauth_only` instead of `init_magnetar` when the application
+  already owns users, passwords, framework sessions, and remember-me state.
+  OAuth-only callbacks use `verify_oauth_identity`; full Magnetar applications
+  continue to use `complete`.
+
+## 1.3.2 - 2026-08-25
+
+### Added
+
+- **OAuth providers can now be registered through `MagnetarConfig::oauth`.** Suprnova re-exports the `OAuthProvider` contract, all five first-party provider and configuration types, and the HTTP, revocation, abuse-limiter, authorization, and auto-link types an application needs. Custom providers no longer require a direct `suprnova-magnetar` dependency or a hand-retained `MagnetarHostEngine`.
+
+- **A production OAuth transport and framework limiter adapter now ship at the crate root.** `ReqwestOAuthTransport` implements token, userinfo, and revocation I/O with redirects disabled by default, a 30-second timeout, a default `User-Agent`, and a 1 MiB response cap. `FrameworkAbuseLimiter` reuses the configured `RateLimiterDriver`; apps no longer hand-write either adapter.
+
+### Fixed
+
+- **`init_magnetar` now publishes OAuth with password and passkey services as one reserved installation.** The OAuth service is built before publication, and all three engine slots remain hidden while the reservation is active. A failed or duplicate OAuth configuration cannot leave password and passkey state visible without the configured OAuth registry.
+
+- **Custom providers can supply userinfo headers.** `OAuthProvider::userinfo_headers` is merged with the host-owned bearer header, enabling requirements such as GitHub's `User-Agent` and media-type `Accept` headers without allowing a provider to replace `Authorization`.
+
+### Upgrading
+
+- **The Magnetar cutover in `4faaa933` removed Torii's OAuth installation path without wiring its replacement into the default initializer.** The old workaround required constructing a custom host engine, calling `oauth_service`, and installing the adapter separately. Replace that workaround with `MagnetarConfig::from_sea_orm(database).oauth(oauth_config)` and one `init_magnetar` call.
+
+- **GitHub community providers must handle verified email explicitly.** GitHub `/user` usually omits non-public email, while the verified primary address requires `/user/emails`. Return `email: None` to use the email-completion ceremony, or point `userinfo_endpoint` at a host adapter that combines both responses; never treat a public but unverified address as ownership.
+
+## 1.3.1 - 2026-08-24
+
+### Fixed
+
+- **Provider-backed applications can reset verified users again.** When no Magnetar engine is installed, `PasswordReset` uses an explicitly reset-capable `UserProvider` and framework `auth_flow_tokens` for already verified accounts. `EloquentUserProvider<M>` opts in when `M` implements `MustVerifyEmail + CanResetPassword`; no `app_users` migration is required.
+- **The published framework line now contains both post-release repair sets.** The translated 1.3.0 changelog layout and headings, CJK wrapping, localized anchors, glossary terms, and prose punctuation are reconciled instead of split across divergent local and remote branches.
+- **Post-tag CLI and Magnetar hardening is included.** Development-process cleanup uses the completed process-group fallback, and the local qualification contracts cover the released refs and plugin-SDK SQLite lanes.
+
+### Security
+
+- **The provider fallback never treats password reset as first mailbox proof.** Unknown and unverified addresses receive the same no-mail response. Install Magnetar when an unverified account must prove mailbox ownership through reset so credential cleanup, auth-epoch advancement, and revocation remain atomic. Provider fallback completion reports framework session and remember revocation failures through `PasswordResetOutcome`.
+
+### Upgrading
+
+- **Move every `v1.3.0` Git dependency to `v1.3.1`.** Applications with their own `users` table keep their configured `UserProvider`; they do not initialize the default `app_users` engine merely to reset an already verified account. Applications that use Magnetar credentials or unverified-account first proof continue to initialize Magnetar.
+
+
+## 1.3.0 - 2026-08-24
+
+### Security
+
+- **Magnetar now fences credential and session mutations to the authenticated
+  actor and account auth epoch.** Password, passkey, linked-account,
+  two-factor, opaque-session, JWT, remember, OAuth, and device-authorization
+  writes reject stale or revoked actors. The first successful password-reset,
+  magic-link, or OAuth verified-email proof on an unverified account advances
+  the epoch and atomically removes provisional credentials, sessions, remember
+  state, and squatter TOTP enrollment. Verified accounts preserve legitimate
+  credentials during password reset. Email verification requires the
+  authenticated token owner, and OAuth never auto-links an unverified existing
+  account from email alone.
+
+- **A protocol-relative `_previous.url` can no longer produce an off-origin open redirect through
+  `Redirect::back()`, on either the write side or the read side.** `SessionMiddleware` no longer
+  persists a protocol-relative current URL: the write goes through the identical sanitizer
+  `InertiaValidationRedirectMiddleware` uses for its `Referer` check, and a request path shaped
+  like `//host` (or carrying an ASCII control byte) is never recorded - without this, an app's
+  `fallback!` route (the standard Inertia/SPA app-shell pattern, where any unmatched path answers
+  `200`) could have `GET //evil.test/anything` persist that path verbatim. `SessionData::previous_url()`
+  now applies the same check on every **read**, too, so a session cookie that survived an upgrade
+  from a release before this fix - already carrying a raw, unsanitized value no write in the
+  current process ever produced - self-heals to "nothing recorded" instead of being trusted.
+  Together, neither an old poisoned cookie nor a new malicious request can hand `Redirect::back()`,
+  `Redirect::refresh()`, or `url::previous()` an off-origin `Location`. When a value fails either
+  check it's treated as absent rather than replaced with a synthesized one, so a genuinely good
+  previous URL is never clobbered.
+- **The Inertia validation-redirect bridge's `Referer` check closed two more same-origin bypasses.**
+  `InertiaValidationRedirectMiddleware`'s `303` target only rejected a `Referer` starting with the
+  literal `//` or `/\` prefix - a value like `Referer: /<TAB>/evil.test` slipped through, because
+  the WHATWG URL parser strips ASCII tab and newline from the whole string before comparing
+  origins, so a browser reads that as `//evil.test` and follows the `303` off-origin. The check now
+  rejects any ASCII control byte (C0 or DEL) anywhere in the candidate, not only within the two
+  named prefixes. Separately, the last-resort fallback - the failing request's own path, used when
+  neither `Referer` nor the session's previous URL is usable - was never sanitized: an origin-form
+  HTTP request-target is syntactically free to start with `//`, so a raw client or a
+  non-normalizing proxy could turn the "safe last resort" into an off-origin redirect too. Both
+  legs now share one root-relative check, falling back to `/` if even the request's own path fails
+  it.
+- **Cookie ciphertext is now bound to its logical cookie name with contexted v2 AAD.** `Cookie::encrypted` /
+  `Cookie::read_encrypted_for` stop a value minted for one cookie slot from decrypting in another slot,
+  while the logical-name binding keeps a later `__Host-` / `__Secure-` wire-prefix flip safe. The
+  version-less compatibility window tries v2 across the whole key ring, then v1 across the whole ring,
+  so existing cookies survive the rollout; the v1 fallback preserves the old replay weakness until its
+  scheduled 1.4.0 removal.
+- **Session and remember-me cookie prefixes are validated at boot and enforced at render time.**
+  `SESSION_COOKIE_PREFIX=__Host-` requires `Secure`, `Path=/`, and no `Domain`; `__Secure-` requires
+  `Secure`. Invalid boot combinations fail before serving, and the renderer rewrites invalid prefixed
+  headers instead of letting browsers discard them silently.
+
+### Added
+
+- **Suprnova authentication now runs on the internal Magnetar engine.** The
+  framework-owned `Auth` facade preserves existing password, magic-link,
+  passkey, OAuth, bearer, lockout, session, and two-factor call sites while
+  removing the Torii dependency. The default engine installs password/session
+  and passkey adapters atomically, stores lifecycle delivery leases in the
+  application database, and shares the application's canonical `i64`
+  `app_users` identities.
+- **A shape-aware authentication migration runner now covers Torii, Suprnova
+  web, and Suprnova API sources.** Dry runs bind a stable plan id to durable
+  row and schema fingerprints plus destination identity decisions. Apply uses
+  transactional imports, retry ledgers, shape-owned cleanup, and collision
+  refusal. MySQL uses a write-barrier-protected shadow swap with pre-copy
+  journals, row and schema parity, resumable renames, and cleanup-preserving
+  restore.
+- **`MAIL_DRIVER=file` writes one RFC 5322 `.eml` per message** to `MAIL_FILE_PATH` (default
+  `storage_path("mail")`; a relative value anchors at the application base directory, not the process
+  CWD), so local mail can be opened in a mail client instead of read out of a log line. The
+  file carries the same header superset SMTP emits, including `X-Priority`, `Importance`, `X-Tag`,
+  `X-Metadata-*`, and `Return-Path`. Like `log` and `memory`, it does not deliver: a production boot
+  refuses it unless `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true`.
+- **`FrameworkError::External` carries the error it wraps.** `FrameworkError::from_external(e)` and
+  `FrameworkError::from_external_with("saving user", e)` keep the original error reachable as a
+  `std::error::Error` source instead of melting it into a string. `FrameworkError::external_source()`
+  returns it for downcasting - use that rather than `source()`, which yields the shared `Arc` handle.
+  Both constructors map to HTTP 500.
+- **5xx logs now render the full error source chain.** `render_error_chain` walks `source()` and is
+  wired into the framework-error log line, the `ErrorOccurred` event payload, and the `debug_message`
+  field emitted under `APP_DEBUG=true`. Client-facing response bodies are unchanged and 5xx bodies
+  stay sanitised.
+- **`InertiaResponse::scroll_wrapped` / `scroll_with_wrapped` / `try_scroll_wrapped`.** Nest a scroll
+  prop's merge instruction under `<key>.<wrap_key>` instead of the bare key - `mergeProps:
+  ["users.data"]` rather than `["users"]` - for a value that's itself an envelope (`{ data: [...], meta:
+  {...} }`). Laravel's `ScrollProp` wraps under `"data"` unconditionally; Suprnova's built-in paginators
+  hand back a bare row array, so this is opt-in rather than a default every caller has to work around.
+  New `ProvidesScrollMetadata` trait (`page_name` / `previous_page` / `next_page` / `current_page`, with
+  a default `scroll_metadata()`) mirrors Laravel's interface of the same name for a paginator this crate
+  doesn't know about; `LengthAwarePaginator`, `Paginator`, and `CursorPaginator` now implement it instead
+  of building `ScrollMetadata` by hand. A scroll prop's `.match_on(...)` fields now also emit into
+  `matchPropsOn`, matching Laravel's `resolveMergeMatchingKeys` (`Response.php:641-652`), which folds a
+  `ScrollProp`'s `matchesOn()` in the same as any other merge prop - the match entry keys off wherever the
+  prop actually merges, `<key>` unwrapped or `<key>.<wrap_key>` under `.scroll_wrap(...)`.
+- **`Prop::merge_with_path`, multi-field `match_on`, and resolver-backed merge props.**
+  `Prop::merge_with_path(path)` merges a nested field inside a prop's value instead of the whole
+  prop - `Prop::eager(v).merge().merge_with_path("data")` emits `mergeProps: ["<key>.data"]`, and a
+  path-merging prop never also merges its root; `.deep_merge()` ignores it, since a deep merge
+  already recurses into every field. `Prop::match_on` now takes one field or several in one call
+  (`match_on(["id", "slug"])`) on top of the `match_on("id").match_on("slug")` chaining `Prop`
+  composition already supports. `InertiaResponse::merge_lazy` / `merge_lazy_with` add the
+  resolver-backed siblings of `.merge` / `.merge_with`, matching Laravel's
+  `Inertia::merge(fn () => ...)`.
+- **Partial-reload `only`/`except` understand dot notation.** `X-Inertia-Partial-Data: user.name`
+  narrows the `user` prop to `{ name: ... }` instead of requiring the whole value or nothing;
+  `X-Inertia-Partial-Except: user.email` prunes just that field, leaving the rest of `user` in place.
+  `except` wins on a path both headers name, a bare entry still means the whole prop, and an unknown
+  or type-mismatched nested path drops silently without touching its siblings. `Always` props are
+  unaffected - they always ship whole.
+- **Dot-key prop nesting.** `.with("user.name", value)` (and any other prop-attaching method, eager or
+  resolved) now nests into `props.user` instead of shipping a literal `"user.name"` key, matching
+  Laravel's `Arr::set`-based `resolveArrayableProperties` unpacking. Two calls sharing a prefix -
+  `.with("user.name", …)` then `.with("user.age", …)` - accumulate into one object; a key with no dot is
+  unaffected. `App::inertia_share*` shared-registry keys nest the same way on the wire. The unpacking
+  only ever touches top-level prop *keys* - it never recurses into a prop's value, so a validation
+  `errors` bag keeps whatever dotted field names it carries internally.
+- **`App::inertia_shared(key)` / `App::flush_inertia_shared()`.** Laravel's `Inertia::getShared` /
+  `Inertia::flushShared`, reading and clearing the static share registry (`App::inertia_share` / `_lazy`
+  / `_once`). `inertia_shared` supports the same dot notation as `inertia_share` for the read side; it
+  returns `None` for a lazy or once share (there's no request to resolve one against) and for an
+  unregistered key. `flush_inertia_shared` clears only the static registry - a trait provider registered
+  via `App::register_inertia_shared` is untouched, matching Laravel (there's no per-request state there
+  to flush).
+- **`InertiaResponse::always_with(key, resolver)`.** The async-resolver sibling of `.always(key, value)`,
+  for an always-included prop expensive enough to be worth resolving lazily - Laravel's
+  `Inertia::always(fn () => …)` (`AlwaysProp` accepts any value, closures included).
+- **`InertiaSharedData::share` now receives the page component name**, so a provider can vary its output
+  by page - Laravel's `RenderContext`. See Upgrading.
+- **Inertia prop composition.** A `Prop` now carries orthogonal flags instead of being one of nine
+  closed variants, so a single prop can be deferred *and* mergeable, mergeable *and* cached, or
+  optional *and* cached - the combinations the Inertia 3 protocol expects and a closed enum could
+  not spell. Build one with `Prop::eager` / `Prop::lazy` / `Prop::from_resolver` / `Prop::absent`,
+  chain `.always()`, `.optional()`, `.defer()`, `.group()`, `.rescue()`, `.merge()`, `.prepend()`,
+  `.deep_merge()`, `.match_on()`, `.once()`, `.as_key()`, `.until()`, `.fresh()`, `.scroll()`, and
+  attach it with the new `InertiaResponse::prop(key, prop)`. A `defer().merge()` prop is announced
+  under `deferredProps` on the first render and arrives under `mergeProps` on the follow-up request.
+  New `MergeMode` and `Visibility` types describe the flags; every existing builder shortcut
+  (`.with`, `.always`, `.lazy`, `.optional`, `.defer`, `.merge*`, `.once*`) is unchanged.
+- **Queue pause / resume.** `Queue::pause(connection, queue)` / `resume` / `pause_all()` /
+  `resume_all()` / `is_paused(connection, queue)` / `paused_queues(connection, &queues)`, backed by
+  `Cache` the same way the restart signal is - `resume_all` does not clear a per-queue pause,
+  matching Laravel. The worker's claim gate sits right before every pop, so an in-flight job always
+  finishes; a global pause short-circuits `--queue=...` filtering the same way Laravel's
+  `pausedQueues` does, and a per-queue pause only takes effect on a worker started with an explicit
+  `--queue=...` list. New CLI commands `queue:pause [queue] [--all]` / `queue:resume [queue] [--all]`
+  (alias `queue:continue`), plus `QUEUE_PAUSABLE=false` for an operator to disable the feature -
+  an unpausable worker ignores pause signals, and `queue:pause` itself refuses to run. New events:
+  `QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed`.
+- **`suprnova::testing::TestResponse`** - a fluent, Laravel-`TestResponse`-shaped wrapper over the
+  `(status, headers, body)` triple every HTTP test harness already produces: `assert_status`,
+  `assert_ok`, `assert_redirect`, `assert_json`, `assert_json_path`, `assert_json_count`,
+  `assert_see`, `assert_header`, `assert_cookie`, and (given `.with_session_store(...)`)
+  `assert_session_has`. Every assertion returns `&Self` and panics on failure, the same contract as
+  `expect!`. Nothing about how a test drives a request has to change.
+- **`suprnova new` scaffolds an SSR entry.** Every starter (Svelte, React, Vue) now ships
+  `frontend/src/ssr.{ts,tsx}` and a `build:ssr` npm script (`vite build --ssr`), wired to its own
+  output directory (`frontend/bootstrap/ssr/`) so the SSR bundle never collides with the client
+  build in `public/assets/`.
+- **`InertiaConfig::ssr_bundle_path(path)` / `.ssr_ensure_bundle_exists(bool)`.** The SSR gateway
+  can now check the built bundle exists on disk before dispatching a render, mirroring Laravel's
+  `ensure_bundle_exists` config - a worker that was never started, or a bundle that was never
+  built, fails fast instead of paying `ssr_timeout` on a connection that was never going to
+  succeed. Opt in with `.ssr_bundle_path(...)`; unlike Laravel's `BundleDetector` the path is never
+  auto-detected, so existing SSR configs (and tests) that don't set one are unaffected.
+- **Validation failures on an Inertia visit now redirect back instead of returning `422` JSON.**
+  `Inertia::install` registers a fourth middleware, `InertiaValidationRedirectMiddleware`, which
+  turns a validation `422` on an `X-Inertia` request into a `303` to the form page with the errors
+  flashed - so `useForm().errors` fills in with no handler code. The Inertia client treats any
+  response without an `X-Inertia` header as non-Inertia and shows its error modal, so the old `422`
+  could never reach `form.errors`. Non-Inertia requests keep the `422` envelope, Precognition
+  dry-runs are untouched, and `X-Inertia-Error-Bag` scopes the flashed bag. The redirect target is
+  the same-origin `Referer`, then the session's previous URL, then the request's own path run
+  through that same sanitizer, falling back to `/` if even that fails it - never trusted verbatim.
+- **`InertiaConfig::with_all_errors(bool)`** - keep every validation message per field instead of
+  collapsing to the first. Mirrors Laravel's `Inertia\Middleware::$withAllErrors`.
+- **`suprnova::testing::AssertableInertia`** - fluent, Laravel-`AssertableInertia`-shaped assertions
+  over an Inertia page object, parsed from either an `X-Inertia` JSON response or a hard-navigation
+  HTML shell's embedded `<script data-page="app">` element: `component`, `url`, `version`, `prop`,
+  `has`, `missing`, `where_`, `count`, `has_flash`. Build one from an `HttpResponse` with
+  `AssertableInertia::from_response`, or from a `TestResponse` with the new
+  `TestResponse::assert_inertia()`. `reload_only`, `reload_except`, and `load_deferred_props` replay
+  a partial reload against a caller-supplied `with_reload(...)` closure - Suprnova's HTTP tests cross
+  a real socket, so there's no single in-process test client to hardcode against.
+- **`Cookie::queue`/`queued`/`unqueue`/`expire`.** A task-local cookie jar - Laravel's `CookieJar` -
+  lets any code queue a cookie for the next outgoing response without holding an `HttpResponse` to
+  attach it to: an event listener, a container-bound service, middleware ahead of the handler.
+  Backed by the same per-request slot `Auth::login_remember` already uses to carry the remember-me
+  cookie past the handler boundary; `SessionMiddleware` drains it onto the response next to the
+  session cookie. `Cookie::expire(name, path, domain)` queues a deletion cookie built with
+  `Cookie::forget_with`. Requires `SessionMiddleware` in the route's middleware chain - outside it,
+  all four calls are a silent no-op, matching `App::flash`'s behavior outside a flash scope.
+- **`HttpResponse::event_stream(stream, end)` and `HttpResponse::stream_json(stream)`.** Laravel's
+  `ResponseFactory::eventStream` / `streamJson`, and the exact wire shapes
+  `@laravel/stream-{react,vue,svelte}`'s `useEventStream` / `useJsonStream` expect. `event_stream`
+  frames a `Stream<Item = sse::StreamedEvent>` as `event: update` per item unless the item names its
+  own event, JSON-encodes any non-string payload, and appends a configurable terminal frame
+  (`EndSignal::default()` is `data: </stream>`; `EndSignal::None` omits it). `stream_json` streams
+  any `Stream<Item = impl Serialize>` as one incrementally-flushed JSON array. Both are built on the
+  existing `sse`/`stream_bytes` body pipeline, so they share its cancellation and panic-isolation
+  behavior with the rest of the framework.
+- **`suprnova serve` respawns a crashed dev process instead of tearing the whole session down.**
+  Exponential backoff between attempts - 200ms, doubling on each consecutive crash, capped at 5s,
+  resetting to the floor once a process has stayed up 30s. `--no-restart` opts out and restores the
+  previous behaviour. `--restart-tries <N>` (default `5`, matching Laravel's `--restart-tries=5`)
+  gives up retrying a process after that many consecutive crashes instead of retrying forever,
+  printing an actionable message and leaving the other processes - and the session itself - running.
+  `--timestamps` prefixes every forwarded line with `HH:MM:SS`. A new `Suprnova.toml`
+  `[[serve.process]]` array lets a project declare its own dev processes - Laravel's
+  `DevCommands::register` - to run alongside the backend and frontend, each with its own `[name]`
+  prefix and an optional color; an unknown key or a blank `name`/`command` in an entry is now a hard
+  parse error instead of silently ignored or a later opaque spawn failure. `--json` emits one JSON
+  object per line (NDJSON) on stdout instead - process start, output, exit, restart-scheduled,
+  restart-succeeded, gave-up, types-regenerated, and shutdown events, including the file watcher's
+  own regeneration notices and the `Ctrl+C` handler's shutdown notice, both of which now stay off
+  stdout under `--json` too - for scripting and log pipelines; combining it with `--timestamps` is
+  harmless but redundant, since every event already carries its own timestamp.
+- **`RequestBuilder::retry_when(predicate)`.** A predicate consulted before every retry the
+  built-in policy (`.retry(...)` / `.retry_non_idempotent(...)`) would otherwise make, receiving a
+  `RetryContext { attempt, method, url, outcome: RetryOutcome::TransportError | Status(u16) }`. It
+  composes with the policy rather than replacing it: `false` vetoes a retry the policy would have
+  made; it can never force one past `max_attempts` or one the policy wouldn't otherwise attempt
+  (a 4xx status, or a non-idempotent method without `retry_non_idempotent`).
+- **`#[model(touches = [...])]` now actually touches.** After a child is created, saved, updated, or
+  deleted, each `BelongsTo` owner named in the list gets one
+  `UPDATE <owner> SET updated_at = ? WHERE <key> = ?`, on the same executor as the write that
+  triggered it - so inside a `DB::transaction` the touch joins that transaction and rolls back with
+  it. An owner whose model has `timestamps = false` is skipped, not written and not an error
+  (Laravel 13.25 closed the same gap). Owners reached through a `NULL` foreign key, and soft-deleted
+  owners, are skipped too. A `touches` entry that doesn't name a declared `BelongsTo` relation is now
+  a compile error; polymorphic owners are not supported yet.
+- **`without_touching_on::<M, _, _>(fut)`** - Laravel's `Model::withoutTouchingOn([M::class], $cb)`.
+  Suppresses both `m.touch()` and any owner cascade targeting `M`, while owners of other types keep
+  bumping. Scopes nest, and the existing `without_touching` now suppresses the owner cascade as well
+  as direct `touch()` calls.
+- **`Model::touch_owners()` / `touch_owners_with_tx(tx)`** - Laravel's `touchOwners()`, for when you
+  wrote the child row through a path the framework doesn't own.
+- **Value-shaped validation rules: `ArrayKeys` and `Distinct`.** A new `ValueRule` trait
+  (`passes(&self, value: &serde_json::Value)`) sits alongside `Rule`, sharing the same
+  keyed-message contract. `rules::ArrayKeys(&[...])` rejects a JSON object carrying any key
+  outside the allowed list (Laravel's `array:keys`, #60918); `rules::Distinct { ignore_case,
+  strict }` rejects a JSON array with a repeated element (Laravel's `distinct`). `validate!` rows
+  accept either kind of rule in the same field list - dispatch is automatic, chosen by which trait
+  the rule implements, not by new row syntax.
+- **`Job::delay()`** - jobs can declare a default delay (`fn delay() -> Option<Duration>`, default
+  `None`), honored by `Queue::push` and `Queue::bulk`: `available_at` becomes `now + delay` instead
+  of `now`. An explicit call-site delay still wins - `Queue::push_later(job, at)` and
+  `Queue::later(delay, job)` use the caller's timestamp verbatim and never consult `Job::delay()`.
+- **`Notification::{queue, timeout, fail_on_timeout, max_tries, backoff}`.** A queued notification
+  (`Notify::queue`) now carries its own queue-tuning defaults onto every per-channel
+  `SendNotificationJob` push via the `EnvelopeOverrides` primitive `Mail::on_queue` uses -
+  `fail_on_timeout(&self) == true` dead-letters on the first timeout instead of retrying, matching
+  Laravel's `#[FailOnTimeout]` notification attribute (#61072). All five default to
+  `SendNotificationJob`'s existing `Job` defaults, so a notification that overrides nothing is
+  unaffected.
+- **`Mail::on_queue` / `Mail::on_connection` + `Queue::push_with`/`later_with`.** A queued mailable
+  now routes itself with `Mail::to(..).on_queue("emails").queue(mailable)`, or defaults via
+  `Mailable::queue(&self)`. Both outrank any `Queue::route` registered for the job and the job's own
+  `Job::queue()`/`Job::connection()` - the new `EnvelopeOverrides` primitive behind them
+  (`Queue::push_with(job, overrides)` / `Queue::later_with(delay, job, overrides)`) also covers
+  timeout, fail-on-timeout, max-tries, and backoff for one push. `MailFake`'s queued snapshots now
+  carry the resolved `queue`, with `queued_on(...)` / `assert_queued_on(name, queue)` to assert it.
+- **`Application::http_bootstrap(f)`** - an HTTP-only boot hook. It runs after `bootstrap` and only
+  on the `serve` / `web:run` path, so the queue, schedule, and workflow workers and the console
+  binary never run it. Worker and console container images no longer need a built frontend manifest
+  to boot: `Inertia::install` fails closed in production when it is missing, and that check now only
+  runs on a process that actually serves HTTP.
+- **`Router::inertia(path, component, props)`** - Laravel's `Route::inertia`, for a static page
+  whose handler would be one line. Registers `GET` (HEAD falls through to it) and returns a
+  `RouteBuilder`, so the route can be named and given middleware. `Router::view` is retained as an
+  alias.
+- **SES v2 send options.** The SES transport now emits `TenantName`, `ConfigurationSetName`, and
+  `ListManagementOptions` on `SendEmail`. Each has a transport-level default
+  (`SesMailTransport::tenant_name` / `configuration_set_name` / `list_management`) and a
+  per-message header override (`X-SES-TENANT-NAME`, `X-SES-CONFIGURATION-SET`,
+  `X-SES-LIST-MANAGEMENT-OPTIONS`), with the header winning. The headers are consumed when the
+  request is built and never rendered into the message.
+- **`without_cookies` on every response builder.** `HttpResponse`, `Response` (via `ResponseExt`),
+  `Redirect`, and `RedirectRouteBuilder` all expire a list of cookies in one call, and `Redirect`
+  /`RedirectRouteBuilder` gained the single-name `without_cookie` they were missing. New
+  `Cookie::forget_with(name, path, domain)` builds a deletion cookie scoped to the path and domain
+  the original was set with - a plain `forget` never clears a cookie set outside `/`.
+- **`Queue::fake()` stamps an envelope id on every captured push.** `pushed_with_id::<J>()` returns
+  `(job, id)` pairs, and the fake now dispatches the same `JobQueueing` / `JobQueued` pair a real
+  driver push does - carrying that id - so a test can correlate a captured push with what its
+  listeners saw. Existing fake helpers are unchanged.
+- **`UniqueJobSkipped` queue event.** `Queue::push_unique` now dispatches
+  `queue::events::UniqueJobSkipped { job_name, unique_id, connection }` when it suppresses a
+  duplicate, so a dedupe is observable instead of silent. The call's return value is unchanged
+  (`Ok(false)`).
+- **`model_keys()` on the query builder and on collections.** `User::query().model_keys().await?`
+  returns every matching row's primary key without hydrating a single model, projecting the
+  table-qualified key (`users.id`) so the query survives a join. `Collection::model_keys()` is the
+  already-hydrated counterpart. `#[suprnova::model]` now also declares the key's Rust type as
+  `EloquentModel::Key`, so both return the type `key_type` names rather than a caller-chosen
+  turbofish.
+
+### Fixed
+
+- **PostgreSQL soft deletes now use backend-aware placeholders, and generated timestamp writes
+  honor declared casts.** `delete()` and `restore()` render PostgreSQL ordinal placeholders instead
+  of MySQL and SQLite `?` placeholders. Generated create, update, save, touch, and soft-delete
+  writes also convert timestamps through each field's declared `Cast` storage type, so native
+  `TIMESTAMPTZ` columns no longer receive text values. Thanks to
+  [@i-am-v-alexander-v](https://github.com/i-am-v-alexander-v) for reporting both defects and
+  submitting a fix in [PR #3](https://github.com/eas4ai/suprnova/pull/3).
+- **Default workspace and Magnetar gate runs no longer require live PostgreSQL or MySQL services.**
+  Backend-specific behavior suites are explicit, ignored qualification tests that still fail when
+  deliberately invoked without their configured database. Reachability-only tests and permanent
+  gate environment requirements were removed, so unrelated changes don't pay for external database
+  setup on every verification run.
+
+- **`PartialFilter::narrow` is now `pub`.** Its four sibling predicates (`should_include`,
+  `should_include_eager`, `should_include_optional`, and the type itself) were already public, but the
+  narrowing pass that makes `should_include_eager`'s `true` answer correct - trimming a resolved value
+  down to the dotted paths an `only`/`except` entry actually asked for - was `pub(crate)`. A caller
+  building custom partial-reload handling on top of `PartialFilter` had no public way to reproduce that
+  narrowing and would ship a value whole under a dotted `only` entry even though `should_include_eager`
+  reported the key as included.
+- **`MailFake`'s `QueuedSnapshot` can now assert on `.on_connection(...)`.** `Queue::fake()` gained
+  `assert_pushed_on_connection` in Wave 3 alongside `assert_pushed_on_queue`; `Mail::fake()` only got the
+  queue half, so a mailable queued with a connection override was resolved and applied to the real
+  dispatch but unassertable through the fake. New `QueuedSnapshot::connection`, `MailFake::queued_on_connection`,
+  and `MailFake::assert_queued_on_connection` close the gap, mirroring `assert_queued_on`'s shape.
+- **A dotted shared prop was unreachable by a bare `only` entry.** `App::inertia_share("auth.user", …)`
+  followed by `router.reload({ only: ['auth'] })` returned `props: {"errors":{}}` - the share vanished
+  outright. The registry stores `auth.user` as one literal key and the `Arr::set` unpacking pass only
+  nests it after every prop has resolved, so the partial-reload gate saw the still-flat key and matched
+  it against neither `auth` nor anything else. `only`/`except` entries are now symmetric: an entry may
+  name a prop's key exactly, a path *inside* it (`user.name`, which narrows), or an **ancestor** of it
+  (`auth` against the key `auth.user`, which ships the prop whole, because the caller asked for the whole
+  root). A bare `except: ['auth']` drops every prop key beneath it the same way `Arr::forget` drops the
+  whole subtree in Laravel's already-nested bag. The prefix must end on a segment boundary, so an
+  unrelated `authAgent.user` prop is untouched by either list. Laravel never hits this because
+  `Inertia::share` runs `Arr::set` at share time; Suprnova's registry cannot, since a lazy share has no
+  value to nest until the request resolves it.
+- **A `#[data(lazy(deferred))]` field bypassed the `?include=` allowlist.** The owner-tagged resolution
+  path in `resolve_props` selected props with `Prop::is_lazy()`, which is false for anything carrying a
+  flag - and a deferred field is `Visibility::Deferred`. The field therefore resolved off the ordinary
+  prop path, where no include-set check exists, and shipped to any client that sent the deferred
+  follow-up regardless of whether the request opted the field in. `Prop::resolve_with_owner` now gates
+  every resolver-backed owner-tagged prop, flags or not, and `resolve_props` runs that gate ahead of
+  every other block: a field outside `?include=` is dropped whole (no value, no `deferredProps`
+  announcement), and a field named by `?include=` but off the DTO's allowlist raises its `400` before
+  `X-Inertia-Partial-Data` can absorb it. Not a regression - the pre-Wave-4 code gated on the `Prop::Lazy`
+  enum variant, which a `Prop::Defer` also failed - but a real hole either way.
+- **`deferredProps` was re-announced on a matched partial reload.** A partial that named one deferred key
+  still advertised every *other* deferred key back to the client, which then fetched them again, and
+  again on the next partial. Laravel's `resolveDeferredProps` returns `[]` the moment the request is
+  partial, before it inspects a single prop (`Response.php:661-663`); the block is now dropped whole on
+  any matched partial. A partial reload aimed at a different component is a standard visit for this gate,
+  as for every other, so its announcements are unaffected.
+- **The `errors` bag filtered differently depending on where the errors came from.** The session-flashed
+  bag is seeded ahead of the resolve loop and no partial-reload filter could reach it, while a handler's
+  own `.with("errors", …)` went through the ordinary gates - so `only: ['errors.email']` shipped the whole
+  seeded bag but a one-field handler bag, and `only: ['users']` replaced the handler's bag with the seeded
+  one instead of leaving the key alone. Both paths now treat `errors` as always-visible, matching
+  Laravel's middleware, which shares it as `Inertia::always(...)` and re-injects the raw value through
+  `resolveAlways` after the `only`/`except` rebuild. This is the shape the client needs: it folds a
+  partial response in with `{...current.props, ...response.props}`, so an empty `errors` object wipes
+  messages already on screen where an unfiltered one leaves them correct. An explicit visibility flag on
+  the key still wins, so `.prop("errors", Prop::eager(…).optional())` behaves optionally.
+- **`Queue::fake()` can now observe per-push `EnvelopeOverrides`.** A job pushed through
+  `Queue::push_with`/`Queue::later_with` was indistinguishable from a plain `Queue::push` under
+  the fake - `FakePush` carried only the payload and `available_at`, so the override never left
+  the facade and nothing could assert a test dispatched to the right queue or connection. New
+  `queue::testing::pushed_with_overrides::<J>() -> Vec<(J, EnvelopeOverrides)>` returns each
+  captured push paired with what it declared; `assert_pushed_on_queue::<J>(queue)` and
+  `assert_pushed_on_connection::<J>(connection)` cover the common single-field case, mirroring
+  `MailFake::assert_queued_on`. Every other entry point (`push`, `push_later`, `bulk`,
+  `push_unique`, the chain/batch dispatchers) still takes no overrides and records
+  `EnvelopeOverrides::default()`, so a plain push reads under the fake exactly as "no override
+  declared."
+- **An SSR worker that stalled mid-response body could hang a render forever.** `SsrConfig::timeout`
+  bounded only the wait for response headers; once headers arrived, reading the body had no
+  timeout of its own, so a worker that accepted the connection, sent headers, then stopped sending
+  data left the request hanging past the configured timeout instead of falling back to CSR (or
+  erroring, under `ssr_throw_on_error`). Both phases now share one deadline, so the configured
+  timeout bounds the whole SSR call, as its own doc already promised.
+- **Queued cookies - including the remember-me cookie `Auth::login_remember` sets - were silently
+  dropped on three internal fail-closed paths in `SessionMiddleware`.** A session read failure, a
+  session write failure, and a session-cookie encryption failure each returned a synthesized `500`
+  directly, bypassing the pending-cookie drain that runs at the end of `handle`. Anything queued via
+  `Cookie::queue` that request - including a remember-me token row already committed to the
+  database - never reached the client as a `Set-Cookie` header. All three paths now drain pending
+  cookies before returning, the same as a handler-returned error or a redirect. This does not cover
+  an uncaught panic, matching Laravel's own queued cookies being lost to one.
+- **`Queue::push_unique` now honors `Job::delay()`, matching `Queue::push`, `Queue::push_with`, and
+  `Queue::bulk`.** It previously computed `available_at` from `Utc::now()` directly, so a job that
+  declared a default delay (`fn delay() -> Option<Duration>`) dispatched immediately when pushed
+  through `push_unique` instead of after that delay. `Queue::push_unique_later` and
+  `Queue::later_unique` are unaffected - they already take an explicit timestamp or delay from the
+  caller and never consult `Job::delay()`, the same rule `push_later`/`later` follow.
+
+### Changed
+
+- **The current development branch uses SeaORM 2.0 and requires Rust 1.94.0.** Suprnova preserves
+  its Eloquent, `#[model]`, migration, and database-facade source shapes. Applications that call
+  SeaORM directly must import `ExprTrait` for SeaQuery expression methods and use explicit
+  `*_raw` connection methods for prebuilt `Statement` values. SeaQuery is now 1.0, and the direct
+  MariaDB vector driver uses SQLx 0.9. Existing databases require no application data migration;
+  fresh PostgreSQL schemas retain serial-backed primary keys.
+- **Three more unused dependencies removed.** `pretty_assertions` and `qrcode` leave the framework
+  crate (`totp-rs` already carries the `qr` feature, so QR provisioning for two-factor enrolment is
+  unaffected), and `notify-debouncer-mini` leaves the CLI (`notify` itself stays - the `serve` and
+  `generate-types` watchers use it directly). All three were confirmed unused by `cargo-udeps` plus
+  a source-wide search that covers doc tests.
+- **`suprnova-macros` no longer depends on `serde` or `serde_derive_internals`.** Neither was used: the
+  `::serde::Serialize` paths the macros emit resolve in the downstream crate, not in the macro crate
+  itself. No effect on generated code.
+- **`MergeStrategy`'s `match_on` now carries more than one field name.** `Append`, `Prepend`, and `Deep`
+  each widen from `match_on: Option<String>` to `match_on: Option<Vec<String>>`, so
+  `InertiaResponse::merge_with` / `merge_lazy_with` can dedupe on several fields the same way
+  `.prop(key, Prop::eager(v).match_on([...]))` already could - before this, the response-builder
+  shortcuts were strictly less expressive than building a `Prop` directly. See Upgrading.
+- **Scroll props now emit Laravel-identical `reset` and merge semantics.** `scrollProps[key].reset` is
+  `true` exactly when the client named `key` in `X-Inertia-Reset`, matching Laravel's
+  `resolveScrollProps` - not `true` on every visit lacking an `X-Inertia-Infinite-Scroll-Merge-Intent`
+  header, as before. A scroll prop now also carries merge metadata unconditionally, defaulting to
+  append: a fresh visit (no headers at all) emits `reset: false` plus a `mergeProps` entry, where it
+  previously emitted `reset: true` and no merge metadata. A key in `X-Inertia-Reset` is excluded from
+  `mergeProps` / `prependProps` for that response, the same exclusion a regular merge prop already had.
+- **`ssr:check` now verifies the SSR worker's `GET /health` route answers 2xx**, rather than only
+  confirming that something accepted a TCP connection. Every `@inertiajs/{vue3,react,svelte}/server`
+  worker answers `/health` out of the box, so this needed no change on the worker side - matches
+  Laravel's `Inertia\Ssr\HttpGateway::isHealthy()`.
+- **The Inertia `errors` prop now carries one string per field, not an array.** A session-flashed
+  validation bag renders as `{ email: "The email field is required." }` rather than
+  `{ email: ["The email field is required."] }`, matching Laravel's default and Inertia's own
+  `ErrorValue = string`. `InertiaConfig::with_all_errors(true)` restores the array shape. An
+  `errors` prop a handler sets itself is passed through untouched, and the session flash
+  (`Redirect::with_errors`, `session.pull_errors_flash()`) still stores arrays - only the rendered
+  page prop changes.
+- **`Model::TOUCHES` moved from an inherent const to `EloquentModel`.** The parent-touch cascade
+  lives on a `Model` trait default, and a trait default can't read an inherent const.
+  `Comment::TOUCHES` still resolves - it now needs `use suprnova::EloquentModel;` in scope. Models
+  without a `touches` attribute get the trait's empty default.
+- **`RelationEntry` gained `related_updated_at_column`.** Anything constructing a `RelationEntry` by
+  hand needs the extra field; nothing in-tree does, the macro emits them all.
+- **`Router::view` now rejects props that aren't a JSON object.** It previously ignored them
+  silently, registering a route that rendered an empty prop bag with no diagnostic. `null` is still
+  accepted as "no props"; `Router::try_inertia` is the fallible form.
+- **The Inertia asset version now defaults to a hash of the Vite build manifest** instead of the
+  literal `"1.0"`, so a deploy invalidates long-lived clients without anyone remembering to bump a
+  string. `InertiaConfig::manifest_path(...)` re-points the resolver with it; an explicit
+  `.version(...)` / `.version_with(...)` still wins. With no manifest on disk - local development -
+  the version falls back to `"1.0"`, which is what every app saw before, so nothing changes until
+  you build. New `VersionResolver::from_manifest(path)` exposes the resolver directly.
+
+### Deprecated
+
+- **`Cookie::read_encrypted` is now the v1-only legacy reader.** Code that mints with
+  `Cookie::encrypted` and reads with `read_encrypted` fails at runtime on the first value written
+  after this release; switch to `read_encrypted_for(name, wire)`. The un-contexted
+  `CryptPurpose::Cookie` entry points are also superseded. Both removals are scheduled for 1.4.0.
+
+### Upgrading
+- **Cookie decrypt warnings now have two independent axes.** A `KeyOrigin::Previous(index)` warning means
+  re-encrypt the value under the current `APP_KEY` and remove that previous key only after the rotation
+  tail is gone; an `AadVersion::Legacy` warning means re-issue the cookie through the name-bound API
+  before the 1.4.0 fallback removal. A value can report both.
+- **`SESSION_COOKIE_PREFIX` is opt-in.** Deploy `__Host-` only with HTTPS, `SESSION_SECURE=true`,
+  `SESSION_PATH=/`, and no `SESSION_DOMAIN`; local HTTP scaffolds leave it empty. `CsrfMiddleware`'s
+  `with_session_config` keeps the literal `XSRF-TOKEN` name; use
+  `.xsrf_cookie_name("__Host-XSRF-TOKEN")` when a client is configured for that separate name.
+- **`DecryptOrigin` is now a two-axis `#[non_exhaustive]` struct.** Read its `key` and `aad` fields
+  independently and keep a wildcard-compatible match strategy for the `KeyOrigin` /
+  `AadVersion` enums.
+- **`SessionConfig` and `CookieOptions` are now `#[non_exhaustive]`.** Struct literals and functional
+  record updates in application code must move to `Type::default()` followed by public-field
+  assignments or builder methods.
+
+- **`FrameworkError` is now `#[non_exhaustive]`.** A `match` on it in your own code needs a wildcard
+  arm. This is the last release in which adding a variant would have been a breaking change.
+- **`MergeStrategy::Append`/`Prepend`/`Deep`'s `match_on` field is now `Option<Vec<String>>`, not
+  `Option<String>`.** A call site constructing the struct-literal form directly - `MergeStrategy::Append
+  { match_on: Some("id".into()) }` - no longer compiles; wrap the field name in a `Vec`:
+  `Some(vec!["id".into()])`. `match_on: None` is unaffected and needs no change.
+- **A matched partial reload no longer emits `deferredProps`.** Code reading `page.deferredProps`
+  off a partial-reload response - a custom deferred-loading component, a test snapshot, an
+  end-to-end assertion - will now find the key absent where it used to list the deferred props the
+  request did not name. Read the announcements off the initial (non-partial) visit, which is where
+  Laravel puts them and where the official client reads them.
+- **A bare `except` entry now drops dotted prop keys beneath it.** `X-Inertia-Partial-Except: auth`
+  previously left a prop registered under `auth.user` in the response, because the gate compared
+  whole keys. It is dropped now. If a page relied on a bare `except` entry pruning only the exact
+  key, name the exact key (`except: ['auth.user']`) or narrow with a dotted path instead.
+- **`errors` ignores `only`/`except`.** A partial reload that filtered a handler-supplied
+  `.with("errors", …)` prop out, or narrowed it with a dotted entry, now ships it whole. Tests
+  asserting a sliced or empty `errors` object on a partial reload need updating. To keep the bag
+  out of a response deliberately, flag it - `.prop("errors", Prop::eager(…).optional())` - rather
+  than relying on the partial-reload lists.
+- **`Prop::resolve_with_owner` gates flagged props too.** It previously resolved any prop that was
+  not `Prop::is_lazy()` - an eager value *or* a resolver carrying a flag - without consulting the
+  include set. It now gates every resolver-backed prop and only lets an already-materialized value
+  through ungated. A `#[data(lazy(deferred))]` field consequently needs `?include=<field>` on the
+  request before it resolves or is announced, the same as every other lazy flavor. Add the field to
+  the request's `?include=` list, or drop the `lazy(...)` attribute if it was never meant to be
+  opt-in.
+- **Scroll prop `reset` no longer follows the merge-intent header.** Code that reads
+  `page.scrollProps[key].reset` directly - a custom infinite-scroll component, a test snapshot - will
+  see `reset: false` (plus a `mergeProps` entry) on a plain revisit that used to read `reset: true` and
+  carry no merge metadata. The official `<InfiniteScroll>` component behaves differently only on a
+  plain revisit: it listens for `reset` on every `router` `success` event, not only an explicit
+  `router.reload()`, so a normal revisit no longer clears its accumulated state unless the server
+  actually named the key in `X-Inertia-Reset`, which matches Laravel. Send `X-Inertia-Reset: <key>`
+  explicitly wherever the old "any non-append/prepend visit resets" behavior was relied upon.
+- **`Prop::match_on` takes `impl MatchOnFields`, not `impl Into<String>`.** The new bound is what
+  lets one call name several fields (`match_on(["id", "slug"])`), and its impl list is deliberately
+  closed - `&str`, `String`, `[T; N]`, and `Vec<T>` only. A blanket impl over `IntoIterator` is not
+  available: coherence rejects it against the `&str` and `String` impls, since nothing stops those
+  types from gaining an `IntoIterator` impl later. Three argument types that compiled before no
+  longer do: `&String`,
+  `Cow<'_, str>`, and `Box<str>`. Pass a `&str` at the call site instead - `match_on(name.as_str())`
+  for a `&String`, `match_on(name.as_ref())` for a `Cow<'_, str>`, `match_on(&*name)` for a
+  `Box<str>`.
+- **A dotted `only`/`except` entry now narrows its top-level prop instead of excluding it
+  entirely.** Before this fix, `X-Inertia-Partial-Data: user.name` made `should_include_eager`
+  look for an exact-match `"user"` entry, found none, and silently dropped the whole `user` prop -
+  a client asking for one field of `user` got nothing. Any frontend page component that happened to
+  rely on that gap (treating a dotted `router.reload({ only: [...] })` as equivalent to omitting the
+  key) now receives `{ user: { name: ... } }` instead. No code changes are required - this is what
+  the Inertia v3 protocol already specifies the request/response contract to mean. The same fix
+  applies to `should_include_optional`, and its effect is operationally bigger: a dotted `only` entry
+  (`permissions.read`) now counts as an explicit request for an `Optional` or `Defer` prop's
+  top-level key, which previously required a bare entry (`permissions`) to trigger at all. A request
+  that used to skip that prop's resolver entirely now runs it - if the resolver hits a database or an
+  external service, a client already sending dotted partial-reload requests starts issuing that work
+  on requests that previously did none. Watch resolver call volume after upgrading if your app has
+  `Optional`/`Defer` props with dotted partial-reload traffic.
+- **`InertiaSharedData::share` now takes the page component name.** Add a `component: &str` parameter
+  after `req`:
+  ```diff
+  -async fn share(&self, req: &dyn InertiaRequestExt) -> Result<IndexMap<String, Prop>, FrameworkError>
+  +async fn share(&self, req: &dyn InertiaRequestExt, component: &str) -> Result<IndexMap<String, Prop>, FrameworkError>
+  ```
+  Ignore it (`_component`) if your provider doesn't need to vary by page - Laravel's `RenderContext`
+  carries the same pairing (`component`, `request`) for `ProvidesInertiaProperties::toInertiaProperties`.
+- **`Prop` is a struct, not an enum.** Its variants are gone; construct and read props through
+  methods:
+  - `Prop::Eager(v)` -> `Prop::eager(v)`
+  - `Prop::EagerNone` -> `Prop::absent()`
+  - `Prop::Always(v)` -> `Prop::eager(v).always()`
+  - `Prop::Lazy(r)` -> `Prop::from_resolver(r)` (`Prop::lazy(closure)` is unchanged)
+  - `Prop::Optional(r)` -> `Prop::from_resolver(r).optional()`
+  - `match prop { Prop::Eager(v) => … }` -> `prop.as_value()`
+  - `matches!(prop, Prop::Lazy(_))` -> `prop.is_lazy()`; `matches!(prop, Prop::EagerNone)` ->
+    `prop.is_absent()`
+  The `DeferConfig`, `MergeConfig`, `OnceConfig`, and `ScrollConfig` payload structs are removed -
+  their fields are flags on `Prop` now. `Prop::is_deferred()` is renamed `Prop::has_resolver()`,
+  which is what it always meant. `DeferOptions`, `OnceOptions`, `MergeStrategy`, `ScrollMetadata`,
+  and every `InertiaResponse` builder method are unchanged, so an app that only uses the response
+  builder needs no edits. Apps that build props by hand - typically an `InertiaSharedData`
+  implementation - need the renames above.
+
+- **This fix protects sessions you already have, not only requests from here on.** Upgrading alone
+  is enough: a session cookie written by an earlier release can carry a `_previous.url` that was
+  never sanitized, and `SessionData::previous_url()` now discards it on read the first time that
+  session is used post-upgrade, rather than trusting it because it's already stored. You don't need
+  to invalidate existing sessions, migrate the session table, or force a re-login. A request whose
+  path looks protocol-relative (`//host`) also no longer updates the recorded previous URL going
+  forward - if your app's `fallback!` route (or any 200-answering route reachable on an unusual
+  path) ever legitimately relied on such a path becoming the `Redirect::back()` target, it won't
+  anymore. Either way, the previous, safe value in the session is left in place instead (or
+  `Redirect::back(fallback)`'s own fallback wins, if nothing safe was ever recorded). No code change
+  is needed unless you were depending on the exact edge case this closes, which was already an
+  open-redirect risk.
+- **Drop the `[0]` from every `errors.<field>` binding in your pages.** With the new default shape
+  `errors.email` is a string, so `errors.email[0]` renders its first character instead of the
+  message. Change the TypeScript type from `string[]` to `string` at the same time. If you would
+  rather not touch your pages, set `InertiaConfig::with_all_errors(true)` on the config you pass to
+  `Inertia::install` and add the `errorValueType: string[]` module augmentation for
+  `@inertiajs/core`. The starter frontends ship the new shape.
+- **A handler that hand-rolled the redirect-back after a validation failure can delete it.** The
+  bridge is automatic now; a handler that still redirects itself keeps working, because the
+  middleware only acts on a `422` that carries a populated `errors` object.
+- **A crashed `suprnova serve` child now respawns instead of ending the session.** If you relied on
+  a crash stopping `suprnova serve` outright (a CI smoke check, a script that treats exit as
+  "something's wrong"), pass `--no-restart` to restore that behaviour exactly. Retries are also
+  bounded by default: a process that crashes 5 times in a row stops being retried (raise the limit
+  with `--restart-tries`, or use `--no-restart` for the original one-crash-and-done behaviour).
+- **`Model::TOUCHES` is no longer an inherent const.** Code that read `Comment::TOUCHES` directly
+  needs `use suprnova::EloquentModel;` (or `suprnova::eloquent::EloquentModel`) in scope - the const
+  moved there so the parent-touch cascade, a `Model` trait default, can read it. A `grep -rn TOUCHES`
+  over your app finds every call site; most apps have none, since the const previously did nothing
+  at runtime.
+- **`RelationEntry` gained a field.** Only code that constructs a `RelationEntry` by hand needs a
+  change - add `related_updated_at_column` to the literal. The macro-generated relation registrations
+  the framework ships already emit it, so an ordinary app doing nothing but declaring relations
+  through `#[suprnova::model]` is unaffected.
+- **`Router::view` with non-object props now panics at boot.** It previously registered silently
+  with an empty prop bag; `view` delegates to `Router::inertia`, which requires an object (or
+  `null`) and panics otherwise. If a `view` call might carry non-object props, switch to
+  `Router::try_inertia` and handle the `Err` - otherwise nothing changes for you.
+- **The Inertia version manifest default can change your version string the moment a build
+  exists.** An app or test that hardcodes `X-Inertia-Version: 1.0` keeps working only until a Vite
+  manifest shows up on disk; once one does, the version becomes the manifest hash instead. If you
+  need the old constant, read it from `VersionResolver::from_manifest(path)` yourself or pin
+  `.version(...)` explicitly. Expect the first deploy after upgrading to force one full-page reload
+  cycle for already-connected clients - one-time, and the point of the change. The no-manifest
+  fallback value is exported as `suprnova::MANIFEST_VERSION_FALLBACK`, so you never need to
+  hardcode `"1.0"` again.
+- **Move `Inertia::install` and `global_middleware!` registration out of `bootstrap::register`.**
+  Put them in a new function and pass it to `.http_bootstrap(...)` instead - the scaffold's new
+  shape is a sync `register_http_stack()` called as
+  `.http_bootstrap(|| async { bootstrap::register_http_stack() })`. Apps that skip this keep today's
+  behavior, worker-boot failure on a missing frontend manifest included.
+
+## 1.2.4 - 2026-08-18
+
+### Security
+
+- **The maintenance-mode bypass secret is compared in constant time.**
+  `MaintenanceMiddleware` matched the secret URL with a plain string
+  compare, which returns at the first differing byte. Because the secret is
+  a bearer credential carried in the request path, that timing difference
+  told an attacker how long a prefix they had guessed correctly. The
+  compare now runs over the full byte length via `subtle::ConstantTimeEq`,
+  short-circuiting only on a length mismatch - the same shape as the
+  bypass-cookie compare next to it.
+
+- **`rules::Url` now rejects script URIs.** The rule accepted any scheme
+  `url::Url` could parse, `javascript:` and `vbscript:` included, so a
+  validated URL could still be a script-execution sink when rendered into
+  an `href`. It now applies Laravel's `url` rule shape
+  (`Illuminate\Support\Str::isUrl`'s `^(PROTOCOLS)://HOST` pattern): the
+  scheme must be on Laravel's allowlist, be followed by `://`, **and** be
+  followed by a non-empty host - Laravel's host group has no `?`, so an
+  absent or empty host never matches even with a listed scheme. The scheme
+  list and the `://`-plus-host requirement are Laravel's verbatim; the host
+  itself is parsed by the `url` crate rather than Laravel's regex, so a few
+  edge cases still differ - an out-of-range port is rejected here and
+  accepted there, and IDN hosts normalise differently. New
+  `Url::protocols(&[...])` mirrors Laravel's `url:http,https`; `HttpUrl`
+  is now literal sugar for it and keeps its own message. **Behaviour
+  change:** a URL with an unlisted scheme that used to validate now
+  fails - name the scheme with `Url::protocols(&["myapp"])` if you meant
+  to accept it. Two more behaviour changes: `mailto:`, `data:`, and
+  `tel:` are on Laravel's allowlist by name but don't carry an authority
+  component, so they now fail; and `file:///etc/passwd`-style paths -
+  `scheme://` with nothing between the last two slashes - now fail too,
+  since an empty string isn't a host either. Both follow from Laravel's
+  own `://`-plus-host rule.
+
+- **Inertia responses now advertise `Vary: X-Inertia` everywhere.** The
+  header was set only on the page-object responses themselves. Redirects,
+  404s, 422s, and static responses carried none, so a shared cache keyed on
+  the URL alone could serve the JSON page object to a hard browser
+  navigation, or the HTML shell to an Inertia XHR. The new
+  `InertiaHeadersMiddleware` - registered by `Inertia::install` as the
+  outermost of the three - sets it on every response, and turns an empty
+  `200` on an Inertia visit into a `303` back rather than a response the
+  client rejects as non-Inertia. `InertiaVersionMiddleware` now re-flashes
+  the session before its `409`, so a flashed error survives the client's
+  follow-up full-page GET.
+
+- **Three Inertia response fixes.** `InertiaResponse::location_for(&req, url)`
+  returns `409` + `X-Inertia-Location` for an Inertia XHR and a plain `302` + `Location` for a hard navigation, so an OAuth or SSO bounce entered
+  outside the SPA no longer dead-ends on a body-less `409`. The existing
+  `location(url)` keeps its always-`409` shape. New `App::clear_history()`
+  flashes the history-clear flag into the session so it survives the logout
+  redirect and lands on the page that actually renders - the per-response
+  `.clear_history()` marked only the redirect the browser throws away,
+  leaving the previous session's encrypted history decryptable. And a
+  `once` prop is now skipped only on a full Inertia visit: an explicit
+  `router.reload({ only: ['stats'] })` re-resolves it instead of returning
+  nothing.
+
+- **The SES transport now sends custom message headers.**
+  `Mail::to(..).header("List-Unsubscribe", ...)` and `Mailable::headers()` were
+  dropped silently under `MAIL_DRIVER=ses`: the `Content.Simple` request body
+  had no `Headers` field and the raw-MIME builder never read
+  `OutgoingMessage::headers`, even though every other transport forwards them.
+  Both SES paths now carry them - `Headers` as SES v2's `{Name, Value}` list,
+  raw MIME as real header lines - so unsubscribe links, threading headers and
+  routing hints survive a driver swap. Header names are validated up front on
+  both paths - CR, LF and NUL (the injection bytes, as the Mailgun transport
+  already refuses) and anything that is not a valid RFC 5322 field name
+  (spaces, colons, non-ASCII) - so attaching a file never changes whether a
+  message is accepted.
+
+### Fixed
+
+- **Nested validation failures now reach the 422 body.** `#[validate(nested)]`
+  failures on a nested struct or on an element of a validated `Vec<T>` were
+  dropped between the validator and the response: the request was correctly
+  rejected with 422, but the `errors` map came back empty, so no message
+  rendered and the client could not tell which field was at fault. Nested
+  failures are now flattened into Laravel's dotted notation -
+  `address.street`, `items.1.name`, `order.items.2.sku` - alongside the
+  top-level ones.
+
+- **The Inertia page object's `url` keeps the query string.** `page.url` was
+  the request path only, so the client recorded `/users` for a visit to
+  `/users?page=2&sort=name`. Every back/forward navigation and every
+  `router.reload()` then replayed the page without its pagination cursor,
+  sort, or filters. It is now path plus query - the same derivation
+  `InertiaVersionMiddleware` already used for `X-Inertia-Location`, so by
+  default the two agree byte for byte. New
+  `InertiaConfig::url_resolver(...)` overrides how the *page object* names
+  the page (Laravel's `Inertia::resolveUrlUsing`); the version bounce keeps
+  naming the URL that arrived, because that is the URL the browser has to
+  fetch.
+
+- **`Inertia::install` now applies its config to every response.** The
+  config handed to `Inertia::install` was read for three fields and then
+  dropped, so every `InertiaResponse` built without an explicit
+  `.with_config(...)` rendered from `InertiaConfig::default()`. An app
+  scaffolded with `--frontend react` served the Svelte entry point and no
+  React refresh preamble unless `SUPRNOVA_FRONTEND` was set in the
+  environment; SSR enabled on the config never reached a response; and the
+  page object's asset version came from a different config than the
+  version middleware's resolver. The installed config is now retained on
+  the container's Inertia registry and is what `InertiaResponse::new`
+  starts from. Per-response `.with_config(...)` still overrides, apps that
+  never call `Inertia::install` are unchanged, and a failed (fail-closed)
+  install retains nothing. As a side effect the production Vite manifest
+  is now parsed once per process rather than once per response.
+
+- **Scaffolded apps now install the Inertia protocol middlewares.** The
+  `bootstrap.rs` written by `suprnova new` registered the session, locale,
+  CSRF and include middlewares but never called `Inertia::install`, so a
+  generated app had neither `InertiaVersionMiddleware` nor
+  `Inertia303Middleware`: a browser still running the previous bundle was
+  never told to reload after a deploy, and a `PUT`/`PATCH`/`DELETE` that
+  redirected stayed on a `302` the client could follow with the original
+  verb. The call now lands after `SessionMiddleware` - where the version
+  middleware's session re-flash works - with a named `INERTIA_VERSION`
+  constant to bump when assets change, and it pins the frontend the
+  project was generated with (`.frontend(Frontend::React)` for
+  `--frontend react`), so the HTML shell loads that framework's Vite entry
+  point instead of falling back to Svelte's. The generated `.env` now sets
+  `SUPRNOVA_FRONTEND` to match. The `--api` starter is unchanged; it has
+  no frontend.
+
+- **`Queue::push_unique` no longer reports a queued job as skipped.** The
+  return value was computed with `matches!(outcome, Idempotent::Fresh(()))`,
+  which folded `Idempotent::FreshUnfenced` into `false` - the outcome where
+  the envelope *was* pushed but the dedupe lease was lost mid-push. Callers
+  branching on that boolean were told a job that was about to run had been
+  suppressed as a duplicate. All three outcomes are now matched exhaustively:
+  a lost lease returns `true` with a `warn` naming the job and its unique
+  key, and only a real duplicate returns `false`. `push_unique_later` and
+  `later_unique` share the path and are fixed with it.
+
+### Changed
+
+- **Parity baseline moved to Laravel 13.25.0.** The 13.23.0, 13.24.0 and
+  13.25.0 release notes were traced item by item to the framework's own
+  surface. Everything that reached a Suprnova code path is either fixed in
+  this release or has a row in [`manual/parity.md`](manual/parity.md) marked
+  `not yet` or `by design no`.
+
+### Upgrading
+
+Two changes can alter a running app without any code change on your side.
+
+- **Settings on the config you pass to `Inertia::install` now take effect.**
+  They were read for three fields and dropped. If your install config sets
+  `.ssr(...)`, SSR is now on: start the worker (`suprnova ssr:start`) before
+  deploying, or drop the `.ssr(...)` call. `.entry_point`,
+  `.assets_base_url`, `.default_title` and `.encrypt_history(...)` set there
+  also reach the page now.
+
+- **`rules::Url` rejects more.** Values that used to pass and no longer do:
+  any scheme outside Laravel's allowlist, `javascript:` and `vbscript:`
+  among them; `mailto:`, `data:` and `tel:`, which are on the allowlist but
+  carry no `://` host; and `scheme://` with an empty host, such as
+  `file:///path`. If you meant to accept a scheme, name it:
+  `Url::protocols(&["myapp"])`.
+
+## 1.2.3 - 2026-08-16
+
+### Fixed
+
+- **Datetime casts now read database-native `CURRENT_TIMESTAMP` text.**
+  `AsDateTime`, `AsImmutableDateTime`, and `AsOptionalDateTime` continue to
+  write canonical RFC-3339, while reads also accept PostgreSQL's
+  timezone-bearing text and timezone-free SQLite/MySQL text. Timezone-free
+  values are interpreted as UTC, matching the framework's UTC timestamp
+  contract.
+
+## 1.2.2 - 2026-08-14
+
+### Fixed
+
+- **Nullable non-text values now work across attribute-based writes on
+  PostgreSQL.** Typed `Builder::update_all` and `Builder::upsert`, model-less
+  `DB::table().insert/update`, and many-to-many pivot extras render explicit
+  JSON nulls as SQL `NULL` while continuing to bind every non-null value. This
+  preserves the target column's type instead of sending a text-typed null
+  parameter that PostgreSQL rejects for bigint, integer, boolean, timestamp,
+  and other non-text columns. Multi-row upserts now also reject missing or
+  extra columns instead of silently converting a malformed row shape to null.
+  Automatic many-to-many pivot timestamps are bound as typed UTC datetimes
+  instead of text.
+
+### Security
+
+- **The release gate now distinguishes dormant lockfile metadata from compiled
+  dependencies across the whole workspace.** Cargo records rust_decimal's
+  unused optional rkyv 0.7 compatibility dependency in `Cargo.lock`; the gate
+  now proves that neither rkyv nor its derive crate is reachable from any
+  workspace member, feature, target, or dependency edge. The corresponding
+  RustSec exception is owned, expires on 2026-11-14, and must be removed when
+  rust_decimal no longer records that legacy optional dependency.
+
+## 1.2.1 - 2026-08-09
+
+### Changed
+
+- **Suprnova moved to the `eas4ai` GitHub organization.** Repository URLs in
+  package metadata, documentation, dependency examples, and scaffold templates
+  now use `github.com/eas4ai`. New projects also use the monitored
+  `shawn@eas4ai.com` author email. This release made no runtime behavior
+  changes.
+
+## 1.2.0 - 2026-08-05
+
+### Added
+
+- **The manual ships in seven languages.** `manual/es/`, `manual/fr/`,
+  `manual/de/`, `manual/pt-BR/`, `manual/ja/` and `manual/zh-Hans/` each
+  carry the full 104-chapter manual - every chapter, the table of
+  contents, and this changelog - translated from the English source.
+  English remains canonical: chapter structure, code blocks, identifiers,
+  CLI commands and environment variables are held byte-identical to the
+  source, so a translated chapter can never disagree with the English
+  about what the framework does, only say it in the reader's language.
+
+  The translations were produced and reviewed for suprnova.app, which
+  renders this manual as its `/docs`. Every section carries a review
+  ledger there: verdicts are recorded against content hashes of both the
+  English and the translation, two independent reviewers must pass the
+  exact bytes for a section to count as approved, and per-locale
+  glossaries pin the terminology rulings (which terms stay English,
+  which take the native word, and why). Corrections are welcome in
+  either repo - a fix here reaches the site on its next sync.
+
+## 1.1.0 - 2026-08-02
+
+### Added
+
+- **Per-locale fallback chains.** `LocalizationConfig` gains `parents`
+  (`APP_LOCALE_PARENTS`, comma-separated `child=parent` pairs, or the
+  chainable `.parent(child, parent)` builder): a locale can inherit from a
+  configured sibling before falling further back to the global
+  `fallback_locale` - `pt-PT` from `pt-BR`, `en-AU` from `en-GB`, and so
+  on, transitively. `Lang::get`/`try_get`/`get_with`/`try_get_with`/`has`
+  all walk the chain, current locale first, so this works for any
+  `Translator` driver, not just the bundled one. A malformed pair, an
+  invalid locale, a child named twice, or a cycle (including a locale
+  naming itself as its own parent) fails loudly at config load rather
+  than degrading at request time.
+
+  Served catalogs stay chain-flattened ahead of time: `FluentTranslator`
+  now builds each locale's `/_suprnova/lang/<locale>.ftl` catalog as a
+  fold - the embedded framework catalog at the bottom for `en`/`en-*`
+  locales, then the locale's configured parent chain, then its own
+  `*.ftl` files - so a chained locale is still one self-contained file
+  the browser fetches once, with no client-side chain awareness needed.
+  Flattening covers configured parents only; the terminal
+  `fallback_locale` is still a `Lang`-facade-level fallback, not baked
+  into the served bytes.
+
+  This makes delta-style catalogs practical: a `lang/pt-PT/` directory
+  can hold only the handful of strings that actually differ from
+  `lang/pt-BR/`, rather than a full duplicate catalog. The merge that
+  makes it possible works at the Fluent AST level - a child's value
+  replaces the parent's, attributes merge by name (an override that
+  doesn't mention an attribute no longer loses it), select expressions
+  replace whole (CLDR plural categories are locale-dependent, so
+  variant-by-variant merging isn't coherent), and child-only entries
+  append. See `manual/localization.md`'s new "Fallback chains" section
+  for the full contract.
+
+### Changed
+
+- **`LocalizationConfig` gained the `parents` field.** `from_env()` and
+  the builder are unaffected; a literal struct constructor (tests
+  building a `LocalizationConfig` by hand) needs one more field.
+- **Served catalog text is now serializer-normalized for every locale**,
+  and intra-locale multi-file merging (several `.ftl` files in one
+  locale directory) now goes through the same AST-level merge as parent
+  chains rather than simple bundle-overriding. Resolved translations are
+  unchanged except for the two strict improvements below; the
+  underlying bytes rotate regardless - `ETag`/`?v=<hash>` rotates once
+  on upgrade. The improvements: an override no longer silently drops
+  the attributes it doesn't mention, and an attributes-only override no
+  longer strips the message's own value (previously an error or a
+  fallback resolution; it now resolves to the earlier override's
+  value).
+
+## 1.0.0 - 2026-08-02
+
+### Added
+
+- **Localization.** Message catalogs in `lang/<locale>/*.ftl`
+  ([Fluent](https://projectfluent.org)), a `Lang` facade with the
+  `__!("key", name: value)` macro, per-request locale detection
+  (`LocaleMiddleware`: session → cookie → `Accept-Language` →
+  `APP_LOCALE`), and locale-aware formatting for numbers, currency,
+  dates, times, lists, and relative times over ICU4X. `manual/localization.md`
+  is the chapter.
+
+  The built-in validation rules stop hardcoding English. Each returns a
+  keyed message (`validation-min` plus its arguments and an English
+  fallback), translated once at the serialization boundary - so a Spanish
+  app gets Spanish validation errors by dropping in
+  `lang/es/validation.ftl`, with no rule wrapping and no forked copy of
+  the framework's messages. Field names humanize through a `field-<name>`
+  lookup. `Rule::passes` (and `ContextualRule` / `AsyncRule`) now return
+  `Result<(), ValidationMessage>`; a custom rule's `Err("…".into())` body
+  still compiles and still renders verbatim, but the signature in your
+  `impl` needs the new type.
+
+  The browser gets the same bytes the server resolved: the merged catalog
+  is served at `/_suprnova/lang/<locale>.ftl` with an ETag and an
+  immutable `?v=<hash>` form, the three starter kits parse it with
+  `@fluent/bundle`, and `suprnova generate-types` emits a `MessageKey`
+  union so renaming a message points the TypeScript compiler at every
+  call site.
+
+  Fluent rather than Laravel-style PHP arrays because one format has to
+  serve both the server and the browser, and because CLDR plural
+  categories are what gets Russian, Polish, and Arabic right -
+  `trans_choice`'s integer ranges cannot, which is why there is no
+  `trans_choice` here. Behind a default-on `localization` feature;
+  `--no-default-features` still compiles and still validates, using the
+  embedded English fallbacks.
+
+- **`IntoInertiaScroll` for `Paginator`.** The trait was implemented for
+  `LengthAwarePaginator` and `CursorPaginator` but not for the simple
+  paginator, so `simple_paginate` results could not feed
+  `Inertia::paginate` at all - despite `simple.rs`'s own module docs
+  pointing at it as the URL-generation path. That left offset-paginated
+  Inertia collections with a choice between a `COUNT(*)` per request and
+  hand-rolling the scroll metadata. `next_page` comes from the
+  `LIMIT n+1` overflow probe rather than a computed last page, there
+  being no total to compute one from.
+
+### Fixed
+
+- **`suprnova generate-types` emitted a different file on every run.**
+  The topological sort seeded its work queue by iterating a `HashMap`,
+  and Rust randomises hash iteration order per process, so consecutive
+  runs ordered the same interfaces differently. The output is a
+  checked-in artifact, so every run produced a diff - and a generated
+  file that churns for no reason is one people stop regenerating, after
+  which it quietly stops describing the Rust it claims to. The directory
+  walk is sorted too, so the output no longer depends on filesystem
+  order either. Two runs of the same source are now byte-identical.
+
+- **`topological_sort` did the opposite of its doc comment**, emitting
+  dependents before dependencies. Harmless - a TypeScript interface may
+  reference one declared later in the same file - so the comment is
+  corrected rather than the order, which would have reshuffled a tracked
+  file for no benefit.
+
+## 0.9.1 - 2026-08-01
+
+Three defects, all found by running the dogfood app under a containerised
+harness rather than by reading the code. Every one of them is invisible to
+a test suite that never stops a process the way production stops it.
+
+They compound in a specific order: a rolling deploy SIGKILLs a worker
+mid-job (the first), and that job then takes a reclaim path that never
+counted the attempt (the second).
+
+### Fixed
+
+- **`schedule:work`, `queue:work` and `workflow:work` ignored SIGTERM.**
+  Each selected on `tokio::signal::ctrl_c()` alone, which installs a
+  SIGINT handler - so SIGTERM had no handler anywhere in the process, and
+  SIGTERM is what `docker stop`, Coolify, systemd and Kubernetes send. All
+  three already had a careful bounded drain behind that `select!`; none of
+  it had ever executed under a supervisor. Measured before the fix: a
+  `docker stop` on a `queue:work` container burned its whole 40s grace
+  window and exited 137 with the in-flight job destroyed. As PID 1 - which
+  is what a container runs - the kernel discards an unhandled SIGTERM
+  outright, so the process did not die badly; it did not die at all until
+  SIGKILL. `Server::run` already handled both signals correctly and its
+  listener is now shared, which also closes a missed-signal window in the
+  scheduler's loop.
+
+- **A job that killed its worker could never be dead-lettered.** A job
+  whose *handler* fails is nacked and its attempt counted, so it
+  dead-letters after `max_tries`. A job that *kills its worker* - OOM,
+  abort, segfault, or the SIGKILL above - settles nothing; its reservation
+  merely lapses, and every driver used to redeliver it byte-identical.
+  Such a job is immortal: it kills each worker that claims it, comes back
+  unchanged, and kills the next one, for as long as anything restarts
+  workers. All three drivers now charge the attempt where they learn a
+  worker died, because swapping `QUEUE_DRIVER` must not change whether a
+  poison job can be stopped. `attempts` now means "deliveries to a worker"
+  rather than "handler failures" - documented in `manual/queues.md`,
+  because a worker lost for unrelated reasons burns an attempt too.
+
+- **…and the exhausted job is now dead-lettered before it is dispatched.**
+  Counting the attempt was necessary and not sufficient. Every
+  dead-letter decision lived in the worker's settlement path, which
+  assumes the handler returns - so it never ran for exactly the jobs that
+  could not return. With the driver fix alone the counter climbed
+  (measured: 0 → 1 → 2 across three killed workers) and nothing acted on
+  it. The budget is now spent before the handler runs. Caught only by
+  re-running the container experiment after the first fix looked correct.
+
+- **The daemons had no tracing subscriber.** `serve` gets one from
+  `init_telemetry`; `queue:work`, `schedule:work`, `schedule:run` and
+  `workflow:work` come through a different boot path and got nothing, so
+  every `tracing::` line they emit went nowhere and `LOG_LEVEL` was inert
+  for them. That is most of what they have to say - a worker
+  dead-lettering a job, a scheduler skipping a tick it lost, a lock it
+  could not release. In a container the only visible output was the
+  startup banner, and the process looked idle while doing all of it. Two
+  of the defects in this release were invisible until this was fixed.
+
+- **A dead-letter with no failed-jobs store bound was a silent deletion.**
+  The persist step sat inside `if let Some(store) = ..`, so with no store
+  the arm did not match and execution fell through to the ack - quieter
+  than the failure path directly above it, which at least leaves the
+  reservation intact. An absent store was treated as more successful than
+  a broken one. It now logs the full envelope at ERROR, because that is
+  what `queue:retry` re-pushes: the difference between work recoverable by
+  hand and work that ceased to exist.
+
+- **`QUEUE_DRIVER=database` now binds a failed-jobs store.** `failed_jobs`
+  is part of that driver's contract - `queue:retry` reads it and
+  `Queue::retry_failed` cannot work without it - but `bootstrap_from_env`
+  wired the driver and left the store unset, so a database-backed queue
+  dead-lettered into nothing unless the app bound one by hand. Configurable
+  via `QUEUE_FAILED_DB_TABLE`. Only for this driver: `memory` is ephemeral
+  by construction and `redis` has no table to write to.
+
+- **Redis reclaim latency now follows `--visibility-timeout`.** The flag
+  sets XAUTOCLAIM's idle threshold, but a separate clock governs how often
+  a consumer looks, and the driver left it at sea-streamer's 30s default -
+  so `--visibility-timeout 5` really meant "up to 35 seconds". The
+  interval now tracks the configured timeout, clamped to 1s..=30s so a
+  short timeout cannot become an XAUTOCLAIM storm and a long one can only
+  make reclaim faster than before.
+
+### Added
+
+- **`TaskBuilder::on_one_server()` / `on_one_server_for(ttl)`** - run a
+  scheduled task exactly once per due tick across replicas. Without it
+  nothing elects a leader for a tick: each `schedule:work` process
+  evaluates the schedule independently, and three replicas were measured
+  running every due task three times, every minute, with no variance. A
+  nightly billing job on three replicas billed every customer three times.
+
+  `without_overlapping()` does not cover this and cannot: its lock is
+  keyed on the task and released when the handler returns, so a fast task
+  frees it before a second replica looks. `on_one_server` keys on the task
+  *and the tick* and holds the lock past the handler, letting it expire on
+  TTL. The two compose.
+
+  Opt-in, matching Laravel. Diverges from Laravel in failing closed: the
+  election is only as shared as the cache behind it, so a production boot
+  with `CACHE_DRIVER=memory` and a single-server task is refused, naming
+  the offending tasks, with `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true`
+  for deployments that genuinely run one scheduler.
+
+### Changed
+
+- `manual/deployment.md` no longer says "run exactly one `schedule:work`
+  process" as the only option, and gains a **Stopping cleanly** section
+  covering the drain windows per subsystem, how to size a platform's
+  termination grace above them, and why PID 1 makes a missing signal
+  handler worse than it sounds.
+
+## 0.9.0 - 2026-07-31
+
+### Security
+
+- **Auth issuance could only be throttled per caller, never per
+  recipient.** An address-keyed limit answers "is one client noisy"; it
+  cannot answer "is one mailbox being flooded". An attacker spread across
+  a botnet or a single IPv6 `/64` stayed under every per-IP budget while
+  filling one victim's inbox with password-reset mail, and nothing in the
+  framework could express the limit that would have stopped it - a key
+  function could read the path, headers, and query string, but not a
+  form-encoded body, so the address was invisible on exactly the route
+  that carries it.
+
+  `identity_key` keys a bucket on the account being acted on. It reads the
+  query string first and then a buffered form body, so one key function
+  covers both shapes; the value is trimmed and lowercased, because
+  `Alice@Example.com` reaches the same mailbox as `alice@example.com` and
+  a limit bypassed by holding down shift is not a limit; and it is hashed,
+  because a rate-limit backend is frequently a shared Redis with weaker
+  access control than the primary database.
+
+  Two new middleware builders support it. `key_reads_body(cap)` buffers
+  the body before keying - opt-in, because buffering is work an
+  unauthenticated caller gets to make you do, and a body over the cap is
+  refused with 413 rather than passed through unkeyed. `only_when(pred)`
+  skips a limiter entirely for requests it has nothing to say about,
+  which is what keeps a stacked per-recipient budget from silently
+  becoming the binding limit on routes that name no recipient.
+
+  The dogfood app now stacks both on its issuance group: 10 per 5 minutes
+  per address, 3 per 15 minutes per recipient.
+
+A review of Torii's session, password, OAuth, and passkey paths turned up
+eight defects, all fixed in the pinned fork (`suprnova-torii-rs` `968b0be`).
+
+- **Expired sessions could be refreshed back to life.** The SeaORM session
+  repository's `refresh` had no expiry predicate and unconditionally extended
+  `expires_at`, and `OpaqueSessionProvider::refresh_session` skipped the
+  `is_expired()` check that `get_session` performs. A token held past its
+  expiry could be renewed indefinitely. Fixed at both layers. Not reachable
+  through Suprnova's own surface - neither `Torii` nor the framework exposes
+  session refresh - but it is public API of both crates.
+- **The login form leaked which accounts exist, by timing.** Authentication
+  returned as soon as the email missed, skipping Argon2 entirely: measured at
+  54µs for an unknown address against 719ms for a wrong password, a ~13,000x
+  gap readable over a network. Both failure paths now verify against a dummy
+  hash so they cost the same. This one *was* reachable through Suprnova's
+  password login.
+- **The JWT `iss` claim was written but never verified.** Algorithm pinning
+  was already correct - `alg: none` and HS/RS confusion were never possible -
+  but the issuer was decoration, so two services sharing a signing key would
+  accept each other's sessions. Now enforced when an issuer is configured.
+- **A single-use PKCE verifier could be claimed twice.** Consumption was a
+  read followed by a delete, so two OAuth callbacks for the same `csrf_state`
+  could both read it before either delete landed. Now claimed in one
+  operation - `DELETE ... RETURNING` on Postgres, a primary-key delete whose
+  affected-row count picks the winner on SeaORM.
+- **Expired sessions were listed as active.** `find_by_user_id` had no expiry
+  filter, and expired rows survive until cleanup runs, so a "devices you're
+  signed in on" screen offered users dead sessions to revoke while saying
+  nothing about the live one.
+- **A passkey lookup was named `authenticate`.** Torii's
+  `PasskeyService::authenticate_credential` took a credential ID and returned
+  the owning user, and `PasskeyAuth::authenticate` minted a session from it.
+  Torii stores passkeys - it carries no WebAuthn dependency and cannot verify
+  an assertion, so the only thing those calls proved was that the caller knew
+  a credential ID: a value the browser sends in the clear and
+  `allowCredentials` hands to anyone who can start a ceremony. Renamed to
+  `find_user_by_credential` and `create_session_for_verified_credential`, both
+  documenting that verification is the caller's job. Not reachable through
+  Suprnova, which drives `webauthn-rs` itself (see
+  `torii_integration::passkey`) and reaches Torii only for credential storage.
+- **A WebAuthn challenge was replayable for its whole TTL.** Neither backend
+  consumed a challenge on read, and the SeaORM `get_challenge` also ignored
+  `expires_at` entirely, returning expired challenges as live. Reads now
+  exclude expired rows on both backends, and a new `take_challenge` claims one
+  exactly once - the same delete-decides-the-winner shape as the PKCE fix.
+
+### Breaking
+
+- **Azure Blob Storage and Google Cloud Storage moved behind the new
+  `filesystem-azure` and `filesystem-gcs` features.** `Storage::register_azblob`,
+  `register_azblob_with`, `register_gcs`, `register_gcs_with`, `AzBlobConfig`
+  and `GcsConfig` no longer exist unless you enable the matching feature. If
+  you use either backend, add it to your dependency:
+
+  ```toml
+  suprnova = { git = "…", tag = "v…", features = ["filesystem-gcs"] }
+  ```
+
+  You get a compile error naming the missing item, not a runtime failure.
+
+  Both opendal service crates pull `rsa`, which carries RUSTSEC-2023-0071
+  (the Marvin timing attack) with no fixed release upstream. They were the
+  only crates enabling `reqsign-core/jwt`, the feature `reqsign-core`'s
+  optional `rsa` sits behind, so gating them severs all three opendal paths
+  to it at once. `rsa` is now *avoidable*: `--no-default-features --features
+  filesystem,database-postgres` resolves without it and still has the
+  storage subsystem. Previously no feature combination could shed it while
+  keeping storage at all.
+
+  A stock default build still carries `rsa` - `database-mysql` is a default
+  feature and `sqlx-mysql 0.8.6` depends on it non-optionally - so the audit
+  exception stays open. S3 is deliberately **not** gated: `reqsign-aws-v4`
+  takes `reqsign-core` without `jwt`, so the S3 driver never contributed a
+  path, and gating it would break the most-used cloud backend while removing
+  nothing.
+
+### Added
+
+- **`suprnova --version`**, with `-v` as well as clap's default `-V`. Asking a
+  CLI its version with the flag every other CLI uses should not print a usage
+  error.
+
+### Fixed
+
+- **Two Redis operations had no upper bound.** The cache's tag flush read a
+  tag's whole member set with `SMEMBERS` and deleted key by key, so a tag with
+  a large membership stalled the connection and a concurrent write could be
+  lost between the read and the delete; tags are now generation-based, flushed
+  atomically, and scanned with a bounded `SSCAN`. The delayed-queue promotion
+  pass moved every due job in one unbounded `ZRANGEBYSCORE`, so a backlog that
+  came due together produced a single enormous script; it now promotes in
+  batches.
+- **Two shutdown drains waited forever.** `schedule:work` on Ctrl-C and the
+  workflow worker after cancellation both awaited every in-flight task with no
+  deadline, so one task that never returned held the process open until
+  `SIGKILL` - an operator sees a daemon that "doesn't stop". Both now wait a
+  bounded grace, then abort what remains and report the count.
+- **The release version-pin sweep only recognised one of the two pin
+  syntaxes**, so every file carrying a `cargo install --tag vX.Y.Z` line and
+  no dependency snippet was never discovered. `suprnova-cli/README.md` had
+  been telling readers to install v0.6.0 for three releases; `manual/cli.md`
+  and `manual/cli-new.md` sat at v0.7.2; `manual/installation.md` carried
+  both forms and had one bumped while the other froze. Discovery and rewrite
+  now read from one pattern table, and a file's rules are derived from its
+  content.
+- **`cargo doc` failed for any build with `filesystem` but without
+  `testing`** - seven `Storage::fake` intra-doc links could not resolve, and
+  `lib.rs` denies broken links. `testing` is a default feature, so no gate
+  step had ever built that combination; `check-feature-matrix.sh` now does.
+- **Torii's migrations could not be replayed over their own schema**, so a
+  database holding it without the `torii_migrations` tracking table - restored
+  from a dump that skipped it, or migrated by hand - could not be brought under
+  management. Every `Table::create()` carried `.if_not_exists()`; none of the 19
+  `Index::create()` calls did, nor did the `ADD COLUMN locked_at` alter, so
+  replay sailed through the tables and died on the first `CREATE INDEX`. Fixed
+  in the pinned fork (`suprnova-torii-rs` `a0f956d`) via `has_index` /
+  `has_column` rather than `IF NOT EXISTS`, which sea-query silently drops for
+  MySQL - the syntactic fix would have left a default-featured build broken.
+- **A failed Torii migration aborted the process instead of returning an
+  error.** `SeaORMStorage::migrate` unwrapped the migrator and returned
+  `Ok(())` unconditionally, so `init_torii`'s mapping of the failure into a
+  `FrameworkError` was unreachable code.
+- **An app's own `users` table silently suppressed Torii's**, because
+  `.if_not_exists()` cannot tell "already mine" from "already somebody
+  else's". The migration reported success and authentication failed later on
+  a missing column - the reason the `--api` starter names its table
+  `app_users`. Torii's migration now warns at migrate time when an existing
+  `users` table lacks columns it requires, naming the columns and the remedy.
+  It stays a warning rather than a hard failure so existing deployments keep
+  booting.
+- **The Railway and DigitalOcean deployment guides pointed the platform
+  health check at a path that could probe Postgres.** Both platforms restart
+  the container when that check fails, so following the advice turned a
+  database blip into a restart loop across every replica. Both now use
+  `/_suprnova/health/live`, with the database probed by hand from the
+  console. The legacy paths still resolve; nothing already deployed needs
+  changing.
+
+## 0.8.0 - 2026-07-30
+
+Remediation of an external red-team audit. The audit returned 19 P1
+findings and a NO-GO verdict for 1.0; this release closes **all nineteen**,
+plus a number of defects found while fixing them that the audit had not
+named.
+
+Several fixes deliberately turn a silent misconfiguration into a refused
+boot. Read **Upgrading** before deploying - a production app that has been
+running happily may not start.
+
+### Upgrading
+
+Three configurations that used to boot with a warning (or in silence) now
+fail closed in production. Each error names the variable that unblocks it,
+and each has an explicit override for the deployment where the risk is
+genuinely absent.
+
+- **A non-delivering mail driver.** `MAIL_DRIVER` unset, `log`, `memory`,
+  or an unrecognised value all resolved to a transport that renders mail
+  and discards it - so password resets reported success while nothing was
+  sent. Override: `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true`.
+- **Cleartext SMTP.** Three of the four credential combinations landed on
+  an unencrypted transport, and the both-unset case logged a warning and
+  sent anyway. Override: `MAIL_ALLOW_INSECURE_SMTP_IN_PRODUCTION=true`.
+- **The in-memory rate limiter.** Its buckets live in one process's heap,
+  so behind N replicas every quota is really N× and each deploy resets
+  them. Point `RATE_LIMIT_DRIVER` at `redis`, or set
+  `RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION=true` if you genuinely run one
+  process. An *unrecognised* driver value fails for the same reason,
+  because it fell back to memory - `RATE_LIMIT_DRIVER=Redis`, capitalised,
+  is the case most likely to reach production because it looks configured.
+
+Development, testing and staging are unchanged in all three cases. Staging
+is deliberately not gated: hard-failing it pushes teams to set the
+override globally, which disarms the check where it matters.
+
+Two behaviour changes that are not boot failures:
+
+- **`fill` and `first_or_new` reject malformed values.** A value that
+  cannot decode into its field's type used to become that field's
+  `Default` and return `Ok` - `fill(attrs!{ age: "abc" })` set `age = 0`
+  and reported success. It now returns a `ValidationError` naming the
+  field, and leaves the model untouched. Unknown columns are still skipped
+  silently (Laravel parity), and numeric widening still works.
+- **`/_suprnova/health?db=true` no longer returns the driver error.** The
+  detail moves to the log; the body keeps `"database": "error"`. Debug
+  builds still include it. Dashboards parsing `status` / `database` are
+  unaffected.
+- **`url::signature_has_not_expired` now requires a valid signature**, and
+  is deprecated. It used to answer `true` for a forged URL - a bad
+  signature is not "expired", because it never had an expiry to miss - so
+  any handler guarding on it alone accepted forgeries. It is now identical
+  to `has_valid_signature`. If you were using it to tell *expired* from
+  *invalid* (to render "request a fresh link" rather than a 403), switch to
+  `url::signature_verdict`, which returns all three states. This diverges
+  from Laravel's `URL::signatureHasNotExpired`, deliberately.
+
+Two additions that need something from you only if you opt in:
+
+- **`QueueDriver` gained `settle` and `release`**, both with default
+  implementations, so existing driver impls keep compiling unchanged.
+  Implement `settle` if your backend can commit a follow-up write and an
+  acknowledgement in one transaction; implement `release` if it can requeue
+  a reserved message in place.
+- **Batch accounting can now be durable.** `DatabaseBatchRepository` needs
+  two new tables, `job_batches` and `job_batch_settlements` - add them to
+  your migrations, as with `jobs` and `failed_jobs`. The schema is in
+  `manual/queues.md`. Nothing changes if you stay on
+  `MemoryBatchRepository`.
+
+### Security
+
+- **Slowloris (SEC-07).** hyper's header-read timeout was documented as
+  30s but inert - it only arms when a timer is installed on the connection
+  builder, and none was. A client could hold a connection, and a
+  `SERVER_MAX_CONNECTIONS` permit, indefinitely. Now armed and
+  configurable via `SERVER_HEADER_READ_TIMEOUT`.
+- **Multipart uploads (SEC-05).** The cap applied to individual part
+  payloads but not to the raw stream, so a body could exceed the limit in
+  aggregate. Now capped at the stream.
+- **Webhook HMAC with an empty key (SEC-08).** Both payment adapters
+  accepted a blank secret, which verifies anything. Refused on both.
+- **Paddle signature parsing (P2-11).** An odd-length or non-hex
+  `paddle-signature` reached the pinned SDK and panicked inside it. Now
+  validated first: a malformed signature is a 401.
+- **Passkey enrolment and reset tokens (SEC-01, SEC-02).** Anonymous
+  enrolment against an existing email, non-owner enrolment, and owner
+  enrolment without recent reauth are each refused with distinct statuses.
+  A password login now stamps the reauth window.
+- **`dev:tls` (SEC-10).** A project could choose the CA the command
+  trusts.
+- **Generated Docker Compose (P2-12).** Published Postgres and Redis on
+  all interfaces with credentials committed in this repository. Now bound
+  to loopback with per-scaffold generated passwords, `.env` written 0600,
+  and symlinked targets refused.
+- **Health endpoint (P2-01, CI-05).** It decided whether to query the
+  database with `query.contains("db=true")` - a substring test, so
+  `?nodb=true` ran the probe too. Now parsed properly. The 503 no longer
+  embeds the driver error, which named hosts, ports, schemas and versions.
+- **Credential issuance throttling (P2-02).** The four auth-issuance
+  routes in the reference app carried no rate limit at all, and the one
+  route that did keyed its bucket on the raw `x-forwarded-for` header -
+  which any client can vary per request to get a fresh bucket. Both fixed;
+  the issuance budget is shared across the four routes so rotating between
+  them does not multiply it.
+- **A redelivered chain step re-pushed its successor under a new id
+  (DATA-02b, partial).** Settlement pushes the next chain link *before*
+  acking, deliberately: acking first means a crash in that window loses
+  the chain permanently, and a duplicate is recoverable where silent loss
+  is not. But the successor's envelope got a fresh `Uuid::new_v4()` on
+  every push, so the duplicate produced by that trade was
+  indistinguishable from a legitimate new step - to the driver, to an
+  outbox, and to the handler.
+
+  That last one is the real cost. The framework's delivery contract is
+  at-least-once and its answer to duplicates is "handlers must be
+  idempotent" - but a handler keyed on `env.id`, the only identifier it
+  receives, could not satisfy that contract for a chained job, because the
+  duplicate arrived under a new id every time. The contract was
+  unsatisfiable by construction.
+
+  The successor's id is now a UUIDv5 derived from its predecessor's, which
+  is stable across that predecessor's own redeliveries. A redelivered step
+  re-pushes the id it pushed before. No schema change, no new field, no
+  new dependency.
+
+  This makes the duplicate **detectable**, which is the primitive the rest
+  of DATA-02b was missing. It does not make the push atomic with the ack
+  (that needs the outbox), and nothing yet rejects the duplicate on the way
+  in. Both remain open.
+- **Signed URLs verified one URL and executed another (SEC-04).** The
+  canonical form collapsed query pairs into a map, so a repeated key kept
+  only its **last** value - while `Request::query_param` returned the
+  **first**. A legitimately signed `?user=victim` could therefore be
+  replayed as `?user=attacker&user=victim` with the original signature
+  untouched: verification canonicalised over `victim` and passed, and the
+  handler acted on `attacker`.
+
+  The canonical form now carries every pair, sorted by `(key, value)`, so
+  the signature covers the exact multiset of parameters - adding,
+  removing, or substituting any value breaks the HMAC. A repeated
+  `signature` or `expires` is refused outright, since two of either leaves
+  no non-arbitrary answer to which one governs.
+
+  `Request::query_param` now resolves a repeated key to its last value,
+  matching `query_params` and `Context::query_param`; it was the only one
+  of the three that disagreed, and that disagreement was the other half of
+  the defect. **Existing signed links keep working** - with no repeated
+  keys the payload bytes are unchanged, which a test pins, because a
+  canonical-form change that silently invalidated every outstanding
+  password-reset link would be worse than the bug.
+
+  Six regression tests, including both attack orderings, a legitimately
+  repeated key that must still sign and verify, and the reordering
+  guarantee. *Not* changed: `signature_has_not_expired` still reports a
+  forged signature as "not expired". That is Laravel's behaviour, was
+  settled deliberately as a documentation fix, and has its own test
+  pinning it against a well-meaning "correction".
+- **RBAC under Postgres.** Verified against a real Postgres rather than
+  SQLite alone.
+- **Four RustSec advisories eliminated, not renewed.** The Pinecone driver
+  was rewritten against Pinecone's REST API, dropping `pinecone-sdk 0.1.2` -
+  whose newest release dates from 2024-09-06 - and with it
+  `tonic 0.11 → rustls 0.22 → rustls-webpki 0.102` and
+  RUSTSEC-2026-0049 / -0098 / -0099 / -0104. All four were fixed upstream
+  in `rustls-webpki >= 0.103.13`, which this workspace already resolved
+  for its other TLS users; one abandoned crate held the tree on the
+  vulnerable line. `.cargo/audit.toml` is down from five ignores to one.
+  See **Changed** for what this means for the driver's API.
+- **Audit exceptions now expire.** Every entry in `.cargo/audit.toml`
+  carries an `OWNER` and an `EXPIRES` date, and `scripts/check-audit.sh`
+  fails the release gate on a missing owner, a missing or unparseable
+  date, or a lapsed one. `cargo audit` has no notion of an expiring
+  ignore, so one added "temporarily" stayed until somebody re-read the
+  file. The remaining entry (RUSTSEC-2023-0071, `rsa`, which has no fixed
+  release at all) is owned and dated.
+- **Reachability claims are checked, not asserted.**
+  `scripts/check-feature-matrix.sh` resolves real dependency trees and
+  asserts that no build - including `--all-features`, which is what
+  `cargo audit` actually reads - contains `pinecone-sdk`,
+  `rustls-webpki 0.102.x` or `tonic 0.11.x`. An exception justified by a
+  comment nothing verifies stops being true the first time someone adds a
+  dependency.
+
+### Fixed
+
+- **Every release on a database-backed queue was silently a no-op.**
+  `JobOutcome::Released` - a busy `WithoutOverlapping` lock, a rate-limiter
+  backoff - was implemented as "push a copy, then ack the original". The
+  envelope id is the `jobs` table's primary key, so the copy collided with
+  the row still holding the live reservation and the push failed with
+  `UNIQUE constraint failed: jobs.id`. The worker then correctly declined
+  to ack, so the requested delay was never applied, no `JobReleased` event
+  fired, and the job simply parked until visibility expiry redelivered it.
+  Releases are now one driver call, done in place.
+- **A partial batch dispatch orphaned the jobs it had already queued
+  (DATA-02).** When a `driver.push` failed mid-loop,
+  `PendingBatch::dispatch` deleted the batch row - but the envelopes
+  already in the queue were still stamped with that batch id, so each of
+  them settled against a batch that no longer existed, returning
+  `Err(batch not found)` on every delivery, forever. The batch is now
+  settled instead: undispatched jobs are recorded as failures and the batch
+  is cancelled, so the queued ones settle normally and the terminal
+  callbacks still fire.
+- **Nothing tested that `url::has_valid_signature` rejects a forged URL.**
+  Found while verifying the SEC-04 fix: the entire framework suite passed
+  with the primary signed-URL guard rewritten to accept any signature.
+- **A scaffolded app could not migrate its database or build its image
+  (REL-01b).** Neither scaffold declared `default-run`, so all nine CLI
+  wrappers that shell out to `cargo run` failed on a fresh project. The
+  generated Dockerfile had five independent defects - a missing lockfile
+  COPY, `npm ci` without a lock, a cache stage stubbing one of two
+  declared binaries, a frontend build copied from a path vite never
+  creates, and a missing `frontend/src/pages` copy that
+  `inertia_response!` validates at compile time. A stock scaffold's image
+  could not build.
+- **`docker:init` emitted one Dockerfile for every project type.** On an
+  `--api` project its first instruction, `COPY frontend/package.json`,
+  failed outright. API projects now get a frontend-free Dockerfile.
+- **SQL placeholders (DATA-01).** Rendered per backend rather than
+  assuming one dialect.
+- **Queue settlement (DATA-02a, P2-06c).** Follow-ups settle before the
+  reservation is acked, and a lock-release error no longer converts an
+  already-succeeded job into a retry.
+- **A cancelled batch fired `Catch`, never `Then`.**
+- **`Builder::clone` silently dropped the eager-load plan (P2-09a).**
+  `User::query().with("posts")` cloned anywhere - pagination, `count()`,
+  any scope that clones - returned rows with no relations and no error.
+- **Presence rosters lost members (P2-08).** The roster was snapshotted
+  before subscribing, so anyone joining in that window appeared in
+  neither, permanently.
+- **Pinecone serialised every index acquisition (P2-14).** The write lock
+  was held across two network round trips, and `tokio`'s fair `RwLock`
+  meant one cold index stalled every warm one.
+- **The type watcher discarded bursts (P2-13).** Leading-edge debounce
+  regenerated on the first file of a burst and dropped the rest with no
+  trailing run, so the last save never took effect.
+- **`ssr:check` could hang, and tried one address (P2-13).** DNS ran
+  outside the timeout entirely, and only the first resolved address was
+  tried - so a host with an AAAA record and no IPv6 route reported the
+  worker down while it was listening on v4.
+- **`suprnova serve` installed `cargo-watch` unpinned (P2-13).** Now
+  `--locked` with a major-version bound.
+- **The release bumper rewrote five READMEs and nothing else.** Four
+  manual chapters and a public doc comment pinned tags that no release
+  ever updated - the doc comment was two releases stale. Discovery now
+  replaces the hand-maintained list, and the smoke test greps the bumped
+  tree independently rather than trusting the bumper's own verify step.
+- **`db:sync` treated the database schema as trusted input (CLI-01).**
+- **`migrate:fresh` is gated behind `--force` plus a typed confirmation
+  (CLI-02)**, in the app binary as well as the CLI.
+- **The `log` mail driver now logs the whole message**, as Laravel does,
+  and no longer writes bearer links to the log in production.
+
+### Added
+
+- **Atomic terminal settlement (`QueueDriver::settle`, DATA-02).** The
+  chain successor and the acknowledgement now commit together on
+  `DatabaseQueueDriver`, closing the window where a crash between them
+  either lost the rest of a chain or ran its next step twice. The
+  reservation-keyed delete doubles as a fence: a worker whose visibility
+  expired mid-run commits nothing and reports `Settled::Stale`, so it
+  cannot enqueue work for a message another consumer now owns. Drivers that
+  cannot do this answer `Settled::Unsupported` and keep the documented
+  push-before-ack ordering.
+- **`DatabaseBatchRepository` (DATA-02).** Batch accounting survives a
+  restart, and `pending_jobs`/`failed_jobs` are derived from settlement
+  rows keyed `(batch_id, job_id)` rather than stored and decremented - so a
+  redelivered job cannot drive a batch to "finished" while its other jobs
+  are still running, and the guard holds across processes rather than
+  within one.
+- **`/_suprnova/health/live` and `/_suprnova/health/ready`.** Liveness
+  touches nothing; readiness probes dependencies. Wiring a database check
+  into a liveness probe turns a database blip into a rolling restart of
+  every replica, which the single previous endpoint invited.
+  `/_suprnova/health` keeps working exactly as documented.
+- **`SERVER_HEALTH_READINESS_TOKEN`.** Optional shared secret for the
+  readiness probe, compared in constant time. Without it, readiness
+  answers 404 - indistinguishable from an unrouted path, because it *is*
+  the router's own 404. Unset by default so existing probes keep working.
+- **`MAIL_SMTP_ENCRYPTION`** - `starttls` | `tls` | `none`, with `ssl` and
+  `null` accepted as Laravel-compatible aliases. Unset derives from the
+  credentials, reproducing the previous behaviour exactly. This also makes
+  implicit TLS on port 465 reachable: the transport supported it, but no
+  combination of environment variables could select it.
+- **`SERVER_MAX_CONNECTIONS` and `SERVER_HEADER_READ_TIMEOUT`** documented
+  in `manual/env-vars.md`, where they had been missing entirely.
+
+### Changed
+
+The audit's own conclusion was that the gate passed in 470s and caught
+none of the 19 P1s. Most of this release's test work is aimed at that.
+
+- **Postgres runs in the gate.** Twelve tests across six files had never
+  executed. Two of them turned out to aim `DROP TABLE` at whatever
+  Postgres was on `localhost:5432` by default, and neither had ever
+  initialised `Crypt`, so both failed the first time they ran.
+- **Scaffold assertions read the bytes a user receives**, after
+  substitution, rather than the template source. Found an API project
+  shipping a doc comment naming a database literally `{package_name}`, and
+  a `.env.example` advertising five mail keys the framework never reads.
+- **Queue fault injection.** ACK loss, redelivery, lease lapse and partial
+  dispatch are driven by a decorator that fails a named operation on a
+  named call, so every case is deterministic rather than a sleep race.
+- **Payment adapters have negative tests.** Stripe's `verify()` had never
+  been exercised with a *valid* signature, so every rejection path that
+  depends on reaching the HMAC comparison was unproven.
+- **The Pinecone driver speaks REST.** *Breaking, behind the
+  off-by-default `vector-pinecone` feature.* Motivation is under
+  **Security**; the surface changes are:
+  - `client()` is gone - there is no `PineconeClient` any more. Replacing
+    it are `control_plane_get`, `control_plane_post` and `data_plane_post`,
+    which reach *any* Pinecone endpoint with your own request and response
+    types over the driver's authenticated, host-resolved transport. That
+    is strictly more reach than the old trapdoor had.
+  - `json_to_metadata` → `metadata_from_json`, and metadata is now
+    `serde_json::Map` rather than `prost_types::Struct`. `decode_match_fields`
+    → `decode_match`, taking a `PineconeMatch`. `namespace()` returns
+    `&str`.
+  - New: `with_control_plane`, `with_api_version`, `with_index_host`
+    (pins a known host and skips the control-plane round trip),
+    `index_host`, and the `PineconeVector` / `PineconeMatch` wire types.
+  - `from_env` still reads `PINECONE_API_KEY` and
+    `PINECONE_CONTROLLER_HOST`, and now also `PINECONE_API_VERSION`.
+  - The REST API version is pinned, not floated - `2025-04`, the version
+    the driver's request and response shapes were written against.
+  - Nothing serializes any more. The old driver cached one `Index` per
+    name behind a `tokio::Mutex` because `pinecone-sdk` exposed it only
+    behind `&mut self`; the new one caches a host string and shares
+    `reqwest`'s connection pool.
+  - A host learned from the control plane is always contacted over
+    `https`, whatever scheme the response carries.
+  - `Debug` is implemented by hand with the API key redacted, so a
+    `#[derive(Debug)]` on a struct holding a driver can't print it.
+- **Wire-contract tests for Pinecone.** The live integration tests need a
+  `PINECONE_API_KEY` and so cannot run in the gate - which left a REST
+  rewrite's field names (`topK`, `includeMetadata`, `vectorCount`) resting
+  on nothing. Thirteen tests now drive the driver against a local
+  `wiremock` fake and assert the exact method, path, headers and JSON body
+  it puts on the wire, plus that a non-2xx is never decoded as a result
+  and that an error message never carries the API key. They pin the driver
+  to Pinecone's *documented* contract; only the `#[ignore]`d tests can
+  confirm the documentation matches the live service.
+
+## 0.7.2 - 2026-07-28
+
+### Fixed
+
+- **`generate-types` resolves nested prop structs without derives.** 0.7.1's
+  generator degraded any prop field whose type didn't derive
+  `InertiaProps`/`Data` to `unknown` - so re-running the generator (or the
+  `suprnova serve` watcher) over a project with a committed types file
+  replaced real interfaces like `Array<AdminArticleRow>` with `unknown` and
+  broke type-checking across the app. Plain structs defined anywhere in
+  `src/` now resolve to their real interfaces, transitively from the prop
+  roots; `unknown` (with a warning) is reserved for types the project
+  genuinely doesn't define - external crate types, enums, tuple structs.
+
+### Changed
+
+- **`routes.ts` generation is opt-in.** `generate-types` no longer drops
+  `frontend/src/types/routes.ts` into every project unasked; pass
+  `--routes` to generate it.
+
+- **Frontend starter dependencies refreshed.** New scaffolds from
+  `suprnova new` now pin current versions: Vite ^8.1.5, Tailwind CSS ^4.3.3,
+  Svelte ^5.56.8 (vite-plugin-svelte ^7.2.0, svelte-check ^4.7.4),
+  React ^19.2.8 (plugin-react ^6.0.4), Vue ^3.5.40 (plugin-vue ^6.0.8,
+  vue-tsc ^3.3.8), and `@types/node` ^24 (the Node 24 LTS types line).
+  TypeScript stays at ^6.0.3 deliberately: it is the latest 6.x, and
+  svelte-check's peer range (`^5 || ^6`) does not yet admit TypeScript 7.
+  All three starters were verified end to end (`npm install` +
+  `npm run build`) against the refreshed set.
+
+## 0.7.1 - 2026-07-27
+
+A defect-fix pass over 0.7.0's queue routing, from a full post-release review.
+
+### Fixed
+
+- **Chained jobs no longer lose their declared queue.** `ChainLink` captured a
+  job's `max_tries`, `timeout`, and `backoff` at chain-build time but not its
+  `Job::queue()`, so a job that landed on its declared queue when pushed
+  directly landed on `default` when dispatched as part of a chain - the "job"
+  tier of the route → job → default resolution order silently vanished for
+  chains. The declared queue is now captured on the link and resolved exactly
+  like a direct push. Chain payloads written before this release decode
+  unchanged (`serde(default)`), and a link with no declared queue serializes
+  byte-identically to what 0.7.0 wrote.
+- **Failed-job records carry the queue the job died on.** The worker's
+  dead-letter path hardcoded `queue = "default"` into every `FailedJob`
+  record, so failures of a routed job were invisible to an operator filtering
+  the failed store by the pool that owns them. The record now carries the
+  envelope's queue (`default` for unrouted jobs).
+- **The 0.7.0 upgrade note understated the `jobs` migration.** It read
+  "unfiltered workers are unaffected and need no migration", but
+  `DatabaseQueueDriver::push` names the `queue` column in its `INSERT`
+  whether or not the job is routed - a 0.7.0 binary against an un-migrated
+  table fails **every push**, filtered or not. The 0.7.0 section below and
+  `manual/queues.md` are corrected: on the database driver the `ALTER TABLE`
+  is required for every deployment, and it must run before binaries roll
+  (older binaries list their columns explicitly, so migrating first is safe).
+
+- **README no longer advertises a `#[job]` macro.** No such macro exists -
+  jobs implement the `Job` trait. The queues row now describes the real
+  surface, including 0.7.0's queue routing.
+
+### Changed
+
+- **The release path now bumps README version references.**
+  `bump-workspace-version.py` rewrites the README's pinned install tag, the
+  distribution-model example, and the MSRV line atomically with the
+  manifests, and a reworded README that stops matching a pattern fails the
+  release loudly. The README had advertised v0.6.0 since v0.7.0 shipped
+  because nothing in the release path touched it.
+- **Connection routing is documented as name-resolution only.**
+  `Job::connection()` and the connection field of `Queue::route` resolve the
+  connection *name* carried on the `JobQueueing` / `JobQueued` lifecycle
+  events; a single process-global driver still receives every push, so they
+  do not select a different driver. The rustdoc and `manual/queues.md`
+  previously implied driver selection that does not exist. The queue
+  dimension is unaffected - it is honored end to end. Per-connection drivers
+  remain future work.
+- `ChainLink` gained a public `queue: Option<String>` field, which breaks
+  struct-literal construction of chain links. Links built through
+  `ChainLink::from_job` - the normal path - are unaffected.
+
+### Upgrading
+
+Coming from ≤ 0.6.x on the database queue driver, apply the 0.7.0 migration
+below **before** rolling binaries; it is required for every deployment on
+that driver, not just ones using `--queue`. 0.7.1 itself needs no migration.
+
+## 0.7.0 - 2026-07-26
+
+### Security
+
+- **Upgraded `ammonia` to 4.1.4 (RUSTSEC-2026-0213).** Versions through 4.1.3
+  allow XSS via SVG `animate` and `set` animation tags. `ammonia` is the
+  sanitizer at the end of Suprnova's markdown pipeline
+  (`comrak` → `syntect` → `ammonia`), so any app rendering user-supplied
+  Markdown through `content` was exposed. The advisory was published
+  2026-07-21 - after v0.6.5 shipped - so **every release up to and including
+  v0.6.5 is affected**. Upgrading the framework is the fix; no application
+  code changes are required.
+
+### Added
+
+- **Queue routing.** Jobs can be dispatched to a specific queue and connection,
+  and workers can be dedicated to specific queues - the Laravel 13
+  `Queue::route(...)` surface, typed. A job states its own home with
+  `Job::queue()` / `Job::connection()`; an operator overrides it centrally with
+  `Queue::route::<SendInvoice>(Some("redis"), Some("billing"))` in
+  `bootstrap::register()`, without editing the job. Resolution is route, then
+  job, then global default, and a `None` field in a route defers rather than
+  clearing. `queue:work --queue=billing,default` drains only those queues.
+  Unrouted jobs belong to `default`, so they are never stranded. Chained jobs
+  resolve routes by name, since a chain link stores its job erased.
+- **`QueueDriver::pop_from`.** Filtering pop, with a default implementation that
+  **rejects** a filter it cannot honor rather than silently draining every
+  queue - a worker told to drain `billing` that quietly drains everything is
+  indistinguishable from a working deployment until the wrong pool eats the
+  wrong jobs. The memory and database drivers filter natively. Custom drivers
+  keep compiling and inherit the loud default.
+- **Documented the `jobs` table schema.** `manual/queues.md` now carries the DDL
+  `DatabaseQueueDriver` actually expects, which was previously only discoverable
+  by reading the driver's SQL.
+- **Documented Inertia's `serverHead` option.** Server-driven `<head>` elements
+  (Inertia 3.5.0) need no framework support: the client reads them from an
+  ordinary prop, so any handler can already supply them. See
+  `manual/frontend-inertia-responses.md`.
+
+### Changed
+
+- `Envelope` gained a `queue: Option<String>` field. It is `serde(default)` and
+  skipped when absent, so an unrouted envelope serializes byte-identically to
+  what previous versions wrote - the frozen wire-format test passes unchanged,
+  there is no `schema_version` bump, and mixed-version fleets interoperate
+  during a rolling upgrade.
+- `WorkerConfig` gained a `queues: Vec<String>` field (empty = drain everything,
+  the previous behaviour).
+- Removed `ROADMAP.md`. Its design principles live in `manual/introduction.md`,
+  the working agreement in `manual/contributions.md`, and the deployment and
+  scale-out material in `manual/deployment.md`; the shipped/planned checklists
+  had gone stale. `README.md`'s pointer to it for "the relationship to upstream"
+  was already dangling - that attribution lives in `LICENSE`.
+- Scaffold frontends now pin `@inertiajs/{svelte,react,vue3}` at `^3.6.1`
+  (from `^3.4.0`). The 3.4.0 → 3.6.1 range is client-side only - audited against
+  the upstream changelog and the `Page` contract in `packages/core/src/types.ts`,
+  every `X-Inertia-*` header the 3.6.1 client sends was already handled.
+- `scripts/release.sh` now publishes the GitHub release itself, with notes taken
+  from the version's `CHANGELOG.md` section. Previously this was a manual
+  "next step" that got skipped, which is why v0.5.10 and v0.6.1-v0.6.3 are
+  tag-only and the Releases page sat on a stale version. Preflight runs before
+  the gate so a missing `gh` or changelog section fails in seconds, and
+  publishing is skipped automatically unless `origin` is GitHub.
+
+### Upgrading
+
+Existing `jobs` tables on the database queue driver **must** add the new
+column - `push` names it in its `INSERT` whether or not the job is routed, so
+an un-migrated table fails every push. Migrate first, then roll binaries
+(older binaries list their columns explicitly and ignore the new one, so that
+order is safe):
+
+```sql
+ALTER TABLE jobs ADD COLUMN queue TEXT NULL;
+CREATE INDEX idx_jobs_queue ON jobs(queue);
+```
+
+*(Corrected in 0.7.1 - this note originally claimed unfiltered deployments
+needed no migration.)*
+
+## 0.6.5 - 2026-07-21
+
+### Added
+
+- **Hosted one-off Checkout in the Stripe adapter.** `Checkout::start_session`
+  with `SessionMode::OneOff` and non-empty `price_refs` now creates a hosted
+  Checkout Session (`mode=payment`, one line item per price ref,
+  `allow_promotion_codes=true`) and returns
+  `SessionPayload::StripeCheckoutRedirect`. The `amount_hint`-only Elements
+  path is unchanged; the two shapes are picked per request.
+- **Stripe Managed Payments (merchant-of-record) support.**
+  `StripeProvider::with_managed_payments(true)` - or
+  `STRIPE_MANAGED_PAYMENTS=true` in `from_env()` - sends
+  `managed_payments[enabled]=true` on hosted one-off session creation. Off by
+  default; the field is omitted entirely so non-enrolled accounts are
+  unaffected.
+- **`Checkout::session_status`.** New trait method (default:
+  `PaymentError::NotSupported`) reporting a session's provider-side state as
+  the new neutral `CheckoutSessionState` (`Open` /
+  `Complete { paid, payment_ref, amount_total }` / `Expired`). The Stripe impl
+  maps `GET /v1/checkout/sessions/{id}`; `payment_ref` carries the session's
+  PaymentIntent id for mirror-table correlation. This is the server-side
+  verification primitive for redirect return pages and reconciliation sweeps.
+- **`Promotions` capability trait.** `create_promotion_code` mints a
+  customer-restricted, optionally expiring, redemption-capped code off a
+  pre-created coupon. Queried via the new
+  `PaymentProvider::as_promotions()` (default `None`). Implemented for Stripe
+  (`POST /v1/promotion_codes`) and the mock.
+- **`MockPaymentProvider` upgrades for the above.** Records every
+  `start_session` request (`recorded_sessions()`), scripts `session_status`
+  per session id (`script_session_status()` - unscripted known sessions
+  report `Open`, unknown ids `NotFound`), and implements `Promotions` with
+  recorded requests (`recorded_promotion_requests()`).
+
+## 0.6.4 - 2026-07-17
+
+### Fixed
+
+- **Eloquent aggregates decode consistently across database backends.** Generated
+  `count`, `sum`, `avg`, `min`, and `max` expressions now use one stable internal
+  result alias. PostgreSQL no longer returns false zeroes or `None` because its
+  driver labels aggregate columns differently from SQLite, and missing-column or
+  incompatible-type errors now propagate instead of being silently defaulted.
+- **Mass deletes cannot use caller-supplied table expressions.** Executable
+  delete SQL always derives its target from the model's validated static
+  `M::TABLE`. The legacy public renderer argument remains source-compatible but
+  cannot redirect or inject the delete target.
+
+## 0.6.3 - 2026-07-15
+
+### Added
+
+- **Typed raw reads can stay on a transaction's pinned connection.**
+  `Transaction::backend()` exposes the active backend and
+  `Transaction::query_all(Statement)` executes typed aggregate or custom SQL
+  through the transaction while preserving `QueryExecuted` instrumentation.
+  Applications no longer need a pool-level query or private executor access
+  when a lock-scoped decision depends on computed result columns.
+
+## 0.6.2 - 2026-07-15
+
+### Fixed
+
+- **Bound raw predicates are backend-neutral.** Eloquent `filter_raw` and
+  `where_raw` now accept portable `?` bind markers on every database backend;
+  PostgreSQL rendering rebases them to monotonic `$N` positions across prior
+  predicates, relationship subqueries, HAVING clauses, and UNION arms. Existing
+  numbered PostgreSQL fragments are normalized by their local marker order,
+  while mixed styles and bind-count mismatches fail validation before I/O.
+  The SQL-aware scanner preserves question marks inside quoted strings,
+  identifiers, comments, and dollar-quoted bodies; `??` emits a literal
+  question-mark operator in a bound raw fragment.
+
+## 0.6.1 - 2026-07-15
+
+### Added
+
+- **Observable supervised session cleanup.** `SessionMiddleware::install`
+  uses the configurable `SESSION_GC_INTERVAL` cadence (one hour by default),
+  while `session_gc_metrics()` exposes process-local run, success, failure,
+  removed-row, and last-result timestamps for protected operations surfaces.
+- **Bounded sliding-session touches.** `SESSION_TOUCH_INTERVAL` controls the
+  minimum activity-write cadence (five minutes by default) and is capped at
+  half the session lifetime so active sessions cannot expire between touches.
+
+### Fixed
+
+- **State-free requests no longer create durable sessions.** Requests without
+  a valid session cookie perform no session-store read or write and receive no
+  session cookie unless handling creates state. Existing clean sessions avoid
+  unconditional upserts and cookie churn, legacy cookies migrate on their next
+  request, and cookies whose backing rows have expired are cleared without
+  recreating empty sessions.
+
+## 0.6.0 - 2026-07-10
+
+### Added
+
+- **Opt-in framework subsystems with backward-compatible defaults.** Filesystem
+  storage, SQLite/Postgres/MySQL database drivers, the MariaDB vector driver,
+  and Web Push now have explicit Cargo features. Existing default builds retain
+  all of these capabilities, while `default-features = false` consumers can
+  select zero drivers or only the storage/database/vector/push surface they use.
+  The executable feature matrix verifies zero-driver, individual-driver,
+  Nation X minimal, default, and all-feature profiles.
+- **Raw P-256 VAPID private-key import.** `VapidKey::from_bytes` accepts a
+  validated 32-byte big-endian P-256 scalar alongside the existing PKCS#8 PEM
+  import/export path.
+
+### Changed
+
+- **VAPID JWTs are signed directly with P-256.** Web Push now serializes the
+  RFC 8292 ES256 header/claims and signs them with `p256`, removing the generic
+  JWT dependency while preserving generated keys, PEM round trips, public-key
+  encoding, and the 24-hour lifetime bound.
+- **Security dependency refresh.** Updated vulnerable framework dependencies,
+  including bcrypt and ammonia, and narrowed Comrak's enabled features while
+  retaining syntax highlighting.
+- **Rust 1.91.1 is the release MSRV.** Every workspace package declares the
+  same `rust-version`, generated Dockerfiles pin the matching builder image,
+  and the full release gate compiles the supported filesystem profile with the
+  exact Rust 1.91.1 toolchain.
+- **OpenDAL 0.58 security pin.** The filesystem feature pins
+  `eas4ai/opendal` commit
+  `88717391eb72c9839d3f8e79fccad9f22fc3a1b4`, a minimal fork based exactly on
+  official Apache OpenDAL commit
+  `ae99a3b016e354a1b2bb2baf0c70f9f9e134970a`. The fork changes only the
+  Reqsign declarations used by OpenDAL core plus S3, GCS, and Azure Blob so
+  downstream consumers resolve official Apache Reqsign commit
+  `b49cd2996b9d2d9944e84481f8835ff55b188b97` and `quick-xml` 0.41.0. A fork is
+  required because a dependency repository's root Cargo patches do not
+  propagate to consumers; the published graph could otherwise restore
+  vulnerable `quick-xml` 0.38/0.40.
+
+### Fixed
+
+- **Atomic release version metadata.** The release bump now updates
+  `workspace.package.version` and every versioned internal path dependency in
+  one validated operation, stages every affected manifest, and proves a
+  temporary `0.6.0` workspace with `cargo check --workspace` before release.
+  Release versions are validated as strict SemVer 2.0, including the numeric
+  prerelease leading-zero rule. Version-agnostic disposable bare-remote smokes
+  derive a later patch release from both the current source and an already
+  `0.6.0` source, reject staged/unstaged/untracked release trees before the
+  gate, prove atomic commit/tag publication rolls both refs back when a tag is
+  rejected, and prove the normal release sequence without touching the real
+  remote. Release versions must increase by SemVer precedence, including
+  prerelease transitions. Smoke build artifacts always stay inside their
+  temporary workspace, ignoring any caller `CARGO_TARGET_DIR`.
+- **Rustdoc covers every supported feature boundary.** The OAuth module links
+  to public `OAuthAuth::complete`, and the executable matrix builds zero-driver,
+  default, and all-feature rustdoc with no dependencies.
+- **Filesystem stream validation is session-scoped.** Local filesystem writers,
+  listers, and copiers resolve and confine their paths once before first I/O
+  instead of once per chunk/item, while activated close/abort operations always
+  reach the backend for cleanup. Existing traversal and symlink confinement
+  remain enforced for a trusted filesystem; canonicalize-then-open checks do
+  not eliminate races against a principal concurrently mutating the tree.
+
+### Security
+
+- **The release gate fails closed.** `release.sh` delegates to the canonical
+  full gate before editing manifests or creating commits/tags; that gate always
+  runs `cargo audit`, treats a missing `cargo-audit` binary as an error, and
+  stops on any audit failure. It also builds and audits an isolated downstream
+  filesystem consumer, asserting exact OpenDAL/Reqsign source revisions and no
+  `quick-xml` below 0.41. No new advisory ignores were added.
+
+## 0.5.10 - 2026-07-03
+
+### Fixed
+
+- **`generate-types` no longer drops self-referencing structs.** A struct with a
+  field that references its own type (a tree node with `children: Vec<Self>`,
+  e.g. a threaded-comment view) created a self-edge in the type-dependency
+  graph, pinning its in-degree above zero so Kahn's topological sort never
+  emitted it - leaving every interface that referenced it with a dangling type
+  name that failed `svelte-check`/`tsc`. Self-edges are now stripped before
+  sorting, and any structs trapped in a reference cycle (mutual recursion) are
+  emitted in arbitrary order rather than dropped, since TS interfaces may
+  reference one another regardless of declaration order.
+
+## 0.5.9 - 2026-07-01
+
+### Added
+
+- **`MAIL_FROM_NAME` - optional display name on auth-flow emails.** The
+  email-verification, password-reset, and password-changed mailables now render
+  their `From` header as `"Name <address>"` when `MAIL_FROM_NAME` is set (read
+  at send time so it survives the queue's serde round-trip). `MAIL_FROM` stays a
+  bare address; leaving `MAIL_FROM_NAME` unset or blank keeps the previous
+  bare-address behavior. No change to any call site - the mailables read the env
+  var themselves.
+
+## 0.5.8 - 2026-06-30
+
+### Fixed
+
+- **`generate-types` route helpers are always valid TypeScript.** When several
+  routes in a module share one handler (e.g. a `static_files::serve` whitelist
+  mapping many favicon/asset URLs), the first kept the handler name and the rest
+  got a key derived from the route path - but the path was only partly
+  sanitized (`/ { } -` → `_`), so a file extension leaked a `.` into the key:
+  `favicon_16x16.png: (...) => ...`. That is member access, not a property name,
+  so `tsc`/`svelte-check` rejected the generated `routes.ts`. Derived keys are
+  now sanitized to legal identifiers - every non-alphanumeric character becomes
+  `_` and a leading digit is prefixed - so `favicon-16x16.png` → `favicon_16x16_png`
+  and `2fa.json` → `_2fa_json`. Unique handler names are untouched.
+
+## 0.5.7 - 2026-06-30
+
+### Fixed
+
+- **`generate-types` no longer emits dangling type references.** A prop field
+  whose type is a struct that doesn't derive `InertiaProps`/`Data` (or an
+  external type the generator can't see) was emitted as a bare identifier - e.g.
+  `user: UserInfo` - producing TypeScript that fails `tsc`/`svelte-check`
+  because that interface is never written. Such references now degrade to
+  `unknown` (`user: unknown`; `Vec<T>` → `Array<unknown>`; `Option<T>` →
+  `unknown | null`), so generated output always type-checks, and
+  `generate-types` prints a warning naming the unresolved type and the field
+  that references it, with the fix (derive `InertiaProps`/`Data` on it).
+  Generic parameters and resolved nested InertiaProps/Data types are
+  unaffected.
+
+## 0.5.6 - 2026-06-29
+
+### Changed
+
+- **Sign in with Apple: RS256 JWKS verification.** Bump `suprnova-apple-rs` to
+  v0.3.1 - Apple ID tokens are now verified against Apple's published JWKS
+  (RS256) instead of being trusted structurally.
+
+## 0.5.5 - 2026-06-28
+
+### Added
+
+- **`MagicLink` token purpose.** New `MagicLink` variant on the auth-flow
+  `TokenPurpose` enum, for passwordless magic-link sign-in tokens.
+
+## 0.5.4 - 2026-06-28
+
+### Changed
+
+- **Composable OAuth completion.** Split the generic OAuth completion into
+  `verify_oauth_identity` (verify + resolve the identity) and a thin `complete`,
+  so apps can verify an OAuth identity without triggering the full
+  session-completion side effects.
+
+## 0.5.3 - 2026-06-28
+
+### Fixed
+
+- **Correct workspace version metadata.** v0.5.2 was tagged and pushed before
+  its `Cargo.toml` version bump was staged, so the pushed v0.5.2 tag still reads
+  `version = "0.5.1"`. v0.5.3 re-cuts the release with the correct workspace
+  version - no code change (the v0.5.2 OAuth split is unaffected).
+
+## 0.5.2 - 2026-06-28
+
+### Changed
+
+- **Composable Apple completion.** Split Apple Sign-In completion into
+  `verify_apple_identity` + a thin `complete_apple`, mirroring the generic OAuth
+  split. (Note: the pushed v0.5.2 tag carries a stale `0.5.1` version field -
+  fixed in v0.5.3.)
+
+## 0.5.1 - 2026-06-28
+
+### Changed
+
+- **Renamed Apple crate.** Repoint the Apple dependency to the renamed
+  `suprnova-apple-rs` repository.
+
+## 0.5.0 - 2026-06-28
+
+### Added
+
+- **Sign in with Apple.** OAuth token exchange + ID-token verification + user
+  upsert for Apple; Apple well-known endpoints and the `form_post` response
+  mode; Apple-specific fields on `OAuthProviderConfig`; `AppleKeyPair`
+  re-exported so apps configure Apple Sign-In without a direct `apple`
+  dependency.
+
+### Fixed
+
+- Omit PKCE parameters from the Apple authorize URL (Apple rejects the request
+  when they are present).
+
+### Dependencies
+
+- Consume the `torii` magic-auth fix; add `apple-rs` v0.3.0.
+
+## 0.4.1 - 2026-06-26
+
+### Performance
+
+- Pre-size `MiddlewareChain` to eliminate per-request `Vec` reallocations.
+
+### Fixed
+
+- Make the maintenance down-file path collision-proof under parallel test runs.
+
+### Docs
+
+- Compile-check the framework's doc examples (`ignore` → `no_run`); reconcile
+  the distribution notes with the tagged GitHub Releases; ignore the whole
+  `docs/` tree.
+
+## 0.4.0 - 2026-06-22
+
+### Changed
+
+- **Distribution is git-tracked; you don't pin to tags.** Scaffolded apps
+  depend on `suprnova = { git = "…/suprnova.git" }` and track the default
+  branch; pull updates with `cargo update -p suprnova`. Versions are published
+  as tagged GitHub Releases (`v0.4.0`, …) for the changelog, but `Cargo.lock`
+  already pins the exact resolved commit - so builds stay reproducible without
+  hand-pinning a `tag` or `rev`. The installation docs no longer present
+  commit-pinning as the update path.
+
+## 0.3.0 - 2026-06-21
+
+### Added
+
+- **Query instrumentation for Eloquent reads** - `Builder::get`, `Model::find`,
+  `find_many`, and `all` now emit `QueryExecuted`, so model SELECTs and
+  eager-load queries surface in `DB::listen` and the in-memory query log
+  alongside writes and raw queries. Adds the instrumented
+  `ExecutorChoice::statement_all` read terminal.
+- **Resource-route authorization** - `ResourceRoutes::authorize_resource::<U, R>()`
+  attaches the conventional ability check to every generated resource route as
+  per-route middleware (Laravel `authorizeResource` parity). The action→ability
+  map is `index`/`show` → `view`, `create`/`store` → `create`,
+  `edit`/`update` → `update`, `destroy` → `delete`. One call gates the whole
+  seven-action surface instead of relying on every controller body to remember
+  a `Gate::authorize`.
+- **Atomic rate-limit hit** - `RateLimiter::hit_and_check(key, max, decay)`
+  increments a fixed window and tests it in a single round-trip, returning
+  whether the bucket is now over its limit (`i64::MAX` means unlimited).
+- **Constant-time comparison helper** - `constant_time_eq(a, b)` (subtle-backed)
+  for webhook signature verification; `WebhookHandler::verify` docs now mandate
+  constant-time digest comparison.
+- **Inertia client to 3.4.0** - the Svelte/React/Vue scaffolds now pin
+  `@inertiajs/{svelte,react,vue3}` at `^3.4.0` (from `3.1.1`), picking up
+  `router.poll` modes, dynamic `usePoll`, `Inertia.once`, the InfiniteScroll
+  cancel fix, and awaited Form `onSuccess`. The server already emits the full
+  3.4.0 page-object and header surface (once-props, the prepend/deep-merge
+  scroll family, `matchPropsOn`, rescued/shared props), so this is a
+  client-currency bump with no protocol change.
+- **Optional connection cap** - `SERVER_MAX_CONNECTIONS` (and the programmatic
+  `Server::max_connections(n)`) bounds concurrently active connections with a
+  semaphore on the accept loop, applying back-pressure at the TCP level. Unset -
+  or `0` - leaves connections unbounded (the default, unchanged). A backstop to
+  pair with a reverse proxy and `LimitNOFILE`, not a replacement for upstream
+  rate limiting.
+- **Opt out of redirect-following** - `RequestBuilder::no_redirects()` routes a
+  request through a non-following HTTP client so a `3xx` is returned as-is
+  instead of chased. Use it when the request URL is influenced by untrusted
+  input, to close a redirect-based SSRF vector (a hostile endpoint redirecting
+  toward an internal or cloud-metadata host). The default client still follows
+  redirects, matching general-client convention.
+
+### Security
+
+- **Resource routes** fail closed on the authorization registry's type-erased
+  downcast instead of panicking, and `authorize_resource` denials /
+  unauthenticated requests are refused before the handler runs.
+- **Rate limiter** closes a fixed-window check-then-hit race by incrementing and
+  comparing atomically (`hit_and_check`).
+- **Queue `RateLimited` middleware** now admits jobs through that atomic
+  `hit_and_check` instead of a separate `too_many_attempts` + `hit` pair, so
+  concurrent workers can no longer all pass the budget check before any of them
+  increments and over-admit past `max_attempts`.
+- **Upload validators** (`mimetypes` / `mime`) content-sniff the uploaded bytes
+  instead of trusting the client-supplied `Content-Type`.
+- **Filesystem path guard** canonicalizes paths to catch symlink traversal out
+  of the storage root, beyond the prior lexical `../` / absolute / UNC checks.
+- **Auth** closes a passwordless-login timing oracle - a matched-but-passwordless
+  account given a password now runs a fixed-cost verify, across both the Eloquent
+  and database user providers - and `dummy_verify` drives the configured hasher so
+  the unmatched-user path is constant-time.
+- **Eloquent** validates column identifiers on the `pluck` / `value` /
+  `pluck_keyed` / `sole_value` and `sum` / `avg` / `min` / `max` projection
+  paths.
+- **Payments** - the mock provider's verifier fails closed outside a development
+  environment, and webhook source IPs resolve through `TrustedProxiesConfig`
+  (`req.ip()`) rather than a raw `X-Forwarded-For` header.
+- **Filesystem path guard** now walks to the nearest *existing* ancestor when a
+  write target doesn't exist yet, closing a symlink escape where a planted
+  intermediate symlink with a missing immediate parent slipped past the guard.
+- **`DB::init_with`** validates the environment before connecting (matching
+  `DB::init`), so the dev SQLite fallback can no longer boot silently in
+  production through that entry point.
+- **Static-file serving** rejects dotfiles (`.env`, `.git/config`, `.htpasswd`,
+  any leading-`.` segment), not just `.`/`..` traversal.
+- **Payment webhooks** serialize concurrent retries of the same unprocessed
+  event with a `FOR UPDATE` lock + re-check, and treat mirror-table unique
+  violations as benign already-applied; `payments_subscription_items` gains a
+  `UNIQUE(subscription_id, provider_item_id)`.
+- **RBAC** defaults the model discriminator to the fully-qualified type name, so
+  two authenticatable types sharing a leaf name can no longer inherit each
+  other's roles/permissions.
+- **`invalidate_session()`** rotates the session id (not just flushes), closing a
+  session-fixation gap; the queue `WithoutOverlapping` middleware releases its
+  cache lock even when the job panics.
+- **Mail providers** cap error-response body reads (8 KiB), matching the
+  web-push client, so a hostile endpoint can't drive sender memory.
+- **Web push** disables HTTP redirect-following on the default client, so an
+  attacker-influenced push endpoint can no longer `3xx`-redirect a notification
+  POST toward an internal or cloud-metadata host (SSRF). A redirect now surfaces
+  as a rejected push rather than a silently followed request.
+- **Stripe adapter** `Debug` redacts the webhook signing secret *and* prints a
+  placeholder for the `stripe::Client` (which carries the API secret key in its
+  auth header), so neither secret can reach logs through a `{:?}` of
+  `StripeProvider`, regardless of the upstream client's own `Debug`.
+- **Stripe adapter** `from_env` rejects present-but-blank credentials, failing
+  closed instead of constructing a client with an empty (and therefore forgeable)
+  webhook HMAC secret.
+- **OAuth email verification** fails closed for unrecognised providers: a
+  userinfo payload carrying an `email` but no `email_verified` flag is no longer
+  treated as verified. An unknown provider must now assert `email_verified: true`
+  or expose a verified-emails endpoint, closing an account-link/takeover vector
+  for apps that key accounts on email. Google (explicit-`true`-only) and GitHub
+  (verified-by-the-`/user`-contract) are unchanged.
+
+### Fixed
+
+- **Nested eager loading** (`with(["posts.comments"])`) is now a constant number
+  of queries - the tail segment loads in one batched IN query across all
+  parents instead of one query per parent (N+1).
+- **`where_has`/`where_doesnt_have`** qualify closure columns with the target
+  table, so a column present on both pivot and target no longer produces an
+  ambiguous-column error on many-to-many relations.
+- **Soft-delete `delete`/`force_delete`/`touch` and factory `persist`** honor a
+  model's `#[model(connection = "…")]` routing (matching `restore` and the
+  other write paths) instead of falling back to the primary pool.
+- **JSON:API `Maybe::Missing`** uses a non-collidable wire sentinel, so user
+  data shaped like `{"__missing__": true}` is no longer silently stripped.
+- **Queued notifications** honor `should_send` (per-channel veto) and
+  `after_sending`, re-checked on the worker - previously only the synchronous
+  path did.
+- **Released jobs** push the retry copy before acking the original, so a transient
+  driver push error no longer drops the job.
+- **Paddle adjustment (refund) webhooks** key the mirror update off the referenced
+  transaction id and read amounts from `data.totals`, instead of inserting a
+  zero-amount row under the adjustment id.
+- **SQLite URLs** carrying a query string (`sqlite://db.sqlite?mode=rwc`) build a
+  valid single-query connection URL and a clean on-disk filename.
+- **HTTP** clamps `Accept` `q`-values to `[0,1]` and enforces a `FormRequest`'s
+  `max_body_bytes` even when the body was pre-buffered; **WebSocket** config
+  rejects `max_missed_pings < 2` (1 closed every connection on its first ping).
+- **Cron** day-of-month and day-of-week use OR semantics when both are restricted
+  (Vixie/POSIX parity); Markdown `plain_text`/excerpts preserve intentional
+  spaced punctuation; `CachedEvaluator` bounds its cache growth;
+  `SupervisorRegistry::start_all` no longer double-spawns on a second call; the
+  test container recovers in place from a poisoned lock.
+- **Supervisor restart backoff** resets to the 100 ms floor after a run that
+  stays up at least the 60 s cap, so a daemon that ran healthily for a long
+  stretch and then exits restarts promptly instead of inheriting backoff that
+  climbed during an earlier failure burst. A crash loop whose runs never reach
+  the threshold still ramps to the cap, so the reset never masks a flapping
+  supervisor.
+- Corrected stale docs on `filter_op` (operators are allowlist-validated), signed
+  URLs (not byte-compatible with Laravel's default absolute signatures),
+  `UniqueIdKind::is_valid` (a caller helper, not auto-wired into `find`), and the
+  identifier length cap (128, not 64).
+
+### Documentation
+
+- Documented resource-route authorization (`authorize_resource`) in the routing
+  and authorization chapters, and the atomic `hit_and_check` counter in the
+  rate-limiting chapter.
+
+## 0.2.0 - 2026-06-21
+
+Adds role-based access control, a Markdown content / docs-rendering pipeline, and
+native static-file serving.
+
+### Added
+
+- **Tier-2 RBAC** - `HasRoles` trait; roles + permissions with a
+  `role_has_permissions` join; `PermissionMiddleware` / `RoleMiddleware` (both
+  fail-closed / default-deny); the `CreateRbacTables` migration; and
+  `create_role` / `create_permission` / `give_permission_to_role` helpers.
+- **Content rendering** - Markdown rendering and a docs-build pipeline:
+  `MarkdownRenderer`, `build_docs`, `DocsCatalog` / `DocsChapter`, heading
+  extraction and `slugify_heading`. Rendered HTML is sanitized
+  (comrak + syntect + ammonia).
+- **Native static-file serving** - `StaticFiles::public()` fallback handler for
+  serving a `public/` directory at the web root, replacing hand-rolled per-asset
+  whitelist controllers in apps.
+
+### Fixed
+
+- Freshly generated apps inherit a framework-level `time = 0.3.47` compatibility
+  pin, avoiding Rust 1.96 coherence conflicts from `time 0.3.48` in fresh
+  scaffold dependency resolutions.
+
+### Documentation
+
+- Documented the two shipped starter kits - **Nebula** (Breeze-tier auth) and
+  **Pulsar** (product site + community) - across the manual, README, and roadmap;
+  restructured the roadmap around the shipped surface; and reconciled version
+  references throughout the docs.
+
+## 0.1.0 - 2026-06-10
+
+The initial Suprnova release. Suprnova is a Laravel-inspired web
+framework for Rust, forked from Kit and taken in its own direction.
+Today's parity target is Laravel 13.x.
+
+This release uses the git distribution model: framework consumers depend
+on `suprnova = { git = "https://github.com/eas4ai/suprnova.git" }`,
+and the CLI installs with `cargo install --git`.
+
+### Added
+
+#### HTTP, routing, and middleware
+
+- `Router` with route groups, prefixes, parameter constraints, named routes
+- Compile-time-validated route registration via the `routes!` macro
+- Resource routing (`Router::resource`) producing the seven standard routes
+- Signed URLs (`url::signed_route` / `url::temporary_signed_route` free
+  functions, plus `Redirect::signed_route` / `Redirect::temporary_signed_route`)
+- Redirect helpers - `Redirect::to`, `Redirect::back`, `Redirect::route`,
+  `Redirect::with_input`, `Redirect::with_errors`, `with_flash`
+- Middleware trait with global, group, and per-route layers
+- Built-in middleware - CORS, CSRF, session, request timeout,
+  request ID, throttle / login throttle, signed-URL verify,
+  authenticated, email-verified, brute-force
+- Abort helpers (`abort`, `abort_unless`, `abort_if`)
+- `suprnova::handle_request(...)` - public adapter to serve a single
+  hyper request against a router + middleware chain
+
+#### Inertia.js frontend bridge
+
+- `#[derive(InertiaProps)]` with TypeScript type emission
+- `inertia_response!` macro with compile-time component validation
+- Three first-class starter frontends - **Svelte 5** (runes-on),
+  **React 19**, **Vue 3.5** - all on Inertia 3.1.1 + Vite 8 + Tailwind v4
+- Partial reloads (`only` / `except`), deferred props, persistent
+  layout, encrypted history, scroll preservation
+- `Inertia::paginate(component, key, paginator)` for paginator → Inertia
+  prop wiring
+
+#### Eloquent-style ORM (over SeaORM)
+
+- `#[suprnova::model]` attribute macro that emits a SeaORM entity and
+  the user-facing Eloquent struct in one shot
+- Full `Model` trait - `create`, `find`, `find_or_fail`, `find_many`,
+  `all`, `query`, `save`, `update`, `delete`, `force_delete`, `refresh`,
+  `fresh`, `replicate`, `replicate_into`, `increment`/`decrement`,
+  `destroy`, `is`/`is_not`, `to_array`/`to_json`
+- Fillable / guarded mass-assignment with `Attrs` envelope
+- 22 attribute casts - booleans, integers, floats, dates, enums,
+  hashed, encrypted, JSON, collections, money, datetime with timezone
+- Accessors / mutators via `#[suprnova::model]`
+- Auto-timestamps (`created_at`, `updated_at`)
+- Soft deletes (`deleted_at`) with `force_delete`, `restore`, `trashed`,
+  `only_trashed`, `with_trashed`
+- Eleven relation kinds - `HasOne`, `HasMany`, `BelongsTo`,
+  `BelongsToMany`, `HasOneThrough`, `HasManyThrough`, `MorphOne`,
+  `MorphMany`, `MorphTo`, `MorphToMany`, `MorphedByMany`
+- Per-family morph enums + morph registry with `APP_KEY_PREVIOUS` rotation
+- Eager loading via `.with(...)`, `.with_count(...)`, `.load_missing(...)`
+- Correlated EXISTS engine for `has` / `where_has`
+- Sixteen lifecycle events (retrieving, retrieved, creating, created,
+  updating, updated, saving, saved, deleting, deleted, restoring,
+  restored, force-deleting, force-deleted, replicating, trashed)
+- `Observer<M>` trait with per-method auto-registration via inventory
+- Local scopes via `#[scopes(M)]`, global scopes via `GlobalScope`
+- `Collection<M>` Laravel surface - `pluck`, `key_by`, `group_by`,
+  `where_in`, `first_where`, `contains_where`, `partition`, etc.
+- Three paginators - `paginate` (length-aware), `simple_paginate`,
+  `cursor_paginate` - all serializing to Laravel-shape JSON
+- `chunk` / `lazy` / `cursor` for bulk-row iteration without OOM
+- `lock_for_update` / `shared_lock` row-level locking
+- `DB::table(...)` query builder with `DynamicRow` for ad-hoc queries
+- `DB::transaction(...)` with savepoints, retry-on-deadlock,
+  multi-connection read/write split
+- `DB::listen(...)` + `QueryExecuted` / `TransactionBegan` /
+  `TransactionCommitted` / `TransactionRolledBack` events
+- `Prunable` trait + `model:prune` console command
+- `dump` / `dd` query-helper methods
+- `#[model(unique_id="...")]` for UUID / ULID primary keys
+
+#### Auth
+
+- `Authenticatable` trait + `EloquentUserProvider<M>`
+- `Auth::attempt`, `Auth::login`, `Auth::user`, `Auth::user_or_fail`,
+  `Auth::user_as<T>`, `Auth::logout`, `Auth::check`
+- Multiple named guards (web session, API token)
+- Email verification flow - `EmailVerification`,
+  `EnsureEmailVerifiedMiddleware`, signed verification URLs,
+  `EmailVerificationMail`
+- Password reset flow - `PasswordReset`, throttled tokens,
+  `PasswordChangedMail`, `PasswordResetLinkSent` event
+- Two-factor TOTP - enroll, verify, recovery codes, replay protection
+- Brute-force / login throttle - IP + identifier keyed,
+  `LoginThrottleMiddleware`
+- Remember-me cookies with stable opaque tokens
+- Six auth events - `LoginAttempted`, `LoggedIn`, `Authenticated`,
+  `LoggedOut`, `PasswordResetLinkSent`, `EmailVerified`
+- Browser sessions backed by the Torii fork at
+  `github.com/eas4ai/suprnova-torii-rs`
+
+#### Authorization
+
+- `Gate` facade - `define`, `allows`, `denies`, `authorize`, `any`,
+  `none`, `check` (sync + async variants)
+- `#[policy(Model)]` macro for policy registration
+- Resource-route auto-authorization
+
+#### Payments
+
+- Provider-agnostic five-trait surface - `Checkout`, `Payment`,
+  `Subscription`, `CustomerStore`, `WebhookHandler`
+- `PaymentProvider` umbrella trait + capability-querying via `as_payment()`
+- DB mirror - `customers`, `subscriptions`, `subscription_items`,
+  `payments`, `refunds`, `payment_webhook_events` (UNIQUE for idempotency)
+- Flow-tagged `SessionPayload` enum (one-shot vs subscription)
+- Two reference adapters as workspace crates -
+  `suprnova-payments-stripe` (gateway, full `Payment` impl),
+  `suprnova-payments-paddle` (Merchant of Record, no `Payment` impl)
+- Mock provider for tests
+
+#### Queue, jobs, batches, chains
+
+- `Job` trait - `handle`, `max_tries`, `backoff`, `timeout`,
+  `fail_on_timeout`
+- `Queue::push`, `Queue::push_later`, `Queue::push_unique`,
+  `Queue::push_unique_later`
+- Drivers - `sync`, `null`, `redis`, `database`
+- `JobMiddleware` trait - six built-in middleware
+- Batches and chains - `Queue::batch(jobs).dispatch()`, fluent chain
+  builder, cancellation, progress tracking
+- Failed-jobs store with replay
+- Worker with graceful shutdown, configurable concurrency, panic
+  recovery via `catch_unwind`, settlement metrics
+- Twelve queue events covering queueing, processing, failure, release,
+  worker lifecycle
+
+#### Broadcasting and WebSockets
+
+- `ws!()` macro + `Router::ws` for typed WebSocket endpoints
+- `WsSocket` Sink/Stream split
+- Auto-restart supervisors via `Supervisor` trait
+- `BroadcastHub` with `Channel`, `Private`, `Presence` channels
+- JSON-envelope protocol, presence join/leave/here, configurable
+  presence TTL with crash recovery
+- `Broadcastable` bridge to `EventDispatcher`
+- Close-on-no-pong heartbeat with configurable WS_TASKS drain
+- Per-route WebSocket middleware
+- 1 MiB / 64 KiB safer defaults + `WsConfig::generous()` factory
+- Origin policy + 1011 close-on-protocol-violation
+
+#### Notifications and mail
+
+- `Notification` trait + `Notify::send(recipient, notification).await`
+- Mailable + Markdown template rendering
+- Database / mail / broadcast / web-push channels
+- VAPID signing + RFC 8291 ECE payload encryption (via
+  `suprnova-web-push`)
+- VAPID subject validation, retry-after parsing, 8 KiB rejection-body cap
+- Notifiable trait for recipient typing
+
+#### Events
+
+- Typed event dispatcher - `EventFacade::dispatch`,
+  `EventFacade::listen<E, L>`, `EventFacade::forget`
+- Cancellable saving/updating events (return `EventResult::cancel`)
+- Queueable listeners
+
+#### Filesystem
+
+- `Storage::disk("name")` with multi-driver support - local, S3,
+  Azure, GCS via OpenDAL
+- Move, copy, exists, size, mime, last-modified, prepend/append
+- Streaming uploads and downloads
+
+#### Cache
+
+- `Cache::store("name")` + driver registration
+- Drivers - memory, redis (with bounded connect-timeout), database, file
+- `remember`, `forever`, `tags`, atomic increment/decrement, locks
+
+#### Vector DB
+
+- `VectorDriver` trait with four drivers - in-memory, Qdrant
+  (UUID-5 ID mapping), Pinecone (native string IDs), MariaDB native
+  `VECTOR(N)` + HNSW indexes (11.7+)
+- Cosine / dot / euclidean distance
+
+#### Console binary and CLI
+
+- Per-project `console` binary - Rust analogue of `php artisan`,
+  runs user-defined commands via `#[suprnova::console::command]`
+- `#[derive(Command)]` for typed arguments
+- `suprnova` CLI - `new`, `serve`, `migrate`, `db:sync`,
+  `generate-types`, `key:generate`, `make:{controller,middleware,action,error,inertia,migration,task,command}`,
+  `db:seed`, `model:prune`
+- `--version` flag
+- Scaffold templates for backend + API starters across three frontends
+
+#### Feature flags
+
+- `DatabaseEvaluator` with snapshot loading
+- `CachedEvaluator` with TTL
+- `FeatureMiddleware` extractor
+- Admin CRUD surface
+- `FeatureSync` trait for sub-second propagation across processes
+
+#### Schedule
+
+- Cron expression parser
+- `Schedule::task(...)` with composable predicates
+- Single-server locks, overlap prevention, dispatch tracking
+- `schedule:run` console command
+
+#### Validation
+
+- `validator` 0.20 integration
+- `#[request]` + `#[derive(FormRequest)]` macros
+- `#[form_request(max_body_bytes = N)]` per-form size cap
+- `#[form_request(custom_hooks)]` opt-out for user-written
+  `impl FormRequest`
+- Lifecycle hooks - `authorize`, `after_validation`,
+  `after_validation_async`
+
+#### Database drivers
+
+- SeaORM-backed support for SQLite, Postgres, MySQL, MariaDB
+- URL-based driver detection
+- Migration system + `migrate`, `migrate:rollback`, `migrate:status`,
+  `migrate:fresh`, `migrate:refresh`
+
+#### HTTP client
+
+- `Http` facade - `get` / `post` / `put` / `patch` / `delete`
+  returning a `RequestBuilder`; `.send().await` produces a
+  `ClientResponse`
+- rustls TLS, 30s default timeout, `suprnova/<version>` user-agent
+- `json` / `form` / `body` / `header` / `bearer_token` / `basic_auth`
+  / `timeout` chainable methods
+- `RequestBuilder::retry(max_attempts, base_backoff)` - exponential
+  backoff for transient failures and 5xx; respects `Retry-After`
+- `Http::fake(|| async { ... }).await` test guard with
+  `fake_response(method, url_substring, status, body)` +
+  `assert_sent` / `assert_not_sent`
+
+#### Encryption
+
+- `Crypt` static facade + `EncryptionKey` (`crypto::*`); AES-256-GCM
+  with 12-byte random nonces
+- `encrypt_string` / `decrypt_string` / `encrypt<T>` / `decrypt<T>`
+- `CryptPurpose` AAD binding preventing cross-protocol replay
+- `APP_KEY_PREVIOUS` rotation
+- `suprnova key:generate` CLI command for minting fresh keys
+
+#### Testing
+
+- `#[suprnova_test]` async test macro
+- `TestDatabase::fresh::<Migrator>()` with parallel-safe instances
+- `TestContainer::bind` for per-test mocks
+- HTTP test helpers - `Test::get`, `Test::post`, JSON / form / multipart
+- Queue / Mail / Notification / Event fakes
+- `assert_emitted`, `assert_dispatched`, `assert_dispatched_times`
+
+### Changed
+
+- Auth verification and password-reset flows now operate through the
+  configured user provider instead of Torii internals.
+- Generated apps must implement `get_auth_password`; scaffolded examples
+  now fail loudly instead of allowing login to always fail silently.
+- The local release gate is wired into `scripts/release.sh`, and the repo
+  includes an enforced pre-push hook for fmt, clippy, tests, docs, and
+  feature builds.
+- Scaffolded dev-port documentation moved to the current backend/frontend
+  defaults (`8765` / `5765`), with `dev:tls` and `--with-portless`
+  documented.
+- `MAIL_FROM` is validated before verification or reset tokens are issued,
+  avoiding orphaned auth-flow rows when mail configuration is invalid.
+
+### Fixed
+
+- React scaffold template drift from the released starter.
+- Root route groups no longer generate duplicate `//` paths.
+- Literal-path redirects now dispatch through the intended routing path.
+- Broadcasting fanout tests now handle `track` / `untrack` results.
+- The mail log driver emits the rendered text body, so verification and
+  password-reset links surface in local development logs.
+- Password-reset coverage pins session and remember-me revocation behavior.
+
+### Notes
+
+- **Distribution model**: git-based end-to-end.
+  `suprnova = { git = "https://github.com/eas4ai/suprnova.git" }`;
+  CLI via `cargo install --git`. Nothing is published to crates.io.

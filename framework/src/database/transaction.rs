@@ -1,0 +1,1833 @@
+//! Phase 10C T11 - Transactions: closure form, manual form,
+//! savepoints, retry-on-deadlock.
+//!
+//! Three transaction entry points:
+//!
+//! - [`DB::transaction`](crate::DB::transaction) - closure form. The
+//!   closure runs inside a transaction; commit on `Ok`, rollback on
+//!   `Err`. Operations inside the closure pick up the active
+//!   transaction automatically via a `tokio::task_local` - callers
+//!   don't have to thread a tx handle through every model call.
+//!
+//! - [`DB::begin_transaction`](crate::DB::begin_transaction) - manual
+//!   form. Returns a [`Transaction`] handle the caller commits or
+//!   rolls back explicitly. Useful when the transaction's lifetime
+//!   spans multiple control-flow branches that don't fit a closure.
+//!   Manual mode does NOT install `CURRENT_TX`; callers opt every
+//!   operation into the transaction with `Builder::with_tx(&tx)` or
+//!   the `Model::*_with_tx` shims.
+//!
+//! - [`DB::transaction_with_attempts`](crate::DB::transaction_with_attempts) -
+//!   retry-on-deadlock closure form. Re-runs the closure up to `n`
+//!   times when the inner `FrameworkError` looks like a serialization
+//!   failure or deadlock (Postgres SQLSTATE `40001` / `40P01`, or any
+//!   error containing the case-insensitive substring `"deadlock"`).
+//!
+//! ## Savepoints
+//!
+//! Inside the closure, [`Transaction::savepoint`] /
+//! [`Transaction::rollback_to`] checkpoint and roll back nested work
+//! without aborting the outer transaction. SQLite supports
+//! `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` even though it doesn't have
+//! row-level locking - the user-visible contract ("commit inner work
+//! only if everything succeeded; otherwise restore the snapshot") is
+//! the same across all three backends.
+//!
+//! A savepoint rollback unwinds the after-commit registry with the rows: a
+//! deferred queue push registered inside the savepoint is discarded and its
+//! compensation runs. See [`Transaction::rollback_to`].
+//!
+//! ## After-commit callbacks
+//!
+//! [`DB::transaction`](crate::DB::transaction) drains two callback registries
+//! when it finishes: the after-commit list runs once the physical commit
+//! succeeds, and the rollback list runs instead when the closure returns `Err`.
+//! Both run *outside* the `CURRENT_TX` scope, so a callback that dispatches
+//! its own work sees no ambient transaction and acts immediately.
+//!
+//! The queue is the caller that matters: `Job::after_commit()` routes a push
+//! through this registry so the envelope only reaches the driver once the rows
+//! it describes are durable. See `database::after_commit`. Manual transactions
+//! do not participate - they install no `CURRENT_TX`, so there is no drain
+//! point.
+//!
+//! ## Nested `DB::transaction` is rejected at runtime
+//!
+//! SeaORM's `DatabaseConnection::begin()` doesn't compose - calling
+//! it on a connection that's already holding a transaction starts a
+//! brand-new physical transaction that commits / rolls back
+//! independently of the outer scope. That's a silent data-integrity
+//! footgun, so [`DB::transaction`] checks `CURRENT_TX` up front
+//! and returns a database error instead of producing the wrong
+//! semantics. Use [`Transaction::savepoint`] for nested behaviour.
+
+use crate::database::DB;
+use crate::database::identifier::canonical_savepoint_name;
+use crate::error::FrameworkError;
+use rand::RngExt;
+use sea_orm::{ConnectionTrait, DatabaseTransaction, IsolationLevel, TransactionTrait};
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Internal state shared by [`Transaction`], [`TxHandle`], and the
+/// task-local [`CURRENT_TX`]. Pairs the SeaORM transaction handle with
+/// the logical connection name the transaction was opened against, so
+/// every `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted`
+/// / `TransactionRolledBack` event carries the actual connection name
+/// rather than a hard-coded sentinel.
+///
+/// `Arc<str>` not `String` for the name - every clone of a `TxHandle`
+/// duplicates the pair, and the connection name is small + immutable
+/// for the transaction's lifetime.
+pub(crate) struct TxState {
+    pub(crate) tx: Arc<DatabaseTransaction>,
+    pub(crate) connection_name: Arc<str>,
+    /// Callbacks queued by
+    /// [`after_commit::register_callback`](super::after_commit::register_callback),
+    /// run in registration order once the physical commit succeeds.
+    ///
+    /// `std::sync::Mutex`, not `tokio::sync::Mutex`: registration is a
+    /// synchronous `Vec::push` and the drain is a single `mem::take`, so the
+    /// lock is never held across an `.await`.
+    pub(crate) after_commit: std::sync::Mutex<Vec<super::after_commit::AfterCommitCallback>>,
+    /// Compensating callbacks queued by
+    /// [`after_commit::register_rollback_callback`](super::after_commit::register_rollback_callback),
+    /// run when the transaction rolls back. The after-commit list is discarded
+    /// in that case.
+    pub(crate) on_rollback: std::sync::Mutex<Vec<super::after_commit::AfterCommitCallback>>,
+    /// Where both registries stood at each [`Transaction::savepoint`] still in
+    /// scope, innermost last.
+    ///
+    /// A savepoint rollback undoes the rows a deferred dispatch was waiting on,
+    /// so it has to undo the dispatch too - and without a recorded length there
+    /// is nothing to measure "registered above the savepoint" against. See
+    /// [`after_commit::SavepointMark`](super::after_commit::SavepointMark).
+    pub(crate) savepoints: std::sync::Mutex<Vec<super::after_commit::SavepointMark>>,
+}
+
+/// Cancellation finalizer for the [`DB::transaction`] closure scope.
+///
+/// The closure's scoped future owns every other framework transaction
+/// reference and drops them before this guard. Cancellation can therefore
+/// hand the database transaction and callbacks to one rollback task, which
+/// finishes the database rollback before releasing deferred queue locks.
+/// Normal completion transfers the same state to an awaited owned task.
+struct ScopeFinalizer {
+    state: Option<Arc<TxState>>,
+}
+
+impl ScopeFinalizer {
+    fn armed(state: Arc<TxState>) -> Self {
+        Self { state: Some(state) }
+    }
+
+    async fn complete(mut self, commit: bool) -> Result<(), TransactionFailure> {
+        let state = self.state.take().ok_or_else(|| {
+            FrameworkError::internal("DB::transaction: finalization state already consumed")
+        })?;
+        super::after_commit::spawn_owned(finish_transaction(state, commit))
+            .await
+            .map_err(|error| {
+                TransactionFailure::FinalizationInterrupted(FrameworkError::internal(format!(
+                    "DB::transaction: finalization task ended without a result; \
+                     the database outcome is unknown and must not be retried: {error}"
+                )))
+            })?
+    }
+}
+
+impl Drop for ScopeFinalizer {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            super::after_commit::spawn_detached(async move {
+                if let Err(error) = finish_transaction(state, false).await {
+                    tracing::error!(
+                        target: "suprnova::database",
+                        error = %error.into_error(),
+                        "cancelled transaction finalization failed",
+                    );
+                }
+            });
+        }
+    }
+}
+
+/// Own the physical outcome, event listeners, and callback sequence as one
+/// completion task. The caller's generic closure and return value never move
+/// into this task, so neither needs an added `'static` bound.
+async fn finish_transaction(state: Arc<TxState>, commit: bool) -> Result<(), TransactionFailure> {
+    let (after_commit, on_rollback) = super::after_commit::drain(&state);
+    let tx = state.tx.clone();
+    let connection_name = state.connection_name.clone();
+    drop(state);
+
+    let tx = match Arc::try_unwrap(tx) {
+        Ok(tx) => tx,
+        Err(tx) => {
+            let leaked = Arc::strong_count(&tx).saturating_sub(1);
+            drop(tx);
+            tracing::error!(
+                target: "suprnova::database",
+                leaked_handles = leaked,
+                "DB::transaction: TxHandle clones outlived the closure; transaction is in \
+                 ZOMBIE STATE until all leaked handles drop and trigger rollback",
+            );
+            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
+                .compensate()
+                .await;
+            return if commit {
+                Err(FrameworkError::internal(
+                    "DB::transaction: TxHandle clones outlived the closure; \
+                     drop them before the closure returns Ok so commit can proceed",
+                )
+                .into())
+            } else {
+                Ok(())
+            };
+        }
+    };
+
+    if commit {
+        if let Err(error) = tx.commit().await {
+            tracing::error!(
+                target: "suprnova::database",
+                error = %error,
+                "Transaction commit failed; deferred dispatches will be compensated",
+            );
+            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
+                .compensate()
+                .await;
+            return Err(FrameworkError::database(error.to_string()).into());
+        }
+        drop(on_rollback);
+        // Arm the committed branch before invoking any listener code. A
+        // listener panic must not discard an already-committed dispatch.
+        let callbacks = super::after_commit::GuardedCallbacks::after_commit(after_commit);
+        emit_tx_event(super::events::TransactionCommitted {
+            connection_name: connection_name.to_string(),
+        })
+        .await;
+        callbacks
+            .run_after_commit()
+            .await
+            .map_err(TransactionFailure::AfterCommitCallback)
+    } else {
+        let callbacks =
+            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback);
+        if let Err(error) = tx.rollback().await {
+            tracing::warn!(
+                error = %error,
+                "Transaction rollback failed; the original closure error is still surfaced. \
+                 The connection may have been lost between BEGIN and rollback.",
+            );
+        } else {
+            emit_tx_event(super::events::TransactionRolledBack {
+                connection_name: connection_name.to_string(),
+            })
+            .await;
+        }
+        callbacks.compensate().await;
+        Ok(())
+    }
+}
+
+/// Why a `DB::transaction` call failed, kept out of the flat `FrameworkError`
+/// so [`DB::transaction_with_attempts`] can tell the two apart.
+///
+/// A retry is only ever safe when nothing was written. Once the COMMIT lands,
+/// the closure's writes are durable and re-running it would apply them twice -
+/// so an after-commit callback failing has to be a distinct outcome, not an
+/// error the retry loop pattern-matches on a message. `is_deadlock` matches the
+/// substring `"deadlock"`, and a deferred queue push failing against a
+/// contended table produces exactly that string, after the commit.
+enum TransactionFailure {
+    /// The transaction did not commit: the closure returned `Err`, a leaked
+    /// `TxHandle` blocked the commit, or the database refused it. Nothing is
+    /// durable, so a retry is safe.
+    NotCommitted(FrameworkError),
+    /// The transaction committed and an after-commit callback then failed.
+    /// Never retryable.
+    AfterCommitCallback(FrameworkError),
+    /// The completion task failed without establishing the database outcome.
+    /// Retrying could duplicate committed writes.
+    FinalizationInterrupted(FrameworkError),
+}
+
+impl TransactionFailure {
+    /// Flatten to the error the public surface returns. All variants carry a
+    /// user-facing error already; the variant only ever mattered internally.
+    fn into_error(self) -> FrameworkError {
+        match self {
+            Self::NotCommitted(e)
+            | Self::AfterCommitCallback(e)
+            | Self::FinalizationInterrupted(e) => e,
+        }
+    }
+}
+
+impl From<FrameworkError> for TransactionFailure {
+    /// Closure/setup failures use the pre-commit conversion. Finalization
+    /// constructs post-commit and interrupted outcomes explicitly.
+    fn from(e: FrameworkError) -> Self {
+        Self::NotCommitted(e)
+    }
+}
+
+tokio::task_local! {
+    /// Active transaction installed by [`DB::transaction`] /
+    /// [`DB::transaction_with_attempts`] for the duration of their
+    /// inner closure. Every terminal method on `Builder<M>` and every
+    /// CRUD method on `Model` consults this - when `Some(_)`, the SQL
+    /// runs through the transaction's connection; otherwise the
+    /// global pool from [`DB::connection`] handles it.
+    ///
+    /// Implementation detail - exposed `pub(crate)` because the
+    /// executor-dispatch helpers in `eloquent::builder` and
+    /// `eloquent::model` need to read it from outside this module.
+    pub(crate) static CURRENT_TX: Option<Arc<TxState>>;
+}
+
+/// Handle returned by [`DB::begin_transaction`] and surfaced as
+/// `&Transaction` inside the closure form. Owns the active
+/// `DatabaseTransaction` until [`Self::commit`] / [`Self::rollback`]
+/// consume it.
+///
+/// Holding a `Transaction` ties up one connection from the pool for
+/// the lifetime of the handle. On SQLite (single shared connection)
+/// any parallel non-transactional read will block until the
+/// transaction completes - load any pre-flight rows BEFORE
+/// `DB::begin_transaction()` and scope every dependent write through
+/// the returned `tx` handle.
+pub struct Transaction {
+    pub(crate) inner: Arc<DatabaseTransaction>,
+    pub(crate) connection_name: Arc<str>,
+    /// The callback registry this handle's savepoints answer to, or `None` for
+    /// the manual [`DB::begin_transaction`] form, which registers nothing.
+    ///
+    /// Held on the handle rather than read from `CURRENT_TX`, because a manual
+    /// transaction opened *inside* a [`DB::transaction`] closure would find the
+    /// ambient task-local and unwind the enclosing closure's deferred pushes on
+    /// its own `rollback_to` - the wrong registry, silently.
+    ///
+    /// This is a second path from a live `Transaction` to the
+    /// `Arc<DatabaseTransaction>` (`TxState` holds one too), so `DB::transaction`
+    /// has to drop the handle before `Arc::try_unwrap` can reach the transaction
+    /// to commit it. It already does; the drop is now load-bearing twice over.
+    pub(crate) registry: Option<Arc<TxState>>,
+}
+
+/// Cheap shareable view of a [`Transaction`] used to scope a single
+/// query through `Builder::with_tx(&tx)` /
+/// `Model::*_with_tx(&tx, ...)`. Cloning a `TxHandle` is an
+/// `Arc::clone` - every clone points at the same underlying
+/// `DatabaseTransaction`.
+///
+/// `TxHandle` is also the executor-dispatch carrier inside
+/// `Builder<M>::tx_override` - when set, it short-circuits the
+/// `CURRENT_TX` lookup so a builder cloned out of a tx scope can
+/// still target the original transaction.
+#[derive(Clone)]
+pub struct TxHandle {
+    pub(crate) inner: Arc<DatabaseTransaction>,
+    pub(crate) connection_name: Arc<str>,
+}
+
+impl TxHandle {
+    /// Borrow the underlying SeaORM transaction. Internal - exposed
+    /// `pub(crate)` so the executor-dispatch helpers in
+    /// [`ExecutorChoice`] can reach the same `DatabaseTransaction` the
+    /// closure / `Transaction` handle owns. User code goes through
+    /// `Builder::with_tx(&tx)` or `Model::*_with_tx(&tx)` instead.
+    #[allow(dead_code)] // retained for symmetry; ExecutorChoice reaches `self.inner` directly.
+    pub(crate) fn as_conn(&self) -> &DatabaseTransaction {
+        &self.inner
+    }
+}
+
+// ---- ExecutorChoice -----------------------------------------------------
+
+/// Internal dispatch helper. Every terminal method that used to call
+/// `DB::connection()?` now calls [`ExecutorChoice::resolve`] (or
+/// [`ExecutorChoice::resolve_with_override`] for builders carrying a
+/// `tx_override`) and routes the query through the variant arm.
+///
+/// The three-way precedence is:
+///
+/// 1. **Builder-level override** - `Builder::with_tx(&tx)` /
+///    `Model::*_with_tx(&tx, ...)` set a [`TxHandle`] on the builder.
+///    Takes precedence over the task-local because explicit beats
+///    ambient.
+/// 2. **Ambient `CURRENT_TX`** - installed by [`DB::transaction`] /
+///    [`DB::transaction_with_attempts`] for the closure's task scope.
+/// 3. **Pool fallback** - `DB::connection()?` returns the global
+///    [`DbConnection`](crate::database::DbConnection) singleton.
+///
+/// The arm-by-arm `match` is verbose but mechanically sound - SeaORM
+/// generics on `&C: ConnectionTrait` don't compose into a single
+/// `&dyn ConnectionTrait` cleanly because the trait isn't dyn-safe
+/// across every helper we touch. Per-method match arms sidestep the
+/// dyn-dispatch problem.
+#[doc(hidden)]
+pub enum ExecutorChoice {
+    /// Route through an active transaction's connection (closure form
+    /// CURRENT_TX or explicit `with_tx` override). Second field is the
+    /// logical connection name the transaction was opened against -
+    /// threaded into every `QueryExecuted` / transaction-lifecycle
+    /// event so observers see the real connection.
+    Tx(Arc<DatabaseTransaction>, Arc<str>),
+    /// Route through a pool. Second field is the logical name of the
+    /// pool the executor resolved - `__primary__` for the default,
+    /// `__read_replica__` for the auto-routed replica, or whatever
+    /// name was passed to [`Builder::on`](crate::eloquent::Builder::on)
+    /// / `#[model(connection = "...")]` / [`DB::register_named`].
+    Pool(crate::database::DbConnection, Arc<str>),
+}
+
+impl ExecutorChoice {
+    /// The logical connection name this executor is bound to. Threaded
+    /// into [`QueryExecuted::connection_name`](crate::database::events::QueryExecuted::connection_name)
+    /// from the instrumentation helpers.
+    #[doc(hidden)]
+    pub fn connection_name(&self) -> &str {
+        match self {
+            ExecutorChoice::Tx(_, name) => name,
+            ExecutorChoice::Pool(_, name) => name,
+        }
+    }
+
+    /// Pick the executor for an operation that has no builder-level
+    /// override. Consults `CURRENT_TX` first, then falls back to
+    /// the global pool.
+    ///
+    /// Doc-hidden internal API. Public visibility is required because
+    /// the `#[suprnova::model]` macro emits code in user crates that
+    /// references it; user code should not call it directly.
+    #[doc(hidden)]
+    pub fn resolve() -> Result<Self, FrameworkError> {
+        if let Ok(Some(state)) = CURRENT_TX.try_with(|t| t.clone()) {
+            return Ok(ExecutorChoice::Tx(
+                state.tx.clone(),
+                state.connection_name.clone(),
+            ));
+        }
+        Ok(ExecutorChoice::Pool(
+            DB::connection()?,
+            crate::database::PRIMARY_CONNECTION_NAME.into(),
+        ))
+    }
+
+    /// Pick the executor for an operation that may carry a builder-
+    /// level override. The override wins outright when present -
+    /// otherwise the behaviour matches [`Self::resolve`].
+    #[doc(hidden)]
+    pub fn resolve_with_override(
+        override_handle: Option<&TxHandle>,
+    ) -> Result<Self, FrameworkError> {
+        if let Some(h) = override_handle {
+            return Ok(ExecutorChoice::Tx(
+                h.inner.clone(),
+                h.connection_name.clone(),
+            ));
+        }
+        Self::resolve()
+    }
+
+    /// Phase 10C T12 - pick the executor for a READ-shape operation.
+    /// Five-step precedence:
+    ///
+    /// 1. **Builder-level transaction override** (`Builder::with_tx`).
+    ///    Explicit beats every other consideration.
+    /// 2. **Ambient `CURRENT_TX`** installed by [`DB::transaction`] /
+    ///    [`DB::transaction_with_attempts`]. Inside a closure-form
+    ///    transaction every read uses the tx connection - `on(name)`
+    ///    routing is silently ignored.
+    /// 3. **Per-builder `connection_override`** (`Builder::on(name)`).
+    ///    The `__primary__` sentinel short-circuits to
+    ///    [`DB::connection`] without consulting the registry.
+    /// 4. **Per-model default** (`#[model(connection = "...")]`).
+    /// 5. **`__read_replica__`** if registered.
+    /// 6. **Default pool** (`DB::connection`).
+    ///
+    /// Step 1 fires when the closure form's task-local is `Some(_)`;
+    /// step 2 is the same lookup but with a builder-attached
+    /// [`TxHandle`]. Steps 3-6 are the new T12 routing chain.
+    #[doc(hidden)]
+    pub async fn resolve_read(
+        tx_override: Option<&TxHandle>,
+        connection_override: Option<&str>,
+        model_default_conn: Option<&'static str>,
+    ) -> Result<Self, FrameworkError> {
+        // Step 1: explicit builder-level tx override.
+        if let Some(h) = tx_override {
+            return Ok(ExecutorChoice::Tx(
+                h.inner.clone(),
+                h.connection_name.clone(),
+            ));
+        }
+        // Step 2: ambient closure-form transaction.
+        if let Ok(Some(state)) = CURRENT_TX.try_with(|t| t.clone()) {
+            // CACHE-008: a read bound for another connection runs there,
+            // not on the ambient transaction, which is pinned to one
+            // database. Under a RenderCache snapshot the collector is told,
+            // so the render is not published as if the snapshot covered it
+            // (audit finding ASTRA-06).
+            if let Some(name) = connection_override
+                .or(model_default_conn)
+                .filter(|name| *name != crate::database::PRIMARY_CONNECTION_NAME)
+                .filter(|name| state.connection_name.as_ref() != *name)
+            {
+                crate::render_cache::collector::observe_foreign_connection_read();
+                return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
+            }
+            return Ok(ExecutorChoice::Tx(
+                state.tx.clone(),
+                state.connection_name.clone(),
+            ));
+        }
+        // Step 3: per-builder connection override.
+        if let Some(name) = connection_override {
+            if name == crate::database::PRIMARY_CONNECTION_NAME {
+                return Ok(ExecutorChoice::Pool(
+                    DB::connection()?,
+                    crate::database::PRIMARY_CONNECTION_NAME.into(),
+                ));
+            }
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
+        }
+        // Step 4: per-model default connection.
+        if let Some(name) = model_default_conn {
+            if name == crate::database::PRIMARY_CONNECTION_NAME {
+                return Ok(ExecutorChoice::Pool(
+                    DB::connection()?,
+                    crate::database::PRIMARY_CONNECTION_NAME.into(),
+                ));
+            }
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
+        }
+        // Step 5: read replica if registered.
+        if crate::database::ConnectionRegistry::has(crate::database::READ_REPLICA_CONNECTION_NAME)
+            .await
+        {
+            return Ok(ExecutorChoice::Pool(
+                DB::named(crate::database::READ_REPLICA_CONNECTION_NAME).await?,
+                crate::database::READ_REPLICA_CONNECTION_NAME.into(),
+            ));
+        }
+        // Step 6: default pool.
+        Ok(ExecutorChoice::Pool(
+            DB::connection()?,
+            crate::database::PRIMARY_CONNECTION_NAME.into(),
+        ))
+    }
+
+    /// Like [`Self::resolve_read`] but skips the auto-routed
+    /// `__read_replica__` step. Read terminals that emit
+    /// `SELECT ... FOR UPDATE` / `FOR SHARE` route through this so the
+    /// lock lands on a primary-capable pool - Postgres hot-standbys
+    /// reject locked reads outright, and MySQL replicas accept them
+    /// but the lock is local to the replica and useless.
+    ///
+    /// Precedence is unchanged for steps 1-4 (tx override > ambient
+    /// `CURRENT_TX` > builder `on(name)` > per-model default). When
+    /// none of those resolve, falls through to the primary pool
+    /// directly without consulting `__read_replica__`.
+    #[doc(hidden)]
+    pub async fn resolve_read_avoid_replica(
+        tx_override: Option<&TxHandle>,
+        connection_override: Option<&str>,
+        model_default_conn: Option<&'static str>,
+    ) -> Result<Self, FrameworkError> {
+        if let Some(h) = tx_override {
+            return Ok(ExecutorChoice::Tx(
+                h.inner.clone(),
+                h.connection_name.clone(),
+            ));
+        }
+        if let Ok(Some(state)) = CURRENT_TX.try_with(|t| t.clone()) {
+            // CACHE-008: a read bound for another connection runs there,
+            // not on the ambient transaction, which is pinned to one
+            // database. Under a RenderCache snapshot the collector is told,
+            // so the render is not published as if the snapshot covered it
+            // (audit finding ASTRA-06).
+            if let Some(name) = connection_override
+                .or(model_default_conn)
+                .filter(|name| *name != crate::database::PRIMARY_CONNECTION_NAME)
+                .filter(|name| state.connection_name.as_ref() != *name)
+            {
+                crate::render_cache::collector::observe_foreign_connection_read();
+                return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
+            }
+            return Ok(ExecutorChoice::Tx(
+                state.tx.clone(),
+                state.connection_name.clone(),
+            ));
+        }
+        if let Some(name) = connection_override {
+            if name == crate::database::PRIMARY_CONNECTION_NAME {
+                return Ok(ExecutorChoice::Pool(
+                    DB::connection()?,
+                    crate::database::PRIMARY_CONNECTION_NAME.into(),
+                ));
+            }
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
+        }
+        if let Some(name) = model_default_conn {
+            if name == crate::database::PRIMARY_CONNECTION_NAME {
+                return Ok(ExecutorChoice::Pool(
+                    DB::connection()?,
+                    crate::database::PRIMARY_CONNECTION_NAME.into(),
+                ));
+            }
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
+        }
+        Ok(ExecutorChoice::Pool(
+            DB::connection()?,
+            crate::database::PRIMARY_CONNECTION_NAME.into(),
+        ))
+    }
+
+    /// Phase 10C T12 - pick the executor for a WRITE-shape operation
+    /// (`Model::create`, `Model::save`, `Model::update`, `Model::delete`,
+    /// `DbTableBuilder::insert/update/delete`).
+    ///
+    /// Same precedence as [`Self::resolve_read`] EXCEPT step 5 is
+    /// skipped - writes never auto-route to `__read_replica__`. If the
+    /// caller wants a write against a non-primary connection they must
+    /// chain `Builder::on(name)` (step 3) or tag the model with
+    /// `#[model(connection = "...")]` (step 4) explicitly.
+    #[doc(hidden)]
+    pub async fn resolve_write(
+        tx_override: Option<&TxHandle>,
+        connection_override: Option<&str>,
+        model_default_conn: Option<&'static str>,
+    ) -> Result<Self, FrameworkError> {
+        if let Some(h) = tx_override {
+            return Ok(ExecutorChoice::Tx(
+                h.inner.clone(),
+                h.connection_name.clone(),
+            ));
+        }
+        if let Ok(Some(state)) = CURRENT_TX.try_with(|t| t.clone()) {
+            return Ok(ExecutorChoice::Tx(
+                state.tx.clone(),
+                state.connection_name.clone(),
+            ));
+        }
+        if let Some(name) = connection_override {
+            if name == crate::database::PRIMARY_CONNECTION_NAME {
+                return Ok(ExecutorChoice::Pool(
+                    DB::connection()?,
+                    crate::database::PRIMARY_CONNECTION_NAME.into(),
+                ));
+            }
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
+        }
+        if let Some(name) = model_default_conn {
+            if name == crate::database::PRIMARY_CONNECTION_NAME {
+                return Ok(ExecutorChoice::Pool(
+                    DB::connection()?,
+                    crate::database::PRIMARY_CONNECTION_NAME.into(),
+                ));
+            }
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
+        }
+        // No read-replica auto-routing on writes.
+        Ok(ExecutorChoice::Pool(
+            DB::connection()?,
+            crate::database::PRIMARY_CONNECTION_NAME.into(),
+        ))
+    }
+
+    /// Build an executor that routes through a specific transaction.
+    /// Used by the `Model::*_with_tx` shims, which bypass both the
+    /// builder override and the ambient `CURRENT_TX` because the
+    /// caller has supplied the tx handle explicitly.
+    #[doc(hidden)]
+    pub fn from_tx(tx: &Transaction) -> Self {
+        ExecutorChoice::Tx(tx.inner.clone(), tx.connection_name.clone())
+    }
+
+    /// Build an executor that routes through an explicit query-builder
+    /// transaction override (`Builder::with_tx(&tx)` / `Model::*_with_tx`
+    /// pin `Builder`/`Model` operations to `tx.handle()`). Same shape as
+    /// [`Self::from_tx`], for callers that only have the cheap
+    /// [`TxHandle`] rather than the full [`Transaction`].
+    #[doc(hidden)]
+    pub fn from_handle(handle: &TxHandle) -> Self {
+        ExecutorChoice::Tx(handle.inner.clone(), handle.connection_name.clone())
+    }
+
+    /// Get the active SeaORM database backend (Postgres / MySQL /
+    /// SQLite). Threaded into the per-backend SQL renderers.
+    #[doc(hidden)]
+    pub fn backend(&self) -> sea_orm::DbBackend {
+        match self {
+            ExecutorChoice::Tx(t, _) => t.get_database_backend(),
+            ExecutorChoice::Pool(c, _) => c.inner().get_database_backend(),
+        }
+    }
+
+    /// Execute a SeaORM-built `Select<E>` and materialise every
+    /// matching row into `E::Model`. Emits
+    /// [`QueryExecuted`](crate::database::events::QueryExecuted) when
+    /// observation is active.
+    #[doc(hidden)]
+    pub async fn select_all<E>(
+        &self,
+        q: sea_orm::Select<E>,
+    ) -> Result<Vec<E::Model>, sea_orm::DbErr>
+    where
+        E: sea_orm::EntityTrait,
+    {
+        if super::events::is_dispatching() || !super::events::query_observation_active() {
+            return match self {
+                ExecutorChoice::Tx(t, _) => q.all(t.as_ref()).await,
+                ExecutorChoice::Pool(c, _) => q.all(c.inner()).await,
+            };
+        }
+        let stmt = sea_orm::QueryTrait::build(&q, self.backend());
+        let (sql, bindings) = (stmt.sql.clone(), stmt_bindings_strings(&stmt));
+        let conn_name = self.connection_name().to_string();
+        let start = std::time::Instant::now();
+        let res = match self {
+            ExecutorChoice::Tx(t, _) => q.all(t.as_ref()).await,
+            ExecutorChoice::Pool(c, _) => q.all(c.inner()).await,
+        };
+        let elapsed = start.elapsed();
+        finish_query_event(
+            sql,
+            bindings,
+            elapsed,
+            super::events::ReadWriteType::Read,
+            conn_name,
+            &res,
+        )
+        .await;
+        res
+    }
+
+    /// Execute a SeaORM-built `Select<E>` and materialise at most one
+    /// row into `E::Model`. See [`Self::select_all`] for the
+    /// observability contract.
+    #[doc(hidden)]
+    pub async fn select_one<E>(
+        &self,
+        q: sea_orm::Select<E>,
+    ) -> Result<Option<E::Model>, sea_orm::DbErr>
+    where
+        E: sea_orm::EntityTrait,
+    {
+        if super::events::is_dispatching() || !super::events::query_observation_active() {
+            return match self {
+                ExecutorChoice::Tx(t, _) => q.one(t.as_ref()).await,
+                ExecutorChoice::Pool(c, _) => q.one(c.inner()).await,
+            };
+        }
+        let stmt = sea_orm::QueryTrait::build(&q, self.backend());
+        let (sql, bindings) = (stmt.sql.clone(), stmt_bindings_strings(&stmt));
+        let conn_name = self.connection_name().to_string();
+        let start = std::time::Instant::now();
+        let res = match self {
+            ExecutorChoice::Tx(t, _) => q.one(t.as_ref()).await,
+            ExecutorChoice::Pool(c, _) => q.one(c.inner()).await,
+        };
+        let elapsed = start.elapsed();
+        finish_query_event(
+            sql,
+            bindings,
+            elapsed,
+            super::events::ReadWriteType::Read,
+            conn_name,
+            &res,
+        )
+        .await;
+        res
+    }
+
+    /// Execute a SeaORM-built `Select<E>` as a `COUNT(*)` and return the
+    /// total matching row count. See [`Self::select_all`] for the
+    /// observability contract.
+    #[doc(hidden)]
+    pub async fn select_count<E>(&self, q: sea_orm::Select<E>) -> Result<u64, sea_orm::DbErr>
+    where
+        E: sea_orm::EntityTrait,
+        E::Model: Send + Sync,
+    {
+        use sea_orm::PaginatorTrait;
+        if super::events::is_dispatching() || !super::events::query_observation_active() {
+            return match self {
+                ExecutorChoice::Tx(t, _) => q.count(t.as_ref()).await,
+                ExecutorChoice::Pool(c, _) => q.count(c.inner()).await,
+            };
+        }
+        let stmt = sea_orm::QueryTrait::build(&q, self.backend());
+        let (sql, bindings) = (stmt.sql.clone(), stmt_bindings_strings(&stmt));
+        let conn_name = self.connection_name().to_string();
+        let start = std::time::Instant::now();
+        let res = match self {
+            ExecutorChoice::Tx(t, _) => q.count(t.as_ref()).await,
+            ExecutorChoice::Pool(c, _) => q.count(c.inner()).await,
+        };
+        let elapsed = start.elapsed();
+        finish_query_event(
+            sql,
+            bindings,
+            elapsed,
+            super::events::ReadWriteType::Read,
+            conn_name,
+            &res,
+        )
+        .await;
+        res
+    }
+
+    /// Execute a prepared `Statement` that produces rows.
+    ///
+    /// Emits [`QueryExecuted`](crate::database::events::QueryExecuted)
+    /// to every registered listener - `DB::listen` callback, dispatcher
+    /// listener, and the in-memory query log. Re-entrancy guarded:
+    /// a listener that re-queries does not re-fire QueryExecuted.
+    #[doc(hidden)]
+    pub async fn query_all(
+        &self,
+        stmt: sea_orm::Statement,
+    ) -> Result<Vec<sea_orm::QueryResult>, sea_orm::DbErr> {
+        self.run_instrumented(stmt, Some(super::events::ReadWriteType::Read), |s, e| {
+            Box::pin(async move {
+                match e {
+                    ExecutorChoice::Tx(t, _) => t.query_all_raw(s).await,
+                    ExecutorChoice::Pool(c, _) => c.inner().query_all_raw(s).await,
+                }
+            })
+        })
+        .await
+    }
+
+    /// Execute a prepared `Statement` that produces at most one row.
+    /// See [`Self::query_all`] for the observability contract.
+    #[doc(hidden)]
+    pub async fn query_one(
+        &self,
+        stmt: sea_orm::Statement,
+    ) -> Result<Option<sea_orm::QueryResult>, sea_orm::DbErr> {
+        self.run_instrumented(stmt, Some(super::events::ReadWriteType::Read), |s, e| {
+            Box::pin(async move {
+                match e {
+                    ExecutorChoice::Tx(t, _) => t.query_one_raw(s).await,
+                    ExecutorChoice::Pool(c, _) => c.inner().query_one_raw(s).await,
+                }
+            })
+        })
+        .await
+    }
+
+    /// Execute a prepared `Statement` that produces rows and hydrate
+    /// each into `T` via [`FromQueryResult`](sea_orm::FromQueryResult).
+    /// Instrumented identically to [`Self::query_all`] - emits
+    /// [`QueryExecuted`](crate::database::events::QueryExecuted) when
+    /// observation is active.
+    ///
+    /// This is the read terminal the Eloquent `Builder` uses, so model
+    /// SELECTs - and the eager-load IN-queries that recurse back through
+    /// `Builder::get` - surface in `DB::listen` / the query log the way
+    /// Laravel's do. Behaviourally equivalent to
+    /// `find_by_statement(stmt).all(conn)` (SeaORM hydrates each row with
+    /// the empty column prefix) but routed through the observability
+    /// fan-out instead of straight at the connection.
+    #[doc(hidden)]
+    pub async fn statement_all<T>(&self, stmt: sea_orm::Statement) -> Result<Vec<T>, sea_orm::DbErr>
+    where
+        T: sea_orm::FromQueryResult,
+    {
+        self.run_instrumented(stmt, Some(super::events::ReadWriteType::Read), |s, e| {
+            Box::pin(async move {
+                let rows = match e {
+                    ExecutorChoice::Tx(t, _) => t.query_all_raw(s).await?,
+                    ExecutorChoice::Pool(c, _) => c.inner().query_all_raw(s).await?,
+                };
+                rows.iter()
+                    .map(|r| <T as sea_orm::FromQueryResult>::from_query_result(r, ""))
+                    .collect::<Result<Vec<T>, sea_orm::DbErr>>()
+            })
+        })
+        .await
+    }
+
+    /// Execute a prepared `Statement` that doesn't produce rows
+    /// (INSERT / UPDATE / DELETE / DDL). See [`Self::query_all`] for
+    /// the observability contract.
+    #[doc(hidden)]
+    pub async fn run(
+        &self,
+        stmt: sea_orm::Statement,
+    ) -> Result<sea_orm::ExecResult, sea_orm::DbErr> {
+        self.run_instrumented(stmt, Some(super::events::ReadWriteType::Write), |s, e| {
+            Box::pin(async move {
+                match e {
+                    ExecutorChoice::Tx(t, _) => t.execute_raw(s).await,
+                    ExecutorChoice::Pool(c, _) => c.inner().execute_raw(s).await,
+                }
+            })
+        })
+        .await
+    }
+
+    /// Generic helper that runs a Statement and emits `QueryExecuted`
+    /// to every registered observer. Shared by `query_all`, `query_one`,
+    /// and `run` so the dispatch shape is in exactly one place.
+    ///
+    /// Listener errors are observational: the closure's result is
+    /// returned to the caller verbatim regardless of listener outcome.
+    /// Re-entrancy is guarded - listeners that themselves run queries
+    /// will not re-fire QueryExecuted.
+    async fn run_instrumented<F, T>(
+        &self,
+        stmt: sea_orm::Statement,
+        rw: Option<super::events::ReadWriteType>,
+        f: F,
+    ) -> Result<T, sea_orm::DbErr>
+    where
+        F: for<'a> FnOnce(
+            sea_orm::Statement,
+            &'a Self,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T, sea_orm::DbErr>> + Send + 'a>,
+        >,
+    {
+        // Fast path: if no observer is active OR we're already inside
+        // a listener dispatch, skip the SQL/binding capture entirely.
+        if super::events::is_dispatching() || !super::events::query_observation_active() {
+            return f(stmt, self).await;
+        }
+        // Capture SQL/bindings BEFORE the call (the Statement is moved
+        // into `f`). Cloning here is the cost of observability - gated
+        // by the active-observer check above.
+        let sql = stmt.sql.clone();
+        let bindings: Vec<String> = stmt
+            .values
+            .as_ref()
+            .map(|v| v.0.iter().map(|val| format!("{val:?}")).collect())
+            .unwrap_or_default();
+        let conn_name = self.connection_name().to_string();
+        let start = std::time::Instant::now();
+        let res = f(stmt, self).await;
+        let elapsed = start.elapsed();
+        let result_for_event: Result<(), String> = match &res {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
+        let event = super::events::QueryExecuted {
+            sql,
+            bindings,
+            time: elapsed,
+            connection_name: conn_name,
+            read_write_type: rw,
+            result: result_for_event,
+        };
+        emit_query_executed(event).await;
+        res
+    }
+
+    /// Insert an active model. Routes through the active transaction
+    /// or the pool depending on the variant.
+    #[doc(hidden)]
+    pub async fn insert_active<A>(
+        &self,
+        am: A,
+    ) -> Result<<A::Entity as sea_orm::EntityTrait>::Model, sea_orm::DbErr>
+    where
+        A: sea_orm::ActiveModelTrait + sea_orm::ActiveModelBehavior + Send + 'static,
+        <A::Entity as sea_orm::EntityTrait>::Model: Send + sea_orm::IntoActiveModel<A>,
+    {
+        match self {
+            ExecutorChoice::Tx(t, _) => {
+                <A as sea_orm::ActiveModelTrait>::insert(am, t.as_ref()).await
+            }
+            ExecutorChoice::Pool(c, _) => {
+                <A as sea_orm::ActiveModelTrait>::insert(am, c.inner()).await
+            }
+        }
+    }
+
+    /// Update an active model. Routes through the active transaction
+    /// or the pool depending on the variant.
+    #[doc(hidden)]
+    pub async fn update_active<A>(
+        &self,
+        am: A,
+    ) -> Result<<A::Entity as sea_orm::EntityTrait>::Model, sea_orm::DbErr>
+    where
+        A: sea_orm::ActiveModelTrait + sea_orm::ActiveModelBehavior + Send + 'static,
+        <A::Entity as sea_orm::EntityTrait>::Model: Send + sea_orm::IntoActiveModel<A>,
+    {
+        match self {
+            ExecutorChoice::Tx(t, _) => {
+                <A as sea_orm::ActiveModelTrait>::update(am, t.as_ref()).await
+            }
+            ExecutorChoice::Pool(c, _) => {
+                <A as sea_orm::ActiveModelTrait>::update(am, c.inner()).await
+            }
+        }
+    }
+
+    /// Delete an active model. Routes through the active transaction
+    /// or the pool depending on the variant.
+    #[doc(hidden)]
+    pub async fn delete_active<A>(&self, am: A) -> Result<sea_orm::DeleteResult, sea_orm::DbErr>
+    where
+        A: sea_orm::ActiveModelTrait + sea_orm::ActiveModelBehavior + Send + 'static,
+    {
+        match self {
+            ExecutorChoice::Tx(t, _) => {
+                <A as sea_orm::ActiveModelTrait>::delete(am, t.as_ref()).await
+            }
+            ExecutorChoice::Pool(c, _) => {
+                <A as sea_orm::ActiveModelTrait>::delete(am, c.inner()).await
+            }
+        }
+    }
+}
+
+impl Transaction {
+    /// The transaction installed as the ambient `CURRENT_TX` by the active
+    /// [`DB::transaction`] / [`DB::transaction_with_attempts`] closure, or
+    /// `None` when no transaction is active.
+    ///
+    /// Lets a helper called from inside the closure - without itself
+    /// receiving a `&Transaction` argument - detect the ambient transaction
+    /// and gate on its presence, or read its pinned backend, while still
+    /// issuing its actual reads and writes through `DB::select` /
+    /// `DB::statement` / `Model` calls, which already consult `CURRENT_TX`
+    /// on their own. `pub(crate)`: this is an internal detection seam, not
+    /// a second way to run statements against the transaction - use
+    /// [`Self::query_all`] or the `DB` facade for that.
+    pub(crate) fn current() -> Option<Self> {
+        let state = CURRENT_TX.try_with(|t| t.clone()).ok().flatten()?;
+        Some(Self {
+            inner: state.tx.clone(),
+            connection_name: state.connection_name.clone(),
+            registry: Some(state),
+        })
+    }
+
+    /// Return the backend used by this transaction's pinned connection.
+    pub fn backend(&self) -> sea_orm::DbBackend {
+        self.inner.get_database_backend()
+    }
+
+    /// Execute a typed raw query on this transaction's pinned connection.
+    ///
+    /// The query participates in the transaction and emits the same
+    /// `QueryExecuted` observations as builder and facade reads.
+    pub async fn query_all(
+        &self,
+        statement: sea_orm::Statement,
+    ) -> Result<Vec<sea_orm::QueryResult>, sea_orm::DbErr> {
+        ExecutorChoice::from_tx(self).query_all(statement).await
+    }
+
+    /// Return a clonable handle to this transaction. Pair with
+    /// `Builder::with_tx(&tx)` (or the `Model::*_with_tx` variants)
+    /// to scope a single operation through the transaction without
+    /// installing it as the ambient `CURRENT_TX`.
+    pub fn handle(&self) -> TxHandle {
+        TxHandle {
+            inner: self.inner.clone(),
+            connection_name: self.connection_name.clone(),
+        }
+    }
+
+    /// Issue `SAVEPOINT <name>` against the active transaction.
+    ///
+    /// Pair with [`Self::rollback_to`] to drop a block of inner work
+    /// while keeping outer changes intact. Works on all three
+    /// backends - SQLite's `SAVEPOINT` is fully functional even
+    /// though SQLite has no row-level locking.
+    ///
+    /// The savepoint name is validated as an unqualified SQL
+    /// identifier (ASCII alphanumeric + underscore, leading letter
+    /// or underscore, max 64 chars) before interpolation. A caller
+    /// that splices untrusted input gets a
+    /// [`FrameworkError::bad_request`] instead of an injected
+    /// statement. [`Self::rollback_to`] applies the same guard.
+    /// Names are case-insensitive. PostgreSQL also aliases names that share
+    /// their first 63 ASCII bytes; SQLite and MySQL retain all 64 bytes.
+    ///
+    /// Inside [`DB::transaction`] the call also marks the after-commit
+    /// registry, so a later [`Self::rollback_to`] can discard the deferred
+    /// dispatches this savepoint's rows were paying for. Repeating a name is
+    /// allowed: the inner savepoint shadows the outer one until it is rolled
+    /// back, which is how every backend resolves it.
+    pub async fn savepoint(&self, name: &str) -> Result<(), FrameworkError> {
+        let validated = canonical_savepoint_name(name, self.backend())?;
+        let sql = format!("SAVEPOINT {validated}");
+        self.inner
+            .execute_unprepared(&sql)
+            .await
+            .map(|_| ())
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        // Marked only once the statement landed: a mark for a savepoint the
+        // database never established would discard callbacks whose rows are
+        // still there.
+        if let Some(state) = self.registry.as_deref() {
+            super::after_commit::mark_savepoint(state, &validated);
+        }
+        Ok(())
+    }
+
+    /// Issue `ROLLBACK TO SAVEPOINT <name>` against the active
+    /// transaction. Drops every change made inside the savepoint
+    /// without aborting the outer transaction.
+    ///
+    /// The savepoint name is validated the same way as
+    /// [`Self::savepoint`] before interpolation - see that method
+    /// for the accepted shape.
+    ///
+    /// Inside [`DB::transaction`] this also unwinds the after-commit registry
+    /// to the savepoint: a [`Job::after_commit`](crate::queue::Job::after_commit)
+    /// push registered above it is discarded, and the compensating callbacks
+    /// registered with it run now, so a deferred `push_unique`'s dedupe lock
+    /// goes back immediately and a re-dispatch inside the same transaction can
+    /// win it. Callbacks registered *before* the savepoint are untouched, and a
+    /// savepoint that is never rolled back keeps everything registered inside
+    /// it. Manual transactions have no registry and so unwind nothing.
+    ///
+    /// The compensations run with the transaction still open and `CURRENT_TX`
+    /// still installed - unlike the end-of-transaction drain, there is no way to
+    /// step out of a task-local scope from inside it. Say that plainly, because a
+    /// caller writing its own compensation has to plan for it: any database write
+    /// such a compensation makes is routed onto this transaction's connection, so
+    /// it commits or rolls back with the transaction rather than standing on its
+    /// own, and a later `rollback_to` on an *earlier* savepoint undoes it like any
+    /// other row this transaction wrote. Compensate outside the database - or hand
+    /// the work to something that is not this transaction - if that is not what
+    /// you want. The one compensation the framework registers is unaffected:
+    /// [`Idempotency::release_owned`](crate::idempotency::Idempotency::release_owned)
+    /// goes to the cache store, and neither shipped store is database-backed.
+    pub async fn rollback_to(&self, name: &str) -> Result<(), FrameworkError> {
+        let validated = canonical_savepoint_name(name, self.backend())?;
+        let sql = format!("ROLLBACK TO SAVEPOINT {validated}");
+        self.inner
+            .execute_unprepared(&sql)
+            .await
+            .map(|_| ())
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        // Registry after SQL, never before: a refused `ROLLBACK TO` leaves the
+        // rows in place, and callbacks discarded for it could not be recovered.
+        if let Some(state) = self.registry.as_deref() {
+            match super::after_commit::rollback_to_savepoint(state, &validated) {
+                Some(compensations) => {
+                    super::after_commit::run_rollback(compensations).await;
+                }
+                None => tracing::warn!(
+                    target: "suprnova::database",
+                    savepoint = validated,
+                    "rolled back to a savepoint this transaction never issued through \
+                     Transaction::savepoint; after-commit callbacks registered inside it \
+                     are kept, because there is no recorded mark to unwind to",
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    /// Commit the manual transaction returned by
+    /// [`DB::begin_transaction`]. Consumes the handle - any
+    /// [`TxHandle`] clones stored elsewhere become inert (their
+    /// `DatabaseTransaction` is still alive in the `Arc`, but the
+    /// underlying connection is no longer in a transactional state).
+    ///
+    /// Errors if any outstanding [`TxHandle`] clones prevent
+    /// `Arc::try_unwrap` from unwrapping the inner transaction -
+    /// that's the correct behaviour, because committing while
+    /// another part of the program might still write through the
+    /// same `TxHandle` would create a race.
+    ///
+    /// Fires [`TransactionCommitted`](super::events::TransactionCommitted)
+    /// after a successful commit.
+    pub async fn commit(self) -> Result<(), FrameworkError> {
+        let conn_name = self.connection_name.to_string();
+        let tx = Arc::try_unwrap(self.inner).map_err(|_| {
+            FrameworkError::internal(
+                "Transaction::commit: TxHandle clones still alive; \
+                 drop them before commit so no further writes can race",
+            )
+        })?;
+        tx.commit()
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        emit_tx_event(super::events::TransactionCommitted {
+            connection_name: conn_name,
+        })
+        .await;
+        Ok(())
+    }
+
+    /// Roll back the manual transaction returned by
+    /// [`DB::begin_transaction`]. Same `Arc::try_unwrap` constraint
+    /// as [`Self::commit`].
+    ///
+    /// Fires [`TransactionRolledBack`](super::events::TransactionRolledBack)
+    /// after a successful rollback.
+    pub async fn rollback(self) -> Result<(), FrameworkError> {
+        let conn_name = self.connection_name.to_string();
+        let tx = Arc::try_unwrap(self.inner).map_err(|_| {
+            FrameworkError::internal(
+                "Transaction::rollback: TxHandle clones still alive; \
+                 drop them before rollback so no further writes can race",
+            )
+        })?;
+        tx.rollback()
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        emit_tx_event(super::events::TransactionRolledBack {
+            connection_name: conn_name,
+        })
+        .await;
+        Ok(())
+    }
+}
+
+impl DB {
+    /// Run `f` inside a database transaction. The closure receives a
+    /// `&Transaction` it can use to issue savepoints; operations on
+    /// `Builder<M>` / `Model` inside the closure pick up the active
+    /// transaction automatically via the `CURRENT_TX` task-local.
+    ///
+    /// - Closure returns `Ok` → commit. Result propagated.
+    /// - Closure returns `Err` → rollback. Original error returned.
+    ///
+    /// One `Err` does **not** mean the transaction rolled back: when an
+    /// after-commit callback fails, the commit already succeeded and is
+    /// durable, and the error reads `after-commit callback failed (the
+    /// transaction itself committed): …`. The closure's return value is lost
+    /// in that case, but its writes are not. Only a deferred dispatch failed -
+    /// see [`Job::after_commit`](crate::queue::Job::after_commit). Every
+    /// registered callback still runs; the first error is the one you get.
+    ///
+    /// Nested `DB::transaction` calls are rejected with a database
+    /// error - SeaORM's `begin()` doesn't compose. Use
+    /// [`Transaction::savepoint`] for nested-rollback behaviour.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// DB::transaction(|_tx| {
+    ///     Box::pin(async move {
+    ///         let mut alice = User::query().filter("name", "alice").first_or_fail().await?;
+    ///         alice.balance -= 30;
+    ///         alice.save().await?;
+    ///
+    ///         let mut bob = User::query().filter("name", "bob").first_or_fail().await?;
+    ///         bob.balance += 30;
+    ///         bob.save().await?;
+    ///         Ok::<(), FrameworkError>(())
+    ///     })
+    /// }).await?;
+    /// ```
+    ///
+    /// The `Box::pin(async move { ... })` shape is required because
+    /// the closure's return type is `Pin<Box<dyn Future + 'b>>` -
+    /// the HRTB lifetime lets the future borrow `&tx` across `.await`
+    /// points (so `tx.savepoint(...)` calls work).
+    pub async fn transaction<F, T>(f: F) -> Result<T, FrameworkError>
+    where
+        // HRTB: the closure must accept a borrow of `Transaction`
+        // tied to a fresh lifetime `'b` and return a boxed future
+        // that captures that borrow. Mirrors SeaORM's
+        // `TransactionTrait::transaction` shape, which is the only
+        // signature Rust accepts when the future actually USES the
+        // `&Transaction` across `.await` points (e.g. calling
+        // `tx.savepoint(...)`).
+        F: for<'b> FnOnce(
+            &'b Transaction,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T, FrameworkError>> + Send + 'b>,
+        >,
+        T: Send,
+    {
+        Self::transaction_inner(f, None)
+            .await
+            .map_err(TransactionFailure::into_error)
+    }
+
+    /// [`DB::transaction`] opened at an explicit isolation level.
+    ///
+    /// Identical to [`DB::transaction`] in every other respect: the same
+    /// nesting refusal, the same `CURRENT_TX` scope, the same begin, commit,
+    /// and rollback events, the same savepoint and after-commit handling,
+    /// because both entry points share [`Self::transaction_inner`]. The only
+    /// difference is the `BEGIN`: SeaORM's
+    /// `begin_with_config(isolation_level, None)` instead of a bare
+    /// `begin()`, which on PostgreSQL issues `SET TRANSACTION ISOLATION
+    /// LEVEL ...` as the first statement of the transaction and on MySQL
+    /// sets it before `START TRANSACTION`. `None` is exactly the backend
+    /// default and therefore exactly what `DB::transaction` does.
+    ///
+    /// `pub(crate)`: the render cache is the one caller. Its render
+    /// transaction needs one consistent snapshot across the handler's own
+    /// reads and the generation read at window close, which PostgreSQL's
+    /// default `READ COMMITTED` does not give (every statement sees the
+    /// latest committed data), so it asks for `REPEATABLE READ` there. See
+    /// `render_cache::middleware::run_render`.
+    pub(crate) async fn transaction_with_isolation<F, T>(
+        isolation_level: Option<IsolationLevel>,
+        f: F,
+    ) -> Result<T, FrameworkError>
+    where
+        F: for<'b> FnOnce(
+            &'b Transaction,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T, FrameworkError>> + Send + 'b>,
+        >,
+        T: Send,
+    {
+        Self::transaction_inner(f, isolation_level)
+            .await
+            .map_err(TransactionFailure::into_error)
+    }
+
+    /// [`DB::transaction`] with the failure cause still intact.
+    ///
+    /// The public entry point flattens everything to a `FrameworkError`, which
+    /// is the right surface for a caller that just wants to know it failed.
+    /// [`DB::transaction_with_attempts`] needs more than that: re-running a
+    /// closure whose writes are already durable would double them, so it has to
+    /// tell "nothing was written" from "the commit landed and an after-commit
+    /// callback failed afterwards". Encoding that in the return type rather
+    /// than in the error's message means no user-supplied error text can ever
+    /// be mistaken for either.
+    async fn transaction_inner<F, T>(
+        f: F,
+        isolation_level: Option<IsolationLevel>,
+    ) -> Result<T, TransactionFailure>
+    where
+        F: for<'b> FnOnce(
+            &'b Transaction,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T, FrameworkError>> + Send + 'b>,
+        >,
+        T: Send,
+    {
+        Self::transaction_scoped(isolation_level, |transaction| async move {
+            f(&transaction).await
+        })
+        .await
+    }
+
+    /// CACHE-009: like [`DB::transaction`], but the closure takes no handle
+    /// and returns any `Send` future. Every write path already routes
+    /// through the ambient `CURRENT_TX`, so a caller that only needs the
+    /// transaction to exist, such as [`crate::render_cache::orm::atomic`],
+    /// can pass a future that borrows from its own frame instead of boxing
+    /// one tied to the handle's lifetime. Crate-internal on purpose: the
+    /// public surface stays the one shape the manual documents.
+    pub(crate) async fn transaction_ambient<F, Fut, T>(f: F) -> Result<T, FrameworkError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, FrameworkError>>,
+        T: Send,
+    {
+        Self::transaction_scoped(None, |_transaction| f())
+            .await
+            .map_err(TransactionFailure::into_error)
+    }
+
+    /// The one transaction body: begin on the primary, install the
+    /// ambient `CURRENT_TX` for the future `make` builds from the handle,
+    /// and commit or roll back through the scope finalizer. Both public
+    /// shapes above are adapters over it.
+    async fn transaction_scoped<G, Fut, T>(
+        isolation_level: Option<IsolationLevel>,
+        make: G,
+    ) -> Result<T, TransactionFailure>
+    where
+        G: FnOnce(Transaction) -> Fut,
+        Fut: std::future::Future<Output = Result<T, FrameworkError>>,
+        T: Send,
+    {
+        // Reject nested calls before doing any work. Without this
+        // guard, `conn.inner().begin()` below would start a brand-new
+        // top-level transaction on a pooled connection that's
+        // independent of the outer scope - silently corrupting the
+        // composition semantics callers expect.
+        let nested = CURRENT_TX.try_with(|t| t.is_some()).unwrap_or(false);
+        if nested {
+            return Err(FrameworkError::database(
+                "nested DB::transaction is not supported; use tx.savepoint(name) for nested rollback",
+            )
+            .into());
+        }
+
+        let conn = DB::connection()?;
+        // DB::transaction always opens against the default pool today
+        // (no `transaction_on(name)` surface yet); when that lands, the
+        // `conn_name` Arc<str> is the only thing that needs to grow.
+        let conn_name: Arc<str> = super::PRIMARY_CONNECTION_NAME.into();
+        // `begin_with_config(None, None)` is what SeaORM's own `begin()`
+        // delegates to, so a caller that asked for no isolation level gets
+        // exactly the backend default `DB::transaction` has always opened
+        // with; only `transaction_with_isolation` ever passes `Some`.
+        let tx = conn
+            .inner()
+            .begin_with_config(isolation_level, None)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        // BEGIN succeeded - fire TransactionBeginning before the
+        // closure runs so listeners observe the open tx.
+        emit_tx_event(super::events::TransactionBeginning {
+            connection_name: conn_name.to_string(),
+        })
+        .await;
+        let tx_state = Arc::new(TxState {
+            tx: Arc::new(tx),
+            connection_name: conn_name,
+            after_commit: std::sync::Mutex::new(Vec::new()),
+            on_rollback: std::sync::Mutex::new(Vec::new()),
+            savepoints: std::sync::Mutex::new(Vec::new()),
+        });
+        let scope_finalizer = ScopeFinalizer::armed(tx_state.clone());
+        // Keep every temporary handle inside the scoped future. On abort,
+        // they drop before ScopeFinalizer, so its owned rollback task can
+        // unwrap the transaction without racing framework-owned references.
+        let transaction = Transaction {
+            inner: tx_state.tx.clone(),
+            connection_name: tx_state.connection_name.clone(),
+            registry: Some(tx_state.clone()),
+        };
+        let result = CURRENT_TX.scope(Some(tx_state), make(transaction)).await;
+
+        // Transfer state before the next await. Dropping the caller now only
+        // stops waiting: the physical outcome, listeners, and callbacks remain
+        // owned by the completion task. T stays here, without a 'static bound.
+        scope_finalizer.complete(result.is_ok()).await?;
+        result.map_err(TransactionFailure::from)
+    }
+
+    /// Open a manual transaction. The caller is responsible for
+    /// calling [`Transaction::commit`] or [`Transaction::rollback`];
+    /// if the handle is dropped the underlying SeaORM
+    /// `DatabaseTransaction::drop` rolls back automatically.
+    ///
+    /// Note: the implicit drop-rollback rolls back the database but does
+    /// NOT emit the [`TransactionRolledBack`](crate::database::TransactionRolledBack)
+    /// event - only an explicit [`Transaction::rollback`] does. A `Drop`
+    /// impl is synchronous and cannot await the async dispatcher without a
+    /// detached spawn that could outlive runtime shutdown, so the event is
+    /// tied to the explicit call. If a listener must observe every rollback
+    /// (audit, metrics), call `rollback()` explicitly on the error path
+    /// rather than relying on `?`-propagation dropping the handle.
+    ///
+    /// Manual mode does NOT install `CURRENT_TX`. Scope individual
+    /// operations through the transaction with `Builder::with_tx(&tx)`
+    /// or the `Model::*_with_tx(&tx, ...)` shims.
+    ///
+    /// One consequence worth knowing before you reach for this form: because
+    /// there is no `CURRENT_TX`, there is no after-commit registry and no drain
+    /// point either, so a [`Job::after_commit`](crate::queue::Job::after_commit)
+    /// push inside a manual transaction happens **immediately** rather than
+    /// waiting for [`Transaction::commit`]. Deferring it would mean queuing a
+    /// callback nothing will ever run. Use [`DB::transaction`] when a dispatch
+    /// has to wait for the commit.
+    ///
+    /// Holding a `Transaction` pins one pool connection for its
+    /// entire lifetime. Pre-load any rows you need to read BEFORE
+    /// calling `begin_transaction`, especially on SQLite (where the
+    /// single shared connection is checked out for the tx duration).
+    pub async fn begin_transaction() -> Result<Transaction, FrameworkError> {
+        let conn = DB::connection()?;
+        let conn_name: Arc<str> = super::PRIMARY_CONNECTION_NAME.into();
+        let tx = conn
+            .inner()
+            .begin()
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        emit_tx_event(super::events::TransactionBeginning {
+            connection_name: conn_name.to_string(),
+        })
+        .await;
+        Ok(Transaction {
+            inner: Arc::new(tx),
+            connection_name: conn_name,
+            // No `CURRENT_TX` and no drain point, so nothing ever registers
+            // against this transaction and its savepoints have nothing to
+            // unwind. See the module doc on manual transactions.
+            registry: None,
+        })
+    }
+
+    /// Run `f` inside a transaction, retrying up to `attempts` times
+    /// when the inner `FrameworkError` looks like a deadlock or
+    /// serialization failure.
+    ///
+    /// The closure body runs from scratch on every attempt - capture
+    /// owned state (or `Arc`s) rather than `&mut` references so the
+    /// retry path is well-defined.
+    ///
+    /// Detection is by Display-string substring against the inner
+    /// error:
+    ///
+    /// - Postgres SQLSTATE `40001` (serialization_failure)
+    /// - Postgres SQLSTATE `40P01` (deadlock_detected)
+    /// - Case-insensitive `"deadlock"` substring (covers MySQL
+    ///   `Deadlock found when trying to get lock` and any user-
+    ///   surfaced deadlock string)
+    ///
+    /// Between attempts a jittered backoff sleeps for the internal
+    /// `deadlock_retry_backoff` helper's computed duration - exponential
+    /// with full jitter, capped at 500ms - so contending writers don't
+    /// thrash the database after a deadlock victim is chosen. On the
+    /// final attempt the error propagates unchanged with no sleep.
+    ///
+    /// A failure that happens *after* the COMMIT is never retried, whatever it
+    /// says. Once the commit lands the closure's writes are durable, so
+    /// re-running it would apply them twice; an after-commit callback failing
+    /// with a deadlock-shaped message is a deferred dispatch's problem, not the
+    /// transaction's. See [`Job::after_commit`](crate::queue::Job::after_commit).
+    pub async fn transaction_with_attempts<F, T>(
+        attempts: u32,
+        mut f: F,
+    ) -> Result<T, FrameworkError>
+    where
+        // HRTB matching `transaction` - the closure must accept a
+        // freshly-borrowed `&Transaction` per attempt and return a
+        // boxed future that borrows it. The `FnMut` bound lets the
+        // closure capture state (e.g. an `Arc<AtomicU32>` retry
+        // counter) and mutate it across attempts.
+        F: for<'b> FnMut(
+                &'b Transaction,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<T, FrameworkError>> + Send + 'b>,
+            > + Send,
+        T: Send,
+    {
+        if attempts == 0 {
+            return Err(FrameworkError::database(
+                "transaction_with_attempts called with attempts = 0",
+            ));
+        }
+        for attempt in 1..=attempts {
+            // `transaction_inner`, not `transaction`: the retry decision needs
+            // to know whether the COMMIT landed. An after-commit callback that
+            // fails with a deadlock-shaped error must not re-run a closure whose
+            // writes are already durable.
+            match DB::transaction_inner(|tx| f(tx), None).await {
+                Ok(v) => return Ok(v),
+                Err(TransactionFailure::NotCommitted(e))
+                    if is_deadlock(&e) && attempt < attempts =>
+                {
+                    let backoff = deadlock_retry_backoff(attempt);
+                    tracing::warn!(
+                        target: "suprnova::eloquent::tx",
+                        attempt,
+                        max_attempts = attempts,
+                        backoff_ms = backoff.as_millis() as u64,
+                        error = %e,
+                        "transaction deadlocked, retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
+                Err(failure) => return Err(failure.into_error()),
+            }
+        }
+        // unreachable - the loop either returns `Ok(_)` or the final
+        // `Err(_)` branch above. Kept as a hardened fallthrough.
+        Err(FrameworkError::internal(
+            "transaction_with_attempts: loop exited without returning",
+        ))
+    }
+}
+
+/// Backoff for [`DB::transaction_with_attempts`]: exponential with
+/// full jitter, base 10ms, doubled per attempt, capped at 500ms.
+///
+/// - attempt 1 → uniform in `[0, 10ms]`
+/// - attempt 2 → uniform in `[0, 20ms]`
+/// - attempt 3 → uniform in `[0, 40ms]`
+/// - attempt 4 → uniform in `[0, 80ms]`
+/// - ...
+/// - attempt 7+ → uniform in `[0, 500ms]`
+///
+/// Full jitter (uniform `[0, capped]`) is the AWS-recommended shape
+/// for transient-fault retries: it spreads contending writers across
+/// the entire window so they don't synchronise on the same retry
+/// instant. The cap keeps the worst-case latency bounded; deadlock
+/// resolution should not stretch into multi-second territory.
+fn deadlock_retry_backoff(attempt: u32) -> Duration {
+    let base_ms: u64 = 10;
+    let raw = base_ms.saturating_mul(1u64 << (attempt.saturating_sub(1)).min(6));
+    let capped = raw.min(500);
+    let jittered = rand::rng().random_range(0..=capped);
+    Duration::from_millis(jittered)
+}
+
+/// Render every bound value of a `Statement` as a debug string. The
+/// `format!("{val:?}")` representation is the same shape used by
+/// `run_instrumented`; pulled out so `select_all`/`select_one`/
+/// `select_count` can match.
+fn stmt_bindings_strings(stmt: &sea_orm::Statement) -> Vec<String> {
+    stmt.values
+        .as_ref()
+        .map(|v| v.0.iter().map(|val| format!("{val:?}")).collect())
+        .unwrap_or_default()
+}
+
+/// Emit a `QueryExecuted` event from the captured SQL/bindings + an
+/// execution result. Used by the `select_*` helpers; the result is
+/// borrowed (not consumed) so the caller still returns it.
+async fn finish_query_event<T>(
+    sql: String,
+    bindings: Vec<String>,
+    elapsed: std::time::Duration,
+    rw: super::events::ReadWriteType,
+    connection_name: String,
+    res: &Result<T, sea_orm::DbErr>,
+) {
+    let result_for_event: Result<(), String> = match res {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    };
+    let event = super::events::QueryExecuted {
+        sql,
+        bindings,
+        time: elapsed,
+        connection_name,
+        read_write_type: Some(rw),
+        result: result_for_event,
+    };
+    emit_query_executed(event).await;
+}
+
+/// Fan a [`QueryExecuted`](super::events::QueryExecuted) event out to
+/// every registered observer. Three sinks:
+///
+/// 1. Direct `DB::listen(|q| { ... })` callbacks - synchronous.
+/// 2. The in-memory query log when
+///    [`DB::enable_query_log`](crate::DB::enable_query_log) is active.
+/// 3. The framework-wide [`EventDispatcher`](crate::EventDispatcher)
+///    so `EventFacade::listen::<QueryExecuted, _>(...)` works.
+///
+/// The whole call runs inside
+/// [`with_dispatching_flag`](super::events::with_dispatching_flag) so
+/// any listener that re-queries does not re-fire QueryExecuted.
+/// Listener errors at the EventFacade layer are swallowed via
+/// [`dispatch_best_effort`](crate::EventFacade::dispatch_best_effort) -
+/// observation must never fail the query.
+pub(crate) async fn emit_query_executed(event: super::events::QueryExecuted) {
+    super::events::with_dispatching_flag(async move {
+        // (1) Direct DB::listen callbacks. Cloning the registry's
+        // listener Vec keeps the lock window tight; listeners are
+        // Arc-cloned so calling them outside the lock is safe.
+        //
+        // Each callback runs inside a `catch_unwind` boundary - the
+        // query already completed (we're emitting the post-execution
+        // event), so a panicking listener must NOT unwind through the
+        // executor and surface as a "query failed" error to the
+        // caller. Mirrors the EventFacade `dispatch_best_effort`
+        // contract: observation never fails the query.
+        let callbacks: Vec<super::events::QueryListener> = match super::events::listeners().read() {
+            Ok(reg) => reg.listeners.clone(),
+            Err(_) => Vec::new(),
+        };
+        for cb in callbacks {
+            let event_ref = &event;
+            let cb_ref = &cb;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                cb_ref(event_ref);
+            }));
+            if let Err(payload) = result {
+                let msg = payload
+                    .downcast_ref::<&'static str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "<non-string panic payload>".to_string());
+                tracing::warn!(
+                    target: "suprnova::database",
+                    panic = %msg,
+                    sql = %event.sql,
+                    "DB::listen callback panicked; ignoring (query already completed)",
+                );
+            }
+        }
+        // (2) Query log.
+        if let Ok(mut log) = super::events::query_log().lock()
+            && log.enabled
+        {
+            log.entries.push(event.clone());
+        }
+        // (3) EventFacade dispatch. Best-effort - a logging listener
+        // returning Err must not fail the query.
+        if crate::EventFacade::has_listeners::<super::events::QueryExecuted>() {
+            let _ = crate::EventFacade::dispatch_best_effort(event).await;
+        }
+    })
+    .await;
+}
+
+/// Fire a transaction-lifecycle event through `EventFacade`. Best-effort
+/// dispatch - a failing listener does not abort the transaction. The
+/// no-listeners short-circuit makes this a no-op in the common case.
+async fn emit_tx_event<E: crate::Event>(event: E) {
+    if crate::EventFacade::has_listeners::<E>() {
+        let _ = crate::EventFacade::dispatch_best_effort(event).await;
+    }
+}
+
+/// Whether `e`'s Display matches the deadlock / serialization-failure
+/// pattern. Used by [`DB::transaction_with_attempts`] to decide
+/// whether to retry.
+fn is_deadlock(e: &FrameworkError) -> bool {
+    let msg = format!("{e}");
+    msg.contains("40001") || msg.contains("40P01") || msg.to_lowercase().contains("deadlock")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A closure that fails with a deadlock-shaped error is the case
+    /// `transaction_with_attempts` exists for: nothing committed, so re-running
+    /// is safe. This is the control for the test below it.
+    #[tokio::test]
+    async fn a_deadlocked_closure_is_retried() {
+        let _db = crate::testing::TestDatabase::sqlite_memory()
+            .await
+            .expect("sqlite");
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counter = runs.clone();
+
+        let err = DB::transaction_with_attempts(3, move |_tx| {
+            let counter = counter.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(FrameworkError::database(
+                    "ERROR: deadlock detected (SQLSTATE 40P01)",
+                ))
+            })
+        })
+        .await
+        .expect_err("every attempt deadlocked");
+
+        assert_eq!(runs.load(Ordering::SeqCst), 3, "all three attempts run");
+        assert!(err.to_string().contains("deadlock"));
+    }
+
+    /// The same error text, raised from an after-commit callback instead, must
+    /// NOT be retried: the closure's writes are already durable, so re-running
+    /// it would apply them twice. Before `TransactionFailure` existed, the
+    /// retry loop's `is_deadlock` substring match could not tell these apart.
+    #[tokio::test]
+    async fn an_after_commit_failure_is_never_retried_however_deadlocked_it_reads() {
+        let _db = crate::testing::TestDatabase::sqlite_memory()
+            .await
+            .expect("sqlite");
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counter = runs.clone();
+
+        let err = DB::transaction_with_attempts(3, move |_tx| {
+            let counter = counter.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                crate::database::after_commit::register_callback(Box::new(|| {
+                    Box::pin(async {
+                        Err(FrameworkError::database(
+                            "ERROR: deadlock detected (SQLSTATE 40P01)",
+                        ))
+                    })
+                }))
+                .await?;
+                Ok::<(), FrameworkError>(())
+            })
+        })
+        .await
+        .expect_err("the after-commit callback failed");
+
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "the commit landed on the first attempt; re-running the closure would \
+             double its writes"
+        );
+        assert!(
+            err.to_string()
+                .contains("after-commit callback failed (the transaction itself committed)"),
+            "the caller must be told the commit happened: {err}"
+        );
+    }
+
+    #[test]
+    fn is_deadlock_matches_postgres_sqlstates() {
+        assert!(is_deadlock(&FrameworkError::database(
+            "ERROR: could not serialize access (SQLSTATE 40001)"
+        )));
+        assert!(is_deadlock(&FrameworkError::database(
+            "ERROR: deadlock detected (SQLSTATE 40P01)"
+        )));
+    }
+
+    #[test]
+    fn is_deadlock_matches_case_insensitive_deadlock_substring() {
+        assert!(is_deadlock(&FrameworkError::database(
+            "Deadlock found when trying to get lock"
+        )));
+        assert!(is_deadlock(&FrameworkError::database("simulated deadlock")));
+        assert!(is_deadlock(&FrameworkError::database("DEADLOCK!")));
+    }
+
+    #[test]
+    fn is_deadlock_rejects_unrelated_errors() {
+        assert!(!is_deadlock(&FrameworkError::database(
+            "ERROR: relation \"users\" does not exist"
+        )));
+        assert!(!is_deadlock(&FrameworkError::database(
+            "connection refused"
+        )));
+        assert!(!is_deadlock(&FrameworkError::internal("oops")));
+    }
+
+    #[test]
+    fn deadlock_retry_backoff_caps_at_500ms() {
+        // 1000 samples per attempt: every sampled value must respect
+        // the documented cap. Late attempts saturate at the 500ms
+        // ceiling regardless of which `attempt` value comes in.
+        for attempt in 1..=20u32 {
+            for _ in 0..1000 {
+                let d = deadlock_retry_backoff(attempt);
+                assert!(
+                    d <= Duration::from_millis(500),
+                    "attempt {attempt} produced {d:?} which exceeds the 500ms cap"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn deadlock_retry_backoff_window_grows_with_attempt() {
+        // Full jitter is uniform in `[0, capped_ms]`. Sample heavily
+        // and assert the empirical maximum reaches at least 50% of the
+        // expected ceiling for each early attempt - looser than the
+        // upper bound but tight enough to catch a regression that
+        // accidentally drops the exponential growth.
+        let expected_ceilings = [10u64, 20, 40, 80, 160, 320, 500];
+        for (i, ceiling) in expected_ceilings.iter().enumerate() {
+            let attempt = (i + 1) as u32;
+            let mut observed_max = 0u64;
+            for _ in 0..2000 {
+                let d = deadlock_retry_backoff(attempt).as_millis() as u64;
+                if d > observed_max {
+                    observed_max = d;
+                }
+                assert!(
+                    d <= *ceiling,
+                    "attempt {attempt}: sample {d}ms exceeded ceiling {ceiling}ms"
+                );
+            }
+            assert!(
+                observed_max >= ceiling / 2,
+                "attempt {attempt}: observed_max {observed_max}ms is below half of ceiling {ceiling}ms - jitter window may have collapsed"
+            );
+        }
+    }
+}

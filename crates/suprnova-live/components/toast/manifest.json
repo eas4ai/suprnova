@@ -1,0 +1,13 @@
+{
+  "name": "suprnova.toast",
+  "version": 1,
+  "root": "suprnova-ui/toast",
+  "files": [
+    "toast.html",
+    "toast.css",
+    "toast.js"
+  ],
+  "elements": [
+    "sn-toast-region"
+  ]
+}

@@ -1,0 +1,18 @@
+error[E0061]: this function takes 1 argument but 0 arguments were supplied
+  --> tests/ui/live/fail/upload_policy_signature.rs:11:23
+   |
+ 7 | #[derive(LiveComponent)]
+   |          ------------- argument #1 of type `&str` is missing
+...
+11 |     #[upload(policy = policy)]
+   |                       ^^^^^^
+   |
+note: function defined here
+  --> tests/ui/live/fail/upload_policy_signature.rs:3:4
+   |
+ 3 | fn policy(_field: &str) -> UploadPolicy {
+   |    ^^^^^^ ------------
+help: provide the argument
+   |
+11 |     #[upload(policy = policy(/* &str */))]
+   |                             ++++++++++++

@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.button-group",
+  "version": 1,
+  "root": "suprnova-ui/button-group",
+  "files": [
+    "button-group.html",
+    "button-group.css"
+  ],
+  "elements": []
+}

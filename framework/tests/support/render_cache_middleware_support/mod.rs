@@ -1,0 +1,3173 @@
+//! Shared boot for the Task 14 middleware tests in
+//! `render_cache_middleware.rs`: a multi-connection in-memory SQLite
+//! database (see [`boot_with_render_cache`] for why one connection is not
+//! enough here), a real `RenderCache::install`, an adjustable clock, and
+//! the `counting_route` handler that lets the tests observe render counts,
+//! block a render, and inject a write mid-render without a timing-based
+//! wait anywhere.
+#![allow(dead_code)]
+
+use std::any::Any;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
+use sea_orm_migration::{MigrationTrait, MigratorTrait};
+use suprnova::auth::{Authenticatable, Guard, SessionGuard, UserProvider};
+use suprnova::render_cache::config::RenderCacheConfig;
+use suprnova::render_cache::registry::GroupPolicy;
+use suprnova::render_cache::{
+    FreshnessPolicy, NegotiatedPolicy, QueryPolicy, RenderCache, RenderCachePolicy,
+    RepresentationClass, VarianceDimension,
+};
+use suprnova::testing::TestContainer;
+use suprnova::{
+    App, Auth, AuthConfig, AuthManager, ConnectionTrait, Crypt, DB, DatabaseUserProvider,
+    EncryptionKey, FrameworkError, GenericUser, HttpResponse, MiddlewareRegistry, Model, Next,
+    Request, Response, Router, attrs, handle_request,
+};
+// `Lang`, `Locale`, and `scope_locale` exist only with the `localization`
+// feature, which the minimal profile checked by
+// `scripts/check-feature-matrix.sh` leaves off. This support module is
+// shared by several test modules that do not need localization, so the
+// gate is at item level: the two locale middlewares, the three locale
+// handlers, their route lines, and their global registrations. The
+// policies those routes are attached under name only
+// `VarianceDimension::Locale`, which is engine-side and always present, so
+// the policy list and the `try_render_cache` chain stay unconditional.
+#[cfg(feature = "localization")]
+use suprnova::{Lang, Locale, scope_locale};
+use suprnova_live::clock::{Clock, ClockError};
+use suprnova_live::identity::UnixMillis;
+use suprnova_live::render_cache::RenderCacheError;
+use suprnova_live::render_cache::key::RenderKey;
+use suprnova_live::render_cache::singleflight::{
+    LocalCoordinatorLimits, LocalRebuildCoordinator, RebuildAdmission, RebuildCoordinator,
+    RebuildLease,
+};
+use suprnova_live::render_cache::store::PublicationFence;
+
+mod probe;
+// `pub`, unlike `probe`: Task 7 added two names here
+// (`recording::ServerTimingLog` and `recording::dispatch_get_timed`) that
+// only the workload bench uses, and re-exporting them below would report
+// them as unused imports in every other target that includes this module.
+// The three names the test suite already used keep their re-export, so no
+// test's imports change.
+pub mod recording;
+
+// Task 5b review: two self-contained blocks of this module now live in
+// sibling files, and every name they used to define is re-exported here
+// under the same path, so a test's `use render_cache_middleware_support::{..}`
+// line is unchanged by the split.
+pub use probe::probe_route;
+pub use recording::{CountingBody, FrameLog};
+// `dispatch_get_recording` is used only by `bypass.rs`, which is gated on
+// the `testing` feature (ruling R72), so the re-export is gated the same
+// way instead of going unused under the minimal profile.
+#[cfg(feature = "testing")]
+pub use recording::dispatch_get_recording;
+
+use probe::probe_handler;
+// Named in `dispatch_recording`'s signature; see the note on `pub mod
+// recording` above for why it is not re-exported.
+use recording::ServerTimingLog;
+
+#[suprnova::model(
+    table = "posts",
+    timestamps = false,
+    fillable = ["title", "views"]
+)]
+pub struct Post {
+    pub id: i64,
+    pub title: String,
+    pub views: i64,
+}
+
+/// The row `DatabaseUserProvider` resolves `Auth::user()` from on the
+/// `/shows-auth-user` route (final review, F2). Written through the ORM by
+/// the test that proves such a render is invalidated by a change to the
+/// user's own row.
+#[suprnova::model(table = "users", timestamps = false, fillable = ["name"])]
+pub struct User {
+    pub id: i64,
+    pub name: String,
+}
+
+struct MiddlewareMigrator;
+
+#[async_trait::async_trait]
+impl MigratorTrait for MiddlewareMigrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![Box::new(suprnova::render_cache::migration::Migration)]
+    }
+}
+
+/// A test principal, recognized through the `x-test-login` header (see
+/// [`LoginHeader`]) - the same shape `live_dogfood_support::Principal`
+/// uses.
+pub struct Principal(String);
+
+impl Authenticatable for Principal {
+    fn get_auth_identifier(&self) -> String {
+        self.0.clone()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+}
+
+/// Stands in for the application's sign-in: a request carrying
+/// `x-test-login: <id>` is treated as that authenticated user for the rest
+/// of the request. Must run before `RenderCacheMiddleware` so `Auth::id()`
+/// reflects it when the middleware builds `Principal` variance and reads
+/// what the render observed.
+pub struct LoginHeader;
+
+#[async_trait]
+impl suprnova::Middleware for LoginHeader {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if let Some(id) = request.header("x-test-login") {
+            Auth::set_user(Arc::new(Principal(id.to_owned())));
+        }
+        next(request).await
+    }
+}
+
+/// The sign-in shape that makes `Auth::user()` reach a `UserProvider`
+/// (final review, F2): a request carrying `x-test-provider-login: <id>` has
+/// that id established as the default guard's identity (`Auth::login_id`,
+/// inside a test session scope) with **no** user object cached for the
+/// request, so the first `Auth::user()` in the handler resolves the row
+/// through the `DatabaseUserProvider` this harness registers on the `users`
+/// provider name. `LoginHeader` above cannot serve this purpose: `set_user`
+/// caches the user object, so `Auth::user()` never touches a provider.
+///
+/// Runs before `RenderCacheMiddleware`, like `LoginHeader`, so the session
+/// write `login_id` performs happens outside the render's collector scope
+/// and the identity is already established when the middleware derives the
+/// key; the handler's own `Auth::user()` then reads request state, never the
+/// session.
+pub struct ProviderLoginHeader;
+
+#[async_trait]
+impl suprnova::Middleware for ProviderLoginHeader {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let Some(id) = request.header("x-test-provider-login").map(str::to_owned) else {
+            return next(request).await;
+        };
+        suprnova::session::session_scope_for_test(
+            suprnova::session::new_session_slot_for_test(),
+            async move {
+                Auth::login_id(id).expect("login_id inside the test session scope");
+                next(request).await
+            },
+        )
+        .await
+    }
+}
+
+/// The sign-in shape a cookie-carried web login actually has on every
+/// request after the login itself: the identity is in the persisted
+/// session and **nothing** is in request state, so the first `Auth::id()`
+/// inside the render has to read it out of the session.
+///
+/// `ProviderLoginHeader` above cannot serve this purpose and neither can
+/// `LoginHeader`: `Auth::login_id` and `Auth::set_user` both write the
+/// request-scoped auth state, so by the time the handler runs the identity
+/// is already there and the session is never consulted. This middleware
+/// installs a session scope whose `SessionData` already carries the
+/// `user_id` - exactly what `SessionMiddleware` leaves behind when it
+/// hydrates a session cookie - and writes no request state at all.
+///
+/// Runs before `RenderCache::install`, like every other sign-in here, so
+/// the scope is in place when the middleware derives the key. The read
+/// itself still happens inside the render, which is the whole point: it is
+/// the read `session_identity` classifies as an identity read rather than
+/// as a session-value read.
+pub struct SessionOnlyLoginHeader;
+
+#[async_trait]
+impl suprnova::Middleware for SessionOnlyLoginHeader {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let Some(id) = request.header("x-test-session-login").map(str::to_owned) else {
+            return next(request).await;
+        };
+        let slot = suprnova::session::new_session_slot_for_test();
+        slot.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_mut()
+            .expect("a fresh test session slot holds a session")
+            .user_id = Some(id);
+        suprnova::session::session_scope_for_test(slot, async move { next(request).await }).await
+    }
+}
+
+/// Resolves the Live tenant from an `x-test-tenant` header, for fix round
+/// 4's tenant-partitioning tests. Wired through the real
+/// `suprnova::live::LiveTenantMiddleware`, exactly like a production tenant
+/// resolver, rather than setting `Request::live_tenant` directly - that
+/// setter is crate-private, reachable only through this middleware.
+pub struct TestTenantResolver;
+
+#[async_trait]
+impl suprnova::live::LiveTenantResolver for TestTenantResolver {
+    async fn resolve(&self, request: &Request) -> Result<Option<String>, FrameworkError> {
+        Ok(request.header("x-test-tenant").map(str::to_owned))
+    }
+}
+
+/// Installs a per-request locale scope starting at `"en"`, the same job
+/// the real `LocaleMiddleware` does (via `scope_locale`) once a translator
+/// is bound - this harness has none, so it calls `scope_locale` directly
+/// instead, matching that function's own doc ("tests... can use it
+/// directly"). Registered before `RenderCache::install`, for the same
+/// ordering reason as `LoginHeader`.
+#[cfg(feature = "localization")]
+pub struct TestLocaleMiddleware;
+
+#[cfg(feature = "localization")]
+#[async_trait]
+impl suprnova::Middleware for TestLocaleMiddleware {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        scope_locale(
+            Locale::parse("en").expect("en is a valid locale"),
+            next(request),
+        )
+        .await
+    }
+}
+
+/// Fix round 5, Leak 1 (first reproduction): stands in for a per-route
+/// impersonation middleware, which the framework explicitly supports.
+/// Registered *after* `RenderCache::install` (see [`boot`]'s own comment at
+/// the registration site), so it runs after `RenderCacheMiddleware` in the
+/// chain and therefore after the key has already been derived from
+/// whatever `LoginHeader` established - exactly the shape the reviewer
+/// proved over real HTTP.
+pub struct ImpersonationMiddleware;
+
+#[async_trait]
+impl suprnova::Middleware for ImpersonationMiddleware {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if let Some(target) = request.header("x-test-impersonate") {
+            Auth::set_user(Arc::new(Principal(target.to_owned())));
+        }
+        next(request).await
+    }
+}
+
+/// Fix round 6, Leak 1, second reproduction: stands in for a per-route
+/// locale middleware, which the framework's own review named as "the only
+/// position such a middleware can occupy" - a per-route middleware always
+/// composes closer to the handler than any global middleware, so it always
+/// runs after `RenderCacheMiddleware` regardless of registration order,
+/// the same reasoning [`ImpersonationMiddleware`] above already
+/// establishes for identity. Gated on `x-test-late-locale` (rather than
+/// applying unconditionally, the way a real per-route middleware would be
+/// scoped to its one route) so every other test's own locale expectations
+/// (`TestLocaleMiddleware`'s outer `"en"`) are unaffected. `scope_locale`d
+/// around only this middleware's own `next(request)` call, so the nested
+/// scope pops the instant the handler returns - before
+/// `RenderCacheMiddleware`'s own post-render guard check ever runs, which
+/// is exactly what defeated round 5's post-render re-read of the same
+/// task-local.
+#[cfg(feature = "localization")]
+pub struct LateLocaleMiddleware;
+
+#[cfg(feature = "localization")]
+#[async_trait]
+impl suprnova::Middleware for LateLocaleMiddleware {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if request.header("x-test-late-locale").is_none() {
+            return next(request).await;
+        }
+        scope_locale(
+            Locale::parse("fr").expect("fr is a valid locale"),
+            next(request),
+        )
+        .await
+    }
+}
+
+/// A `UserProvider` whose `retrieve_by_id` is never actually exercised in
+/// the fix round 4 Leak B reproduction: the test sets the named guard's
+/// user directly via `set_user`, which the guard's own per-request cache
+/// (`request_state::guard_user`) serves back without a provider lookup.
+struct NamedGuardDummyProvider;
+
+#[async_trait]
+impl UserProvider for NamedGuardDummyProvider {
+    async fn retrieve_by_id(
+        &self,
+        _id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        Ok(None)
+    }
+}
+
+/// The name a fix round 4 Leak B route resolves its identity through - a
+/// guard other than the configured default - so `Auth::id()` (the default
+/// guard's own slot) never reflects an identity this middleware sets.
+const NAMED_GUARD: &str = "admin-guard-round-4";
+
+/// Stands in for a non-default guard's own sign-in, the same shape
+/// [`LoginHeader`] provides for the default guard: a request carrying
+/// `x-test-named-login: <id>` is signed in on [`NAMED_GUARD`] specifically.
+/// `SessionGuard::set_user` mirrors into the generic `Auth`-facade slot
+/// only when the guard's name matches the configured default guard (see
+/// `auth::request_state::set_guard_user`'s own doc), so `Auth::id()` stays
+/// `None` for a request that only this middleware touched - exactly the
+/// shape that defeated round 3's re-read-based classification (fix round
+/// 4, Leak B).
+pub struct NamedGuardLoginHeader;
+
+#[async_trait]
+impl suprnova::Middleware for NamedGuardLoginHeader {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if let Some(id) = request.header("x-test-named-login") {
+            let guard = SessionGuard::named(NAMED_GUARD, Arc::new(NamedGuardDummyProvider));
+            guard.set_user(Arc::new(Principal(id.to_owned()))).await;
+        }
+        next(request).await
+    }
+}
+
+/// A clock the tests can move forward on demand, in whole milliseconds.
+pub struct AdjustableTestClock {
+    millis: AtomicU64,
+}
+
+impl AdjustableTestClock {
+    fn new(start_ms: u64) -> Self {
+        Self {
+            millis: AtomicU64::new(start_ms),
+        }
+    }
+
+    /// Advances the clock by `delta_ms`. Never goes backwards.
+    pub fn advance_ms(&self, delta_ms: u64) {
+        self.millis.fetch_add(delta_ms, Ordering::SeqCst);
+    }
+}
+
+impl Clock for AdjustableTestClock {
+    fn now(&self) -> Result<UnixMillis, ClockError> {
+        Ok(UnixMillis::new(self.millis.load(Ordering::SeqCst)))
+    }
+}
+
+/// Wraps [`LocalRebuildCoordinator`] to make singleflight admission
+/// observable from a test: [`Harness::wait_until_waiting`] blocks on a
+/// state barrier (a counter plus a `Notify`, following the tokio
+/// "enable-then-check" pattern so a notification firing between the check
+/// and the wait is never lost) rather than a timing-based wait, which this
+/// project's own conventions forbid.
+struct WaiterTrackingCoordinator {
+    inner: LocalRebuildCoordinator,
+    waiting: AtomicU64,
+    waiting_notify: tokio::sync::Notify,
+    /// Task 17: how many admitted leads (foreground or background) have
+    /// finished their whole publish-decision pipeline and released their
+    /// lease back to the coordinator - regardless of whether they actually
+    /// published. `lead_render` calls `release` on every return path
+    /// immediately after that path's own publish decision (a decline, a
+    /// discard as moved, or `store_entry`'s write); on the one path that
+    /// does publish, `finish_fresh_render` still runs *after* `release` to
+    /// build the client-visible response, so `release` is not literally the
+    /// last thing that path does, but the store write it counts is already
+    /// applied by the time `release` fires. So this is the one signal that
+    /// is true exactly when a render's outcome (published, declined, or
+    /// discarded as moved) is already final and observable in the store,
+    /// which a background rebuild's own start alone cannot prove:
+    /// `spawn_background_rebuild` fires it in a detached `tokio::spawn`, so
+    /// a client dispatch that merely served the stale entry returns long
+    /// before the rebuild it kicked off has necessarily finished.
+    released: AtomicU64,
+    /// Paired with `released` the same way `waiting_notify` is paired with
+    /// `waiting`: race-free "enable-then-check" (see [`counting_route::wait_until_rendering_count`]'s
+    /// own doc for why the capture-then-check order matters).
+    released_notify: tokio::sync::Notify,
+}
+
+impl WaiterTrackingCoordinator {
+    fn new(limits: LocalCoordinatorLimits) -> Self {
+        Self {
+            inner: LocalRebuildCoordinator::new(limits),
+            waiting: AtomicU64::new(0),
+            waiting_notify: tokio::sync::Notify::new(),
+            released: AtomicU64::new(0),
+            released_notify: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl RebuildCoordinator for WaiterTrackingCoordinator {
+    async fn admit(
+        &self,
+        key: &RenderKey,
+        epoch: u64,
+        now_ms: u64,
+    ) -> Result<RebuildAdmission, RenderCacheError> {
+        let admission = self.inner.admit(key, epoch, now_ms).await?;
+        if matches!(admission, RebuildAdmission::Wait(_)) {
+            self.waiting.fetch_add(1, Ordering::SeqCst);
+            self.waiting_notify.notify_waiters();
+        }
+        Ok(admission)
+    }
+
+    async fn publish_token(
+        &self,
+        lease: &RebuildLease,
+        now_ms: u64,
+    ) -> Result<PublicationFence, RenderCacheError> {
+        self.inner.publish_token(lease, now_ms).await
+    }
+
+    async fn release(&self, lease: RebuildLease) -> Result<(), RenderCacheError> {
+        let result = self.inner.release(lease).await;
+        self.released.fetch_add(1, Ordering::SeqCst);
+        self.released_notify.notify_waiters();
+        result
+    }
+}
+
+/// Everything one test needs: the router and middleware registry to
+/// dispatch through, the adjustable clock, and the singleflight waiter
+/// counter. Held behind an `Arc` so a test can `.clone()` it into a
+/// `tokio::spawn`ed task (the singleflight test dispatches two concurrent
+/// requests).
+pub struct Harness {
+    router: Arc<Router>,
+    middleware: Arc<MiddlewareRegistry>,
+    clock: Arc<AdjustableTestClock>,
+    waiting: Arc<WaiterTrackingCoordinator>,
+    conn: suprnova::database::DbConnection,
+    _guard: suprnova::testing::TestContainerGuard,
+    /// The directory holding a fresh SQLite database; `None` when booted on
+    /// a live server connection or on a previous boot's database.
+    _tempdir: Option<tempfile::TempDir>,
+    /// Held only for its `Drop` (removes the directory on disk); `None`
+    /// unless booted through [`boot_with_render_cache_and_l1_for_test`].
+    _l1_tempdir: Option<tempfile::TempDir>,
+    /// The L1 directory the runtime was installed with, whether this boot
+    /// created it or inherited it; `None` when L1 is disabled.
+    l1_dir: Option<PathBuf>,
+}
+
+/// Where a boot gets its database.
+pub enum BootDatabase {
+    /// A fresh WAL-mode SQLite file in a new temporary directory; see
+    /// [`boot_with_render_cache`] for why a file rather than memory.
+    FreshSqlite,
+    /// A live server (Postgres or MySQL) connection. The harness drops and
+    /// recreates every table it owns, so the database must be disposable.
+    LiveServer(suprnova::database::DbConnection),
+    /// A connection a previous boot in this process already prepared;
+    /// schema and rows are kept exactly as that boot left them.
+    Existing(suprnova::database::DbConnection),
+}
+
+/// Where a boot gets its L1 directory.
+pub enum BootL1 {
+    /// No L1 provider.
+    Disabled,
+    /// A fresh temporary directory, with L0 capped at one entry; see
+    /// [`boot_with_render_cache_and_l1_for_test`].
+    Fresh,
+    /// A directory a previous boot created, reopened as is, with the same
+    /// single-entry L0 cap.
+    Existing(PathBuf),
+}
+
+/// Boots a fresh SQLite database with WAL journaling, installs RenderCache,
+/// and registers the routes and policies every test in this file needs.
+///
+/// # Why a WAL-mode file database, not `TestDatabase`'s in-memory pool
+///
+/// This project's own `TestDatabase::fresh` opens `sqlite::memory:` with
+/// exactly one connection - correct for the write-path tests in
+/// `render_cache_orm.rs`, which never hold two transactions open at once.
+/// This suite's "a write during the render discards the candidate" test
+/// needs the opposite: the render's own read view (`DB::transaction`,
+/// opened by the middleware around the handler) must still be open when a
+/// *second*, independent write commits on another connection, so that the
+/// render's snapshot genuinely predates it and the post-render reread can
+/// observe the difference.
+///
+/// Two SQLite configurations were tried and rejected before this one, each
+/// empirically (a hung `Post::create` on the independent connection,
+/// confirmed with `eprintln!` checkpoints, not assumed):
+/// - A single-connection pool contends the render's own transaction against
+///   the injected write for the pool's one connection - the same shape
+///   ruling R76 fixed elsewhere, proven to hang the same way.
+/// - A multi-connection `sqlite::memory:?cache=shared` pool avoids the pool
+///   contention but not a second one: SQLite's shared-cache mode uses
+///   table-level locking, so the render's read-only transaction (which has
+///   read the `posts` table) still blocks a second connection's write to
+///   that same table until the reader's transaction ends - and it can't
+///   end until the handler, which is awaiting that write, returns.
+///
+/// A real file with `journal_mode=WAL` gives genuine reader/writer
+/// concurrency instead: a WAL reader sees a fixed snapshot as of when its
+/// transaction began and never blocks a writer, and a writer never blocks
+/// a reader. That is exactly the isolation the render's read view needs.
+pub async fn boot_with_render_cache() -> Arc<Harness> {
+    boot(
+        true,
+        BootDatabase::FreshSqlite,
+        BootL1::Disabled,
+        None,
+        suprnova::render_cache::HintsConfig::Disabled,
+    )
+    .await
+}
+
+/// Test-only for the fix round 1, item 2 regression test: boots exactly
+/// like [`boot_with_render_cache`] but does **not** clear the global
+/// middleware registry first, so a caller can register its own marker
+/// middleware beforehand and then observe whether `RenderCache::install`
+/// preserved it. Production `install` never clears the registry (see its
+/// own doc); this seam exists only so a test can arrange "an application
+/// already registered its own middleware" without also fighting this
+/// harness's own test-isolation clear.
+pub async fn boot_with_render_cache_preserving_global_middleware_for_test() -> Arc<Harness> {
+    boot(
+        false,
+        BootDatabase::FreshSqlite,
+        BootL1::Disabled,
+        None,
+        suprnova::render_cache::HintsConfig::Disabled,
+    )
+    .await
+}
+
+/// Test-only for fix round 2, item 5: boots exactly like
+/// [`boot_with_render_cache`], except the runtime is configured with a real
+/// file-backed L1 provider (a fresh temp directory) and an L0 capped at a
+/// single entry, so a second publish deterministically evicts the first from
+/// L0 while L1 - sized generously - keeps both. `/l1-cached/{id}` is the only
+/// route registered with `StorageLayers::l0_and_l1()`; every other route in
+/// this harness stays L0-only, matching every other test in this file, so
+/// this is the first and only place L1 actually runs together with the
+/// middleware.
+pub async fn boot_with_render_cache_and_l1_for_test() -> Arc<Harness> {
+    boot(
+        true,
+        BootDatabase::FreshSqlite,
+        BootL1::Fresh,
+        None,
+        suprnova::render_cache::HintsConfig::Disabled,
+    )
+    .await
+}
+
+/// Boots exactly like [`boot_with_render_cache_and_l1_for_test`], except
+/// the installed configuration's build id is overridden with `build_id`
+/// (via [`suprnova::render_cache::config::RenderCacheConfig::with_build_id`])
+/// rather than whatever [`RenderCacheConfig::from_env`] would have chosen.
+/// Exists for the build-id middleware test: pairing this with
+/// [`reboot_with_render_cache_on_the_same_database_and_l1_with_build_id_for_test`]
+/// gives two installs over the *same* database and L1 directory that agree
+/// on everything except the build id.
+pub async fn boot_with_render_cache_and_l1_and_build_id_for_test(build_id: &str) -> Arc<Harness> {
+    boot(
+        true,
+        BootDatabase::FreshSqlite,
+        BootL1::Fresh,
+        Some(build_id.to_owned()),
+        suprnova::render_cache::HintsConfig::Disabled,
+    )
+    .await
+}
+
+/// Boots exactly like [`boot_with_render_cache`], except the installed
+/// configuration carries `hints`.
+///
+/// Every other boot here leaves the hint channel disabled, which is what
+/// `RenderCacheConfig::from_env` chooses for this harness's Embedded
+/// profile anyway; this is the one seam that turns it on, so that a test
+/// can prove what a configured-but-unreachable channel does to a node.
+pub async fn boot_with_render_cache_and_hints_for_test(
+    hints: suprnova::render_cache::HintsConfig,
+) -> Arc<Harness> {
+    boot(
+        true,
+        BootDatabase::FreshSqlite,
+        BootL1::Disabled,
+        None,
+        hints,
+    )
+    .await
+}
+
+/// Boots exactly like [`boot_with_render_cache`], on a live server
+/// connection instead of a fresh SQLite file (final review, F1 / ruling
+/// R117): the render-cache race that SQLite's WAL snapshot hides by
+/// construction can only be proven against a server whose default
+/// transaction isolation is not a snapshot. Drops and recreates every table
+/// this harness owns (`posts`, `users`, and the three RenderCache tables),
+/// so `conn` must point at a disposable database.
+pub async fn boot_with_render_cache_on_live_server_for_test(
+    conn: suprnova::database::DbConnection,
+) -> Arc<Harness> {
+    boot(
+        true,
+        BootDatabase::LiveServer(conn),
+        BootL1::Disabled,
+        None,
+        suprnova::render_cache::HintsConfig::Disabled,
+    )
+    .await
+}
+
+/// A simulated process restart (final review, F3 / ruling R119): a fresh
+/// runtime slot (`RenderCache::install` replaces the installed runtime, so
+/// L0, the coordinator, and the lease map start empty), over the **same**
+/// database `previous` booted and the **same** L1 directory it published
+/// into, reopened as is. `previous` must have been booted with L1 and must
+/// stay alive for the duration (it owns the directory on disk).
+pub async fn reboot_with_render_cache_on_the_same_database_and_l1_for_test(
+    previous: &Harness,
+) -> Arc<Harness> {
+    let l1_dir = previous
+        .l1_dir
+        .clone()
+        .expect("the previous boot must have been made with L1 enabled");
+    boot(
+        true,
+        BootDatabase::Existing(previous.conn.clone()),
+        BootL1::Existing(l1_dir),
+        None,
+        suprnova::render_cache::HintsConfig::Disabled,
+    )
+    .await
+}
+
+/// Exactly like [`reboot_with_render_cache_on_the_same_database_and_l1_for_test`],
+/// except the second install's build id is overridden with `build_id`
+/// instead of inheriting whatever [`RenderCacheConfig::from_env`] would
+/// have chosen for both installs alike.
+pub async fn reboot_with_render_cache_on_the_same_database_and_l1_with_build_id_for_test(
+    previous: &Harness,
+    build_id: &str,
+) -> Arc<Harness> {
+    let l1_dir = previous
+        .l1_dir
+        .clone()
+        .expect("the previous boot must have been made with L1 enabled");
+    boot(
+        true,
+        BootDatabase::Existing(previous.conn.clone()),
+        BootL1::Existing(l1_dir),
+        Some(build_id.to_owned()),
+        suprnova::render_cache::HintsConfig::Disabled,
+    )
+    .await
+}
+
+/// The tables this harness owns on a live server, dropped and recreated by
+/// every `BootDatabase::LiveServer` boot. Children before parents is not a
+/// concern here (nothing references anything), but the RenderCache tables
+/// come last so a failed drop of one of them is the loudest failure.
+const OWNED_TABLES: [&str; 5] = [
+    "posts",
+    "users",
+    "suprnova_render_epochs",
+    "suprnova_render_generation_log",
+    "suprnova_render_generations",
+];
+
+/// Creates `posts` and `users` in the active backend's own DDL. SQLite's
+/// `INTEGER PRIMARY KEY AUTOINCREMENT`, Postgres's `BIGSERIAL`, and
+/// MySQL's `BIGINT AUTO_INCREMENT` all back the models' `i64` ids.
+async fn create_owned_tables(conn: &suprnova::database::DbConnection) {
+    let backend = conn.inner().get_database_backend();
+    let id_column = match backend {
+        sea_orm::DbBackend::Sqlite => "INTEGER PRIMARY KEY AUTOINCREMENT",
+        sea_orm::DbBackend::Postgres => "BIGSERIAL PRIMARY KEY",
+        sea_orm::DbBackend::MySql => "BIGINT AUTO_INCREMENT PRIMARY KEY",
+        other => panic!("this harness has no DDL for backend {other:?}"),
+    };
+    let views_column = match backend {
+        sea_orm::DbBackend::Sqlite => "INTEGER NOT NULL DEFAULT 0",
+        _ => "BIGINT NOT NULL DEFAULT 0",
+    };
+    conn.inner()
+        .execute_unprepared(&format!(
+            "CREATE TABLE posts (id {id_column}, title TEXT NOT NULL, views {views_column})"
+        ))
+        .await
+        .expect("create posts table");
+    conn.inner()
+        .execute_unprepared(&format!(
+            "CREATE TABLE users (id {id_column}, name TEXT NOT NULL)"
+        ))
+        .await
+        .expect("create users table");
+}
+
+async fn boot(
+    clear_global_middleware: bool,
+    database: BootDatabase,
+    l1: BootL1,
+    build_id: Option<String>,
+    hints: suprnova::render_cache::HintsConfig,
+) -> Arc<Harness> {
+    static CRYPT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    CRYPT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
+    App::init();
+    counting_route::reset();
+    probe_route::reset();
+    // Fix round 1, F4: disarms any race point a previous test in this same
+    // binary armed but never fired (see `race::reset`'s own doc). Gated the
+    // same as `race` itself: `race_points` only exists in the library under
+    // the `testing` feature, so this call must not exist without it either.
+    #[cfg(feature = "testing")]
+    race::reset();
+    if clear_global_middleware {
+        suprnova::middleware::clear_global_middleware_for_test();
+    }
+
+    let guard = TestContainer::fake();
+    let (conn, tempdir) = match database {
+        BootDatabase::FreshSqlite => {
+            let tempdir =
+                tempfile::tempdir().expect("tempdir for render cache middleware test database");
+            let db_path = tempdir.path().join("render-cache-middleware.sqlite3");
+            let config = suprnova::database::DatabaseConfig::builder()
+                .url(format!("sqlite://{}", db_path.display()))
+                .max_connections(4)
+                .min_connections(1)
+                .logging(false)
+                .build();
+            #[cfg(feature = "testing")]
+            let mut conn = suprnova::database::DbConnection::connect(&config)
+                .await
+                .expect("connect sqlite");
+            #[cfg(not(feature = "testing"))]
+            let conn = suprnova::database::DbConnection::connect(&config)
+                .await
+                .expect("connect sqlite");
+            // Task 5: the only boot path that owns a pool nothing has
+            // cloned yet, which is what installing a metric callback
+            // needs - see `statements::install`. The two other
+            // `BootDatabase` arms are handed a connection somebody else
+            // already holds, so they cannot install one and the bypass
+            // suite does not use them. Ruling R47: `statements::install`
+            // reaches `DbConnection::observe_statements_for_test`, which
+            // only exists under the `testing` feature, so the install call
+            // (and the `mut` it alone needs) is gated the same way instead
+            // of the seam being compiled into a minimal-profile binary.
+            #[cfg(feature = "testing")]
+            assert!(
+                statements::install(&mut conn),
+                "a freshly connected pool must accept the statement observer"
+            );
+            conn.inner()
+                .execute_unprepared("PRAGMA journal_mode=WAL")
+                .await
+                .expect("enable WAL journaling");
+            conn.inner()
+                .execute_unprepared("PRAGMA busy_timeout=5000")
+                .await
+                .expect("set busy timeout");
+            MiddlewareMigrator::up(conn.inner(), None)
+                .await
+                .expect("apply render cache migration");
+            create_owned_tables(&conn).await;
+            (conn, Some(tempdir))
+        }
+        BootDatabase::LiveServer(conn) => {
+            for table in OWNED_TABLES {
+                conn.inner()
+                    .execute_unprepared(&format!("DROP TABLE IF EXISTS {table}"))
+                    .await
+                    .expect("drop a harness-owned table on the live server");
+            }
+            // The migration's `up` directly, not the migrator: a live
+            // database that ran a previous boot still lists the migration
+            // as applied in `seaql_migrations`, and the migrator would then
+            // skip recreating the tables this boot just dropped.
+            let manager = sea_orm_migration::SchemaManager::new(conn.inner());
+            suprnova::render_cache::migration::Migration
+                .up(&manager)
+                .await
+                .expect("apply the render cache migration to the live server");
+            create_owned_tables(&conn).await;
+            (conn, None)
+        }
+        BootDatabase::Existing(conn) => (conn, None),
+    };
+    TestContainer::singleton(conn.clone());
+    // Final review, F2: the named-guard system, so `Auth::user()` resolves
+    // the default guard through a registered provider rather than the
+    // legacy container-bound fallback, and a `DatabaseUserProvider` over
+    // the `users` table as that provider. `Auth::id()`, `Auth::check()`,
+    // and `Auth::set_user` are manager-free, so every route that only ever
+    // used those is unaffected; `ProviderLoginHeader` is the only sign-in
+    // that leaves a request with an identity but no cached user object,
+    // which is what sends `Auth::user()` to the provider.
+    TestContainer::singleton(AuthManager::new(AuthConfig::default()));
+    Auth::register_provider("users", Arc::new(DatabaseUserProvider::new("users")))
+        .expect("register the users provider on the test AuthManager");
+
+    let waiting = Arc::new(WaiterTrackingCoordinator::new(LocalCoordinatorLimits {
+        lease_ms: 30_000,
+        max_waiters: 128,
+    }));
+    let clock = Arc::new(AdjustableTestClock::new(1_000_000));
+
+    let cached_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .query(QueryPolicy::declared(["page"]))
+        .build()
+        .expect("cached policy");
+    // Two routes that differ from `/cached/{id}` only in the replayable
+    // header their handler sets; the policy shape is the plain public one.
+    let control_byte_header_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("control byte header policy");
+    let non_ascii_header_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("non ascii header policy");
+    // CACHE-003: the plain public shape again, on a route whose handler
+    // sets the six isolation and execution headers.
+    let security_headers_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("security headers policy");
+    // CACHE-004: the plain public shape on a route that mints a CSP nonce.
+    let csp_nonce_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("csp nonce policy");
+    // CACHE-001: the plain public shape on a route whose handler says no-store.
+    let no_store_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("no store policy");
+    // CACHE-002: the plain public shape, declaring no header dimension, on a
+    // route whose handler varies on a request header of its own.
+    let vary_undeclared_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("vary undeclared policy");
+    // CACHE-009: the plain public shape on a route that renders one row.
+    let write_atomicity_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("write atomicity policy");
+    // CACHE-008: the plain public shape on a route whose one read names a
+    // connection other than the snapshot's.
+    let named_connection_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("named connection policy");
+    // CACHE-006 and CACHE-005: the plain public shape on a route that renders
+    // nothing for HEAD, and on one that serves pre-compressed bytes.
+    let head_empty_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("head empty policy");
+    let encoded_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("encoded policy");
+    let stale_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 60_000, 120_000).expect("freshness"))
+        .build()
+        .expect("stale policy");
+    // Task 8, ruling R18: the same route shape with *no* stale-servable
+    // window, only a stale-on-error one. That is the only shape in which a
+    // singleflight waiter can reach `StaleOnError` from its own
+    // re-evaluation rather than from the arm that admitted it: an entry the
+    // leader published with observations already behind the ledger is
+    // floored at `fresh_ms`, which lands at `past_fresh == 0` - inside the
+    // empty stale-servable band, and therefore in the stale-on-error one.
+    // See `races::a_waiter_that_re_evaluates_onto_a_stale_on_error_entry_...`.
+    let stale_error_only_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 120_000).expect("freshness"))
+        .build()
+        .expect("stale error only policy");
+    let private_policy = RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .build()
+        .expect("private policy");
+    // Final review, F3 / ruling R119: the same private shape with L1, so a
+    // pre-bump entry can survive a simulated restart on disk and be proven
+    // a miss afterwards. Only meaningful when booted with L1.
+    let private_l1_policy = RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .layers(suprnova::render_cache::StorageLayers::l0_and_l1())
+        .build()
+        .expect("private l1 policy");
+    // Final review, F2 / ruling R118: a public route whose only read is the
+    // query-builder facade (`DB::table("posts").get()`), and one whose only
+    // read is raw SQL (`DB::select`, `select_one`, or `scalar` by route
+    // parameter). Neither declares any variance; the question is what the
+    // collector records for each read shape.
+    let builder_read_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("builder read policy");
+    let raw_read_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("raw read policy");
+    // Final review, F2: a private route whose body shows `Auth::user()`,
+    // resolved through `DatabaseUserProvider` (see `ProviderLoginHeader`).
+    let shows_auth_user_policy = RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .build()
+        .expect("shows auth user policy");
+    // The same handler as `/shows-auth-user`, on a route that declares no
+    // `Principal` variance at all. Reading the principal on such a route has
+    // to be declined: there is no dimension in the key to partition the
+    // entry by, so publishing it would serve one visitor's page to every
+    // other. This is the negative that keeps the session-resolved identity
+    // read safe to classify as an identity read.
+    let session_principal_undeclared_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .build()
+            .expect("session principal undeclared policy");
+    let sets_cookie_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("sets-cookie policy");
+    let overflow_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("overflow policy");
+    // A stitched public shell is the one class classified from content
+    // reads alone. The two routes below differ only in whether their
+    // handler marks the handler boundary the way the Live completion
+    // middleware does, which is what decides whether the shell may be
+    // published at all.
+    let stitched_gate_only_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShellStitched)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .build()
+            .expect("stitched gate-only policy");
+    let stitched_handler_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShellStitched)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .build()
+            .expect("stitched handler policy");
+    // Fix round 1, item 1: deliberately declares no `Principal` variance,
+    // matching the reviewer's proven shape exactly.
+    let leaky_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("leaky policy");
+    // Fix round 2, item 4: `Principal` variance with real stale windows.
+    // Deliberately `PublicShared`, not `PrivateCached` like `/private/{id}`
+    // above: `evaluate_freshness` never serves a `PrivateCached` entry
+    // stale at all (see `stale_service_is_policy_driven_bounded_and_never_private`),
+    // which would make this route unable to reach StaleServable and so
+    // unable to exercise the background-rebuild skip this policy exists to
+    // test. Paired with `cached_handler` below rather than `private_handler`:
+    // a handler that itself reads `Auth::id()` would make `classify` narrow
+    // the *served* class to `PrivateCached` regardless of what this policy
+    // declares (see `variance::classify`), defeating the point of choosing
+    // `PublicShared` here. Declaring `Principal` variance is enough on its
+    // own to make `key_input` derive an identity-scoped key - the render
+    // itself does not need to read the identity for that to happen.
+    let stale_principal_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 60_000, 120_000).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .build()
+        .expect("stale principal policy");
+    // Fix round 2, item 6: the only route in this harness using
+    // `CoherenceMode::Lease` rather than the default `Authority`.
+    let leased_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .coherence(suprnova::render_cache::CoherenceMode::Lease { max_age_ms: 60_000 })
+        .build()
+        .expect("leased policy");
+    // Final review, I2: the one lease-mode route whose lease expires well
+    // inside its own fresh window. Every other lease-mode fixture sets
+    // `max_age_ms` equal to `fresh_ms`, so one clock advance kills the
+    // lease and the entry together and no test can tell which of the two
+    // caused the rebuild. Five fresh minutes against a ten second lease
+    // separates them: eleven seconds is far past the lease and nowhere near
+    // the entry, so an authority read after it can only be the lease
+    // expiring.
+    let short_leased_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(300_000, 0, 0).expect("freshness"))
+        .coherence(suprnova::render_cache::CoherenceMode::Lease { max_age_ms: 10_000 })
+        .build()
+        .expect("short leased policy");
+    // Fix round 2, item 5: the only route in this harness declaring
+    // `StorageLayers::l0_and_l1()` - every other policy above defaults to
+    // L0-only, so this is the one that actually exercises L1 together with
+    // the middleware when booted through `boot_with_render_cache_and_l1_for_test`.
+    let l1_cached_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .layers(suprnova::render_cache::StorageLayers::l0_and_l1())
+        .build()
+        .expect("l1 cached policy");
+    // Fix round 3, item 1: same shape as `leaky_policy` - no declared
+    // `Principal` variance - paired with a handler that reads identity
+    // through a different, previously-uninstrumented accessor.
+    let leaky_via_request_state_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .build()
+            .expect("leaky via request_state policy");
+    // Fix round 3, item 2: no declared variance at all - the shape the
+    // reviewer's `Gate::allows`-driven attack needs, since the point is
+    // that nothing partitions the key by which role was checked.
+    let authz_driven_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("authz driven policy");
+    // Fix round 4, Leak B: no declared variance at all, matching `/leaky`'s
+    // shape - the point is that classification must narrow (and this guard
+    // must then decline, since nothing partitions) regardless of which
+    // accessor observed the identity.
+    let leaky_via_named_guard_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .build()
+            .expect("leaky via named guard policy");
+    // Fix round 4, Leak C: no declared variance; the point is that a
+    // `session_mut` read alone must force Uncacheable.
+    let session_mut_reading_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("session mut reading policy");
+    // Fix round 5, Leak 3: declares Locale correctly - the point is that a
+    // mid-render `Lang::set_locale` call must still be caught even though
+    // the declared dimension matches what a render *usually* uses.
+    let locale_declared_switches_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Locale)
+            .build()
+            .expect("locale declared switches policy");
+    // Fix round 5, Leak 2: no declared variance; the point is that a
+    // cookie read alone must force Uncacheable.
+    let cookie_reading_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("cookie reading policy");
+    // Fix round 6, Leak 1 (both reproductions): declares Locale correctly,
+    // the same shape as `locale_declared_switches_policy` above - the point
+    // is that a *nested*, popped `scope_locale` (or a locale established
+    // by a middleware positioned after `RenderCacheMiddleware`) must still
+    // be caught, which round 5's re-derivation could not do.
+    let nested_scope_locale_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Locale)
+        .build()
+        .expect("nested scope locale policy");
+    let late_locale_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Locale)
+        .build()
+        .expect("late locale policy");
+    // Fix round 6, Leak 3: declares Principal - the point is that the key
+    // (always built from the *default* guard's identity, see
+    // `variance_descriptor`) must still be declined when the render also
+    // observed a *different* identity through a named guard, even though
+    // the default identity alone would resolve to a matching private value.
+    let named_guard_then_default_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Principal)
+            .build()
+            .expect("named guard then default policy");
+    // Fix round 6, item 5: `FeatureVersion` has no producer on this host;
+    // `RenderCachePolicy::builder` now accepts declaring it (the rejection
+    // moved to `variance_descriptor`, see its own doc), so this route
+    // exercises the moved rejection rather than a build-time failure.
+    let feature_version_declared_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::FeatureVersion)
+            .build()
+            .expect("a host-neutral policy may declare FeatureVersion; only this host rejects it");
+    // Iteration 006: Media and Encoding now negotiate against a route's own
+    // closed declared set instead of resolving to a constant. Both share
+    // `cached_handler`'s already-established discriminator (fix round 3's
+    // body embeds the monotonic render count, so a wrongly-shared key would
+    // surface as the wrong count coming back on a hit) rather than a
+    // dedicated handler.
+    let media_declared_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary_media(
+            NegotiatedPolicy::declared(["text/html", "application/json"], "text/html")
+                .expect("valid media policy"),
+        )
+        .build()
+        .expect("media declared policy");
+    let encoding_declared_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary_encoding(
+            NegotiatedPolicy::declared(["identity", "gzip"], "identity")
+                .expect("valid encoding policy"),
+        )
+        .build()
+        .expect("encoding declared policy");
+    // Fix round 4: one pair of policies per classification reason - the
+    // wrong dimension declared for that reason, and the matching one -
+    // parameterising the leak shape instead of pinning it to one remembered
+    // route. `PrincipalObserved`'s pair:
+    let tenant_declared_reads_principal_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Tenant)
+            .build()
+            .expect("tenant declared reads principal policy");
+    let principal_declared_reads_principal_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Principal)
+            .build()
+            .expect("principal declared reads principal policy");
+    // `TenantObserved`'s pair:
+    let principal_declared_reads_tenant_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Principal)
+            .build()
+            .expect("principal declared reads tenant policy");
+    let tenant_declared_reads_tenant_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Tenant)
+            .build()
+            .expect("tenant declared reads tenant policy");
+    // `AuthorizationRead`'s pair (requires `Principal`, per that reason's
+    // own "the decision is per-user" rule, not `Tenant`):
+    let tenant_declared_reads_authz_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Tenant)
+            .build()
+            .expect("tenant declared reads authz policy");
+    let principal_declared_reads_authz_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Principal)
+            .build()
+            .expect("principal declared reads authz policy");
+
+    // Task 5: the bypass probe's two policies. Identical `PublicShared`
+    // shapes with no declared variance, differing only in coherence mode,
+    // so the statement a hit costs is the only thing that separates them.
+    // Two routes rather than two boot helpers: a policy is attached per
+    // pattern, so one boot can carry both modes and every other test in
+    // this binary is untouched by their presence.
+    let probe_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("probe policy");
+    let leased_probe_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .coherence(suprnova::render_cache::CoherenceMode::Lease { max_age_ms: 60_000 })
+        .build()
+        .expect("leased probe policy");
+    // Task 7: lease coherence, so a hot hit on the C64 route consults no
+    // authority - the shape whose statement count is zero.
+    let c64_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(300_000, 0, 0).expect("freshness"))
+        .coherence(suprnova::render_cache::CoherenceMode::Lease {
+            max_age_ms: 300_000,
+        })
+        .build()
+        .expect("c64 policy");
+    // Task 7: authority coherence, because the storm's whole subject is
+    // whether a write is observed; `page` is declared so one row can back
+    // several keys.
+    let storm_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(300_000, 0, 0).expect("freshness"))
+        .query(QueryPolicy::declared(["page"]))
+        .build()
+        .expect("storm policy");
+
+    let router: Router = Router::new().get("/cached/{id}", cached_handler).into();
+    let router: Router = router.get("/stale/{id}", stale_handler).into();
+    let router: Router = router.get("/stale-error-only/{id}", stale_handler).into();
+    let router: Router = router.get("/probe/{id}", probe_handler).into();
+    let router: Router = router.get("/probe-leased/{id}", probe_handler).into();
+    let router: Router = router.get(C64_ROUTE, c64_handler).into();
+    let router: Router = router.get(STORM_ROUTE, storm_handler).into();
+    let router: Router = router.get("/private/{id}", private_handler).into();
+    let router: Router = router.get("/private-l1/{id}", private_handler).into();
+    let router: Router = router.get("/builder-read", builder_read_handler).into();
+    let router: Router = router.get("/raw-read/{kind}", raw_read_handler).into();
+    let router: Router = router
+        .get("/shows-auth-user", shows_auth_user_handler)
+        .into();
+    let router: Router = router
+        .get("/session-principal-undeclared", shows_auth_user_handler)
+        .into();
+    let router: Router = router.get("/sets-cookie", sets_cookie_handler).into();
+    let router: Router = router
+        .get("/control-byte-header", control_byte_header_handler)
+        .into();
+    let router: Router = router
+        .get("/non-ascii-header", non_ascii_header_handler)
+        .into();
+    let router: Router = router
+        .get("/security-headers", security_headers_handler)
+        .into();
+    let router: Router = router.get("/csp-nonce", csp_nonce_handler).into();
+    let router: Router = router.get("/no-store", no_store_handler).into();
+    let router: Router = router
+        .get("/vary-undeclared", vary_undeclared_handler)
+        .into();
+    let router: Router = router
+        .get("/write-atomicity/{id}", write_atomicity_handler)
+        .into();
+    let router: Router = router
+        .get("/named-connection", named_connection_handler)
+        .into();
+    let router: Router = router.get("/head-empty", head_empty_handler).into();
+    let router: Router = router.get("/encoded", encoded_handler).into();
+    let router: Router = router.get("/overflow", overflow_handler).into();
+    let router: Router = router
+        .get("/stitched-gate-only", stitched_gate_only_handler)
+        .into();
+    let router: Router = router
+        .get("/stitched-handler", stitched_handler_handler)
+        .into();
+    let router: Router = router.get("/leaky", leaky_handler).into();
+    let router: Router = router.get("/stale-principal/{id}", cached_handler).into();
+    let router: Router = router.get("/leased/{id}", cached_handler).into();
+    let router: Router = router.get("/short-leased/{id}", cached_handler).into();
+    let router: Router = router.get("/l1-cached/{id}", cached_handler).into();
+    let router: Router = router
+        .get("/leaky-via-request-state", leaky_handler_via_request_state)
+        .into();
+    let router: Router = router.get("/authz-driven", authz_driven_handler).into();
+    let router: Router = router
+        .get(
+            "/tenant-declared-reads-principal/{id}",
+            reads_principal_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/principal-declared-reads-principal/{id}",
+            reads_principal_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/principal-declared-reads-tenant/{id}",
+            reads_tenant_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/tenant-declared-reads-tenant/{id}",
+            reads_tenant_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/tenant-declared-reads-authz/{id}",
+            reads_authz_by_principal_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/principal-declared-reads-authz/{id}",
+            reads_authz_by_principal_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/leaky-via-named-guard",
+            reads_via_named_guard_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get("/session-mut-reading", session_mut_reading_handler)
+        .into();
+    // The three locale routes are gated with their handlers, for the reason
+    // this module's `Lang` import records. Their policies are still
+    // attached below: a policy attached to a pattern no route serves is
+    // inert, and keeping the chain unconditional keeps every other route's
+    // attachment exactly where it is.
+    #[cfg(feature = "localization")]
+    let router: Router = router
+        .get(
+            "/locale-declared-switches-mid-render/{id}",
+            locale_switching_handler,
+        )
+        .into();
+    let router: Router = router.get("/cookie-reading", cookie_reading_handler).into();
+    #[cfg(feature = "localization")]
+    let router: Router = router
+        .get("/nested-scope-locale/{id}", nested_scope_locale_handler)
+        .into();
+    #[cfg(feature = "localization")]
+    let router: Router = router.get("/late-locale/{id}", late_locale_handler).into();
+    let router: Router = router
+        .get(
+            "/named-guard-then-default/{id}",
+            reads_named_guard_then_touches_default_leaky_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/feature-version-declared/{id}",
+            feature_version_declared_handler,
+        )
+        .into();
+    let router: Router = router.get("/media-declared/{id}", cached_handler).into();
+    let router: Router = router.get("/encoding-declared/{id}", cached_handler).into();
+    // Fix round 7: the feature-flag and per-tenant-authorization routes.
+    // `no_variance_policy` is deliberately shared by every flag route -
+    // the question each of them asks is whether reading a flag of a given
+    // scope costs the cache a route that declares nothing, which is the
+    // shape the reference application's pages have.
+    let no_variance_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("no variance policy");
+    let principal_declared_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .build()
+        .expect("principal declared policy");
+    let tenant_declared_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Tenant)
+        .build()
+        .expect("tenant declared policy");
+    // Fix round 7, finding 4: the documented remedy for a per-tenant gate -
+    // declare `Principal` alongside `Tenant` and the route partitions by
+    // both.
+    let tenant_and_principal_declared_policy =
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(VarianceDimension::Tenant)
+            .vary(VarianceDimension::Principal)
+            .build()
+            .expect("tenant and principal declared policy");
+    let router: Router = router
+        .get(
+            "/reads-team-scoped-flag/{id}",
+            reads_team_scoped_flag_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/principal-declared-reads-team-scoped-flag/{id}",
+            reads_team_scoped_flag_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/reads-user-scoped-flag/{id}",
+            reads_user_scoped_flag_handler,
+        )
+        .into();
+    let router: Router = router
+        .get("/reads-global-flag/{id}", reads_global_flag_handler)
+        .into();
+    let router: Router = router
+        .get(
+            "/reads-flag-with-another-users-override/{id}",
+            reads_flag_with_another_users_override_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/reads-auth-user-id-accessor/{id}",
+            reads_auth_user_id_accessor_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/tenant-declared-reads-per-tenant-authz/{id}",
+            reads_tenant_authz_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(
+            "/tenant-and-principal-declared-reads-per-tenant-authz/{id}",
+            reads_tenant_authz_handler,
+        )
+        .into();
+    let router = router
+        .try_render_cache("/cached/{id}", GroupPolicy::from(cached_policy))
+        .expect("attach cached policy")
+        .try_render_cache("/stale/{id}", GroupPolicy::from(stale_policy))
+        .expect("attach stale policy")
+        .try_render_cache(
+            "/stale-error-only/{id}",
+            GroupPolicy::from(stale_error_only_policy),
+        )
+        .expect("attach stale error only policy")
+        .try_render_cache("/probe/{id}", GroupPolicy::from(probe_policy))
+        .expect("attach probe policy")
+        .try_render_cache("/probe-leased/{id}", GroupPolicy::from(leased_probe_policy))
+        .expect("attach leased probe policy")
+        .try_render_cache(C64_ROUTE, GroupPolicy::from(c64_policy))
+        .expect("attach c64 policy")
+        .try_render_cache(STORM_ROUTE, GroupPolicy::from(storm_policy))
+        .expect("attach storm policy")
+        .try_render_cache("/private/{id}", GroupPolicy::from(private_policy))
+        .expect("attach private policy")
+        .try_render_cache("/private-l1/{id}", GroupPolicy::from(private_l1_policy))
+        .expect("attach private l1 policy")
+        .try_render_cache("/builder-read", GroupPolicy::from(builder_read_policy))
+        .expect("attach builder read policy")
+        .try_render_cache("/raw-read/{kind}", GroupPolicy::from(raw_read_policy))
+        .expect("attach raw read policy")
+        .try_render_cache(
+            "/shows-auth-user",
+            GroupPolicy::from(shows_auth_user_policy),
+        )
+        .expect("attach shows auth user policy")
+        .try_render_cache(
+            "/session-principal-undeclared",
+            GroupPolicy::from(session_principal_undeclared_policy),
+        )
+        .expect("attach session principal undeclared policy")
+        .try_render_cache("/sets-cookie", GroupPolicy::from(sets_cookie_policy))
+        .expect("attach sets-cookie policy")
+        .try_render_cache(
+            "/control-byte-header",
+            GroupPolicy::from(control_byte_header_policy),
+        )
+        .expect("attach control byte header policy")
+        .try_render_cache(
+            "/non-ascii-header",
+            GroupPolicy::from(non_ascii_header_policy),
+        )
+        .expect("attach non ascii header policy")
+        .try_render_cache(
+            "/security-headers",
+            GroupPolicy::from(security_headers_policy),
+        )
+        .expect("attach security headers policy")
+        .try_render_cache("/csp-nonce", GroupPolicy::from(csp_nonce_policy))
+        .expect("attach csp nonce policy")
+        .try_render_cache("/no-store", GroupPolicy::from(no_store_policy))
+        .expect("attach no store policy")
+        .try_render_cache(
+            "/vary-undeclared",
+            GroupPolicy::from(vary_undeclared_policy),
+        )
+        .expect("attach vary undeclared policy")
+        .try_render_cache(
+            "/write-atomicity/{id}",
+            GroupPolicy::from(write_atomicity_policy),
+        )
+        .expect("attach write atomicity policy")
+        .try_render_cache(
+            "/named-connection",
+            GroupPolicy::from(named_connection_policy),
+        )
+        .expect("attach named connection policy")
+        .try_render_cache("/head-empty", GroupPolicy::from(head_empty_policy))
+        .expect("attach head empty policy")
+        .try_render_cache("/encoded", GroupPolicy::from(encoded_policy))
+        .expect("attach encoded policy")
+        .try_render_cache("/overflow", GroupPolicy::from(overflow_policy))
+        .expect("attach overflow policy")
+        .try_render_cache(
+            "/stitched-gate-only",
+            GroupPolicy::from(stitched_gate_only_policy),
+        )
+        .expect("attach stitched gate-only policy")
+        .try_render_cache(
+            "/stitched-handler",
+            GroupPolicy::from(stitched_handler_policy),
+        )
+        .expect("attach stitched handler policy")
+        .try_render_cache("/leaky", GroupPolicy::from(leaky_policy))
+        .expect("attach leaky policy")
+        .try_render_cache(
+            "/stale-principal/{id}",
+            GroupPolicy::from(stale_principal_policy),
+        )
+        .expect("attach stale principal policy")
+        .try_render_cache("/leased/{id}", GroupPolicy::from(leased_policy))
+        .expect("attach leased policy")
+        .try_render_cache("/short-leased/{id}", GroupPolicy::from(short_leased_policy))
+        .expect("attach short leased policy")
+        .try_render_cache("/l1-cached/{id}", GroupPolicy::from(l1_cached_policy))
+        .expect("attach l1 cached policy")
+        .try_render_cache(
+            "/leaky-via-request-state",
+            GroupPolicy::from(leaky_via_request_state_policy),
+        )
+        .expect("attach leaky via request_state policy")
+        .try_render_cache("/authz-driven", GroupPolicy::from(authz_driven_policy))
+        .expect("attach authz driven policy")
+        .try_render_cache(
+            "/tenant-declared-reads-principal/{id}",
+            GroupPolicy::from(tenant_declared_reads_principal_policy),
+        )
+        .expect("attach tenant declared reads principal policy")
+        .try_render_cache(
+            "/principal-declared-reads-principal/{id}",
+            GroupPolicy::from(principal_declared_reads_principal_policy),
+        )
+        .expect("attach principal declared reads principal policy")
+        .try_render_cache(
+            "/principal-declared-reads-tenant/{id}",
+            GroupPolicy::from(principal_declared_reads_tenant_policy),
+        )
+        .expect("attach principal declared reads tenant policy")
+        .try_render_cache(
+            "/tenant-declared-reads-tenant/{id}",
+            GroupPolicy::from(tenant_declared_reads_tenant_policy),
+        )
+        .expect("attach tenant declared reads tenant policy")
+        .try_render_cache(
+            "/tenant-declared-reads-authz/{id}",
+            GroupPolicy::from(tenant_declared_reads_authz_policy),
+        )
+        .expect("attach tenant declared reads per-tenant authz policy")
+        .try_render_cache(
+            "/principal-declared-reads-authz/{id}",
+            GroupPolicy::from(principal_declared_reads_authz_policy),
+        )
+        .expect("attach principal declared reads authz policy")
+        .try_render_cache(
+            "/leaky-via-named-guard",
+            GroupPolicy::from(leaky_via_named_guard_policy),
+        )
+        .expect("attach leaky via named guard policy")
+        .try_render_cache(
+            "/session-mut-reading",
+            GroupPolicy::from(session_mut_reading_policy),
+        )
+        .expect("attach session mut reading policy")
+        .try_render_cache(
+            "/locale-declared-switches-mid-render/{id}",
+            GroupPolicy::from(locale_declared_switches_policy),
+        )
+        .expect("attach locale declared switches policy")
+        .try_render_cache("/cookie-reading", GroupPolicy::from(cookie_reading_policy))
+        .expect("attach cookie reading policy")
+        .try_render_cache(
+            "/nested-scope-locale/{id}",
+            GroupPolicy::from(nested_scope_locale_policy),
+        )
+        .expect("attach nested scope locale policy")
+        .try_render_cache("/late-locale/{id}", GroupPolicy::from(late_locale_policy))
+        .expect("attach late locale policy")
+        .try_render_cache(
+            "/named-guard-then-default/{id}",
+            GroupPolicy::from(named_guard_then_default_policy),
+        )
+        .expect("attach named guard then default policy")
+        .try_render_cache(
+            "/feature-version-declared/{id}",
+            GroupPolicy::from(feature_version_declared_policy),
+        )
+        .expect("attach feature version declared policy")
+        .try_render_cache(
+            "/reads-team-scoped-flag/{id}",
+            GroupPolicy::from(no_variance_policy.clone()),
+        )
+        .expect("attach reads team scoped flag policy")
+        .try_render_cache(
+            "/principal-declared-reads-team-scoped-flag/{id}",
+            GroupPolicy::from(principal_declared_policy),
+        )
+        .expect("attach principal declared reads team scoped flag policy")
+        .try_render_cache(
+            "/reads-user-scoped-flag/{id}",
+            GroupPolicy::from(no_variance_policy.clone()),
+        )
+        .expect("attach reads user scoped flag policy")
+        .try_render_cache(
+            "/reads-global-flag/{id}",
+            GroupPolicy::from(no_variance_policy.clone()),
+        )
+        .expect("attach reads global flag policy")
+        .try_render_cache(
+            "/reads-flag-with-another-users-override/{id}",
+            GroupPolicy::from(no_variance_policy.clone()),
+        )
+        .expect("attach reads flag with another users override policy")
+        .try_render_cache(
+            "/reads-auth-user-id-accessor/{id}",
+            GroupPolicy::from(no_variance_policy),
+        )
+        .expect("attach reads auth user id accessor policy")
+        .try_render_cache(
+            "/tenant-declared-reads-per-tenant-authz/{id}",
+            GroupPolicy::from(tenant_declared_policy),
+        )
+        .expect("attach tenant declared reads per-tenant authz policy")
+        .try_render_cache(
+            "/tenant-and-principal-declared-reads-per-tenant-authz/{id}",
+            GroupPolicy::from(tenant_and_principal_declared_policy),
+        )
+        .expect("attach tenant and principal declared reads authz policy")
+        .try_render_cache(
+            "/media-declared/{id}",
+            GroupPolicy::from(media_declared_policy),
+        )
+        .expect("attach media declared policy")
+        .try_render_cache(
+            "/encoding-declared/{id}",
+            GroupPolicy::from(encoding_declared_policy),
+        )
+        .expect("attach encoding declared policy");
+
+    let config = RenderCacheConfig::from_env()
+        .expect("the test environment configures a valid render cache")
+        .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>)
+        .with_coordinator_for_test(Arc::clone(&waiting) as Arc<dyn RebuildCoordinator>);
+    let mut config = config;
+    config.enabled = true;
+    config.hints = hints;
+    if let Some(build_id) = build_id {
+        config = config.with_build_id(build_id);
+    }
+    let (l1_tempdir, l1_dir) = match l1 {
+        BootL1::Disabled => {
+            config.l1 = suprnova::render_cache::L1Config::Disabled;
+            (None, None)
+        }
+        BootL1::Fresh => {
+            let dir = tempfile::tempdir().expect("l1 tempdir");
+            let path = dir.path().to_path_buf();
+            config.l1 = suprnova::render_cache::L1Config::File {
+                directory: path.clone(),
+                max_bytes: 16 * 1024 * 1024,
+            };
+            // Forces a second publish to evict the first from L0 (see this
+            // function's own doc), while L1's byte budget above comfortably
+            // holds both of this suite's tiny bodies.
+            config.l0.max_entries = 1;
+            (Some(dir), Some(path))
+        }
+        BootL1::Existing(path) => {
+            config.l1 = suprnova::render_cache::L1Config::File {
+                directory: path.clone(),
+                max_bytes: 16 * 1024 * 1024,
+            };
+            config.l0.max_entries = 1;
+            (None, Some(path))
+        }
+    };
+
+    // Fix round 1, item 3: register the identity-establishing middleware
+    // globally, and do it *before* `RenderCache::install`, so the ordering
+    // matches production exactly - `RenderCache::install` appends to
+    // whatever is already registered (see its own doc), never inserts at a
+    // fixed position, so calling it after `LoginHeader` is what makes the
+    // cache middleware see `Auth::id()` as `LoginHeader` set it, the same
+    // way a real deployment's locale/session/auth middleware would have to
+    // be registered before this call for the same reason. An earlier draft
+    // built the registry with `MiddlewareRegistry::from_global().prepend(LoginHeader)`
+    // instead - a *local* prepend that put `LoginHeader` first regardless of
+    // global registration order, which is an ordering no production
+    // deployment can produce and which would have hidden exactly the
+    // ordering bug fix round 1 found.
+    suprnova::middleware::register_global_middleware(LoginHeader);
+    // Final review, F2: the provider-resolving sign-in, same ordering
+    // requirement as `LoginHeader` above.
+    suprnova::middleware::register_global_middleware(ProviderLoginHeader);
+    // R24: the session-only sign-in, same ordering requirement as
+    // `LoginHeader` above.
+    suprnova::middleware::register_global_middleware(SessionOnlyLoginHeader);
+    // Fix round 4, Leak B: the non-default-guard sign-in, same ordering
+    // requirement as `LoginHeader` above.
+    suprnova::middleware::register_global_middleware(NamedGuardLoginHeader);
+    // Fix round 4: the tenant resolver, same ordering requirement as
+    // `LoginHeader` above and for the same reason - `RenderCacheMiddleware`
+    // reads `Request::live_tenant()` while building declared `Tenant`
+    // variance, which is only meaningful once this has already run.
+    suprnova::middleware::register_global_middleware(suprnova::live::LiveTenantMiddleware::new(
+        Arc::new(TestTenantResolver),
+    ));
+    // Fix round 5: the per-request locale scope, same ordering requirement
+    // as `LoginHeader` above - `RenderCacheMiddleware` reads `Lang::locale()`
+    // while building declared `Locale` variance.
+    #[cfg(feature = "localization")]
+    suprnova::middleware::register_global_middleware(TestLocaleMiddleware);
+    // Fix round 7: the framework's own feature middleware, in the only
+    // position it can occupy for `Auth::id()` to be resolved (after
+    // `LoginHeader`) and for `is_enabled!` to be read inside the render
+    // (before `RenderCache::install`) - the same position
+    // `app/src/bootstrap.rs` puts it in. Team from a header, which
+    // `with_team_from_header` is the shipped helper for. It is registered
+    // for *every* test in this binary, not only the flag ones, so that a
+    // future change which makes an ambient feature-flag context cost the
+    // cache something shows up in the whole suite rather than in one
+    // corner of it.
+    install_feature_evaluator().await;
+    suprnova::middleware::register_global_middleware(
+        suprnova::features::FeatureMiddleware::new().with_team_from_header("x-test-team"),
+    );
+    let router = RenderCache::install(router, config)
+        .await
+        .expect("install render cache");
+    // Fix round 5, Leak 1 (first reproduction): registered *after*
+    // `RenderCache::install`, so it runs *after* `RenderCacheMiddleware` in
+    // the chain - `register_global_middleware` appends (see `install`'s own
+    // doc), it never inserts at a fixed position. This is what makes it a
+    // faithful stand-in for a per-route impersonation middleware, which the
+    // framework explicitly supports and which necessarily runs closer to
+    // the handler than a middleware registered globally before install.
+    suprnova::middleware::register_global_middleware(ImpersonationMiddleware);
+    // Fix round 6, Leak 1 (second reproduction): same "after install"
+    // reasoning as `ImpersonationMiddleware` immediately above, standing in
+    // for a per-route locale middleware this time.
+    #[cfg(feature = "localization")]
+    suprnova::middleware::register_global_middleware(LateLocaleMiddleware);
+
+    let middleware = Arc::new(MiddlewareRegistry::from_global());
+
+    // Last, deliberately: migrations, the harness's own DDL, and
+    // `RenderCache::install`'s migration checks are all statements, and a
+    // test that measures a request must not start with them in its count.
+    statements::reset();
+
+    Arc::new(Harness {
+        router: Arc::new(router),
+        middleware,
+        clock,
+        waiting,
+        conn,
+        _guard: guard,
+        _tempdir: tempdir,
+        _l1_tempdir: l1_tempdir,
+        l1_dir,
+    })
+}
+
+/// The adjustable clock `install` was configured with.
+pub fn clock(harness: &Harness) -> &Arc<AdjustableTestClock> {
+    &harness.clock
+}
+
+/// The ledger reading the same database this harness installed.
+pub fn ledger() -> suprnova::render_cache::ledger::SqlGenerationLedger {
+    suprnova::render_cache::ledger::SqlGenerationLedger::new()
+}
+
+/// Task 5b: advances the authority epoch the way another node in the same
+/// deployment would - through a second [`ledger`] handle on the shared
+/// database, never through `RenderCache::advance_epoch`.
+///
+/// The distinction is the whole point. `RenderCache::advance_epoch` is this
+/// process's own operator lever: it clears L0 and drops the runtime's
+/// leased epoch, so the very next request here sees the new epoch. An
+/// advance committed by another node reaches this one only through the
+/// database, so the only thing that can tell this runtime about it is its
+/// next authority read - which is exactly what the leased epoch bounds.
+pub async fn advance_epoch_on_another_node(_harness: &Harness) {
+    ledger()
+        .advance_epoch()
+        .await
+        .expect("advance the authority epoch as another node would");
+}
+
+/// Rewinds the shared epoch singleton to `to`, the way restoring a backup
+/// taken before the current deploy does. Goes through the ordinary write
+/// path rather than a ledger method, because no ledger method lowers an
+/// epoch and none should: this is what an operator's restore leaves behind,
+/// not an operation the framework offers.
+pub async fn rewind_epoch_on_another_node(_harness: &Harness, to: u64) {
+    let bound = i64::try_from(to).expect("an epoch fits in an i64");
+    let rows = suprnova::DB::affecting_statement(
+        "UPDATE suprnova_render_epochs SET epoch = ? WHERE singleton = 1",
+        vec![sea_orm::Value::from(bound)],
+    )
+    .await
+    .expect("rewind the epoch singleton");
+    assert_eq!(rows, 1, "the epoch singleton must exist");
+}
+
+/// The shared authority epoch, read the way a sibling node reads it.
+pub async fn authority_epoch() -> u64 {
+    use suprnova_live::render_cache::generation::GenerationLedger as _;
+
+    ledger().epoch().await.expect("read the authority epoch")
+}
+
+/// Advances the `posts` table's generation directly, through the ORM path,
+/// independent of any render.
+pub async fn advance_posts(_harness: &Harness) {
+    create_extra_post("advanced").await;
+}
+
+/// Creates the `users` row `/shows-auth-user` resolves, through the ORM,
+/// returning its id. Final review, F2.
+pub async fn create_user(_harness: &Harness, name: &str) -> i64 {
+    let name = name.to_owned();
+    User::create(attrs! { name: name })
+        .await
+        .expect("create user")
+        .id
+}
+
+/// Renames a `users` row through the ORM (`save`), inside its own
+/// `DB::transaction`, so the write advances the `users` table and record
+/// generations the way any application write would. Final review, F2.
+pub async fn rename_user(_harness: &Harness, id: i64, name: &str) {
+    let name = name.to_owned();
+    suprnova::DB::transaction(move |_tx| {
+        Box::pin(async move {
+            let mut user = User::find(id).await?.expect("the user row exists");
+            user.name = name;
+            user.save().await?;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("rename user");
+}
+
+/// Creates one more `posts` row inside its own `DB::transaction`, through
+/// the ORM path - the shared body [`advance_posts`] and
+/// [`race::write_posts_after_reread`] both use to advance the same
+/// dependency identity a render's own `Post::find` observes, independent
+/// of any render.
+async fn create_extra_post(title: &str) {
+    let title = title.to_owned();
+    suprnova::DB::transaction(move |_tx| {
+        Box::pin(async move {
+            Post::create(attrs! { title: title }).await?;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("create extra post");
+}
+
+async fn cached_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let id: i64 = request
+        .param("id")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let _ = Post::find(id).await;
+    counting_route::maybe_write_during_render().await;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("cached render {n}")))
+}
+
+/// The route pattern [`c64_handler`] answers.
+pub const C64_ROUTE: &str = "/c64/{id}";
+
+/// Exactly how many bytes a `/c64/{id}` body is.
+///
+/// The engine's own budget bench measures a 64 KiB Complete entry
+/// (`crates/suprnova-live/benches/render_cache_budget.rs`); this is the same
+/// body size reached through the whole middleware instead, so the two
+/// numbers are about one shape.
+pub const C64_BODY_BYTES: usize = 65_536;
+
+/// How many rows [`c64_handler`] reads, and so how many record dependency
+/// identities its entry observes.
+///
+/// The reads also share one `posts` *table* identity, which
+/// `Model::find` observes on every call
+/// (`framework/src/eloquent/model.rs:220`), so the published entry observes
+/// this many plus one. A caller that reports a dependency count reports the
+/// count it measured, not this constant.
+pub const C64_DEPENDENCY_ROWS: usize = 12;
+
+/// Task 7: the `C64` route. Twelve ORM reads, and a body of exactly
+/// [`C64_BODY_BYTES`] bytes built out of what they returned.
+///
+/// The body is derived from the rows rather than being constant filler, so
+/// a hit that replayed a stale entry would replay stale row values with it -
+/// which is what makes this route usable as a coherence subject as well as a
+/// size. Registered under lease coherence, so a hot hit on it consults no
+/// authority at all.
+async fn c64_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let id: i64 = request
+        .param("id")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let mut seed = String::new();
+    for offset in 0..C64_DEPENDENCY_ROWS {
+        let row = Post::find(id + offset as i64).await?;
+        let views = row.as_ref().map_or(-1, |post| post.views);
+        let title_bytes = row.as_ref().map_or(0, |post| post.title.len());
+        seed.push_str(&format!("{offset}.{views}.{title_bytes};"));
+    }
+    Ok(HttpResponse::html(c64_body(id, &seed)))
+}
+
+/// A body of exactly [`C64_BODY_BYTES`] bytes whose every filler byte comes
+/// from `seed`, which is what the twelve reads returned.
+///
+/// # Panics
+///
+/// Panics when the framing alone would exceed [`C64_BODY_BYTES`], which is a
+/// broken fixture rather than a failure of anything under measurement.
+fn c64_body(id: i64, seed: &str) -> String {
+    const CLOSING: &str = "</p></body></html>";
+    let opening = format!("<!doctype html><html><body><p>c64 {id} {seed} ");
+    assert!(
+        opening.len() + CLOSING.len() <= C64_BODY_BYTES,
+        "the C64 framing must fit inside C64_BODY_BYTES"
+    );
+    let filler: &[u8] = seed.as_bytes();
+    assert!(
+        !filler.is_empty(),
+        "the C64 filler is derived from the reads"
+    );
+    let mut body = String::with_capacity(C64_BODY_BYTES);
+    body.push_str(&opening);
+    let mut index = 0_usize;
+    while body.len() + CLOSING.len() < C64_BODY_BYTES {
+        // Every byte the seed carries is ASCII (digits, `.`, `;`), so one
+        // pushed byte is one byte of body and the length below is exact.
+        body.push(char::from(filler[index % filler.len()]));
+        index += 1;
+    }
+    body.push_str(CLOSING);
+    assert_eq!(
+        body.len(),
+        C64_BODY_BYTES,
+        "a C64 body is exactly C64_BODY_BYTES bytes"
+    );
+    body
+}
+
+/// The route pattern [`storm_handler`] answers.
+pub const STORM_ROUTE: &str = "/storm/{id}";
+
+/// Task 7: the invalidation-storm route. Its body carries the row data it
+/// depends on, so "the body every key serves reflects the generation the
+/// storm ended on" is checkable against the database rather than against
+/// another response.
+///
+/// `/cached/{id}` cannot answer that question: its body is a global render
+/// counter, so a body that reflected no write at all would look exactly
+/// like one that reflected every write.
+async fn storm_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let id: i64 = request
+        .param("id")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let views = Post::find(id).await?.map_or(-1, |post| post.views);
+    Ok(HttpResponse::html(format!(
+        "<p>storm {id} views {views}</p>"
+    )))
+}
+
+/// The `(id, views)` pair a `/storm/{id}` body carries, or `None` when
+/// `body` is not one.
+///
+/// Lives beside [`storm_handler`] so the format has exactly one definition:
+/// a caller comparing a served body against the row it came from reads the
+/// values through this rather than re-deriving the handler's `format!`.
+/// The `id` is part of the pair because `views` alone cannot tell a body
+/// served for the right row from one served for a different row that
+/// happens to hold the same count.
+#[must_use]
+pub fn storm_body_row(body: &[u8]) -> Option<(i64, i64)> {
+    let text = std::str::from_utf8(body).ok()?;
+    let id = text
+        .split("storm ")
+        .nth(1)?
+        .split(' ')
+        .next()?
+        .parse()
+        .ok()?;
+    let views = text
+        .split(" views ")
+        .nth(1)?
+        .split('<')
+        .next()?
+        .parse()
+        .ok()?;
+    Some((id, views))
+}
+
+/// A `link` value carrying `0x7f` (DEL): a byte `SafeHeaders` used to accept
+/// and `http::HeaderValue` has never accepted. See the middleware test that
+/// owns `/control-byte-header`.
+pub const CONTROL_BYTE_LINK: &str = "<https://example.com/next>; rel=\"next\"; title=\"a\u{7f}b\"";
+
+/// A `link` value that is valid `http::HeaderValue` bytes but not ASCII, so
+/// `HeaderValue::to_str` refuses it while the wire carries it happily. See
+/// the middleware test that owns `/non-ascii-header`.
+pub const NON_ASCII_LINK: &str =
+    "<https://example.com/caf\u{e9}>; rel=\"next\"; title=\"caf\u{e9}\"";
+
+/// The six response headers whose loss changes how a browser isolates or
+/// executes the same bytes (CACHE-003, from audit finding ASTRA-11), with
+/// the exact values `/security-headers` sets. A hardening test asserts
+/// each one survives a second request byte for byte.
+pub const SECURITY_HEADERS: &[(&str, &str)] = &[
+    ("Content-Disposition", "attachment; filename=report.html"),
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+    ("Cross-Origin-Embedder-Policy", "require-corp"),
+    ("Cross-Origin-Resource-Policy", "same-origin"),
+    ("Permissions-Policy", "camera=(), microphone=()"),
+    ("X-Frame-Options", "DENY"),
+];
+
+/// Renders an HTML attachment carrying every header in
+/// [`SECURITY_HEADERS`]: bytes that download on the render and would run
+/// inline under the application's origin if a hit ever dropped the
+/// disposition.
+async fn security_headers_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    let n = counting_route::renders();
+    let mut response = HttpResponse::html(format!(
+        "<script>globalThis.attachmentExecuted = {n}</script>"
+    ));
+    for (name, value) in SECURITY_HEADERS {
+        response = response.header(*name, *value);
+    }
+    Ok(response)
+}
+
+/// Renders a public page that mints a fresh CSP nonce per render and
+/// declares it in both the `Content-Security-Policy` header and an inline
+/// script (CACHE-004, from audit finding ASTRA-12). The nonce is the render
+/// count, so two renders never share one and a replayed one is visible.
+async fn csp_nonce_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    let nonce = format!("hardening-nonce-{}", counting_route::renders());
+    Ok(HttpResponse::html(format!(
+        "<script nonce=\"{nonce}\">globalThis.nonceExecuted = true</script>"
+    ))
+    .header(
+        "Content-Security-Policy",
+        format!("script-src 'nonce-{nonce}'"),
+    ))
+}
+
+/// Renders a public page whose handler says `Cache-Control: no-store`
+/// (CACHE-001, from audit finding ASTRA-02). The body carries the render
+/// count, so a replayed body is visible.
+async fn no_store_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("private render {n}")).header("Cache-Control", "no-store"))
+}
+
+/// Renders the request's `X-Flavor` and declares `Vary: X-Flavor`, on a
+/// route whose policy declares no such dimension (CACHE-002, from audit
+/// finding ASTRA-09). The body is the flavor, so a variant served to the
+/// wrong request is visible.
+async fn vary_undeclared_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    let flavor = request.header("x-flavor").unwrap_or("absent").to_owned();
+    Ok(HttpResponse::text(flavor).header("Vary", "X-Flavor"))
+}
+
+/// Renders the named post's title and nothing else (CACHE-009, from audit
+/// finding ASTRA-10), so a stale body after a write is visible as the old
+/// title.
+async fn write_atomicity_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let id: i64 = request
+        .param("id")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let title = Post::find(id)
+        .await?
+        .map(|post| post.title)
+        .unwrap_or_default();
+    Ok(HttpResponse::text(title))
+}
+
+/// Renders the marker row of the `hardening_aux` named connection and
+/// nothing else (CACHE-008, from audit finding ASTRA-06), so a read that
+/// was rerouted to the primary shows up as the primary's row.
+async fn named_connection_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let marker = match DB::table_on("hardening_aux", "markers").first().await? {
+        Some(row) => row.get_string("marker")?,
+        None => String::new(),
+    };
+    Ok(HttpResponse::text(marker))
+}
+
+/// Renders an empty body for HEAD and a real one for GET (CACHE-006, from
+/// audit finding ASTRA-03), the shape that let a cold HEAD poison the GET
+/// representation.
+async fn head_empty_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    Ok(if request.method().as_str() == "HEAD" {
+        HttpResponse::html("")
+    } else {
+        HttpResponse::html("GET body")
+    })
+}
+
+/// A valid gzip member holding `<p>encoded body</p>`, served with
+/// `Content-Encoding: gzip` (CACHE-005, from audit finding ASTRA-04).
+pub const GZIP_BODY: &[u8] = &[
+    31, 139, 8, 0, 0, 0, 0, 0, 2, 255, 179, 41, 176, 115, 205, 75, 206, 79, 73, 77, 81, 72, 202,
+    79, 169, 180, 209, 47, 176, 3, 0, 169, 189, 227, 35, 19, 0, 0, 0,
+];
+
+/// Renders pre-compressed bytes with their content coding declared.
+async fn encoded_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    Ok(
+        HttpResponse::bytes(Bytes::from_static(GZIP_BODY), "text/html")
+            .header("Content-Encoding", "gzip"),
+    )
+}
+
+/// Renders with a replayable header whose value the wire cannot carry.
+async fn control_byte_header_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("control byte render {n}")).header("Link", CONTROL_BYTE_LINK))
+}
+
+/// Renders with a replayable header whose value is valid on the wire but is
+/// not ASCII.
+async fn non_ascii_header_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Post::find(1).await;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("non ascii render {n}")).header("Link", NON_ASCII_LINK))
+}
+
+async fn stale_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    if counting_route::should_fail_next_render() {
+        return Ok(HttpResponse::text("boom").status(500));
+    }
+    let id: i64 = request
+        .param("id")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let _ = Post::find(id).await;
+    // Task 17: lets a background rebuild of this route be raced by a write
+    // the same way `cached_handler`'s foreground renders already can be
+    // (see `write_during_next_render`'s own doc) - a no-op unless a test
+    // has armed it, so every other test's stale-route behavior (fail,
+    // stale-on-error, stale-servable) is unaffected.
+    counting_route::maybe_write_during_render().await;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("stale render {n}")))
+}
+
+async fn private_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = Auth::id();
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("private render {n}")))
+}
+
+/// Fix round 1, item 1: declares `PublicShared` with **no** `Principal`
+/// variance, yet reads an identity held in `auth::request_state` (via
+/// `Auth::id()`, the same mechanism `LoginHeader` writes through
+/// `Auth::set_user` - bearer-token or remember-me shaped authentication,
+/// not a session read, which would already force `Uncacheable` through
+/// `session_read`). Without `key_omits_observed_privacy`, this is exactly
+/// the shape that stores one identity's render under a principal-free key
+/// and serves it back to a different identity.
+/// Final review, F2 / ruling R118: reads `posts` through the query-builder
+/// facade only. The body carries the row count so a stale serve is visible
+/// in the response, not only in the render count.
+async fn builder_read_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let rows = DB::table("posts").get().await?;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!(
+        "builder read sees {} posts (render {n})",
+        rows.len()
+    )))
+}
+
+/// Final review, F2 / ruling R118: reads `posts` through exactly one raw
+/// facade method, chosen by the `{kind}` route parameter: `select`,
+/// `select-one`, or `scalar`. Each is its own key, so one route proves all
+/// three shapes decline to store.
+async fn raw_read_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let kind = request.param("kind").unwrap_or("select").to_owned();
+    // Plain column reads for the row-returning shapes: an aggregate column
+    // does not reliably carry a type through the dynamic row conversion on
+    // SQLite (see `DbTableBuilder::count`'s own doc), and what matters here
+    // is the read shape, not the arithmetic.
+    let count: i64 = match kind.as_str() {
+        "select" => DB::select("SELECT id FROM posts", vec![]).await?.len() as i64,
+        "select-one" => DB::select_one("SELECT id FROM posts ORDER BY id LIMIT 1", vec![])
+            .await?
+            .map_or(0, |_| 1),
+        "scalar" => DB::scalar("SELECT COUNT(*) FROM posts", vec![]).await?,
+        other => {
+            return Ok(HttpResponse::text(format!("unknown raw read kind {other}")).status(404));
+        }
+    };
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!(
+        "raw {kind} sees {count} posts (render {n})"
+    )))
+}
+
+/// Final review, F2: shows the signed-in user's own row, resolved through
+/// `Auth::user()` and therefore through `DatabaseUserProvider` when the
+/// request was signed in by `ProviderLoginHeader`. The body carries the
+/// row's `name` so a stale serve after the row changes is visible.
+async fn shows_auth_user_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let user = Auth::user().await?;
+    let shown = match user {
+        Some(user) => {
+            let name = user
+                .as_any()
+                .downcast_ref::<GenericUser>()
+                .and_then(|generic| generic.attribute("name"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("<no name>")
+                .to_owned();
+            format!("user {} named {name}", user.get_auth_identifier())
+        }
+        None => "nobody".to_owned(),
+    };
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("{shown} (render {n})")))
+}
+
+async fn leaky_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let identity = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+    Ok(HttpResponse::html(format!("leaky render for {identity}")))
+}
+
+/// Fix round 3, item 1: the reviewer's exact proof - same route, same
+/// policy as [`leaky_handler`], one line changed: reads the identity
+/// through `suprnova::auth_user_id()` (the seam `request_state::read_state`
+/// now instruments) instead of `Auth::id()` (which always called
+/// `observe_principal_read()` explicitly, even before this round).
+async fn leaky_handler_via_request_state(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let identity = suprnova::auth_user_id().unwrap_or_else(|| "anonymous".to_owned());
+    Ok(HttpResponse::html(format!(
+        "leaky render via request_state for {identity}"
+    )))
+}
+
+/// Fix round 3, item 2: drives the served body entirely from a `Gate::allows`
+/// decision - `x-test-role: admin` gets a different body than any other
+/// value - without reading `Auth::id`, `auth_user_id`, or any other
+/// identity accessor. `Gate::inspect` (which `allows` routes through)
+/// already calls `observe_authorization_read()`, narrowing the served class
+/// to `PrivateCached` via `classify`'s `AuthorizationRead` reason - but the
+/// route below declares no variance dimension at all, so nothing partitions
+/// the key by which role was checked.
+async fn authz_driven_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let is_admin = request.header("x-test-role") == Some("admin");
+    let allowed = suprnova::Gate::allows::<bool, bool>(ROUND3_AUTHZ_GATE, &is_admin, &true);
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!(
+        "authz render {n}: allowed={allowed}"
+    )))
+}
+
+/// Registered once per process by [`ensure_round3_authz_gate`]; action name
+/// scoped to this fix round so it cannot collide with a gate any other test
+/// file registers.
+const ROUND3_AUTHZ_GATE: &str = "fix-round-3-item-2-authz-gate";
+
+/// Registers [`ROUND3_AUTHZ_GATE`] exactly once for the process:
+/// `Gate::allows` on an undefined gate always denies (see its own doc), so
+/// [`authz_driven_handler`] needs this registered before it can produce a
+/// body that actually varies with `is_admin`. `Gate`'s registry is
+/// independent of this harness's own per-test reset, so registering once
+/// per process (not per test) is correct and sufficient.
+pub fn ensure_round3_authz_gate() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        suprnova::Gate::define::<bool, bool>(ROUND3_AUTHZ_GATE, |is_admin: &bool, _resource| {
+            *is_admin
+        });
+    });
+}
+
+/// Fix round 4: reads identity through `Auth::id()` and includes it in the
+/// body, used across three routes with different declared variance so the
+/// same reason (`PrincipalObserved`) can be tested against a route that
+/// declares the wrong dimension, the right one, and (for `AuthorizationRead`,
+/// below) as the input to a per-user gate decision.
+async fn reads_principal_leaky_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let identity = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+    Ok(HttpResponse::html(format!(
+        "principal-reading render for {identity}"
+    )))
+}
+
+/// Fix round 4: reads the Live tenant through `Request::live_tenant()`
+/// (which now records a `tenant_read` observation on every call) and
+/// includes it in the body.
+async fn reads_tenant_leaky_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let tenant = request.live_tenant().unwrap_or("no-tenant").to_owned();
+    Ok(HttpResponse::html(format!(
+        "tenant-reading render for {tenant}"
+    )))
+}
+
+/// Registered once per process by [`ensure_round4_per_user_authz_gate`].
+/// Deliberately keyed by the caller's own id (a `String`), not a bare
+/// `bool` like [`ROUND3_AUTHZ_GATE`]: the point of this gate is that the
+/// decision genuinely varies *by principal* ("admin" allowed, anyone else
+/// denied), which is what makes `Principal` the dimension `AuthorizationRead`
+/// must require - not merely a role flag carried on the request.
+const ROUND4_PER_USER_AUTHZ_GATE: &str = "fix-round-4-per-user-authz-gate";
+
+/// Registers [`ROUND4_PER_USER_AUTHZ_GATE`] exactly once for the process.
+/// See [`ensure_round3_authz_gate`]'s own doc for why once-per-process is
+/// correct and sufficient here too.
+pub fn ensure_round4_per_user_authz_gate() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        suprnova::Gate::define::<String, bool>(
+            ROUND4_PER_USER_AUTHZ_GATE,
+            |user: &String, _resource| user == "admin",
+        );
+    });
+}
+
+/// Fix round 4: drives the served body from a per-user `Gate::allows`
+/// decision - reading identity through `Auth::id()` to decide the
+/// decision, so `principal_read` is set (via `Auth::id()`'s own explicit
+/// observation) *and* `authorization_read` is set (via `Gate::inspect`'s),
+/// exactly the shape `AuthorizationRead` names `Principal` as the required
+/// dimension for.
+async fn reads_authz_by_principal_leaky_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let user = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+    let allowed = suprnova::Gate::allows::<String, bool>(ROUND4_PER_USER_AUTHZ_GATE, &user, &true);
+    Ok(HttpResponse::html(format!(
+        "authz-by-principal render for {user}: allowed={allowed}"
+    )))
+}
+
+/// Fix round 4, Leak B (proven): reads identity through the named,
+/// non-default guard [`NAMED_GUARD`] rather than `Auth::id()`. Round 3's
+/// seam makes `SessionGuard::id`'s underlying `guard_auth_user_id` read
+/// record a `principal_read` observation regardless; the leak was that
+/// classification then re-read `Auth::id()` specifically to build the
+/// observed value, and that accessor returns `None` for an identity this
+/// guard alone holds.
+async fn reads_via_named_guard_leaky_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let guard = SessionGuard::named(NAMED_GUARD, Arc::new(NamedGuardDummyProvider));
+    let identity = guard
+        .id()
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "anonymous".to_owned());
+    Ok(HttpResponse::html(format!(
+        "named-guard render for {identity}"
+    )))
+}
+
+/// Fix round 4, Leak C (proven): reads session state through `session_mut`
+/// rather than `session()`. Before this round, `session_mut` recorded no
+/// observation at all, so a render depending on session state through this
+/// idiomatic read-and-mutate accessor was never forced `Uncacheable` the
+/// way an equivalent `session()` read already was.
+async fn session_mut_reading_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = suprnova::session::session_mut(|session| session.get::<String>("anything"));
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("session-mut render {n}")))
+}
+
+/// Fix round 5, Leak 2: reads a cookie and nothing else. Cookies produce no
+/// `ClassificationReason` on their own; `Request::cookies` (which
+/// `Request::cookie` delegates to) now records a session read instead,
+/// treating a cookie read the same as a session read.
+async fn cookie_reading_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = request.cookie("session");
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("cookie render {n}")))
+}
+
+/// Fix round 5, Leak 3 (proven): the key is derived from `Lang::locale()`
+/// before this handler runs; this then calls `Lang::set_locale`, which the
+/// framework documents as supported mid-request, and renders in the new
+/// locale. The key was already fixed at the old one.
+#[cfg(feature = "localization")]
+async fn locale_switching_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let before = Lang::locale().as_str().to_owned();
+    Lang::set_locale(Locale::parse("fr").expect("fr is a valid locale"));
+    let after = Lang::locale().as_str().to_owned();
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!(
+        "locale render {n} before={before} after={after}"
+    )))
+}
+
+/// Fix round 6, Leak 1 (proven, nested `scope_locale`). The key is derived
+/// while the outer `TestLocaleMiddleware` scope (`"en"`) is the only one
+/// active; this handler then renders its whole body inside a *nested*
+/// `scope_locale` - the framework's own documented, supported API for a
+/// mid-render locale switch - and that nested scope pops the instant its
+/// future resolves, before this handler itself returns. Round 5's guard
+/// re-read `Lang::locale()` after the render, by which point only the
+/// outer, pre-switch scope was left to see - always agreeing with the key.
+#[cfg(feature = "localization")]
+async fn nested_scope_locale_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    let body = scope_locale(Locale::parse("fr").expect("fr is a valid locale"), async {
+        format!("nested-scope render {n} locale={}", Lang::locale().as_str())
+    })
+    .await;
+    Ok(HttpResponse::html(body))
+}
+
+/// Fix round 6, Leak 1, second reproduction (proven). Reads `Lang::locale()`
+/// plainly; [`LateLocaleMiddleware`] (registered after `RenderCache::install`,
+/// gated on `x-test-late-locale`) is what actually supplies the switched
+/// locale, in a scope that pops before this middleware's own `next(request)`
+/// call - and therefore before `RenderCacheMiddleware`'s post-render
+/// guard - returns.
+#[cfg(feature = "localization")]
+async fn late_locale_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    let locale = Lang::locale().as_str();
+    Ok(HttpResponse::html(format!(
+        "late-locale render {n} locale={locale}"
+    )))
+}
+
+/// Fix round 6, Leak 3 (proven, cross-identity). Reads the named,
+/// non-default guard's identity to build the body, then separately touches
+/// the default accessor for an unrelated check whose result the body does
+/// not use - the shape round 5's single last-write slot could not survive:
+/// the second read overwrote the first's recorded material, so the guard
+/// compared only the default identity (which `variance_descriptor`'s
+/// `Principal` arm always builds the key from) against itself and always
+/// passed, even though the *body* came from a different, unrecorded
+/// named-guard identity.
+async fn reads_named_guard_then_touches_default_leaky_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let guard = SessionGuard::named(NAMED_GUARD, Arc::new(NamedGuardDummyProvider));
+    let named_identity = guard
+        .id()
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "anonymous".to_owned());
+    // An unrelated later touch of the default accessor - an audit or
+    // feature check, say - whose own result the body does not use.
+    let _ = Auth::id();
+    Ok(HttpResponse::html(format!(
+        "named-then-default render for {named_identity}"
+    )))
+}
+
+/// Fix round 6, item 5 (engine rule moved to the host): the key's own doc
+/// on `variance_descriptor` explains why this dimension is rejected here
+/// rather than at policy build time. The handler itself is unremarkable;
+/// the point under test is that the route never gets cached at all.
+async fn feature_version_declared_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("feature-version render {n}")))
+}
+
+/// Installs the framework's own [`DatabaseEvaluator`](suprnova::features::DatabaseEvaluator)
+/// (as one half of a shared `Chain`) as featureflag's process-global
+/// default the way `features::bootstrap_database_cached` does in a real
+/// application - which is what `install_evaluator` / `set_global_default`
+/// is for, and why these tests can drive `is_enabled!` over real HTTP
+/// rather than only at the unit level: unlike
+/// `featureflag::evaluator::with_default`, the global default is not a
+/// synchronous scope and survives every await point in a request.
+///
+/// Delegates to `render_cache_feature_evaluator_support`: featureflag's
+/// global default is a genuine process-wide `OnceLock` with no reset, and
+/// `render_cache_privacy_support` needs its own evaluator visible through
+/// that same one slot. See that module's doc for why a shared installer
+/// exists at all and why chaining the two is safe for this module's own
+/// four flags (`user-scoped-flag`, `team-scoped-flag`, `global-flag`,
+/// `another-users-override-flag`).
+async fn install_feature_evaluator() {
+    crate::render_cache_feature_evaluator_support::install().await;
+}
+
+/// Fix round 7, finding 1: the body is driven entirely by a **team-scoped**
+/// feature flag read ambiently through `is_enabled!`. `FeatureMiddleware`
+/// resolved the team before the render began, so nothing the render itself
+/// touches is an instrumented accessor - the evaluator's own read is the
+/// only place the dependency can be seen.
+async fn reads_team_scoped_flag_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    let enabled = suprnova::is_enabled!("team-scoped-flag", false);
+    Ok(HttpResponse::html(format!(
+        "team-scoped-flag render {n} enabled={enabled}"
+    )))
+}
+
+/// The user-scoped half of the same shape (fix round 6, Leak 4), driven
+/// over real HTTP through the shipped middleware and evaluator.
+async fn reads_user_scoped_flag_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    let enabled = suprnova::is_enabled!("user-scoped-flag", false);
+    Ok(HttpResponse::html(format!(
+        "user-scoped-flag render {n} enabled={enabled}"
+    )))
+}
+
+/// Fix round 7, finding 2: a **globally** scoped flag - the same answer for
+/// every visitor, no identity in the decision. Reading it must cost the
+/// cache nothing, even for a signed-in visitor whose id `FeatureMiddleware`
+/// has put in the ambient context.
+async fn reads_global_flag_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    let enabled = suprnova::is_enabled!("global-flag", false);
+    Ok(HttpResponse::html(format!(
+        "global-flag render {n} enabled={enabled}"
+    )))
+}
+
+/// Fix round 7, finding 2, the case a naive fix gets wrong: the flag's only
+/// identity rule belongs to bob, so alice falls through to the global rule.
+/// Her answer is still a function of who she is - bob's would differ - so
+/// her page must not be published under a key bob hits.
+async fn reads_flag_with_another_users_override_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    let enabled = suprnova::is_enabled!("another-users-override-flag", false);
+    Ok(HttpResponse::html(format!(
+        "another-users-override-flag render {n} enabled={enabled}"
+    )))
+}
+
+/// Reads the identity through `Request::auth_user_id()`, a public accessor
+/// with no collector instrumentation at all. The sixth review measured this
+/// and found it carries no identity on the ordinary HTTP path (the only
+/// `with_auth_user_id` call site is the WebSocket-upgrade terminator); this
+/// route keeps that measurement standing, so a future change that stamps it
+/// on the HTTP path fails here rather than leaking silently.
+async fn reads_auth_user_id_accessor_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let n = counting_route::renders();
+    let identity = request.auth_user_id().unwrap_or("none").to_owned();
+    Ok(HttpResponse::html(format!(
+        "auth-user-id-accessor render {n} identity={identity}"
+    )))
+}
+
+/// A **per-tenant** authorization gate, not a per-user one.
+const PER_TENANT_AUTHZ_GATE: &str = "per-tenant-authz-gate";
+
+/// Registers [`PER_TENANT_AUTHZ_GATE`] once per process.
+pub fn ensure_per_tenant_authz_gate() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        suprnova::Gate::define::<String, bool>(
+            PER_TENANT_AUTHZ_GATE,
+            |tenant: &String, _resource| tenant == "acme",
+        );
+    });
+}
+
+/// Fix round 7, finding 4: a body built from a per-tenant authorization
+/// decision. `AuthorizationRead` maps to `Principal` unconditionally, so
+/// this caches only on the route that declares `Principal` alongside
+/// `Tenant`, never on the one keyed by `Tenant` alone - the documented
+/// limitation and its documented remedy, both driven by this one handler.
+async fn reads_tenant_authz_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let tenant = request.live_tenant().unwrap_or("no-tenant").to_owned();
+    let allowed = suprnova::Gate::allows::<String, bool>(PER_TENANT_AUTHZ_GATE, &tenant, &true);
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!(
+        "tenant-authz render {n} tenant={tenant} allowed={allowed}"
+    )))
+}
+
+async fn sets_cookie_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    Ok(HttpResponse::html("has a cookie").cookie(suprnova::Cookie::new("session", "abc")))
+}
+
+/// Ruling R55: observes more distinct table identities than the collector
+/// can hold, so its report overflows. `4_200` clears
+/// `suprnova_live::render_cache::generation::MAX_OBSERVATIONS` (4_096) with
+/// room to spare without importing the constant just for this bound.
+/// A stitched shell whose chain answered before the handler boundary was
+/// ever marked: every read it makes is a gate read, so its content bucket
+/// is empty. Standing in for an authorization guard or tenant middleware
+/// that returns a page instead of calling the next layer, without needing
+/// a Live route to build the stitch.
+async fn stitched_gate_only_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let _ = DB::table("posts").get().await?;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("stitched gate only {n}")))
+}
+
+/// The positive control for [`stitched_gate_only_handler`]: identical
+/// except that it marks the handler boundary first, exactly as the Live
+/// completion middleware will, so its read is a content read and the
+/// shell is publishable.
+async fn stitched_handler_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    suprnova::render_cache::collector::begin_handler();
+    let _ = DB::table("posts").get().await?;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("stitched handler {n}")))
+}
+
+async fn overflow_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    for i in 0..4_200_u32 {
+        suprnova::render_cache::collector::observe_table_read(&format!("overflow_table_{i}"));
+    }
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("overflow render {n}")))
+}
+
+/// Render-counting and coordination hooks the tests use to observe and
+/// steer the mock handlers above, all built on atomics and
+/// `tokio::sync::Notify` - never a timing-based wait.
+pub mod counting_route {
+    use super::*;
+
+    static RENDERS: AtomicU64 = AtomicU64::new(0);
+    static RENDER_STARTED: AtomicU64 = AtomicU64::new(0);
+    static RENDERING_NOTIFY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    static HOLD_NEXT: AtomicBool = AtomicBool::new(false);
+    static RELEASE_NOTIFY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    static WRITE_DURING_NEXT: AtomicBool = AtomicBool::new(false);
+    static FAIL_NEXT: AtomicBool = AtomicBool::new(false);
+
+    fn rendering_notify() -> &'static tokio::sync::Notify {
+        RENDERING_NOTIFY.get_or_init(tokio::sync::Notify::new)
+    }
+
+    fn release_notify() -> &'static tokio::sync::Notify {
+        RELEASE_NOTIFY.get_or_init(tokio::sync::Notify::new)
+    }
+
+    pub(crate) fn reset() {
+        RENDERS.store(0, Ordering::SeqCst);
+        RENDER_STARTED.store(0, Ordering::SeqCst);
+        HOLD_NEXT.store(false, Ordering::SeqCst);
+        WRITE_DURING_NEXT.store(false, Ordering::SeqCst);
+        FAIL_NEXT.store(false, Ordering::SeqCst);
+    }
+
+    /// Arms the next render to return a 500 instead of its ordinary body -
+    /// the shape a handler-level failure takes, as opposed to a provider
+    /// failure before the handler ever runs. Used to exercise
+    /// stale-on-error for the failure mode it is actually named for. See
+    /// fix round 2, item 3.
+    pub fn fail_next_render(_harness: &super::Harness) {
+        FAIL_NEXT.store(true, Ordering::SeqCst);
+    }
+
+    /// Consumes the arm-once flag set by [`fail_next_render`].
+    pub(crate) fn should_fail_next_render() -> bool {
+        FAIL_NEXT.swap(false, Ordering::SeqCst)
+    }
+
+    /// Total number of times a mock handler in this file has actually run.
+    pub fn renders() -> u64 {
+        RENDERS.load(Ordering::SeqCst)
+    }
+
+    /// Arms the next render to block, once started, until
+    /// [`release_render`] is called.
+    pub fn hold_next_render(_harness: &super::Harness) {
+        HOLD_NEXT.store(true, Ordering::SeqCst);
+    }
+
+    /// Releases a render blocked by [`hold_next_render`].
+    ///
+    /// The blocked render must already be waiting on `release_notify()` by
+    /// the time a caller reaches this - `notify_waiters` stores no permit,
+    /// so a release that fires before the held render's own
+    /// `.notified().await` call is registered is lost forever, and that
+    /// render (and any singleflight waiter parked behind it) hangs with no
+    /// CPU and no output, not a red test. That guarantee holds only when
+    /// the caller waited on [`wait_until_rendering_count`] for the *correct*
+    /// count first - see that function's own doc for why "any render has
+    /// started" is not the same guarantee, and was the bug fix round 3,
+    /// item 4 found and fixed.
+    pub fn release_render(_harness: &super::Harness) {
+        release_notify().notify_waiters();
+    }
+
+    /// Arms the next render to perform a write on a genuinely independent
+    /// connection - spawned so it does not inherit the ambient
+    /// `CURRENT_TX` the render's own read-view transaction installed -
+    /// after its own read, and to wait for that write to commit before the
+    /// render returns.
+    pub fn write_during_next_render(_harness: &super::Harness) {
+        WRITE_DURING_NEXT.store(true, Ordering::SeqCst);
+    }
+
+    /// Waits until at least `n` renders have started (called
+    /// [`on_render_start`]) since the harness booted. Race-free: the notify
+    /// handle is captured before the condition is checked, so a
+    /// notification that fires in between is never missed.
+    ///
+    /// Takes an explicit count, not "any render has started" (fix round 3,
+    /// item 4): `RENDER_STARTED` is cumulative across the whole test, never
+    /// reset between renders, so a caller that arms [`hold_next_render`]
+    /// *after* an earlier render already ran must wait for the *next* one
+    /// specifically - passing the count of renders that will have happened
+    /// by the time the held one starts (prior renders, plus one). An
+    /// earlier version of this function checked only `> 0`, which was
+    /// already satisfied by a prior render before `hold_next_render` was
+    /// even armed, so it returned immediately without the held render ever
+    /// having started - and [`release_render`]'s guarantee, which depends
+    /// on this having actually waited for it, did not hold. That produced a
+    /// real, if intermittent, hang: three hangs in forty isolated runs of
+    /// the singleflight test this exact race affected, per the fix round 3
+    /// review, not a background-task capture artifact as an earlier version
+    /// of this project's report claimed.
+    pub async fn wait_until_rendering_count(_harness: &super::Harness, n: u64) {
+        loop {
+            let notified = rendering_notify().notified();
+            if RENDER_STARTED.load(Ordering::SeqCst) >= n {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Waits until at least `n` requests have been admitted as singleflight
+    /// waiters for this harness's coordinator.
+    pub async fn wait_until_waiting(harness: &super::Harness, n: u64) {
+        loop {
+            let notified = harness.waiting.waiting_notify.notified();
+            if harness.waiting.waiting.load(Ordering::SeqCst) >= n {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    pub(crate) async fn on_render_start() {
+        RENDERS.fetch_add(1, Ordering::SeqCst);
+        RENDER_STARTED.fetch_add(1, Ordering::SeqCst);
+        rendering_notify().notify_waiters();
+        if HOLD_NEXT.swap(false, Ordering::SeqCst) {
+            release_notify().notified().await;
+        }
+    }
+
+    pub(crate) async fn maybe_write_during_render() {
+        if WRITE_DURING_NEXT.swap(false, Ordering::SeqCst) {
+            let handle = tokio::spawn(async {
+                let _ = super::Post::create(attrs! { title: "raced-write" }).await;
+            });
+            let _ = handle.await;
+        }
+    }
+}
+
+/// Task 5: how many statements this harness's database connection has
+/// executed.
+///
+/// The one cost a handler-side counter cannot see. A cache that skipped
+/// the handler but still consulted the database on every hit would satisfy
+/// every counter in [`probe_route`] and still cost a round trip per
+/// request; this is what holds it to the round trips the coherence mode
+/// actually requires.
+///
+/// Counted through SeaORM's own metric callback, which fires once per
+/// executed statement on the pool and on every transaction started from
+/// it - so it sees the render's reads, the ledger's epoch read, and the
+/// coherence reread alike. The callback is told nothing about the
+/// statement (see `DbConnection::observe_statements_for_test`): no SQL
+/// text and no bound value reaches this test module.
+pub mod statements {
+    use super::*;
+
+    static STATEMENTS: AtomicU64 = AtomicU64::new(0);
+
+    /// How many statements have run since the last [`reset`].
+    pub fn count() -> u64 {
+        STATEMENTS.load(Ordering::SeqCst)
+    }
+
+    /// Zeroes the counter.
+    pub fn reset() {
+        STATEMENTS.store(0, Ordering::SeqCst);
+    }
+
+    /// Points `conn`'s metric callback at this counter, reporting whether
+    /// it took. Installing needs sole ownership of the pool, so this has
+    /// to run before the connection is cloned anywhere - see
+    /// [`super::boot`], which calls it immediately after connecting.
+    ///
+    /// Compiled only under the `testing` feature (ruling R47):
+    /// `DbConnection::observe_statements_for_test` only exists in the
+    /// library under that feature, so `boot`'s own call is gated the same
+    /// way instead of failing a minimal-profile build against a seam that
+    /// is not there.
+    #[cfg(feature = "testing")]
+    pub(crate) fn install(conn: &mut suprnova::database::DbConnection) -> bool {
+        conn.observe_statements_for_test(|| {
+            STATEMENTS.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+}
+
+/// Waits until at least `n` admitted leads (foreground or background) have
+/// finished their whole publish-decision pipeline and released their
+/// coordinator lease, regardless of whether they actually published - the
+/// same race-free "enable-then-check" shape as
+/// [`counting_route::wait_until_waiting`], over
+/// [`WaiterTrackingCoordinator::released`] instead of its `waiting`
+/// counter. See that field's own doc for exactly which point in
+/// `lead_render` calls `release` on each return path; every one of them has
+/// already made its publish decision (and applied it to the store, when
+/// there is one) by the time `release` runs, so this is true exactly when a
+/// render's outcome (published, declined, or discarded as moved) is already
+/// final and observable - unlike a render merely having *started*
+/// ([`counting_route::wait_until_rendering_count`]), which a background
+/// rebuild reaches long before its own publish decision is made.
+///
+/// Task 5b fix round 1: lives here rather than inside [`race`], where it
+/// started. It touches no race point, so the `testing` feature gate that
+/// module needs was never its own - and a stale-while-revalidate test
+/// outside the race suite needs exactly this barrier. [`race`] re-exports
+/// it, so `race::wait_until_background_finished` still resolves for the
+/// race suite's existing callers.
+pub async fn wait_until_background_finished(harness: &Harness, n: u64) {
+    loop {
+        let notified = harness.waiting.released_notify.notified();
+        if harness.waiting.released.load(Ordering::SeqCst) >= n {
+            return;
+        }
+        notified.await;
+    }
+}
+
+/// Task 17: the deterministic race suite's own hooks.
+///
+/// Three of the five hooks a race suite over this middleware needs already
+/// exist, under other names, in [`counting_route`]: [`counting_route::hold_next_render`],
+/// [`counting_route::wait_until_rendering_count`], and
+/// [`counting_route::release_render`] cover holding a render (foreground or
+/// background - both call [`counting_route::on_render_start`]), observing
+/// that it has actually started, and releasing it (ruling R83). This
+/// module does not duplicate them; a race test calls them directly. What
+/// this module adds:
+///
+/// - [`write_posts_after_reread`], [`write_posts_before_view`],
+///   [`write_posts_after_view_close`], [`write_posts_during_reread`], and
+///   [`advance_epoch_during_next_render`] arm the race points in
+///   [`suprnova::render_cache::middleware::race_points`] that do not
+///   correspond to anything `counting_route` already exposes, because they
+///   fire from the render's own read view and the coherence checks around
+///   it, not from the render itself. The four write hooks between them
+///   place one write on each side of every boundary a render has: before
+///   the read view opens, after it closes, inside the fresh reread, and
+///   after that reread has already passed.
+/// - [`wait_until_background_finished`] is a barrier `counting_route` has
+///   no reason to provide: a background rebuild is a detached `tokio::spawn`
+///   inside the middleware (see `RenderCacheMiddleware::spawn_background_rebuild`),
+///   so the client dispatch that triggered it returns long before that
+///   rebuild's own publish decision is final. See its own doc for why
+///   [`WaiterTrackingCoordinator::released`] - not a render merely having
+///   started - is the correct signal to wait on.
+///
+/// Compiled only under the `testing` feature (ruling R72): the first two
+/// functions reach `suprnova::render_cache::middleware::race_points`,
+/// which only exists in the library under that feature, so an integration
+/// test crate outside it can only see this module through the same gate -
+/// matching `#![cfg(feature = "testing")]` at the top of `render_cache_races.rs`,
+/// which is this module's only caller.
+#[cfg(feature = "testing")]
+pub mod race {
+    use suprnova::render_cache::middleware::race_points;
+
+    use super::*;
+
+    /// Arms the fresh reread of whichever render next finds itself
+    /// coherent to land one more write to the `posts` table - the same
+    /// dependency a `Post::find` render observes - immediately after that
+    /// reread has already passed, but before the render's own candidate is
+    /// built and stored. The stored candidate therefore still carries the
+    /// pre-write observations, so it is the *next* lookup, not this one,
+    /// that finds them behind the ledger and misses. One-shot: consumed
+    /// the first time [`race_points::AFTER_REREAD`] fires after this call.
+    pub fn write_posts_after_reread(_harness: &Harness) {
+        let hook: race_points::Hook =
+            Box::new(|| Box::pin(create_extra_post("raced-after-reread")));
+        race_points::arm(&race_points::AFTER_REREAD, hook);
+    }
+
+    /// Arms the next admitted lead to land one more write to the `posts`
+    /// table before its own consistent read view opens - so the render
+    /// reads that write, the window it closes records the generation the
+    /// write produced, and the fresh reread agrees. The candidate must
+    /// publish: this is the arrival near a render that is not a race.
+    /// One-shot: consumed the first time [`race_points::BEFORE_VIEW`]
+    /// fires after this call.
+    pub fn write_posts_before_view(_harness: &Harness) {
+        let hook: race_points::Hook = Box::new(|| Box::pin(create_extra_post("raced-before-view")));
+        race_points::arm(&race_points::BEFORE_VIEW, hook);
+    }
+
+    /// Arms the next admitted lead to land one more write to the `posts`
+    /// table the instant its read view closes - after the render's own
+    /// reads and its window close are fixed, before the fresh reread runs.
+    /// That reread sees the write and discards the candidate, so nothing is
+    /// published at all. One-shot: consumed the first time
+    /// [`race_points::AFTER_VIEW_CLOSE`] fires after this call, which is
+    /// every render that completes, including one whose candidate a later
+    /// check would have declined anyway.
+    pub fn write_posts_after_view_close(_harness: &Harness) {
+        let hook: race_points::Hook =
+            Box::new(|| Box::pin(create_extra_post("raced-after-view-close")));
+        race_points::arm(&race_points::AFTER_VIEW_CLOSE, hook);
+    }
+
+    /// Arms the fresh reread of whichever render reaches it next to land
+    /// one more write to the `posts` table *inside* that reread - after it
+    /// has read the generations it will judge against, before it judges
+    /// them. The comparison therefore passes on values that are already
+    /// behind and the entry publishes stale; the next lookup's own
+    /// coherence check is where it is caught. One-shot: consumed the first
+    /// time [`race_points::DURING_REREAD`] fires after this call.
+    pub fn write_posts_during_reread(_harness: &Harness) {
+        let hook: race_points::Hook =
+            Box::new(|| Box::pin(create_extra_post("raced-during-reread")));
+        race_points::arm(&race_points::DURING_REREAD, hook);
+    }
+
+    /// Arms the next *request's* epoch capture (in
+    /// `RenderCacheMiddleware::serve`, which reads the epoch for every
+    /// GET/HEAD to a policy-covered route before it knows whether that
+    /// request will be a hit, a stale serve, or a render) to advance the
+    /// installed runtime's authority epoch immediately after that capture.
+    /// That is not necessarily the next render: a request this hook fires
+    /// on but that turns out to be a hit or a stale serve still consumes
+    /// the arm without any render happening. When the request the hook
+    /// does fire on goes on to render, that render carries a stale epoch
+    /// by construction, and its own fresh reread - which reads the epoch
+    /// again, after the advance - is guaranteed to find it moved. One-shot:
+    /// consumed the first time [`race_points::EPOCH_CAPTURED`] fires after
+    /// this call, on whichever request reaches it next.
+    pub fn advance_epoch_during_next_render(_harness: &Harness) {
+        let hook: race_points::Hook = Box::new(|| {
+            Box::pin(async {
+                RenderCache::advance_epoch()
+                    .await
+                    .expect("advance epoch during race test");
+            })
+        });
+        race_points::arm(&race_points::EPOCH_CAPTURED, hook);
+    }
+
+    pub use super::wait_until_background_finished;
+
+    /// Disarms every race point. Fix round 1, F4: nothing previously
+    /// cleared an arm a test made but never consumed - `AFTER_REREAD` only
+    /// fires on a coherent reread, and `lead_render` has several decline
+    /// paths that return before reaching it, so a test that armed it and
+    /// then hit one of those paths would otherwise leave the hook loaded
+    /// for whichever test runs next in the same process. Called from
+    /// [`super::boot`] alongside [`counting_route::reset`], so every test
+    /// starts with every race point disarmed regardless of what the
+    /// previous test in the same binary armed and never fired. Task 5:
+    /// extended to the three new points, which have the same exposure -
+    /// `BEFORE_VIEW` and `AFTER_VIEW_CLOSE` never fire for a request that
+    /// is a hit or that no coordinator admits, and `DURING_REREAD` never
+    /// fires for a candidate declined before the reread.
+    pub(crate) fn reset() {
+        race_points::disarm(&race_points::AFTER_REREAD);
+        race_points::disarm(&race_points::EPOCH_CAPTURED);
+        race_points::disarm(&race_points::BEFORE_VIEW);
+        race_points::disarm(&race_points::AFTER_VIEW_CLOSE);
+        race_points::disarm(&race_points::DURING_REREAD);
+    }
+}
+
+/// One dispatched response: status, lower-cased header map (first value per
+/// name), and body bytes.
+pub struct TestResponse {
+    pub status: hyper::StatusCode,
+    /// Raw header bytes, not `HeaderValue::to_str` output: that accessor
+    /// refuses every byte at or above `0x80`, so a header value that is
+    /// valid on the wire but not ASCII would read back as an empty string
+    /// and a test could not tell it from a dropped header. The framework
+    /// stores header values as `String`, so UTF-8 is the right lens.
+    headers: std::collections::HashMap<String, Vec<u8>>,
+    pub body: Bytes,
+}
+
+impl TestResponse {
+    /// The first value of a response header, case-insensitively, as UTF-8.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(&name.to_ascii_lowercase()).map(|value| {
+            std::str::from_utf8(value).expect("a header value this suite sends is UTF-8")
+        })
+    }
+}
+
+async fn dispatch(
+    harness: &Harness,
+    method: hyper::Method,
+    path: &str,
+    extra_headers: &[(&str, &str)],
+) -> TestResponse {
+    dispatch_recording(harness, method, path, extra_headers, None, None).await
+}
+
+async fn dispatch_recording(
+    harness: &Harness,
+    method: hyper::Method,
+    path: &str,
+    extra_headers: &[(&str, &str)],
+    frames: Option<FrameLog>,
+    server_timings: Option<ServerTimingLog>,
+) -> TestResponse {
+    let mut builder = hyper::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", "127.0.0.1");
+    for (name, value) in extra_headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder
+        .body(Full::new(Bytes::new()))
+        .expect("build request");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let router = Arc::clone(&harness.router);
+    let middleware = Arc::clone(&harness.middleware);
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept test request");
+        let service = service_fn(move |request| {
+            let router = Arc::clone(&router);
+            let middleware = Arc::clone(&middleware);
+            let frames = frames.clone();
+            let server_timings = server_timings.clone();
+            async move {
+                // Task 7: the server side of one request, from the moment
+                // hyper hands the parsed request over to the moment the
+                // response value exists - the whole of `handle_request`,
+                // and none of the connection this test host sets up around
+                // it. Recorded only when a caller asked for it, so every
+                // other dispatch does exactly what it did before.
+                let started = std::time::Instant::now();
+                let response = handle_request(router, middleware, request).await;
+                if let Some(timings) = &server_timings {
+                    timings
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push(started.elapsed());
+                }
+                // Wrapped only when a test asked for a recording, so every
+                // other dispatch in this suite hands hyper exactly the body
+                // the framework produced, with no extra layer in the way.
+                let response = match frames {
+                    Some(frames) => response.map(|body| CountingBody::new(body, frames).boxed()),
+                    None => response,
+                };
+                Ok::<_, std::convert::Infallible>(response)
+            }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await;
+    });
+
+    let stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect test request");
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .expect("HTTP handshake");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let response = sender.send_request(request).await.expect("send request");
+    let status = response.status();
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_ascii_lowercase(),
+                value.as_bytes().to_owned(),
+            )
+        })
+        .collect();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect response body")
+        .to_bytes();
+    TestResponse {
+        status,
+        headers,
+        body,
+    }
+}
+
+/// Dispatches a `GET` request to `path` with `extra_headers`.
+pub async fn dispatch_get(
+    harness: &Harness,
+    path: &str,
+    extra_headers: &[(&str, &str)],
+) -> TestResponse {
+    dispatch(harness, hyper::Method::GET, path, extra_headers).await
+}
+
+/// Dispatches a `HEAD` request to `path`.
+pub async fn dispatch_head(harness: &Harness, path: &str) -> TestResponse {
+    dispatch(harness, hyper::Method::HEAD, path, &[]).await
+}

@@ -1,0 +1,755 @@
+//! # Suprnova - a Laravel-inspired web framework for Rust
+//!
+//! Suprnova brings the productivity of Laravel to async Rust. It pairs a
+//! batteries-included stack - routing, middleware, sessions, Eloquent-style
+//! ORM, queues, broadcasting, mail, payments, scheduling - with the
+//! concurrency model Tokio gives you for free, so long-lived connections,
+//! background workers, and parallel IO are first-class rather than bolted on.
+//!
+//! ## Where to start
+//!
+//! * [`server`] - boot the HTTP server, wire global middleware, register routes.
+//! * [`routing`] - define typed routes, route groups, signed URLs, resource controllers.
+//! * [`http`] - request/response types, extractors, form validation, file uploads.
+//! * [`eloquent`] - Active-Record style models on top of SeaORM.
+//! * [`database`] - connection pools for SQLite, MySQL, and Postgres.
+//! * [`auth`] / [`auth_flows`] - authentication guards, password reset, 2FA, email verification.
+//! * [`queue`] / [`schedule`] - background jobs and cron-style scheduling.
+//! * [`broadcasting`] - WebSocket channels with presence and authorization.
+//! * [`payments`] - provider-neutral checkout, subscriptions, and webhooks.
+//! * [`testing`] - first-class harness for HTTP, database, and queue tests.
+//!
+//! ## Conventions
+//!
+//! Consumers depend on `suprnova::*`. Implementation crates (SeaORM, hyper,
+//! tokio, etc.) are re-exported where the surface meets the user and hidden
+//! where it doesn't, so application code never needs to reach for
+//! `use sea_orm::*` or `use tokio::*` directly.
+//!
+//! For task-driven docs, see the user manual in `docs/manual/`.
+
+// Rustdoc link hygiene - deny-level: every intra-doc link that
+// rustdoc can't resolve fails the build, and any pub item linking
+// to a private one is rejected at the same gate. The sweep that
+// brought the count to zero ran in release-prep §3.3; the CI
+// ratchet that tracked it is gone, replaced by these two attrs.
+#![deny(rustdoc::broken_intra_doc_links)]
+#![deny(rustdoc::private_intra_doc_links)]
+// Missing-doc surface - deny-level: every undocumented public item
+// fails the build. The §3.4 sweep brought the count to zero; the
+// deny attr keeps it there.
+#![deny(missing_docs)]
+
+pub mod app;
+pub mod auth;
+pub mod auth_flows;
+pub mod authorization;
+pub mod boot;
+pub mod broadcasting;
+pub mod bus;
+pub mod cache;
+pub mod config;
+pub mod console;
+pub mod container;
+pub mod content;
+pub mod context;
+pub mod cors;
+pub mod crypto;
+pub mod csrf;
+pub mod data;
+pub mod database;
+pub mod eloquent;
+pub mod error;
+pub mod events;
+pub mod factory;
+pub mod features;
+#[cfg(feature = "filesystem")]
+pub mod filesystem;
+pub mod hashing;
+pub mod http;
+pub mod http_client;
+pub mod idempotency;
+pub mod inertia;
+/// Server-driven interactive components and their application-facing contracts.
+pub mod live;
+#[cfg(feature = "localization")]
+pub mod localization;
+pub(crate) mod lock;
+pub mod logging;
+pub mod magnetar_integration;
+pub mod mail;
+#[cfg(feature = "media")]
+pub mod media;
+pub mod middleware;
+pub mod notifications;
+pub mod pagination;
+pub mod payments;
+pub mod prelude;
+pub mod queue;
+pub mod rate_limit;
+pub mod rbac;
+pub(crate) mod redis_retry;
+pub mod render_cache;
+pub mod resources;
+pub mod routing;
+pub mod schedule;
+pub mod seed;
+pub mod server;
+pub mod session;
+/// Process shutdown signals - SIGINT and SIGTERM - observed once and
+/// shared. Internal: the shape callers see is `Server::run` and the
+/// daemons already draining correctly.
+pub(crate) mod signals;
+pub mod sse;
+/// Static file fallback serving.
+pub mod static_files;
+pub mod supervisor;
+pub mod telemetry;
+pub mod testing;
+pub mod timeout;
+pub mod validation;
+pub mod vector;
+/// Checked server-rendered view contracts used by ordinary routes and Live components.
+pub mod view;
+#[cfg(feature = "web-push")]
+pub mod web_push;
+pub mod workflow;
+pub mod ws;
+
+extern crate self as suprnova;
+
+pub use app::Application;
+/// The Suprnova framework version (the `suprnova` crate version).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub use app::maintenance::{
+    CacheMaintenanceMode, FileMaintenanceMode, MaintenanceMiddleware, MaintenanceMode,
+    MaintenancePayload, maintenance_mode,
+};
+pub use app::paths::{
+    base_path, config_path, database_path, lang_path, public_path, resource_path, set_base_path,
+    storage_path, use_config_path, use_database_path, use_lang_path, use_public_path,
+    use_resource_path, use_storage_path,
+};
+pub use auth::{
+    Auth, AuthConfig, AuthFlowUser, AuthManager, AuthMiddleware, Authenticatable,
+    BasicAuthMiddleware, CanResetPassword, Credentials, DatabaseUserProvider, EloquentUserProvider,
+    GenericUser, Guard, GuardConfig, GuardDriver, GuestMiddleware, LockoutStatus, MustVerifyEmail,
+    Session, SessionBuilder, SessionGuard, SessionToken, StatefulGuard, TokenGuard, User,
+    UserBuilder, UserId, UserProvider,
+};
+pub use authorization::{Authorizable, Gate};
+// The crate root binds `Response` to the HTTP response contract, so the
+// authorization decision type is exported here under an unambiguous alias.
+// Its Laravel-spelled home is `suprnova::authorization::Response`.
+pub use authorization::Response as GateResponse;
+pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, LockGuard, RedisCache};
+pub use config::{
+    AppConfig, AppConfigBuilder, Config, Environment, ServerConfig, ServerConfigBuilder, env,
+    env_optional, env_required, try_env_required,
+};
+pub use container::{App, Container};
+pub use context::{Context, ContextStore};
+pub use crypto::{Crypt, CryptPurpose, EncryptionKey};
+pub use csrf::{CsrfMiddleware, OriginPolicy, csrf_field, csrf_meta_tag, csrf_token};
+pub use data::{
+    Field, IncludeError, IncludeMiddleware, IsRelationLoaded, RequestIncludeSet,
+    current_include_set, scope_include_set, with_include_overrides,
+};
+pub use database::{
+    AutoRouteBinding, ConnectionEstablished, ConnectionRegistry, DB, Database, DatabaseBusy,
+    DatabaseConfig, DatabaseType, DbConnection, DbTableBuilder, DynamicRow, EntityExt,
+    EntityExtMut, PRIMARY_CONNECTION_NAME, QueryExecuted, QueryListener,
+    READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, RouteParam, Transaction,
+    TransactionBeginning, TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource,
+};
+#[cfg(feature = "magnetar-oauth")]
+pub use magnetar::{
+    Error as MagnetarError, Result as MagnetarResult,
+    abuse::{AbuseLimiter, AbusePolicy, Permit},
+    oauth::{
+        AuthorizationRequestShape, AutoLinkPolicy, ClientAuthentication,
+        ClientAuthenticationMaterial, EndpointOverrides, InvalidGrantMeaning,
+        OAuthAuthorizationConfig, OAuthProtocolError, OAuthProvider, OAuthResult, ParamPlacement,
+        PkcePosture, ProviderIdentity, ProviderResponse, RefreshPolicy, RevocationRequest,
+        RevocationTransport, TokenHint, TokenRequestShape,
+    },
+    plugin::{
+        HttpRequest as OAuthHttpRequest, HttpResponse as OAuthHttpResponse,
+        HttpTransport as OAuthHttpTransport,
+    },
+    plugins::{
+        oauth_apple::{AppleOAuthProvider, AppleProviderConfig, ApplePublicKeySource},
+        oauth_facebook::{FacebookOAuthProvider, FacebookProviderConfig},
+        oauth_google::{GoogleOAuthProvider, GoogleProviderConfig},
+        oauth_tiktok::{TikTokOAuthProvider, TikTokProviderConfig},
+        oauth_x::{XOAuthProvider, XProviderConfig},
+    },
+};
+pub use magnetar_integration::SignInOutcome;
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
+pub use magnetar_integration::{
+    FactorAuth, MagnetarConfig, MagnetarFactorAuthEngine, PasskeyConfig, init_magnetar,
+    middleware::BearerTokenMiddleware,
+};
+#[cfg(feature = "magnetar-oauth")]
+pub use magnetar_integration::{
+    MagnetarOAuthOnlyConfig,
+    abuse_limiter::FrameworkAbuseLimiter,
+    engine::{MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig},
+    init_magnetar_oauth_only, install_magnetar_oauth_engine,
+    install_magnetar_oauth_engine_with_factor,
+    oauth_transport::ReqwestOAuthTransport,
+};
+#[cfg(feature = "magnetar-oauth")]
+pub use secrecy::SecretString;
+
+// SeaORM type aliasing - Suprnova design principle #4: SeaORM is an
+// implementation detail; consumers reach for `suprnova::*` and never
+// `use sea_orm::*`. Every type a user would name in handler / model /
+// migration code is re-exported here.
+pub use sea_orm::sea_query;
+pub use sea_orm::strum::IntoEnumIterator as Iterable;
+pub use sea_orm::{
+    ActiveModelBehavior, ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait,
+    DatabaseConnection, DatabaseTransaction, DbErr, DeriveActiveEnum, EntityName, EntityTrait,
+    Iden, IntoActiveModel, ModelTrait, NotSet, PrimaryKeyToColumn, PrimaryKeyTrait, QueryFilter,
+    QueryOrder, QuerySelect, RelationDef, RelationTrait, Schema, Select, Set, SqlErr,
+    TransactionTrait, TryGetable,
+};
+
+// Top-level escape hatch (spec 02-seaorm-aliasing §Rationale): the full
+// `sea_orm` module is reachable as `suprnova::sea_orm::*` so users who
+// need a type we haven't aliased can still get to it without adding
+// `sea_orm` to their Cargo.toml. The aliased names above remain the
+// documented surface; this is the "I know what I'm doing" path.
+pub use ::sea_orm;
+
+// hyper type aliasing - same principle as the SeaORM block above:
+// `Request::method() -> &Method`, `Request::uri() -> &Uri`,
+// `Request::headers() -> &HeaderMap`, and the streaming body type all
+// surface hyper-owned types. Re-exporting them at the crate root lets
+// consumers name those types without adding `hyper` to their
+// Cargo.toml. The full `hyper` module is also re-exported as the
+// documented escape hatch for anything we haven't aliased.
+pub use ::hyper;
+pub use ::hyper::{HeaderMap, Method, StatusCode, Uri, body::Incoming as RequestBodyStream};
+
+// opendal escape hatch - `Storage::disk(name)` returns `opendal::Operator`
+// and the `DiskExt` extension trait is implemented on `opendal::Operator`,
+// so consumers need to name `Operator` (and reach for layer types like
+// `RetryLayer`, `TimeoutLayer`, `LoggingLayer`) directly. Re-exporting the
+// full `opendal` module under `suprnova::opendal` lets them do that without
+// adding `opendal` to their Cargo.toml or risking a version-skew mismatch
+// against the version Suprnova links.
+#[cfg(feature = "filesystem")]
+pub use ::opendal;
+// `#[suprnova::main]` expands to runtime-builder calls, so consumers link
+// Tokio whether or not they name it. Re-exporting it means the generated
+// code resolves against the version Suprnova links rather than whatever
+// the app happens to have in its own Cargo.toml.
+pub use ::tokio;
+pub use broadcasting::{
+    BroadcastEnvelope, BroadcastHub, BroadcastListener, Broadcastable, BroadcastingWsHandler,
+    InMemoryBroadcastHub,
+};
+pub use bus::{Bus, Dispatched};
+pub use console::{CommandEntry, CommandHandler, TypedCommand, dispatch_argv, two_column_detail};
+pub use cors::{AllowedHeaders, AllowedOrigins, CorsConfig, CorsMiddleware};
+pub use error::{AppError, FrameworkError, HttpError, ValidationErrors, render_error_chain};
+pub use events::{
+    DebouncedListener, ErrorOccurred, Event, EventDispatcher, EventFacade, EventFakeGuard,
+    Listener, QueuedListener, Subscriber,
+};
+pub use factory::{Factory, FactoryBuilder, Persistable, Sequence, persist_via_seaorm};
+#[cfg(feature = "filesystem-azure")]
+pub use filesystem::AzBlobConfig;
+#[cfg(feature = "filesystem-gcs")]
+pub use filesystem::GcsConfig;
+#[cfg(feature = "filesystem")]
+pub use filesystem::{
+    ATOMIC_STAGING_DIR, ChecksumAlgorithm, DiskExt, ReadThroughConfig, S3Config, Storage,
+    copy_between_disks,
+};
+pub use hashing::{
+    Algorithm as HashAlgorithm, Argon2Options, Argon2iHasher, Argon2idHasher, BcryptHasher,
+    BcryptOptions, DEFAULT_COST as HASH_DEFAULT_COST, DEFAULT_ROUNDS as HASH_DEFAULT_ROUNDS,
+    HashConfig, HashInfo, Hasher, MAX_BCRYPT_PASSWORD_BYTES, hash, info as hash_info, is_hashed,
+    needs_rehash, verify,
+};
+pub use http::body::{
+    DEFAULT_MAX_REQUEST_BODY_BYTES, collect_body_with_cap, global_max_request_body_bytes,
+    set_global_max_request_body_bytes,
+};
+pub use http::upload::validators::{ImageFile, MaxSize, MimeAllowlist, MimeType};
+pub use http::upload::{
+    DEFAULT_MAX_MULTIPART_BODY_BYTES, DEFAULT_MAX_MULTIPART_PARTS, DEFAULT_UPLOAD_SPILL_THRESHOLD,
+    MultipartLimits, MultipartPayload, MultipartRequestHooks, MultipartValue, UploadedFile,
+    UploadedFileBacking, global_max_multipart_body_bytes, global_max_multipart_parts,
+    global_upload_spill_threshold, parse_multipart_streaming, parse_multipart_streaming_with_cap,
+    parse_multipart_streaming_with_limits, set_global_max_multipart_body_bytes,
+    set_global_max_multipart_parts, set_global_upload_spill_threshold,
+    upload_tempfiles_spilled_total,
+};
+pub use http::{
+    Cookie, CookieOptions, CookiePrefix, FormRequest, FromParam, FromRequest, HttpResponse,
+    Redirect, RedirectRouteBuilder, Request, Response, ResponseExt, SameSite, abort_if,
+    abort_unless, abort_with, json, text,
+};
+pub use http_client::{
+    ClientResponse, FailOnRealCallsGuard, Http, RecordedRequest, RequestBuilder, RetryContext,
+    RetryOutcome, assert_not_sent, assert_sent, fake_response,
+};
+pub use idempotency::{Idempotency, Idempotent, Replay};
+pub use inertia::{
+    DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia, Inertia303Middleware, InertiaConfig,
+    InertiaErrorPageMiddleware, InertiaHeadersMiddleware, InertiaRegistry, InertiaRequestExt,
+    InertiaResponse, InertiaSharedData, InertiaValidationRedirectMiddleware,
+    InertiaVersionMiddleware, IntoInertiaData, MANIFEST_VERSION_FALLBACK, ManifestEntry,
+    MatchOnFields, MergeMode, MergeStrategy, OnceOptions, PartialFilter, Prop, PropEntry,
+    PropFuture, PropResolver, ProvidesScrollMetadata, ResolvedAssets, ScrollMetadata, SsrConfig,
+    SsrResponse, VersionResolver, Visibility, ViteManifest,
+};
+#[cfg(feature = "localization")]
+pub use localization::{
+    CatalogSource, DateStyle, Detect, FluentTranslator, Lang, ListStyle, Locale, LocaleMiddleware,
+    LocaleShare, Localization, LocalizationConfig, RelativeUnit, TimeStyle, Translator,
+    scope_locale,
+};
+pub use logging::{
+    LogConfig, LogFormat, RequestId, RequestIdMiddleware, current_request_id, init_subscriber,
+    spawn_with_request_id,
+};
+pub use middleware::{
+    Middleware, MiddlewareFactory, MiddlewareFuture, MiddlewareRegistry, MiddlewareResolveError,
+    Next, Pipeline, Terminable, TerminationSnapshot, append_middleware_priority,
+    clear_middleware_alias, clear_middleware_group, dispatch_termination, get_global_middleware,
+    global_middleware_count, has_global_middleware, has_middleware_alias, has_middleware_group,
+    has_terminable, middleware_priority, prepend_global_middleware, prepend_middleware_priority,
+    register_global_middleware, register_middleware_alias, register_middleware_group,
+    register_terminable, registered_middleware_aliases, registered_middleware_groups,
+    registered_terminables, resolve_middleware_alias, resolve_middleware_group, terminable_count,
+};
+pub use pagination::{
+    CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, Paginated,
+    Pagination, Paginator,
+};
+pub use queue::{
+    BackoffSchedule, Batch, BatchCallback, BatchOptions, BatchRepository, ChainLink,
+    DEFAULT_BATCH_SETTLEMENTS_TABLE, DEFAULT_BATCHES_TABLE, DatabaseBatchRepository,
+    DatabaseFailedJobStore, DatabaseQueueDriver, DebounceOptions, Debounced, Envelope,
+    EnvelopeError, EnvelopeOverrides, FailOnException, FailedJob, FailedJobStore,
+    FailoverQueueDriver, InspectedJob, Job, JobMiddleware, JobMiddlewareNext, JobOutcome,
+    ManuallyFailed, MaxAttemptsExceeded, MemoryBatchRepository, MemoryFailedJobStore,
+    MemoryQueueDriver, NullFailedJobStore, NullQueueDriver, PendingBatch, PendingChain, Queue,
+    QueueDriver, QueueFilterCapability, QueueRoute, RateLimited, RedisQueueDriver, Reservation,
+    ReservationToken, Settled, Skip, SkipIfBatchCancelled, SyncQueueDriver, TerminalCallbackClaim,
+    ThrottlesExceptions, TimeoutExceeded, UpdatedBatchJobCounts, WithoutOverlapping,
+};
+pub use rate_limit::{
+    BackendErrorPolicy, GlobalLimit, Limit, LimitResult, RateLimitMiddleware, RateLimiter,
+    RateLimiterDriver, SlidingWindowConfig, ThrottleRequestsMiddleware, Unlimited, identity_key,
+    names_identity,
+};
+pub use rbac::{HasRoles, PermissionMiddleware, RoleMiddleware};
+pub use render_cache::RenderCache;
+pub use resources::{
+    AsRelationshipValue, DEFAULT_MAX_RELATIONSHIP_DEPTH, IncludeResolutionError, IncludeTree,
+    IncludedSink, IntoJsonResource, JsonApi, JsonApiBuilder, JsonApiInfo, JsonApiResponse, Maybe,
+    MissingValue, PushIncluded, RelationshipValue, RequestFieldsetSet, Resource,
+    ResourceIdentifier, current_fieldset, current_max_relationship_depth, insert_maybe,
+    max_relationship_depth, scope_fieldset, strip_missing_values,
+};
+pub use routing::{
+    // Internal functions used by macros (hidden from docs)
+    __any_impl,
+    __delete_impl,
+    __fallback_impl,
+    __get_impl,
+    __head_impl,
+    __options_impl,
+    __patch_impl,
+    __post_impl,
+    __put_impl,
+    __ws_impl,
+    FallbackDefBuilder,
+    GroupBuilder,
+    GroupDef,
+    GroupItem,
+    GroupRoute,
+    GroupRouter,
+    IntoGroupItem,
+    ResourceAction,
+    ResourceController,
+    ResourceRoutes,
+    RouteBuilder,
+    RouteDefBuilder,
+    Router,
+    SignatureVerdict,
+    WsRouteDef,
+    clear_route_names_for_test,
+    redirect,
+    redirect_to,
+    route,
+    sign_route,
+    sign_url,
+    url,
+    validate_route_path,
+    verify_signature,
+};
+pub use schedule::{CronExpression, DayOfWeek, Schedule, Task, TaskBuilder, TaskEntry, TaskResult};
+// chrono-tz escape hatch, same principle as the opendal block above:
+// `TaskBuilder::timezone` takes a `chrono_tz::Tz` and `TaskEntry::timezone`
+// hands one back, so consumers need to name that type. Re-exporting `Tz` at
+// the crate root - and the whole module for the zone constants
+// (`chrono_tz::America::New_York`) - lets them do it without adding
+// `chrono-tz` to their own Cargo.toml or risking a version-skew mismatch
+// against the version Suprnova links.
+pub use ::chrono_tz;
+pub use ::chrono_tz::Tz;
+pub use seed::Seeder;
+pub use server::{Server, handle_request, handle_request_with_peer};
+pub use session::{
+    DatabaseSessionDriver, SessionBlock, SessionConfig, SessionData, SessionGcSupervisor,
+    SessionMiddleware, SessionMigrationError, SessionStore, auth_user_id, clear_auth_user,
+    destroy_all_for_user, generate_csrf_token, generate_session_id, get_csrf_token,
+    invalidate_session, is_authenticated, is_valid_session_id, regenerate_csrf_token,
+    regenerate_session_id, session, session_mut, set_auth_user,
+};
+pub use sse::{EndSignal, SseEvent, StreamedEvent};
+pub use static_files::StaticFiles;
+pub use supervisor::{RestartPolicy, Supervisor, SupervisorEntry, SupervisorRegistry};
+pub use telemetry::{
+    CounterHandle, GaugeHandle, HistogramHandle, Metrics, OtelConfig, TelemetryGuard,
+    init_telemetry,
+};
+pub use timeout::TimeoutMiddleware;
+pub use validation::message::{TranslateArgs, ValidationMessage};
+pub use validation::rule::{
+    AsyncRule, ContextualRule, FormContext, Rule, Unique, ValueRule, async_rules, rules,
+    rules::{
+        Alpha, AlphaDash, AlphaNum, ArrayKeys, Between, Boolean, CompareWith, Confirmed, Contains,
+        Different, Distinct, DoesntContain, Email, Gt, Gte, HibpVerifier, HttpUrl, In, InArray,
+        Integer, Lt, Lte, Max, Min, NotIn, Numeric, Password, Required, RequiredIf, RequiredUnless,
+        RequiredWith, RequiredWithAll, Same, UncompromisedVerifier, Url, UrlProtocols, Uuid,
+    },
+};
+// The media subsystem's flat names. `Image` is the image-manipulation
+// pipeline, mirroring `Illuminate\Image\Image`; the upload validator that used
+// to hold this name is now `ImageFile`, mirroring
+// `Illuminate\Validation\Rules\ImageFile`.
+#[cfg(feature = "media")]
+pub use media::{
+    DEFAULT_IMAGE_MAGICK_TIMEOUT_SECS, DEFAULT_IMAGE_MAX_ALLOC_BYTES, DEFAULT_IMAGE_MAX_DIMENSION,
+    DEFAULT_IMAGE_QUALITY, Image, ImageConfig, ImageDriver, ImageDriverKind, ImagePipeline,
+    MagickCliDriver, OutputFormat, OxideAvImageDriver, Transformation,
+};
+#[cfg(feature = "vector-pinecone")]
+pub use vector::PineconeVectorDriver;
+#[cfg(feature = "vector-mariadb")]
+pub use vector::{MariaDbDistance, MariaDbVectorDriver};
+pub use vector::{
+    MemoryVectorDriver, QdrantDistance, QdrantVectorDriver, SUPRNOVA_ID_PAYLOAD_KEY, Vector,
+    VectorDriver, VectorItem, VectorMatch, VectorRegistry, VectorStore,
+};
+#[cfg(feature = "web-push")]
+pub use web_push::{
+    ContentEncoding, EndpointPolicy, PushResponse, SubscriptionInfo, VapidClaims, VapidKey,
+    VapidSigner, WebPushClient, WebPushError,
+};
+pub use workflow::{
+    StepStatus, WorkflowConfig, WorkflowContext, WorkflowHandle, WorkflowStatus, WorkflowWorker,
+    start_named,
+};
+// Phase 12 - payments. Money + Currency are the foundational primitives;
+// every payment DTO builds on them. Re-exported at the crate root so
+// consumers write `suprnova::Money` / `suprnova::Currency`.
+pub use payments::{
+    Currency, MockPaymentProvider, Money, PaymentProviderEntry, PaymentProviderRegistry,
+};
+
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
+pub use auth_flows::{BruteForce, LoginThrottleMiddleware};
+pub use auth_flows::{
+    EmailVerification, EmailVerificationMail, EnrollmentResponse, EnsureEmailVerifiedMiddleware,
+    PasswordChangedMail, PasswordReset, PasswordResetLinkSent, PasswordResetMail, TwoFactor,
+    TwoFactorChallengeFailed, TwoFactorChallengeMiddleware, TwoFactorChallenged, TwoFactorUser,
+};
+#[doc(hidden)]
+pub use clap as __clap;
+pub use mail::{
+    Address, Attachment, Mail, MailBuilder, MailFake, Mailable, MessageSending, MessageSent,
+    OutgoingMessage, QueuedSnapshot, SendMailJob,
+};
+// Phase 13 - feature flags.
+//
+// `Feature`, `Evaluator`, and `EvaluatorRef` re-export cleanly at the
+// crate root. `Context` and the `context!` macro cannot - both names
+// collide with the framework's own per-request context module
+// (`crate::context`). Consumers reach for the featureflag context as
+// `suprnova::features::Context` and the macro as
+// `featureflag::context!` (the crate is in scope transitively); we
+// expose the rest of the primitives + the non-colliding macros here.
+pub use featureflag::{feature, is_enabled};
+pub use features::{Evaluator, EvaluatorRef, Feature};
+// Phase 10 - Eloquent. Foundation primitives land in 10A; relationships
+// (10B) and collections/pagination/observers (10C) extend the same
+// `eloquent` module. The `ModelEntry` registry is populated at compile
+// time by `#[suprnova::model]` (Task 3) and walked at boot by Phase 8
+// (Admin), `model:prune`, and future tooling.
+pub use eloquent::{
+    AggregateKind, AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal,
+    AsEncrypted, AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat,
+    AsHashed, AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsObject, AsOptionalDateTime,
+    AsString, AsTimestamp, Attrs, BelongsTo, BelongsToMany, Builder, Cast, Collection, Direction,
+    DynCast, EagerLoadCache, EagerLoadDispatch, EloquentModel, Fillable, FirstOrCreate,
+    GlobalScope, HasMany, HasManyThrough, HasOne, HasOneThrough, IntoColumn, IntoDynCast, IntoVal,
+    LazyCollection, MassPrunable, Model, ModelEntry, MorphMany, MorphOne, MorphTo, MorphToMany,
+    MorphTypeEntry, MorphedByMany, Prunable, PrunerEntry, Relation, RelationEntry, RelationKind,
+    ReplicateExt, ScopeRegistry, SoftDeletes, Touchable, find_model_by_table, find_morph_type,
+    find_morph_type_by_id, find_relation, models, morph_types,
+    prevent_silently_discarding_attributes, preventing_silently_discarding_attributes, prune_all,
+    prune_all_dry, prune_one, relations, relations_of, unguarded,
+};
+// Phase 10C T1 - model lifecycle events. The 16 per-type event
+// structs (`Created`, `Saving`, ...) are macro-emitted into each
+// model's `events::` submodule; the cross-model shared types
+// (`EventResult`, listener traits, dispatch helpers) re-export here
+// so user code reaches them as `suprnova::EventResult`,
+// `suprnova::CancellableListener`, etc.
+pub use eloquent::events::{
+    CancellableListener, EventResult, ModelEventHooks, dispatch_after, dispatch_cancellable,
+    listen_cancellable,
+};
+// Phase 10C T2a - lifecycle observers. Users implement `Observer<M>`
+// on their observer struct (zero-sized or `Arc`-clonable); the
+// `#[suprnova::observer(M)]` macro (T2b) walks the impl block and
+// registers per-method listeners through the `ObserverEntry` inventory.
+// `bootstrap_observers` drains the inventory at startup.
+pub use eloquent::observers::{
+    Observer, ObserverEntry, ObserverInstallFuture, bootstrap_observers,
+};
+// `casts!` macro is `#[macro_export]` in eloquent/casts/mod.rs - re-exported
+// at the crate root automatically. No `pub use` needed here.
+pub use notifications::channels::broadcast::BroadcastChannel;
+pub use notifications::channels::database::DatabaseChannel;
+pub use notifications::channels::mail::{
+    MailChannel, MailRendering, NotificationMailable, register_mail_renderer,
+};
+#[cfg(feature = "web-push")]
+pub use notifications::channels::webpush::WebPushChannel;
+pub use notifications::{
+    AnonymousNotifiable, Channel, DynNotification, Notifiable, Notification,
+    NotificationDispatcher, NotificationFactory, NotificationFailed, NotificationSending,
+    NotificationSent, Notify, NotifyFakeGuard, SendNotificationJob, StoredNotification,
+};
+
+pub use ws::{WebSocketHandler, WsConfig, WsSocket};
+
+// Re-export async_trait for middleware implementations
+pub use async_trait::async_trait;
+// Re-export the async_trait crate under a doc-hidden name so that
+// proc-macros generated by suprnova can write
+// `#[::suprnova::__async_trait::async_trait]` without requiring consumers to
+// depend on async-trait directly.
+#[doc(hidden)]
+pub use async_trait as __async_trait;
+
+// Re-export inventory for #[service(ConcreteType)] macro
+#[doc(hidden)]
+pub use inventory;
+
+// Doc-hidden re-export of the Eloquent dispatcher seal. The
+// `#[suprnova::model]` macro emits
+// `impl ::suprnova::__private_eloquent::Sealed for <Model>`; user
+// crates cannot reach the same name without depending on the framework
+// `__private_eloquent` re-export deliberately, so user-written `impl
+// EagerLoadDispatch for X` fails to compile (`the trait bound `X:
+// __sealed::Sealed` is not satisfied`).
+#[doc(hidden)]
+pub use eloquent::relations::__sealed as __private_eloquent;
+
+// Re-export indexmap so consumers implementing InertiaSharedData
+// don't need to depend on it separately.
+pub use indexmap;
+
+// Re-export for macro usage
+#[doc(hidden)]
+pub use serde_json;
+
+// Re-export serde for InertiaProps derive macro
+pub use serde;
+
+// Re-export chrono so macros (e.g. the `#[suprnova::model]` timestamp
+// injection in T9) can emit `::suprnova::chrono::Utc::now()` without
+// requiring downstream user crates to add `chrono` to their
+// `[dependencies]`. Public (not doc-hidden) because `DateTime<Utc>`
+// is a Laravel-shape column type users name in their own structs.
+pub use chrono;
+
+// Re-export Tera for the `#[derive(NotificationMailable)]` macro - the
+// generated `to_mail` references `::suprnova::__tera::{Context, Tera}`
+// so consumers don't need to add `tera` to their `[dependencies]`.
+#[doc(hidden)]
+pub use tera as __tera;
+
+// Re-export fake for the `#[derive(Factory)]` macro and for consumers
+// who want to hand-write `Mailable::definition`-style code referencing
+// `::suprnova::__fake::Faker.fake()`. The public re-exports below cover
+// the common surface: `Dummy` derive (struct auto-fill), `Fake` trait
+// (`.fake()` method), `Faker` (universal generator).
+#[doc(hidden)]
+pub use fake as __fake;
+pub use fake::{Dummy, Fake, Faker};
+
+// Re-export validator for FormRequest validation
+pub use validator;
+pub use validator::Validate;
+
+// Re-export the proc-macros for compile-time component validation and type safety
+pub use suprnova_macros::Command;
+pub use suprnova_macros::Data;
+pub use suprnova_macros::FormRequest as FormRequestDerive;
+pub use suprnova_macros::InertiaProps;
+pub use suprnova_macros::LiveComponent;
+pub use suprnova_macros::accessor;
+pub use suprnova_macros::command;
+pub use suprnova_macros::domain_error;
+pub use suprnova_macros::handler;
+pub use suprnova_macros::inertia_response;
+pub use suprnova_macros::injectable;
+pub use suprnova_macros::live;
+pub use suprnova_macros::main;
+pub use suprnova_macros::model;
+pub use suprnova_macros::mutator;
+pub use suprnova_macros::observer;
+pub use suprnova_macros::policy;
+pub use suprnova_macros::prunable;
+pub use suprnova_macros::redirect;
+pub use suprnova_macros::request;
+pub use suprnova_macros::scopes;
+pub use suprnova_macros::service;
+pub use suprnova_macros::workflow;
+pub use suprnova_macros::workflow_step;
+pub use suprnova_macros::{view, view_filter};
+// Derives + traits live in separate namespaces, so the `Factory`
+// derive re-export coexists with the `Factory` trait re-export above.
+// Same pattern as `serde::Serialize` (trait + derive same name).
+pub use suprnova_macros::Factory;
+pub use suprnova_macros::MultipartRequest;
+pub use suprnova_macros::NotificationMailable;
+pub use suprnova_macros::suprnova_test;
+
+// Re-export Jest-like testing macros
+pub use suprnova_macros::describe;
+pub use suprnova_macros::test;
+
+/// Build a JSON [`HttpResponse`] from a `serde_json::json!`-style literal.
+///
+/// Wraps the body in `Ok(...)` so the macro plugs directly into a handler
+/// returning `Result<HttpResponse, _>`.
+///
+/// ```rust,no_run
+/// # use suprnova::{json_response, HttpResponse, FrameworkError};
+/// # fn ex() -> Result<HttpResponse, FrameworkError> {
+/// # let id = 1u64;
+/// # let name = "Ada";
+/// json_response!({ "ok": true, "user": { "id": id, "name": name } })
+/// # }
+/// ```
+#[macro_export]
+macro_rules! json_response {
+    ($($json:tt)+) => {
+        Ok($crate::HttpResponse::json($crate::serde_json::json!($($json)+)))
+    };
+}
+
+/// Build a plain-text [`HttpResponse`] from any `Into<String>` expression.
+///
+/// Wraps the body in `Ok(...)` so the macro plugs directly into a handler
+/// returning `Result<HttpResponse, _>`.
+#[macro_export]
+macro_rules! text_response {
+    ($text:expr) => {
+        Ok($crate::HttpResponse::text($text))
+    };
+}
+
+/// Register global middleware that runs on every request
+///
+/// Global middleware is registered in `bootstrap.rs` and runs in registration order,
+/// before any route-specific middleware.
+///
+/// Registration is idempotent per middleware type - registering the same
+/// type twice keeps the first registration - so re-running bootstrap won't
+/// double-run a global middleware. Register every global BEFORE the server
+/// is constructed: the server snapshots the registry at build time, so a
+/// `global_middleware!` call made after `Server::from_config` / `Server::new`
+/// does not retroactively apply to that server.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// // In bootstrap.rs
+/// use suprnova::global_middleware;
+/// use suprnova::middleware::{Middleware, Next};
+/// use suprnova::http::{Request, Response};
+/// use suprnova::async_trait;
+///
+/// #[derive(Clone)]
+/// struct LoggingMiddleware;
+/// #[async_trait]
+/// impl Middleware for LoggingMiddleware {
+///     async fn handle(&self, req: Request, next: Next) -> Response { next(req).await }
+/// }
+///
+/// pub fn register() {
+///     global_middleware!(LoggingMiddleware);
+/// }
+/// ```
+#[macro_export]
+macro_rules! global_middleware {
+    ($middleware:expr) => {
+        $crate::register_global_middleware($middleware)
+    };
+}
+
+/// Create an expectation for fluent assertions
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use suprnova::expect;
+/// # let actual = 1;
+/// # let expected = 1;
+/// # let result: Result<(), ()> = Ok(());
+/// # let vec = vec![1, 2, 3];
+///
+/// expect!(actual).to_equal(expected);
+/// expect!(result).to_be_ok();
+/// expect!(vec).to_have_length(3);
+/// ```
+///
+/// On failure, shows clear output:
+/// ```text
+/// Test: "returns all todos"
+///   at src/actions/todo_action.rs:25
+///
+///   expect!(actual).to_equal(expected)
+///
+///   Expected: 0
+///   Received: 3
+/// ```
+#[macro_export]
+macro_rules! expect {
+    ($value:expr) => {
+        $crate::testing::Expect::new($value, concat!(file!(), ":", line!()))
+    };
+}

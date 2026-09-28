@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.checkbox",
+  "version": 1,
+  "root": "suprnova-ui/checkbox",
+  "files": [
+    "checkbox.html",
+    "checkbox.css"
+  ],
+  "elements": []
+}

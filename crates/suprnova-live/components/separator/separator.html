@@ -1,0 +1,8 @@
+{#
+  suprnova.separator - a thematic break or a vertical rule (DATA-001).
+  A horizontal separator is the native hr; a vertical one is a labeled
+  separator role. Neither adds a wrapper.
+#}
+{% macro separator(orientation="horizontal", label="") %}
+{% if orientation == "vertical" %}<div class="sn-separator" role="separator" aria-orientation="vertical"{% if label != "" %} aria-label="{{ label }}"{% endif %}></div>{% else %}<hr class="sn-separator"{% if label != "" %} aria-label="{{ label }}"{% endif %}>{% endif %}
+{% endmacro %}

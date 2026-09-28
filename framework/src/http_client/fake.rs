@@ -1,0 +1,351 @@
+//! In-memory recorder and canned-response store for `Http::fake()`.
+//!
+//! Activated by `Http::fake(|| async { ... }).await`: the closure runs
+//! inside a `tokio::task_local!` scope where every `RequestBuilder::send`
+//! is intercepted, captured into a recorded-requests vec, and matched
+//! against canned responses queued via [`fake_response`].
+//!
+//! Each task gets its own isolated fake state (`Arc<Mutex<FakeState>>`),
+//! so tests can run in parallel without serializing themselves on a
+//! process-wide mutex.
+//!
+//! Note: `tokio::task_local!` is task-scoped. Work spawned via
+//! `tokio::spawn` inside the scope runs on a fresh task and does NOT
+//! inherit the fake by default - those requests escape to the real
+//! network (or fail-closed when `Http::fail_on_real_calls()` is on).
+//!
+//! For the cases that actually want spawned tasks to share the parent's
+//! fake (e.g. a queue worker that calls outbound HTTP from within a
+//! spawned future), [`Http::spawn_with_fake_inheritance`] captures the
+//! current fake state via the shared `Arc` and re-installs it in the
+//! child's `tokio::task_local!` scope. Recorded requests and consumed
+//! canned responses are shared with the parent through the same Arc -
+//! `assert_sent` on the parent sees what the child sent.
+
+use crate::lock;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
+
+use bytes::Bytes;
+
+use super::{Body, ClientResponse, Http, RequestBuilder};
+
+tokio::task_local! {
+    /// Per-task fake state. Set by [`Http::fake`]. Inside the scope,
+    /// `is_fake_active()` returns `true` and `intercept` reads / mutates
+    /// the state. Outside, all of them return `false` / panic with a
+    /// friendly error.
+    ///
+    /// `Arc<Mutex<...>>` (rather than `Mutex<...>` directly) so the
+    /// state can be cloned cheaply and re-installed in spawned tasks
+    /// via [`Http::spawn_with_fake_inheritance`]; recorded requests
+    /// from the child remain visible to the parent through the same
+    /// Arc.
+    static FAKE_STATE: Arc<Mutex<FakeState>>;
+}
+
+#[derive(Default)]
+pub(crate) struct FakeState {
+    recorded: Vec<RecordedRequest>,
+    canned: Vec<CannedResponse>,
+}
+
+/// A recorded outbound request - used by [`assert_sent`] /
+/// [`assert_not_sent`].
+#[derive(Debug, Clone)]
+pub struct RecordedRequest {
+    /// HTTP method as a static string: `"GET"`, `"POST"`, etc.
+    pub method: String,
+    /// Full request URL exactly as passed to `Http::get`/`post`/etc.
+    pub url: String,
+    /// Headers added to the request, in the order they were appended.
+    pub headers: Vec<(String, String)>,
+    /// Raw body bytes (JSON serialized as JSON, form serialized as
+    /// urlencoded, raw passed through).
+    pub body: Option<Vec<u8>>,
+}
+
+struct CannedResponse {
+    method: String,
+    url_substring: String,
+    status: u16,
+    body: Bytes,
+    /// `content-type` header value the intercepted response answers with.
+    /// `"application/json"` for [`fake_response`], `"text/plain; charset=utf-8"`
+    /// for [`fake_response_text`] - the two entry points differ only in how
+    /// the body is *produced* (JSON-encoded vs. verbatim bytes); this field
+    /// keeps the header truthful either way.
+    content_type: String,
+}
+
+/// Queue a canned response. The first request whose method matches
+/// (case-insensitive) and whose URL contains `url_substring` returns
+/// this response - and the canned entry is consumed.
+///
+/// Method `"*"` matches any method.
+///
+/// Subsequent matching requests fall through to the next canned entry,
+/// or - if none match - return an empty `200 {}`.
+///
+/// **Must be called inside a `Http::fake(|| async { ... })` scope.**
+/// Panics if no fake scope is active on the current task.
+pub fn fake_response(method: &str, url_substring: &str, status: u16, body: serde_json::Value) {
+    let bytes =
+        serde_json::to_vec(&body).expect("fake_response body (a serde_json::Value) must serialize");
+    with_state(|s| {
+        s.canned.push(CannedResponse {
+            method: method.to_string(),
+            url_substring: url_substring.to_string(),
+            status,
+            body: Bytes::from(bytes),
+            content_type: "application/json".to_string(),
+        });
+    });
+}
+
+/// Queue a canned response whose body is sent back to the caller verbatim
+/// as text, without JSON-encoding - the raw-body sibling of
+/// [`fake_response`] for upstream APIs that speak `text/plain` rather than
+/// JSON (the HIBP k-anonymity range endpoint [`crate::HibpVerifier`] calls
+/// is the motivating case). Same method/URL-substring matching and
+/// consume-on-match semantics as `fake_response`; the response's
+/// `content-type` header is `text/plain; charset=utf-8` instead of
+/// `application/json`.
+///
+/// Reached through [`crate::http_client::Http::fake_response_text`], the
+/// public entry point - kept `pub(crate)` here because there is no reason
+/// for a caller to reach the `fake` module directly.
+///
+/// **Must be called inside a `Http::fake(|| async { ... })` scope.**
+/// Panics if no fake scope is active on the current task.
+pub(crate) fn fake_response_text(method: &str, url_substring: &str, status: u16, body: &str) {
+    with_state(|s| {
+        s.canned.push(CannedResponse {
+            method: method.to_string(),
+            url_substring: url_substring.to_string(),
+            status,
+            body: Bytes::from(body.as_bytes().to_vec()),
+            content_type: "text/plain; charset=utf-8".to_string(),
+        });
+    });
+}
+
+/// Assert that at least one recorded request satisfies the predicate.
+/// Panics with a list of recorded requests on failure.
+///
+/// Must be called inside a `Http::fake(...)` scope.
+pub fn assert_sent(predicate: impl Fn(&RecordedRequest) -> bool) {
+    with_state(|s| {
+        if !s.recorded.iter().any(&predicate) {
+            panic!(
+                "assert_sent: no recorded request matched the predicate. \
+                 Recorded (header values and bodies redacted):{}",
+                redacted(&s.recorded)
+            );
+        }
+    });
+}
+
+/// Assert that no recorded request satisfies the predicate. Panics
+/// with the offending request on failure.
+///
+/// Must be called inside a `Http::fake(...)` scope.
+pub fn assert_not_sent(predicate: impl Fn(&RecordedRequest) -> bool) {
+    with_state(|s| {
+        if let Some(hit) = s.recorded.iter().find(|r| predicate(r)) {
+            panic!(
+                "assert_not_sent: forbidden request was sent (header values and \
+                 bodies redacted):{}",
+                redacted(std::slice::from_ref(hit))
+            );
+        }
+    });
+}
+
+/// Run `f` inside a task-local fake scope. While `f` is awaiting, every
+/// outbound HTTP call on the same task is intercepted instead of
+/// hitting the network.
+///
+/// Returns whatever the closure returns.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use suprnova::{Http, fake_response, assert_sent};
+/// # use suprnova::serde_json;
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+/// Http::fake(|| async {
+///     fake_response("POST", "/api/users", 201, serde_json::json!({"id": 1}));
+///     let resp = Http::post("https://example.com/api/users")
+///         .json(&serde_json::json!({"name": "Ada"}))
+///         .send()
+///         .await
+///         .unwrap();
+///     assert_eq!(resp.status(), 201);
+///     assert_sent(|r| r.method == "POST" && r.url.contains("/api/users"));
+/// })
+/// .await;
+/// # Ok(()) }
+/// ```
+pub async fn install_fake_scope<F, Fut, T>(f: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = T>,
+{
+    FAKE_STATE
+        .scope(Arc::new(Mutex::new(FakeState::default())), f())
+        .await
+}
+
+/// Install a previously-captured `Arc<Mutex<FakeState>>` for the
+/// duration of `fut`, so a spawned task can share the parent's
+/// recorded-requests / canned-responses store. Used by
+/// [`Http::spawn_with_fake_inheritance`].
+pub(crate) async fn install_inherited_scope<F, T>(state: Arc<Mutex<FakeState>>, fut: F) -> T
+where
+    F: Future<Output = T>,
+{
+    FAKE_STATE.scope(state, fut).await
+}
+
+/// Capture the current task's fake state for re-installation in a
+/// spawned task. Returns `None` when no fake scope is active on the
+/// current task - in which case the caller should fall through to a
+/// regular `tokio::spawn` rather than asserting inheritance.
+pub(crate) fn snapshot_current_fake_state() -> Option<Arc<Mutex<FakeState>>> {
+    FAKE_STATE.try_with(|state| state.clone()).ok()
+}
+
+/// `true` if a fake scope is active on the current task. Used by
+/// `RequestBuilder::send` to decide whether to short-circuit.
+pub(crate) fn is_fake_active() -> bool {
+    // `try_with` returns Ok if the task_local is in scope.
+    FAKE_STATE.try_with(|_| ()).is_ok()
+}
+
+pub(crate) fn intercept(req: &RequestBuilder) -> Result<ClientResponse, crate::FrameworkError> {
+    let body_bytes = match &req.body {
+        Some(Body::Json(v)) => Some(serde_json::to_vec(v).unwrap_or_default()),
+        Some(Body::Form(v)) => Some(
+            serde_urlencoded::to_string(v)
+                .unwrap_or_default()
+                .into_bytes(),
+        ),
+        Some(Body::Raw(b)) => Some(b.to_vec()),
+        None => None,
+    };
+
+    with_state(|s| {
+        s.recorded.push(RecordedRequest {
+            method: req.method.as_str().to_string(),
+            url: req.url.clone(),
+            headers: req.headers.clone(),
+            body: body_bytes,
+        });
+
+        let method_str = req.method.as_str();
+        let idx = s.canned.iter().position(|c| {
+            let m_ok = c.method == "*" || c.method.eq_ignore_ascii_case(method_str);
+            m_ok && req.url.contains(&c.url_substring)
+        });
+
+        match idx {
+            Some(i) => {
+                let c = s.canned.remove(i);
+                Ok(ClientResponse::fake(
+                    c.status,
+                    vec![("content-type".to_string(), c.content_type.clone())],
+                    c.body,
+                ))
+            }
+            // No canned response matched. With the fail-closed guard active,
+            // a drifted URL/method must fail loudly rather than silently
+            // returning an empty 200 that masks the mismatch.
+            None if Http::is_guarded() => Err(crate::FrameworkError::internal(format!(
+                "Http::fake: no canned response matched {} {} while \
+                 Http::fail_on_real_calls is active. Register a matching \
+                 fake_response(...), or release the guard to allow the \
+                 default empty 200 response.",
+                method_str, req.url
+            ))),
+            None => Ok(ClientResponse::fake(
+                200,
+                vec![("content-type".to_string(), "application/json".to_string())],
+                Bytes::from_static(b"{}"),
+            )),
+        }
+    })
+}
+
+/// Access the per-task `FakeState`. Panics if no scope is active.
+fn with_state<R>(f: impl FnOnce(&mut FakeState) -> R) -> R {
+    FAKE_STATE
+        .try_with(|state| {
+            let mut guard = lock::lock(state, "http fake state").expect("FakeState mutex poisoned");
+            f(&mut guard)
+        })
+        .unwrap_or_else(|_| {
+            panic!(
+                "Http fake helpers called outside an Http::fake(...) scope. \
+                 Wrap the test body in Http::fake(|| async {{ ... }}).await."
+            )
+        })
+}
+
+/// Format recorded requests for assertion-failure messages WITHOUT
+/// leaking secrets. Header values and body bytes routinely carry bearer
+/// tokens, API keys, and webhook payloads, so only the method, URL, a
+/// small allowlist of non-sensitive header names, and a body byte count
+/// are shown; every other header value and the body itself are redacted.
+fn redacted(reqs: &[RecordedRequest]) -> String {
+    const SAFE_HEADERS: &[&str] = &["content-type", "accept", "user-agent"];
+    let mut out = String::new();
+    for r in reqs {
+        out.push_str(&format!("\n  {} {}", r.method, r.url));
+        for (name, value) in &r.headers {
+            if SAFE_HEADERS.iter().any(|h| h.eq_ignore_ascii_case(name)) {
+                out.push_str(&format!("\n    {name}: {value}"));
+            } else {
+                out.push_str(&format!("\n    {name}: <redacted>"));
+            }
+        }
+        match &r.body {
+            Some(b) => out.push_str(&format!("\n    body: <{} bytes>", b.len())),
+            None => out.push_str("\n    body: <none>"),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacted_hides_header_values_and_body_bytes() {
+        let reqs = vec![RecordedRequest {
+            method: "POST".to_string(),
+            url: "https://api.test/charge".to_string(),
+            headers: vec![
+                (
+                    "Authorization".to_string(),
+                    "Bearer super-secret-token".to_string(),
+                ),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ],
+            body: Some(br#"{"card":"4242424242424242"}"#.to_vec()),
+        }];
+        let out = redacted(&reqs);
+        // Method, URL, and allowlisted header values are shown.
+        assert!(out.contains("POST https://api.test/charge"), "{out}");
+        assert!(out.contains("Content-Type: application/json"), "{out}");
+        // Sensitive header value and body bytes are NOT shown.
+        assert!(
+            !out.contains("super-secret-token"),
+            "auth value leaked: {out}"
+        );
+        assert!(out.contains("Authorization: <redacted>"), "{out}");
+        assert!(!out.contains("4242424242424242"), "body leaked: {out}");
+        assert!(out.contains("body: <"), "{out}");
+    }
+}

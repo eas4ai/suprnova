@@ -1,0 +1,1010 @@
+//! Cookie handling for suprnova framework
+//!
+//! Provides Laravel-like cookie API with secure defaults.
+
+use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
+use std::collections::HashMap;
+use std::time::Duration;
+
+/// Bytes that must be percent-encoded when serializing a cookie name or
+/// value into a Set-Cookie header per RFC 6265 cookie-octet rules.
+///
+/// `CONTROLS` covers 0x00–0x1F + 0x7F, so CR (`\r`), LF (`\n`), NUL, and
+/// every other ASCII control character is encoded - closing the
+/// header-injection class of bugs where an attacker-controlled cookie
+/// name or value containing CRLF would split the response.
+///
+/// On top of CONTROLS we add the cookie-octet exclusions from RFC 6265
+/// §4.1.1 (whitespace, `"`, `,`, `;`, `\`, `%`) plus the gen-delims and
+/// sub-delims so non-ASCII bytes and reserved URL characters also get
+/// percent-encoded.
+const COOKIE_ENCODE: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'$')
+    .add(b'%')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'(')
+    .add(b')')
+    .add(b'*')
+    .add(b'+')
+    .add(b',')
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'<')
+    .add(b'=')
+    .add(b'>')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
+
+/// SameSite cookie attribute
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum SameSite {
+    /// `Strict` - never sent on cross-site requests.
+    Strict,
+    /// `Lax` - sent on top-level navigations but not on cross-site subresource requests. The default.
+    #[default]
+    Lax,
+    /// `None` - sent on every cross-site request. Browsers require `Secure` to be set when `None` is used.
+    None,
+}
+
+/// A cookie-name prefix (`__Host-` / `__Secure-`) as defined by RFC 6265bis.
+///
+/// Browsers enforce invariants keyed on the *name*: a `__Host-` cookie is
+/// rejected unless it is `Secure`, has `Path=/`, and carries no `Domain`;
+/// a `__Secure-` cookie is rejected unless it is `Secure`. The value of
+/// the protection is that a compromised sibling subdomain cannot set a
+/// wider-scoped cookie of the same name that shadows the real one.
+///
+/// The framework applies a prefix as a *name transformation*, never as a
+/// stored flag: every enforcement point ([`Cookie::to_header_value`], boot
+/// validation) re-derives the rules from the rendered name, so a cookie
+/// built by hand with a literal `"__Host-"` name gets exactly the same
+/// treatment as one built through [`Self::apply`].
+///
+/// `apply` and [`Self::strip`] are public because not every cookie is
+/// framework-written: the locale cookie, for example, is set by app code
+/// and only read by the framework. An app choosing to prefix its own
+/// cookies uses the same mapping the framework uses, so the write side
+/// and the read side cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CookiePrefix {
+    /// No prefix. The logical name is the wire name.
+    #[default]
+    None,
+    /// `__Secure-`: the browser requires the `Secure` attribute.
+    Secure,
+    /// `__Host-`: the browser requires `Secure`, `Path=/`, and no
+    /// `Domain` attribute - a host-locked cookie.
+    Host,
+}
+
+impl CookiePrefix {
+    /// Parse a configuration value. Accepts the literal prefix
+    /// (`"__Host-"`, `"__Secure-"`) or the bare word (`"host"`,
+    /// `"secure"`, `"none"`), case-insensitively; the empty string is
+    /// [`Self::None`]. Returns `Option::None` for anything else so the
+    /// caller can fail loudly instead of silently shipping an
+    /// unprefixed cookie the operator believed was locked.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.to_ascii_lowercase().as_str() {
+            "" | "none" => Some(Self::None),
+            "__secure-" | "secure" => Some(Self::Secure),
+            "__host-" | "host" => Some(Self::Host),
+            _ => None,
+        }
+    }
+
+    /// The literal name prefix this variant prepends.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Secure => "__Secure-",
+            Self::Host => "__Host-",
+        }
+    }
+
+    /// Map a logical cookie name to its wire name.
+    ///
+    /// Idempotent: applying a prefix to a name that already carries it
+    /// returns the name unchanged, so routing a value through two
+    /// prefix-aware layers cannot double-prefix it.
+    ///
+    /// That idempotency is per-prefix, not universal: applying a prefix
+    /// to a name that already carries the *other* prefix stacks them
+    /// (`Host.apply("__Secure-x")` is `"__Host-__Secure-x"`) rather than
+    /// replacing it. A logical name that already carries a prefix is a
+    /// configuration error, and this type does not guess at the intended
+    /// fix - the rendered name still starts with the outermost prefix
+    /// applied, so browser rules and render-time enforcement key on that.
+    pub fn apply(self, logical: &str) -> String {
+        let p = self.as_str();
+        if p.is_empty() || logical.starts_with(p) {
+            logical.to_string()
+        } else {
+            format!("{p}{logical}")
+        }
+    }
+
+    /// Recover the logical name from a wire name by removing a
+    /// recognised prefix, if present. The inverse of [`Self::apply`]
+    /// for all three variants, which is what lets a call site that only
+    /// holds the wire name (a test helper, a log line) get back to the
+    /// name the AEAD binding uses.
+    ///
+    /// Removes the outermost recognised prefix only: a name that stacks
+    /// both prefixes (see [`Self::apply`]'s caveat) still has one layer
+    /// left after stripping, matching `apply`'s stacking rather than
+    /// silently unwinding a configuration error it did not create.
+    pub fn strip(name: &str) -> &str {
+        name.strip_prefix("__Host-")
+            .or_else(|| name.strip_prefix("__Secure-"))
+            .unwrap_or(name)
+    }
+
+    /// Check a prefix against the cookie attributes it will be rendered
+    /// with. Pure so it is callable (and testable) from anywhere -
+    /// [`crate::Config::init`] runs it at boot, where the per-request
+    /// config constructors cannot host a fallible check.
+    ///
+    /// The error string names the constraint, not the cookie: the boot
+    /// caller knows which cookies the setting governs and adds that.
+    pub fn validate(self, domain: Option<&str>, path: &str) -> Result<(), String> {
+        if self != Self::Host {
+            return Ok(());
+        }
+        if domain.is_some() {
+            return Err(
+                "__Host- forbids a Domain attribute: the browser rejects the cookie, \
+                 silently, and the whole point of the prefix is host-locking"
+                    .to_string(),
+            );
+        }
+        if path != "/" {
+            return Err(format!(
+                "__Host- requires Path=/ (configured path is {path:?}): the browser \
+                 rejects any other value, silently"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Cookie options with secure defaults.
+///
+/// This struct is non-exhaustive so adding a cookie attribute does not become
+/// a breaking change; construct it with [`CookieOptions::default`] and use
+/// the builder methods on [`Cookie`] for changes.
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub struct CookieOptions {
+    /// Forbids JavaScript access via `document.cookie`.
+    pub http_only: bool,
+    /// Limits the cookie to HTTPS connections.
+    pub secure: bool,
+    /// `SameSite` attribute controlling cross-site send behaviour.
+    pub same_site: SameSite,
+    /// Path scope - the cookie is only sent for requests under this path prefix.
+    pub path: String,
+    /// Domain scope - `None` defaults to the origin host.
+    pub domain: Option<String>,
+    /// `Max-Age` lifetime - `None` makes the cookie a session cookie.
+    pub max_age: Option<Duration>,
+    /// Emit the `Partitioned` (CHIPS) attribute. Independent of
+    /// `SameSite`; browsers that don't recognise it silently ignore
+    /// the attribute.
+    pub partitioned: bool,
+}
+
+impl Default for CookieOptions {
+    fn default() -> Self {
+        Self {
+            http_only: true,
+            secure: true,
+            same_site: SameSite::Lax,
+            path: "/".to_string(),
+            domain: None,
+            max_age: None,
+            partitioned: false,
+        }
+    }
+}
+
+/// Cookie builder with fluent API
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use suprnova::Cookie;
+/// use std::time::Duration;
+///
+/// let cookie = Cookie::new("session", "abc123")
+///     .http_only(true)
+///     .secure(true)
+///     .max_age(Duration::from_secs(3600));
+/// ```
+#[derive(Clone, Debug)]
+pub struct Cookie {
+    name: String,
+    value: String,
+    options: CookieOptions,
+}
+
+impl Cookie {
+    /// Create a new cookie with the given name and value
+    ///
+    /// Default options:
+    /// - HttpOnly: true
+    /// - Secure: true
+    /// - SameSite: Lax
+    /// - Path: "/"
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+            options: CookieOptions::default(),
+        }
+    }
+
+    /// Get the cookie name
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Get the cookie value
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Set the HttpOnly flag (default: true)
+    ///
+    /// HttpOnly cookies are not accessible via JavaScript, protecting against XSS.
+    pub fn http_only(mut self, value: bool) -> Self {
+        self.options.http_only = value;
+        self
+    }
+
+    /// Set the Secure flag (default: true)
+    ///
+    /// Secure cookies are only sent over HTTPS connections.
+    pub fn secure(mut self, value: bool) -> Self {
+        self.options.secure = value;
+        self
+    }
+
+    /// Set the SameSite attribute (default: Lax)
+    ///
+    /// Controls when the cookie is sent with cross-site requests.
+    pub fn same_site(mut self, value: SameSite) -> Self {
+        self.options.same_site = value;
+        self
+    }
+
+    /// Set the cookie's max age
+    ///
+    /// The cookie will expire after this duration.
+    pub fn max_age(mut self, duration: Duration) -> Self {
+        self.options.max_age = Some(duration);
+        self
+    }
+
+    /// Set the cookie path (default: "/")
+    pub fn path(mut self, path: impl Into<String>) -> Self {
+        self.options.path = path.into();
+        self
+    }
+
+    /// Set the cookie domain
+    pub fn domain(mut self, domain: impl Into<String>) -> Self {
+        self.options.domain = Some(domain.into());
+        self
+    }
+
+    /// Rename this cookie to its wire form under `prefix`. Idempotent,
+    /// like [`CookiePrefix::apply`]. Called last in a builder chain -
+    /// the attribute enforcement in [`Self::to_header_value`] keys on
+    /// the final name, so order relative to `.secure()` / `.domain()`
+    /// does not matter.
+    pub fn prefixed(mut self, prefix: CookiePrefix) -> Self {
+        self.name = prefix.apply(&self.name);
+        self
+    }
+
+    /// Toggle the `Partitioned` (CHIPS) attribute. Browsers that
+    /// support CHIPS scope the cookie to the embedding top-level
+    /// site, isolating it from the unpartitioned third-party-cookie
+    /// jar; browsers that don't simply ignore the attribute.
+    pub fn partitioned(mut self, value: bool) -> Self {
+        self.options.partitioned = value;
+        self
+    }
+
+    /// Build the Set-Cookie header value
+    pub fn to_header_value(&self) -> String {
+        // RFC 6265bis name-prefix rules are enforced at render time and
+        // keyed on the name: a flag could not survive the builder chains
+        // (every session site sets `.secure()` / `.path()` / `.domain()`
+        // after the base cookie) and could not reach `Cookie::queue` at
+        // all. A prefixed cookie violating a rule is silently rejected by
+        // the browser - no error, no log, "login is broken" - so rewriting
+        // here plus a warning is more observable than emitting an invalid
+        // header faithfully.
+        let host_prefixed = self.name.starts_with("__Host-");
+        let secure_prefixed = self.name.starts_with("__Secure-");
+        let mut parts = vec![format!(
+            "{}={}",
+            url_encode(&self.name),
+            url_encode(&self.value)
+        )];
+
+        let mut path = sanitize_path(&self.options.path);
+        if host_prefixed && path != "/" {
+            tracing::warn!(
+                cookie = %self.name,
+                configured_path = %path,
+                "__Host- requires Path=/; rewriting the configured path so the \
+                 browser does not silently reject the cookie"
+            );
+            path = "/".to_string();
+        }
+        parts.push(format!("Path={path}"));
+
+        if self.options.http_only {
+            parts.push("HttpOnly".to_string());
+        }
+
+        // Secure is forced by the builder, SameSite=None (browsers reject
+        // that pair otherwise), or either name prefix (both require it).
+        if self.options.secure
+            || self.options.same_site == SameSite::None
+            || host_prefixed
+            || secure_prefixed
+        {
+            parts.push("Secure".to_string());
+        }
+
+        match self.options.same_site {
+            SameSite::Strict => parts.push("SameSite=Strict".to_string()),
+            SameSite::Lax => parts.push("SameSite=Lax".to_string()),
+            SameSite::None => parts.push("SameSite=None".to_string()),
+        }
+
+        if let Some(domain) = &self.options.domain {
+            if host_prefixed {
+                tracing::warn!(
+                    cookie = %self.name,
+                    domain = %domain,
+                    "__Host- forbids a Domain attribute; dropping it. The cookie is \
+                     host-locked - that is the point of the prefix. Remove the domain \
+                     from configuration to silence this warning."
+                );
+            } else if let Some(safe) = sanitize_domain(domain) {
+                parts.push(format!("Domain={safe}"));
+            }
+        }
+
+        if let Some(max_age) = self.options.max_age {
+            parts.push(format!("Max-Age={}", max_age.as_secs()));
+        }
+
+        if self.options.partitioned {
+            parts.push("Partitioned".to_string());
+        }
+
+        parts.join("; ")
+    }
+
+    /// Create a cookie that deletes itself (for logout)
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Cookie;
+    /// # use suprnova::http::HttpResponse;
+    /// # let response = HttpResponse::new();
+    /// let forget = Cookie::forget("session");
+    /// response.cookie(forget)
+    /// # ;
+    /// ```
+    pub fn forget(name: impl Into<String>) -> Self {
+        Self::forget_with(name, None, None)
+    }
+
+    /// Create a deletion cookie scoped to an explicit path and/or domain.
+    ///
+    /// A browser only drops a cookie when the deletion cookie's `Path`
+    /// and `Domain` match the ones the cookie was set with. That makes
+    /// [`Self::forget`] - path `/`, no domain - silently useless against
+    /// a cookie set with `Path=/admin` or `Domain=.example.com`: the
+    /// response looks correct, the header is on the wire, and the cookie
+    /// survives. Mirrors Laravel's
+    /// `Response::withoutCookie($name, $path, $domain)`.
+    ///
+    /// `None` for either argument keeps the framework default (path `/`,
+    /// no `Domain` attribute), so `forget_with(name, None, None)` is
+    /// exactly [`Self::forget`].
+    pub fn forget_with(name: impl Into<String>, path: Option<&str>, domain: Option<&str>) -> Self {
+        let mut cookie = Self::new(name, "")
+            .max_age(Duration::from_secs(0))
+            .http_only(true)
+            .secure(true);
+        if let Some(p) = path {
+            cookie = cookie.path(p);
+        }
+        if let Some(d) = domain {
+            cookie = cookie.domain(d);
+        }
+        cookie
+    }
+
+    /// Create a permanent cookie (5 years)
+    pub fn forever(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self::new(name, value).max_age(Duration::from_secs(5 * 365 * 24 * 60 * 60))
+    }
+
+    /// Build a cookie whose value is the AES-256-GCM ciphertext of
+    /// `plaintext`, base64-url-no-pad encoded, with the AAD bound to
+    /// this cookie's **logical name** (`suprnova:cookie:v2:{name}`).
+    /// One cookie's ciphertext therefore cannot be replayed into
+    /// another cookie, and because the binding is the logical name (not
+    /// the rendered prefix), enabling a `__Host-`/`__Secure-` prefix later
+    /// does not invalidate anything.
+    ///
+    /// Read it back with [`Self::read_encrypted_for`], passing the same
+    /// logical name.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `FrameworkError::Internal` if encryption fails (most
+    /// commonly because `Crypt` has not been initialized - `APP_KEY`
+    /// not set at server boot).
+    pub fn encrypted(
+        name: impl Into<String>,
+        plaintext: impl AsRef<str>,
+    ) -> Result<Self, crate::FrameworkError> {
+        let name = name.into();
+        let wire = crate::crypto::Crypt::encrypt_string_for(
+            crate::crypto::CryptPurpose::Cookie,
+            &name,
+            plaintext.as_ref(),
+        )?;
+        Ok(Self::new(name, wire))
+    }
+
+    /// Decrypt a cookie value produced by [`Self::encrypted`] under the
+    /// same logical `name`. Falls back to the un-contexted v1 AAD for
+    /// values written before name binding (removal: 1.4.0) - during
+    /// that window a pre-upgrade cookie still opens, but so does a
+    /// pre-upgrade ciphertext replayed from another cookie slot; the
+    /// name binding pays off fully when the fallback is removed.
+    pub fn read_encrypted_for(name: &str, wire: &str) -> Result<String, crate::FrameworkError> {
+        crate::crypto::Crypt::decrypt_string_for(crate::crypto::CryptPurpose::Cookie, name, wire)
+    }
+
+    /// Decrypt a cookie value under the legacy un-contexted v1 AAD.
+    #[deprecated(
+        since = "1.3.0",
+        note = "Cookie::encrypted now binds the cookie's name into the AAD, and this \
+                reader CANNOT decrypt what it writes - the documented encrypted/read_encrypted \
+                pair is broken as of 1.3.0. Use read_encrypted_for(name, wire). This \
+                legacy reader and the v1 fallback are scheduled for removal in 1.4.0."
+    )]
+    pub fn read_encrypted(wire: &str) -> Result<String, crate::FrameworkError> {
+        crate::crypto::Crypt::decrypt_string(crate::crypto::CryptPurpose::Cookie, wire)
+    }
+
+    /// Queue a cookie to attach to the *next* outgoing response
+    /// instead of the one being built right now - Laravel's
+    /// `Cookie::queue()`. Useful from code with no `HttpResponse` in
+    /// hand: an event listener, a container-bound service, middleware
+    /// that runs ahead of the handler.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use suprnova::Cookie;
+    ///
+    /// Cookie::queue(Cookie::new("theme", "dark"));
+    /// ```
+    ///
+    /// Backed by the same per-request jar `Auth::login_remember`
+    /// already uses to carry the remember-me cookie past the handler
+    /// boundary; [`SessionMiddleware`](crate::session::SessionMiddleware)
+    /// drains it onto the response right after the session cookie.
+    /// Queuing a second cookie under a name already queued replaces
+    /// the first - the jar is keyed by name, not by name *and* path
+    /// the way Laravel's `CookieJar` is.
+    ///
+    /// Silently does nothing when no `SessionMiddleware` is installed
+    /// for the current request, or there is no request scope at all
+    /// (e.g. a plain unit test) - the same posture `App::flash` takes
+    /// outside a flash scope.
+    pub fn queue(cookie: Cookie) {
+        crate::session::middleware::queue_cookie(cookie);
+    }
+
+    /// Look up a cookie queued by [`Self::queue`] (or [`Self::expire`])
+    /// under `name`. `None` when nothing is queued under that name,
+    /// including outside a request scope.
+    pub fn queued(name: &str) -> Option<Cookie> {
+        crate::session::middleware::queued_cookie(name)
+    }
+
+    /// Remove a cookie queued under `name`, if any. No-op when nothing
+    /// is queued under that name, or outside a request scope.
+    pub fn unqueue(name: &str) {
+        crate::session::middleware::unqueue_cookie(name);
+    }
+
+    /// Queue a deletion cookie for `name` - Laravel's
+    /// `Cookie::expire()`. Builds the deletion cookie with
+    /// [`Self::forget_with`], so `path`/`domain` scope it exactly like
+    /// a direct `forget_with` call would; `None` for either keeps the
+    /// framework default (path `/`, no `Domain` attribute).
+    pub fn expire(name: impl Into<String>, path: Option<&str>, domain: Option<&str>) {
+        Self::queue(Self::forget_with(name, path, domain));
+    }
+}
+
+/// Parse cookies from a Cookie header value
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use suprnova::http::parse_cookies;
+/// let cookies = parse_cookies("session=abc123; user_id=42");
+/// assert_eq!(cookies.get("session"), Some(&"abc123".to_string()));
+/// ```
+pub fn parse_cookies(header: &str) -> HashMap<String, String> {
+    header
+        .split(';')
+        .filter_map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                return None;
+            }
+            let mut parts = part.splitn(2, '=');
+            let name = parts.next()?.trim();
+            let value = parts.next().unwrap_or("").trim();
+            Some((url_decode(name), url_decode(value)))
+        })
+        .collect()
+}
+
+/// Percent-encode cookie names and values per [`COOKIE_ENCODE`].
+///
+/// The previous hand-rolled version only encoded ASCII printables and
+/// passed CR/LF, control characters, and non-ASCII bytes through
+/// unchanged - a header-injection class bug. Routing through
+/// `percent_encoding::utf8_percent_encode` guarantees:
+///
+/// - Every CTL byte (including CR `\r`, LF `\n`) is percent-encoded.
+/// - Every non-ASCII byte (UTF-8 sequences) is percent-encoded.
+/// - Cookie-octet exclusions from RFC 6265 §4.1.1 are percent-encoded.
+fn url_encode(s: &str) -> String {
+    utf8_percent_encode(s, COOKIE_ENCODE).to_string()
+}
+
+/// Percent-decode a cookie name or value.
+///
+/// Multi-byte UTF-8 sequences (e.g. `%C3%A9` for `é`) round-trip
+/// correctly: `percent_decode_str` accumulates bytes first, then the
+/// `decode_utf8_lossy` call interprets the byte buffer as UTF-8. The
+/// previous hand-rolled version pushed each decoded byte as a separate
+/// `char` (Latin-1 interpretation), corrupting every multi-byte UTF-8
+/// cookie value.
+///
+/// `+` is left untouched (a literal plus sign): cookie values are not
+/// form-urlencoded, so translating `+`→space would corrupt any cookie set
+/// by another system that legitimately contains a `+`.
+fn url_decode(s: &str) -> String {
+    // Cookie values are NOT `application/x-www-form-urlencoded`, so `+` is a
+    // literal plus sign, not an encoded space - decoding it as a space would
+    // corrupt a cookie like `a+b` into `a b`. Our own encoder percent-encodes
+    // a real space as `%20` and a literal `+` as `%2B`, so round-tripping
+    // through this decoder is unaffected.
+    percent_decode_str(s).decode_utf8_lossy().into_owned()
+}
+
+/// Constrain a cookie `Path` attribute to RFC 6265 §4.1.1 `path-value`
+/// (any CHAR except CTLs or `;`). Control characters (CR, LF, NUL, …) and
+/// `;` are stripped so a caller-supplied path can never inject additional
+/// `Set-Cookie` attributes or split the header. A path that is empty after
+/// stripping falls back to `/`, since a `Path` attribute is always emitted.
+fn sanitize_path(path: &str) -> String {
+    let cleaned: String = path
+        .chars()
+        .filter(|&c| !c.is_control() && c != ';')
+        .collect();
+    if cleaned.is_empty() {
+        "/".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Constrain a cookie `Domain` attribute to valid host characters (ASCII
+/// letters, digits, `.`, and `-`, which also covers an optional leading
+/// `.`). Anything else is stripped so a caller-supplied domain can't inject
+/// attributes. A domain that is empty after stripping yields `None`: the
+/// attribute is then omitted, which is itself a valid host-only posture.
+fn sanitize_domain(domain: &str) -> Option<String> {
+    let cleaned: String = domain
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+        .collect();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cookie_builder() {
+        let cookie = Cookie::new("test", "value")
+            .http_only(true)
+            .secure(true)
+            .same_site(SameSite::Strict)
+            .path("/app")
+            .max_age(Duration::from_secs(3600));
+
+        let header = cookie.to_header_value();
+        assert!(header.contains("test=value"));
+        assert!(header.contains("HttpOnly"));
+        assert!(header.contains("Secure"));
+        assert!(header.contains("SameSite=Strict"));
+        assert!(header.contains("Path=/app"));
+        assert!(header.contains("Max-Age=3600"));
+    }
+
+    #[test]
+    fn test_parse_cookies() {
+        let cookies = parse_cookies("session=abc123; user_id=42; empty=");
+        assert_eq!(cookies.get("session"), Some(&"abc123".to_string()));
+        assert_eq!(cookies.get("user_id"), Some(&"42".to_string()));
+        assert_eq!(cookies.get("empty"), Some(&"".to_string()));
+    }
+
+    #[test]
+    fn test_forget_cookie() {
+        let cookie = Cookie::forget("session");
+        let header = cookie.to_header_value();
+        assert!(header.contains("Max-Age=0"));
+        assert!(header.contains("session="));
+    }
+
+    /// A CRLF in a cookie name MUST be percent-encoded so it cannot
+    /// inject additional headers into the Set-Cookie response. Before
+    /// this was enforced, a raw `\r\n` passed through `url_encode` and
+    /// either landed in the response verbatim (header injection) or
+    /// panicked the per-connection task when hyper rejected the value.
+    #[test]
+    fn cookie_name_with_crlf_is_percent_encoded() {
+        let cookie = Cookie::new("evil\r\nX-Injected: yes", "v");
+        let header = cookie.to_header_value();
+        assert!(
+            !header.contains('\r') && !header.contains('\n'),
+            "encoded cookie header must contain no raw CR or LF; got: {header}"
+        );
+        assert!(
+            header.contains("%0D%0A"),
+            "CRLF must round-trip as %0D%0A in the encoded cookie name; got: {header}"
+        );
+    }
+
+    /// Same fix applied to the value side. A user-controlled value
+    /// containing CR/LF cannot inject headers.
+    #[test]
+    fn cookie_value_with_crlf_is_percent_encoded() {
+        let cookie = Cookie::new("session", "abc\r\nX-Injected: yes");
+        let header = cookie.to_header_value();
+        assert!(
+            !header.contains('\r') && !header.contains('\n'),
+            "encoded cookie value must contain no raw CR/LF; got: {header}"
+        );
+        assert!(
+            header.contains("%0D%0A"),
+            "CRLF in the value must be percent-encoded; got: {header}"
+        );
+    }
+
+    /// Non-ASCII bytes in a cookie value get percent-encoded so the
+    /// resulting Set-Cookie header is pure ASCII per RFC 6265.
+    #[test]
+    fn cookie_value_with_non_ascii_is_percent_encoded() {
+        let cookie = Cookie::new("lang", "café");
+        let header = cookie.to_header_value();
+        assert!(
+            header.is_ascii(),
+            "encoded cookie header must be pure ASCII; got: {header}"
+        );
+        assert!(
+            header.contains("caf%C3%A9"),
+            "UTF-8 multi-byte sequence must percent-encode each byte; got: {header}"
+        );
+    }
+
+    /// Percent-encoded UTF-8 round-trips as the original UTF-8 string.
+    /// A naive byte-wise decode would render `%C3%A9` as two Latin-1
+    /// chars (`Ã©`) instead of `é`.
+    #[test]
+    fn cookie_utf8_round_trip_preserves_multi_byte_chars() {
+        let original = "café - naïve façade";
+        let encoded = url_encode(original);
+        let decoded = url_decode(&encoded);
+        assert_eq!(
+            decoded, original,
+            "UTF-8 round-trip must preserve multi-byte chars; \
+             encoded: {encoded}, decoded: {decoded}"
+        );
+    }
+
+    /// `parse_cookies` consumes a real Cookie header from the browser
+    /// containing percent-encoded UTF-8. After the decode fix, the
+    /// resulting HashMap holds the correct decoded values.
+    #[test]
+    fn parse_cookies_handles_percent_encoded_utf8() {
+        let cookies = parse_cookies("display_name=caf%C3%A9; lang=fr");
+        assert_eq!(cookies.get("display_name"), Some(&"café".to_string()));
+        assert_eq!(cookies.get("lang"), Some(&"fr".to_string()));
+    }
+
+    #[test]
+    fn sanitize_path_strips_ctl_and_semicolon() {
+        assert_eq!(sanitize_path("/app"), "/app");
+        // CR, LF, and `;` are removed; surrounding characters are glued.
+        assert_eq!(sanitize_path("/a\r\np;Max-Age=0"), "/apMax-Age=0");
+        // A path that survives as empty falls back to `/`.
+        assert_eq!(sanitize_path(""), "/");
+        assert_eq!(sanitize_path(";\r\n"), "/");
+    }
+
+    #[test]
+    fn sanitize_domain_keeps_host_chars_and_empties_to_none() {
+        assert_eq!(
+            sanitize_domain("example.com").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            sanitize_domain(".example.com").as_deref(),
+            Some(".example.com")
+        );
+        // `;`, `=`, and CRLF are stripped; alnum / `.` / `-` survive.
+        assert_eq!(
+            sanitize_domain("ex;ample.com\r\n").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(sanitize_domain(";;;").as_deref(), None);
+    }
+
+    #[test]
+    fn cookie_path_value_cannot_inject_attributes() {
+        let header = Cookie::new("s", "v")
+            .path("/app\r\n;Max-Age=999")
+            .to_header_value();
+        assert!(
+            !header.contains('\r') && !header.contains('\n'),
+            "no raw CR/LF in header: {header}"
+        );
+        // The Path attribute carries no `;` that could start a new attribute.
+        let path_attr = header
+            .split("; ")
+            .find(|p| p.starts_with("Path="))
+            .expect("a Path attribute is always emitted");
+        assert!(
+            !path_attr.contains(';'),
+            "path must not contain a ';': {path_attr}"
+        );
+    }
+
+    #[test]
+    fn cookie_domain_value_cannot_inject_attributes() {
+        let header = Cookie::new("s", "v")
+            .domain("evil.com\r\n;HttpOnly=x")
+            .to_header_value();
+        assert!(!header.contains('\r') && !header.contains('\n'), "{header}");
+        let dom = header
+            .split("; ")
+            .find(|p| p.starts_with("Domain="))
+            .expect("a Domain attribute was set");
+        // Only host characters survive - the injected `;HttpOnly=x` collapses
+        // into the host text rather than becoming its own attribute.
+        assert_eq!(dom, "Domain=evil.comHttpOnlyx");
+    }
+
+    #[test]
+    fn cookie_all_stripped_path_falls_back_and_domain_is_omitted() {
+        let header = Cookie::new("s", "v")
+            .path(";\r\n")
+            .domain(";;;")
+            .to_header_value();
+        assert!(
+            header.contains("Path=/"),
+            "stripped path falls back to /: {header}"
+        );
+        assert!(
+            !header.contains("Domain="),
+            "an all-stripped domain is omitted entirely: {header}"
+        );
+    }
+
+    #[test]
+    fn samesite_none_forces_secure_even_when_disabled() {
+        let header = Cookie::new("s", "v")
+            .secure(false)
+            .same_site(SameSite::None)
+            .to_header_value();
+        assert!(header.contains("SameSite=None"), "{header}");
+        assert!(
+            header.contains("Secure"),
+            "SameSite=None must be paired with Secure or browsers drop it: {header}"
+        );
+    }
+
+    #[test]
+    fn insecure_lax_cookie_omits_secure() {
+        let header = Cookie::new("s", "v")
+            .secure(false)
+            .same_site(SameSite::Lax)
+            .to_header_value();
+        assert!(
+            !header.contains("Secure"),
+            "an explicitly insecure Lax cookie must not be forced Secure: {header}"
+        );
+    }
+    #[test]
+    fn host_prefix_forces_secure_path_and_drops_domain_even_when_set_after() {
+        // Enforcement is render-time and name-keyed: every session
+        // construction site applies `.secure()` / `.path()` / `.domain()`
+        // after the base cookie, so earlier enforcement would be overwritten.
+        let header = Cookie::new("__Host-session", "v")
+            .secure(false)
+            .path("/admin")
+            .domain(".example.com")
+            .to_header_value();
+        assert!(header.contains("Secure"), "{header}");
+        assert!(header.contains("Path=/"), "{header}");
+        assert!(!header.contains("Path=/admin"), "{header}");
+        assert!(!header.contains("Domain"), "{header}");
+    }
+
+    #[test]
+    fn secure_prefix_forces_secure_only() {
+        let header = Cookie::new("__Secure-pref", "v")
+            .secure(false)
+            .path("/admin")
+            .domain(".example.com")
+            .to_header_value();
+        assert!(header.contains("Secure"), "{header}");
+        assert!(header.contains("Path=/admin"), "{header}");
+        assert!(header.contains("Domain=.example.com"), "{header}");
+    }
+
+    #[test]
+    fn unprefixed_cookies_are_untouched_by_enforcement() {
+        let header = Cookie::new("plain", "v")
+            .secure(false)
+            .path("/admin")
+            .domain(".example.com")
+            .same_site(SameSite::Lax)
+            .to_header_value();
+        assert!(!header.contains("Secure"), "{header}");
+        assert!(header.contains("Path=/admin"), "{header}");
+        assert!(header.contains("Domain=.example.com"), "{header}");
+    }
+
+    #[test]
+    fn cookie_plus_sign_is_literal_not_space() {
+        // Cookies are not form-urlencoded: a literal `+` must survive decode.
+        let cookies = parse_cookies("token=a+b+c");
+        assert_eq!(cookies.get("token"), Some(&"a+b+c".to_string()));
+        // And our own encode/decode round-trip preserves it (encoder → %2B).
+        assert_eq!(url_decode(&url_encode("a+b")), "a+b");
+    }
+
+    #[test]
+    fn forget_with_custom_path_emits_matching_deletion_attributes() {
+        // A cookie set under a non-root path must be deleted with the SAME
+        // path or the browser keeps the original; `forget` chains with `path`.
+        let header = Cookie::forget("sess").path("/admin").to_header_value();
+        assert!(header.contains("Path=/admin"), "{header}");
+        assert!(header.contains("Max-Age=0"), "{header}");
+        assert!(header.contains("sess="), "{header}");
+    }
+
+    #[test]
+    fn prefix_parse_accepts_both_spellings_case_insensitively() {
+        assert_eq!(CookiePrefix::parse(""), Some(CookiePrefix::None));
+        assert_eq!(CookiePrefix::parse("none"), Some(CookiePrefix::None));
+        assert_eq!(CookiePrefix::parse("__Secure-"), Some(CookiePrefix::Secure));
+        assert_eq!(CookiePrefix::parse("secure"), Some(CookiePrefix::Secure));
+        assert_eq!(CookiePrefix::parse("__Host-"), Some(CookiePrefix::Host));
+        assert_eq!(CookiePrefix::parse("HOST"), Some(CookiePrefix::Host));
+        assert_eq!(CookiePrefix::parse("__host-"), Some(CookiePrefix::Host));
+        assert_eq!(CookiePrefix::parse("garbage"), None);
+    }
+
+    #[test]
+    fn prefix_apply_is_idempotent() {
+        assert_eq!(
+            CookiePrefix::Host.apply("suprnova_session"),
+            "__Host-suprnova_session"
+        );
+        assert_eq!(
+            CookiePrefix::Host.apply("__Host-suprnova_session"),
+            "__Host-suprnova_session"
+        );
+        assert_eq!(CookiePrefix::Secure.apply("s"), "__Secure-s");
+        assert_eq!(CookiePrefix::None.apply("s"), "s");
+    }
+
+    #[test]
+    fn prefix_strip_removes_either_prefix_and_only_one() {
+        assert_eq!(
+            CookiePrefix::strip("__Host-suprnova_session"),
+            "suprnova_session"
+        );
+        assert_eq!(CookiePrefix::strip("__Secure-x"), "x");
+        assert_eq!(CookiePrefix::strip("plain"), "plain");
+    }
+
+    #[test]
+    fn prefix_validate_rejects_host_with_domain_or_nonroot_path() {
+        assert!(
+            CookiePrefix::Host
+                .validate(Some(".example.com"), "/")
+                .is_err()
+        );
+        assert!(CookiePrefix::Host.validate(None, "/admin").is_err());
+        assert!(CookiePrefix::Host.validate(None, "/").is_ok());
+        // __Secure- constrains only the Secure flag, which render-time
+        // enforcement forces; domain and path are legal.
+        assert!(
+            CookiePrefix::Secure
+                .validate(Some(".example.com"), "/admin")
+                .is_ok()
+        );
+        assert!(
+            CookiePrefix::None
+                .validate(Some(".example.com"), "/x")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn prefixed_builder_renames_to_the_wire_form() {
+        let c = Cookie::new("suprnova_session", "v").prefixed(CookiePrefix::Host);
+        assert!(c.to_header_value().starts_with("__Host-suprnova_session="));
+        // Idempotent through the builder too.
+        let c2 = c.prefixed(CookiePrefix::Host);
+        assert!(c2.to_header_value().starts_with("__Host-suprnova_session="));
+    }
+
+    #[test]
+    fn mixed_prefixes_stack_and_strip_removes_only_the_outermost() {
+        // A logical name that itself carries a prefix is a
+        // configuration error; the type stacks rather than guesses.
+        // Pinned so any future change to this corner is a conscious
+        // decision, not an accident.
+        assert_eq!(CookiePrefix::Host.apply("__Secure-x"), "__Host-__Secure-x");
+        assert_eq!(CookiePrefix::Secure.apply("__Host-x"), "__Secure-__Host-x");
+        assert_eq!(CookiePrefix::strip("__Host-__Secure-x"), "__Secure-x");
+    }
+}

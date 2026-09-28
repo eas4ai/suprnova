@@ -1,0 +1,1420 @@
+//! Shared boot for the Task 18 privacy-leak suite in
+//! `render_cache_privacy.rs`.
+//!
+//! Deliberately self-contained and separate from
+//! `render_cache_middleware_support`, for two reasons. The first is
+//! ruling R91: Task 17 extends that module on a concurrent branch, and two
+//! branches appending to one file conflict at merge. The second is the
+//! point of this suite at all: every attack it replays was proven against
+//! the middleware's own guard, and a suite that shared the guard's own
+//! harness could be made green by a change to that harness rather than by
+//! the guard actually holding. Nothing here imports from the middleware
+//! suite; the routes, policies, middleware, and dispatch loop below are a
+//! minimal re-derivation of the same shapes.
+//!
+//! Every route is registered under `/privacy/...` so nothing here can be
+//! confused with a route of the same purpose in another suite.
+//!
+//! Two boots, because one attack is about middleware order:
+//!
+//! - [`boot_with_render_cache`] registers the identity, tenant, locale and
+//!   feature middleware **before** `RenderCache::install`, which is the
+//!   only ordering a real deployment can produce for a global middleware
+//!   (`install` appends). [`ImpersonationMiddleware`] and
+//!   [`LateLocaleMiddleware`] are registered **after** it, standing in for
+//!   per-route middleware, which always compose closer to the handler than
+//!   any global one.
+//! - [`boot_with_cache_installed_before_the_auth_middleware`] does the
+//!   opposite for the identity middleware alone, so `RenderCacheMiddleware`
+//!   derives its key before any identity exists and a declared `Principal`
+//!   dimension resolves `Anonymous` while the render observes a real
+//!   principal.
+//!
+//! One exception to "nothing here is imported": [`STITCHED_ROUTE`] mounts the
+//! Live counter component and document view from `live_dogfood_support`,
+//! because a Live island needs a registered component and a template file and
+//! declaring a second identical pair here would buy nothing. The routes,
+//! policies, middleware, and dispatch loop - everything a leak could hide in -
+//! are still this module's own.
+#![allow(
+    dead_code,
+    reason = "the framework's test-support modules are shared by test binaries \
+              that each use a subset of the harness; five of the nine \
+              pre-existing ones carry a bare allow for the same reason, and \
+              this one names it"
+)]
+
+use std::any::Any;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
+use sea_orm_migration::{MigrationTrait, MigratorTrait};
+use suprnova::auth::{Authenticatable, Guard, SessionGuard, UserProvider};
+use suprnova::eloquent::scopes::{GlobalScope, ScopeDependency, ScopeRegistry};
+use suprnova::live::testing::{AdjustableTestClock, prepare_live_router_with_clock_for_test};
+use suprnova::live::{LiveBootstrapOptions, LiveDocument, LiveMount, LiveRegistry};
+use suprnova::render_cache::config::RenderCacheConfig;
+use suprnova::render_cache::registry::GroupPolicy;
+use suprnova::render_cache::{
+    CoordinatorConfig, FreshnessPolicy, L1Config, RenderCache, RenderCachePolicy,
+    RepresentationClass, VarianceDimension,
+};
+use suprnova::testing::TestContainer;
+use suprnova::view::{AssetSet, DocumentResponseIntent, ViewName};
+use suprnova::{
+    App, Auth, AuthMiddleware, Builder, ConnectionTrait, Crypt, EncryptionKey, FrameworkError,
+    HttpResponse, MiddlewareRegistry, Model, Next, Request, Response, Router, SessionConfig,
+    SessionMiddleware, StatusCode, handle_request,
+};
+// `Lang`, `Locale`, and `scope_locale` exist only with the `localization`
+// feature, which the minimal profile checked by
+// `scripts/check-feature-matrix.sh` leaves off. This support module is
+// shared with `render_cache/privacy.rs`, which is not localization-only, so
+// the gate is at item level: the two locale middlewares, the three locale
+// handlers, their route lines, and their global registrations. The policies
+// those routes are attached under name only `VarianceDimension::Locale`,
+// which is engine-side and always present, so they stay unconditional.
+#[cfg(feature = "localization")]
+use suprnova::{Lang, Locale, scope_locale};
+use suprnova_live::canonical::CanonicalValue;
+use suprnova_live::clock::{Clock, ClockError};
+use suprnova_live::identity::UnixMillis;
+use suprnova_live::mount::MountFlags;
+
+use crate::live_dogfood_support::{DogfoodCounter, DogfoodDocument, MemorySessionStore};
+
+struct PrivacyMigrator;
+
+#[async_trait::async_trait]
+impl MigratorTrait for PrivacyMigrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![
+            Box::new(suprnova::render_cache::migration::Migration),
+            Box::new(suprnova::rbac::migrations::CreateRbacTables),
+        ]
+    }
+}
+
+/// A test principal, recognized through the `x-test-login` header (see
+/// [`LoginHeader`]).
+pub struct Principal(String);
+
+impl Authenticatable for Principal {
+    fn get_auth_identifier(&self) -> String {
+        self.0.clone()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+}
+
+/// Stands in for the application's sign-in on the default guard: a request
+/// carrying `x-test-login: <id>` is that authenticated user for the rest of
+/// the request.
+pub struct LoginHeader;
+
+#[async_trait]
+impl suprnova::Middleware for LoginHeader {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if let Some(id) = request.header("x-test-login") {
+            Auth::set_user(Arc::new(Principal(id.to_owned())));
+        }
+        next(request).await
+    }
+}
+
+/// The name of the non-default guard this suite signs in on. Scoped to this
+/// file so it cannot collide with a guard another test binary registers.
+const NAMED_GUARD: &str = "privacy-suite-admin-guard";
+
+/// A `UserProvider` whose `retrieve_by_id` is never exercised: the named
+/// guard's user is set directly through `set_user`, which the guard's own
+/// per-request cache serves back without a provider lookup.
+struct NamedGuardDummyProvider;
+
+#[async_trait]
+impl UserProvider for NamedGuardDummyProvider {
+    async fn retrieve_by_id(
+        &self,
+        _id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        Ok(None)
+    }
+}
+
+/// Signs a request in on [`NAMED_GUARD`] specifically, from
+/// `x-test-named-login: <id>`. `SessionGuard::set_user` mirrors into the
+/// generic `Auth` facade slot only for the configured default guard, so
+/// `Auth::id()` stays `None` for a request only this middleware touched.
+pub struct NamedGuardLoginHeader;
+
+#[async_trait]
+impl suprnova::Middleware for NamedGuardLoginHeader {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if let Some(id) = request.header("x-test-named-login") {
+            let guard = SessionGuard::named(NAMED_GUARD, Arc::new(NamedGuardDummyProvider));
+            guard.set_user(Arc::new(Principal(id.to_owned()))).await;
+        }
+        next(request).await
+    }
+}
+
+/// Resolves the Live tenant from `x-test-tenant`, through the real
+/// `LiveTenantMiddleware` rather than by setting `Request::live_tenant`
+/// directly (that setter is crate-private).
+pub struct TestTenantResolver;
+
+#[async_trait]
+impl suprnova::live::LiveTenantResolver for TestTenantResolver {
+    async fn resolve(&self, request: &Request) -> Result<Option<String>, FrameworkError> {
+        Ok(request.header("x-test-tenant").map(str::to_owned))
+    }
+}
+
+/// Opens the per-request locale scope, the job the real `LocaleMiddleware`
+/// does once a translator is bound. Reads `x-test-locale` (default `en`) so
+/// a test can drive two requests through two declared locales and observe
+/// that the key genuinely partitions by locale. Registered before
+/// `RenderCache::install`, so the scope is already open when
+/// `RenderCacheMiddleware` reads `Lang::locale()` to build the key.
+#[cfg(feature = "localization")]
+pub struct TestLocaleMiddleware;
+
+#[cfg(feature = "localization")]
+#[async_trait]
+impl suprnova::Middleware for TestLocaleMiddleware {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let locale = request
+            .header("x-test-locale")
+            .and_then(|tag| Locale::parse(tag).ok())
+            .unwrap_or_else(|| Locale::parse("en").expect("en is a valid locale"));
+        scope_locale(locale, next(request)).await
+    }
+}
+
+/// Stands in for a per-route impersonation middleware, which the framework
+/// explicitly supports. Registered *after* `RenderCache::install`, so it
+/// runs after `RenderCacheMiddleware` and therefore after the key has
+/// already been derived from whatever [`LoginHeader`] established.
+pub struct ImpersonationMiddleware;
+
+#[async_trait]
+impl suprnova::Middleware for ImpersonationMiddleware {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if let Some(target) = request.header("x-test-impersonate") {
+            Auth::set_user(Arc::new(Principal(target.to_owned())));
+        }
+        next(request).await
+    }
+}
+
+/// Stands in for a per-route locale middleware. A per-route middleware
+/// always composes closer to the handler than a global one, so it always
+/// runs after `RenderCacheMiddleware` no matter how it was registered, and
+/// its `scope_locale` pops the instant its own `next(request)` resolves -
+/// before any post-render re-read of the same task-local could look.
+/// Gated on `x-test-late-locale` so it changes nothing for any other test.
+#[cfg(feature = "localization")]
+pub struct LateLocaleMiddleware;
+
+#[cfg(feature = "localization")]
+#[async_trait]
+impl suprnova::Middleware for LateLocaleMiddleware {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let Some(tag) = request.header("x-test-late-locale") else {
+            return next(request).await;
+        };
+        let Ok(locale) = Locale::parse(tag) else {
+            return next(request).await;
+        };
+        scope_locale(locale, next(request)).await
+    }
+}
+
+/// A clock that never moves. Deliberately fixed and with no way to advance
+/// it: every entry this suite publishes stays fresh for its whole window, so
+/// a second render is always a guard decision and never an expiry. A test
+/// that wanted to observe an expiry would be testing freshness, not privacy.
+pub struct FixedTestClock {
+    millis: AtomicU64,
+}
+
+impl FixedTestClock {
+    fn new(start_ms: u64) -> Self {
+        Self {
+            millis: AtomicU64::new(start_ms),
+        }
+    }
+}
+
+impl Clock for FixedTestClock {
+    fn now(&self) -> Result<UnixMillis, ClockError> {
+        Ok(UnixMillis::new(self.millis.load(Ordering::SeqCst)))
+    }
+}
+
+/// Render counting. Every proof in this suite rests on it: a leak is a
+/// request that was served without its handler running, so the count is
+/// what distinguishes "the guard declined" from "the guard published and
+/// the next visitor got someone else's page".
+pub mod counting_route {
+    use super::{AtomicU64, Ordering};
+
+    static RENDERS: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn reset() {
+        RENDERS.store(0, Ordering::SeqCst);
+    }
+
+    /// Total number of times a handler in this file has actually run.
+    pub fn renders() -> u64 {
+        RENDERS.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn record() -> u64 {
+        RENDERS.fetch_add(1, Ordering::SeqCst) + 1
+    }
+}
+
+// ── Global scopes ──────────────────────────────────────────────────────
+
+/// A model whose rows belong to a tenant, behind a global scope that reads
+/// the current tenant. The shape the manual has always warned about.
+#[suprnova::model(table = "articles", timestamps = false, fillable = ["tenant_id", "title"])]
+pub struct Article {
+    pub id: i64,
+    pub tenant_id: String,
+    pub title: String,
+}
+
+/// A model behind a scope whose filter is the same for every request.
+#[suprnova::model(table = "notices", timestamps = false, fillable = ["published", "title"])]
+pub struct Notice {
+    pub id: i64,
+    pub published: i64,
+    pub title: String,
+}
+
+/// Filters `articles` by the tenant `LiveTenantMiddleware` resolved, read
+/// through the framework's own instrumented accessor. Declared
+/// `PerRequest`, which is also the default.
+pub struct TenantScope;
+
+impl GlobalScope<Article> for TenantScope {
+    fn apply(&self, query: Builder<Article>) -> Builder<Article> {
+        let tenant = suprnova::live::current_tenant().unwrap_or_default();
+        query.filter("tenant_id", tenant)
+    }
+}
+
+/// Filters `notices` by a literal. Declares `Constant`, so its evaluation
+/// is expected to record nothing and the route keeps caching.
+pub struct PublishedScope;
+
+impl GlobalScope<Notice> for PublishedScope {
+    fn apply(&self, query: Builder<Notice>) -> Builder<Notice> {
+        query.filter("published", 1_i64)
+    }
+
+    fn dependency(&self) -> ScopeDependency {
+        ScopeDependency::Constant
+    }
+}
+
+// ── Handlers ───────────────────────────────────────────────────────────
+
+/// Touches nothing observable: no identity, no tenant, no locale, no
+/// session, no cookie, no flag. The negative direction of the whole suite
+/// depends on this staying that way.
+async fn plain_handler(request: Request) -> Response {
+    let n = counting_route::record();
+    let id = request.param("id").unwrap_or("0");
+    Ok(HttpResponse::html(format!("plain render {n} for {id}")))
+}
+
+/// Reads the identity through `Auth::id()` and puts it in the body.
+async fn reads_auth_id_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    let identity = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+    Ok(HttpResponse::html(format!(
+        "auth-id render {n} for {identity}"
+    )))
+}
+
+/// Reads the identity through the crate-root `suprnova::auth_user_id()`,
+/// which consults request state before the session-backed path, so a
+/// bearer-token or remember-me identity is read without `Auth::id()`'s own
+/// explicit observation ever running.
+async fn reads_crate_root_auth_user_id_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    let identity = suprnova::auth_user_id().unwrap_or_else(|| "anonymous".to_owned());
+    Ok(HttpResponse::html(format!(
+        "crate-root-auth-user-id render {n} for {identity}"
+    )))
+}
+
+/// Drives the body entirely from a `Gate::allows` decision, touching no
+/// identity accessor at all.
+async fn authz_driven_handler(request: Request) -> Response {
+    let n = counting_route::record();
+    let is_admin = request.header("x-test-role") == Some("admin");
+    let allowed = suprnova::Gate::allows::<bool, bool>(ROLE_GATE, &is_admin, &true);
+    Ok(HttpResponse::html(format!(
+        "authz render {n} allowed={allowed}"
+    )))
+}
+
+/// Body driven by a decision whose evaluation reads only the tenant. The
+/// handler itself touches no accessor at all, so everything the collector
+/// records for this route happens inside the gate's own consult window.
+async fn tenant_only_gate_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    let allowed = suprnova::Gate::allows::<bool, bool>(TENANT_ONLY_GATE, &true, &true);
+    Ok(HttpResponse::html(format!(
+        "tenant-only-gate render {n} allowed={allowed}"
+    )))
+}
+
+/// Reads the tenant *and* the identity: a tenant-keyed route whose body
+/// still varies per user inside one tenant.
+async fn reads_tenant_and_identity_handler(request: Request) -> Response {
+    let n = counting_route::record();
+    let tenant = request.live_tenant().unwrap_or("no-tenant").to_owned();
+    let identity = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+    Ok(HttpResponse::html(format!(
+        "tenant-and-identity render {n} tenant={tenant} for {identity}"
+    )))
+}
+
+/// Reads only the tenant, for the "a declared dimension actually
+/// partitions" direction.
+async fn reads_tenant_handler(request: Request) -> Response {
+    let n = counting_route::record();
+    let tenant = request.live_tenant().unwrap_or("no-tenant").to_owned();
+    Ok(HttpResponse::html(format!(
+        "tenant render {n} tenant={tenant}"
+    )))
+}
+
+/// Reads the identity through the non-default [`NAMED_GUARD`] only.
+/// `Auth::id()` yields nothing for such a request, so the key's `Principal`
+/// dimension resolves `Anonymous` while the body is a specific person's.
+async fn reads_named_guard_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    let guard = SessionGuard::named(NAMED_GUARD, Arc::new(NamedGuardDummyProvider));
+    let identity = guard
+        .id()
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "anonymous".to_owned());
+    Ok(HttpResponse::html(format!(
+        "named-guard render {n} for {identity}"
+    )))
+}
+
+/// Builds the body from the named guard's identity and *then* touches the
+/// default accessor for an unrelated check whose result the body ignores.
+/// A record that keeps one slot per dimension keeps only the second value,
+/// which is the one the key was built from, so the comparison passes while
+/// the body came from the first.
+async fn reads_named_guard_then_touches_default_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    let guard = SessionGuard::named(NAMED_GUARD, Arc::new(NamedGuardDummyProvider));
+    let named_identity = guard
+        .id()
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "anonymous".to_owned());
+    // The unrelated later touch: an audit or feature check whose own
+    // result this body never uses.
+    let _ = Auth::id();
+    Ok(HttpResponse::html(format!(
+        "named-then-default render {n} for {named_identity}"
+    )))
+}
+
+/// Reads session state through `session_mut`, the idiomatic read-and-touch
+/// accessor, rather than through `session()`.
+async fn reads_session_mut_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    let _ = suprnova::session::session_mut(|session| session.get::<String>("anything"));
+    Ok(HttpResponse::html(format!("session-mut render {n}")))
+}
+
+/// Reads a cookie and nothing else. A cookie read produces no
+/// classification reason of its own; it has to be counted as a session
+/// read or it costs the guard nothing.
+async fn reads_cookie_handler(request: Request) -> Response {
+    let n = counting_route::record();
+    let _ = request.cookie("session");
+    Ok(HttpResponse::html(format!("cookie render {n}")))
+}
+
+/// Switches the locale mid-render through `Lang::set_locale`, which the
+/// framework documents as supported, after the key has already been fixed
+/// at the pre-switch locale. The target comes from a header so two
+/// requests that derive the *same* key render two different bodies.
+#[cfg(feature = "localization")]
+async fn locale_switching_handler(request: Request) -> Response {
+    let n = counting_route::record();
+    let before = Lang::locale().as_str();
+    if let Some(locale) = request
+        .header("x-test-switch-to")
+        .and_then(|tag| Locale::parse(tag).ok())
+    {
+        Lang::set_locale(locale);
+    }
+    let after = Lang::locale().as_str();
+    Ok(HttpResponse::html(format!(
+        "locale-switch render {n} before={before} after={after}"
+    )))
+}
+
+/// Renders the whole body inside a *nested* `scope_locale`, the framework's
+/// own documented API for a mid-render locale switch. The nested scope pops
+/// the instant its future resolves, before the handler returns, so nothing
+/// outside it can re-read what the body was rendered in.
+#[cfg(feature = "localization")]
+async fn nested_scope_locale_handler(request: Request) -> Response {
+    let n = counting_route::record();
+    let target = request
+        .header("x-test-nested-locale")
+        .and_then(|tag| Locale::parse(tag).ok())
+        .unwrap_or_else(|| Locale::parse("en").expect("en is a valid locale"));
+    let body = scope_locale(target, async move {
+        format!("nested-scope render {n} locale={}", Lang::locale().as_str())
+    })
+    .await;
+    Ok(HttpResponse::html(body))
+}
+
+/// Reads `Lang::locale()` plainly. [`LateLocaleMiddleware`] is what
+/// actually supplies the switched locale, in a scope that pops before its
+/// own `next(request)` returns.
+#[cfg(feature = "localization")]
+async fn reads_locale_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    let locale = Lang::locale().as_str();
+    Ok(HttpResponse::html(format!(
+        "locale render {n} locale={locale}"
+    )))
+}
+
+/// Reads a **user-scoped** feature flag ambiently through `is_enabled!`.
+/// `FeatureMiddleware` resolved the identity into the featureflag context
+/// before the render started, so the render itself touches no instrumented
+/// identity accessor: the evaluator's own read is the only place the
+/// dependency can be seen.
+async fn reads_user_scoped_flag_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    // The literal is repeated rather than referenced through a named
+    // constant because `is_enabled!` matches a string literal, not an
+    // expression. A divergence between the two would show up immediately
+    // as the flag's sanity assertion in the test (alice gets
+    // `enabled=true`) failing.
+    let enabled = suprnova::is_enabled!("privacy-user-scoped-flag", false);
+    Ok(HttpResponse::html(format!(
+        "user-scoped-flag render {n} enabled={enabled}"
+    )))
+}
+
+/// Reads a **globally** scoped flag: the same answer for every visitor, no
+/// identity anywhere in the decision. Reading it must cost the cache
+/// nothing, even for a signed-in visitor whose id `FeatureMiddleware` has
+/// already put in the ambient context. R103's positive control for the two
+/// flag leak tests: without it, a change that made every flag read
+/// uncacheable would leave both of them green while disabling the cache for
+/// every page in an application that checks any flag.
+async fn reads_global_flag_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    // See [`reads_user_scoped_flag_handler`] for why the literal is
+    // repeated here rather than referenced through a named constant.
+    let enabled = suprnova::is_enabled!("privacy-global-flag", false);
+    Ok(HttpResponse::html(format!(
+        "global-flag render {n} enabled={enabled}"
+    )))
+}
+
+/// Builds its body from `Request::auth_user_id()` - a `pub` accessor with no
+/// collector instrumentation at all - alongside the instrumented one, so a
+/// test can assert both halves of the claim the R79 sweep rests on: that the
+/// field is stamped only on the WebSocket-upgrade path, and that the
+/// identity the render actually sees is the observed one.
+async fn reads_request_auth_user_id_handler(request: Request) -> Response {
+    let n = counting_route::record();
+    let stamped = request.auth_user_id().unwrap_or("none").to_owned();
+    let observed = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+    Ok(HttpResponse::html(format!(
+        "request-auth-user-id render {n} stamped={stamped} observed={observed}"
+    )))
+}
+
+/// Reads a flag whose only identity rule belongs to *someone else*. A
+/// reader who carries no id at all falls through to the global rule, gets
+/// an answer the override's owner would not get, and must not publish that
+/// answer under a key the owner also hits.
+async fn reads_another_users_override_flag_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    // See [`reads_user_scoped_flag_handler`] for why the literal is
+    // repeated here rather than referenced through a named constant.
+    let enabled = suprnova::is_enabled!("privacy-override-flag", false);
+    Ok(HttpResponse::html(format!(
+        "override-flag render {n} enabled={enabled}"
+    )))
+}
+
+// ── Gates and flags ────────────────────────────────────────────────────
+
+/// A gate keyed by a plain role flag, so a body can depend on an
+/// authorization decision without any identity accessor being touched.
+const ROLE_GATE: &str = "privacy-suite-role-gate";
+
+/// Registers [`ROLE_GATE`] exactly once per process. `Gate::allows` on an
+/// undefined ability always denies, so without this the handler's body
+/// would not actually vary.
+pub fn ensure_role_gate() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        suprnova::Gate::define::<bool, bool>(ROLE_GATE, |is_admin: &bool, _resource| *is_admin);
+    });
+}
+
+/// A gate that decides from the current tenant and nothing else, read
+/// through the framework's own instrumented accessor. The consult window
+/// around its evaluation therefore records tenant material and no
+/// principal material, which is what makes the decision `TenantOnly`.
+const TENANT_ONLY_GATE: &str = "privacy-suite-tenant-only-gate";
+
+/// Registers [`TENANT_ONLY_GATE`] exactly once per process, for the reason
+/// [`ensure_role_gate`] gives.
+pub fn ensure_tenant_only_gate() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        suprnova::Gate::define::<bool, bool>(TENANT_ONLY_GATE, |_user: &bool, _resource| {
+            suprnova::live::current_tenant().as_deref() == Some("acme")
+        });
+    });
+}
+
+/// The model discriminator and ability the RBAC-gated route checks. Fixed
+/// strings rather than `HasRoles::rbac_model_type`, so the test can grant
+/// the permission through the free functions without an authenticatable
+/// value in hand.
+const RBAC_MODEL_TYPE: &str = "privacy_suite::Principal";
+const RBAC_PERMISSION: &str = "articles.publish";
+
+/// Body driven by a real database-backed permission check: the five RBAC
+/// tables are read through `DB::select_one` and `DB::scalar`, which is the
+/// path that used to mark the whole render unobservable.
+async fn rbac_gated_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    let id = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
+    let allowed = suprnova::rbac::has_permission_for_model(RBAC_MODEL_TYPE, &id, RBAC_PERMISSION)
+        .await
+        .map_err(|error| HttpResponse::text(format!("rbac check failed: {error}")).status(500))?;
+    Ok(HttpResponse::html(format!(
+        "rbac render {n} allowed={allowed}"
+    )))
+}
+
+/// Installs this suite's evaluator stack (as one half of a shared `Chain`)
+/// process-globally, the way `features::bootstrap_database_cached` does in
+/// a real application: a [`CachedEvaluator`](suprnova::features::CachedEvaluator)
+/// in front of a [`DatabaseEvaluator`](suprnova::features::DatabaseEvaluator),
+/// so one installed stack exercises both halves of the feature-flag attack -
+/// the miss path reaches the database evaluator's own identity record, and
+/// the second read of the same flag by the same context is a cache hit that
+/// never reaches it and must replay what the miss consulted.
+///
+/// Delegates to `render_cache_feature_evaluator_support`: featureflag's
+/// global default is a genuine process-wide `OnceLock` with no reset, and
+/// `render_cache_middleware_support` needs its own evaluator visible
+/// through that same one slot. See that module's doc for why a shared
+/// installer exists at all and why chaining the two is safe for this
+/// suite's own three flags (`privacy-user-scoped-flag` - a rule at one
+/// specific user, `alice`; `privacy-global-flag` - one global rule and no
+/// identity rule; `privacy-override-flag` - a global rule *and* an
+/// override belonging to `bob`, which is the case that distinguishes
+/// "record by flag scope" from "record by the scope key that happened to
+/// match this reader").
+async fn install_feature_evaluator() {
+    crate::render_cache_feature_evaluator_support::install().await;
+}
+
+/// [`STITCHED_ROUTE`]'s handler: a Live document whose shell touches no
+/// identity at all and whose single island is identity-bound, so the
+/// document splits cleanly into bytes everybody may share and bytes exactly
+/// one principal may see.
+async fn stitched_handler(
+    request: Request,
+    mount: LiveMount<DogfoodCounter>,
+) -> Result<HttpResponse, HttpResponse> {
+    counting_route::record();
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let mut document = LiveDocument::from_request(&request)
+            .map_err(|error| FrameworkError::internal(format!("from_request {error}")))?;
+        let island = document
+            .mount(
+                &mount,
+                CanonicalValue::Object(std::collections::BTreeMap::new()),
+                MountFlags::empty(),
+            )
+            .await
+            .map_err(|error| FrameworkError::internal(format!("mount {error}")))?;
+        let bootstrap = document
+            .bootstrap(LiveBootstrapOptions::esm())
+            .map_err(|error| FrameworkError::internal(format!("bootstrap {error}")))?;
+        document
+            .render(
+                ViewName::parse("live/dogfood-document.html")
+                    .map_err(|_| FrameworkError::internal("view identity"))?,
+                &DogfoodDocument {
+                    bootstrap: bootstrap.html(),
+                    island: island.html(),
+                },
+                DocumentResponseIntent::html(StatusCode::OK)
+                    .map_err(|_| FrameworkError::internal("response intent"))?,
+                AssetSet::empty(),
+            )
+            .map_err(FrameworkError::from)
+    }
+    .await;
+    result.map_err(|error| HttpResponse::text(format!("Live document failed: {error}")).status(500))
+}
+
+/// Lists articles through `Model::query()`, so the registered tenant scope
+/// applies and its `current_tenant()` read happens inside the render.
+async fn tenant_scoped_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    let titles = Article::query()
+        .get()
+        .await
+        .map_err(|error| HttpResponse::text(format!("query failed: {error}")).status(500))?
+        .into_iter()
+        .map(|article| article.title)
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(HttpResponse::html(format!(
+        "tenant-scoped render {n} titles={titles}"
+    )))
+}
+
+/// The same shape behind a `Constant` scope.
+async fn constant_scoped_handler(_request: Request) -> Response {
+    let n = counting_route::record();
+    let titles = Notice::query()
+        .get()
+        .await
+        .map_err(|error| HttpResponse::text(format!("query failed: {error}")).status(500))?
+        .into_iter()
+        .map(|notice| notice.title)
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(HttpResponse::html(format!(
+        "constant-scoped render {n} titles={titles}"
+    )))
+}
+
+// ── Harness ────────────────────────────────────────────────────────────
+
+/// Everything one test needs: the router and middleware registry to
+/// dispatch through, plus the clock `install` was configured with.
+pub struct Harness {
+    router: Arc<Router>,
+    middleware: Arc<MiddlewareRegistry>,
+    _conn: suprnova::database::DbConnection,
+    _guard: suprnova::testing::TestContainerGuard,
+    _tempdir: tempfile::TempDir,
+}
+
+/// The ordinary boot: every identity, tenant, locale and feature
+/// middleware registered before `RenderCache::install`, impersonation and
+/// the per-route locale middleware after it.
+pub async fn boot_with_render_cache() -> Arc<Harness> {
+    boot(true).await
+}
+
+/// The same routes and policies, with the identity middleware registered
+/// **after** `RenderCache::install`, so `RenderCacheMiddleware` derives its
+/// key before any identity exists. A route declaring `Principal` then
+/// resolves that dimension to `Anonymous` and partitions nothing, while the
+/// render goes on to observe a real principal.
+pub async fn boot_with_cache_installed_before_the_auth_middleware() -> Arc<Harness> {
+    boot(false).await
+}
+
+async fn boot(auth_before_install: bool) -> Arc<Harness> {
+    static CRYPT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    CRYPT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
+    App::init();
+    counting_route::reset();
+    suprnova::middleware::clear_global_middleware_for_test();
+
+    let guard = TestContainer::fake();
+    ScopeRegistry::register::<Article, _>(TenantScope);
+    ScopeRegistry::register::<Notice, _>(PublishedScope);
+    // The Live registry the stitched route's island is mounted from. Only
+    // the component and its view are borrowed from the dogfood support: the
+    // routes, policies, middleware, and dispatch loop this suite attacks are
+    // still entirely its own, which is what the module doc's independence
+    // rule is about.
+    App::singleton(
+        LiveRegistry::builder()
+            .register::<DogfoodCounter>()
+            .expect("register the counter this suite's island mounts")
+            .build(),
+    );
+    let tempdir = tempfile::tempdir().expect("tempdir for render cache privacy test database");
+    let db_path = tempdir.path().join("render-cache-privacy.sqlite3");
+    let config = suprnova::database::DatabaseConfig::builder()
+        .url(format!("sqlite://{}", db_path.display()))
+        .max_connections(4)
+        .min_connections(1)
+        .logging(false)
+        .build();
+    let conn = suprnova::database::DbConnection::connect(&config)
+        .await
+        .expect("connect sqlite");
+    conn.inner()
+        .execute_unprepared("PRAGMA journal_mode=WAL")
+        .await
+        .expect("enable WAL journaling");
+    conn.inner()
+        .execute_unprepared("PRAGMA busy_timeout=5000")
+        .await
+        .expect("set busy timeout");
+    PrivacyMigrator::up(conn.inner(), None)
+        .await
+        .expect("apply render cache migration");
+    for statement in [
+        "CREATE TABLE articles (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            tenant_id TEXT NOT NULL, \
+            title TEXT NOT NULL\
+         )",
+        "CREATE TABLE notices (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            published INTEGER NOT NULL, \
+            title TEXT NOT NULL\
+         )",
+        "INSERT INTO articles (tenant_id, title) VALUES ('acme', 'acme-only')",
+        "INSERT INTO articles (tenant_id, title) VALUES ('globex', 'globex-only')",
+        "INSERT INTO notices (published, title) VALUES (1, 'published-notice')",
+        "INSERT INTO notices (published, title) VALUES (0, 'draft-notice')",
+    ] {
+        conn.inner()
+            .execute_unprepared(statement)
+            .await
+            .unwrap_or_else(|error| panic!("scope fixture {statement:?} failed: {error}"));
+    }
+    TestContainer::singleton(conn.clone());
+
+    let clock = Arc::new(FixedTestClock::new(1_000_000));
+
+    let no_variance = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("no variance policy");
+    let principal_declared = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .build()
+        .expect("principal declared policy");
+    let tenant_declared = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Tenant)
+        .build()
+        .expect("tenant declared policy");
+    let locale_declared = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Locale)
+        .build()
+        .expect("locale declared policy");
+    let private_declared = RenderCachePolicy::builder(RepresentationClass::PrivateCached)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Principal)
+        .build()
+        .expect("private declared policy");
+    // Deliberately no declared variance: a stitched shell is shared by
+    // construction, and it is the island inside it - re-mounted on every hit
+    // for whoever asked - that carries the per-principal bytes. A `Principal`
+    // dimension here would partition the shell too and prove nothing.
+    let stitched_declared = RenderCachePolicy::builder(RepresentationClass::PublicShellStitched)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("stitched declared policy");
+
+    let router: Router = Router::new().get(PLAIN_ROUTE, plain_handler).into();
+    let router: Router = router
+        .get(READS_AUTH_ID_ROUTE, reads_auth_id_handler)
+        .into();
+    let router: Router = router
+        .get(
+            READS_CRATE_ROOT_AUTH_USER_ID_ROUTE,
+            reads_crate_root_auth_user_id_handler,
+        )
+        .into();
+    let router: Router = router.get(AUTHZ_DRIVEN_ROUTE, authz_driven_handler).into();
+    let router: Router = router
+        .get(TENANT_ONLY_GATE_ROUTE, tenant_only_gate_handler)
+        .into();
+    let router: Router = router
+        .get(TENANT_ONLY_GATE_UNDECLARED_ROUTE, tenant_only_gate_handler)
+        .into();
+    let router: Router = router
+        .get(
+            TENANT_DECLARED_READS_IDENTITY_ROUTE,
+            reads_tenant_and_identity_handler,
+        )
+        .into();
+    let router: Router = router.get(TENANT_VARIES_ROUTE, reads_tenant_handler).into();
+    let router: Router = router
+        .get(NAMED_GUARD_ONLY_ROUTE, reads_named_guard_handler)
+        .into();
+    let router: Router = router
+        .get(
+            NAMED_THEN_DEFAULT_ROUTE,
+            reads_named_guard_then_touches_default_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(READS_SESSION_MUT_ROUTE, reads_session_mut_handler)
+        .into();
+    let router: Router = router.get(READS_COOKIE_ROUTE, reads_cookie_handler).into();
+    let router: Router = router.get(IMPERSONATED_ROUTE, reads_auth_id_handler).into();
+    let router: Router = router
+        .get(
+            PRINCIPAL_DECLARED_READS_IDENTITY_ROUTE,
+            reads_auth_id_handler,
+        )
+        .into();
+    let router: Router = router.get(PRIVATE_ROUTE, reads_auth_id_handler).into();
+    // The five locale routes are gated with their handlers, for the reason
+    // this module's `Lang` import records. Their policies are still
+    // attached below: a policy attached to a pattern no route serves is
+    // inert, and keeping the chain unconditional keeps every other route's
+    // attachment exactly where it is.
+    #[cfg(feature = "localization")]
+    let router: Router = router
+        .get(LOCALE_SWITCHES_ROUTE, locale_switching_handler)
+        .into();
+    #[cfg(feature = "localization")]
+    let router: Router = router
+        .get(LOCALE_NESTED_SCOPE_ROUTE, nested_scope_locale_handler)
+        .into();
+    #[cfg(feature = "localization")]
+    let router: Router = router
+        .get(LOCALE_LATE_MIDDLEWARE_ROUTE, reads_locale_handler)
+        .into();
+    #[cfg(feature = "localization")]
+    let router: Router = router.get(LOCALE_VARIES_ROUTE, reads_locale_handler).into();
+    #[cfg(feature = "localization")]
+    let router: Router = router
+        .get(UNDECLARED_LOCALE_ROUTE, reads_locale_handler)
+        .into();
+    let router: Router = router
+        .get(READS_USER_SCOPED_FLAG_ROUTE, reads_user_scoped_flag_handler)
+        .into();
+    let router: Router = router
+        .get(
+            READS_OVERRIDE_FLAG_ROUTE,
+            reads_another_users_override_flag_handler,
+        )
+        .into();
+    let router: Router = router
+        .get(READS_GLOBAL_FLAG_ROUTE, reads_global_flag_handler)
+        .into();
+    let router: Router = router
+        .get(PRINCIPAL_DECLARED_AUTHZ_ROUTE, authz_driven_handler)
+        .into();
+    let router: Router = router
+        .get(
+            REQUEST_AUTH_USER_ID_ROUTE,
+            reads_request_auth_user_id_handler,
+        )
+        .into();
+    let router: Router = router.get(RBAC_GATED_ROUTE, rbac_gated_handler).into();
+    let router: Router = router
+        .get(TENANT_SCOPED_UNDECLARED_ROUTE, tenant_scoped_handler)
+        .into();
+    let router: Router = router
+        .get(TENANT_SCOPED_ROUTE, tenant_scoped_handler)
+        .into();
+    let router: Router = router
+        .get(CONSTANT_SCOPED_ROUTE, constant_scoped_handler)
+        .into();
+    let stitched_mount = LiveMount::<DogfoodCounter>::identity_bound(
+        STITCHED_ROUTE,
+        "counter",
+        STITCHED_DOCUMENT_KEY,
+    )
+    .expect("declare the stitched island mount");
+    let handler_mount = stitched_mount.clone();
+    let router: Router = router
+        .get(STITCHED_ROUTE, move |request: Request| {
+            let mount = handler_mount.clone();
+            async move { stitched_handler(request, mount).await }
+        })
+        // The route's own guard, which a stitched hit runs again before the
+        // entry is served: this is what turns a signed-out visitor away.
+        //
+        // No tenant middleware here: this suite already registers one
+        // globally, and a Live security check may be recorded only once per
+        // request - a second `LiveTenantMiddleware` on the route would
+        // invalidate the whole attestation and every mount with it.
+        .middleware(AuthMiddleware::new())
+        .into();
+    let router = router
+        .try_live_mount(&stitched_mount)
+        .expect("register the stitched island mount");
+
+    let router = router
+        .try_render_cache(PLAIN_ROUTE, GroupPolicy::from(no_variance.clone()))
+        .expect("attach plain policy")
+        .try_render_cache(READS_AUTH_ID_ROUTE, GroupPolicy::from(no_variance.clone()))
+        .expect("attach reads-auth-id policy")
+        .try_render_cache(
+            READS_CRATE_ROOT_AUTH_USER_ID_ROUTE,
+            GroupPolicy::from(no_variance.clone()),
+        )
+        .expect("attach crate-root auth-user-id policy")
+        .try_render_cache(AUTHZ_DRIVEN_ROUTE, GroupPolicy::from(no_variance.clone()))
+        .expect("attach authz-driven policy")
+        .try_render_cache(
+            TENANT_ONLY_GATE_ROUTE,
+            GroupPolicy::from(tenant_declared.clone()),
+        )
+        .expect("attach tenant-only-gate policy")
+        .try_render_cache(
+            TENANT_ONLY_GATE_UNDECLARED_ROUTE,
+            GroupPolicy::from(no_variance.clone()),
+        )
+        .expect("attach tenant-only-gate-undeclared policy")
+        .try_render_cache(
+            TENANT_DECLARED_READS_IDENTITY_ROUTE,
+            GroupPolicy::from(tenant_declared.clone()),
+        )
+        .expect("attach tenant-declared reads-identity policy")
+        .try_render_cache(
+            TENANT_VARIES_ROUTE,
+            GroupPolicy::from(tenant_declared.clone()),
+        )
+        .expect("attach tenant-varies policy")
+        .try_render_cache(
+            NAMED_GUARD_ONLY_ROUTE,
+            GroupPolicy::from(principal_declared.clone()),
+        )
+        .expect("attach named-guard-only policy")
+        .try_render_cache(
+            NAMED_THEN_DEFAULT_ROUTE,
+            GroupPolicy::from(principal_declared.clone()),
+        )
+        .expect("attach named-then-default policy")
+        .try_render_cache(
+            READS_SESSION_MUT_ROUTE,
+            GroupPolicy::from(no_variance.clone()),
+        )
+        .expect("attach session-mut policy")
+        .try_render_cache(READS_COOKIE_ROUTE, GroupPolicy::from(no_variance.clone()))
+        .expect("attach cookie policy")
+        .try_render_cache(
+            IMPERSONATED_ROUTE,
+            GroupPolicy::from(principal_declared.clone()),
+        )
+        .expect("attach impersonated policy")
+        .try_render_cache(
+            PRINCIPAL_DECLARED_READS_IDENTITY_ROUTE,
+            GroupPolicy::from(principal_declared.clone()),
+        )
+        .expect("attach principal-declared reads-identity policy")
+        .try_render_cache(PRIVATE_ROUTE, GroupPolicy::from(private_declared))
+        .expect("attach private policy")
+        .try_render_cache(
+            LOCALE_SWITCHES_ROUTE,
+            GroupPolicy::from(locale_declared.clone()),
+        )
+        .expect("attach locale-switches policy")
+        .try_render_cache(
+            LOCALE_NESTED_SCOPE_ROUTE,
+            GroupPolicy::from(locale_declared.clone()),
+        )
+        .expect("attach locale-nested-scope policy")
+        .try_render_cache(
+            LOCALE_LATE_MIDDLEWARE_ROUTE,
+            GroupPolicy::from(locale_declared.clone()),
+        )
+        .expect("attach locale-late-middleware policy")
+        .try_render_cache(LOCALE_VARIES_ROUTE, GroupPolicy::from(locale_declared))
+        .expect("attach locale-varies policy")
+        .try_render_cache(
+            UNDECLARED_LOCALE_ROUTE,
+            GroupPolicy::from(no_variance.clone()),
+        )
+        .expect("attach undeclared-locale policy")
+        .try_render_cache(
+            READS_USER_SCOPED_FLAG_ROUTE,
+            GroupPolicy::from(no_variance.clone()),
+        )
+        .expect("attach user-scoped-flag policy")
+        .try_render_cache(
+            READS_OVERRIDE_FLAG_ROUTE,
+            GroupPolicy::from(no_variance.clone()),
+        )
+        .expect("attach override-flag policy")
+        .try_render_cache(
+            READS_GLOBAL_FLAG_ROUTE,
+            GroupPolicy::from(no_variance.clone()),
+        )
+        .expect("attach global-flag policy")
+        .try_render_cache(
+            PRINCIPAL_DECLARED_AUTHZ_ROUTE,
+            GroupPolicy::from(principal_declared.clone()),
+        )
+        .expect("attach principal-declared authz policy")
+        .try_render_cache(
+            REQUEST_AUTH_USER_ID_ROUTE,
+            GroupPolicy::from(principal_declared.clone()),
+        )
+        .expect("attach request-auth-user-id policy")
+        .try_render_cache(RBAC_GATED_ROUTE, GroupPolicy::from(principal_declared))
+        .expect("attach rbac-gated policy")
+        .try_render_cache(STITCHED_ROUTE, GroupPolicy::from(stitched_declared))
+        .expect("attach stitched policy")
+        .try_render_cache(
+            TENANT_SCOPED_UNDECLARED_ROUTE,
+            GroupPolicy::from(no_variance.clone()),
+        )
+        .expect("attach tenant-scoped-undeclared policy")
+        .try_render_cache(
+            TENANT_SCOPED_ROUTE,
+            GroupPolicy::from(tenant_declared.clone()),
+        )
+        .expect("attach tenant-scoped policy")
+        .try_render_cache(
+            CONSTANT_SCOPED_ROUTE,
+            GroupPolicy::from(no_variance.clone()),
+        )
+        .expect("attach constant-scoped policy");
+
+    let mut config = RenderCacheConfig::from_env()
+        .expect("the test environment configures a valid render cache")
+        .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
+    config.enabled = true;
+    config.l1 = L1Config::Disabled;
+    // Pinned alongside the L1 tier, and for the same reason: an ambient
+    // RENDER_CACHE_PROFILE or RENDER_CACHE_COORDINATOR must not change which
+    // providers this suite installs.
+    config.coordinator = CoordinatorConfig::Local {
+        lease_ms: 30_000,
+        max_waiters: 128,
+    };
+
+    install_feature_evaluator().await;
+
+    // Registered before `RenderCache::install`, so the cache middleware sits
+    // inside it and never sees the `Set-Cookie` the session writes on the way
+    // out. An identity-bound Live island binds to a session as well as a
+    // principal, so without this the stitched route could not mount at all.
+    let mut session_config = SessionConfig::default();
+    session_config.cookie_secure = false;
+    suprnova::middleware::register_global_middleware(SessionMiddleware::with_store(
+        session_config,
+        Arc::new(MemorySessionStore::default()),
+    ));
+    if auth_before_install {
+        // The production ordering: `RenderCache::install` appends to the
+        // global registry, so anything the middleware needs already
+        // resolved (identity, tenant, locale, the feature context) has to
+        // be registered before it.
+        suprnova::middleware::register_global_middleware(LoginHeader);
+    }
+    suprnova::middleware::register_global_middleware(NamedGuardLoginHeader);
+    suprnova::middleware::register_global_middleware(suprnova::live::LiveTenantMiddleware::new(
+        Arc::new(TestTenantResolver),
+    ));
+    #[cfg(feature = "localization")]
+    suprnova::middleware::register_global_middleware(TestLocaleMiddleware);
+    suprnova::middleware::register_global_middleware(
+        suprnova::features::FeatureMiddleware::new().with_team_from_header("x-test-team"),
+    );
+    let router = RenderCache::install(router, config)
+        .await
+        .expect("install render cache");
+    if !auth_before_install {
+        // The attacked ordering: the cache is installed first, so
+        // `RenderCacheMiddleware` runs before any identity exists.
+        suprnova::middleware::register_global_middleware(LoginHeader);
+    }
+    // Both stand in for per-route middleware, which always compose closer
+    // to the handler than any global middleware and therefore always run
+    // after `RenderCacheMiddleware` has derived the key.
+    suprnova::middleware::register_global_middleware(ImpersonationMiddleware);
+    #[cfg(feature = "localization")]
+    suprnova::middleware::register_global_middleware(LateLocaleMiddleware);
+
+    let middleware = Arc::new(MiddlewareRegistry::from_global());
+
+    let router = Arc::new(router);
+    // The Live runtime the stitched route mounts through. Its own clock is
+    // separate from the RenderCache one only because the two seams take
+    // different types; both are fixed at the same instant and no test in
+    // this suite moves either.
+    prepare_live_router_with_clock_for_test(&router, Arc::new(AdjustableTestClock::new(1_000_000)))
+        .expect("prepare the Live runtime");
+
+    Arc::new(Harness {
+        router,
+        middleware,
+        _conn: conn,
+        _guard: guard,
+        _tempdir: tempdir,
+    })
+}
+
+/// Whether `pattern` resolves to a render-cache policy on the router this
+/// harness installed (R103).
+///
+/// Every leak test that attacks a route which can never be stored - the
+/// undeclared-dimension declines, and the session and cookie reads - asserts
+/// this about its own route, because no behavioural signal can tell "under a
+/// policy and correctly declining" from "never registered at all": both
+/// return the raw handler response with no validators. Without it, deleting
+/// one route's `.try_render_cache(...)` opt-in makes that route's leak test
+/// assert nothing while staying green, which is exactly the vacuity the
+/// review measured.
+///
+/// Reads the production policy table (`RenderCachePolicyTable::effective_policy`,
+/// through the framework's own `render_cache::testing::policy_table` seam),
+/// not a copy this module keeps.
+///
+/// Requires the route's own effective policy to carry a class other than
+/// `Uncacheable` (final review, F13 / ruling R104): a future patch to
+/// `Uncacheable` would otherwise keep the attachment assertion green while
+/// the route could never store anything, which is the same vacuity from a
+/// different direction.
+pub fn route_is_under_a_policy(harness: &Harness, pattern: &str) -> bool {
+    suprnova::render_cache::testing::policy_table(&harness.router)
+        .effective_policy(pattern)
+        .is_some_and(|policy| policy.class() != RepresentationClass::Uncacheable)
+}
+
+// ── Route patterns ─────────────────────────────────────────────────────
+
+/// Declares nothing, observes nothing. The negative direction.
+pub const PLAIN_ROUTE: &str = "/privacy/plain/{id}";
+/// Declares nothing, reads `Auth::id()`.
+pub const READS_AUTH_ID_ROUTE: &str = "/privacy/reads-auth-id";
+/// Declares nothing, reads `suprnova::auth_user_id()`.
+pub const READS_CRATE_ROOT_AUTH_USER_ID_ROUTE: &str = "/privacy/reads-crate-root-auth-user-id";
+/// Declares nothing, body driven by `Gate::allows` alone.
+pub const AUTHZ_DRIVEN_ROUTE: &str = "/privacy/authz-driven";
+/// Declares `Tenant`, body driven by a tenant-only authorization decision.
+pub const TENANT_ONLY_GATE_ROUTE: &str = "/privacy/tenant-only-gate/{id}";
+/// The same handler on a route that declares nothing.
+pub const TENANT_ONLY_GATE_UNDECLARED_ROUTE: &str = "/privacy/tenant-only-gate-undeclared/{id}";
+/// Declares `Tenant` only, reads the tenant *and* the identity.
+pub const TENANT_DECLARED_READS_IDENTITY_ROUTE: &str =
+    "/privacy/tenant-declared-reads-identity/{id}";
+/// Declares `Tenant`, reads only the tenant.
+pub const TENANT_VARIES_ROUTE: &str = "/privacy/tenant-varies/{id}";
+/// Declares `Principal`, reads the identity through the non-default guard.
+pub const NAMED_GUARD_ONLY_ROUTE: &str = "/privacy/named-guard-only/{id}";
+/// Declares `Principal`, builds the body from the named guard then touches
+/// the default accessor.
+pub const NAMED_THEN_DEFAULT_ROUTE: &str = "/privacy/named-then-default/{id}";
+/// Declares nothing, reads session state through `session_mut`.
+pub const READS_SESSION_MUT_ROUTE: &str = "/privacy/reads-session-mut";
+/// Declares nothing, reads a cookie.
+pub const READS_COOKIE_ROUTE: &str = "/privacy/reads-cookie";
+/// Declares `Principal`, reads `Auth::id()`; driven with
+/// `x-test-impersonate` so the identity changes after key derivation.
+pub const IMPERSONATED_ROUTE: &str = "/privacy/impersonated/{id}";
+/// Declares `Principal`, reads `Auth::id()`; used under the boot whose
+/// auth middleware runs after the cache.
+pub const PRINCIPAL_DECLARED_READS_IDENTITY_ROUTE: &str =
+    "/privacy/principal-declared-reads-identity/{id}";
+/// `PrivateCached`, declares `Principal`, reads `Auth::id()`.
+pub const PRIVATE_ROUTE: &str = "/privacy/private/{id}";
+/// Declares `Locale`, switches locale mid-render.
+pub const LOCALE_SWITCHES_ROUTE: &str = "/privacy/locale-switches/{id}";
+/// Declares `Locale`, renders inside a nested `scope_locale`.
+pub const LOCALE_NESTED_SCOPE_ROUTE: &str = "/privacy/locale-nested-scope/{id}";
+/// Declares `Locale`; the locale is supplied by a middleware installed
+/// after the cache.
+pub const LOCALE_LATE_MIDDLEWARE_ROUTE: &str = "/privacy/locale-late-middleware/{id}";
+/// Declares `Locale`, reads the locale; the positive control.
+pub const LOCALE_VARIES_ROUTE: &str = "/privacy/locale-varies/{id}";
+/// Declares nothing, reads the locale.
+pub const UNDECLARED_LOCALE_ROUTE: &str = "/privacy/undeclared-locale";
+/// Declares nothing, reads a user-scoped flag.
+pub const READS_USER_SCOPED_FLAG_ROUTE: &str = "/privacy/reads-user-scoped-flag/{id}";
+/// Declares nothing, reads a flag whose only override belongs to bob.
+pub const READS_OVERRIDE_FLAG_ROUTE: &str = "/privacy/reads-override-flag/{id}";
+/// Declares nothing, reads a globally scoped flag; the flag tests' positive
+/// control, because a global flag's answer does not depend on the reader.
+pub const READS_GLOBAL_FLAG_ROUTE: &str = "/privacy/reads-global-flag/{id}";
+/// Declares `Principal`, body driven by `Gate::allows`; the authorization
+/// test's positive control, since `AuthorizationRead` requires exactly that
+/// dimension.
+pub const PRINCIPAL_DECLARED_AUTHZ_ROUTE: &str = "/privacy/principal-declared-authz/{id}";
+/// Declares `Principal`, reads the uninstrumented `Request::auth_user_id()`
+/// beside the instrumented accessor.
+pub const REQUEST_AUTH_USER_ID_ROUTE: &str = "/privacy/reads-request-auth-user-id/{id}";
+/// Declares `Principal`, body driven by a database-backed RBAC permission
+/// check for the signed-in principal.
+pub const RBAC_GATED_ROUTE: &str = "/privacy/rbac-gated/{id}";
+/// `PublicShellStitched`, declares nothing, and renders a Live document with
+/// one identity-bound island inside a shell that reads no identity at all.
+/// The one route here whose stored representation is deliberately *shared*
+/// while part of the document it produces is per-principal.
+pub const STITCHED_ROUTE: &str = "/privacy/stitched";
+/// The document mount key the island on [`STITCHED_ROUTE`] carries.
+pub const STITCHED_DOCUMENT_KEY: &str = "privacy-stitched-counter";
+/// Declares nothing; its model carries a tenant-reading global scope.
+pub const TENANT_SCOPED_UNDECLARED_ROUTE: &str = "/privacy/tenant-scoped-undeclared/{id}";
+/// The same handler on a route that declares `Tenant`.
+pub const TENANT_SCOPED_ROUTE: &str = "/privacy/tenant-scoped/{id}";
+/// Declares nothing; its model carries a `Constant` global scope.
+pub const CONSTANT_SCOPED_ROUTE: &str = "/privacy/constant-scoped/{id}";
+
+// ── Reading an emitted island ──────────────────────────────────────────
+
+/// The island-markup readers, defined once in
+/// [`crate::render_cache_support`] and re-exported here: this suite and the
+/// stitch suite held byte-identical copies until task 8, and "which bytes
+/// are the island and which are the shell around it" has to mean the same
+/// thing in both.
+pub use crate::render_cache_support::{attribute, decoded_snapshot, island_tag};
+
+/// The scope the island on [`STITCHED_ROUTE`] was mounted under, as it
+/// reached the client.
+#[must_use]
+pub fn stitched_scope(html: &str) -> String {
+    decoded_snapshot(island_tag(html, STITCHED_DOCUMENT_KEY))["body"]["scope"]
+        .as_str()
+        .expect("a scope in the emitted snapshot")
+        .to_owned()
+}
+
+/// The session cookie pair a response established, to present on a later
+/// request that has to be the *same* session.
+#[must_use]
+pub fn session_cookie(response: &TestResponse) -> String {
+    let value = response
+        .header("set-cookie")
+        .expect("the session middleware set a cookie");
+    value
+        .split(';')
+        .next()
+        .expect("a cookie name=value pair")
+        .to_owned()
+}
+
+// ── Dispatch ───────────────────────────────────────────────────────────
+
+/// One dispatched response: status, lower-cased header map (first value per
+/// name), and body bytes.
+pub struct TestResponse {
+    pub status: hyper::StatusCode,
+    headers: std::collections::HashMap<String, String>,
+    pub body: Bytes,
+}
+
+impl TestResponse {
+    /// The first value of a response header, case-insensitively.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+
+    /// The body as text. Every body this suite renders is ASCII HTML.
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+}
+
+/// Dispatches a `GET` to `path` with `extra_headers` over a real loopback
+/// HTTP connection, so the whole middleware chain runs exactly as it does
+/// in production.
+pub async fn dispatch_get(
+    harness: &Harness,
+    path: &str,
+    extra_headers: &[(&str, &str)],
+) -> TestResponse {
+    let mut builder = hyper::Request::builder()
+        .method(hyper::Method::GET)
+        .uri(path)
+        .header("host", "127.0.0.1");
+    for (name, value) in extra_headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder
+        .body(Full::new(Bytes::new()))
+        .expect("build request");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let router = Arc::clone(&harness.router);
+    let middleware = Arc::clone(&harness.middleware);
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept test request");
+        let service = service_fn(move |request| {
+            let router = Arc::clone(&router);
+            let middleware = Arc::clone(&middleware);
+            async move {
+                Ok::<_, std::convert::Infallible>(handle_request(router, middleware, request).await)
+            }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await;
+    });
+
+    let stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect test request");
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .expect("HTTP handshake");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let response = sender.send_request(request).await.expect("send request");
+    let status = response.status();
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_ascii_lowercase(),
+                value.to_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect response body")
+        .to_bytes();
+    TestResponse {
+        status,
+        headers,
+        body,
+    }
+}

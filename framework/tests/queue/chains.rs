@@ -1,0 +1,324 @@
+//! Queued chain tests: jobs run in order, each only after the prior ack's.
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serial_test::serial;
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::error::FrameworkError;
+use suprnova::queue::{
+    Job, MemoryQueueDriver, Queue, QueueDriver,
+    worker::{WorkerConfig, register_job, run_worker},
+};
+use tokio_util::sync::CancellationToken;
+
+static ORDER: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ChainStep {
+    label: u32,
+}
+
+#[async_trait]
+impl Job for ChainStep {
+    fn job_name() -> &'static str {
+        "queue_chains::ChainStep"
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        ORDER.lock().unwrap().push(self.label);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn chain_runs_in_order() {
+    ORDER.lock().unwrap().clear();
+    register_job::<ChainStep>();
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Queue::chain()
+        .add(ChainStep { label: 1 })
+        .unwrap()
+        .add(ChainStep { label: 2 })
+        .unwrap()
+        .add(ChainStep { label: 3 })
+        .unwrap()
+        .dispatch()
+        .await
+        .unwrap();
+
+    // The chain dispatches one envelope; the worker pops it, runs step 1,
+    // then pushes step 2 on success - and so on. So we need three loop
+    // iterations to drain.
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(5),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(3),
+        queues: Vec::new(),
+    };
+    let cancel = CancellationToken::new();
+    run_worker(driver.clone(), cfg, cancel).await;
+
+    let seen = ORDER.lock().unwrap().clone();
+    assert_eq!(seen, vec![1, 2, 3], "chain must execute in order");
+}
+
+static STOP_AT: std::sync::Mutex<u32> = std::sync::Mutex::new(0);
+
+#[derive(Serialize, Deserialize, Clone)]
+struct StopAt {
+    label: u32,
+}
+
+#[async_trait]
+impl Job for StopAt {
+    fn job_name() -> &'static str {
+        "queue_chains::StopAt"
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        *STOP_AT.lock().unwrap() = self.label;
+        if self.label == 2 {
+            Err(FrameworkError::internal("step 2 fails permanently"))
+        } else {
+            Ok(())
+        }
+    }
+    fn max_tries() -> u32 {
+        1
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn chain_stops_after_a_failing_link() {
+    register_job::<StopAt>();
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Queue::chain()
+        .add(StopAt { label: 1 })
+        .unwrap()
+        .add(StopAt { label: 2 })
+        .unwrap()
+        .add(StopAt { label: 3 })
+        .unwrap()
+        .dispatch()
+        .await
+        .unwrap();
+
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(5),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(2),
+        queues: Vec::new(),
+    };
+    let cancel = CancellationToken::new();
+    run_worker(driver.clone(), cfg, cancel).await;
+
+    // Step 2 dead-letters; step 3 never gets enqueued (the worker doesn't
+    // propagate the tail on failure).
+    assert_eq!(
+        *STOP_AT.lock().unwrap(),
+        2,
+        "chain must stop at the failing link"
+    );
+    let pending = driver.pending_size().await.unwrap();
+    let reserved = driver.reserved_size().await.unwrap();
+    let delayed = driver.delayed_size().await.unwrap();
+    assert_eq!(
+        pending + reserved + delayed,
+        0,
+        "no further chain envelopes after the failure"
+    );
+}
+
+// Lights up the M39 fix: a job overriding `Job::backoff()` must propagate
+// that schedule through the chain - `ChainLink::to_envelope` previously
+// hardcoded `BackoffSchedule::default()` and dropped the override on
+// rehydration.
+#[derive(Serialize, Deserialize, Clone)]
+struct FixedBackoffJob;
+
+#[async_trait]
+impl Job for FixedBackoffJob {
+    fn job_name() -> &'static str {
+        "queue_chains::FixedBackoffJob"
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+    fn backoff() -> suprnova::queue::BackoffSchedule {
+        suprnova::queue::BackoffSchedule::Fixed { secs: 7 }
+    }
+}
+
+#[test]
+fn chain_link_propagates_job_backoff_into_envelope() {
+    let link =
+        suprnova::queue::chain::ChainLink::from_job(FixedBackoffJob).expect("chain link encode");
+    let env = link.to_envelope();
+    assert_eq!(
+        env.backoff,
+        suprnova::queue::BackoffSchedule::Fixed { secs: 7 },
+        "chain envelope must carry the job's custom backoff schedule"
+    );
+}
+
+static CHAIN_DRIVER_TAG: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+#[derive(Serialize, Deserialize, Clone)]
+struct DriverTagStep {
+    label: u32,
+}
+
+#[async_trait]
+impl Job for DriverTagStep {
+    fn job_name() -> &'static str {
+        "queue_chains::DriverTagStep"
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        CHAIN_DRIVER_TAG.lock().unwrap().push(self.label);
+        Ok(())
+    }
+}
+
+/// Pins L29: under a multi-driver setup, the chain's next link must land
+/// on the worker's BOUND driver, not whichever driver is globally
+/// registered via `Queue::set_driver`. The dispatch path inside
+/// `handle_completed` used to resolve through `current_driver()`, which
+/// silently picked the global registration and would have sprayed
+/// follow-up links onto the wrong queue under a per-connection worker
+/// fleet.
+#[tokio::test]
+#[serial]
+async fn chain_dispatch_uses_bound_driver_not_global() {
+    CHAIN_DRIVER_TAG.lock().unwrap().clear();
+    register_job::<DriverTagStep>();
+
+    let bound: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    let global: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+
+    // Build the chain envelope on the bound driver while the GLOBAL
+    // slot points at a different driver. Pre-fix: handle_completed
+    // would route step 2 to `global` via `current_driver()` -
+    // `bound`'s worker would then sit idle and the chain would never
+    // complete.
+    Queue::set_driver(bound.clone());
+    Queue::chain()
+        .add(DriverTagStep { label: 1 })
+        .unwrap()
+        .add(DriverTagStep { label: 2 })
+        .unwrap()
+        .dispatch()
+        .await
+        .unwrap();
+    Queue::set_driver(global.clone());
+
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(5),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(2),
+        queues: Vec::new(),
+    };
+    let cancel = CancellationToken::new();
+    run_worker(bound.clone(), cfg, cancel).await;
+
+    let seen = CHAIN_DRIVER_TAG.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![1, 2],
+        "both chain steps must execute on the bound worker - proves the next \
+         link landed on `bound` (where the worker polls), not on `global`"
+    );
+    assert_eq!(
+        global.size().await.unwrap(),
+        0,
+        "the global driver must remain empty - no stray chain links should \
+         have leaked onto it"
+    );
+}
+
+// Forward-compat: a chain payload serialized BEFORE the M39 fix did not
+// include `backoff` on the link. The `#[serde(default)]` annotation makes
+// such payloads decode to the framework-default schedule, preserving
+// pre-fix behaviour for in-flight messages.
+#[test]
+fn v2_chain_link_without_backoff_decodes_to_default() {
+    let v2_payload = serde_json::json!({
+        "job_name": "queue_chains::FixedBackoffJob",
+        "payload": {},
+        "max_tries": 3,
+        "timeout_secs": null,
+        "fail_on_timeout": false,
+    });
+    let link: suprnova::queue::chain::ChainLink =
+        serde_json::from_value(v2_payload).expect("v2 chain link must decode under serde(default)");
+    assert_eq!(
+        link.backoff,
+        suprnova::queue::BackoffSchedule::default(),
+        "missing backoff must fall back to framework default"
+    );
+}
+
+// The declared-queue analogue of the backoff capture above: `Job::queue()` is
+// unreachable from a type-erased chain link, so `ChainLink::from_job` captures
+// it at build time. Previously it was silently dropped - a job routed to a
+// dedicated pool when pushed directly landed on `default` when chained.
+#[derive(Serialize, Deserialize, Clone)]
+struct DeclaredQueueJob;
+
+#[async_trait]
+impl Job for DeclaredQueueJob {
+    fn job_name() -> &'static str {
+        "queue_chains::DeclaredQueueJob"
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+    fn queue() -> Option<&'static str> {
+        Some("exports")
+    }
+}
+
+#[test]
+fn chain_link_propagates_declared_queue_into_envelope() {
+    let link =
+        suprnova::queue::chain::ChainLink::from_job(DeclaredQueueJob).expect("chain link encode");
+    assert_eq!(link.queue.as_deref(), Some("exports"));
+    let env = link.to_envelope();
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("exports"),
+        "a chained job must keep the queue it declared, same as a direct push"
+    );
+}
+
+#[test]
+fn chain_link_without_declared_queue_adds_no_wire_key() {
+    let link =
+        suprnova::queue::chain::ChainLink::from_job(FixedBackoffJob).expect("chain link encode");
+    let json = serde_json::to_value(&link).expect("serialize");
+    assert!(
+        json.get("queue").is_none(),
+        "an undeclared queue must not add a key, or pre-0.7.1 workers see a changed chain payload"
+    );
+}
+
+// A chain payload written before the `queue` field existed must decode and
+// keep behaving as it did: no declared queue, so a registered route or the
+// driver default decides.
+#[test]
+fn legacy_chain_link_without_queue_decodes_to_none() {
+    let legacy_payload = serde_json::json!({
+        "job_name": "queue_chains::DeclaredQueueJob",
+        "payload": {},
+        "max_tries": 3,
+        "timeout_secs": null,
+        "fail_on_timeout": false,
+    });
+    let link: suprnova::queue::chain::ChainLink = serde_json::from_value(legacy_payload)
+        .expect("pre-queue chain link must decode under serde(default)");
+    assert_eq!(link.queue, None);
+}

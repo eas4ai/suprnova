@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = [
+    "framework",
+    "app",
+    "suprnova-cli",
+    "suprnova-macros",
+    "crates/suprnova-web-push",
+    "crates/suprnova-payments-stripe",
+    "crates/suprnova-payments-paddle",
+    "crates/suprnova-payments-nowpayments",
+    "crates/suprnova-magnetar",
+    "crates/suprnova-live",
+    "crates/suprnova-live/crates/suprnova-live-macro-fixture",
+    "crates/suprnova-live/crates/suprnova-live-test-support",
+]
+exclude = ["crates/suprnova-live/fuzz"]
+
+[workspace.package]
+version = "2.1.0"
+edition = "2024"
+rust-version = "1.94.0"
+license = "MIT"
+
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"

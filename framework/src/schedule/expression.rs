@@ -1,0 +1,1191 @@
+//! Cron expression parsing and due-checking
+//!
+//! Supports standard cron syntax with 5 fields:
+//! `minute hour day-of-month month day-of-week`
+
+use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
+
+/// Day of week enum for scheduling
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DayOfWeek {
+    /// Sunday - cron numeric value `0`.
+    Sunday = 0,
+    /// Monday - cron numeric value `1`.
+    Monday = 1,
+    /// Tuesday - cron numeric value `2`.
+    Tuesday = 2,
+    /// Wednesday - cron numeric value `3`.
+    Wednesday = 3,
+    /// Thursday - cron numeric value `4`.
+    Thursday = 4,
+    /// Friday - cron numeric value `5`.
+    Friday = 5,
+    /// Saturday - cron numeric value `6`.
+    Saturday = 6,
+}
+
+impl DayOfWeek {
+    /// Convert from chrono Weekday
+    pub fn from_chrono(weekday: chrono::Weekday) -> Self {
+        match weekday {
+            chrono::Weekday::Sun => DayOfWeek::Sunday,
+            chrono::Weekday::Mon => DayOfWeek::Monday,
+            chrono::Weekday::Tue => DayOfWeek::Tuesday,
+            chrono::Weekday::Wed => DayOfWeek::Wednesday,
+            chrono::Weekday::Thu => DayOfWeek::Thursday,
+            chrono::Weekday::Fri => DayOfWeek::Friday,
+            chrono::Weekday::Sat => DayOfWeek::Saturday,
+        }
+    }
+}
+
+/// Cron expression for scheduling tasks
+///
+/// Supports standard cron syntax with 5 fields:
+/// `minute hour day-of-month month day-of-week`
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use suprnova::CronExpression;
+/// # fn ex() {
+/// // Every minute
+/// let expr = CronExpression::every_minute();
+///
+/// // Daily at 3:00 AM
+/// let expr = CronExpression::daily_at("03:00");
+///
+/// // Custom cron expression
+/// let expr = CronExpression::parse("0 */2 * * *").unwrap(); // Every 2 hours
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct CronExpression {
+    raw: String,
+    /// Minutes (0-59)
+    minute: CronField,
+    /// Hours (0-23)
+    hour: CronField,
+    /// Day of month (1-31)
+    day_of_month: CronField,
+    /// Month (1-12)
+    month: CronField,
+    /// Day of week (0-6, Sunday=0)
+    day_of_week: CronField,
+}
+
+#[derive(Debug, Clone)]
+enum CronField {
+    Any,                // *
+    Value(u32),         // 5
+    Range(u32, u32),    // 1-5
+    Step(u32),          // */5
+    List(Vec<u32>),     // 1,3,5
+    StepFrom(u32, u32), // 5/10 (start at 5, every 10)
+}
+
+/// Per-field value bounds, plus a human label used in error messages.
+///
+/// Each cron field has a fixed inclusive range (minute 0..=59, hour
+/// 0..=23, day-of-month 1..=31, month 1..=12, day-of-week 0..=6). Without
+/// bounds the parser silently accepts `99 25 99 13 9` and ships a
+/// never-firing schedule; the schedule entry then sits forever as
+/// dead weight and the operator never learns about the typo.
+#[derive(Clone, Copy)]
+struct FieldBounds {
+    /// Smallest value accepted in this field (inclusive).
+    min: u32,
+    /// Largest value accepted in this field (inclusive).
+    max: u32,
+    /// Human label for error messages - `"minute"`, `"hour"`, etc.
+    name: &'static str,
+}
+
+impl FieldBounds {
+    const MINUTE: Self = Self {
+        min: 0,
+        max: 59,
+        name: "minute",
+    };
+    const HOUR: Self = Self {
+        min: 0,
+        max: 23,
+        name: "hour",
+    };
+    const DAY_OF_MONTH: Self = Self {
+        min: 1,
+        max: 31,
+        name: "day-of-month",
+    };
+    const MONTH: Self = Self {
+        min: 1,
+        max: 12,
+        name: "month",
+    };
+    const DAY_OF_WEEK: Self = Self {
+        min: 0,
+        max: 6,
+        name: "day-of-week",
+    };
+
+    fn check(&self, value: u32, label: &str, raw: &str) -> Result<(), String> {
+        if value < self.min || value > self.max {
+            return Err(format!(
+                "{} {label} `{value}` out of range {}..={} in '{}'",
+                self.name, self.min, self.max, raw
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl CronField {
+    fn matches(&self, value: u32) -> bool {
+        match self {
+            CronField::Any => true,
+            CronField::Value(v) => *v == value,
+            CronField::Range(start, end) => value >= *start && value <= *end,
+            CronField::Step(step) => value.is_multiple_of(*step),
+            CronField::StepFrom(start, step) => {
+                value >= *start && (value - start).is_multiple_of(*step)
+            }
+            CronField::List(values) => values.contains(&value),
+        }
+    }
+
+    /// `true` when this field is the unrestricted wildcard `*`. Used by
+    /// [`CronExpression::is_due_at`] to decide whether the day-of-month and
+    /// day-of-week fields combine with AND or OR.
+    fn is_any(&self) -> bool {
+        matches!(self, CronField::Any)
+    }
+
+    /// Parse a single cron-field token against the supplied bounds.
+    ///
+    /// `bounds` carries the per-field inclusive range (minute 0..=59,
+    /// hour 0..=23, etc.) and a human label used to build a clear error
+    /// message. Numeric values, range endpoints, and list entries are
+    /// each checked against the bounds; a `Range(start, end)` further
+    /// requires `start <= end`. `Step(0)` / `StepFrom(_, 0)` are
+    /// rejected: a step of zero degenerates to "every value congruent
+    /// to 0 mod 0" which only matches `value == 0`, silently turning a
+    /// `*/0 * * * *` schedule into "every hour at minute 0".
+    fn parse(s: &str, bounds: FieldBounds) -> Result<Self, String> {
+        if s == "*" {
+            return Ok(CronField::Any);
+        }
+
+        // Handle */N (every N)
+        if let Some(rest) = s.strip_prefix("*/") {
+            let step: u32 = rest
+                .parse()
+                .map_err(|_| format!("Invalid step value in '{}'", s))?;
+            if step == 0 {
+                return Err(format!(
+                    "{} step `*/0` is invalid (step must be positive) in '{}'",
+                    bounds.name, s
+                ));
+            }
+            return Ok(CronField::Step(step));
+        }
+
+        // Handle N/M (starting at N, every M)
+        if s.contains('/') && !s.starts_with('*') {
+            let parts: Vec<&str> = s.split('/').collect();
+            if parts.len() == 2 {
+                let start: u32 = parts[0]
+                    .parse()
+                    .map_err(|_| format!("Invalid start value in '{}'", s))?;
+                let step: u32 = parts[1]
+                    .parse()
+                    .map_err(|_| format!("Invalid step value in '{}'", s))?;
+                if step == 0 {
+                    return Err(format!(
+                        "{} step `{start}/0` is invalid (step must be positive) in '{}'",
+                        bounds.name, s
+                    ));
+                }
+                bounds.check(start, "start", s)?;
+                return Ok(CronField::StepFrom(start, step));
+            }
+        }
+
+        // Handle comma-separated list (1,3,5)
+        if s.contains(',') {
+            let values: Vec<u32> = s
+                .split(',')
+                .map(|v| v.trim().parse::<u32>())
+                .collect::<Result<_, _>>()
+                .map_err(|_| format!("Invalid list value in '{}'", s))?;
+            for v in &values {
+                bounds.check(*v, "list entry", s)?;
+            }
+            return Ok(CronField::List(values));
+        }
+
+        // Handle range (1-5)
+        if s.contains('-') {
+            let parts: Vec<&str> = s.split('-').collect();
+            if parts.len() == 2 {
+                let start: u32 = parts[0]
+                    .parse()
+                    .map_err(|_| format!("Invalid range start in '{}'", s))?;
+                let end: u32 = parts[1]
+                    .parse()
+                    .map_err(|_| format!("Invalid range end in '{}'", s))?;
+                if start > end {
+                    return Err(format!(
+                        "{} range start `{start}` is greater than end `{end}` in '{}'",
+                        bounds.name, s
+                    ));
+                }
+                bounds.check(start, "range start", s)?;
+                bounds.check(end, "range end", s)?;
+                return Ok(CronField::Range(start, end));
+            }
+        }
+
+        // Handle single value
+        let value: u32 = s.parse().map_err(|_| format!("Invalid value in '{}'", s))?;
+        bounds.check(value, "value", s)?;
+        Ok(CronField::Value(value))
+    }
+}
+
+impl std::fmt::Display for CronField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CronField::Any => write!(f, "*"),
+            CronField::Value(v) => write!(f, "{}", v),
+            CronField::Range(s, e) => write!(f, "{}-{}", s, e),
+            CronField::Step(s) => write!(f, "*/{}", s),
+            CronField::StepFrom(start, step) => write!(f, "{}/{}", start, step),
+            CronField::List(l) => write!(
+                f,
+                "{}",
+                l.iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        }
+    }
+}
+
+impl CronExpression {
+    /// Parse a cron expression string
+    ///
+    /// Format: `minute hour day-of-month month day-of-week`
+    ///
+    /// # Examples
+    ///
+    /// - `* * * * *` - Every minute
+    /// - `0 * * * *` - Every hour
+    /// - `0 3 * * *` - Daily at 3:00 AM
+    /// - `0 0 * * 0` - Weekly on Sunday
+    /// - `*/5 * * * *` - Every 5 minutes
+    pub fn parse(expression: &str) -> Result<Self, String> {
+        let parts: Vec<&str> = expression.split_whitespace().collect();
+
+        if parts.len() != 5 {
+            return Err(format!(
+                "Cron expression must have 5 fields, got {}",
+                parts.len()
+            ));
+        }
+
+        Ok(Self {
+            raw: expression.to_string(),
+            minute: CronField::parse(parts[0], FieldBounds::MINUTE)?,
+            hour: CronField::parse(parts[1], FieldBounds::HOUR)?,
+            day_of_month: CronField::parse(parts[2], FieldBounds::DAY_OF_MONTH)?,
+            month: CronField::parse(parts[3], FieldBounds::MONTH)?,
+            day_of_week: CronField::parse(parts[4], FieldBounds::DAY_OF_WEEK)?,
+        })
+    }
+
+    /// Check if this expression is due now (wall clock).
+    ///
+    /// Thin wrapper over [`Self::is_due_at`] that uses `Local::now()` as the
+    /// clock. Production schedulers should call this; tests should prefer
+    /// `is_due_at` so they can inject a synthetic clock and avoid clock-skew
+    /// flakiness.
+    pub fn is_due(&self) -> bool {
+        self.is_due_at(Local::now())
+    }
+
+    /// Check if this expression is due for the supplied instant.
+    ///
+    /// Exposed so tests can drive cron evaluation against a fixed clock -
+    /// the same-minute dedup test and any future timezone/DST test build a
+    /// `DateTime<Local>` from a fixed `NaiveDateTime` rather than racing
+    /// `tokio::time::pause()` against wall-clock advancement. Generic over
+    /// `TimeZone` so callers can also pass `Utc` or a custom offset when
+    /// the per-schedule timezone follow-up lands.
+    ///
+    /// The day-of-month and day-of-week fields follow the Vixie/POSIX cron
+    /// rule (which Laravel inherits): when *both* day fields are restricted
+    /// (neither is `*`), the expression fires when *either* matches - so
+    /// `0 0 13 * 5` runs on the 13th of the month OR on any Friday. When at
+    /// least one day field is `*`, the two combine with AND as usual. The
+    /// minute, hour, and month fields always AND.
+    pub fn is_due_at<Tz: TimeZone>(&self, now: DateTime<Tz>) -> bool {
+        let dom_match = self.day_of_month.matches(now.day());
+        let dow_match = self
+            .day_of_week
+            .matches(now.weekday().num_days_from_sunday());
+
+        // Vixie cron: if both day fields are restricted, OR them; otherwise AND.
+        let day_ok = if !self.day_of_month.is_any() && !self.day_of_week.is_any() {
+            dom_match || dow_match
+        } else {
+            dom_match && dow_match
+        };
+
+        self.minute.matches(now.minute())
+            && self.hour.matches(now.hour())
+            && self.month.matches(now.month())
+            && day_ok
+    }
+
+    /// Upper bound on the minute scan performed by [`Self::next_run_after`]:
+    /// eight years of minutes, plus the one extra minute that lets a
+    /// schedule landing exactly on the far edge still be found.
+    ///
+    /// **The invariant: any cron expression that matches at all matches
+    /// within this window.** Four of the five fields cycle annually. The
+    /// fifth does not: `29 2` (February 29) is a perfectly valid, genuinely
+    /// periodic expression, and the widest gap it can leave sets the bound
+    /// for every expression.
+    ///
+    /// That gap is eight years, not four. February 29 usually recurs every
+    /// four years, but the Gregorian century rule drops it in years
+    /// divisible by 100 and not by 400 - so 1900, 2100, 2200 and 2300 have
+    /// no February 29, and consecutive leap days straddling one of those
+    /// years are eight years apart (1896 -> 1904, and next 2096 -> 2104:
+    /// 2,921 days, 4,206,240 minutes). No pair can be further apart than
+    /// that, because at most one century year falls in any eight-year span.
+    /// Day-of-month/day-of-week alignment also repeats well inside eight
+    /// years, so nothing else widens the window.
+    ///
+    /// A one-year bound was the original defect: it reported "never" for a
+    /// `29 2` task from roughly three of every four query dates, and in
+    /// `schedule:list` that false `None` also suppressed the timezone
+    /// conversion, which needs two real run instants to sample offsets from.
+    ///
+    /// Do not narrow this back down. The saving is imaginary - a matchable
+    /// expression exits the scan at its first match, so the bound is only
+    /// ever walked in full by an expression that matches nothing at all
+    /// (`0 0 30 2 *`), and walking it in full is measured in fractions of a
+    /// second. `next_run_after_finds_a_february_29_across_a_skipped_century`
+    /// is the regression test that fails if this shrinks.
+    const NEXT_RUN_SCAN_MINUTES: u32 = (8 * 366 + 2) * 24 * 60 + 1;
+
+    /// The first minute strictly after `after` at which this expression is
+    /// due, in `after`'s own timezone.
+    ///
+    /// Used by `schedule:list` to show operators when a task will actually
+    /// fire. The scan is deliberately a plain minute-by-minute probe of
+    /// [`Self::is_due_at`] rather than a field-stepping solver: a solver has
+    /// to re-derive the Vixie day-field OR rule, month lengths, and leap
+    /// years, and any disagreement with `is_due_at` would print a time the
+    /// scheduler never runs. One shared predicate cannot disagree with
+    /// itself, and the scan exits at the first match, so the bound is only
+    /// ever paid by an expression that genuinely matches nothing for years
+    /// - and `schedule:list` is an interactive command, not a hot path.
+    ///
+    /// Stepping happens on the UTC instant, so a DST transition inside the
+    /// scan neither repeats nor skips a probe; the cron fields are still
+    /// read off the local wall clock.
+    ///
+    /// `None` means the expression matches nothing, ever: the scan covers
+    /// eight years, which is the widest gap any matchable expression can
+    /// leave, so surviving it proves unsatisfiability rather than rarity
+    /// (`0 0 30 2 *` names a date that never occurs). The only other `None`
+    /// is `after` sitting so close to the end of the representable calendar
+    /// that the scan would overflow.
+    pub fn next_run_after<Tz: TimeZone>(&self, after: DateTime<Tz>) -> Option<DateTime<Tz>> {
+        let tz = after.timezone();
+        // Truncate on the UTC instant rather than the local wall clock:
+        // `with_second` on a local time can land inside a spring-forward
+        // gap and yield `None`, and every real zone's offset is a whole
+        // number of minutes, so the two truncations agree anyway.
+        let mut candidate = after
+            .naive_utc()
+            .with_second(0)?
+            .with_nanosecond(0)?
+            .checked_add_signed(chrono::Duration::minutes(1))?;
+
+        for _ in 0..Self::NEXT_RUN_SCAN_MINUTES {
+            let local = tz.from_utc_datetime(&candidate);
+            if self.is_due_at(local.clone()) {
+                return Some(local);
+            }
+            candidate = candidate.checked_add_signed(chrono::Duration::minutes(1))?;
+        }
+        None
+    }
+
+    /// Get the raw cron expression string
+    pub fn expression(&self) -> &str {
+        &self.raw
+    }
+
+    /// Parse a `HH:MM` clock string into `(hour, minute)` `u32`s.
+    ///
+    /// Returns `Err` when `time` is not exactly two `:`-separated
+    /// segments or when either segment fails to parse as `u32`.
+    /// Shared by [`at`](Self::at) (infallible, warn-and-return-self
+    /// on parse failure) and [`try_at`](Self::try_at) (fallible).
+    ///
+    /// Range-checking (hour `0..=23`, minute `0..=59`) is intentionally
+    /// NOT performed here - the existing `at` surface accepts any `u32`
+    /// for compatibility, and tightening it would change the accepted
+    /// input set for the infallible form. Use
+    /// [`try_daily_at`](Self::try_daily_at) when range validation is
+    /// required.
+    fn parse_hh_mm(time: &str) -> Result<(u32, u32), String> {
+        let parts: Vec<&str> = time.split(':').collect();
+        if parts.len() != 2 {
+            return Err(format!(
+                "at: expected `HH:MM` (two `:`-separated segments), got `{time}`"
+            ));
+        }
+        let hour: u32 = parts[0]
+            .parse()
+            .map_err(|_| format!("at: hour segment `{}` is not numeric in `{time}`", parts[0]))?;
+        let minute: u32 = parts[1].parse().map_err(|_| {
+            format!(
+                "at: minute segment `{}` is not numeric in `{time}`",
+                parts[1]
+            )
+        })?;
+        Ok((hour, minute))
+    }
+
+    /// Set the time component (modifies hour and minute).
+    ///
+    /// `time` is a `HH:MM` 24-hour-clock string. On parse failure (wrong
+    /// segment count or non-numeric segment) the modifier logs at
+    /// `tracing::warn!` and returns `self` unchanged - this preserves the
+    /// existing builder ergonomics. Use [`try_at`](Self::try_at) when a
+    /// malformed time should surface as an error instead of being silently
+    /// swallowed.
+    pub fn at(mut self, time: &str) -> Self {
+        match Self::parse_hh_mm(time) {
+            Ok((hour, minute)) => {
+                self.hour = CronField::Value(hour);
+                self.minute = CronField::Value(minute);
+                self.raw = format!(
+                    "{} {} {} {} {}",
+                    minute, hour, self.day_of_month, self.month, self.day_of_week,
+                );
+                self
+            }
+            Err(e) => {
+                tracing::warn!(
+                    cron = self.raw.as_str(),
+                    "{e}; returning the expression unchanged. Use `try_at` \
+                     to surface the parse failure instead of swallowing it."
+                );
+                self
+            }
+        }
+    }
+
+    /// Fallible sibling of [`at`](Self::at): returns `Err` on a malformed
+    /// `HH:MM` string instead of warn-and-return-unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `time` is not exactly two `:`-separated segments
+    /// or when either segment fails to parse as `u32`. Range-checking
+    /// (hour `0..=23`, minute `0..=59`) is intentionally not performed -
+    /// use [`try_daily_at`](Self::try_daily_at) for that.
+    pub fn try_at(mut self, time: &str) -> Result<Self, String> {
+        let (hour, minute) = Self::parse_hh_mm(time)?;
+        self.hour = CronField::Value(hour);
+        self.minute = CronField::Value(minute);
+        self.raw = format!(
+            "{} {} {} {} {}",
+            minute, hour, self.day_of_month, self.month, self.day_of_week,
+        );
+        Ok(self)
+    }
+
+    // =========================================================================
+    // Factory Methods
+    // =========================================================================
+
+    /// Every minute: `* * * * *`
+    pub fn every_minute() -> Self {
+        Self::parse("* * * * *").unwrap()
+    }
+
+    /// Every N minutes: `*/N * * * *`
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n` is outside the cron minute range `1..=59`. Cron
+    /// step values must be positive and below the field width. Use a
+    /// `1..=59` value, or fall back to [`Self::hourly`] / similar
+    /// helpers for coarser intervals.
+    pub fn every_n_minutes(n: u32) -> Self {
+        Self::try_every_n_minutes(n)
+            .expect("every_n_minutes: step `n` must be in the cron minute range 1..=59")
+    }
+
+    /// Fallible sibling of [`every_n_minutes`](Self::every_n_minutes): returns
+    /// `Err` instead of panicking when `n` is outside `1..=59`. (The infallible
+    /// helper's `# Panics` contract was previously unenforced - the cron parser
+    /// accepts any `u32` without range-checking - so a bad step silently
+    /// produced a never-firing schedule; this validates the contract.)
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `n` is outside `1..=59` (the cron minute field
+    /// width). Cron step values must be positive and below the field width;
+    /// for coarser intervals use [`hourly`](Self::hourly) or similar helpers.
+    pub fn try_every_n_minutes(n: u32) -> Result<Self, String> {
+        if !(1..=59).contains(&n) {
+            return Err(format!(
+                "every_n_minutes: step `n` must be in 1..=59, got {n}"
+            ));
+        }
+        Self::parse(&format!("*/{} * * * *", n))
+    }
+
+    /// Every hour at minute 0: `0 * * * *`
+    pub fn hourly() -> Self {
+        Self::parse("0 * * * *").unwrap()
+    }
+
+    /// Every hour at specific minute: `M * * * *`
+    ///
+    /// # Panics
+    ///
+    /// Panics if `minute` is outside `0..=59`. Cron minute field accepts
+    /// 0 through 59 inclusive.
+    pub fn hourly_at(minute: u32) -> Self {
+        Self::try_hourly_at(minute).expect("hourly_at: `minute` must be in 0..=59")
+    }
+
+    /// Fallible sibling of [`hourly_at`](Self::hourly_at): returns `Err`
+    /// instead of panicking when `minute` is outside `0..=59`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `minute` is outside `0..=59` (the cron minute
+    /// field width).
+    pub fn try_hourly_at(minute: u32) -> Result<Self, String> {
+        if minute > 59 {
+            return Err(format!(
+                "hourly_at: `minute` must be in 0..=59, got {minute}"
+            ));
+        }
+        Self::parse(&format!("{} * * * *", minute))
+    }
+
+    /// Daily at midnight: `0 0 * * *`
+    pub fn daily() -> Self {
+        Self::parse("0 0 * * *").unwrap()
+    }
+
+    /// Daily at specific time: `M H * * *`
+    ///
+    /// `time` is a `HH:MM` string (24-hour clock). Lenient parsing: a string
+    /// that is not exactly two `:`-separated segments falls back to
+    /// [`daily`](Self::daily); a non-numeric segment is treated as `0`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either numeric segment is out of cron range (hour `0..=23`,
+    /// minute `0..=59`). Pass a well-formed `"HH:MM"` to avoid the panic -
+    /// e.g. `"09:30"` or `"23:00"` - or use [`try_daily_at`](Self::try_daily_at).
+    pub fn daily_at(time: &str) -> Self {
+        Self::try_daily_at(time)
+            .expect("daily_at: HH:MM segments must be in cron range (hour 0..=23, minute 0..=59)")
+    }
+
+    /// Fallible sibling of [`daily_at`](Self::daily_at): returns `Err` instead
+    /// of panicking when a numeric `HH:MM` segment is out of range. Mirrors
+    /// `daily_at`'s lenient parsing otherwise (non-`HH:MM` → [`daily`](Self::daily),
+    /// non-numeric segment → `0`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `time` is a well-formed `"HH:MM"` whose hour is
+    /// outside `0..=23` or whose minute is outside `0..=59`. Lenient
+    /// parsing is preserved for non-`HH:MM` strings and non-numeric segments.
+    pub fn try_daily_at(time: &str) -> Result<Self, String> {
+        let parts: Vec<&str> = time.split(':').collect();
+        if parts.len() == 2 {
+            let hour: u32 = parts[0].parse().unwrap_or(0);
+            let minute: u32 = parts[1].parse().unwrap_or(0);
+            if hour > 23 {
+                return Err(format!("daily_at: hour `{hour}` must be in 0..=23"));
+            }
+            if minute > 59 {
+                return Err(format!("daily_at: minute `{minute}` must be in 0..=59"));
+            }
+            Self::parse(&format!("{} {} * * *", minute, hour))
+        } else {
+            Ok(Self::daily())
+        }
+    }
+
+    /// Weekly on Sunday at midnight: `0 0 * * 0`
+    pub fn weekly() -> Self {
+        Self::parse("0 0 * * 0").unwrap()
+    }
+
+    /// Weekly on specific day at midnight: `0 0 * * D`
+    pub fn weekly_on(day: DayOfWeek) -> Self {
+        Self::parse(&format!("0 0 * * {}", day as u32)).unwrap()
+    }
+
+    /// On specific days of the week at midnight
+    pub fn on_days(days: &[DayOfWeek]) -> Self {
+        let days_str: Vec<String> = days.iter().map(|d| (*d as u32).to_string()).collect();
+        Self::parse(&format!("0 0 * * {}", days_str.join(","))).unwrap()
+    }
+
+    /// Monthly on the first day at midnight: `0 0 1 * *`
+    pub fn monthly() -> Self {
+        Self::parse("0 0 1 * *").unwrap()
+    }
+
+    /// Monthly on specific day at midnight: `0 0 D * *`
+    ///
+    /// # Panics
+    ///
+    /// Panics if `day` is outside `1..=31`. Use a day-of-month value
+    /// the calendar can hit - months without a 31st silently skip
+    /// (this is cron-standard behaviour).
+    pub fn monthly_on(day: u32) -> Self {
+        Self::try_monthly_on(day).expect("monthly_on: `day` must be in 1..=31")
+    }
+
+    /// Fallible sibling of [`monthly_on`](Self::monthly_on): returns `Err`
+    /// instead of panicking when `day` is outside `1..=31`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `day` is outside `1..=31` (the cron day-of-month
+    /// field width). Months without a 31st silently skip - that is
+    /// cron-standard behaviour.
+    pub fn try_monthly_on(day: u32) -> Result<Self, String> {
+        if !(1..=31).contains(&day) {
+            return Err(format!("monthly_on: `day` must be in 1..=31, got {day}"));
+        }
+        Self::parse(&format!("0 0 {} * *", day))
+    }
+
+    /// Quarterly on the first day of each quarter at midnight
+    pub fn quarterly() -> Self {
+        Self::parse("0 0 1 1,4,7,10 *").unwrap()
+    }
+
+    /// Yearly on January 1st at midnight: `0 0 1 1 *`
+    pub fn yearly() -> Self {
+        Self::parse("0 0 1 1 *").unwrap()
+    }
+
+    /// On weekdays (Monday-Friday) at midnight
+    pub fn weekdays() -> Self {
+        Self::parse("0 0 * * 1-5").unwrap()
+    }
+
+    /// On weekends (Saturday-Sunday) at midnight
+    pub fn weekends() -> Self {
+        Self::parse("0 0 * * 0,6").unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_every_minute() {
+        let expr = CronExpression::parse("* * * * *").unwrap();
+        assert_eq!(expr.expression(), "* * * * *");
+    }
+
+    #[test]
+    fn test_parse_specific_time() {
+        let expr = CronExpression::parse("30 14 * * *").unwrap();
+        assert_eq!(expr.expression(), "30 14 * * *");
+    }
+
+    #[test]
+    fn test_parse_invalid_expression() {
+        let result = CronExpression::parse("* * *");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_factory_methods() {
+        assert_eq!(CronExpression::every_minute().expression(), "* * * * *");
+        assert_eq!(CronExpression::hourly().expression(), "0 * * * *");
+        assert_eq!(CronExpression::daily().expression(), "0 0 * * *");
+        assert_eq!(CronExpression::weekly().expression(), "0 0 * * 0");
+        assert_eq!(CronExpression::monthly().expression(), "0 0 1 * *");
+    }
+
+    #[test]
+    fn test_daily_at() {
+        let expr = CronExpression::daily_at("03:30");
+        assert_eq!(expr.expression(), "30 3 * * *");
+    }
+
+    #[test]
+    fn test_at_modifier() {
+        let expr = CronExpression::daily().at("14:30");
+        assert_eq!(expr.expression(), "30 14 * * *");
+    }
+
+    #[test]
+    fn try_at_returns_err_on_wrong_segment_count() {
+        // Single segment ("14") and three segments ("14:30:00") were both
+        // silently swallowed by the infallible `at`; `try_at` must surface
+        // the parse failure.
+        assert!(CronExpression::daily().try_at("14").is_err());
+        let err = CronExpression::daily().try_at("14:30:00").unwrap_err();
+        assert!(
+            err.contains("HH:MM") && err.contains("14:30:00"),
+            "error should name the expected shape and the bad input: {err}"
+        );
+    }
+
+    #[test]
+    fn try_at_returns_err_on_non_numeric_segment() {
+        let err = CronExpression::daily().try_at("ab:30").unwrap_err();
+        assert!(
+            err.contains("hour") && err.contains("ab"),
+            "error should call out the non-numeric hour segment: {err}"
+        );
+        assert!(CronExpression::daily().try_at("14:cd").is_err());
+    }
+
+    #[test]
+    fn try_at_accepts_well_formed_time() {
+        let expr = CronExpression::daily().try_at("09:30").unwrap();
+        assert_eq!(expr.expression(), "30 9 * * *");
+    }
+
+    #[test]
+    fn at_returns_self_unchanged_on_malformed_time() {
+        // Behaviour preserved: malformed input no longer panics, no longer
+        // silently mutates state; it logs and returns self unchanged. The
+        // existing `at` accepted-input set is unchanged so callers don't
+        // regress, but `try_at` exists for callers who want the failure.
+        let baseline = CronExpression::daily();
+        let after = baseline.clone().at("not-a-time");
+        assert_eq!(after.expression(), baseline.expression());
+        // Three-segment input also returns unchanged.
+        let after2 = CronExpression::daily().at("14:30:00");
+        assert_eq!(after2.expression(), "0 0 * * *");
+    }
+
+    // ---- helpers validate ranges ----------------------------------------
+    //
+    // The cron parser accepts any `u32` without range-checking, so these
+    // helpers' `# Panics` docs were unenforced and bad input silently became
+    // a never-firing schedule. The `try_*` siblings now return descriptive
+    // `Err`; the infallible variants `expect` on the same check.
+
+    #[test]
+    fn try_every_n_minutes_validates_step() {
+        assert!(CronExpression::try_every_n_minutes(5).is_ok());
+        let err = CronExpression::try_every_n_minutes(0).unwrap_err();
+        assert!(err.contains("1..=59"), "got: {err}");
+        assert!(CronExpression::try_every_n_minutes(60).is_err());
+    }
+
+    #[test]
+    fn try_hourly_at_validates_minute() {
+        assert!(CronExpression::try_hourly_at(30).is_ok());
+        let err = CronExpression::try_hourly_at(99).unwrap_err();
+        assert!(err.contains("99") && err.contains("0..=59"), "got: {err}");
+    }
+
+    #[test]
+    fn try_daily_at_validates_but_mirrors_lenient_parse() {
+        // Out-of-range numeric -> Err.
+        assert!(CronExpression::try_daily_at("25:00").is_err());
+        assert!(CronExpression::try_daily_at("09:61").is_err());
+        // Well-formed -> Ok.
+        assert_eq!(
+            CronExpression::try_daily_at("09:30").unwrap().expression(),
+            "30 9 * * *"
+        );
+        // Lenient (unchanged): non-HH:MM falls back to daily, non-numeric -> 0.
+        assert_eq!(
+            CronExpression::try_daily_at("nope").unwrap().expression(),
+            "0 0 * * *"
+        );
+        assert_eq!(
+            CronExpression::try_daily_at("ab:cd").unwrap().expression(),
+            "0 0 * * *"
+        );
+    }
+
+    #[test]
+    fn try_monthly_on_validates_day() {
+        assert!(CronExpression::try_monthly_on(15).is_ok());
+        assert!(CronExpression::try_monthly_on(0).is_err());
+        assert!(CronExpression::try_monthly_on(99).is_err());
+    }
+
+    #[test]
+    fn infallible_factories_now_panic_on_out_of_range() {
+        use std::panic::catch_unwind;
+        assert!(catch_unwind(|| CronExpression::hourly_at(99)).is_err());
+        assert!(catch_unwind(|| CronExpression::monthly_on(99)).is_err());
+        assert!(catch_unwind(|| CronExpression::every_n_minutes(0)).is_err());
+        // Sanity: valid inputs still build the expected expression.
+        assert_eq!(CronExpression::hourly_at(30).expression(), "30 * * * *");
+    }
+
+    // ---- field-level range validation -----------------------------------
+    //
+    // Before this hardening landed, the parser accepted any `u32` per
+    // field. `CronExpression::parse("99 25 99 13 9")` returned `Ok` and
+    // built a never-firing schedule. `*/0 * * * *` parsed as `Step(0)`,
+    // and `value.is_multiple_of(0)` is true only for `value == 0`, so
+    // the expression silently became "every hour at minute 0". A range
+    // with `start > end` (e.g. `5-1`) parsed but matched nothing.
+
+    #[test]
+    fn parse_rejects_out_of_range_field_values() {
+        // Each field exceeds its inclusive max.
+        let err = CronExpression::parse("99 25 99 13 9").unwrap_err();
+        assert!(
+            err.contains("minute") && err.contains("0..=59"),
+            "first failure should call out the minute bounds: {err}"
+        );
+        assert!(CronExpression::parse("0 25 * * *").is_err(), "hour > 23");
+        assert!(
+            CronExpression::parse("0 0 32 * *").is_err(),
+            "day-of-month > 31"
+        );
+        assert!(CronExpression::parse("0 0 * 13 *").is_err(), "month > 12");
+        assert!(
+            CronExpression::parse("0 0 * * 7").is_err(),
+            "day-of-week > 6"
+        );
+
+        // Per-field minimums: day-of-month and month are 1-based.
+        assert!(
+            CronExpression::parse("0 0 0 * *").is_err(),
+            "day-of-month = 0 is below the 1..=31 floor"
+        );
+        assert!(
+            CronExpression::parse("0 0 * 0 *").is_err(),
+            "month = 0 is below the 1..=12 floor"
+        );
+
+        // Valid edge cases still parse - defends against regressions
+        // that would tighten the bounds incorrectly.
+        assert!(CronExpression::parse("59 23 31 12 6").is_ok());
+        assert!(CronExpression::parse("0 0 1 1 0").is_ok());
+    }
+
+    #[test]
+    fn parse_rejects_zero_step_in_steps() {
+        // `*/0 * * * *` previously parsed as `Step(0)` and matched only
+        // value 0 - silently became "every hour at minute 0".
+        let err = CronExpression::parse("*/0 * * * *").unwrap_err();
+        assert!(
+            err.contains("step") && err.contains("invalid"),
+            "should reject `*/0` as a malformed step: {err}"
+        );
+        // `5/0 * * * *` - StepFrom with zero step - same issue.
+        assert!(CronExpression::parse("5/0 * * * *").is_err());
+
+        // Non-zero steps still parse.
+        assert!(CronExpression::parse("*/5 * * * *").is_ok());
+        assert!(CronExpression::parse("5/10 * * * *").is_ok());
+    }
+
+    #[test]
+    fn parse_rejects_inverted_range() {
+        // `5-1` previously built `Range(5, 1)` which `matches` never
+        // satisfied - a silent no-op schedule.
+        let err = CronExpression::parse("5-1 * * * *").unwrap_err();
+        assert!(
+            err.contains("range start") && err.contains("greater than end"),
+            "should describe the inverted-range failure: {err}"
+        );
+        // Range endpoints also have to live in the field's bounds.
+        assert!(
+            CronExpression::parse("0-99 * * * *").is_err(),
+            "range end exceeds minute bounds"
+        );
+
+        // Well-formed ranges still parse.
+        assert!(CronExpression::parse("1-5 * * * *").is_ok());
+    }
+
+    #[test]
+    fn parse_rejects_out_of_range_list_entries() {
+        // A list with an entry outside the field's range silently
+        // contributed a dead value to the firing set. Reject the whole
+        // field.
+        assert!(CronExpression::parse("1,3,99 * * * *").is_err());
+        assert!(CronExpression::parse("0 0 * * 0,3,9").is_err());
+
+        // In-range lists still parse.
+        assert!(CronExpression::parse("1,3,5 * * * *").is_ok());
+    }
+
+    #[test]
+    fn parse_rejects_out_of_range_step_from_start() {
+        // `99/5 * * * *` - start is out of minute range; previously
+        // accepted silently.
+        let err = CronExpression::parse("99/5 * * * *").unwrap_err();
+        assert!(
+            err.contains("0..=59"),
+            "should call out the minute bounds: {err}"
+        );
+    }
+
+    // ---- day-of-month / day-of-week OR semantics ------------------------
+    //
+    // Vixie/POSIX cron (and Laravel) treat the two day fields specially:
+    // when BOTH are restricted (neither is `*`), the expression fires when
+    // EITHER matches. The previous all-fields-ANDed evaluation required the
+    // 13th to also be a Friday, so `0 0 13 * 5` would only ever fire on a
+    // Friday-the-13th - silently dropping every other 13th and every other
+    // Friday.
+
+    /// Build a fixed local instant at midnight for OR-semantics tests.
+    fn at_midnight(year: i32, month: u32, day: u32) -> DateTime<Local> {
+        use chrono::NaiveDate;
+        let naive = NaiveDate::from_ymd_opt(year, month, day)
+            .expect("valid calendar date")
+            .and_hms_opt(0, 0, 0)
+            .expect("valid time");
+        Local
+            .from_local_datetime(&naive)
+            .single()
+            .expect("unambiguous local instant")
+    }
+
+    #[test]
+    fn both_day_fields_restricted_fires_on_either_match() {
+        // `0 0 13 * 5` - midnight on the 13th OR on any Friday.
+        let expr = CronExpression::parse("0 0 13 * 5").unwrap();
+
+        // 2026-06-13 is a Saturday (not Friday) but it IS the 13th -> fires
+        // by day-of-month even though day-of-week does not match.
+        let saturday_the_13th = at_midnight(2026, 6, 13);
+        assert_eq!(saturday_the_13th.weekday(), chrono::Weekday::Sat);
+        assert!(
+            expr.is_due_at(saturday_the_13th),
+            "the 13th must fire even when it isn't a Friday"
+        );
+
+        // 2026-06-19 is a Friday but not the 13th -> fires by day-of-week
+        // even though day-of-month does not match.
+        let friday_not_13th = at_midnight(2026, 6, 19);
+        assert_eq!(friday_not_13th.weekday(), chrono::Weekday::Fri);
+        assert!(
+            expr.is_due_at(friday_not_13th),
+            "any Friday must fire even when it isn't the 13th"
+        );
+
+        // A day that is neither the 13th nor a Friday must NOT fire.
+        let plain_tuesday = at_midnight(2026, 6, 16);
+        assert_eq!(plain_tuesday.weekday(), chrono::Weekday::Tue);
+        assert!(
+            !expr.is_due_at(plain_tuesday),
+            "a day matching neither field must not fire"
+        );
+    }
+
+    #[test]
+    fn one_day_field_wildcard_keeps_and_semantics() {
+        // `0 0 13 * *` - day-of-week is `*`, so only the 13th fires; an
+        // ordinary day must not.
+        let dom_only = CronExpression::parse("0 0 13 * *").unwrap();
+        assert!(dom_only.is_due_at(at_midnight(2026, 6, 13)));
+        assert!(!dom_only.is_due_at(at_midnight(2026, 6, 14)));
+
+        // `0 0 * * 5` - day-of-month is `*`, so only Fridays fire.
+        let dow_only = CronExpression::parse("0 0 * * 5").unwrap();
+        let friday = at_midnight(2026, 6, 19);
+        assert_eq!(friday.weekday(), chrono::Weekday::Fri);
+        assert!(dow_only.is_due_at(friday));
+        let thursday = at_midnight(2026, 6, 18);
+        assert_eq!(thursday.weekday(), chrono::Weekday::Thu);
+        assert!(!dow_only.is_due_at(thursday));
+    }
+
+    /// Build a fixed UTC instant for the `next_run_after` scan tests.
+    fn utc_at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<chrono::Utc> {
+        chrono::Utc
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .expect("unambiguous UTC instant")
+    }
+
+    #[test]
+    fn next_run_after_is_strictly_after_the_supplied_instant() {
+        let expr = CronExpression::parse("30 2 * * *").unwrap();
+        // Standing exactly on a due minute must move on rather than
+        // returning the same minute back.
+        let on_the_minute = expr
+            .next_run_after(utc_at(2026, 5, 28, 2, 30))
+            .expect("satisfiable");
+        assert_eq!(
+            (
+                on_the_minute.day(),
+                on_the_minute.hour(),
+                on_the_minute.minute()
+            ),
+            (29, 2, 30),
+        );
+
+        // Sub-minute precision is truncated, not rounded up past the next
+        // due minute.
+        let just_before = utc_at(2026, 5, 28, 2, 29)
+            .with_second(59)
+            .expect("valid second");
+        let next = expr.next_run_after(just_before).expect("satisfiable");
+        assert_eq!((next.day(), next.hour(), next.minute()), (28, 2, 30));
+    }
+
+    #[test]
+    fn next_run_after_honours_the_or_semantics_of_the_two_day_fields() {
+        // `0 0 13 * 5` fires on the 13th OR on any Friday. From the 10th
+        // (a Wednesday in June 2026) the next hit is Friday the 12th, not
+        // the 13th.
+        let expr = CronExpression::parse("0 0 13 * 5").unwrap();
+        let next = expr
+            .next_run_after(utc_at(2026, 6, 10, 12, 0))
+            .expect("satisfiable");
+        assert_eq!(next.day(), 12);
+        assert_eq!(next.weekday(), chrono::Weekday::Fri);
+    }
+
+    #[test]
+    fn next_run_after_crosses_a_year_boundary() {
+        // The only minute of the year that matches, found from mid-year.
+        let expr = CronExpression::parse("0 0 1 1 *").unwrap();
+        let next = expr
+            .next_run_after(utc_at(2026, 6, 10, 12, 0))
+            .expect("satisfiable");
+        assert_eq!(
+            (next.year(), next.month(), next.day(), next.hour()),
+            (2027, 1, 1, 0),
+        );
+    }
+
+    #[test]
+    fn next_run_after_gives_up_on_an_unsatisfiable_expression() {
+        // February 30 never occurs, so the bounded scan runs out. This is
+        // the worst case for the scan (every probe of the leap-cycle bound
+        // is taken), so it also pins that exhausting the bound stays fast
+        // enough for an interactive command.
+        let expr = CronExpression::parse("0 0 30 2 *").unwrap();
+        let started = std::time::Instant::now();
+        assert!(expr.next_run_after(utc_at(2026, 1, 1, 0, 0)).is_none());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "a full-bound scan must stay interactive; took {:?}",
+            started.elapsed(),
+        );
+    }
+
+    /// `29 2` is a *matchable* expression that recurs every four years, not
+    /// an unsatisfiable one. A one-year scan bound reported `never` for it
+    /// from roughly three of every four query dates.
+    #[test]
+    fn next_run_after_finds_a_february_29_four_years_out() {
+        let expr = CronExpression::parse("0 0 29 2 *").unwrap();
+
+        // Worst case: one minute past a leap day, so the next match is a
+        // full leap cycle (1461 days) away.
+        let just_after_a_leap_day = expr
+            .next_run_after(utc_at(2024, 2, 29, 0, 1))
+            .expect("February 29 recurs every four years");
+        assert_eq!(
+            (
+                just_after_a_leap_day.year(),
+                just_after_a_leap_day.month(),
+                just_after_a_leap_day.day(),
+                just_after_a_leap_day.hour(),
+                just_after_a_leap_day.minute(),
+            ),
+            (2028, 2, 29, 0, 0),
+        );
+
+        // And from an ordinary non-leap date more than a year out, which is
+        // the case the old one-year bound got wrong.
+        let from_a_common_year = expr
+            .next_run_after(utc_at(2026, 5, 28, 12, 0))
+            .expect("February 29 recurs every four years");
+        assert_eq!(
+            (
+                from_a_common_year.year(),
+                from_a_common_year.month(),
+                from_a_common_year.day(),
+            ),
+            (2028, 2, 29),
+        );
+    }
+
+    /// The widest gap any matchable cron expression can leave, and so the
+    /// case that sets `NEXT_RUN_SCAN_MINUTES`.
+    ///
+    /// 2100 is divisible by 100 but not by 400, so the Gregorian rules give
+    /// it no February 29 - which puts 2,921 days between the leap days of
+    /// 2096 and 2104 instead of the usual 1,461. Any attempt to "optimise"
+    /// the scan bound back down to four years fails here.
+    #[test]
+    fn next_run_after_finds_a_february_29_across_a_skipped_century() {
+        let expr = CronExpression::parse("0 0 29 2 *").unwrap();
+        let next = expr
+            .next_run_after(utc_at(2096, 3, 1, 0, 0))
+            .expect("the leap day after 2096 is 2104, not 2100");
+        assert_eq!(
+            (next.year(), next.month(), next.day(), next.hour()),
+            (2104, 2, 29, 0),
+        );
+    }
+
+    /// Guards the premise of the test above: chrono applies the century
+    /// rule, so 2100 really has no February 29 to find.
+    #[test]
+    fn the_gregorian_century_rule_skips_2100() {
+        use chrono::NaiveDate;
+        assert!(
+            NaiveDate::from_ymd_opt(2100, 2, 29).is_none(),
+            "2100 is divisible by 100 and not by 400, so it is not a leap year",
+        );
+        assert!(NaiveDate::from_ymd_opt(2096, 2, 29).is_some());
+        assert!(NaiveDate::from_ymd_opt(2104, 2, 29).is_some());
+    }
+
+    #[test]
+    fn next_run_after_steps_over_a_spring_forward_gap() {
+        // Europe/Berlin skips 02:00-02:59 local on 2026-03-29, so a task
+        // pinned to 02:30 has no run that day; stepping on the UTC instant
+        // finds the next real 02:30 rather than stalling or duplicating.
+        let berlin = chrono_tz::Europe::Berlin;
+        let expr = CronExpression::parse("30 2 * * *").unwrap();
+        let before = chrono::Utc
+            .with_ymd_and_hms(2026, 3, 28, 12, 0, 0)
+            .single()
+            .expect("unambiguous UTC instant")
+            .with_timezone(&berlin);
+        let next = expr.next_run_after(before).expect("satisfiable");
+        assert_eq!(
+            (next.month(), next.day(), next.hour(), next.minute()),
+            (3, 30, 2, 30),
+            "2026-03-29 02:30 does not exist in Berlin, so the next run is the 30th",
+        );
+    }
+}

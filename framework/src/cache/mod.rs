@@ -1,0 +1,638 @@
+//! Cache module for suprnova framework
+//!
+//! Provides a unified facade over an in-memory store and a Redis store.
+//! The backend is selected explicitly via the `CACHE_DRIVER` env var
+//! (`memory` - default - or `redis`); a misconfigured or unreachable
+//! Redis fails boot rather than silently downgrading to a per-process
+//! in-memory cache.
+//!
+//! # Quick Start
+//!
+//! The cache is automatically initialized when the server starts. The
+//! driver defaults to in-memory; set `CACHE_DRIVER=redis` to bootstrap
+//! against `REDIS_URL`.
+//!
+//! ```rust,no_run
+//! # async fn ex() -> Result<(), suprnova::FrameworkError> {
+//! use suprnova::Cache;
+//! use std::time::Duration;
+//!
+//! # let user = "alice";
+//! // Store a value with 1 hour TTL
+//! Cache::put("user:1", &user, Some(Duration::from_secs(3600))).await?;
+//!
+//! // Retrieve it
+//! let cached: Option<String> = Cache::get("user:1").await?;
+//!
+//! // Check if exists
+//! if Cache::has("user:1").await? {
+//!     // ...
+//! }
+//!
+//! // Remove it
+//! Cache::forget("user:1").await?;
+//!
+//! // Clear all cache
+//! Cache::flush().await?;
+//! # Ok(()) }
+//! ```
+
+pub mod config;
+pub mod memory;
+pub mod redis;
+pub mod store;
+
+pub use config::{CacheConfig, CacheConfigBuilder, CacheDriver};
+pub use memory::InMemoryCache;
+pub use redis::RedisCache;
+pub use store::CacheStore;
+
+use crate::config::Config;
+use crate::container::App;
+use crate::error::FrameworkError;
+use serde::{Serialize, de::DeserializeOwned};
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Cache facade - main entry point for cache operations
+///
+/// Provides static methods for accessing the cache. The cache store
+/// is automatically initialized when the server starts.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use suprnova::Cache;
+/// use std::time::Duration;
+/// # async fn expensive_computation() -> Result<String, suprnova::FrameworkError> { Ok(String::new()) }
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+/// # let value = String::from("payload");
+/// // Store with TTL
+/// Cache::put("key", &value, Some(Duration::from_secs(3600))).await?;
+///
+/// // Store forever (no expiration)
+/// Cache::forever("key", &value).await?;
+///
+/// // Retrieve
+/// let value: Option<String> = Cache::get("key").await?;
+///
+/// // Get or compute (remember pattern)
+/// let value: String = Cache::remember("key", Some(Duration::from_secs(3600)), || async {
+///     expensive_computation().await
+/// }).await?;
+/// # Ok(()) }
+/// ```
+pub struct Cache;
+
+impl Cache {
+    /// Bootstrap the cache system.
+    ///
+    /// Reads `CacheConfig` from the configured `Config` (or constructs
+    /// it from env). The bootstrap dispatches on `CacheConfig::driver`:
+    ///
+    /// - [`CacheDriver::Memory`] - bind an `InMemoryCache` derived from
+    ///   the prefix and default TTL. Always succeeds.
+    /// - [`CacheDriver::Redis`] - connect to `REDIS_URL` and bind the
+    ///   resulting `RedisCache`. **Fails closed** if the URL is
+    ///   unreachable so a misconfigured production deployment never
+    ///   silently downgrades to a per-process cache.
+    ///
+    /// Called automatically by `Server::run()` and `App` boot helpers.
+    pub(crate) async fn bootstrap() -> Result<(), FrameworkError> {
+        let config = match Config::get::<CacheConfig>() {
+            Some(c) => c,
+            None => CacheConfig::from_env()?,
+        };
+
+        match config.driver {
+            CacheDriver::Memory => {
+                let memory_cache = InMemoryCache::with_config(&config);
+                App::bind::<dyn CacheStore>(Arc::new(memory_cache));
+            }
+            CacheDriver::Redis => {
+                // No silent downgrade - surface the connection failure
+                // so operators notice misconfiguration at boot.
+                let redis_cache = RedisCache::connect(&config).await.map_err(|e| {
+                    FrameworkError::internal(format!(
+                        "Cache::bootstrap: CACHE_DRIVER=redis but Redis is unreachable at \
+                         {url}: {e}. Fix the URL or set CACHE_DRIVER=memory to use the \
+                         in-memory backend explicitly.",
+                        url = config.url,
+                    ))
+                })?;
+                App::bind::<dyn CacheStore>(Arc::new(redis_cache));
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the underlying cache store
+    pub fn store() -> Result<Arc<dyn CacheStore>, FrameworkError> {
+        App::resolve_make::<dyn CacheStore>()
+    }
+
+    /// Check if the cache is initialized
+    pub fn is_initialized() -> bool {
+        App::has_binding::<dyn CacheStore>()
+    }
+
+    // =========================================================================
+    // Main cache operations
+    // =========================================================================
+
+    /// Retrieve an item from the cache
+    ///
+    /// Returns `None` if the key doesn't exist or has expired.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), suprnova::FrameworkError> {
+    /// let user: Option<String> = Cache::get("user:1").await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn get<T: DeserializeOwned>(key: &str) -> Result<Option<T>, FrameworkError> {
+        let store = Self::store()?;
+        match store.get_raw(key).await? {
+            Some(json) => {
+                let value = serde_json::from_str(&json).map_err(|e| {
+                    FrameworkError::internal(format!("Cache deserialize error: {}", e))
+                })?;
+                Ok(Some(value))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Store an item in the cache.
+    ///
+    /// If `ttl` is `None`, uses the default TTL from config (or no
+    /// expiration if the default is 0). The default-TTL resolution
+    /// happens at the facade layer - both in-memory and Redis backends
+    /// honour `None` literally at the store level.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let user = "alice";
+    /// Cache::put("user:1", &user, Some(Duration::from_secs(3600))).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn put<T: Serialize>(
+        key: &str,
+        value: &T,
+        ttl: Option<Duration>,
+    ) -> Result<(), FrameworkError> {
+        let store = Self::store()?;
+        let json = serde_json::to_string(value)
+            .map_err(|e| FrameworkError::internal(format!("Cache serialize error: {}", e)))?;
+        let effective_ttl = ttl.or_else(|| store.default_ttl());
+        store.put_raw(key, &json, effective_ttl).await
+    }
+
+    /// Store an item forever (no expiration).
+    ///
+    /// Bypasses the configured default TTL entirely - even if
+    /// `CACHE_DEFAULT_TTL` is set, the value will never expire. This
+    /// path is symmetric across in-memory and Redis backends.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let settings = "theme=dark";
+    /// Cache::forever("config:settings", &settings).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn forever<T: Serialize>(key: &str, value: &T) -> Result<(), FrameworkError> {
+        let store = Self::store()?;
+        let json = serde_json::to_string(value)
+            .map_err(|e| FrameworkError::internal(format!("Cache serialize error: {}", e)))?;
+        // Pass `None` literally so the store writes without any TTL.
+        // Do NOT delegate to `Cache::put` - that would resolve the
+        // facade default and make forever non-forever.
+        store.put_raw(key, &json, None).await
+    }
+
+    /// Check if a key exists in the cache
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// if Cache::has("user:1").await? {
+    ///     println!("User is cached");
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn has(key: &str) -> Result<bool, FrameworkError> {
+        let store = Self::store()?;
+        store.has(key).await
+    }
+
+    /// Determine if an item does NOT exist in the cache. Mirror of
+    /// Laravel's `Cache::missing($key)`; semantically `!has(key)`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn warm_cache_for_user(_id: u64) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// if Cache::missing("user:1").await? {
+    ///     warm_cache_for_user(1).await?;
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn missing(key: &str) -> Result<bool, FrameworkError> {
+        Ok(!Self::has(key).await?)
+    }
+
+    /// Retrieve an item from the cache AND delete it in one call. Mirrors
+    /// Laravel's `Cache::pull($key)`. Returns `None` if the key was absent.
+    ///
+    /// **Not atomic** across the get and forget - same shape as Laravel's
+    /// `Repository::pull` (PHP-side it's also a non-atomic
+    /// `get`-then-`forget` pair). For an atomic dequeue, wrap the call in
+    /// a `Cache::lock` around the read.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let uid = 1u64;
+    /// // One-shot consumption: drain the pending notice for this user
+    /// let notice: Option<String> = Cache::pull(&format!("notice:{}", uid)).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn pull<T: DeserializeOwned>(key: &str) -> Result<Option<T>, FrameworkError> {
+        let value = Self::get::<T>(key).await?;
+        if value.is_some() {
+            Self::forget(key).await?;
+        }
+        Ok(value)
+    }
+
+    /// Store a value only if the key is not already present. Mirrors
+    /// Laravel's `Cache::add($key, $value, $ttl)`. Returns `true` if the
+    /// value was written, `false` if the key already existed (or had not
+    /// yet expired).
+    ///
+    /// **Atomic** on the built-in backends - `InMemoryCache` holds a
+    /// write-lock across the existence check + insert, `RedisCache` uses
+    /// `SET NX [EX ttl]`. Custom `CacheStore` implementations that do not
+    /// override `CacheStore::add_raw` fall back to a non-atomic
+    /// check-then-put (matching Laravel's `Repository::add` fallback in
+    /// `Cache/Repository.php:476-490` for PHP stores without a native
+    /// `add`).
+    ///
+    /// `None` ttl resolves to the configured store default - same shape
+    /// as `Cache::put`. Pass an explicit `Duration` to bypass the
+    /// default, or use `Cache::add(key, &value, None)` with no
+    /// `CACHE_DEFAULT_TTL` for "forever-unless-overwritten".
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use suprnova::Cache;
+    /// # async fn send_winner_email(_id: u64) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let user_id = 1u64;
+    /// // Only the first writer wins this slot; subsequent callers see false
+    /// let won = Cache::add("daily:winner", &user_id, Some(Duration::from_secs(86_400))).await?;
+    /// if won { send_winner_email(user_id).await?; }
+    /// # Ok(()) }
+    /// ```
+    pub async fn add<T: Serialize>(
+        key: &str,
+        value: &T,
+        ttl: Option<Duration>,
+    ) -> Result<bool, FrameworkError> {
+        let store = Self::store()?;
+        let json = serde_json::to_string(value)
+            .map_err(|e| FrameworkError::internal(format!("Cache serialize error: {}", e)))?;
+        let effective_ttl = ttl.or_else(|| store.default_ttl());
+        store.add_raw(key, &json, effective_ttl).await
+    }
+
+    /// Alias of [`Cache::remember_forever`]. Mirrors Laravel's
+    /// `Cache::sear($key, $callback)`. Ships under the Laravel-side name
+    /// for migration ergonomics; `remember_forever` is the Rust-side name
+    /// and is the more discoverable spelling. Inherits the non-atomic /
+    /// stampede-prone semantics - see [`Cache::remember`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn load_settings_from_database() -> Result<String, suprnova::FrameworkError> { Ok(String::new()) }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// let settings: String = Cache::sear("config:settings", || async {
+    ///     load_settings_from_database().await
+    /// }).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn sear<T, F, Fut>(key: &str, default: F) -> Result<T, FrameworkError>
+    where
+        T: Serialize + DeserializeOwned,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, FrameworkError>>,
+    {
+        Self::remember_forever(key, default).await
+    }
+
+    /// Remove an item from the cache
+    ///
+    /// Returns `true` if the item existed and was removed.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// Cache::forget("user:1").await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn forget(key: &str) -> Result<bool, FrameworkError> {
+        let store = Self::store()?;
+        store.forget(key).await
+    }
+
+    /// Remove all items from the cache
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// Cache::flush().await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn flush() -> Result<(), FrameworkError> {
+        let store = Self::store()?;
+        store.flush().await
+    }
+
+    /// Increment a numeric value
+    ///
+    /// If the key doesn't exist, it's initialized to 0 before incrementing.
+    /// Returns the new value.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// let count = Cache::increment("visits", 1).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn increment(key: &str, amount: i64) -> Result<i64, FrameworkError> {
+        let store = Self::store()?;
+        store.increment(key, amount).await
+    }
+
+    /// Decrement a numeric value
+    ///
+    /// If the key doesn't exist, it's initialized to 0 before decrementing.
+    /// Returns the new value.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// let remaining = Cache::decrement("quota", 1).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn decrement(key: &str, amount: i64) -> Result<i64, FrameworkError> {
+        let store = Self::store()?;
+        store.decrement(key, amount).await
+    }
+
+    /// Get an item or store a default value if it doesn't exist
+    ///
+    /// If the key exists, returns the cached value.
+    /// If not, calls the closure to compute the value, stores it, and returns it.
+    ///
+    /// # Concurrency - not stampede-safe
+    ///
+    /// `remember` is the get-or-compute composition Laravel ships and is
+    /// **non-atomic**: N concurrent misses for the same key will each run
+    /// `default()` and each write the result. That matches Laravel's
+    /// `Repository::remember` semantics (the upstream version is also a
+    /// non-atomic `get`-then-`put` pair) but it does not protect against
+    /// cache stampedes - a popular cold key under heavy load will hit
+    /// the backing store once per concurrent caller.
+    ///
+    /// For stampede-safe rebuilds wrap the call in [`Cache::lock`]:
+    ///
+    /// ```rust,no_run
+    /// use std::time::Duration;
+    /// use suprnova::Cache;
+    /// # struct User;
+    /// # impl User { async fn find(_id: u64) -> Result<String, suprnova::FrameworkError> { Ok(String::new()) } }
+    /// # async fn ex() -> Result<String, Box<dyn std::error::Error>> {
+    /// if let Some(guard) = Cache::lock("rebuild:user:1", Duration::from_secs(10)).await? {
+    ///     let user: String = Cache::remember("user:1", Some(Duration::from_secs(3600)), || async {
+    ///         User::find(1).await
+    ///     }).await?;
+    ///     guard.release().await?;
+    ///     return Ok(user);
+    /// }
+    /// // Lost the race - read whatever the winner wrote (or fall back).
+    /// # Ok(String::new()) }
+    /// ```
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use suprnova::Cache;
+    /// # struct User;
+    /// # impl User {
+    /// #     async fn find(_id: u64) -> Result<String, suprnova::FrameworkError> { Ok(String::new()) }
+    /// # }
+    /// # async fn ex() -> Result<(), suprnova::FrameworkError> {
+    /// let user: String = Cache::remember("user:1", Some(Duration::from_secs(3600)), || async {
+    ///     User::find(1).await
+    /// }).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn remember<T, F, Fut>(
+        key: &str,
+        ttl: Option<Duration>,
+        default: F,
+    ) -> Result<T, FrameworkError>
+    where
+        T: Serialize + DeserializeOwned,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, FrameworkError>>,
+    {
+        // Try to get from cache first
+        if let Some(cached) = Self::get::<T>(key).await? {
+            return Ok(cached);
+        }
+
+        // Compute the value
+        let value = default().await?;
+
+        // Store it
+        Self::put(key, &value, ttl).await?;
+
+        Ok(value)
+    }
+
+    /// Get an item or store a default value forever
+    ///
+    /// Same as `remember` but with no expiration. Inherits `remember`'s
+    /// non-atomic / stampede-prone semantics - see [`Cache::remember`]
+    /// for the lock-based mitigation.
+    pub async fn remember_forever<T, F, Fut>(key: &str, default: F) -> Result<T, FrameworkError>
+    where
+        T: Serialize + DeserializeOwned,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, FrameworkError>>,
+    {
+        Self::remember(key, None, default).await
+    }
+
+    /// Store a tagged value via the static facade.
+    ///
+    /// The value is serialized to JSON and stored under `key`. Every tag in
+    /// `tags` records this key so that a subsequent `Cache::flush_tags` call
+    /// removes it.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let user = "alice";
+    /// Cache::tags_put(&["users"], "user:1", &user, Some(Duration::from_secs(3600))).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn tags_put<T: Serialize>(
+        tags: &[&str],
+        key: &str,
+        value: &T,
+        ttl: Option<Duration>,
+    ) -> Result<(), FrameworkError> {
+        let store = Self::store()?;
+        let json = serde_json::to_string(value)
+            .map_err(|e| FrameworkError::internal(format!("Cache serialize error: {e}")))?;
+        store.tagged_put_raw(tags, key, &json, ttl).await
+    }
+
+    /// Remove every key that was stored under any of the given tags.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// Cache::flush_tags(&["users", "active"]).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn flush_tags(tags: &[&str]) -> Result<(), FrameworkError> {
+        let store = Self::store()?;
+        store.flush_tags(tags).await
+    }
+
+    /// Try to acquire a distributed lock for `key` with the given TTL.
+    ///
+    /// On success returns `Ok(Some(guard))`. The guard holds the ownership
+    /// token and exposes `.release()` and `.refresh()`. Call `.release()`
+    /// explicitly - there is intentionally no `Drop` auto-release because
+    /// a Redis lock must be acknowledged across process boundaries.
+    ///
+    /// On contention returns `Ok(None)`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use suprnova::Cache;
+    /// # async fn do_exclusive_work() {}
+    /// # async fn ex() -> Result<(), suprnova::FrameworkError> {
+    /// if let Some(guard) = Cache::lock("job:42", Duration::from_secs(30)).await? {
+    ///     do_exclusive_work().await;
+    ///     guard.release().await?;
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn lock(key: &str, ttl: Duration) -> Result<Option<LockGuard>, FrameworkError> {
+        let store = Self::store()?;
+        match store.acquire_lock(key, ttl).await? {
+            Some(token) => Ok(Some(LockGuard {
+                key: key.into(),
+                token,
+                store,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Refresh the TTL of an existing key without changing its value.
+    ///
+    /// Returns `true` if the key existed (and wasn't expired) and was refreshed;
+    /// `false` otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// let refreshed = Cache::touch("user:1", Duration::from_secs(3600)).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn touch(key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
+        Self::store()?.touch(key, ttl).await
+    }
+}
+
+/// Guard returned by [`Cache::lock`].
+///
+/// Holds the ownership token for the acquired lock. Release explicitly via
+/// `.release()`. No `Drop` auto-release - cross-process Redis semantics
+/// require an explicit acknowledgement.
+pub struct LockGuard {
+    key: String,
+    token: String,
+    store: Arc<dyn CacheStore>,
+}
+
+impl LockGuard {
+    /// The ownership token for this lock.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Laravel-side alias of [`LockGuard::token`]. Matches the spelling in
+    /// `Illuminate\Cache\Lock::owner()` so migrating call sites read the
+    /// same way; the underlying value is identical to `token()`.
+    pub fn owner(&self) -> &str {
+        &self.token
+    }
+
+    /// Release the lock. Returns `true` if the lock was successfully released,
+    /// `false` if the token no longer matches (already expired or stolen).
+    pub async fn release(self) -> Result<bool, FrameworkError> {
+        self.store.release_lock(&self.key, &self.token).await
+    }
+
+    /// Extend the lock's TTL. Returns `true` if refreshed, `false` if the
+    /// token no longer matches.
+    pub async fn refresh(&self, ttl: Duration) -> Result<bool, FrameworkError> {
+        self.store.refresh_lock(&self.key, &self.token, ttl).await
+    }
+}

@@ -1,0 +1,23 @@
+<section>
+  <div live:preserve.self>Missing key</div>
+  <div live:key="wrong-preserve" live:preserve.children>Wrong preserve mode</div>
+  <div live:key="wrong-ignore" live:ignore.self>Wrong ignore mode</div>
+  <div live:key="wrong-replace" live:replace.self>Wrong replace mode</div>
+  <div live:key="multiple" live:persist="draft" live:teleport="#modal-root">Multiple controls</div>
+  <div live:key="unsafe-target" live:teleport="/route">Unsafe selector</div>
+  <div live:key="missing-target" live:teleport="#missing-root">Missing target</div>
+  <div id="duplicate-root"></div>
+  <div id="duplicate-root"></div>
+  <div live:key="duplicate-target" live:teleport="#duplicate-root">Duplicate target</div>
+  <div live:key="ignored" live:ignore.children>
+    <button live:click="save">Ignored descendants cannot acquire Live authority</button>
+  </div>
+  <div live:key="outer-move" live:persist="outer">
+    <div live:key="inner-move" live:teleport="#modal-root">Nested move</div>
+  </div>
+  <article live:component="tests.child" live:key="child-owner">
+    <div id="child-target"></div>
+  </article>
+  <div live:key="cross-owner" live:teleport="#child-target">Cross-owner target</div>
+  <div id="modal-root"></div>
+</section>

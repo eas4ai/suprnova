@@ -1,0 +1,246 @@
+//! Workflow execution context
+
+use crate::error::FrameworkError;
+use crate::workflow::store;
+use crate::workflow::types::StepStatus;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::Duration;
+
+/// Per-execution context handed to every `#[step]` inside a running workflow.
+///
+/// Carries the parent workflow's id, the lock-renewal deadline, and the
+/// monotonically-incrementing step index used to key durable step records.
+#[derive(Clone)]
+pub struct WorkflowContext {
+    inner: Arc<WorkflowContextInner>,
+}
+
+struct WorkflowContextInner {
+    workflow_id: i64,
+    lock_timeout: Duration,
+    step_index: AtomicI32,
+    /// Fencing token from the claim that started this run - presented back
+    /// to `store::refresh_lock` on every pre/post-step lease refresh so a
+    /// context whose lease was reclaimed by another worker cannot extend
+    /// the new owner's lease. See `ClaimedWorkflow` and `store::refresh_lock`.
+    worker_id: String,
+    attempts: i32,
+}
+
+tokio::task_local! {
+    static CONTEXT: WorkflowContext;
+}
+
+impl WorkflowContext {
+    pub(crate) fn new(
+        workflow_id: i64,
+        lock_timeout: Duration,
+        worker_id: String,
+        attempts: i32,
+    ) -> Self {
+        Self {
+            inner: Arc::new(WorkflowContextInner {
+                workflow_id,
+                lock_timeout,
+                step_index: AtomicI32::new(0),
+                worker_id,
+                attempts,
+            }),
+        }
+    }
+
+    /// Run a future within this workflow context
+    pub async fn enter<T, Fut>(self, fut: Fut) -> T
+    where
+        Fut: Future<Output = T>,
+    {
+        CONTEXT.scope(self, fut).await
+    }
+
+    /// Get the current workflow context if set
+    pub fn current() -> Option<Self> {
+        CONTEXT.try_with(|ctx| ctx.clone()).ok()
+    }
+
+    /// Check if workflow context is active
+    pub fn is_active() -> bool {
+        CONTEXT.try_with(|_| ()).is_ok()
+    }
+
+    pub(crate) fn current_claim_for(workflow_id: i64) -> Result<(String, i32), FrameworkError> {
+        let context = Self::current().ok_or_else(|| {
+            FrameworkError::internal("Workflow step mutation requires an active workflow context")
+        })?;
+
+        if context.inner.workflow_id != workflow_id {
+            return Err(FrameworkError::internal(format!(
+                "Workflow context mismatch: active workflow is {}, requested workflow is {workflow_id}",
+                context.inner.workflow_id
+            )));
+        }
+
+        Ok((context.inner.worker_id.clone(), context.inner.attempts))
+    }
+
+    /// Run a workflow step with pre-serialized input JSON
+    pub async fn run_step_with_input<F, Fut, T>(
+        &self,
+        step_name: &str,
+        input_json: String,
+        f: F,
+    ) -> Result<T, FrameworkError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, FrameworkError>> + Send + 'static,
+        T: Serialize + DeserializeOwned + Send + 'static,
+    {
+        let workflow_id = self.inner.workflow_id;
+        let step_index = self.inner.step_index.fetch_add(1, Ordering::SeqCst);
+
+        if let Some(existing) = store::load_step(workflow_id, step_index, step_name).await? {
+            // Workflows must be deterministic. If the same step at the same
+            // index is replayed with different serialized input, the recorded
+            // output (if any) belongs to a different invocation and reusing
+            // it would silently corrupt downstream steps. Fail loud rather
+            // than masking the contract violation by either returning the
+            // wrong cached output (Succeeded branch) or quietly overwriting
+            // the input column (Running branch).
+            if existing.input != input_json {
+                return Err(FrameworkError::internal(format!(
+                    "Workflow step input mismatch at index {} ('{}'): cached input does not match replay input. \
+                     Workflow steps must be deterministic.",
+                    step_index, step_name
+                )));
+            }
+
+            if let Some(status) = StepStatus::from_str(&existing.status)
+                && status == StepStatus::Succeeded
+            {
+                let output_json = existing.output.ok_or_else(|| {
+                    FrameworkError::internal("Step output missing for succeeded step")
+                })?;
+                let value = serde_json::from_str(&output_json).map_err(|e| {
+                    FrameworkError::internal(format!(
+                        "Workflow step output deserialize error: {}",
+                        e
+                    ))
+                })?;
+                store::refresh_lock_owned(
+                    workflow_id,
+                    self.inner.lock_timeout,
+                    &self.inner.worker_id,
+                    self.inner.attempts,
+                )
+                .await?;
+                return Ok(value);
+            }
+
+            store::update_step_running_owned(
+                existing,
+                &input_json,
+                &self.inner.worker_id,
+                self.inner.attempts,
+            )
+            .await?;
+        } else {
+            if let Some(other) = store::load_step_by_index(workflow_id, step_index).await?
+                && other.step_name != step_name
+            {
+                return Err(FrameworkError::internal(format!(
+                    "Workflow step mismatch at index {}: expected '{}', found '{}'. \
+                         Workflow steps must be deterministic.",
+                    step_index, step_name, other.step_name
+                )));
+            }
+            store::insert_step_running_owned(
+                workflow_id,
+                step_index,
+                step_name,
+                &input_json,
+                &self.inner.worker_id,
+                self.inner.attempts,
+            )
+            .await?;
+        }
+
+        store::refresh_lock_owned(
+            workflow_id,
+            self.inner.lock_timeout,
+            &self.inner.worker_id,
+            self.inner.attempts,
+        )
+        .await?;
+
+        let result = f().await;
+
+        match result {
+            Ok(value) => {
+                let output_json = serde_json::to_string(&value).map_err(|e| {
+                    FrameworkError::internal(format!("Workflow step output serialize error: {}", e))
+                })?;
+                if let Some(step) = store::load_step(workflow_id, step_index, step_name).await? {
+                    store::mark_step_succeeded_owned(
+                        workflow_id,
+                        step.id,
+                        &output_json,
+                        &self.inner.worker_id,
+                        self.inner.attempts,
+                    )
+                    .await?;
+                }
+                store::refresh_lock_owned(
+                    workflow_id,
+                    self.inner.lock_timeout,
+                    &self.inner.worker_id,
+                    self.inner.attempts,
+                )
+                .await?;
+                Ok(value)
+            }
+            Err(err) => {
+                if let Some(step) = store::load_step(workflow_id, step_index, step_name).await? {
+                    store::mark_step_failed_owned(
+                        workflow_id,
+                        step.id,
+                        &err.to_string(),
+                        &self.inner.worker_id,
+                        self.inner.attempts,
+                    )
+                    .await?;
+                }
+                store::refresh_lock_owned(
+                    workflow_id,
+                    self.inner.lock_timeout,
+                    &self.inner.worker_id,
+                    self.inner.attempts,
+                )
+                .await?;
+                Err(err)
+            }
+        }
+    }
+
+    /// Run a workflow step with serializable arguments
+    pub async fn run_step<Args, F, Fut, T>(
+        &self,
+        step_name: &str,
+        args: &Args,
+        f: F,
+    ) -> Result<T, FrameworkError>
+    where
+        Args: Serialize,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, FrameworkError>> + Send + 'static,
+        T: Serialize + DeserializeOwned + Send + 'static,
+    {
+        let input_json = serde_json::to_string(args).map_err(|e| {
+            FrameworkError::internal(format!("Workflow step input serialize error: {}", e))
+        })?;
+
+        self.run_step_with_input(step_name, input_json, f).await
+    }
+}

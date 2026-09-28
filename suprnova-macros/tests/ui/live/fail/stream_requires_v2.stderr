@@ -1,0 +1,5 @@
+error: streams require minimum_protocol_version = 2 or newer
+  --> tests/ui/live/fail/stream_requires_v2.rs:14:5
+   |
+14 |     streams(stream(name = "orders", topics("orders"), events(OrdersUpdated)))
+   |     ^^^^^^^

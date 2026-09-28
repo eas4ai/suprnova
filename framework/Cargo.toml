@@ -1,0 +1,443 @@
+[package]
+name = "suprnova"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A Laravel-inspired web framework for Rust"
+repository = "https://github.com/eas4ai/suprnova"
+homepage = "https://github.com/eas4ai/suprnova"
+keywords = ["web", "framework", "async", "http", "server"]
+categories = ["web-programming::http-server", "asynchronous"]
+readme = "README.md"
+
+[dependencies]
+askama = "=0.16.0"
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+http = "1.4"
+matchit = "0.9"
+async-trait = "0.1"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+suprnova-live = { path = "../crates/suprnova-live", version = "2.1.0" }
+suprnova-macros = { path = "../suprnova-macros", version = "2.1.0" }
+dotenvy = "0.15"
+inventory = "0.3"
+sea-orm = { version = "2.0", features = ["runtime-tokio-rustls", "macros", "postgres-use-serial-pk", "with-rust_decimal", "with-bigdecimal"] }
+sea-orm-migration = { version = "2.0", features = ["runtime-tokio-rustls"] }
+thiserror = "2"
+redis = { version = "1.2.1", features = ["tokio-comp", "connection-manager"] }
+validator = { version = "0.20", features = ["derive"] }
+serde_urlencoded = "0.7"
+chrono = { version = "0.4", features = ["serde"] }
+# Named IANA zones for per-task schedule timezones. chrono alone only offers
+# `Local` and fixed offsets, neither of which can answer "what is Tokyo's UTC
+# offset on this date" - which is what a per-task timezone and the
+# timezone-aware `schedule:list` conversion both need.
+chrono-tz = "0.9"
+bcrypt = "0.19.2"
+rand = { version = "0.10", features = ["std", "std_rng"] }
+aes-gcm = "0.10"
+base64 = "0.22"
+sha2 = "0.11"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry", "smallvec", "parking_lot"] }
+uuid = { version = "1", features = ["v4", "v5", "v7", "fast-rng", "serde"] }
+dashmap = "6"
+webauthn-rs = { version = "0.5", features = ["resident-key-support", "danger-allow-state-serialisation"] }
+suprnova-magnetar = { path = "../crates/suprnova-magnetar", version = "2.1.0", default-features = false, features = ["password", "password-management", "magic-link", "passkey", "two-factor"] }
+secrecy = "0.10"
+
+# Used by the `pagination` module to round-trip `sea_orm::Value::Decimal` /
+# `Value::BigDecimal` boundaries in cursor payloads.
+rust_decimal = { version = "1", features = ["serde"] }
+bigdecimal = "0.4"
+once_cell = "1"
+
+# OpenTelemetry - optional, gated behind the `otel` feature. Default OFF.
+# Pinned to the 0.31.x line because `tracing-opentelemetry 0.32.1` (latest)
+# still depends on `opentelemetry 0.31.0`. Mixing 0.31 and 0.32 fails to
+# compile (different `Tracer` trait identity).
+opentelemetry = { version = "0.31.0", optional = true, default-features = false, features = ["trace", "metrics", "logs"] }
+opentelemetry_sdk = { version = "0.31.0", optional = true, default-features = false, features = ["trace", "metrics", "logs", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31.0", optional = true, default-features = false, features = ["http-proto", "reqwest-rustls", "trace", "metrics", "logs"] }
+opentelemetry-appender-tracing = { version = "0.31.0", optional = true, default-features = false, features = ["log"] }
+opentelemetry-http = { version = "0.31.0", optional = true, default-features = false }
+opentelemetry-semantic-conventions = { version = "0.31.0", optional = true }
+tracing-opentelemetry = { version = "0.32.1", optional = true }
+
+# Localization - optional, gated behind the `localization` feature. Default ON.
+# Fluent message catalogs, per-request locale detection, and ICU formatting.
+fluent-bundle = { version = "0.16", optional = true }
+fluent-syntax = { version = "0.12", optional = true }
+fluent-langneg = { version = "0.14", optional = true }
+unic-langid = { version = "0.9", features = ["macros"], optional = true }
+intl-memoizer = { version = "0.5", optional = true }
+icu_decimal = { version = "2", optional = true }
+icu_datetime = { version = "2", optional = true }
+icu_list = { version = "2", optional = true }
+icu_calendar = { version = "2", optional = true }
+# icu_locale_core ships zero default features (no `default` key in its own
+# feature table), so `Locale::try_from_str` - which every formatter
+# constructor in `localization/format.rs` needs to turn a `Locale` into
+# ICU4X's locale type - doesn't exist without explicitly requesting `alloc`.
+icu_locale_core = { version = "2", features = ["alloc"], optional = true }
+icu_experimental = { version = "0.5", optional = true }
+# fixed_decimal::Decimal is the input type every icu_decimal/icu_experimental
+# formatter takes; `ryu` unlocks `Decimal::try_from_f64`, used to convert the
+# f64 amounts `Lang::number`/`currency`/`relative` accept.
+fixed_decimal = { version = "0.7", optional = true, features = ["ryu"] }
+# CurrencyCode's inner type - icu_experimental doesn't re-export it, so
+# `localization/format.rs` constructs one directly to call
+# CurrencyFormatter::format_fixed_decimal.
+tinystr = { version = "0.8", optional = true }
+# The `Writeable` trait every ICU4X formatter's `.format(..)` result
+# implements; `localization/format.rs` uses `write_to_string()` to render it
+# to an owned `String`.
+writeable = { version = "0.6", optional = true }
+
+# Phase 4 - filesystem, uploads, and validation
+infer = "0.19"
+multer = "3"
+opendal = { version = "0.58.0", git = "https://github.com/eas4ai/opendal.git", rev = "88717391eb72c9839d3f8e79fccad9f22fc3a1b4", optional = true, default-features = false, features = [
+    "services-fs",
+    "services-s3",
+    "services-memory",
+    # `services-azblob` and `services-gcs` are NOT here - they are enabled by
+    # the `filesystem-azure` / `filesystem-gcs` features. See those features
+    # for why those two and not `services-s3`.
+    # Production-grade middleware stack. Each `layers-*` feature pulls a
+    # separate `opendal-layer-*` crate, which is why they're feature-gated
+    # at all - without these flags the layer types aren't even reachable.
+    # `layers-retry` (in 0.56 → `RetryLayer`): exponential-backoff retries
+    #   on transient 5xx and throttling.
+    # `layers-timeout` (`TimeoutLayer`): per-operation timeout.
+    # `layers-logging` (`LoggingLayer`): debug-level structured logs for
+    #   every operation.
+    # `layers-tracing` (`TracingLayer`): `tracing` spans per operation;
+    #   integrates with the framework's existing `tracing-subscriber` setup
+    #   and (when the `otel` feature is on) the OTLP exporter.
+    # `layers-prometheus-client` (`PrometheusClientLayer`): histograms +
+    #   counters for the `prometheus-client` registry. We pick this over
+    #   `layers-prometheus` because `prometheus-client` is the actively-
+    #   maintained crate; the older `prometheus` crate is in maintenance
+    #   mode.
+    # OTel-specific layers (`layers-otel-trace` / `layers-otel-metrics`)
+    # are intentionally NOT enabled here because they depend on the
+    # `opentelemetry` crate and could drag in a version different from
+    # the framework's pinned 0.31.x line, fracturing the `Tracer` trait
+    # identity. If a consumer needs OpenTelemetry, the framework's `otel`
+    # feature already wires the SDK and reqwest exporter; opendal's spans
+    # surface through `TracingLayer` because `tracing-opentelemetry`
+    # bridges them.
+    "layers-retry",
+    "layers-timeout",
+    "layers-logging",
+    "layers-tracing",
+    "layers-prometheus-client",
+] }
+url = "2"
+# Spill-to-disk backing for large multipart parts. Used at runtime when a
+# single upload exceeds the in-memory spill threshold so the framework never
+# materialises an arbitrarily large body in RAM.
+tempfile = "3"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "query", "multipart"] }
+getrandom = "0.4.2"
+tokio-util = { version = "0.7.18", features = ["time"] }
+sea-streamer = { version = "0.5.0", features = ["redis", "stdio", "runtime-tokio", "socket", "json"], default-features = false }
+sea-streamer-redis = { version = "0.5.2", features = ["runtime-tokio"] }
+lettre = { version = "0.11.22", default-features = false, features = ["smtp-transport", "pool", "rustls-tls", "hostname", "builder", "tokio1", "tokio1-rustls"] }
+tera = "1"
+aws-sigv4 = "1"
+suprnova-web-push = { version = "2.1.0", path = "../crates/suprnova-web-push", optional = true }
+aws-credential-types = "1.2.14"
+fake = { version = "5.1.0", features = ["chrono", "derive", "uuid"] }
+envy = "0.4.2"
+hyper-tungstenite = "0.20.0"
+futures-util = "0.3.32"
+tokio-tungstenite = "0.29.0"
+totp-rs = { version = "5", features = ["gen_secret", "otpauth", "qr"] }
+featureflag = { version = "0.0.3", features = ["feature-registry", "futures"] }
+async-stream = "0.3.6"
+qdrant-client = "1.18.0"
+sqlx = { version = "0.9", optional = true, default-features = false, features = ["runtime-tokio", "tls-rustls", "json"] }
+iso_currency = { version = "0.5.3", features = ["with-serde"] }
+percent-encoding = "2.3.2"
+httpdate = "1.0.3"
+argon2 = "0.5.3"
+md-5 = "0.11.0"
+sha1 = "0.11.0"
+hex = "0.4.3"
+digest = "0.11.3"
+regex = "1.12.3"
+hmac = "0.13"
+subtle = "2"
+zeroize = { version = "1.8.2", features = ["derive"] }
+comrak = { version = "0.52.0", default-features = false, features = ["syntect"] }
+ammonia = "4.1.4"
+
+# The image subsystem's backend: the pure-Rust OxideAV framework. Eight
+# crates rather than the `oxideav-meta` aggregator, because the framework
+# needs five still-image codecs, not a media framework (oxideav-meta's own
+# README says to skip it for subsets).
+#
+# Versions are pinned EXACTLY (`=0.x.y`, the `thiserror = "=2.0.18"`
+# precedent) because these are pre-1.0 crates from a fast-moving
+# same-owner org: a caret range would silently adopt a breaking 0.x bump.
+# Same-owner coordination makes a deliberate bump cheap.
+#
+# `oxideav-gif` is Apache-2.0; the other seven are MIT. Compatible, but it
+# is the one non-MIT crate in the set, so it is called out here rather
+# than discovered during a licence audit.
+#
+# `oxideav-io` is deliberately absent. Its open/save facade is the obvious
+# entry point and is unusable here: gif and webp register no demuxer or
+# muxer, so it can read three of the five formats and write exactly one.
+# The driver drives the codec registry directly instead, so there is
+# nothing left for the facade to do. See `media/oxideav.rs`.
+oxideav-core = { version = "=0.1.34", optional = true }
+oxideav-image-filter = { version = "=0.1.2", optional = true }
+oxideav-pixfmt = { version = "=0.1.7", optional = true }
+oxideav-mjpeg = { version = "=0.1.8", optional = true }
+oxideav-png = { version = "=0.1.8", optional = true }
+oxideav-webp = { version = "=0.2.3", optional = true }
+oxideav-gif = { version = "=0.0.11", optional = true }
+oxideav-bmp = { version = "=0.1.6", optional = true }
+
+[features]
+default = [
+    "testing",
+    "filesystem",
+    "database-sqlite",
+    "database-postgres",
+    "database-mysql",
+    "vector-mariadb",
+    "web-push",
+    "localization",
+    "magnetar-oauth",
+    "media",
+]
+# Exposes framework test hooks such as encryption-key installation, a
+# force-the-next-encrypt-call-to-fail switch, and request query overrides.
+# Filesystem fakes additionally require `filesystem`.
+testing = []
+magnetar-oauth = [
+    "suprnova-magnetar/oauth",
+    "suprnova-magnetar/oauth-apple",
+    "suprnova-magnetar/oauth-facebook",
+    "suprnova-magnetar/oauth-google",
+    "suprnova-magnetar/oauth-tiktok",
+    "suprnova-magnetar/oauth-x",
+]
+# Enables the OpenDAL-backed filesystem facade with the local, in-memory,
+# and S3 backends. Kept in the default set for backward compatibility.
+filesystem = ["dep:opendal"]
+# Azure Blob Storage and Google Cloud Storage. Off by default, because
+# each drags `rsa` into the dependency graph and `rsa 0.9.x` carries
+# RUSTSEC-2023-0071 (the Marvin timing attack) with no fixed release
+# upstream. Both opendal service crates reach it the same way: they take
+# `reqsign-core` with its `jwt` feature, and `reqsign-core`'s `rsa` is
+# optional behind exactly that feature. `reqsign-azure-storage` also
+# depends on `rsa` directly.
+#
+# What this buys, precisely: `rsa` is present only when the Azure or GCS
+# filesystem adapters request it. SQLx 0.9's MySQL driver does not pull it
+# independently. An app that does not use those adapters can build with no
+# `rsa` at all and still have the filesystem subsystem:
+#
+#     --no-default-features --features filesystem,database-postgres
+#
+# Before this split there was no such combination - `filesystem` meant
+# opendal, and opendal meant azblob and gcs, so the only way out was to
+# give up storage entirely.
+#
+# S3 is deliberately NOT gated alongside them. `reqsign-aws-v4` takes
+# `reqsign-core` *without* `jwt`, so the S3 driver never pulled `rsa` -
+# gating it would break the most-used cloud backend and remove no
+# dependency. This asymmetry is the point, not an oversight.
+#
+# Enabling either feature re-admits the advisory knowingly. That is the
+# right trade for an app that actually stores objects in Azure or GCS,
+# and the wrong one to make on every consumer's behalf by default.
+filesystem-azure = ["filesystem", "opendal/services-azblob"]
+filesystem-gcs = ["filesystem", "opendal/services-gcs"]
+# The `media` subsystem: the `Image` facade and its OxideAV driver.
+# Default-on because it is a
+# Laravel-parity surface - `Image::from_upload(..).resize(..).to_response()`
+# should just work in a scaffolded app, the same way `Cache` and `Storage` do.
+#
+# A feature at all, rather than an unconditional dependency, because a
+# minimal profile (an API-only service that never touches pixels) otherwise
+# pays for five codec compiles it will never call. Turning `media` off
+# removes all eight crates from the tree; `scripts/check-feature-matrix.sh`
+# asserts exactly that.
+media = [
+    "dep:oxideav-core",
+    "dep:oxideav-image-filter",
+    "dep:oxideav-pixfmt",
+    "dep:oxideav-mjpeg",
+    "dep:oxideav-png",
+    "dep:oxideav-webp",
+    "dep:oxideav-gif",
+    "dep:oxideav-bmp",
+]
+# Database drivers are shared by SeaORM, migrations, and Magnetar.
+database-sqlite = [
+    "sea-orm/sqlx-sqlite",
+    "sea-orm-migration/sqlx-sqlite",
+    "suprnova-magnetar/seaorm-sqlite",
+]
+database-postgres = [
+    "sea-orm/sqlx-postgres",
+    "sea-orm-migration/sqlx-postgres",
+    "suprnova-magnetar/seaorm-postgres",
+]
+database-mysql = [
+    "sea-orm/sqlx-mysql",
+    "sea-orm-migration/sqlx-mysql",
+    "suprnova-magnetar/seaorm-mysql",
+]
+# Enables the direct-SQLx MariaDB vector driver.
+vector-mariadb = ["dep:sqlx", "sqlx/mysql", "database-mysql"]
+# Enables the browser web-push client and notification channel. Kept in the
+# default set while allowing minimal builds to exclude its RSA implementation.
+web-push = ["dep:suprnova-web-push"]
+# First-class i18n: Fluent message catalogs, per-request locale detection,
+# translated validation messages, ICU4X locale-aware formatting, and the
+# /_suprnova/lang/<locale>.ftl catalog endpoint. Default-on. With the
+# feature off, validation falls back to its embedded English strings and
+# the localization module does not compile.
+localization = [
+    "dep:fluent-bundle",
+    "dep:fluent-syntax",
+    "dep:fluent-langneg",
+    "dep:unic-langid",
+    "dep:intl-memoizer",
+    "dep:icu_decimal",
+    "dep:icu_datetime",
+    "dep:icu_list",
+    "dep:icu_calendar",
+    "dep:icu_locale_core",
+    "dep:icu_experimental",
+    "dep:fixed_decimal",
+    "dep:tinystr",
+    "dep:writeable",
+]
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:opentelemetry-appender-tracing",
+    "dep:opentelemetry-http",
+    "dep:opentelemetry-semantic-conventions",
+    "dep:tracing-opentelemetry",
+]
+# Enables SeaStreamerBroadcastHub - cross-process fanout via sea-streamer.
+# sea-streamer (with stdio backend) is already a base dep (required by the
+# queue/redis driver). This feature gates only the fanout module itself,
+# keeping the public API surface opt-in.
+broadcasting-fanout = []
+# Enables the Pinecone vector driver. It costs no extra dependencies -
+# the driver speaks Pinecone's REST API over the `reqwest` client the
+# framework already carries - so this feature gates compilation, not a
+# dependency tree.
+#
+# It stays off by default because most apps do not use Pinecone and
+# should not pay to compile its driver, and because removing the feature
+# outright would break every consumer that already names it. It used to
+# exist for a very different reason: `pinecone-sdk 0.1.2` pulled
+# `tonic 0.11 → rustls-webpki 0.102` and four active RustSec advisories
+# with it. Dropping that SDK removed all four; see the driver's module
+# docs and `manual/vector.md`.
+vector-pinecone = []
+
+[dev-dependencies]
+secrecy = "0.10"
+suprnova-live-test-support = { path = "../crates/suprnova-live/crates/suprnova-live-test-support" }
+# Smoke test for the `opendal::layers::PrometheusClientLayer` feature.
+# Pinned to the same line opendal-layer-prometheus-client 0.58 builds
+# against - different majors of `prometheus-client` would fracture the
+# `Registry` type identity.
+prometheus-client = "0.25"
+serial_test = "=2.0.0"
+strum = { version = "0.28.0", features = ["derive"] }
+tokio = { version = "1", features = ["test-util"] }
+tracing = "0.1"
+tracing-test = { version = "0.2.6", features = ["no-env-filter"] }
+url = "2"
+# Software authenticator, so the passkey tests can complete a real
+# WebAuthn ceremony instead of only asserting its rejections. `softpasskey`
+# pulls openssl + ctap2 and none of the hardware transports (USB HID, NFC,
+# BLE); openssl is already in the tree, so this adds no system dependency.
+webauthn-authenticator-rs = { version = "0.5.5", default-features = false, features = [
+    "softpasskey",
+] }
+wiremock = "0.6"
+
+# On-demand RenderCache workload measurement, run by
+# `crates/suprnova-live/scripts/run-render-cache-budget.sh` and never by a
+# gate. It reuses the render-cache test support modules, so it needs the
+# `testing` seams and a database driver; `required-features` keeps a bare
+# `cargo bench` from trying to build it without them.
+[[bench]]
+name = "render_cache_workloads"
+harness = false
+required-features = ["testing", "database-sqlite"]
+
+# Standalone binaries: these files register link-time inventory entries whose
+# exact contents their tests assert, which collide inside a shared module
+# binary. They stay in their module folder but compile as their own targets.
+# Named after the former top-level file so test ids are unchanged.
+[[test]]
+name = "container_boot_returns_err_on_missing_dep"
+path = "tests/container/boot_returns_err_on_missing_dep.rs"
+
+[[test]]
+name = "eloquent_macro_smoke"
+path = "tests/eloquent/macro_smoke.rs"
+
+[[test]]
+name = "eloquent_relations_morph_registry"
+path = "tests/eloquent/relations_morph_registry.rs"
+
+[[test]]
+name = "eloquent_soft_deletes"
+path = "tests/eloquent/soft_deletes.rs"
+
+# Each of these binds the process-global Live runtime and mount catalog, and a
+# second binding in one process is rejected, so each owns its binary rather
+# than folding into tests/live/main.rs.
+[[test]]
+name = "live_boot"
+path = "tests/live/boot.rs"
+
+[[test]]
+name = "live_boot_async_route_order"
+path = "tests/live/boot_async_route_order.rs"
+
+[[test]]
+name = "live_dogfood"
+path = "tests/live/dogfood.rs"
+
+[[test]]
+name = "live_dogfood_forms"
+path = "tests/live/dogfood_forms.rs"
+
+[[test]]
+name = "live_dogfood_server"
+path = "tests/live/dogfood_server.rs"
+
+[[test]]
+name = "live_assets"
+path = "tests/live/assets.rs"
+
+[[test]]
+name = "live_async_backpressure"
+path = "tests/live/async_backpressure.rs"

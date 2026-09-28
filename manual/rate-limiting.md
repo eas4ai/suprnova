@@ -1,0 +1,422 @@
+# Rate Limiting
+
+Suprnova ships two complementary rate-limit surfaces:
+
+| Surface | Use when... | Backend |
+|---------|-------------|---------|
+| `RateLimiterDriver` + `RateLimitMiddleware` | You want strict sliding-window enforcement against arbitrary storage (Redis ZSET, in-memory deque) | `dyn RateLimiterDriver` |
+| `RateLimiter` + `ThrottleRequestsMiddleware` | You want Laravel-shape named limiters, `attempt()` workflow callbacks, or `X-RateLimit-*` response headers | `Cache` store (memory or Redis) |
+
+The sliding-window driver is Suprnova's native shape - one slot per request, no separate timer key, atomic Lua eval on Redis. The Laravel facade is what migrated apps reach for and what the named-limiter / response-callback pattern requires. The two coexist by design, and a route can layer both.
+
+## Sliding-window driver SPI
+
+`RateLimiterDriver` is the storage SPI for the sliding-window algorithm. Each key tracks a deque of hit timestamps. On every `try_acquire`, entries older than `now - window` are evicted; if the remaining count is below `max_requests`, `now` is appended and the call accepts. Otherwise it rejects.
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::rate_limit::memory::InMemoryRateLimiter;
+use suprnova::rate_limit::{RateLimiterDriver, SlidingWindowConfig};
+
+let limiter: Arc<dyn RateLimiterDriver> = Arc::new(InMemoryRateLimiter::new());
+let cfg = SlidingWindowConfig {
+    max_requests: 60,
+    window: Duration::from_secs(60),
+};
+let ok = limiter.try_acquire("user:42", &cfg).await?;
+if !ok {
+    let wait = limiter.retry_after("user:42", &cfg).await?;
+    // wait is the Option<Duration> until the oldest slot in the bucket
+    // ages out.
+}
+```
+
+### Built-in drivers
+
+| Driver | Storage | Selected via |
+|--------|---------|--------------|
+| `InMemoryRateLimiter` | Per-process `HashMap<String, Bucket>` with `tokio::time::Instant` so `start_paused` tests can drive the clock | `RATE_LIMIT_DRIVER=memory` (default) |
+| `RedisRateLimiter` | Redis ZSET + Lua atomic check-and-record | `RATE_LIMIT_DRIVER=redis` + `RATE_LIMIT_REDIS_URL` |
+
+`bootstrap_from_env()` wires the matching driver into the container. Outside production an unknown driver value falls back to memory with a `warn!` log.
+
+### Production fails closed on the in-memory driver
+
+In production, resolving to the in-memory limiter is a boot failure:
+
+```
+refusing to boot in production: RATE_LIMIT_DRIVER is unset, which defaults
+to the in-memory limiter. Per-process buckets mean every configured quota
+is multiplied by your replica count and reset by every deploy...
+```
+
+The in-memory driver keeps its buckets in one process's heap. Behind N
+replicas each keeps its own count, so a "5 attempts per 15 minutes"
+password-reset throttle is really 5N, and every deploy resets all of them
+to zero. The limit you configured is not the limit you get - and nothing
+says so, because the requests succeed, which is what a working throttle
+looks like from the outside. It surfaces as a credential-stuffing or
+account-enumeration incident, not as an error.
+
+An **unrecognised** driver value fails for the same reason: it falls back
+to memory. `RATE_LIMIT_DRIVER=Redis` - capitalised - would otherwise warn
+once at boot and quietly leave a multi-replica deployment throttling
+per-process. That is the case most likely to reach production, because it
+looks configured.
+
+Either point it at Redis:
+
+```env
+RATE_LIMIT_DRIVER=redis
+RATE_LIMIT_REDIS_URL=redis://cache.internal:6379
+```
+
+or, if you genuinely run a single process, say so:
+
+```env
+RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION=true
+```
+
+Development, testing and **staging** are untouched. Staging is
+deliberately not gated, on the same reasoning as the mail guard: hard
+failing it pushes teams to set the override globally, which disarms the
+check exactly where it matters.
+
+### `RateLimitMiddleware`
+
+The HTTP wrapper around the driver. Construct with a `key_fn` closure to drive bucket selection per-request:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::container::App;
+use suprnova::rate_limit::{
+    BackendErrorPolicy, RateLimitMiddleware, RateLimiterDriver, SlidingWindowConfig,
+};
+
+let limiter: Arc<dyn RateLimiterDriver> =
+    App::resolve_make::<dyn RateLimiterDriver>().unwrap();
+
+let mw = RateLimitMiddleware::new(
+    limiter,
+    SlidingWindowConfig {
+        max_requests: 100,
+        window: Duration::from_secs(60),
+    },
+    |req| format!("route:{}", req.path()),
+)
+.on_backend_error(BackendErrorPolicy::FailClosed);
+```
+
+On rejection (over quota) it returns HTTP 429 with a `Retry-After` header.
+
+### Limiting per recipient, not just per caller
+
+An address-keyed limit answers *is one client making too many requests*. It cannot answer *is one mailbox being flooded*. An attacker spread across a botnet, a proxy pool, or a single IPv6 `/64` stays under every per-IP budget while sending one victim thousands of password-reset emails - the inbox is the resource being exhausted, and the victim's address is the only thing those requests share. The reverse hurts too: behind carrier-grade NAT or an office gateway, per-IP limits punish a crowd for one member's behaviour.
+
+`identity_key` keys a bucket on the account being *acted on*:
+
+```rust
+use suprnova::rate_limit::{identity_key, names_identity};
+
+let per_recipient = RateLimitMiddleware::new(
+    limiter.clone(),
+    SlidingWindowConfig { max_requests: 3, window: Duration::from_secs(900) },
+    |req| identity_key(req, "email", "auth-issuance"),
+)
+.key_reads_body(4096)
+.only_when(|req| names_identity(req, "email"))
+.on_backend_error(BackendErrorPolicy::FailClosed);
+```
+
+Stack it *alongside* a per-IP limiter rather than replacing one with the other. Each catches what the other cannot: per-IP stops one host enumerating many addresses; per-recipient stops many hosts targeting one address.
+
+Three details carry the security:
+
+- **`key_reads_body`** buffers the body (to the given cap) before the key is computed, so the field can be read out of a form-encoded POST as well as a query string. It is opt-in because buffering is work an unauthenticated caller gets to make you do; the cap bounds it. A body over the cap is rejected with 413 rather than passed through unkeyed - otherwise padding the body would be a way out of the limit.
+- **`only_when`** skips the limiter for requests that name nobody. Without it those fall into `identity_key`'s address fallback and are counted against *this* limiter's quota - and since a per-recipient budget is normally the tighter of the pair, it would silently become the binding limit for every route that names no one.
+- **The value is normalised and hashed.** `Alice@Example.com` and `alice@example.com` reach the same mailbox and must share a bucket, or the limit is bypassed by changing capitalisation. The result is hashed because a rate-limit backend is frequently a shared Redis with weaker access control than the primary database, and a key dump should not read as a list of who is resetting their password.
+
+### Backend-error policy
+
+`BackendErrorPolicy` governs what happens when the limiter *backend* itself errors - e.g. Redis is unreachable - as distinct from a request legitimately exceeding its quota. The backend cannot make a decision, so the middleware must choose between availability and the limit's guarantee.
+
+| Policy | Behaviour | When to use |
+|--------|-----------|-------------|
+| `FailOpen` (default) | Pass the request through; log at `warn` | Most public APIs - a limiter outage should not take down traffic |
+| `FailClosed` | Reject with HTTP 503 + `Retry-After: 1`; log at `error` | Sensitive routes (login, password reset, payments) where unbounded traffic during a backend outage is worse than briefly rejecting |
+
+Choose with `.on_backend_error(BackendErrorPolicy::FailClosed)` on the middleware. Quota-exhausted requests are always 429 regardless of the policy - the policy only affects backend-error fallthrough.
+
+## Cache-backed Laravel-shape facade
+
+`RateLimiter` (the struct) mirrors `Illuminate\Cache\RateLimiter`. It's a fixed-window counter built on top of the Suprnova [`Cache`](cache.md) facade. Use it for named limiters, `attempt()` workflows, or any time you want the `X-RateLimit-*` headers Laravel apps expect.
+
+### Storage layout
+
+For an attempt counter key `K` with decay of `D` seconds:
+
+- `K` - i64 counter incremented by every `hit`. Initial seed is 0 (via `Cache::add`).
+- `K:timer` - i64 unix-seconds-since-epoch when the window ends, set via `Cache::add` so only the first caller in a window pins the deadline.
+
+Both keys carry the same TTL so the cache cleans them up automatically when the window ends. When the counter has reached `max_attempts` but the `:timer` is gone, `too_many_attempts` resets the counter - this is what makes the window slide forward after a quota-exhausted period.
+
+### Counter API
+
+```rust
+use suprnova::RateLimiter;
+
+// Burn one attempt; seeds the window if missing.
+let n = RateLimiter::hit("login:1.2.3.4", 60).await?;
+
+// Burn one attempt AND test the limit in a single atomic round-trip.
+// Returns `true` when this hit pushed the bucket over `max` (refuse the
+// request), `false` when it was admitted. Use this instead of a separate
+// `too_many_attempts` + `hit` pair: checking and then hitting as two calls
+// lets concurrent requests slip past the limit (a check-then-act race).
+// `i64::MAX` as the max means "unlimited" - always admits, still counts.
+let over_limit = RateLimiter::hit_and_check("login:1.2.3.4", 5, 60).await?;
+if over_limit { /* return 429 */ }
+
+// Increment by N; useful for "cost-weighted" limits (each request burns
+// more than one attempt).
+let n = RateLimiter::increment("api:user:1", 60, 5).await?;
+
+// Read the current count (0 when never hit or expired).
+let attempts = RateLimiter::attempts("login:1.2.3.4").await?;
+
+// Number of seconds until the window reopens (0 when no window open).
+let secs = RateLimiter::available_in("login:1.2.3.4").await?;
+
+// Retries left before tripping.
+let remaining = RateLimiter::remaining("login:1.2.3.4", 5).await?;
+// retries_left is the Laravel-spelt alias of remaining.
+let remaining = RateLimiter::retries_left("login:1.2.3.4", 5).await?;
+
+// Is the bucket over its limit RIGHT NOW (with window still open)?
+let over = RateLimiter::too_many_attempts("login:1.2.3.4", 5).await?;
+
+// Drop only the counter (timer stays - the window is still pinned).
+RateLimiter::reset_attempts("login:1.2.3.4").await?;
+
+// Drop both counter and timer.
+RateLimiter::clear("login:1.2.3.4").await?;
+```
+
+### `attempt()` workflow
+
+Run a callback only when the bucket is under quota; the hit is only burned when the callback runs:
+
+```rust
+let result = RateLimiter::attempt(
+    "login:1.2.3.4",
+    5,
+    || async { do_login_work().await },
+    60,
+).await?;
+match result {
+    Some(value) => { /* callback ran, attempt counted */ }
+    None => { /* over limit, callback was NOT run */ }
+}
+```
+
+This is the right shape for login forms - you don't burn an attempt unless the work actually reached the callback.
+
+### Named limiters
+
+Register at boot, resolve at request time. The Laravel-side name `for` is a Rust reserved keyword, so the primary Rust-side name is `define`; the literal Laravel alias is exposed via `r#for`.
+
+```rust
+use suprnova::{Limit, RateLimiter};
+
+// At boot - `define` is the primary Rust-side name.
+RateLimiter::define("api", |req| {
+    // `req.ip()`, not the raw `X-Forwarded-For` header - see below.
+    let key = req.ip().unwrap_or_else(|| "anon".into());
+    Limit::per_minute(60).by(format!("ip:{key}")).into()
+});
+
+// Laravel-side alias - same thing under the keyword-escape spelling.
+RateLimiter::r#for("uploads", |_req| Limit::per_hour(100).into());
+
+// Resolve.
+let cb = RateLimiter::limiter("api").unwrap();
+let limit_result = cb(&request);
+```
+
+A named-limiter callback returns a [`LimitResult`], constructible from:
+
+- A single `Limit` - apply this limit.
+- A `Vec<Limit>` - apply every limit; first to trip wins.
+- An `HttpResponse` - short-circuit immediately with this response (used for "admin gets unlimited access" via `Limit::none()`, or to refuse the request outright).
+
+### Sanitising keys
+
+`RateLimiter::clean_rate_limiter_key(key)` strips `&abc;` HTML-entity markers from a key - Laravel uses this for user-supplied strings that round-trip through `htmlentities`. Suprnova reproduces the strip stage exactly but does NOT prepend the `htmlentities` encoding (which only matters for non-UTF-8 inputs, irrelevant for Rust `String`). The function is deterministic and idempotent inside Suprnova; consumers who need byte-identical hashing with a PHP service should run their own `htmlentities` pre-step on the input.
+
+```rust
+assert_eq!(RateLimiter::clean_rate_limiter_key("a&amp;b"), "aab");
+```
+
+## `Limit` builder
+
+The data type returned by named-limiter callbacks. Shorthand constructors mirror Laravel's `Limit::per*`:
+
+```rust
+use suprnova::Limit;
+use std::time::Duration;
+
+Limit::per_second(10, 1);           // 10 per 1 second (max_attempts, decay_seconds)
+Limit::per_minute(60);              // 60 per minute
+Limit::per_minutes(5, 100);         // 100 per 5 minutes (decay-first, Laravel signature)
+Limit::per_hour(1_000);             // 1000/hr
+Limit::per_hours(6, 5_000);         // 5000 per 6 hours
+Limit::per_day(10_000);             // 10000/day
+Limit::per_days(7, 50_000);         // 50000 per 7 days
+Limit::new(123, Duration::from_secs(45));  // bare ctor
+
+// Builder chain.
+let l = Limit::per_minute(5)
+    .by("user:42")
+    .response(|req| {
+        suprnova::HttpResponse::text("blocked").status(429)
+    })
+    .after(|response| response.status_code() >= 400);
+```
+
+- `.by(key)` - set the bucket key. Empty key is "global" (every caller shares one bucket).
+- `.response(callback)` - generate a custom response when the limit trips; the default is plain 429 "Too Many Attempts.".
+- `.after(callback)` - only burn the attempt when `callback(response)` returns true. Canonical use: only count failed logins (`after(|r| r.status_code() >= 400)`).
+
+`Limit::none()` returns an `Unlimited` (a `GlobalLimit` with `max_attempts = i64::MAX`). Returning it from a named limiter is the Laravel pattern for bypass. `GlobalLimit` itself is a thin wrapper around `Limit` with an empty key, kept for parity with `Illuminate\Cache\RateLimiting\GlobalLimit`.
+
+## `ThrottleRequestsMiddleware`
+
+HTTP wrapper around the Cache-backed facade. Mirrors `Illuminate\Routing\Middleware\ThrottleRequests`. Three constructors:
+
+```rust
+use suprnova::{Limit, ThrottleRequestsMiddleware};
+
+// Named limiter - resolves at request time via RateLimiter::limiter(name).
+ThrottleRequestsMiddleware::by_name("api");
+
+// Inline max/decay/prefix - the literal Laravel `throttle:60,1` shape.
+ThrottleRequestsMiddleware::with(60, 1, "myroute");
+
+// Explicit list of Limits - first-to-trip wins; most Rust-idiomatic.
+ThrottleRequestsMiddleware::with_limits(vec![
+    Limit::per_hour(5_000).by("user:1"),
+    Limit::per_minute(60).by("user:1"),
+]);
+```
+
+Wire it into a route group:
+
+```rust
+use suprnova::{Limit, RateLimiter, Router, ThrottleRequestsMiddleware};
+
+RateLimiter::define("api", |req| {
+    Limit::per_minute(60)
+        .by(req.ip().unwrap_or_else(|| "anon".into()))
+        .into()
+});
+
+let router = Router::new()
+    .get("/api/items", list_items)
+    .post("/api/items", create_item)
+    .middleware(ThrottleRequestsMiddleware::by_name("api"));
+```
+
+### Key on `req.ip()`, never on the header
+
+`X-Forwarded-For` is caller-supplied. A limiter keyed on the raw header is
+defeated by sending a different value on each request - the attacker picks
+their own bucket, so the quota is per-request rather than per-client.
+
+`Request::ip()` is the safe read. It returns `X-Forwarded-For` / `X-Real-IP`
+**only when the TCP peer is listed in `APP_TRUSTED_PROXIES`**, and otherwise
+the peer address, so a header from anyone but your own proxy is ignored.
+
+The corollary matters as much: with that variable unset - the default -
+`req.ip()` behind a terminating proxy returns *the proxy's* address on every
+request, and every per-IP limit in the app collapses into a single shared
+bucket. `ThrottleRequestsMiddleware::with(20, 1, "login")` then means 20
+attempts a minute across all users combined, which any one caller can spend
+to lock everybody out. Deploying behind nginx, Traefik, an ALB or Cloudflare
+means setting [`APP_TRUSTED_PROXIES`](env-vars.md#behind-a-reverse-proxy-set-app_trusted_proxies).
+
+### Response headers
+
+Every wrapped response carries:
+
+- `X-RateLimit-Limit` - the configured `max_attempts`.
+- `X-RateLimit-Remaining` - retries left for this bucket.
+
+429 responses additionally carry:
+
+- `Retry-After` - seconds until the window reopens.
+- `X-RateLimit-Reset` - unix-seconds-since-epoch when the bucket reopens.
+
+This matches Laravel's `ThrottleRequests::getHeaders` shape exactly.
+
+### Missing named limiter
+
+When a route is wired to `by_name("X")` but no limiter under `X` has been registered, the middleware returns HTTP 503 with a body that names the missing limiter. Laravel throws `MissingRateLimiterException`; we surface it as an HTTP response so a misconfigured boot does not panic the worker thread.
+
+### Driver-vs-facade composition
+
+The two middlewares can coexist on a single router. Layer the sliding-window driver for low-level fairness, then the Cache-backed throttle for per-endpoint named limits:
+
+```rust
+let router = Router::new()
+    .get("/api/items", list_items)
+    .middleware(RateLimitMiddleware::new(limiter_driver, cfg, key_fn))
+    .middleware(ThrottleRequestsMiddleware::by_name("api"));
+```
+
+## Configuration
+
+The driver SPI is configured via environment variables; the Cache-backed facade is configured wherever your [`Cache`](cache.md) store is configured (memory or Redis).
+
+| Variable | Used by | Default |
+|----------|---------|---------|
+| `RATE_LIMIT_DRIVER` | Driver SPI bootstrap | `memory` (refused in production - see above) |
+| `RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION` | Production fail-closed override | unset |
+| `RATE_LIMIT_REDIS_URL` | Redis driver | `redis://127.0.0.1:6379` |
+| `RATE_LIMIT_PREFIX` | Redis key prefix | `suprnova:` |
+| `CACHE_DRIVER` / `REDIS_URL` / `CACHE_DEFAULT_TTL` / `REDIS_PREFIX` | Cache-backed `RateLimiter` facade (see [`Cache`](cache.md)) | various |
+
+## Migration from Laravel
+
+| Laravel | Suprnova |
+|---------|----------|
+| `RateLimiter::for('api', fn ($req) => Limit::perMinute(60))` | `RateLimiter::define("api", \|req\| Limit::per_minute(60).into())` or `RateLimiter::r#for(...)` |
+| `RateLimiter::hit($key, $decay)` | `RateLimiter::hit(key, decay).await?` |
+| `RateLimiter::tooManyAttempts($key, $max)` | `RateLimiter::too_many_attempts(key, max).await?` |
+| `RateLimiter::availableIn($key)` | `RateLimiter::available_in(key).await?` |
+| `RateLimiter::attempt($key, $max, $cb, $decay)` | `RateLimiter::attempt(key, max, \|\| async { ... }, decay).await?` |
+| `RateLimiter::retriesLeft($key, $max)` | `RateLimiter::retries_left(key, max).await?` |
+| `RateLimiter::cleanRateLimiterKey($key)` | `RateLimiter::clean_rate_limiter_key(key)` |
+| `Limit::perMinute(60)->by($ip)->response(fn () => abort(429))` | `Limit::per_minute(60).by(ip).response(\|_\| HttpResponse::text("...").status(429))` |
+| `Limit::perMinutes(3, 100)` | `Limit::per_minutes(3, 100)` |
+| `Limit::none()` | `Limit::none()` |
+| `throttle:api` middleware | `ThrottleRequestsMiddleware::by_name("api")` |
+| `throttle:60,1` middleware | `ThrottleRequestsMiddleware::with(60, 1, "")` |
+| `X-RateLimit-Limit/Remaining/Reset` + `Retry-After` headers | Same headers, same shape |
+
+### Why Suprnova diverges
+
+Laravel ships one shape: `Illuminate\Cache\RateLimiter` (Cache-backed fixed-window counter) with `Illuminate\Routing\Middleware\ThrottleRequests` as its HTTP wrapper. Suprnova ships both that shape *and* a native sliding-window driver SPI because two real questions need two real answers.
+
+A Cache-backed counter is the right answer to "I have named limiters, response callbacks, after-callbacks for failed-login-only counting, and I want to be source-compatible with Laravel migrations." It's the wrong answer to "I need exact one-slot-per-request sliding-window enforcement against a Redis ZSET with atomic Lua eval and no separate timer key." That second question is what most Rust services hitting Tokio's concurrency limits actually have, so `RateLimiterDriver` + `RateLimitMiddleware` exist alongside, not behind a feature flag.
+
+The backend-error policy is also a Suprnova addition. Laravel's middleware never surfaces a "the limiter is broken" decision because PHP's per-request lifecycle hides it - the next request gets a fresh process. A long-lived Tokio worker that loses Redis for ten seconds must decide what to do with the requests arriving during that window; `BackendErrorPolicy::FailOpen` (default) vs `FailClosed` is that decision exposed explicitly.
+
+## Next
+
+- [Middleware](middleware.md) - how middleware composes, runs, and short-circuits in the request chain
+- [Cache](cache.md) - the store the Laravel-shape `RateLimiter` facade is built on
+- [Configuration](configuration.md) - typed config for the cache and Redis backends
+- [Auth Flows](auth-flows.md) - `LoginThrottleMiddleware` and the brute-force lockout pattern build on this surface
+- [Error Model](error-model.md) - why `Result<HttpResponse, HttpResponse>` lets the middleware short-circuit cleanly

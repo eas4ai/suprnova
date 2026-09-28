@@ -1,0 +1,191 @@
+//! Job envelope (BREAKING-CHANGE-FROZEN v1).
+//!
+//! Every queue driver round-trips through this exact JSON layout.
+//! Bumping `schema_version` requires a dual-read worker for one minor release.
+
+use crate::queue::chain::ChainLink;
+use crate::queue::job::BackoffSchedule;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+/// Highest [`Envelope::schema_version`] this build knows how to read.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+
+/// Name of the queue an envelope belongs to when it carries no explicit one.
+///
+/// Stored as `None` rather than `Some("default")` so unrouted envelopes stay
+/// byte-identical on the wire; this constant is what `None` *means* when a
+/// worker filters by queue name.
+pub const DEFAULT_QUEUE: &str = "default";
+
+/// True when `envelope_queue` is drained by a worker watching `queues`.
+///
+/// An empty `queues` means "drain everything". A `None` envelope queue is
+/// treated as [`DEFAULT_QUEUE`], so a worker started with `--queue=default`
+/// picks up unrouted jobs and a worker started with `--queue=billing` does
+/// not silently steal them.
+pub fn queue_matches(envelope_queue: Option<&str>, queues: &[String]) -> bool {
+    if queues.is_empty() {
+        return true;
+    }
+    let name = envelope_queue.unwrap_or(DEFAULT_QUEUE);
+    queues.iter().any(|wanted| wanted == name)
+}
+
+/// One-element slice for [`queue_matches`] when `queue` names a filter, or
+/// empty ("any queue") when it doesn't.
+///
+/// Shared by every driver's `pending_jobs`/`delayed_jobs`/`reserved_jobs`
+/// listing so a single-queue filter reuses exactly the semantics
+/// [`queue_matches`] already established for `pop_from`, rather than a
+/// second implementation that can drift from it.
+pub(crate) fn queue_filter(queue: Option<&str>) -> Vec<String> {
+    match queue {
+        Some(q) => vec![q.to_string()],
+        None => Vec::new(),
+    }
+}
+
+/// Wire-format envelope every queue driver round-trips on push and pop.
+///
+/// Bumping fields requires a `schema_version` increment and a dual-read
+/// worker for one minor release - see the module docs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope {
+    /// Envelope schema version; rejected on pop if greater than
+    /// [`CURRENT_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// Unique envelope identifier assigned at push time.
+    pub id: Uuid,
+    /// Fully-qualified job type name (matches `Job::name()`).
+    pub job_name: String,
+    /// Queue this envelope was routed to, resolved at push time from
+    /// [`Queue::route`](crate::queue::Queue::route), then the job's own
+    /// [`Job::queue`](crate::queue::Job::queue), then the driver default.
+    ///
+    /// `None` means "the driver's default queue" and is what every envelope
+    /// written before routing existed deserializes to - the field is
+    /// `serde(default)` and `Envelope` does not deny unknown fields, so old
+    /// and new workers round-trip each other's envelopes without a
+    /// `schema_version` bump.
+    ///
+    /// `skip_serializing_if` keeps that promise concrete: an unrouted job
+    /// serializes to byte-identical JSON to what pre-routing versions wrote,
+    /// which is why the frozen wire-format test in
+    /// `framework/tests/queue_envelope.rs` still passes unchanged. Only a
+    /// job that is actually routed adds the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<String>,
+    /// Typed handler payload as JSON.
+    pub payload: serde_json::Value,
+    /// When the envelope was first pushed.
+    pub dispatched_at: DateTime<Utc>,
+    /// Earliest moment a worker may claim this envelope.
+    pub available_at: DateTime<Utc>,
+    /// Number of attempts already dispatched (incremented on each pop).
+    pub attempts: u32,
+    /// Maximum attempts before the worker dead-letters the job.
+    pub max_tries: u32,
+    /// Backoff schedule consulted when a failed attempt is re-released.
+    pub backoff: BackoffSchedule,
+    /// Per-attempt timeout budget, in seconds; `None` disables the timeout.
+    pub timeout_secs: Option<u64>,
+    /// When `true`, a timeout consumes the attempt as a permanent failure.
+    pub fail_on_timeout: bool,
+    /// Dedupe id stamped by the [`Queue::push_unique`](crate::queue::Queue::push_unique)
+    /// family at push time and recorded on the envelope for observability.
+    /// Push-time uniqueness is enforced via
+    /// [`Idempotency::commit_on_success`](crate::idempotency::Idempotency::commit_on_success)
+    /// keyed on this id; the worker does **not** consult this field on
+    /// redelivery. At-least-once delivery means handlers must still be
+    /// idempotent on their own (see the
+    /// [worker module docs](crate::queue::worker) for the recommended
+    /// `Idempotency::once` / `commit_on_success` / `remember` patterns).
+    /// Cleared by [`Queue::retry_failed`](crate::queue::Queue::retry_failed)
+    /// and `retry_all_failed` so a retried envelope re-enters the queue
+    /// without occupying the unique slot of the original dispatch.
+    pub idempotency_key: Option<String>,
+    /// The cache-lock owner token recorded when
+    /// [`Queue::push_unique`](crate::queue::Queue::push_unique) won the
+    /// uniqueness lock. `None` for non-unique pushes and for envelopes written
+    /// before this field existed.
+    ///
+    /// Carried on the wire because the worker releases the lock from a
+    /// different task than the one that took it (see
+    /// [`Job::unique_until_processing`](crate::queue::Job::unique_until_processing)),
+    /// and a [`LockGuard`](crate::cache::LockGuard) cannot cross that boundary
+    /// - its lifetime is the acquiring closure's.
+    ///
+    /// The release is owner-scoped: a release carrying a stale token is a
+    /// no-op, so a redelivered attempt can never force-release a lock that a
+    /// newer dispatch now holds.
+    ///
+    /// Additive under `#[serde(default)]`, and `skip_serializing_if` keeps a
+    /// non-unique push byte-identical on the wire, so
+    /// [`CURRENT_SCHEMA_VERSION`] stays at 2 - see the `queue` field above for
+    /// the same promise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unique_lock_owner: Option<String>,
+    /// Debounce key suffix stamped at push time from
+    /// [`Job::debounce_id`](crate::queue::Job::debounce_id) or from a
+    /// [`DebounceOptions`](crate::queue::DebounceOptions) id. `None` means the
+    /// job debounces as a whole rather than per entity.
+    ///
+    /// Carried on the wire so the worker can recompose the cache key without
+    /// deserializing the payload to ask the job - the same reasoning
+    /// `idempotency_key` above uses. Additive under `#[serde(default)]`, and
+    /// `skip_serializing_if` keeps a non-debounced push byte-identical on the
+    /// wire, so [`CURRENT_SCHEMA_VERSION`] stays at 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debounce_id: Option<String>,
+    /// Token proving this dispatch owned the debounce window when it was
+    /// pushed. `None` for a non-debounced push.
+    ///
+    /// The worker compares it against the token currently in the cache: a
+    /// mismatch means a newer dispatch superseded this envelope, which is then
+    /// dropped rather than run. A missing token in the cache fails **open** -
+    /// the job runs - because an evicted or expired key must never be read as
+    /// "somebody else owns this".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debounce_owner: Option<String>,
+    /// Owning batch id when this envelope was dispatched as part of a
+    /// [`PendingBatch`](crate::queue::batch::PendingBatch). `None` for
+    /// non-batched jobs.
+    #[serde(default)]
+    pub batch_id: Option<String>,
+    /// Tail of a queued chain - remaining links to dispatch after this
+    /// envelope's handler reports success. Empty for non-chained jobs
+    /// (the common case).
+    #[serde(default)]
+    pub chain_remaining: Vec<ChainLink>,
+}
+
+/// Errors raised when decoding or validating a queue envelope.
+#[derive(Debug, thiserror::Error)]
+pub enum EnvelopeError {
+    /// The envelope's `schema_version` is newer than [`CURRENT_SCHEMA_VERSION`].
+    #[error("unsupported queue envelope schema_version: {0}")]
+    UnsupportedSchemaVersion(u32),
+    /// The envelope JSON failed to parse against the [`Envelope`] schema.
+    #[error("envelope decode error: {0}")]
+    Decode(#[from] serde_json::Error),
+}
+
+impl Envelope {
+    /// Decode an envelope, accepting both schema v1 and v2. v1 envelopes
+    /// land with empty `batch_id` / `chain_remaining` via serde defaults -
+    /// the new fields don't change semantics for jobs that pre-date them.
+    pub fn from_json(s: &str) -> Result<Self, EnvelopeError> {
+        let env: Envelope = serde_json::from_str(s)?;
+        if env.schema_version > CURRENT_SCHEMA_VERSION {
+            return Err(EnvelopeError::UnsupportedSchemaVersion(env.schema_version));
+        }
+        Ok(env)
+    }
+
+    /// Serialize the envelope to its canonical JSON wire form.
+    pub fn to_json(&self) -> Result<String, EnvelopeError> {
+        Ok(serde_json::to_string(self)?)
+    }
+}

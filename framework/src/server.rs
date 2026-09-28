@@ -1,0 +1,2620 @@
+//! HTTP server boot and per-request pipeline.
+//!
+//! Wraps hyper with Suprnova's container, middleware chain, router,
+//! WebSocket upgrade path, request-id propagation, graceful shutdown,
+//! and telemetry init. The two entry points users care about are
+//! [`Server::from_config`] (read [`ServerConfig`] from env / typed
+//! config) and [`Server::new`] (programmatic, for tests).
+
+use crate::cache::Cache;
+use crate::config::{Config, ServerConfig};
+use crate::container::App;
+use crate::http::{HttpResponse, Request};
+#[cfg(feature = "localization")]
+use crate::localization::{CatalogSource, Locale, Localization, Translator};
+use crate::lock;
+use crate::logging::{LogConfig, RequestId, RequestIdMiddleware};
+use crate::middleware::{Middleware, MiddlewareChain, MiddlewareRegistry, into_boxed};
+use crate::routing::Router;
+use crate::telemetry::{OtelConfig, init_telemetry};
+use bytes::Bytes;
+use futures::FutureExt;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::net::SocketAddr;
+use std::panic::AssertUnwindSafe;
+use std::sync::{Arc, OnceLock};
+use tokio::net::TcpListener;
+use tokio::sync::Mutex as TokioMutex;
+use tokio::task::JoinSet;
+use tracing::Instrument;
+
+/// Alias for the body type the server returns into hyper. All
+/// `HttpResponse` variants (static + streaming) collapse to this so
+/// the service signature stays uniform.
+type ServerBody = BoxBody<Bytes, Infallible>;
+
+/// Per-process registry of in-flight WebSocket handler tasks.
+///
+/// `handle_ws_upgrade` spawns each handler into this `JoinSet` so
+/// `Server::run`'s shutdown sequence can drain them alongside the
+/// HTTP connections JoinSet - without that, in-flight WS connections
+/// get force-dropped on Ctrl-C / SIGTERM with no close frame to the
+/// peer. Initialized lazily by `Server::run`; embedders that call
+/// `handle_request` directly (T7 test fixture, custom hyper service
+/// loops) get a bare `tokio::spawn` fallback so they don't have to
+/// know about this registry.
+static WS_TASKS: OnceLock<TokioMutex<JoinSet<()>>> = OnceLock::new();
+
+tokio::task_local! {
+    /// Carries the accept-loop connection-cap permit (when
+    /// `SERVER_MAX_CONNECTIONS` is set) into the request that may upgrade to a
+    /// WebSocket. `serve_connection(...).with_upgrades()` resolves at the 101
+    /// handshake, so the HTTP connection task ends - and would drop the permit -
+    /// while the WS session runs on for the socket's lifetime in `WS_TASKS`. The
+    /// upgrade path `take()`s the permit out of this cell and moves it into the
+    /// session task so the slot is held until the socket closes. A plain request
+    /// (and the no-`Server::run` embedder path) leaves it untaken, so it drops
+    /// when the connection task ends, exactly as before.
+    static CONN_PERMIT: std::cell::RefCell<Option<tokio::sync::OwnedSemaphorePermit>>;
+}
+
+/// Builder + runtime for the HTTP server.
+///
+/// Wraps the router, the global middleware registry, and the listen
+/// address. Constructed via [`Server::new`] (programmatic) or
+/// [`Server::from_config`] (env-driven), then started with
+/// [`Server::run`].
+pub struct Server {
+    router: Arc<Router>,
+    middleware: MiddlewareRegistry,
+    host: String,
+    port: u16,
+    /// Optional cap on concurrent active connections. `None` = unbounded.
+    /// Set via `SERVER_MAX_CONNECTIONS` in the environment (or programmatically
+    /// via [`Server::max_connections`]). When `Some(n)`, the accept loop
+    /// acquires a semaphore permit per connection and holds it for the
+    /// connection's lifetime, providing back-pressure at the TCP level.
+    max_connections: Option<usize>,
+    /// Deadline for reading a client's complete request head. Set via
+    /// `SERVER_HEADER_READ_TIMEOUT` in the environment (or programmatically
+    /// via [`Server::header_read_timeout`]). Installed on every connection's
+    /// `hyper::server::conn::http1::Builder` alongside a
+    /// `hyper_util::rt::TokioTimer` so the deadline actually arms - see
+    /// [`ServerConfig::header_read_timeout`] for the SEC-07 background.
+    header_read_timeout: std::time::Duration,
+    /// Whether fallible framework preparation completed before construction.
+    prepared: bool,
+}
+
+impl Server {
+    /// Build a [`Server`] with default host/port (`127.0.0.1:8000`).
+    ///
+    /// Pulls in middleware registered via `global_middleware!` (through
+    /// [`MiddlewareRegistry::from_global`]), matching [`Server::from_config`]
+    /// so global auth / session / logging applies no matter which
+    /// constructor an embedder picks. (The two used to diverge: `new`
+    /// started with an empty registry while `from_config` pulled globals -
+    /// a silent way to ship a server with none of its global protection.)
+    pub fn new(router: impl Into<Router>) -> Self {
+        Self {
+            router: Arc::new(router.into()),
+            middleware: MiddlewareRegistry::from_global(),
+            host: "127.0.0.1".to_string(),
+            port: 8000,
+            max_connections: None,
+            header_read_timeout: std::time::Duration::from_secs(
+                crate::config::providers::DEFAULT_HEADER_READ_TIMEOUT_SECS,
+            ),
+            prepared: false,
+        }
+    }
+
+    /// Build a [`Server`] from process configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FrameworkError`](crate::FrameworkError) if the encryption key cannot be
+    /// installed. Specifically:
+    ///
+    /// - `APP_ENV` resolves to a non-development environment (anything
+    ///   other than local/development/testing) AND `APP_KEY` is unset
+    ///   or empty. Production fails closed.
+    /// - `APP_KEY` is set but malformed (wrong length, not base64).
+    /// - `APP_KEY_PREVIOUS` is set and any comma-separated entry is
+    ///   malformed. A half-rotated secret must fail at boot rather
+    ///   than silently dropping the fallback key and leaving columns
+    ///   undecryptable.
+    ///
+    /// Local, development, and testing environments generate a
+    /// transient dev key when `APP_KEY` is unset, so `cargo run` stays
+    /// zero-config. A loud `tracing::warn!` is emitted in that case so
+    /// the operator notices sessions won't persist across restarts.
+    ///
+    /// `APP_KEY_PREVIOUS` (optional, comma-separated list of base64
+    /// keys) configures decrypt fallback for key rotation. Encryption
+    /// always uses the current `APP_KEY`; decryption tries current
+    /// first, then each previous key in order. A `tracing::warn!` is
+    /// emitted on every previous-key hit so the operator can schedule
+    /// a re-encrypt pass and then remove the env var.
+    pub fn from_config(router: impl Into<Router>) -> Result<Self, crate::FrameworkError> {
+        let config = Self::prepare_config()?;
+        let router = router.into();
+        let runtime = crate::live::LiveRuntime::bind()?;
+        Self::prepare_live_router(&router, &runtime)?;
+        Ok(Self::from_prepared_config(router, config))
+    }
+
+    /// Prepare framework services before constructing a fallible route catalog.
+    ///
+    /// Live route registration may validate component and slot ownership, so
+    /// the immutable Live runtime is container-bound before `routes` runs.
+    /// Route-construction failures are returned without binding a listener.
+    pub fn try_from_config_with_routes<F>(routes: F) -> Result<Self, crate::FrameworkError>
+    where
+        F: FnOnce() -> Result<Router, crate::FrameworkError>,
+    {
+        let (config, runtime) = Self::prepare_boot()?;
+        let router = routes()?;
+        Self::finish_boot(router, &runtime, config)
+    }
+
+    /// [`Self::try_from_config_with_routes`] for a route catalog whose own
+    /// construction has to await.
+    ///
+    /// Identical sequence and identical guarantees: framework services and
+    /// the immutable Live runtime are prepared before `routes` runs, so the
+    /// closure may resolve either from the container, and a
+    /// route-construction failure is returned without binding a listener.
+    ///
+    /// The asynchronous form exists because some route catalogs cannot be
+    /// built synchronously. `RenderCache::install`
+    /// ([`crate::render_cache::RenderCache::install`]) is this workspace's
+    /// case: it probes the database for the generation ledger's tables
+    /// before it assembles a runtime and appends its middleware, so that a
+    /// missing migration fails once at boot with an actionable message
+    /// rather than on every request. [`crate::Application::try_routes_async`]
+    /// is the application-level hook that reaches this constructor.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::try_from_config_with_routes`] returns, plus
+    /// whatever the awaited closure returns.
+    pub async fn try_from_config_with_routes_async<F, Fut>(
+        routes: F,
+    ) -> Result<Self, crate::FrameworkError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Router, crate::FrameworkError>>,
+    {
+        let (config, runtime) = Self::prepare_boot()?;
+        let router = routes().await?;
+        Self::finish_boot(router, &runtime, config)
+    }
+
+    /// The boot prologue both fallible constructors share: framework
+    /// services first, then the immutable Live runtime, both before any
+    /// route-construction closure runs.
+    fn prepare_boot() -> Result<(ServerConfig, crate::live::LiveRuntime), crate::FrameworkError> {
+        let config = Self::prepare_config()?;
+        let runtime = crate::live::LiveRuntime::bind()?;
+        Ok((config, runtime))
+    }
+
+    /// The boot epilogue both fallible constructors share: register the
+    /// constructed router's Live mounts with the bound runtime, then
+    /// assemble the server around it.
+    fn finish_boot(
+        router: Router,
+        runtime: &crate::live::LiveRuntime,
+        config: ServerConfig,
+    ) -> Result<Self, crate::FrameworkError> {
+        Self::prepare_live_router(&router, runtime)?;
+        Ok(Self::from_prepared_config(router, config))
+    }
+
+    fn prepare_live_router(
+        router: &Router,
+        runtime: &crate::live::LiveRuntime,
+    ) -> Result<(), crate::FrameworkError> {
+        for entry in router.take_live_mount_entries()? {
+            runtime.register_mount(entry)?;
+        }
+        runtime.finalize_mount_catalog()
+    }
+
+    fn prepare_config() -> Result<ServerConfig, crate::FrameworkError> {
+        // Initialize the App container
+        App::init();
+
+        // Boot all auto-registered services from #[service(ConcreteType)]
+        // and #[injectable]. Propagates a structured error if a singleton's
+        // dependency graph is unresolvable (missing #[injectable] or cycle).
+        App::boot_services()?;
+
+        // Validate `APP_KEY` (+ `APP_KEY_PREVIOUS`) on EVERY server boot,
+        // even though generated applications install Crypt at the start of
+        // their shared bootstrap hook so Magnetar can use it. This repeated
+        // validation keeps production fail-closed for embedders and later
+        // boots after the process-wide ring is already sealed.
+        let environment = Config::get::<crate::config::AppConfig>()
+            .map(|c| c.environment)
+            .unwrap_or_else(crate::config::Environment::detect);
+        crate::crypto::initialize_from_environment(&environment)?;
+
+        let config = Config::get::<ServerConfig>().unwrap_or_else(ServerConfig::from_env);
+
+        // Wire the configured body cap into the process-global atomic the
+        // request collector reads from. Per-FormRequest overrides still
+        // take precedence because `FormRequest::max_body_bytes` is checked
+        // at extract time, not at boot.
+        crate::http::body::set_global_max_request_body_bytes(config.max_body_size);
+
+        Ok(config)
+    }
+
+    fn from_prepared_config(router: Router, config: ServerConfig) -> Self {
+        Self {
+            router: Arc::new(router),
+            // Pull global middleware registered via global_middleware! in bootstrap.rs
+            middleware: MiddlewareRegistry::from_global(),
+            host: config.host,
+            port: config.port,
+            max_connections: config.max_connections,
+            header_read_timeout: config.header_read_timeout,
+            prepared: true,
+        }
+    }
+
+    /// Add global middleware (runs on every request)
+    ///
+    /// For route-specific middleware, use `.middleware(M)` on the route itself.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{Server, async_trait, Middleware, Next, Request, Response};
+    /// # use suprnova::routing::Router;
+    /// # pub struct LoggingMiddleware;
+    /// # #[async_trait]
+    /// # impl Middleware for LoggingMiddleware {
+    /// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+    /// # }
+    /// # pub struct CorsMiddleware;
+    /// # #[async_trait]
+    /// # impl Middleware for CorsMiddleware {
+    /// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+    /// # }
+    /// # async fn ex(router: Router) -> Result<(), Box<dyn std::error::Error>> {
+    /// Server::from_config(router)?
+    ///     .middleware(LoggingMiddleware)  // Global
+    ///     .middleware(CorsMiddleware)     // Global
+    ///     .run()
+    ///     .await;
+    /// # Ok(()) }
+    /// ```
+    pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
+        self.middleware = self.middleware.append(middleware);
+        self
+    }
+
+    /// Set the listen host. Accepts an IP literal (`127.0.0.1`, `::1`);
+    /// hostnames must be resolved by the caller before this call.
+    pub fn host(mut self, host: &str) -> Self {
+        self.host = host.to_string();
+        self
+    }
+
+    /// Set the listen port.
+    pub fn port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
+    }
+
+    /// Cap the number of concurrently active connections.
+    ///
+    /// When set, the server will not accept new connections once `n` are
+    /// active. The accept loop blocks until an existing connection closes,
+    /// providing back-pressure at the TCP level. When unset (the default),
+    /// connections are unbounded. Pair with a reverse proxy and an
+    /// appropriate `LimitNOFILE` for full protection.
+    ///
+    /// `n == 0` is treated as unset (unbounded), matching the
+    /// `SERVER_MAX_CONNECTIONS` env knob - a zero cap would accept no
+    /// connections at all, which is never the intent.
+    pub fn max_connections(mut self, n: usize) -> Self {
+        self.max_connections = if n > 0 { Some(n) } else { None };
+        self
+    }
+
+    /// Override the deadline for reading a client's complete request head
+    /// (start line + headers). Default: 30s (see
+    /// [`ServerConfig::header_read_timeout`](crate::config::ServerConfig::header_read_timeout)
+    /// for the SEC-07 slowloris background). A very short value is useful
+    /// in tests that need to assert the deadline fires quickly.
+    pub fn header_read_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.header_read_timeout = timeout;
+        self
+    }
+
+    /// Parse `self.host` as an `IpAddr` and combine with `self.port` into a
+    /// [`SocketAddr`] suitable for `TcpListener::bind`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::Internal`] if `self.host` is not a valid IP
+    /// address literal. The message identifies the bad value and shows the
+    /// expected format so misconfiguration surfaces during boot with an
+    /// actionable diagnostic instead of an opaque process panic.
+    ///
+    /// IPv4 and IPv6 literals are both accepted (e.g. `127.0.0.1`, `::1`).
+    /// Hostnames must be resolved by the caller before reaching this path;
+    /// `Server::host()` accepts strings verbatim.
+    fn get_addr(&self) -> Result<SocketAddr, crate::FrameworkError> {
+        let ip: std::net::IpAddr = self.host.parse().map_err(|e| {
+            crate::FrameworkError::internal(format!(
+                "invalid server host '{}': {e}. Expected an IP literal such as '127.0.0.1' or '::1'.",
+                self.host,
+            ))
+        })?;
+        Ok(SocketAddr::new(ip, self.port))
+    }
+
+    /// Bind the listen socket and serve requests until shutdown.
+    ///
+    /// Boots tracing + OTel, attaches the WebSocket task drain, installs
+    /// SIGINT/SIGTERM handlers (Unix), then drives hyper with
+    /// `.with_upgrades()` so WebSocket connections succeed in the same
+    /// listener loop. Returns when the shutdown signal arrives and all
+    /// in-flight HTTP + WS tasks have drained.
+    pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if !self.prepared {
+            let _ = Self::prepare_config()?;
+            let runtime = crate::live::LiveRuntime::bind()?;
+            Self::prepare_live_router(&self.router, &runtime)?;
+            self.prepared = true;
+        }
+
+        // Initialize the global tracing subscriber (and OTel pipelines
+        // when the `otel` feature is enabled + an endpoint is set).
+        // The guard owns the SDK providers and flushes them on Ctrl-C
+        // or SIGTERM. Idempotent across calls.
+        let guard = init_telemetry(LogConfig::from_env(), OtelConfig::from_env());
+
+        // Register all #[policy] gates collected via inventory::submit!
+        crate::authorization::init_policies();
+
+        // Bootstrap cache - picks in-memory (default) or Redis based on
+        // `CACHE_DRIVER`. Redis bootstrap fails closed on connect error;
+        // no silent downgrade. See `Cache::bootstrap` for the contract.
+        Cache::bootstrap().await?;
+
+        // Prove the Live instance ledger's backend is there, on the same
+        // fail-closed terms: a distributed ledger driver whose tables are
+        // missing or whose Redis answers nothing must stop the boot rather
+        // than fail every mount. `LiveRuntime::bind` above cannot do this
+        // itself - it is synchronous, and both probes are I/O - so it builds
+        // the configured provider and this proves it. The driver was read
+        // from the environment once, at bind time, and this reads it off the
+        // runtime rather than parsing it again. See
+        // `crate::live::verify_ledger_backend`.
+        crate::live::verify_ledger_backend().await?;
+
+        // Bootstrap localization - binds the default `FluentTranslator`
+        // from `lang/` unless the app already bound its own `Translator`.
+        // See `Localization::bootstrap` for the contract.
+        #[cfg(feature = "localization")]
+        Localization::bootstrap().await?;
+
+        // Bootstrap queue and rate-limit drivers from env vars.
+        // Defaults to in-memory when QUEUE_DRIVER / RATE_LIMIT_DRIVER are unset.
+        crate::queue::bootstrap_from_env().await?;
+        crate::rate_limit::bootstrap_from_env().await?;
+
+        // Bootstrap the mail transport from MAIL_DRIVER. Defaults to the
+        // `log` driver when the env var is unset.
+        crate::mail::boot::bootstrap_from_env()?;
+
+        let addr: SocketAddr = self.get_addr()?;
+        let listener = TcpListener::bind(addr).await?;
+
+        tracing::info!(%addr, "suprnova server listening");
+
+        let router = self.router;
+        let middleware = Arc::new(self.middleware);
+        // SEC-07: header-read deadline applied to every accepted
+        // connection below. `Duration` is `Copy`, so each spawned
+        // connection task gets its own value with no `Arc` needed.
+        let header_read_timeout = self.header_read_timeout;
+
+        // Initialize the WS handler-task registry so handle_ws_upgrade
+        // can spawn into it instead of detaching via bare tokio::spawn.
+        // `set` returns Err if already initialized (e.g. a previous
+        // Server::run in the same process); that's fine - both servers
+        // share the same drain registry and shutdown handles both.
+        let _ = WS_TASKS.set(TokioMutex::new(JoinSet::new()));
+
+        // Optional concurrency cap. `None` => unbounded (unchanged default).
+        // When set, the accept loop acquires a permit before handing the
+        // connection off to a task; the permit is moved into the task and
+        // released when the task completes (i.e. when the connection closes).
+        let conn_limit: Option<Arc<tokio::sync::Semaphore>> = self
+            .max_connections
+            .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
+
+        // Track in-flight connections so shutdown can drain them
+        // before flushing OTel buffers. Each accepted connection is
+        // spawned into this JoinSet rather than via bare tokio::spawn.
+        let mut connections: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
+        // One shutdown listener for the whole loop.
+        //
+        // The signal futures used to be reconstructed on every iteration
+        // of the `select!`. A freshly built `ctrl_c()` future only
+        // observes signals delivered after it registers, so a signal that
+        // arrived in the window between dropping the old future and
+        // building the new one could be missed entirely. Listening once,
+        // in a task that outlives the loop, removes the window - and
+        // gives the accept branch something it can race the permit
+        // acquisition against.
+        let shutdown = crate::signals::spawn_shutdown_listener();
+
+        loop {
+            tokio::select! {
+                accept = listener.accept() => {
+                    // Surviving transient accept errors keeps the server
+                    // up under file-descriptor pressure, recoverable
+                    // peer-side aborts (ECONNABORTED), and similar. The
+                    // listener itself stays bound; only the per-connection
+                    // accept failed.
+                    //
+                    // We log every transient error so persistent failures
+                    // surface in operator dashboards, and apply a small
+                    // backoff so a tight-loop failure mode (e.g. EMFILE
+                    // until a connection drops) can't burn CPU. Truly
+                    // fatal listener errors are extremely rare in
+                    // practice; if they do happen, the per-iteration
+                    // warn + 50ms sleep keeps the loop visible without
+                    // dropping the server.
+                    let (stream, peer_socket) = match accept {
+                        Ok(pair) => pair,
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "accept error; continuing after 50ms backoff"
+                            );
+                            tokio::time::sleep(
+                                std::time::Duration::from_millis(50),
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+
+                    // Acquire a permit when a cap is configured. This
+                    // blocks the accept loop (not a spawned task) until a
+                    // slot opens, providing back-pressure at the TCP level.
+                    // The permit is moved into the spawned connection task
+                    // below so it is released exactly when that task ends
+                    // (i.e. when the connection closes), not sooner.
+                    // OPS-01: this await used to be a bare
+                    // `acquire_owned().await`, which parks *inside* the
+                    // branch `select!` has already committed to. While it
+                    // parks, the loop is not polling its shutdown branch
+                    // at all - so a `max_connections`-capped deployment
+                    // whose slots are held by long-lived WebSocket
+                    // sessions was signal-deaf in its ordinary steady
+                    // state. SIGTERM did nothing, no drain ran, and the
+                    // orchestrator SIGKILLed it at the end of the grace
+                    // period. Racing the two makes the wait interruptible.
+                    let conn_permit = match &conn_limit {
+                        Some(sem) => {
+                            match acquire_permit_or_shutdown(sem, shutdown.fired_unit())
+                                .await
+                            {
+                                Some(permit) => Some(permit),
+                                None => {
+                                    tracing::info!(
+                                        "shutdown while waiting for a connection slot; \
+                                         closing the accepted connection undrained"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        None => None,
+                    };
+
+                    // Capture the peer IP off the accepted TCP socket so
+                    // every request served on this connection can report
+                    // its connecting address via `Request::ip()` as the
+                    // trusted fallback when no proxy header is present.
+                    let peer_ip: Option<std::net::IpAddr> = Some(peer_socket.ip());
+                    let io = TokioIo::new(stream);
+                    let router = router.clone();
+                    let middleware = middleware.clone();
+
+                    connections.spawn(async move {
+                        let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                            let router = router.clone();
+                            let middleware = middleware.clone();
+                            async move {
+                                Ok::<_, Infallible>(handle_request_with_peer(router, middleware, req, peer_ip).await)
+                            }
+                        });
+
+                        let serve = async move {
+                            // SEC-07: without an installed `Timer`, hyper's
+                            // documented 30s `header_read_timeout` default
+                            // is inert - `Time::check` logs a warning and
+                            // enforces nothing, so a client that opens a
+                            // connection and never completes its request
+                            // head is held forever (and, with
+                            // `SERVER_MAX_CONNECTIONS` set, keeps its
+                            // semaphore permit forever too). Installing
+                            // `TokioTimer` arms the deadline;
+                            // `header_read_timeout` makes it explicit and
+                            // operator-configurable rather than relying on
+                            // hyper's implicit default.
+                            if let Err(err) = http1::Builder::new()
+                                .timer(TokioTimer::new())
+                                .header_read_timeout(header_read_timeout)
+                                .serve_connection(io, service)
+                                .with_upgrades()
+                                .await
+                            {
+                                tracing::error!(?err, "error serving connection");
+                            }
+                        };
+
+                        // Carry the permit in a task-local for this connection.
+                        // A plain request drops it when `serve` ends (the
+                        // connection closes). A WebSocket upgrade moves it into
+                        // the long-lived session task instead, so the slot stays
+                        // held until the socket closes rather than freeing at the
+                        // 101 handshake when `serve` resolves.
+                        CONN_PERMIT
+                            .scope(std::cell::RefCell::new(conn_permit), serve)
+                            .await;
+                    });
+                }
+                // Reap completed connections to keep the JoinSet small.
+                // join_next() returns None if the set is empty - we treat
+                // that as "stay parked" by branching only on Some.
+                Some(_) = connections.join_next() => {}
+                _ = shutdown.fired_unit() => {
+                    break;
+                }
+            }
+        }
+
+        // Drain in-flight connections before flushing telemetry. Spans
+        // and metrics emitted by these tasks need to land in the
+        // batch processors BEFORE we call shutdown(). Bound the drain
+        // window so a slow client can't block shutdown forever.
+        tracing::info!(
+            in_flight = connections.len(),
+            "draining in-flight connections (max 10s)"
+        );
+        let abandoned =
+            drain_connections(&mut connections, std::time::Duration::from_secs(10)).await;
+        if abandoned > 0 {
+            tracing::warn!(
+                in_flight = abandoned,
+                "drain deadline exceeded; abandoning remaining connections"
+            );
+        }
+
+        // Drain in-flight WebSocket handlers. These were spawned into
+        // WS_TASKS by handle_ws_upgrade and are decoupled from the HTTP
+        // connection JoinSet above (the connection task ends when the
+        // 101 response flushes; the handler task runs independently).
+        // Bound the drain window so a peer that never sends a close
+        // frame can't block shutdown forever - after the deadline we
+        // abort_all, which cancels the handler futures so the runtime
+        // shutdown can proceed cleanly.
+        if let Some(ws_tasks) = WS_TASKS.get() {
+            let mut tasks = ws_tasks.lock().await;
+            if !tasks.is_empty() {
+                let in_flight = tasks.len();
+                tracing::info!(
+                    ws_in_flight = in_flight,
+                    "draining in-flight WebSocket handlers (max 5s)"
+                );
+                let ws_drain_deadline = tokio::time::sleep(std::time::Duration::from_secs(5));
+                tokio::pin!(ws_drain_deadline);
+                loop {
+                    tokio::select! {
+                        next = tasks.join_next() => {
+                            if next.is_none() {
+                                break; // JoinSet drained
+                            }
+                        }
+                        _ = &mut ws_drain_deadline => {
+                            tracing::warn!(
+                                ws_in_flight = tasks.len(),
+                                "WS drain deadline exceeded; aborting remaining handlers"
+                            );
+                            tasks.abort_all();
+                            while tasks.join_next().await.is_some() {}
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Signal supervisors to exit cleanly, then drain their tasks.
+        // This runs AFTER WS_TASKS so in-flight WebSocket connections get
+        // their close frames before the process tears down background work.
+        crate::supervisor::SupervisorRegistry::shutdown(std::time::Duration::from_secs(5)).await;
+
+        // Drain in-flight queued event listeners. These were spawned by
+        // EventDispatcher for `queued()` events and run independently of the
+        // request/worker that fired them; a deploy should let them finish
+        // (bounded) rather than cut them off. Runs after supervisors so any
+        // events they emit on the way down are caught, and before the telemetry
+        // flush so listener spans land in the batch.
+        let queued_in_flight =
+            crate::events::EventFacade::drain_queued(std::time::Duration::from_secs(10)).await;
+        if queued_in_flight > 0 {
+            tracing::warn!(
+                queued_listeners_in_flight = queued_in_flight,
+                "queued event-listener drain deadline exceeded; aborted remaining tasks"
+            );
+        }
+
+        // Flush buffered telemetry before returning. Safe to call when
+        // OTel is disabled - guard just no-ops.
+        guard.shutdown().await;
+        Ok(())
+    }
+}
+
+/// Serve a single inbound `hyper::Request<Incoming>` against the
+/// supplied `router` and `middleware_registry`, returning the
+/// framework's `hyper::Response<BoxBody<Bytes, Infallible>>` exactly
+/// the way `Server::run` does internally.
+///
+/// Intended for tests and embedders that want to wire the framework
+/// into their own hyper service loop. `Server::run` is the production
+/// path; this is the in-process surface for "drive one request".
+pub async fn handle_request(
+    router: Arc<Router>,
+    middleware_registry: Arc<MiddlewareRegistry>,
+    req: hyper::Request<hyper::body::Incoming>,
+) -> hyper::Response<ServerBody> {
+    handle_request_with_peer(router, middleware_registry, req, None).await
+}
+
+/// Same as [`handle_request`] but accepts the connecting peer's IP
+/// address. Called by the production accept loop in [`Server::run`]
+/// (`accepted_socket.peer_addr().ip()`); test harnesses and in-process
+/// callers that don't have a real TCP peer use [`handle_request`]
+/// directly, in which case `Request::ip()` falls through to the proxy
+/// headers (or returns `None` when neither is present).
+pub async fn handle_request_with_peer(
+    router: Arc<Router>,
+    middleware_registry: Arc<MiddlewareRegistry>,
+    req: hyper::Request<hyper::body::Incoming>,
+    peer_ip: Option<std::net::IpAddr>,
+) -> hyper::Response<ServerBody> {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+
+    // WebSocket upgrade branch. hyper-tungstenite checks the request
+    // headers (Connection: Upgrade, Upgrade: websocket, Sec-WebSocket-*)
+    // and returns true iff this is a well-formed WS upgrade. If a
+    // ws_route matches the path, we hand off to handle_ws_upgrade;
+    // the request never reaches the HTTP routing path. If no ws_route
+    // matches, fall through to normal HTTP routing so the path can
+    // 404 like any other unrouted GET.
+    if hyper_tungstenite::is_upgrade_request(&req)
+        && let Some(ws_match) = router.match_ws(&path)
+    {
+        let live_metadata = router.live_route_metadata(&hyper::Method::GET, ws_match.pattern());
+        return handle_ws_upgrade(req, ws_match, middleware_registry, peer_ip, live_metadata).await;
+    }
+
+    // Built-in health check endpoints under /_suprnova/health.
+    // Uses framework prefix to avoid conflicts with user-defined routes.
+    if method == hyper::Method::GET
+        && let Some(kind) = HealthEndpoint::from_path(&path)
+    {
+        let probe_db = kind.probes_database(req.uri().query().unwrap_or(""));
+        // A readiness probe that fails the token gate is deliberately NOT
+        // answered here - it falls through to normal routing, where it
+        // 404s exactly like any unrouted path. Returning a hand-built 404
+        // instead would leak the endpoint's existence by being subtly
+        // different from the router's; falling through cannot, because it
+        // *is* the router's. It also means the rejected probe passes
+        // through the middleware chain, so it shows up in request logs and
+        // can be rate-limited like any other 404 traffic.
+        if !probe_db || readiness_token_matches(req.headers()) {
+            // The health endpoint short-circuits before the middleware chain,
+            // so it resolves and echoes `X-Request-Id` itself to keep liveness
+            // probes correlatable with logs - same contract as routed paths.
+            let mut request = Request::new(req);
+            if let Some(ip) = peer_ip {
+                request = request.with_peer_addr(ip);
+            }
+            // Install the same trusted-proxies allowlist the routed paths
+            // see so a health probe sourced through a real proxy hop
+            // reports the proxy's `X-Forwarded-*` headers consistently.
+            if let Some(cfg) = crate::config::Config::get::<crate::config::AppConfig>() {
+                request = request.with_trusted_proxies(cfg.trusted_proxies);
+            }
+            let request_id = crate::logging::request_id::resolve_request_id(&request);
+            return health_response(probe_db, &request_id).await;
+        }
+    }
+
+    // Built-in localization catalog endpoint: GET /_suprnova/lang/<locale>.ftl.
+    // Short-circuits before the middleware chain for the same reason health
+    // does, just above: this is read-only static content derived entirely
+    // from files the app shipped, and it is fetched by callers that health
+    // is fetched by too - crawlers, and now also the frontend's catalog
+    // loader - often before a session exists and never carrying a CSRF
+    // token. Routing it through auth/session/CSRF middleware built for
+    // stateful app routes would make the one thing a page needs in order to
+    // render at all (its translated strings) depend on machinery that has
+    // nothing to check here.
+    //
+    // Any request this block does not recognize - wrong method, a path
+    // that isn't shaped like `/_suprnova/lang/<locale>.ftl`, a locale that
+    // fails to parse, an unknown locale, or no `Translator` bound at all -
+    // falls through to normal routing and 404s exactly like an unrouted
+    // path, same as the gated-readiness case above. That means there is no
+    // hand-built 404 to keep in sync with the router's real one, and a
+    // malformed or unknown locale can never surface as anything other than
+    // "not found."
+    #[cfg(feature = "localization")]
+    if method == hyper::Method::GET
+        && let Some(locale) = catalog_locale_from_path(&path)
+        && let Ok(translator) = App::resolve_make::<dyn Translator>()
+        && let Some(catalog) = translator.catalog(&locale)
+    {
+        let request = Request::new(req);
+        let request_id = crate::logging::request_id::resolve_request_id(&request);
+        let if_none_match = request
+            .headers()
+            .get("if-none-match")
+            .and_then(|v| v.to_str().ok());
+        return catalog_response(
+            &catalog,
+            request.query().unwrap_or(""),
+            if_none_match,
+            &request_id,
+        );
+    }
+
+    // Inertia context comes off the live Request via header helpers
+    // (`req.is_inertia()`, `req.inertia_version()`, etc.) - no global state.
+    //
+    // Per-request Inertia flash bag scoped via tokio::task_local. The bag
+    // is drained by `InertiaResponse::resolve` at response build time.
+    let flash_bag = crate::inertia::flash::new_bag();
+    let ssr_disabled = crate::inertia::ssr::new_disable_ssr_flag();
+
+    // Capture for the post-response HEAD body strip below. RFC 9110 §9.3.2
+    // forbids the server from sending content on HEAD; we enforce this
+    // uniformly here so the handler (whether an explicit HEAD route or the
+    // GET fallback inside `match_route`) cannot violate the spec.
+    let is_head = method == hyper::Method::HEAD;
+
+    // The broadcasting WS handler assigns each connection a `socket_id` and the
+    // client echoes it as `X-Socket-ID`; capture it so a `broadcast_to_others`
+    // event dispatched while handling this request can exclude that connection.
+    let request_socket_id = req
+        .headers()
+        .get("x-socket-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    // Capture method/path for the post-response terminable dispatch.
+    // `method` is moved into `handle_request_inner` and `&path` is passed
+    // through, so we clone before the scope so the post-response branch
+    // below can still build its `TerminationSnapshot`.
+    let terminate_method = method.clone();
+    let terminate_path = path.clone();
+
+    let response = crate::inertia::flash::FLASH_BAG
+        .scope(flash_bag, async move {
+            crate::inertia::ssr::DISABLE_SSR
+                .scope(ssr_disabled, async move {
+                    // Per-request auth state (resolved user cache + via-remember
+                    // flag), guard-agnostic so token-only requests without a
+                    // session can still use `set_user` / `once` / `has_user`.
+                    crate::broadcasting::request_socket::scope(
+                        request_socket_id,
+                        crate::auth::request_state::scope(handle_request_inner(
+                            router,
+                            middleware_registry,
+                            req,
+                            method,
+                            &path,
+                            peer_ip,
+                        )),
+                    )
+                    .await
+                })
+                .await
+        })
+        .await;
+
+    let response = if is_head {
+        strip_body_for_head(response)
+    } else {
+        response
+    };
+
+    // Post-response termination: run every registered `Terminable`
+    // hook. Spawned on the background runtime so the client gets the
+    // response immediately and the slow work (session persistence,
+    // audit logging, metrics flush) runs without blocking the wire.
+    // The count check elides the spawn entirely when no hooks are
+    // registered, keeping the hot path zero-cost.
+    if crate::middleware::terminable_count() > 0 {
+        let snapshot = crate::middleware::TerminationSnapshot {
+            method: terminate_method.clone(),
+            path: terminate_path.clone(),
+            status: response.status().as_u16(),
+        };
+        tokio::spawn(async move {
+            crate::middleware::dispatch_termination(snapshot).await;
+        });
+    }
+
+    response
+}
+
+/// Replace the body of an outgoing response with an empty `BoxBody`.
+///
+/// Status and headers (including any `Content-Length` set by the handler)
+/// are preserved so the client sees the same metadata it would for the
+/// corresponding GET response. Per RFC 9110 §9.3.2 a HEAD response carries
+/// the same header fields a GET would have produced - the body is the
+/// only thing dropped.
+fn strip_body_for_head(response: hyper::Response<ServerBody>) -> hyper::Response<ServerBody> {
+    let (parts, _body) = response.into_parts();
+    let empty: ServerBody = Full::new(Bytes::new())
+        .map_err(|never| match never {})
+        .boxed();
+    hyper::Response::from_parts(parts, empty)
+}
+
+async fn handle_request_inner(
+    router: Arc<Router>,
+    middleware_registry: Arc<MiddlewareRegistry>,
+    req: hyper::Request<hyper::body::Incoming>,
+    method: hyper::Method,
+    path: &str,
+    peer_ip: Option<std::net::IpAddr>,
+) -> hyper::Response<ServerBody> {
+    // Resolve the trusted-proxies allowlist for this request at the top
+    // of the entry-point so the accessor methods stay pure `&self`
+    // lookups. Falls back to the empty default whenever `Config::init`
+    // hasn't been run yet (in-process tests, WS-upgrade replay) - the
+    // accessors then ignore proxy headers, which is the fail-safe
+    // policy spelled out in `TrustedProxiesConfig`'s docs.
+    let trusted_proxies = crate::config::Config::get::<crate::config::AppConfig>()
+        .map(|cfg| cfg.trusted_proxies)
+        .unwrap_or_else(crate::http::TrustedProxiesConfig::empty);
+
+    // Helper: stamp the peer IP and trusted-proxy allowlist on a
+    // freshly-constructed Request. `peer_ip` stays an `Option` because
+    // in-process callers (the testing harness, the WS upgrade replay)
+    // may invoke `handle_request` directly without a real TCP peer.
+    let stamp_peer = |r: Request| -> Request {
+        let r = match peer_ip {
+            Some(ip) => r.with_peer_addr(ip),
+            None => r,
+        };
+        r.with_trusted_proxies(trusted_proxies.clone())
+    };
+    // RFC 9110 §9.3.2: a HEAD request that lacks an explicit handler falls
+    // back to GET inside `Router::match_route`. The middleware list for
+    // such a request must come from the GET registration, not from an
+    // empty `(HEAD, pattern)` slot - otherwise auth / CSRF / rate-limit
+    // would silently skip on HEAD probes. Compute the "effective" method
+    // (the registry whose route matched) and use it for both the
+    // middleware lookup and the chain's method-context.
+    let effective_method = if method == hyper::Method::HEAD && !router.has_explicit_head(path) {
+        hyper::Method::GET
+    } else {
+        method.clone()
+    };
+
+    match router.match_route(&method, path) {
+        Some((pattern, handler, params)) => {
+            let mut request = stamp_peer(
+                Request::new(req)
+                    .with_params(params)
+                    .with_route_pattern(pattern.clone()),
+            );
+            let live_metadata = router.live_route_metadata(&effective_method, &pattern);
+            if let Some(metadata) = live_metadata {
+                let runtime = match crate::live::LiveRuntime::bind() {
+                    Ok(runtime) => runtime,
+                    Err(_) => {
+                        return HttpResponse::text("Live request preparation failed")
+                            .status(500)
+                            .into_hyper();
+                    }
+                };
+                if runtime
+                    .prepare_request(&mut request, metadata.operation())
+                    .is_err()
+                {
+                    return HttpResponse::text("Live request preparation failed")
+                        .status(500)
+                        .into_hyper();
+                }
+            }
+
+            // Resolve the request id ONCE for this request. The same id is
+            // handed to the middleware (which scopes it) and to
+            // `execute_chain_safely` (which echoes it on a synthesized 500
+            // if the chain panics - the request scope is gone by then).
+            let request_id = crate::logging::request_id::resolve_request_id(&request);
+
+            // Build middleware chain, pre-sized so the backing Vec
+            // never re-allocates mid-assembly (was 2–3 reallocs per
+            // request with `new()` + push + extend + extend).
+            let global_mw = middleware_registry.global_middleware();
+            let route_middleware = router.get_route_middleware(&effective_method, &pattern);
+            let mut chain = MiddlewareChain::with_capacity(
+                1 + global_mw.len() + route_middleware.len() + usize::from(live_metadata.is_some()),
+            );
+
+            // 0. RequestId is always outermost so the `request` span it
+            //    enters - and every event emitted downstream within it -
+            //    carries the per-request id.
+            chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
+
+            // 1. Add global middleware
+            chain.extend(global_mw.iter().cloned());
+
+            // 2. Add route-level middleware (already boxed).
+            //    Lookup is keyed by `(effective_method, pattern)` - the
+            //    matched route pattern (e.g. `/api/posts/{id}`), NOT the
+            //    raw request path; `effective_method` collapses HEAD to
+            //    GET when match_route fell back. That keeps three
+            //    invariants:
+            //    (a) middleware registered for one HTTP method on a
+            //        path never bleeds onto a sibling route on the
+            //        same path under a different method;
+            //    (b) group-applied middleware on parameterised routes
+            //        actually runs, instead of silently missing the
+            //        lookup because `/api/posts/42 != /api/posts/{id}`; and
+            //    (c) HEAD requests that fall back to GET still pick up
+            //        the GET middleware list (auth, CSRF, rate-limit).
+            chain.extend(route_middleware);
+
+            // Live completion is always innermost, after every configured
+            // owner middleware, so omission and ordering remain observable.
+            if let Some(metadata) = live_metadata {
+                chain.push(into_boxed(metadata.completion()));
+            }
+
+            // 3. Execute chain with handler, catching panics in middleware
+            //    or handler so the client receives a proper 500 instead
+            //    of a dropped connection. Pass the original `method` so
+            //    handlers / logs see the wire-level verb (HEAD vs GET);
+            //    middleware that needs to discriminate the two can still
+            //    check `request.method()`.
+            let http_response =
+                execute_chain_safely(chain, request, handler, &method, path, request_id).await;
+
+            // The 5xx -> OTel `Status::Error` marker is recorded inside
+            // `RequestIdMiddleware` (the outermost middleware), where the
+            // request span is still live. Recording here would target the
+            // wrong span: this runs after the middleware's `.instrument`
+            // scope has already closed.
+            http_response.into_hyper()
+        }
+        None => {
+            // Check for fallback handler
+            if let Some((fallback_handler, fallback_middleware)) = router.get_fallback() {
+                let request =
+                    stamp_peer(Request::new(req).with_params(std::collections::HashMap::new()));
+                let request_id = crate::logging::request_id::resolve_request_id(&request);
+
+                // Build middleware chain for fallback, pre-sized
+                // (see matched-route branch for rationale).
+                let mut chain = MiddlewareChain::with_capacity(
+                    1 + middleware_registry.global_middleware().len() + fallback_middleware.len(),
+                );
+
+                // 0. RequestId is always outermost (same as the matched-route path).
+                chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
+
+                // 1. Add global middleware
+                chain.extend(middleware_registry.global_middleware().iter().cloned());
+
+                // 2. Add fallback-specific middleware
+                chain.extend(fallback_middleware);
+
+                // 3. Execute chain with fallback handler, catching panics.
+                let http_response = execute_chain_safely(
+                    chain,
+                    request,
+                    fallback_handler,
+                    &method,
+                    path,
+                    request_id,
+                )
+                .await;
+
+                // 5xx -> OTel error marker is recorded in
+                // `RequestIdMiddleware` (outermost), where the span is live.
+                http_response.into_hyper()
+            } else {
+                // No fallback handler registered. Still run the global
+                // middleware chain (RequestId + global) terminating in a
+                // fixed 404, so cross-cutting concerns act on unrouted
+                // requests too: CORS preflight (OPTIONS never matches a
+                // route, so it lands here) can short-circuit with its 204,
+                // logging sees 404 traffic, and the response carries a
+                // request id. This mirrors the fallback branch above - the
+                // only difference is the terminal handler is a static 404
+                // rather than a user-supplied fallback.
+                let request =
+                    stamp_peer(Request::new(req).with_params(std::collections::HashMap::new()));
+                let request_id = crate::logging::request_id::resolve_request_id(&request);
+
+                let global_mw = middleware_registry.global_middleware();
+                let mut chain = MiddlewareChain::with_capacity(1 + global_mw.len());
+                chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
+                chain.extend(global_mw.iter().cloned());
+
+                let not_found: Arc<crate::routing::BoxedHandler> =
+                    Arc::new(Box::new(|_req: Request| {
+                        Box::pin(async {
+                            Ok(HttpResponse::text(crate::http::NOT_FOUND_BODY).status(404))
+                        })
+                            as std::pin::Pin<
+                                Box<dyn std::future::Future<Output = crate::http::Response> + Send>,
+                            >
+                    }));
+
+                let http_response =
+                    execute_chain_safely(chain, request, not_found, &method, path, request_id)
+                        .await;
+
+                #[cfg(feature = "otel")]
+                if http_response.status_code() >= 500 {
+                    tracing::Span::current().record("error", true);
+                }
+                http_response.into_hyper()
+            }
+        }
+    }
+}
+
+/// Run `chain.execute(request, handler)` with panic recovery.
+///
+/// A panic anywhere in the middleware stack or the route handler would
+/// otherwise propagate up the per-connection task and tear down the
+/// hyper service mid-response, leaving the client with a TCP reset and
+/// no HTTP response. That's a hostile failure mode for an OSS framework -
+/// a user-authored middleware calling `.unwrap()` on a `None` should
+/// surface as a visible 500 the operator can debug, not a silent
+/// connection drop. This helper catches the panic, logs it with the
+/// request method + path for triage, and returns a 500 so the client
+/// always gets a well-formed HTTP response.
+///
+/// `AssertUnwindSafe` is sound here because the captured state (chain,
+/// request, handler) is internal framework data; users don't observe
+/// partially-mutated state across the await boundary.
+async fn execute_chain_safely(
+    chain: MiddlewareChain,
+    request: Request,
+    handler: Arc<crate::routing::BoxedHandler>,
+    method: &hyper::Method,
+    path: &str,
+    request_id: RequestId,
+) -> HttpResponse {
+    let exec = AssertUnwindSafe(chain.execute(request, handler));
+    match exec.catch_unwind().await {
+        Ok(result) => result.unwrap_or_else(|e| e),
+        Err(panic) => {
+            let msg = panic_payload_message(&panic);
+            tracing::error!(
+                panic = %msg,
+                method = %method,
+                path = %path,
+                request_id = %request_id,
+                "request middleware or handler panicked - translating to 500"
+            );
+            // Route the panic through the same `FrameworkError ->
+            // HttpResponse` conversion that returned 5xx errors use:
+            //   - the sanitised `{"message": "Internal Server Error"}`
+            //     JSON body (no panic payload leaks downstream);
+            //   - `ErrorOccurred` event dispatch, so observability
+            //     listeners (Sentry, Pagerduty, custom log shippers) that
+            //     fire on returned 5xx errors also fire on panics.
+            // The panic message stays in the tracing::error! above, not in
+            // the HTTP body - same 5xx-sanitisation contract.
+            //
+            // The panic unwound the original `REQUEST_ID` scope, so the
+            // conversion (and the `ErrorOccurred` event it dispatches) would
+            // otherwise read `current_request_id() == None`. Re-establish the
+            // scope with the id resolved once before the chain ran so the
+            // body, the generic 5xx log, and the event all stay correlatable,
+            // then echo the same id back as `X-Request-Id`.
+            crate::logging::REQUEST_ID
+                .sync_scope(request_id.clone(), || {
+                    HttpResponse::from(crate::error::FrameworkError::internal(format!(
+                        "request handler panicked: {msg}"
+                    )))
+                })
+                .header("X-Request-Id", request_id.as_str())
+        }
+    }
+}
+
+/// Extract a printable message from a panic payload returned by
+/// `catch_unwind`. Panics in Rust are typed `Box<dyn Any + Send>`; the
+/// common payload shapes are `&'static str` (literal panic messages)
+/// and `String` (`format!`-built panic messages). Anything else
+/// returns a generic placeholder so the logging path stays infallible.
+pub(crate) fn panic_payload_message(p: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = p.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panic with non-string payload".to_string()
+    }
+}
+
+async fn handle_ws_upgrade(
+    mut req: hyper::Request<hyper::body::Incoming>,
+    ws_match: crate::routing::WsMatch,
+    middleware_registry: Arc<MiddlewareRegistry>,
+    peer_ip: Option<std::net::IpAddr>,
+    live_metadata: Option<crate::live::context::LiveRouteMetadata>,
+) -> hyper::Response<ServerBody> {
+    use crate::middleware::MiddlewareChain;
+    use crate::routing::BoxedHandler;
+    use std::sync::Mutex;
+
+    let handler = ws_match.handler();
+    let pattern = ws_match.pattern().to_string();
+    let params: HashMap<String, String> = ws_match.params().clone();
+    let middleware_list: Vec<crate::middleware::BoxedMiddleware> = ws_match.middleware().clone();
+
+    let config = ws_match.config().cloned().unwrap_or_default();
+    let heartbeat_interval = config.ping_interval;
+    let tungstenite_config = config.to_tungstenite_config();
+
+    // Enforce the configured `OriginPolicy` BEFORE the protocol upgrade. The
+    // upgrade response is a 101 that the browser commits to; rejecting after
+    // upgrade leaves the peer holding a stillborn socket. Rejecting before
+    // keeps the response a clean HTTP 403 with no upgrade. SameOrigin is the
+    // default - a browser WS request without a matching `Origin` lands here.
+    if let Err(reason) = check_origin_policy(&config.origin_policy, req.headers()) {
+        tracing::warn!(
+            route = %pattern,
+            reason = reason,
+            "websocket upgrade rejected by Origin policy"
+        );
+        return forbidden_text(&format!("websocket upgrade rejected: {reason}"));
+    }
+
+    // Pick the negotiated subprotocol (if any) BEFORE hyper_tungstenite
+    // consumes the request. `accepted_protocols` empty (the default)
+    // skips negotiation entirely; an empty `Sec-WebSocket-Protocol`
+    // response header is the same as omitting it. If the client offered
+    // protocols but none matched, we proceed without echoing one - RFC
+    // 6455 §4.2.2 requires the browser to fail the connection in that
+    // case (which is correct: speaking the wrong protocol silently is
+    // worse than no upgrade).
+    let negotiated_protocol = if !config.accepted_protocols.is_empty() {
+        let client_offer = req
+            .headers()
+            .get(hyper::header::SEC_WEBSOCKET_PROTOCOL)
+            .and_then(|v| v.to_str().ok());
+        crate::ws::negotiate_subprotocol(&config.accepted_protocols, client_offer)
+    } else {
+        None
+    };
+
+    // hyper_tungstenite::upgrade MUST come before Request::new because
+    // it needs `&mut req` before we consume `req`.
+    let (mut response, websocket) =
+        match hyper_tungstenite::upgrade(&mut req, Some(tungstenite_config)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!(error = %e, route = %pattern, "websocket upgrade rejected");
+                return bad_request_text(&format!("websocket upgrade failed: {e}"));
+            }
+        };
+
+    // Echo the negotiated protocol on the 101 handshake response. Done
+    // here rather than as a header on the original 101 because
+    // hyper_tungstenite owns the response shape - we mutate the
+    // returned `response` the same way we do for `x-request-id`. If
+    // the protocol value somehow fails to build a HeaderValue, leave
+    // the header off rather than panic; that surfaces as "client gets
+    // 101 without subprotocol" and browsers will refuse the connection,
+    // which is the safe failure mode.
+    if let Some(proto) = negotiated_protocol.as_deref()
+        && let Ok(value) = hyper::header::HeaderValue::from_str(proto)
+    {
+        response
+            .headers_mut()
+            .insert(hyper::header::SEC_WEBSOCKET_PROTOCOL, value);
+    }
+
+    // Build the framework's Request from the upgrade request. The
+    // body is empty for an upgrade request (RFC 6455); we still
+    // construct via Request::new(req) so headers and cookies are
+    // intact for the handler.
+    let path = req.uri().path().to_string();
+    let mut initial_request = Request::new(req)
+        .with_params(params)
+        .with_route_pattern(pattern.clone());
+    if let Some(ip) = peer_ip {
+        initial_request = initial_request.with_peer_addr(ip);
+    }
+    // Install the same trusted-proxies allowlist HTTP requests use so
+    // a WS upgrade routed through a real proxy hop sees consistent
+    // header trust during middleware authentication / CSRF / etc.
+    if let Some(cfg) = crate::config::Config::get::<crate::config::AppConfig>() {
+        initial_request = initial_request.with_trusted_proxies(cfg.trusted_proxies);
+    }
+    if let Some(metadata) = live_metadata {
+        let runtime = match crate::live::LiveRuntime::bind() {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                return HttpResponse::text("Live request preparation failed")
+                    .status(500)
+                    .into_hyper();
+            }
+        };
+        if runtime
+            .prepare_request(&mut initial_request, metadata.operation())
+            .is_err()
+        {
+            return HttpResponse::text("Live request preparation failed")
+                .status(500)
+                .into_hyper();
+        }
+        initial_request.record_live_security_check_before_chain(
+            crate::live::attestation::SecurityCheck::Origin,
+        );
+        initial_request.record_live_security_not_required(
+            crate::live::attestation::SecurityCheck::Csrf,
+            suprnova_live::host::PolicyReason::StatelessCsrfPolicy,
+        );
+    }
+
+    // Resolve the request id once for the whole upgrade. It is echoed on
+    // the 101 handshake response, threaded into the connection span and
+    // the post-upgrade session task, and - via `RequestIdMiddleware` -
+    // attached to any rejection response the chain produces.
+    let request_id = crate::logging::request_id::resolve_request_id(&initial_request);
+
+    // A WebSocket upgrade is an HTTP GET, so the SAME middleware chain an
+    // ordinary request gets applies here, in the SAME fixed order:
+    // RequestId (outermost) -> global middleware -> per-route WS
+    // middleware -> handler. Global auth / session / rate-limit / logging
+    // protect `/ws/*` exactly as they protect any other route; they are
+    // not silently skipped for upgrades.
+    //
+    // There is no empty-chain fast path anymore: RequestId and the globals
+    // are always present, so the terminator-capture chain always runs. The
+    // terminator records the final (possibly middleware-rewritten) Request
+    // into a shared slot; a non-2xx response from any middleware (e.g. an
+    // auth gate returning 401) aborts the upgrade and the unwoken websocket
+    // future drops cleanly.
+    //
+    // Lock-poison handling: a panic inside a middleware would otherwise
+    // poison the captured-request Mutex. We translate that into a 500 and
+    // abort the upgrade rather than re-panicking inside the per-connection
+    // task - one poisoned upgrade must not cascade into the accept loop or
+    // other in-flight connections.
+    let suprnova_req = {
+        let captured: Arc<Mutex<Option<Request>>> = Arc::new(Mutex::new(None));
+        let captured_for_terminator = captured.clone();
+
+        let terminator: Arc<BoxedHandler> = Arc::new(Box::new(move |req: Request| {
+            let captured = captured_for_terminator.clone();
+            Box::pin(async move {
+                match lock::lock(&captured, "ws upgrade terminator capture") {
+                    Ok(mut guard) => {
+                        // This closure is the innermost link of the chain, so
+                        // the session/auth middleware has run and its ambient
+                        // request-scoped state is live *here* - and only here.
+                        // It unwinds when `chain.execute` returns, before the
+                        // session task is spawned, and only `REQUEST_ID` is
+                        // carried across that boundary on purpose.
+                        //
+                        // So a WebSocket handler had no way to learn who
+                        // connected, even though the upgrade was fully
+                        // authenticated a moment earlier. Pinning the resolved
+                        // id onto the request - which does cross the spawn -
+                        // is what lets a channel authorize on server-derived
+                        // identity instead of something the client typed.
+                        let req = match crate::session::auth_user_id() {
+                            Some(id) => req.with_auth_user_id(id),
+                            None => req,
+                        };
+                        *guard = Some(req);
+                        Ok(HttpResponse::text("").status(200))
+                    }
+                    Err(_) => Err(HttpResponse::text(
+                        "internal error: websocket upgrade aborted (terminator lock poisoned)",
+                    )
+                    .status(500)),
+                }
+            })
+                as std::pin::Pin<
+                    Box<dyn std::future::Future<Output = crate::http::Response> + Send>,
+                >
+        }));
+
+        let mut chain = MiddlewareChain::with_capacity(
+            1 + middleware_registry.global_middleware().len()
+                + middleware_list.len()
+                + usize::from(live_metadata.is_some()),
+        );
+        chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
+        chain.extend(middleware_registry.global_middleware().iter().cloned());
+        chain.extend(middleware_list);
+        if let Some(metadata) = live_metadata {
+            chain.push(into_boxed(metadata.completion()));
+        }
+
+        // The auth request-state scope must wrap the chain, exactly as it
+        // wraps `handle_request_inner` on the HTTP path.
+        //
+        // It did not, and the upgrade returns before that call, so the
+        // scope simply did not exist here. Every request-state write is a
+        // `try_with` that fails silently when no scope is active - so a
+        // middleware could authenticate a WebSocket upgrade, see no error,
+        // and store the result nowhere. `Auth::set_user` was a no-op, and
+        // `Auth::id()` inside a WS middleware always answered `None`.
+        //
+        // Global middleware was already documented to run on upgrades
+        // "exactly as it protects any other route", which was true of
+        // execution and false of effect: an auth gate could reject, but an
+        // auth gate that *succeeds* had nowhere to put the identity it
+        // resolved. That is why the terminator below can now capture one.
+        //
+        // catch_unwind around the WS chain so a panicking middleware
+        // can't tear down the upgrading connection task. On panic we
+        // abort the upgrade with 500 - same policy as the HTTP request
+        // path (see `execute_chain_safely`).
+        let chain_response = match AssertUnwindSafe(crate::auth::request_state::scope(
+            chain.execute(initial_request, terminator),
+        ))
+        .catch_unwind()
+        .await
+        {
+            Ok(resp) => resp,
+            Err(panic) => {
+                let msg = panic_payload_message(&panic);
+                tracing::error!(
+                    panic = %msg,
+                    route = %pattern,
+                    "websocket middleware panicked - aborting upgrade"
+                );
+                return HttpResponse::text(
+                    "internal error: websocket upgrade aborted (middleware panicked)",
+                )
+                .status(500)
+                .header("X-Request-Id", request_id.as_str())
+                .into_hyper();
+            }
+        };
+
+        // Response = Result<HttpResponse, HttpResponse>; collapse both
+        // arms to a single HttpResponse the same way handle_request does.
+        let http_response = chain_response.unwrap_or_else(|e| e);
+        let status = http_response.status_code();
+        if !(200..300).contains(&status) {
+            // Middleware short-circuited (e.g. 401, 403). The response
+            // already carries X-Request-Id: RequestIdMiddleware is the
+            // outermost layer and tags both success and error variants.
+            // Convert to ServerBody and return; the upgrade future drops
+            // cleanly.
+            tracing::debug!(
+                status = status,
+                route = %pattern,
+                "websocket upgrade rejected by middleware"
+            );
+            return http_response.into_hyper();
+        }
+
+        match lock::lock(&captured, "ws upgrade terminator capture") {
+            Ok(mut guard) => match guard.take() {
+                Some(req) => req,
+                None => {
+                    // Middleware chain returned 2xx without ever
+                    // invoking `next(req)`. That's a programming bug
+                    // in the middleware - abort the upgrade with a
+                    // 500 so the issue is visible rather than the
+                    // peer hanging on a stalled upgrade.
+                    tracing::error!(
+                        route = %pattern,
+                        "websocket upgrade aborted: middleware chain \
+                         returned 2xx without invoking `next(req)`"
+                    );
+                    return HttpResponse::text(
+                        "internal error: websocket upgrade aborted (middleware did not call next)",
+                    )
+                    .status(500)
+                    .header("X-Request-Id", request_id.as_str())
+                    .into_hyper();
+                }
+            },
+            Err(_) => {
+                tracing::error!(
+                    route = %pattern,
+                    "websocket upgrade aborted: terminator lock poisoned"
+                );
+                return HttpResponse::text(
+                    "internal error: websocket upgrade aborted (terminator lock poisoned)",
+                )
+                .status(500)
+                .header("X-Request-Id", request_id.as_str())
+                .into_hyper();
+            }
+        }
+    };
+
+    // Echo X-Request-Id on the 101 handshake response so the upgrade GET
+    // stays correlatable with logs, the same contract as the HTTP path.
+    // The id is `is_safe_request_id`-filtered (or a freshly minted UUID),
+    // so building the header value cannot fail in practice - skip silently
+    // on the impossible error rather than panicking on a header write.
+    if let Ok(value) = hyper::header::HeaderValue::from_str(request_id.as_str()) {
+        response.headers_mut().insert("x-request-id", value);
+    }
+
+    // Tracing span covers the entire WS connection lifecycle from
+    // upgrade-resolved to handler-returned. It carries `request_id` so
+    // every event the handler emits inherits it as span context (same
+    // nested-`span` layout as the per-request span). Operators get a
+    // single span per connection plus `connected` / `disconnected`
+    // events bracketing the handler future.
+    let span = tracing::info_span!(
+        "ws.connection",
+        request_id = %request_id,
+        route = %pattern,
+        path = %path
+    );
+
+    let handler_task = async move {
+        match websocket.await {
+            Ok(ws_stream) => {
+                tracing::info!("websocket connected");
+
+                let missed_pings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let mut socket = crate::ws::WsSocket::from_stream_with_heartbeat(
+                    ws_stream,
+                    missed_pings.clone(),
+                );
+                // The forwarder task is spawned inside `from_stream_*`
+                // and detached. Pull its JoinHandle out NOW so we can
+                // await it after the handler returns and `outbound` is
+                // dropped - without this, the handler task (which IS
+                // tracked in WS_TASKS) reports done before the close
+                // handshake completes, and a graceful shutdown can
+                // truncate the final close frame. `take` is one-shot,
+                // and we own the only WsSocket reference here.
+                let forwarder_handle = socket.take_forwarder_handle();
+
+                // One bridge task feeds two senders: heartbeat clones
+                // `outbound`, and we keep `outbound` itself for the
+                // final close frame. When both senders drop, the
+                // bridge task exits and the forwarder closes the sink.
+                let outbound = socket.sender();
+                let heartbeat_sender = outbound.clone();
+
+                let heartbeat = tokio::spawn(crate::ws::heartbeat::run(
+                    heartbeat_sender,
+                    heartbeat_interval,
+                    missed_pings,
+                    config.max_missed_pings,
+                ));
+                let heartbeat_handle = heartbeat.abort_handle();
+
+                // Wrap the handler call in a panic boundary so a user-authored
+                // handler panic still routes into the Close(1011) + teardown
+                // arm below - without this the unwind tears down the WS task,
+                // skipping the heartbeat abort, the explicit Close frame, and
+                // the forwarder drain. `outbound`, `heartbeat_handle`, and
+                // `forwarder_handle` are extracted above, so they survive the
+                // panic and the cleanup proceeds normally.
+                let result = match AssertUnwindSafe(handler.handle(socket, suprnova_req))
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(payload) => {
+                        let msg = panic_payload_message(&payload);
+                        tracing::error!(
+                            panic = %msg,
+                            route = %pattern,
+                            "websocket handler panicked - sending Close(1011)"
+                        );
+                        Err(crate::error::FrameworkError::internal(format!(
+                            "websocket handler panicked: {msg}"
+                        )))
+                    }
+                };
+
+                // Abort the heartbeat FIRST so its sender clone drops
+                // and only `outbound` remains feeding the bridge.
+                heartbeat_handle.abort();
+
+                match result {
+                    Ok(()) => {
+                        // Send an explicit Close(1000) frame so the
+                        // peer sees a normal-closure disconnect rather
+                        // than the protocol-default 1005 ("No Status
+                        // Received") that `sink.close()` alone produces.
+                        // Best-effort: if the handler already called
+                        // `socket.close()` the bridge has terminated
+                        // and the send Errs - fine, we just move on.
+                        let close = tokio_tungstenite::tungstenite::Message::Close(Some(
+                            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                                reason: tokio_tungstenite::tungstenite::Utf8Bytes::from_static(""),
+                            },
+                        ));
+                        let _ = outbound.send(close).await;
+                        tracing::info!("websocket disconnected (ok)");
+                    }
+                    Err(e) => {
+                        // The `WebSocketHandler` trait docs (see
+                        // `framework/src/ws/mod.rs`) promise that an
+                        // `Err(_)` return closes the connection with
+                        // code 1011 (internal error). Without an
+                        // explicit Close frame here the peer would see
+                        // the protocol-default 1005 / 1006 - the
+                        // documented contract is silently broken.
+                        // Send Close(1011) explicitly, mirroring the
+                        // Ok path's Close(1000), then drop `outbound`.
+                        let close = tokio_tungstenite::tungstenite::Message::Close(Some(
+                            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Error,
+                                reason: tokio_tungstenite::tungstenite::Utf8Bytes::from_static("internal error"),
+                            },
+                        ));
+                        let _ = outbound.send(close).await;
+                        tracing::error!(error = %e, "websocket handler returned error - sent Close 1011");
+                    }
+                }
+                // Drop outbound so the bridge task exits and the
+                // forwarder reads None → calls sink.close(), completing
+                // the WebSocket close handshake.
+                drop(outbound);
+
+                // Wait for the forwarder to finish draining and close
+                // the sink. With `outbound` (and the heartbeat sender)
+                // already dropped, the forwarder will see channel-close
+                // and self-terminate quickly. Awaiting it here means
+                // WS_TASKS's drain on shutdown transitively covers the
+                // forwarder - the handler future doesn't resolve until
+                // the close handshake has been flushed to the wire.
+                if let Some(handle) = forwarder_handle {
+                    let _ = handle.await;
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "hyper upgrade failed");
+            }
+        }
+    }
+    .instrument(span);
+
+    // The chain's REQUEST_ID scope unwound when `chain.execute` returned,
+    // so `spawn_with_request_id` would capture nothing here. Re-establish
+    // the id directly around the post-upgrade session task so the handler's
+    // logs (and any work it spawns) carry the request id.
+    //
+    // Only REQUEST_ID follows the handler - deliberately NOT the request
+    // `Context` bag (query params, flash). A WebSocket session is long-lived
+    // and is not serving the originating GET's per-request state; the handler
+    // reads anything it needs from the upgrade request directly via
+    // `suprnova_req`. This matches `spawn_with_request_id`, which likewise
+    // carries only the id into spawned work.
+    let handler_task = crate::logging::REQUEST_ID.scope(request_id, handler_task);
+
+    // Take the connection-cap permit (when SERVER_MAX_CONNECTIONS is set) out of
+    // the connection task's task-local and move it into the WS session task, so
+    // the slot is held for the socket's whole lifetime rather than released when
+    // the HTTP connection task ends at the 101 handshake. `try_with` fails on the
+    // no-`Server::run` path (embedders / test fixtures), where there's no permit.
+    let conn_permit = CONN_PERMIT
+        .try_with(|cell| cell.borrow_mut().take())
+        .ok()
+        .flatten();
+    let handler_task = async move {
+        let _conn_permit = conn_permit;
+        handler_task.await;
+    };
+
+    // Track the spawned handler in WS_TASKS so Server::run can drain
+    // it on shutdown. Fall back to a bare tokio::spawn when WS_TASKS
+    // isn't initialized (T7 test fixtures and external embedders that
+    // call handle_request without going through Server::run).
+    match WS_TASKS.get() {
+        Some(tasks) => {
+            let mut tasks = tasks.lock().await;
+            // Opportunistic reap so the JoinSet doesn't grow unbounded
+            // under long-running operation; completed handles get
+            // dropped here instead of accumulating until shutdown.
+            while tasks.try_join_next().is_some() {}
+            tasks.spawn(handler_task);
+        }
+        None => {
+            tokio::spawn(handler_task);
+        }
+    }
+
+    convert_response_body(response)
+}
+
+fn bad_request_text(msg: &str) -> hyper::Response<ServerBody> {
+    hyper::Response::builder()
+        .status(hyper::StatusCode::BAD_REQUEST)
+        .body(
+            Full::new(Bytes::from(msg.to_string()))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .expect("build 400 response")
+}
+
+fn forbidden_text(msg: &str) -> hyper::Response<ServerBody> {
+    hyper::Response::builder()
+        .status(hyper::StatusCode::FORBIDDEN)
+        .body(
+            Full::new(Bytes::from(msg.to_string()))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .expect("build 403 response")
+}
+
+/// Enforce the configured [`OriginPolicy`](crate::ws::OriginPolicy) against
+/// the upgrade request's headers. Called by [`handle_ws_upgrade`] before
+/// [`hyper_tungstenite::upgrade`] commits to the protocol switch.
+///
+/// Browser WebSocket requests always carry an `Origin` header; this is the
+/// only readily-available CSRF defense for the upgrade path (no
+/// fetch-style token check applies). Non-browser clients are out of scope
+/// for `SameOrigin` - routes that serve them use `AllowAny` or a curated
+/// `AllowList`.
+///
+/// On rejection, returns a short `Err(&str)` reason suitable for logging.
+fn check_origin_policy(
+    policy: &crate::ws::OriginPolicy,
+    headers: &hyper::HeaderMap,
+) -> Result<(), &'static str> {
+    use crate::ws::OriginPolicy;
+    match policy {
+        OriginPolicy::AllowAny => Ok(()),
+        OriginPolicy::SameOrigin => {
+            let origin = headers
+                .get(hyper::header::ORIGIN)
+                .and_then(|v| v.to_str().ok())
+                .ok_or("missing Origin header")?;
+            let origin_url = url::Url::parse(origin).map_err(|_| "malformed Origin")?;
+            let origin_host = origin_url.host_str().ok_or("Origin has no host")?;
+            let origin_scheme = origin_url.scheme();
+            let origin_port = origin_url.port();
+            let host_header = headers
+                .get(hyper::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .ok_or("missing Host header")?;
+            let (host_name, host_port_opt) = split_host_header(host_header);
+            // Host names are case-insensitive (DNS). Port comparison
+            // is exact-or-default: `url::Url::port()` returns `None`
+            // when the URL omitted port OR when it explicitly carried
+            // the scheme's default, but `Host:` headers commonly send
+            // either form (`example.com` or `example.com:443`) and
+            // browsers don't normalize one to the other. Normalize
+            // both sides to the same effective port keyed by the
+            // Origin's scheme so `https://example.com` matches
+            // `example.com:443` and vice versa.
+            if !origin_host.eq_ignore_ascii_case(host_name) {
+                return Err("Origin host does not match Host header");
+            }
+            if effective_port(origin_scheme, origin_port)
+                != effective_port(origin_scheme, host_port_opt)
+            {
+                return Err("Origin port does not match Host header");
+            }
+            Ok(())
+        }
+        OriginPolicy::AllowList(list) => {
+            let origin = headers
+                .get(hyper::header::ORIGIN)
+                .and_then(|v| v.to_str().ok())
+                .ok_or("missing Origin header")?;
+            if list
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(origin))
+            {
+                Ok(())
+            } else {
+                Err("Origin not in AllowList")
+            }
+        }
+    }
+}
+
+/// Resolve a port slot against its scheme's well-known default. Used by
+/// the SameOrigin port check so a peer that sent the explicit form
+/// (`example.com:443`) and a peer that sent the elided form
+/// (`example.com`) compare equal under the same scheme. Schemes whose
+/// default port we don't track (custom upstream, `file:`, etc.) fall
+/// through with `None`, which lands them in the exact-only comparison.
+fn effective_port(scheme: &str, port: Option<u16>) -> Option<u16> {
+    if port.is_some() {
+        return port;
+    }
+    match scheme {
+        "http" | "ws" => Some(80),
+        "https" | "wss" => Some(443),
+        _ => None,
+    }
+}
+
+/// Split a `Host:` header value into `(host, port)`. Handles bracketed IPv6
+/// literals (`"[::1]:8080"` → `("[::1]", Some(8080))`) and bare names
+/// (`"example.com"` → `("example.com", None)`).
+fn split_host_header(host_header: &str) -> (&str, Option<u16>) {
+    if let Some(rest) = host_header.strip_prefix('[') {
+        // IPv6 literal: "[host]:port" or "[host]".
+        if let Some(end) = rest.find(']') {
+            let host = &host_header[..=end + 1]; // include the closing ']'
+            let after = &rest[end + 1..]; // starts with ":port" or ""
+            if let Some(port_str) = after.strip_prefix(':') {
+                let port = port_str.parse().ok();
+                return (host, port);
+            }
+            return (host, None);
+        }
+        // Malformed - fall through to the colon split.
+    }
+    match host_header.rsplit_once(':') {
+        Some((host, port_str)) => {
+            let port = port_str.parse().ok();
+            (host, port)
+        }
+        None => (host_header, None),
+    }
+}
+
+fn convert_response_body(
+    response: hyper::Response<http_body_util::Full<Bytes>>,
+) -> hyper::Response<ServerBody> {
+    let (parts, body) = response.into_parts();
+    let boxed = body.map_err(|never| match never {}).boxed();
+    hyper::Response::from_parts(parts, boxed)
+}
+
+/// Header carrying the readiness secret, when one is configured.
+///
+/// See [`crate::config::ServerConfig::health_readiness_token`].
+const HEALTH_READINESS_TOKEN_HEADER: &str = "x-suprnova-health-token";
+
+/// Which of the built-in health paths a request landed on.
+///
+/// The split exists because "the process is alive" and "the process can
+/// serve traffic" are different questions with different answers during a
+/// database outage, and k8s asks them with different probes: a liveness
+/// failure restarts the pod, a readiness failure only removes it from the
+/// load balancer. Answering a liveness probe with a database round trip -
+/// which the single original endpoint invited via `?db=true` - turns a
+/// database blip into a rolling restart of every replica, which is the
+/// one thing you least want while the database is struggling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HealthEndpoint {
+    /// `/_suprnova/health` - the original endpoint, kept exactly as
+    /// documented. Liveness by default, readiness with `?db=true`.
+    ///
+    /// Every deployment guide in `manual/`, the generated Docker
+    /// `HEALTHCHECK`, the Railway `healthcheckPath` and the DigitalOcean
+    /// app spec name this path, so its behaviour is a published contract
+    /// rather than an implementation detail.
+    Legacy,
+    /// `/_suprnova/health/live` - liveness only. Touches nothing, so it
+    /// answers 200 for as long as the process can serve a request at all.
+    Live,
+    /// `/_suprnova/health/ready` - readiness. Probes dependencies.
+    Ready,
+}
+
+impl HealthEndpoint {
+    fn from_path(path: &str) -> Option<Self> {
+        match path {
+            "/_suprnova/health" => Some(Self::Legacy),
+            "/_suprnova/health/live" => Some(Self::Live),
+            "/_suprnova/health/ready" => Some(Self::Ready),
+            _ => None,
+        }
+    }
+
+    /// Whether this request should run the database probe.
+    fn probes_database(self, query: &str) -> bool {
+        match self {
+            Self::Live => false,
+            Self::Ready => true,
+            Self::Legacy => query_asks_for_db(query),
+        }
+    }
+}
+
+/// Whether a query string asks for the database probe.
+///
+/// This used to be `query.contains("db=true")`, a raw substring test over
+/// the whole query - so `?nodb=true`, `?notdb=true` and `?x=db=true` all
+/// ran a database round trip, and a probe configured to *avoid* touching
+/// the database got the opposite of what it asked for. Parsing the query
+/// properly and matching the `db` key exactly is the fix.
+///
+/// The value is read permissively: the key being present means yes unless
+/// the value is explicitly falsey. The asymmetry is deliberate. Failing to
+/// probe when an operator asked for one reports a healthy service during a
+/// database outage; probing when they did not costs one `SELECT 1`. Only
+/// one of those is worth being strict about, and it is not the cheap one.
+fn query_asks_for_db(query: &str) -> bool {
+    url::form_urlencoded::parse(query.as_bytes()).any(|(key, value)| {
+        key == "db"
+            && !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            )
+    })
+}
+
+/// Whether a request may reach the readiness probe.
+///
+/// Public unless `SERVER_HEALTH_READINESS_TOKEN` is set - see
+/// [`crate::config::ServerConfig::health_readiness_token`] for why that
+/// default cannot change. When a token *is* configured, the comparison is
+/// constant-time: a secret checked with `==` leaks its prefix through
+/// response timing to a caller who can retry, and this endpoint is
+/// designed to be polled.
+fn readiness_token_matches(headers: &hyper::HeaderMap) -> bool {
+    let expected = crate::config::Config::get::<crate::config::ServerConfig>()
+        .unwrap_or_else(crate::config::ServerConfig::from_env)
+        .health_readiness_token;
+
+    let Some(expected) = expected else {
+        return true;
+    };
+
+    headers
+        .get(HEALTH_READINESS_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|presented| {
+            crate::payments::constant_time_eq(presented.as_bytes(), expected.as_bytes())
+        })
+}
+
+/// Built-in health check endpoints under /_suprnova/health.
+///
+/// Returns `{"status": "ok", "timestamp": "..."}` with HTTP 200 by
+/// default. When `probe_db` is set - `/_suprnova/health/ready`, or
+/// `/_suprnova/health?db=true` - database connectivity is checked too; if
+/// any sub-check fails, the response status flips to 503 Service
+/// Unavailable and the top-level `status` field changes to `"degraded"` so
+/// k8s-style `livenessProbe` / `readinessProbe` configurations against
+/// this endpoint can trigger restart on outage. The body shape (with
+/// `database` and `database_error` fields) stays the same so dashboards
+/// can parse both healthy and degraded responses uniformly.
+async fn health_response(probe_db: bool, request_id: &RequestId) -> hyper::Response<ServerBody> {
+    use chrono::Utc;
+    use serde_json::json;
+
+    let timestamp = Utc::now().to_rfc3339();
+
+    let mut response = json!({
+        "status": "ok",
+        "timestamp": timestamp
+    });
+    let mut degraded = false;
+
+    if probe_db {
+        // Try to check database connection
+        match check_database_health().await {
+            Ok(_) => {
+                response["database"] = json!("connected");
+            }
+            Err(e) => {
+                response["database"] = json!("error");
+                response["status"] = json!("degraded");
+                degraded = true;
+
+                // The detail always goes to the log, where an operator can
+                // read it, and only reaches the response body in debug.
+                //
+                // `/_suprnova/health` is unauthenticated by design - it
+                // exists for k8s liveness/readiness probes, so it cannot
+                // sit behind auth. That makes it the one 5xx path that
+                // hands a raw driver error to anyone who asks. Driver
+                // errors name hosts, ports, database and schema names, and
+                // server versions; sqlx's configuration errors can carry
+                // the connection URL itself. Returning that to an
+                // unauthenticated caller during an outage is a gift.
+                //
+                // `http/response.rs` and `resources/errors.rs` already gate
+                // their 5xx detail on `status >= 500 && is_debug()`. This
+                // endpoint predated that convention and never adopted it;
+                // it does now.
+                tracing::error!(
+                    request_id = %request_id.as_str(),
+                    error = %e,
+                    "health check: database probe failed"
+                );
+                if crate::config::Config::is_debug() {
+                    response["database_error"] = json!(e);
+                }
+            }
+        }
+    }
+
+    let status = if degraded { 503 } else { 200 };
+    let body = serde_json::to_string(&response).unwrap_or_else(|_| {
+        if degraded {
+            r#"{"status":"degraded"}"#.to_string()
+        } else {
+            r#"{"status":"ok"}"#.to_string()
+        }
+    });
+
+    hyper::Response::builder()
+        .status(status)
+        .header("Content-Type", "application/json")
+        .header("X-Request-Id", request_id.as_str())
+        .body(
+            Full::new(Bytes::from(body))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .expect("health response builder must succeed for a static status + header set")
+}
+
+/// Parse `/_suprnova/lang/<locale>.ftl` into the locale it names.
+///
+/// Returns `None` for anything that isn't that exact shape - a different
+/// prefix, a missing `.ftl` suffix, an empty locale segment, or a segment
+/// that fails [`Locale::parse`] - so the caller can fall through to
+/// normal routing rather than hand-build a 404. That mirrors the health
+/// block's `readiness_token_matches` fallthrough just above: the shape of
+/// "not our request" and "not found" are made to be the same code path,
+/// so they can't drift into being distinguishable.
+#[cfg(feature = "localization")]
+fn catalog_locale_from_path(path: &str) -> Option<Locale> {
+    let locale_str = path
+        .strip_prefix("/_suprnova/lang/")?
+        .strip_suffix(".ftl")?;
+    if locale_str.is_empty() {
+        return None;
+    }
+    Locale::parse(locale_str).ok()
+}
+
+/// Whether the `?v=` query parameter names `hash` exactly.
+///
+/// `v` is the cache-buster the frontend catalog loader appends once it
+/// already knows a locale's current content hash (from a prior fetch's
+/// `ETag`, or from the Inertia share). A match means the caller is asking
+/// for precisely the bytes this hash identifies, which can never change
+/// underneath that URL - new content gets a new hash and a new URL - so
+/// the response is safe to cache forever. No `v`, or one that names a
+/// hash that is no longer current, gets `no-cache`: the browser must
+/// revalidate every time rather than risk serving stale strings.
+#[cfg(feature = "localization")]
+fn catalog_request_is_immutable(query: &str, hash: &str) -> bool {
+    url::form_urlencoded::parse(query.as_bytes()).any(|(key, value)| key == "v" && value == hash)
+}
+
+/// Whether the `If-None-Match` header value already names `hash`.
+///
+/// Per RFC 9110 §8.8.3.2, entity-tag comparison for `If-None-Match` is by
+/// opaque tag, ignoring an optional leading `W/` weak-validator prefix,
+/// and a client may present several comma-separated candidates (e.g. from
+/// a browser cache holding tags for more than one prior response). This
+/// checks each candidate the same way [`CatalogSource::hash`] was turned
+/// into an `ETag` below, so a tag this endpoint issued always round-trips.
+#[cfg(feature = "localization")]
+fn if_none_match_hits(if_none_match: &str, hash: &str) -> bool {
+    if_none_match.split(',').any(|candidate| {
+        let candidate = candidate
+            .trim()
+            .strip_prefix("W/")
+            .unwrap_or(candidate.trim());
+        candidate.trim_matches('"') == hash
+    })
+}
+
+/// Build the response for a resolved `/_suprnova/lang/<locale>.ftl` fetch -
+/// shared by the fresh (200) and revalidation (304) cases so the ETag
+/// and `Cache-Control` logic lives in exactly one place and can't drift
+/// between them.
+///
+/// `text/plain; charset=utf-8` is deliberate rather than an omission:
+/// Fluent (`.ftl`) has no IANA-registered MIME type, and `text/plain` is
+/// what the Fluent tooling ecosystem (the `@fluent/bundle` loader,
+/// editor syntax highlighters) expects when fetching a catalog directly.
+#[cfg(feature = "localization")]
+fn catalog_response(
+    catalog: &CatalogSource,
+    query: &str,
+    if_none_match: Option<&str>,
+    request_id: &RequestId,
+) -> hyper::Response<ServerBody> {
+    let etag = format!("\"{}\"", catalog.hash);
+    let cache_control = if catalog_request_is_immutable(query, &catalog.hash) {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+
+    if if_none_match.is_some_and(|value| if_none_match_hits(value, &catalog.hash)) {
+        return hyper::Response::builder()
+            .status(304)
+            .header("ETag", etag)
+            .header("Cache-Control", cache_control)
+            .header("X-Request-Id", request_id.as_str())
+            .body(
+                Full::new(Bytes::new())
+                    .map_err(|never| match never {})
+                    .boxed(),
+            )
+            .expect("catalog 304 response builder must succeed for a static header set");
+    }
+
+    hyper::Response::builder()
+        .status(200)
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .header("ETag", etag)
+        .header("Cache-Control", cache_control)
+        .header("X-Request-Id", request_id.as_str())
+        .body(
+            Full::new(Bytes::from(catalog.text.to_string()))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .expect("catalog response builder must succeed for a static header set")
+}
+
+/// Acquire a connection permit, unless shutdown wins the race.
+///
+/// Returns `None` when shutdown won, meaning the caller should stop
+/// accepting rather than keep waiting for a slot that may never free.
+///
+/// Taking the shutdown side as a generic future keeps this testable
+/// without signals: a test can pass any future, including one that is
+/// already ready.
+async fn acquire_permit_or_shutdown(
+    sem: &Arc<tokio::sync::Semaphore>,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    tokio::select! {
+        permit = sem.clone().acquire_owned() => {
+            Some(permit.expect("connection semaphore is never closed"))
+        }
+        _ = shutdown => None,
+    }
+}
+
+/// Wait for every in-flight connection task to finish, giving up after
+/// `deadline`. Returns how many were still running when it gave up - `0`
+/// means a clean drain.
+///
+/// Extracted from `Server::run` so the bound is testable. The property
+/// that matters is not "connections finish" but "shutdown completes even
+/// when they do not": a single client holding a connection open must not
+/// be able to keep the process alive indefinitely, which is what an
+/// unbounded `join_next()` loop would do.
+async fn drain_connections(
+    connections: &mut tokio::task::JoinSet<()>,
+    deadline: std::time::Duration,
+) -> usize {
+    let drain_deadline = tokio::time::sleep(deadline);
+    tokio::pin!(drain_deadline);
+    loop {
+        tokio::select! {
+            next = connections.join_next() => {
+                if next.is_none() {
+                    return 0; // JoinSet empty - all drained
+                }
+            }
+            _ = &mut drain_deadline => {
+                // Abort, then await - the same shape the WebSocket and
+                // supervisor drains already use.
+                //
+                // Returning here without aborting left the abandoned
+                // connection tasks *running* while the caller went on to
+                // flush OTel and shut the runtime down. That breaks the
+                // one ordering invariant this drain exists to hold: spans
+                // and metrics must land in the batch processors before
+                // `shutdown()`. The tasks still emitting were precisely
+                // the ones the deadline gave up on, and the JoinSet's own
+                // `Drop` would not abort them until the caller's scope
+                // ended - well after the flush.
+                let abandoned = connections.len();
+                connections.abort_all();
+                while connections.join_next().await.is_some() {}
+                return abandoned;
+            }
+        }
+    }
+}
+
+/// Check database health by attempting a simple query
+async fn check_database_health() -> Result<(), String> {
+    use crate::database::DB;
+    use sea_orm::ConnectionTrait;
+
+    if !DB::is_connected() {
+        return Err("Database not initialized".to_string());
+    }
+
+    let conn = DB::connection().map_err(|e| e.to_string())?;
+
+    // Execute a simple query to verify connection is alive
+    conn.inner()
+        .execute_unprepared("SELECT 1")
+        .await
+        .map_err(|e| format!("Database query failed: {}", e))?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Invalid `Server::host()` strings used to panic at boot via
+    //! `host.parse().unwrap()`. These tests pin the current behaviour -
+    //! a typed `FrameworkError` with a message that names the offending
+    //! value and the expected format - so a future regression to
+    //! `.unwrap()` fails loudly.
+    use super::*;
+    use crate::routing::Router;
+
+    #[test]
+    fn invalid_host_returns_typed_error_not_panic() {
+        let server = Server::new(Router::new()).host("not-a-valid-host");
+        let result = server.get_addr();
+        let err = result.expect_err("invalid host must surface as Err, not panic or Ok");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid server host"),
+            "error message must identify the failure mode; got: {msg}"
+        );
+        assert!(
+            msg.contains("not-a-valid-host"),
+            "error message must echo the bad host value; got: {msg}"
+        );
+        // 500-class - internal misconfiguration, not a client error.
+        assert_eq!(err.status_code(), 500);
+    }
+
+    #[test]
+    fn empty_host_returns_typed_error_not_panic() {
+        let server = Server::new(Router::new()).host("");
+        let result = server.get_addr();
+        let err = result.expect_err("empty host must surface as Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid server host"),
+            "error message must identify the failure mode; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn valid_ipv4_host_parses_correctly() {
+        let server = Server::new(Router::new()).host("127.0.0.1").port(8000);
+        let addr = server.get_addr().expect("valid IPv4 should parse");
+        assert_eq!(addr.to_string(), "127.0.0.1:8000");
+    }
+
+    #[test]
+    fn valid_ipv6_host_parses_correctly() {
+        let server = Server::new(Router::new()).host("::1").port(8000);
+        let addr = server.get_addr().expect("valid IPv6 should parse");
+        // SocketAddr renders IPv6 with bracket notation.
+        assert_eq!(addr.to_string(), "[::1]:8000");
+    }
+
+    /// `Server::new` must mirror `from_config` and pull globally registered
+    /// middleware (`MiddlewareRegistry::from_global`), not start with an
+    /// empty registry - otherwise an embedder choosing `Server::new` would
+    /// silently drop every `global_middleware!`-registered global. Asserts
+    /// the delta from registering one fresh global so the check is immune to
+    /// any other global the process may already carry.
+    #[test]
+    fn new_snapshots_globally_registered_middleware() {
+        use crate::http::Response;
+        use crate::middleware::Next;
+        use async_trait::async_trait;
+
+        struct NewProbeMiddleware;
+        #[async_trait]
+        impl Middleware for NewProbeMiddleware {
+            async fn handle(&self, request: Request, next: Next) -> Response {
+                next(request).await
+            }
+        }
+
+        let before = Server::new(Router::new())
+            .middleware
+            .global_middleware()
+            .len();
+        crate::register_global_middleware(NewProbeMiddleware);
+        let after = Server::new(Router::new())
+            .middleware
+            .global_middleware()
+            .len();
+
+        assert_eq!(
+            after,
+            before + 1,
+            "Server::new must snapshot newly registered global middleware \
+             (it pulls MiddlewareRegistry::from_global, like from_config)"
+        );
+    }
+
+    fn ws_headers(origin: &str, host: &str) -> hyper::HeaderMap {
+        let mut h = hyper::HeaderMap::new();
+        h.insert(hyper::header::ORIGIN, origin.parse().unwrap());
+        h.insert(hyper::header::HOST, host.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn same_origin_normalizes_https_default_port_443() {
+        // The browser elides :443 on https Origin; the Host header
+        // may carry the explicit form (`example.com:443`) or the
+        // elided form. The exact-or-default rule must accept both
+        // shapes either way around - pre-fix the explicit/elided
+        // mix returned `Origin port does not match` despite being
+        // the SAME origin.
+        let policy = crate::ws::OriginPolicy::SameOrigin;
+
+        // Origin elides 443, Host carries 443 explicit.
+        let h = ws_headers("https://example.com", "example.com:443");
+        assert!(
+            check_origin_policy(&policy, &h).is_ok(),
+            "https://example.com must equal example.com:443"
+        );
+
+        // Origin carries 443 explicit, Host elides.
+        let h = ws_headers("https://example.com:443", "example.com");
+        assert!(
+            check_origin_policy(&policy, &h).is_ok(),
+            "https://example.com:443 must equal example.com"
+        );
+    }
+
+    #[test]
+    fn same_origin_normalizes_http_default_port_80() {
+        let policy = crate::ws::OriginPolicy::SameOrigin;
+
+        let h = ws_headers("http://example.com", "example.com:80");
+        assert!(check_origin_policy(&policy, &h).is_ok());
+
+        let h = ws_headers("http://example.com:80", "example.com");
+        assert!(check_origin_policy(&policy, &h).is_ok());
+    }
+
+    #[test]
+    fn same_origin_still_rejects_genuine_port_mismatch() {
+        // Default-port normalization must NOT let a legitimately
+        // different port slip through. https on default 443 vs
+        // explicit 8443 are different origins.
+        let policy = crate::ws::OriginPolicy::SameOrigin;
+        let h = ws_headers("https://example.com", "example.com:8443");
+        assert_eq!(
+            check_origin_policy(&policy, &h),
+            Err("Origin port does not match Host header"),
+        );
+    }
+
+    #[test]
+    fn effective_port_returns_explicit_when_present() {
+        assert_eq!(effective_port("https", Some(8443)), Some(8443));
+        assert_eq!(effective_port("http", Some(8080)), Some(8080));
+        // Even when the explicit port happens to be the default,
+        // we return it as-is - `url::Url::port()` already stripped
+        // the default to None for us; this branch only fires when
+        // the call site passed Some.
+        assert_eq!(effective_port("https", Some(443)), Some(443));
+    }
+
+    #[test]
+    fn effective_port_fills_well_known_defaults() {
+        assert_eq!(effective_port("http", None), Some(80));
+        assert_eq!(effective_port("ws", None), Some(80));
+        assert_eq!(effective_port("https", None), Some(443));
+        assert_eq!(effective_port("wss", None), Some(443));
+    }
+
+    #[test]
+    fn effective_port_leaves_unknown_scheme_alone() {
+        // Unknown / custom schemes don't get fabricated defaults -
+        // the port comparison falls through to the literal None==None
+        // arm which is the safe (no-spoofing) default.
+        assert_eq!(effective_port("ftp", None), None);
+        assert_eq!(effective_port("file", None), None);
+    }
+
+    // ---- CI-05: saturated shutdown ------------------------------------
+    //
+    // `Server::run` drains in-flight connections on shutdown, bounded by a
+    // deadline. The bound is the interesting half: without it, one client
+    // holding a connection open keeps the process alive forever, and a
+    // rolling deploy stalls behind whichever request never finishes.
+    //
+    // These use `tokio::time::pause()`, so the deadline is virtual - the
+    // tests assert the semantics, not a wall-clock duration, and take
+    // microseconds regardless of how long the real 10s window is.
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_returns_immediately_when_nothing_is_in_flight() {
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        let abandoned = drain_connections(&mut set, std::time::Duration::from_secs(10)).await;
+        assert_eq!(abandoned, 0, "an empty JoinSet drains cleanly");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_waits_for_connections_that_finish_in_time() {
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            set.spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            });
+        }
+
+        let abandoned = drain_connections(&mut set, std::time::Duration::from_secs(10)).await;
+
+        assert_eq!(
+            abandoned, 0,
+            "every task finished inside the window, so none may be reported \
+             abandoned - a drain that gave up early would cut off responses \
+             that were about to be written"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_gives_up_on_connections_that_outlast_the_deadline() {
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        // Three that finish promptly, two that never realistically will.
+        for _ in 0..3 {
+            set.spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            });
+        }
+        for _ in 0..2 {
+            set.spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            });
+        }
+
+        let abandoned = drain_connections(&mut set, std::time::Duration::from_secs(10)).await;
+
+        assert_eq!(
+            abandoned, 2,
+            "the two slow connections must be abandoned and counted; the \
+             three fast ones must still have been awaited"
+        );
+    }
+
+    /// The liveness property, stated directly: a connection that never ends
+    /// must not prevent the drain from returning.
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_that_never_ends_cannot_block_shutdown() {
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        set.spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        let abandoned = drain_connections(&mut set, std::time::Duration::from_secs(10)).await;
+
+        assert_eq!(
+            abandoned, 1,
+            "a never-completing connection is abandoned rather than awaited; \
+             if this test hangs instead of failing, the deadline is gone and \
+             one slow client can pin the process open through every deploy"
+        );
+    }
+
+    /// P2-01. The endpoint used to decide whether to hit the database with
+    /// `query.contains("db=true")` - a substring test over the raw query
+    /// string, so any key *ending* in `db` matched, and so did a value that
+    /// merely contained the text.
+    ///
+    /// The `nodb=true` case is the one that matters: an operator writing a
+    /// probe that explicitly says "do not touch the database" got a
+    /// database round trip on every poll.
+    #[test]
+    fn the_db_flag_matches_a_key_exactly_not_a_substring() {
+        // The documented form, and the obvious synonyms.
+        assert!(query_asks_for_db("db=true"));
+        assert!(query_asks_for_db("db=1"));
+        assert!(query_asks_for_db("verbose=1&db=true"));
+        assert!(query_asks_for_db("db=TRUE"), "value is case-insensitive");
+
+        // The regression. Every one of these ran `SELECT 1` before.
+        assert!(
+            !query_asks_for_db("nodb=true"),
+            "`nodb=true` reads as an explicit request NOT to touch the \
+             database; matching it is the exact opposite of the ask"
+        );
+        assert!(!query_asks_for_db("notdb=true"));
+        assert!(!query_asks_for_db("other=1&notdb=true"));
+        assert!(
+            !query_asks_for_db("x=db%3Dtrue"),
+            "a `db=true` substring inside somebody else's *value* is not a \
+             request for a database probe"
+        );
+
+        // Explicitly off stays off.
+        assert!(!query_asks_for_db("db=false"));
+        assert!(!query_asks_for_db("db=0"));
+        assert!(!query_asks_for_db("db=no"));
+        assert!(!query_asks_for_db("db=off"));
+
+        // Nothing asked, nothing probed.
+        assert!(!query_asks_for_db(""));
+        assert!(!query_asks_for_db("verbose=1"));
+
+        // Present-but-empty (`?db` or `?db=`) counts as asking. Skipping a
+        // probe an operator meant to request reports a healthy service
+        // during an outage; running one they did not costs a `SELECT 1`.
+        assert!(query_asks_for_db("db"));
+        assert!(query_asks_for_db("db="));
+    }
+
+    /// Liveness must never touch a dependency, and readiness must always
+    /// touch one, regardless of what the query string says. Only the
+    /// original path keeps taking its answer from the query - because its
+    /// behaviour is a documented contract.
+    #[test]
+    fn each_health_path_decides_the_database_probe_for_itself() {
+        assert_eq!(
+            HealthEndpoint::from_path("/_suprnova/health"),
+            Some(HealthEndpoint::Legacy)
+        );
+        assert_eq!(
+            HealthEndpoint::from_path("/_suprnova/health/live"),
+            Some(HealthEndpoint::Live)
+        );
+        assert_eq!(
+            HealthEndpoint::from_path("/_suprnova/health/ready"),
+            Some(HealthEndpoint::Ready)
+        );
+        assert_eq!(HealthEndpoint::from_path("/_suprnova/healthz"), None);
+        assert_eq!(HealthEndpoint::from_path("/_suprnova/health/"), None);
+        assert_eq!(HealthEndpoint::from_path("/health"), None);
+
+        // Liveness ignores the query entirely: a database outage must not
+        // be able to fail a liveness probe and restart every replica.
+        assert!(!HealthEndpoint::Live.probes_database("db=true"));
+        // Readiness always probes, even when asked not to.
+        assert!(HealthEndpoint::Ready.probes_database("db=false"));
+        assert!(HealthEndpoint::Ready.probes_database(""));
+        // The documented path keeps its documented behaviour.
+        assert!(!HealthEndpoint::Legacy.probes_database(""));
+        assert!(HealthEndpoint::Legacy.probes_database("db=true"));
+    }
+
+    // ---- OPS-01: shutdown must not be starved by the connection cap ----
+    //
+    // Every one of these wraps the call in a real timeout. A regression
+    // here manifests as a hang, and a hanging test in CI reads as
+    // infrastructure trouble rather than a broken invariant - so the
+    // failure is forced to surface as an assertion instead.
+
+    /// The defect this replaces: `acquire_owned().await` ran inside the
+    /// branch `select!` had already committed to, so while every slot was
+    /// held the accept loop polled no shutdown branch at all. A
+    /// `SERVER_MAX_CONNECTIONS`-capped deployment serving long-lived
+    /// WebSocket sessions sits in that state as its *normal* condition:
+    /// SIGTERM was ignored, no drain ran, and the orchestrator SIGKILLed
+    /// it at the end of the grace period.
+    #[tokio::test]
+    async fn a_saturated_cap_does_not_swallow_the_shutdown_signal() {
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let _held = sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the only permit is available");
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            acquire_permit_or_shutdown(&sem, std::future::ready(())),
+        )
+        .await
+        .expect(
+            "waiting for a connection slot must stay interruptible; a hang here \
+             is exactly the signal-deaf accept loop this fixes",
+        );
+
+        assert!(
+            outcome.is_none(),
+            "shutdown won the race, so the caller must stop accepting rather \
+             than hold an accepted connection waiting for a slot"
+        );
+    }
+
+    /// The other half: shutdown must not be reported when it has not
+    /// happened, or every capped server would refuse traffic.
+    #[tokio::test]
+    async fn a_free_slot_is_taken_rather_than_mistaken_for_shutdown() {
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            acquire_permit_or_shutdown(&sem, std::future::pending::<()>()),
+        )
+        .await
+        .expect("an available permit must be handed out immediately");
+
+        assert!(
+            outcome.is_some(),
+            "a free slot must produce a permit; returning None would refuse \
+             a connection the cap allows"
+        );
+    }
+
+    // The missed-signal property this file used to assert moved to
+    // `crate::signals` with the listener itself, and gained three siblings
+    // there. Asserting it from here as well would test the same code twice
+    // through a longer path.
+
+    /// The drain reported these connections abandoned and then left them
+    /// *running*. Dropping the JoinSet would not abort them until the
+    /// caller's scope ended - well after the telemetry flush the drain
+    /// exists to order against. Its two sibling drains (WebSocket,
+    /// supervisor) both abort and await; this one did neither.
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_drain_stops_the_tasks_it_abandons() {
+        let ticks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        for _ in 0..4 {
+            let ticks = ticks.clone();
+            set.spawn(async move {
+                loop {
+                    ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            });
+        }
+
+        let abandoned = drain_connections(&mut set, std::time::Duration::from_secs(1)).await;
+        assert_eq!(abandoned, 4, "none of these tasks ever finish on their own");
+
+        let at_deadline = ticks.load(std::sync::atomic::Ordering::SeqCst);
+        // Ample virtual time for anything still alive to keep ticking.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        assert_eq!(
+            ticks.load(std::sync::atomic::Ordering::SeqCst),
+            at_deadline,
+            "abandoned connections must be aborted, not detached - a task still \
+             running here is still emitting spans while the process flushes OTel \
+             and shuts the runtime down"
+        );
+    }
+}

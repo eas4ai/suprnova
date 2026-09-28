@@ -1,0 +1,186 @@
+# suprnova new
+
+`suprnova new` genera el andamiaje de un proyecto de Suprnova - un
+crate de Cargo nuevo con controladores, rutas, migraciones, una SPA
+de Inertia, y un flujo de autenticación funcional ya conectados entre
+sí. Ejecútalo una vez por app, y luego vive en `suprnova serve` a
+partir de ahí.
+
+## Uso
+
+```bash
+suprnova new [name] [options]
+```
+
+Si se omite `name`, el asistente interactivo lo solicita. El nombre
+se convierte en el directorio del proyecto, el nombre del paquete de
+Cargo (tras convertirlo a snake_case), y el `APP_NAME` por defecto en
+`.env`. Los nombres deben ser letras/dígitos ASCII/`-`/`_`, empezar
+por una letra, no contener separadores de ruta ni `..`, y tener 64
+caracteres o menos.
+
+## Opciones
+
+| Opción | Descripción |
+|---|---|
+| `--frontend <svelte\|react\|vue>` | Elige el framework de la SPA sin interacción. Entra en conflicto con `--api`. |
+| `--api` | Genera el andamiaje de un proyecto solo JSON:API (sin Inertia, sin SPA, con autenticación por token en lugar de sesiones). |
+| `--no-interaction` | Omite todas las preguntas y usa los valores por defecto (nombre `my-suprnova-app`, frontend `svelte`, autor/descripción vacíos). |
+| `--no-git` | Omite `git init` en el proyecto nuevo. |
+| `--with-portless` | Emite un `portless.json` para que [`suprnova dev:tls`](dev-tls.md) pueda servir la app en `https://<name>.localhost`. Opcional; no cambia nada más. |
+
+## Modo interactivo
+
+```bash
+suprnova new my-app
+```
+
+El asistente hace cuatro preguntas, en este orden:
+
+1. **Nombre del proyecto** - por defecto usa el argumento del
+   directorio (`my-app`)
+2. **Descripción** - se usa como la descripción del paquete de Cargo
+3. **Autor** - se usa como el autor del paquete de Cargo; por
+   defecto toma tu `git config user.name <name@email>` si está
+   establecido
+4. **Framework de frontend** - `Svelte (recommended)`, `React`, o
+   `Vue`
+
+Tras confirmar, el generador de andamiaje escribe el proyecto,
+ejecuta `git init` (a menos que se use `--no-git`), e imprime los
+siguientes pasos:
+
+```
+Backend  http://localhost:8765
+Frontend http://localhost:5765
+```
+
+## Modo no interactivo
+
+Para CI, dotfiles, o configuración por script, pasa
+`--no-interaction` más los flags que quieras sobrescribir:
+
+```bash
+suprnova new my-app --frontend svelte --no-interaction
+```
+
+Valores por defecto bajo `--no-interaction`:
+
+- Frontend: `svelte`
+- Descripción: `"A web application built with Suprnova"`
+- Autor: vacío
+- Git: inicializado
+
+No existen flags `--description` ni `--author`; esos valores solo se
+establecen a través de las preguntas interactivas, o toman sus
+valores por defecto.
+
+## Proyecto solo API
+
+Para backends de servicio sin SPA, usa `--api`:
+
+```bash
+suprnova new my-api --api
+```
+
+El iniciador de API es considerablemente más pequeño: sin directorio
+`frontend/`, sin Inertia, sin vistas de autenticación, y con un layout
+de crate único en `src/main.rs`. Inicializa Magnetar contra la conexión
+compartida de SeaORM, crea el modelo canónico `app_users`, instala
+`BearerTokenMiddleware`, y usa `Auth::password()` para el registro y el
+inicio de sesión. `PASSKEY_RP_ID` y `PASSKEY_RP_ORIGIN` son leídos por
+el bootstrap generado con valores por defecto locales. El iniciador
+también incluye un controlador de usuarios de ejemplo y un
+serializador JSON `UserResource`, y se vincula al puerto 8765 en
+`.env`.
+
+`--api` es mutuamente excluyente con `--frontend`; pasar ambos
+produce un error. Bajo `--api`, solo se pregunta el nombre del
+proyecto - las preguntas de descripción/autor/frontend se omiten.
+
+## Lo que se crea con andamiaje
+
+Un recorrido completo por los directorios vive en
+[Estructura de directorios](structure.md); la versión corta es:
+
+- `cmd/main.rs` - entrada del binario; llama a `Application::new()…run()`
+- `src/` - controladores, acciones, comandos, config, middleware,
+  modelos, migraciones, más `bootstrap.rs` y `routes.rs`. El
+  `bootstrap.rs` generado cablea la cadena de middleware global -
+  logging, sesión, locale, CSRF, análisis de include - y llama a
+  [`Inertia::install`](frontend-inertia-responses.md), que añade los
+  middlewares del protocolo de Inertia (`409` de versión de assets,
+  `302 → 303` en redirecciones que no son GET). La versión de assets
+  que anuncia tiene por defecto un hash del manifiesto de Vite, así que
+  la publicación de un build del frontend la cambia automáticamente;
+  consulta [Detección de versión](frontend-inertia-responses.md). La
+  misma llamada fija el frontend con el que generaste el andamiaje, de
+  modo que el shell HTML carga el punto de entrada de Vite de ese
+  framework; `.env` lleva el `SUPRNOVA_FRONTEND` correspondiente para
+  los propios generadores de la CLI
+- `src/bin/console.rs` - el análogo de `php artisan` por proyecto
+- `frontend/` - Vite 8 + Tailwind v4 + el framework que elijas, con las
+  páginas Home / Dashboard / Login / Register / ForgotPassword /
+  ResetPassword / VerifyEmail ya conectadas a través de Inertia
+- los flujos de cuenta: el registro envía un enlace de verificación y
+  continúa a `/verify-email`, que lo reenvía y lo consume;
+  `/forgot-password` envía un enlace de restablecimiento a una dirección
+  verificada y `/reset-password` recibe la nueva contraseña. El correo
+  sale por los ajustes `MAIL_*` de `.env`, que apuntan a un capturador
+  local en el puerto 1025 (el Mailpit que añade
+  `suprnova docker:compose --with-mailpit`); pon `MAIL_DRIVER=log` para
+  imprimir cada mensaje, enlace incluido, en el log del servidor
+- `src/routes.rs` - las rutas de autenticación y de cuenta, y un
+  fallback de archivos estáticos que sirve `public/` (el frontend
+  compilado) en producción
+- `src/migrations/` - las tablas `users`, `sessions`, `remember_tokens` y
+  `auth_flow_tokens` listas para usar
+- `.env` - base de datos SQLite por defecto, con una `APP_KEY` recién
+  generada para que la aplicación arranque sin intervención del
+  operador
+- `.gitignore`, `Cargo.toml`
+
+### Por qué Suprnova diverge
+
+Laravel viene con Blade y trae un frontend después, vía
+Breeze/Jetstream. Suprnova va en la dirección contraria: `suprnova new`
+siempre genera el andamiaje de una SPA real (Svelte/React/Vue sobre
+Inertia) o de un proyecto JSON:API real. No hay un iniciador que ponga
+por delante un motor de plantillas - si quieres HTML renderizado en el
+servidor, Tera está disponible, pero no es la forma por defecto y no hay
+ninguna ruta en el generador de andamiaje que ponga las vistas al frente
+de tu aplicación.
+
+El frontend por defecto es **Svelte 5** (con runes activadas), no React.
+Lo elegimos porque es el más ligero de los tres en tiempo de ejecución y
+el más cercano a la filosofía del framework de "victorias en tiempo de
+compilación antes que ingenio en tiempo de ejecución". React y Vue son
+igual de primera clase - elige el que conozca tu equipo.
+
+## Distribución
+
+La propia CLI se distribuye vía git, no vía crates.io (fase previa al
+lanzamiento):
+
+```bash
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v2.1.0 suprnova-cli
+```
+
+`--force` sobre el mismo comando actualiza una instalación existente.
+Los proyectos creados con andamiaje dependen del crate del framework de
+la misma forma - una dependencia git en su `Cargo.toml`, fijada a la
+etiqueta de lanzamiento actual. Consulta [Instalación](installation.md)
+para los requisitos previos completos de la cadena de herramientas.
+
+## Siguiente
+
+- [Instalación](installation.md) - requisitos previos de Rust/Node/BD
+  y configuración de la cadena de herramientas
+- [Estructura de directorios](structure.md) - qué hace cada archivo
+  generado con el andamiaje
+- [Inicio rápido](quickstart.md) - los primeros 5 minutos después de
+  `suprnova new`
+- [suprnova serve](cli-serve.md) - el ejecutor de dev que usarás a
+  continuación
+- [Consola](console.md) - `cargo run --bin console` y el sistema
+  `#[command]`

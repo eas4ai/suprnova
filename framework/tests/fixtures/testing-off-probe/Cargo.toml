@@ -1,0 +1,31 @@
+# A separate Cargo workspace - its own `[workspace]` table stops the
+# repository workspace from absorbing it, and its lockfile is its own - the
+# same isolation `crates/suprnova-live/tests/fixtures/compile/` uses. This
+# manifest is both the workspace root and its one package.
+[workspace]
+resolver = "3"
+
+[package]
+name = "testing-off-probe"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94.0"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "testing-off-probe"
+path = "src/main.rs"
+
+[dependencies]
+# The production build shape (design doc section 5, vocabulary): default
+# features off, the nine non-`testing` defaults. `with-testing` is this
+# probe's own switch, proving the exact same set of references compiles
+# once `suprnova/testing` is added back and fails without it.
+suprnova = { path = "../../../../framework", default-features = false, features = [
+    "filesystem", "database-sqlite", "database-postgres", "database-mysql",
+    "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
+] }
+
+[features]
+with-testing = ["suprnova/testing"]

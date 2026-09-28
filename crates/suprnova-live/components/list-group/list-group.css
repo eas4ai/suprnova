@@ -1,0 +1,22 @@
+@layer suprnova-ui {
+  .sn-list-group {
+    display: grid;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border: var(--sn-state-border-width) solid var(--sn-color-border);
+    border-radius: var(--sn-radius-md);
+  }
+
+  .sn-list-item {
+    display: flex;
+    align-items: center;
+    gap: var(--sn-space-3);
+    padding-block: var(--sn-space-2);
+    padding-inline: var(--sn-space-3);
+  }
+
+  .sn-list-item + .sn-list-item {
+    border-block-start: var(--sn-state-border-width) solid var(--sn-color-border);
+  }
+}
