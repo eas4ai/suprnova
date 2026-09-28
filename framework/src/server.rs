@@ -420,6 +420,11 @@ impl Server {
         // `log` driver when the env var is unset.
         crate::mail::boot::bootstrap_from_env()?;
 
+        // Register the S3 disk the environment describes, when it
+        // describes one (`S3_BUCKET`).
+        #[cfg(feature = "filesystem")]
+        crate::filesystem::bootstrap_from_env()?;
+
         let addr: SocketAddr = self.get_addr()?;
         let listener = TcpListener::bind(addr).await?;
 

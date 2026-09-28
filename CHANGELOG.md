@@ -276,6 +276,41 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   version check, which connects and blocks while the application boots. A
   variable that is missing is named in the error at boot, and the error never
   shows a URL.
+- **Storage configures an S3 disk from the environment.** Mail, the queue and
+  the rate limiter read their configuration from `.env` when the server boots;
+  storage read no variable, so an S3 or S3-compatible disk (MinIO, RustFS, R2,
+  B2) existed only when the application built an `S3Config` by hand, and the
+  `.env` the Docker guide shows configured nothing. When `S3_BUCKET` is set,
+  the server now registers an S3 disk named `s3` from `S3_BUCKET`,
+  `S3_REGION`, `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` and `S3_ROOT`.
+  With no keys set the driver uses the default credential chain of AWS, and
+  `AWS_REGION` is read when `S3_REGION` is not set. **What to check when you
+  upgrade:** an application that already sets `S3_BUCKET` for a disk of its
+  own gets the `s3` disk as well, and the server does not boot when the
+  variables describe no usable disk: no region, or one key without the other.
+  A disk the application registered under the name `s3` is left as it is, and
+  the variables are not read then. `S3Config::from_env()` returns the same
+  configuration for a disk with a name of your own, and
+  `filesystem::bootstrap_from_env()` is the function the server calls; the
+  console binary boots no driver of the environment, so an application whose
+  commands use the disk calls it in its own bootstrap. There is still no
+  default disk, and `FILESYSTEM_DISK` is not read.
+- **`Storage::url(disk, path)` returns the public URL of a file.** Storage had
+  presigned links that expire, `temporary_url` and `temporary_upload_url`, and
+  nothing for a file that is meant to be public, so applications built those
+  URLs by hand and repeated the base URL of the disk wherever they did. A disk
+  gets its public base URL with `Storage::set_public_url("public",
+  "https://cdn.example.com/files")`, or a path of the application's own host,
+  `/storage`. `Storage::url("public", "avatars/7.png")` joins the two and
+  writes every character of the path that a URL gives a meaning to as `%XX`,
+  so `c++ notes.pdf` is `c%2B%2B%20notes.pdf`. A disk with no public base URL
+  returns an error, so a private disk hands out no link that can be guessed,
+  and a path with a `.` or `..` segment is refused. A base URL is refused when
+  it has a user or a password, a query or a fragment, a backslash, a `.` or
+  `..` segment, or another scheme than `http` and `https`, and the error does
+  not repeat the URL. `S3_PUBLIC_URL` gives the disk of the environment its
+  base. The function takes the name of the disk, because `Storage::disk`
+  returns the `opendal` operator itself, which carries no name.
 
 ### Changed
 

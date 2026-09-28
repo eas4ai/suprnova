@@ -6,5 +6,6 @@ pub mod copy_atomicity;
 pub mod disk_ext;
 pub mod filesystem;
 pub mod path_traversal;
+pub mod public_url;
 pub mod read_through;
 pub mod read_through_options;

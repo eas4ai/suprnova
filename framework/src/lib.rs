@@ -271,8 +271,8 @@ pub use filesystem::AzBlobConfig;
 pub use filesystem::GcsConfig;
 #[cfg(feature = "filesystem")]
 pub use filesystem::{
-    ATOMIC_STAGING_DIR, ChecksumAlgorithm, DiskExt, ReadThroughConfig, S3Config, Storage,
-    copy_between_disks,
+    ATOMIC_STAGING_DIR, ChecksumAlgorithm, DiskExt, ENV_S3_DISK, ReadThroughConfig, S3Config,
+    Storage, copy_between_disks,
 };
 pub use hashing::{
     Algorithm as HashAlgorithm, Argon2Options, Argon2iHasher, Argon2idHasher, BcryptHasher,

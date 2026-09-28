@@ -1725,7 +1725,7 @@ where
     }
 
     /// Shared bootstrap for non-server subcommands that still need the
-    /// runtime drivers: Cache, Queue, RateLimit, Mail. Mirrors the
+    /// runtime drivers: Cache, Queue, RateLimit, Mail, Storage. Mirrors the
     /// driver-bootstrap order in `Server::run` (telemetry / encryption
     /// keys / authorization init are subcommand-specific and stay out
     /// of this helper).
@@ -1736,6 +1736,8 @@ where
         crate::queue::bootstrap_from_env().await?;
         crate::rate_limit::bootstrap_from_env().await?;
         crate::mail::boot::bootstrap_from_env()?;
+        #[cfg(feature = "filesystem")]
+        crate::filesystem::bootstrap_from_env()?;
         Ok(())
     }
 
@@ -1751,7 +1753,8 @@ where
     /// `bootstrap_fn`; this makes the worker paths agree with it, which also
     /// means a `bootstrap_fn` that installs a driver by hand is overridden by
     /// the environment in exactly the same way under `serve` and under
-    /// `queue:work`.
+    /// `queue:work`. The storage disk of the environment is the one that
+    /// gives way: a disk the bootstrap registered under its name is kept.
     /// Give a daemon process a tracing subscriber.
     ///
     /// `serve` gets one from `init_telemetry`; the daemons come through a
