@@ -696,6 +696,111 @@ async fn a_per_push_override_of_false_pushes_immediately() {
     assert_eq!(driver.count(), 1);
 }
 
+/// Sets `QUEUE_AFTER_COMMIT` for one test and restores what was there.
+struct QueueAfterCommit {
+    saved: Option<String>,
+}
+
+impl QueueAfterCommit {
+    fn set(value: &str) -> Self {
+        let saved = std::env::var("QUEUE_AFTER_COMMIT").ok();
+        // SAFETY: env mutation is process-global; `#[serial]` keeps the
+        // tests that hold this guard from racing each other or any other
+        // `#[serial]` test in this binary.
+        unsafe { std::env::set_var("QUEUE_AFTER_COMMIT", value) };
+        Self { saved }
+    }
+}
+
+impl Drop for QueueAfterCommit {
+    fn drop(&mut self) {
+        // SAFETY: as in `set`; the guard is dropped inside the same
+        // `#[serial]` test that created it.
+        unsafe {
+            match &self.saved {
+                Some(value) => std::env::set_var("QUEUE_AFTER_COMMIT", value),
+                None => std::env::remove_var("QUEUE_AFTER_COMMIT"),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn queue_after_commit_defers_a_job_that_did_not_opt_in() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    let _setting = QueueAfterCommit::set("true");
+
+    DB::transaction(|_tx| {
+        Box::pin(async {
+            Queue::push(PlainJob).await?;
+            Queue::bulk(vec![PlainJob, PlainJob]).await?;
+            assert_eq!(
+                Queue::size().await?,
+                0,
+                "QUEUE_AFTER_COMMIT=true must hold every push until the commit"
+            );
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(driver.count(), 3);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_per_push_override_of_false_outranks_queue_after_commit() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    let _setting = QueueAfterCommit::set("true");
+
+    DB::transaction(|_tx| {
+        Box::pin(async {
+            Queue::push_with(
+                PlainJob,
+                EnvelopeOverrides {
+                    after_commit: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            assert_eq!(
+                Queue::size().await?,
+                1,
+                "one push can still go ahead of the commit"
+            );
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(driver.count(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn queue_after_commit_is_off_for_any_value_but_true_or_1() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    let _setting = QueueAfterCommit::set("yes please");
+
+    DB::transaction(|_tx| {
+        Box::pin(async {
+            Queue::push(PlainJob).await?;
+            assert_eq!(Queue::size().await?, 1, "the setting is off");
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(driver.count(), 1);
+}
+
 #[tokio::test]
 #[serial]
 async fn push_after_commit_defers_a_job_that_did_not_opt_in() {

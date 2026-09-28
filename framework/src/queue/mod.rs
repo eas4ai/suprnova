@@ -480,7 +480,7 @@ impl Queue {
             Self::dispatch_fake_queued_events::<J>(id, connection).await;
             return Ok(());
         }
-        if overrides.after_commit.unwrap_or_else(J::after_commit)
+        if overrides.after_commit.unwrap_or_else(waits_for_commit::<J>)
             && crate::database::after_commit::in_transaction()
         {
             return crate::database::after_commit::register_callback(Box::new(move || {
@@ -733,7 +733,7 @@ impl Queue {
         // that owns the ambient transaction; `commit_on_success_owned` runs the
         // body on this same task, but reading it once keeps that an
         // implementation detail rather than a dependency.
-        let defer = J::after_commit() && crate::database::after_commit::in_transaction();
+        let defer = waits_for_commit::<J>() && crate::database::after_commit::in_transaction();
         let deferred_key = key.clone();
 
         // `commit_on_success_owned` rather than `commit_on_success`: the owner
@@ -887,7 +887,7 @@ impl Queue {
             }
             return Ok(());
         }
-        if J::after_commit() && crate::database::after_commit::in_transaction() {
+        if waits_for_commit::<J>() && crate::database::after_commit::in_transaction() {
             return crate::database::after_commit::register_callback(Box::new(move || {
                 Box::pin(async move { Self::bulk_immediately::<J>(jobs).await })
             }))
@@ -1299,6 +1299,30 @@ pub(crate) fn pausable_from_env() -> bool {
         std::env::var("QUEUE_PAUSABLE").as_deref(),
         Ok("false") | Ok("0")
     )
+}
+
+/// Whether every push waits for the surrounding transaction to commit,
+/// whatever the job declares. Mirrors the `after_commit` option of a Laravel
+/// queue connection. Reads `QUEUE_AFTER_COMMIT` fresh: `"true"` or `"1"`
+/// turns it on, anything else, or unset, leaves it off.
+pub(crate) fn after_commit_from_env() -> bool {
+    matches!(
+        std::env::var("QUEUE_AFTER_COMMIT").as_deref(),
+        Ok("true") | Ok("1")
+    )
+}
+
+/// Whether a push of `J` that names no per-push choice waits for the
+/// surrounding transaction: the job asked for it, or `QUEUE_AFTER_COMMIT`
+/// asks for it on behalf of every job.
+///
+/// The two are joined with "or" because `Job::after_commit` answers `false`
+/// both for a job that never chose and for one that chose `false`, so the
+/// process-wide setting cannot be overruled from the trait. One push can
+/// still go ahead of the commit with
+/// [`EnvelopeOverrides::after_commit`] set to `Some(false)`.
+fn waits_for_commit<J: Job>() -> bool {
+    J::after_commit() || after_commit_from_env()
 }
 
 /// Wire the in-memory queue driver as the default. Idempotent.

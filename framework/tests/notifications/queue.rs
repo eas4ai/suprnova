@@ -602,3 +602,118 @@ async fn notify_queue_fail_on_timeout_dead_letters_on_the_first_timeout_with_zer
          driver (delayed), not gone"
     );
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct InvoicePaid {
+    wait_for_commit: bool,
+}
+
+impl Notification for InvoicePaid {
+    fn notification_name() -> &'static str {
+        "InvoicePaid"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["database"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+    fn after_commit(&self) -> bool {
+        self.wait_for_commit
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn a_notification_that_opts_in_is_queued_at_the_commit() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = suprnova::testing::TestDatabase::sqlite_memory()
+        .await
+        .expect("sqlite");
+
+    suprnova::DB::transaction(|_tx| {
+        Box::pin(async {
+            Notify::queue(
+                &User { id: 7 },
+                InvoicePaid {
+                    wait_for_commit: true,
+                },
+            )
+            .await?;
+            assert_eq!(
+                Queue::size().await?,
+                0,
+                "the notification must not reach the queue before the commit"
+            );
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(
+        driver.size().await.unwrap(),
+        1,
+        "it is queued at the commit"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_rollback_discards_a_queued_notification_that_opted_in() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = suprnova::testing::TestDatabase::sqlite_memory()
+        .await
+        .expect("sqlite");
+
+    let result: Result<(), FrameworkError> = suprnova::DB::transaction(|_tx| {
+        Box::pin(async {
+            Notify::queue(
+                &User { id: 7 },
+                InvoicePaid {
+                    wait_for_commit: true,
+                },
+            )
+            .await?;
+            Err(FrameworkError::internal("force rollback"))
+        })
+    })
+    .await;
+
+    assert!(result.is_err(), "the transaction rolled back");
+    assert_eq!(
+        driver.size().await.unwrap(),
+        0,
+        "a notification about work that was rolled back must never be queued"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_notification_that_did_not_opt_in_is_queued_before_the_commit() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = suprnova::testing::TestDatabase::sqlite_memory()
+        .await
+        .expect("sqlite");
+
+    suprnova::DB::transaction(|_tx| {
+        Box::pin(async {
+            Notify::queue(
+                &User { id: 7 },
+                InvoicePaid {
+                    wait_for_commit: false,
+                },
+            )
+            .await?;
+            assert_eq!(Queue::size().await?, 1, "the default is unchanged");
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(driver.size().await.unwrap(), 1);
+}

@@ -172,6 +172,11 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// [`EnvelopeOverrides::after_commit`](crate::queue::EnvelopeOverrides),
     /// with the sugar [`Queue::push_after_commit`](crate::queue::Queue::push_after_commit)
     /// for opting one dispatch in. Default: `false`.
+    ///
+    /// `QUEUE_AFTER_COMMIT=true` turns this on for every job in the
+    /// process, as the `after_commit` option of a Laravel queue connection
+    /// does. A job cannot turn that off here, because `false` is also the
+    /// answer of a job that never chose. The per-push override can.
     fn after_commit() -> bool
     where
         Self: Sized,

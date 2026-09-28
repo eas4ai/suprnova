@@ -125,6 +125,26 @@ pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
         None
     }
 
+    /// Whether a queued send of this mailable waits for the surrounding
+    /// [`DB::transaction`](crate::DB::transaction) to commit. Default
+    /// `false`. Mirrors Laravel's `ShouldQueueAfterCommit` and
+    /// `afterCommit()` on a mailable.
+    ///
+    /// Turn it on for mail about rows the transaction writes. Without it
+    /// the envelope reaches the queue before the commit, and a worker can
+    /// send mail about a row that is not visible yet, or that a rollback
+    /// then removes. Inside a transaction `Mail::queue` and `Mail::later`
+    /// then push at the commit, and a rollback discards the push. Outside
+    /// one they push at once.
+    ///
+    /// `&self` for the reason [`Self::queue`] gives: every queued mailable
+    /// rides one job type, so the job's own
+    /// [`Job::after_commit`](crate::queue::Job::after_commit) cannot answer
+    /// for one mailable.
+    fn after_commit(&self) -> bool {
+        false
+    }
+
     /// Render the subject. When `subject_template_source` returns `Some`,
     /// Tera-renders that template with `self` as the context; otherwise
     /// returns `subject()` unchanged. The dispatch path

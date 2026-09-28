@@ -96,6 +96,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `--hours N` the ones older than that. `queue:prune-failed` is the same with
   `--hours` defaulting to 24. A command exits non-zero when an id names no
   failed job.
+- **Queued mail and notifications can wait for the commit.**
+  `Mailable::after_commit(&self)` and `Notification::after_commit(&self)`
+  default to `false`. When one answers `true`, `Mail::queue`, `Mail::later`
+  and `Notify::queue` inside `DB::transaction` push at the commit, and a
+  rollback discards the push, as `Job::after_commit` already does for a job.
+  `QUEUE_AFTER_COMMIT=true` turns the same behavior on for every push in the
+  process, as the `after_commit` option of a Laravel queue connection does;
+  `EnvelopeOverrides { after_commit: Some(false), .. }` still sends one push
+  ahead of the commit.
 
 ### Changed
 
