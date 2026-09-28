@@ -270,6 +270,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   retires expired uploads discarded the result of every run, so a store that
   kept failing left the uploads in place with nothing in the log. A failed run
   now logs a warning, and the loop retries on its next interval as before.
+- **A model's cast storage aliases stay out of its rustdoc.** `#[model]` emits
+  a `pub type __Suprnova_Cast_Storage_<field>` for each cast field, and each
+  one appeared in the documentation of the application's own models. They are
+  hidden now.
 
 ### Security
 
