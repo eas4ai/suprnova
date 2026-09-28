@@ -289,6 +289,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   row. `create_quietly()` and `create_many_quietly()` insert with the events
   muted. A model whose key is not auto-increment keeps the key its factory
   set.
+- **`DATABASE_URL=mariadb://...` connects.** Only `mysql://` was recognised,
+  so the scheme a MariaDB operator naturally writes failed at connect with no
+  supporting driver. `mariadb://` is accepted for the primary connection,
+  named connections and read replicas, the migrator, and
+  `MariaDbVectorDriver::from_url`, and `DB::driver_title()` answers `MariaDB`
+  for it. The vector driver's pool error no longer quotes the connection URL,
+  which carries the password.
 
 ### Security
 

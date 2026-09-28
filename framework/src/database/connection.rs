@@ -79,7 +79,7 @@ impl DbConnection {
 
             normalized
         } else {
-            config.url.clone()
+            crate::database::config::driver_url(&config.url).into_owned()
         };
 
         let mut opt = ConnectOptions::new(&url);

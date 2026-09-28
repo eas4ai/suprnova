@@ -201,10 +201,14 @@ impl MariaDbVectorDriver {
     ///
     /// First operation absorbs the connection cost; if the URL points
     /// nowhere, that operation surfaces the failure, not registration.
+    ///
+    /// The URL may use the `mysql://` or the `mariadb://` scheme.
     pub fn from_url(url: &str) -> Result<Self, FrameworkError> {
         let pool = MySqlPoolOptions::new()
-            .connect_lazy(url)
-            .map_err(|e| FrameworkError::internal(format!("mariadb pool init at '{url}': {e}")))?;
+            .connect_lazy(crate::database::config::driver_url(url).as_ref())
+            // The URL carries the password, so the error names the fault
+            // and not the URL.
+            .map_err(|e| FrameworkError::internal(format!("mariadb pool init: {e}")))?;
         Ok(Self::from_pool(pool))
     }
 

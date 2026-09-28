@@ -332,17 +332,17 @@ fn classify_backend(database_url: &str) -> Result<SyncBackend, String> {
         Ok(SyncBackend::Sqlite)
     } else if database_url.starts_with("postgres") {
         Ok(SyncBackend::Postgres)
-    } else if database_url.starts_with("mysql") {
+    } else if database_url.starts_with("mysql") || database_url.starts_with("mariadb") {
         Err(
-            "db:sync does not support MySQL yet - its schema introspection \
-             uses Postgres-specific information_schema queries. Use \
-             hand-written SeaORM migrations for MySQL projects."
+            "db:sync does not support MySQL or MariaDB yet - its schema \
+             introspection uses Postgres-specific information_schema queries. \
+             Use hand-written SeaORM migrations for those projects."
                 .to_string(),
         )
     } else {
         Err(format!(
             "db:sync cannot determine the database backend from DATABASE_URL. \
-             Expected a sqlite://, postgres://, or mysql:// URL, got: {}",
+             Expected a sqlite://, postgres://, mysql:// or mariadb:// URL, got: {}",
             database_url.split(':').next().unwrap_or("(empty)")
         ))
     }

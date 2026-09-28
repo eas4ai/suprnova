@@ -1327,6 +1327,7 @@ impl DB {
         })?;
         Ok(match cfg.database_type() {
             crate::database::DatabaseType::Postgres => "Postgres",
+            crate::database::DatabaseType::Mysql if cfg.names_mariadb() => "MariaDB",
             crate::database::DatabaseType::Mysql => "MySQL",
             crate::database::DatabaseType::Sqlite => "SQLite",
             crate::database::DatabaseType::Unknown => "Unknown",

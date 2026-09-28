@@ -1097,7 +1097,7 @@ where
             database_url
         };
 
-        sea_orm::Database::connect(&database_url)
+        sea_orm::Database::connect(crate::database::config::driver_url(&database_url).as_ref())
             .await
             .unwrap_or_else(|e| {
                 eprintln!("suprnova: failed to connect to the database: {e}");
