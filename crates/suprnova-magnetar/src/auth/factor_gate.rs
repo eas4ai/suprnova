@@ -288,7 +288,10 @@ where
         let payload: ChallengePayload =
             serde_json::from_slice(&plaintext).map_err(|error| Error::InvalidInput {
                 field: "challenge".to_owned(),
-                message: format!("invalid challenge state: {error}"),
+                message: format!(
+                    "invalid challenge state: {}",
+                    crate::crypto::decode_failure(&error)
+                ),
             })?;
         let prepared = self.factors.prepare_code(&payload.user_id, code).await?;
         if !prepared.is_valid() {

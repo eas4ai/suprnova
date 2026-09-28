@@ -751,6 +751,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `Request::hold_for_connection(guard)` is the part other middleware can use:
   it keeps a guard alive until the socket of an upgrade ends, where a guard
   the middleware holds itself is dropped at the handshake.
+- **Magnetar does not quote decrypted state in an error.** Four places decrypt
+  the state of a ceremony or of a device session and decode it, and the error
+  for state of another shape was the message of the JSON decoder, which quotes
+  the value it could not read. That state holds challenges, session grants and
+  tokens, and two of the errors are shown to the client. The error has the
+  kind of the mistake and its position now, and nothing of the content. It can
+  happen where a deployment changes the shape of the state while a ceremony is
+  under way.
 
 ## 2.0.2 - 2026-09-14
 

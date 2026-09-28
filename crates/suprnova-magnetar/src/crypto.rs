@@ -14,6 +14,28 @@ use rand::{RngCore, rngs::OsRng};
 
 use crate::{Error, Result};
 
+/// Why decrypted state did not decode as JSON, without the state.
+///
+/// The message of `serde_json` quotes the value it could not read, and
+/// the state that is decrypted here holds challenges, grants and tokens.
+/// An error travels to a log and to a client, so it has the kind of the
+/// mistake and its position and nothing of the content.
+pub(crate) fn decode_failure(error: &serde_json::Error) -> String {
+    use serde_json::error::Category;
+
+    let kind = match error.classify() {
+        Category::Io => "could not be read",
+        Category::Syntax => "is not JSON",
+        Category::Data => "has another shape than the one that is read",
+        Category::Eof => "ends before its JSON does",
+    };
+    format!(
+        "the state {kind} (line {}, column {})",
+        error.line(),
+        error.column()
+    )
+}
+
 const FORMAT_VERSION: u8 = 1;
 const NONCE_LENGTH: usize = 12;
 const TAG_LENGTH: usize = 16;

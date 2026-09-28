@@ -648,7 +648,10 @@ impl DeviceAuthorizationService {
             .decrypt(CryptoPurpose::SessionGrant, ciphertext)?;
         let snapshot = serde_json::from_slice(&plaintext).map_err(|error| Error::InvalidInput {
             field: "device_code".to_owned(),
-            message: format!("invalid encrypted device session: {error}"),
+            message: format!(
+                "invalid encrypted device session: {}",
+                crate::crypto::decode_failure(&error)
+            ),
         })?;
         SessionGrant::from_snapshot(snapshot)
     }

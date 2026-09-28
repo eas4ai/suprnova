@@ -462,7 +462,10 @@ pub(crate) fn decrypt<T: for<'de> Deserialize<'de>>(
     let plaintext = encryptor.decrypt(CryptoPurpose::CeremonyState, ciphertext)?;
     serde_json::from_slice(&plaintext).map_err(|error| Error::InvalidInput {
         field: "ceremony".to_owned(),
-        message: format!("invalid ceremony state: {error}"),
+        message: format!(
+            "invalid ceremony state: {}",
+            crate::crypto::decode_failure(&error)
+        ),
     })
 }
 
