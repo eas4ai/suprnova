@@ -1,4 +1,5 @@
 pub mod cargo_meta;
+pub mod console_forward;
 pub mod db_sync;
 pub mod dev_tls;
 pub mod docker_compose;

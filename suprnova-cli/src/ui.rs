@@ -226,6 +226,11 @@ pub(crate) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("migrate:rollback", "Rollback last migration(s)"),
             ("migrate:fresh", "Drop all tables & re-migrate"),
             ("db:sync", "Sync schema → entity files"),
+            ("db:seed [name]", "Run the seeders, or the one named"),
+            (
+                "model:prune",
+                "Delete the rows prunable models are done with",
+            ),
         ],
     ),
     (

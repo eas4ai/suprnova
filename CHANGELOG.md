@@ -256,6 +256,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   no command has, arguments the command does not take, and a quote that is not
   closed stop the boot, and `try_command` returns the error. The task is named
   by its command line and described by the command's about text.
+- **`suprnova db:seed` and `suprnova model:prune`.** The console binary has
+  had both commands, and the manual shows them through the CLI, but the CLI
+  forwarded `migrate` and its siblings and not these two, so the step after
+  `suprnova migrate` was `cargo run --bin console -- db:seed`. `suprnova
+  db:seed` runs every seeder, and `suprnova db:seed UserSeeder` or
+  `--class=UserSeeder` runs one. `suprnova model:prune` takes `--model=<Name>`
+  and `--pretend`. Both run the project's console binary, which checks the
+  names.
 
 ### Changed
 

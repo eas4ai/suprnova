@@ -4,6 +4,7 @@ mod templates;
 pub mod ui;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use commands::console_forward::ConsoleCommand;
 use commands::queue_failed::FailedJobs;
 
 #[derive(Parser)]
@@ -308,6 +309,25 @@ enum Commands {
         #[arg(long)]
         with_minio: bool,
     },
+    /// Run the database seeders (all of them, or the one named)
+    #[command(name = "db:seed")]
+    DbSeed {
+        /// Name of the one seeder to run
+        seeder: Option<String>,
+        /// Name of the one seeder to run, as an option: --class=UserSeeder
+        #[arg(long, conflicts_with = "seeder")]
+        class: Option<String>,
+    },
+    /// Delete the rows that prunable models no longer need
+    #[command(name = "model:prune")]
+    ModelPrune {
+        /// Prune one model only, named by its type name (User)
+        #[arg(long)]
+        model: Option<String>,
+        /// Report how many rows would be deleted, and delete none
+        #[arg(long)]
+        pretend: bool,
+    },
     /// Run all due scheduled tasks once (typically called by cron every minute)
     #[command(name = "schedule:run")]
     ScheduleRun,
@@ -547,6 +567,14 @@ fn main() {
         } => {
             commands::docker_compose::run(with_mailpit, with_minio);
         }
+        Commands::DbSeed { seeder, class } => {
+            commands::console_forward::run(ConsoleCommand::Seed {
+                class: class.or(seeder),
+            });
+        }
+        Commands::ModelPrune { model, pretend } => {
+            commands::console_forward::run(ConsoleCommand::Prune { model, pretend });
+        }
         Commands::ScheduleRun => {
             commands::schedule_run::run();
         }
@@ -783,6 +811,63 @@ mod tests {
             Some(Commands::ScheduleList { timezone }) => assert_eq!(timezone, None),
             _ => panic!("`suprnova schedule:list` must be schedule:list"),
         }
+    }
+
+    /// `db:seed` names its seeder the two ways the console's own command
+    /// takes it, and not both at once.
+    #[test]
+    fn db_seed_takes_the_seeder_as_a_name_or_as_the_class_option() {
+        for argv in [
+            vec!["suprnova", "db:seed", "UserSeeder"],
+            vec!["suprnova", "db:seed", "--class=UserSeeder"],
+            vec!["suprnova", "db:seed", "--class", "UserSeeder"],
+        ] {
+            let cli = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("`{}` must parse: {e}", argv.join(" ")));
+            match cli.command {
+                Some(Commands::DbSeed { seeder, class }) => {
+                    assert_eq!(class.or(seeder).as_deref(), Some("UserSeeder"));
+                }
+                _ => panic!("`{}` must be db:seed", argv.join(" ")),
+            }
+        }
+
+        let cli = Cli::try_parse_from(["suprnova", "db:seed"]).expect("a bare db:seed parses");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::DbSeed {
+                seeder: None,
+                class: None
+            })
+        ));
+
+        assert!(
+            Cli::try_parse_from(["suprnova", "db:seed", "A", "--class=B"]).is_err(),
+            "two names for one seeder is a mistake the CLI must not guess at"
+        );
+    }
+
+    #[test]
+    fn model_prune_takes_the_options_the_console_command_takes() {
+        let cli = Cli::try_parse_from(["suprnova", "model:prune", "--model=User", "--pretend"])
+            .expect("`suprnova model:prune --model=User --pretend` parses");
+        match cli.command {
+            Some(Commands::ModelPrune { model, pretend }) => {
+                assert_eq!(model.as_deref(), Some("User"));
+                assert!(pretend);
+            }
+            _ => panic!("it must be model:prune"),
+        }
+
+        let cli =
+            Cli::try_parse_from(["suprnova", "model:prune"]).expect("a bare model:prune parses");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::ModelPrune {
+                model: None,
+                pretend: false
+            })
+        ));
     }
 
     /// A subcommand invoked without a help flag still parses, or the
