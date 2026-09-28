@@ -327,6 +327,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `DbConnection::server_connections()` the number of one connection.
   `DbConnection::connections_in_use()` is the other number, the connections of
   this process's own pool that are out of it now.
+- **`suprnova::fake` is the `fake` crate, for factories written by hand.** The
+  crate root had `Dummy`, `Fake` and `Faker`, and everything else a factory
+  uses, the fakers of `fake::faker` and `rand::Rng` for `fake_with_rng`, was
+  reachable through the hidden `suprnova::__fake` alone, which the factories
+  chapter showed as the supported path. An application that added `fake` to
+  its own dependencies had to keep its version the one of the framework, or
+  the traits did not line up. `use
+  suprnova::fake::faker::internet::en::SafeEmail` and `use
+  suprnova::fake::rand::Rng` now work. `__fake` stays for the code
+  `#[derive(Factory)]` generates. `#[derive(Dummy)]` generates code that names
+  the crate `::fake`, so in an application without `fake` among its
+  dependencies the struct says where the crate is: `#[dummy(crate_name =
+  "suprnova::fake")]`.
 
 ### Changed
 

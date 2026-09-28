@@ -602,13 +602,40 @@ pub use chrono;
 #[doc(hidden)]
 pub use tera as __tera;
 
-// Re-export fake for the `#[derive(Factory)]` macro and for consumers
-// who want to hand-write `Mailable::definition`-style code referencing
-// `::suprnova::__fake::Faker.fake()`. The public re-exports below cover
-// the common surface: `Dummy` derive (struct auto-fill), `Fake` trait
-// (`.fake()` method), `Faker` (universal generator).
+// Re-export fake for the code `#[derive(Factory)]` generates, which
+// names `::suprnova::__fake`. Code that is written by hand uses the
+// public `suprnova::fake` below.
 #[doc(hidden)]
 pub use fake as __fake;
+/// The `fake` crate, for a factory that is written by hand: the fakers of
+/// `suprnova::fake::faker`, such as `faker::internet::en::SafeEmail`, and
+/// `suprnova::fake::rand::Rng` for `fake_with_rng`.
+///
+/// An application that added `fake` to its own dependencies would have to
+/// keep its version the one of this crate: `Dummy` and `Fake` of two
+/// versions are two pairs of traits, and a value that implements the one
+/// does not implement the other.
+///
+/// # `#[derive(Dummy)]`
+///
+/// The code the derive generates names the crate `::fake`, which an
+/// application without `fake` among its dependencies does not have. The
+/// derive is told where the crate is:
+///
+/// ```rust
+/// use suprnova::{Dummy, Fake, Faker};
+///
+/// #[derive(Debug, Dummy)]
+/// #[dummy(crate_name = "suprnova::fake")]
+/// struct Row {
+///     id: u32,
+///     note: String,
+/// }
+///
+/// let row: Row = Faker.fake();
+/// # let _ = (row.id, row.note);
+/// ```
+pub use fake;
 pub use fake::{Dummy, Fake, Faker};
 
 // Re-export validator for FormRequest validation
