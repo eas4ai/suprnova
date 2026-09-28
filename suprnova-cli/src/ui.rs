@@ -237,6 +237,22 @@ pub(crate) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "QUEUE",
+        &[
+            ("queue:failed", "List failed jobs"),
+            (
+                "queue:retry <id|all>",
+                "Push failed jobs back onto the queue",
+            ),
+            ("queue:forget <id>", "Delete one failed job"),
+            ("queue:flush", "Delete the failed jobs"),
+            (
+                "queue:prune-failed",
+                "Delete failed jobs older than --hours",
+            ),
+        ],
+    ),
+    (
         "WORKFLOW",
         &[
             ("workflow:work", "Start workflow worker"),

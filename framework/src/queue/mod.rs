@@ -9,6 +9,7 @@ pub mod envelope;
 pub mod errors;
 pub mod events;
 pub mod failed;
+pub(crate) mod failed_console;
 pub mod failover;
 pub mod inspect;
 pub mod job;

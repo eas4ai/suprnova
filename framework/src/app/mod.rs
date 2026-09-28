@@ -31,6 +31,7 @@
 //! }
 //! ```
 
+use crate::queue::failed_console::Command as FailedJobsCommand;
 use crate::schedule::tz_display::DisplayExpressions;
 use crate::{FrameworkError, Router, Schedule, Server};
 use clap::{Parser, Subcommand};
@@ -202,6 +203,38 @@ enum Commands {
         /// Does not clear a per-queue pause set by `queue:pause <queue>`.
         #[arg(long)]
         all: bool,
+    },
+    /// List the failed jobs. Mirrors `php artisan queue:failed`.
+    #[command(name = "queue:failed")]
+    QueueFailed,
+    /// Push failed jobs back onto the queue. Mirrors
+    /// `php artisan queue:retry`.
+    #[command(name = "queue:retry")]
+    QueueRetry {
+        /// Ids of the failed jobs to retry, or `all` for every one.
+        #[arg(required = true)]
+        ids: Vec<String>,
+    },
+    /// Delete one failed job. Mirrors `php artisan queue:forget`.
+    #[command(name = "queue:forget")]
+    QueueForget {
+        /// Id of the failed job to delete.
+        id: String,
+    },
+    /// Delete the failed jobs. Mirrors `php artisan queue:flush`.
+    #[command(name = "queue:flush")]
+    QueueFlush {
+        /// Only delete jobs that failed more than this many hours ago.
+        #[arg(long)]
+        hours: Option<u64>,
+    },
+    /// Delete the failed jobs older than `--hours`. Mirrors
+    /// `php artisan queue:prune-failed`.
+    #[command(name = "queue:prune-failed")]
+    QueuePruneFailed {
+        /// Delete jobs that failed more than this many hours ago.
+        #[arg(long, default_value = "24")]
+        hours: u64,
     },
     /// Put the application into maintenance mode
     Down {
@@ -977,6 +1010,26 @@ where
             Some(Commands::QueueResume { queue, all }) => {
                 Self::run_queue_resume_internal(bootstrap_fn, queue, all).await;
             }
+            Some(Commands::QueueFailed) => {
+                Self::run_failed_jobs_internal(bootstrap_fn, FailedJobsCommand::Failed).await;
+            }
+            Some(Commands::QueueRetry { ids }) => {
+                Self::run_failed_jobs_internal(bootstrap_fn, FailedJobsCommand::Retry(ids)).await;
+            }
+            Some(Commands::QueueForget { id }) => {
+                Self::run_failed_jobs_internal(bootstrap_fn, FailedJobsCommand::Forget(id)).await;
+            }
+            Some(Commands::QueueFlush { hours }) => {
+                Self::run_failed_jobs_internal(bootstrap_fn, FailedJobsCommand::Flush { hours })
+                    .await;
+            }
+            Some(Commands::QueuePruneFailed { hours }) => {
+                Self::run_failed_jobs_internal(
+                    bootstrap_fn,
+                    FailedJobsCommand::PruneFailed { hours },
+                )
+                .await;
+            }
             Some(Commands::Down {
                 retry,
                 refresh,
@@ -1534,6 +1587,39 @@ where
                     std::process::exit(1);
                 }
                 println!("Job processing on queue [{connection}:{queue}] has been paused.");
+            }
+        }
+    }
+
+    /// `queue:failed`, `queue:retry`, `queue:forget`, `queue:flush` and
+    /// `queue:prune-failed`: the operator's view of the failed-job store.
+    ///
+    /// Boots the way a worker does, because the store and the queue a retry
+    /// pushes to are both wired by that boot. The command itself lives in
+    /// [`crate::queue::failed_console`] and returns what to print. A request
+    /// that was only met in part, such as a retry of an id that names no
+    /// job, exits non-zero after printing.
+    async fn run_failed_jobs_internal(
+        bootstrap_fn: Option<BootstrapFn>,
+        command: FailedJobsCommand,
+    ) {
+        let name = command.name();
+        if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
+            eprintln!("suprnova: {name} bootstrap error: {e}");
+            std::process::exit(1);
+        }
+        match crate::queue::failed_console::run(command).await {
+            Ok(report) => {
+                for line in &report.lines {
+                    println!("{line}");
+                }
+                if !report.succeeded {
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("suprnova: {name}: {e}");
+                std::process::exit(1);
             }
         }
     }

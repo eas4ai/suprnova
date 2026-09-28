@@ -86,6 +86,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   facade had `fake()`; these two had only the free function
   `testing::install_fake()`. Both return the same guard, and the free
   functions stay.
+- **Failed-job commands: `queue:failed`, `queue:retry`, `queue:forget`,
+  `queue:flush` and `queue:prune-failed`.** The manual and the code's own docs
+  sent operators to commands that did not exist; the failed-job store could
+  only be reached from code. The application binary now has all five, and the
+  `suprnova` CLI forwards them. `queue:failed` lists id, connection, queue,
+  job, failure time and the first line of the error. `queue:retry` takes one
+  or more ids, or `all`. `queue:flush` deletes every failed job, or with
+  `--hours N` the ones older than that. `queue:prune-failed` is the same with
+  `--hours` defaulting to 24. A command exits non-zero when an id names no
+  failed job.
 
 ### Changed
 

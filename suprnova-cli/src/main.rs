@@ -4,6 +4,7 @@ mod templates;
 pub mod ui;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use commands::queue_failed::FailedJobs;
 
 #[derive(Parser)]
 #[command(name = "suprnova")]
@@ -316,6 +317,36 @@ enum Commands {
     /// List all registered scheduled tasks
     #[command(name = "schedule:list")]
     ScheduleList,
+    /// List the failed queue jobs
+    #[command(name = "queue:failed")]
+    QueueFailed,
+    /// Push failed queue jobs back onto the queue
+    #[command(name = "queue:retry")]
+    QueueRetry {
+        /// Ids of the failed jobs to retry, or `all` for every one
+        #[arg(required = true)]
+        ids: Vec<String>,
+    },
+    /// Delete one failed queue job
+    #[command(name = "queue:forget")]
+    QueueForget {
+        /// Id of the failed job to delete
+        id: String,
+    },
+    /// Delete the failed queue jobs
+    #[command(name = "queue:flush")]
+    QueueFlush {
+        /// Only delete jobs that failed more than this many hours ago
+        #[arg(long)]
+        hours: Option<u64>,
+    },
+    /// Delete the failed queue jobs older than --hours
+    #[command(name = "queue:prune-failed")]
+    QueuePruneFailed {
+        /// Delete jobs that failed more than this many hours ago
+        #[arg(long, default_value = "24")]
+        hours: u64,
+    },
     /// Start the workflow worker daemon
     #[command(name = "workflow:work")]
     WorkflowWork,
@@ -520,6 +551,21 @@ fn main() {
         }
         Commands::ScheduleList => {
             commands::schedule_list::run();
+        }
+        Commands::QueueFailed => {
+            commands::queue_failed::run(FailedJobs::List);
+        }
+        Commands::QueueRetry { ids } => {
+            commands::queue_failed::run(FailedJobs::Retry(ids));
+        }
+        Commands::QueueForget { id } => {
+            commands::queue_failed::run(FailedJobs::Forget(id));
+        }
+        Commands::QueueFlush { hours } => {
+            commands::queue_failed::run(FailedJobs::Flush(hours));
+        }
+        Commands::QueuePruneFailed { hours } => {
+            commands::queue_failed::run(FailedJobs::Prune(hours));
         }
         Commands::WorkflowWork => {
             commands::workflow_work::run();
