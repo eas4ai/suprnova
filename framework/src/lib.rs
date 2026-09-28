@@ -350,9 +350,9 @@ pub use queue::{
     ThrottlesExceptions, TimeoutExceeded, UpdatedBatchJobCounts, WithoutOverlapping,
 };
 pub use rate_limit::{
-    BackendErrorPolicy, GlobalLimit, Limit, LimitResult, RateLimitMiddleware, RateLimiter,
-    RateLimiterDriver, SlidingWindowConfig, ThrottleRequestsMiddleware, Unlimited, identity_key,
-    names_identity,
+    BackendErrorPolicy, ConnectionsPerIp, GlobalLimit, Limit, LimitResult, RateLimitMiddleware,
+    RateLimiter, RateLimiterDriver, SlidingWindowConfig, ThrottleRequestsMiddleware, Unlimited,
+    identity_key, names_identity,
 };
 pub use rbac::{HasRoles, PermissionMiddleware, RoleMiddleware};
 pub use render_cache::RenderCache;

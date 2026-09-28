@@ -32,12 +32,14 @@
 //! limiter / response-callback pattern needs.
 
 pub mod algorithm;
+pub mod connections;
 pub mod laravel;
 pub mod limit;
 pub mod memory;
 pub mod redis;
 pub mod throttle;
 
+pub use connections::ConnectionsPerIp;
 pub use laravel::{NamedLimiterRegistry, RateLimiter};
 pub use limit::{GlobalLimit, Limit, LimitResult, Unlimited};
 pub use throttle::ThrottleRequestsMiddleware;
@@ -637,6 +639,24 @@ impl RateLimitMiddleware<IpKey> {
                 None => format!("{limit}:no-ip:{}", uuid::Uuid::new_v4()),
             }),
         )
+    }
+}
+
+impl RateLimitMiddleware<IpKey> {
+    /// Allow each client address `max` open WebSocket connections, and
+    /// refuse the next one with `429 Too Many Requests`. Put it on a
+    /// WebSocket route, where a client that opens sockets and keeps them
+    /// would otherwise hold as many as the server accepts.
+    ///
+    /// On a route that is no WebSocket route it caps the requests of an
+    /// address that are being handled at one time, and it does not cover
+    /// a streamed response. [`ConnectionsPerIp`] says what is counted and
+    /// for how long.
+    ///
+    /// It counts what is open, where [`Self::ip_based`] counts how often a
+    /// client asks. A route that needs both takes both.
+    pub fn connections_per_ip(max: usize) -> ConnectionsPerIp {
+        ConnectionsPerIp::new(max)
     }
 }
 

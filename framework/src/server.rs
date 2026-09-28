@@ -1309,7 +1309,7 @@ async fn handle_ws_upgrade(
     // abort the upgrade rather than re-panicking inside the per-connection
     // task - one poisoned upgrade must not cascade into the accept loop or
     // other in-flight connections.
-    let suprnova_req = {
+    let mut suprnova_req = {
         let captured: Arc<Mutex<Option<Request>>> = Arc::new(Mutex::new(None));
         let captured_for_terminator = captured.clone();
 
@@ -1458,6 +1458,12 @@ async fn handle_ws_upgrade(
             }
         }
     };
+
+    // What middleware asked to keep for the life of the connection, such as
+    // a slot of a per-address connection cap. Taken off the request here and
+    // moved into the session task below: the handler owns the request and
+    // may drop it long before the socket closes.
+    let connection_holds = suprnova_req.take_connection_holds();
 
     // Echo X-Request-Id on the 101 handshake response so the upgrade GET
     // stays correlatable with logs, the same contract as the HTTP path.
@@ -1630,6 +1636,7 @@ async fn handle_ws_upgrade(
         .flatten();
     let handler_task = async move {
         let _conn_permit = conn_permit;
+        let _connection_holds = connection_holds;
         handler_task.await;
     };
 

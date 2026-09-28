@@ -539,6 +539,25 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   as an IPv6 one (`::ffff:10.0.0.5`) is the IPv4 address, in the headers and
   for the peer. `Request::ips()` still returns the whole chain and is a
   record, nothing to decide by.
+- **A cap on the WebSocket connections one client address holds open:
+  `RateLimitMiddleware::connections_per_ip(n)`.** The only limit on open
+  connections was the server-wide `SERVER_MAX_CONNECTIONS`, one number for
+  every client together, so a single address that opened WebSockets and kept
+  them could use all of it and lock every other client out of HTTP and
+  WebSocket alike. The broadcasting and WebSocket chapters showed
+  `connections_per_ip` on the `ws!` route; it did not exist. The middleware
+  answers `429 Too Many Requests` when the address already holds `n` sockets.
+  A socket is counted until its session ends, close frame or none, and an
+  upgrade that a later middleware refuses gives its place back at once. The
+  address is the one `Request::ip()` resolves through the trusted proxies; an
+  IPv6 address is counted with its /64 network, because one client holds a
+  whole /64. The counts are kept per process; a clone shares them, so one cap
+  can guard several routes, and `open_for(address)` reads a count. On a route
+  that is no WebSocket route the cap counts the requests being handled at one
+  time and does not cover a streamed response.
+  `Request::hold_for_connection(guard)` is the part other middleware can use:
+  it keeps a guard alive until the socket of an upgrade ends, where a guard
+  the middleware holds itself is dropped at the handshake.
 
 ## 2.0.2 - 2026-09-14
 

@@ -86,6 +86,9 @@ pub struct Request {
     /// A cache hit the RenderCache middleware prepared for a stitched route;
     /// served by the Live completion middleware after the route chain ran.
     render_cache_prepared: Option<Box<crate::render_cache::stitch::PreparedHit>>,
+    /// What middleware asked to keep for as long as the connection lives.
+    /// See [`Request::hold_for_connection`].
+    connection_holds: Vec<ConnectionHold>,
 }
 
 /// The address one entry of `X-Forwarded-For` names, in its canonical
@@ -119,6 +122,11 @@ fn forwarded_address(entry: &str) -> Option<std::net::IpAddr> {
         .map(|address| address.to_canonical())
 }
 
+/// Something a middleware keeps alive for the life of the connection, and
+/// that gives back what it took when it is dropped: a slot of a
+/// per-address connection cap, for one.
+pub(crate) type ConnectionHold = Box<dyn std::any::Any + Send + Sync>;
+
 impl Request {
     /// Wrap a hyper request, splitting off the streaming body. Used by
     /// the server's request pipeline; in-process tests construct via
@@ -138,6 +146,7 @@ impl Request {
             live_tenant: None,
             live_cancellation: None,
             render_cache_prepared: None,
+            connection_holds: Vec::new(),
         }
     }
 
@@ -179,6 +188,34 @@ impl Request {
     pub fn with_trusted_proxies(mut self, cfg: TrustedProxiesConfig) -> Self {
         self.trusted_proxies = cfg;
         self
+    }
+
+    /// Keep `hold` alive for as long as what this request started: for a
+    /// WebSocket upgrade the socket, and for any other request the
+    /// request value.
+    ///
+    /// This is for a middleware that takes something it has to give back,
+    /// such as one place of a cap on open connections. Dropping the value
+    /// is what gives it back, so give this a guard whose `Drop` does that.
+    ///
+    /// For a WebSocket upgrade the server moves the holds into the task
+    /// that runs the socket, and they are dropped when that task ends,
+    /// whatever the handler does with the request it is given. The
+    /// middleware chain has long returned by then, which is why a guard
+    /// the middleware held itself would be dropped at the handshake.
+    ///
+    /// For any other request the holds are dropped with the request
+    /// value: when the handler drops it or consumes it, which reading the
+    /// body does. They do not cover a streamed response, and they do not
+    /// cover a connection that is kept alive between two requests.
+    pub fn hold_for_connection(&mut self, hold: impl std::any::Any + Send + Sync) {
+        self.connection_holds.push(Box::new(hold));
+    }
+
+    /// Take the holds off the request, to keep them somewhere that lives
+    /// as long as the connection.
+    pub(crate) fn take_connection_holds(&mut self) -> Vec<ConnectionHold> {
+        std::mem::take(&mut self.connection_holds)
     }
 
     /// Attach the authenticated user id resolved for this request.
@@ -224,6 +261,7 @@ impl Request {
             live_tenant: None,
             live_cancellation: None,
             render_cache_prepared: None,
+            connection_holds: Vec::new(),
         }
     }
 
@@ -1823,6 +1861,7 @@ mod url_helper_tests {
             live_tenant: None,
             live_cancellation: None,
             render_cache_prepared: None,
+            connection_holds: Vec::new(),
         };
 
         // Use `.err()` rather than `expect_err` so the test doesn't require
@@ -1859,6 +1898,7 @@ mod url_helper_tests {
             live_tenant: None,
             live_cancellation: None,
             render_cache_prepared: None,
+            connection_holds: Vec::new(),
         };
 
         let (_, bytes) = req
@@ -1910,6 +1950,7 @@ mod url_helper_tests {
             live_tenant: None,
             live_cancellation: None,
             render_cache_prepared: None,
+            connection_holds: Vec::new(),
         };
 
         // The bogus middle hop is dropped - only parseable IPs (plus the
@@ -1954,6 +1995,7 @@ mod url_helper_tests {
             live_tenant: None,
             live_cancellation: None,
             render_cache_prepared: None,
+            connection_holds: Vec::new(),
         };
 
         // A junk-only forwarded chain can't rotate rate-limit buckets - `ip()`
