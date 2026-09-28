@@ -66,8 +66,9 @@ pub fn install_test_encryption_key() {
 ///
 /// Test binaries that rotate keys at runtime cannot install twice;
 /// they must install the *final* ring once, then use
-/// [`crate::crypto::_test_encrypt_with`] to mint ciphertext under
-/// arbitrary keys (simulating data written when the old key was current).
+/// [`crate::crypto::testing::encrypt_string_under`] to mint ciphertext
+/// under arbitrary keys (simulating data written when the old key was
+/// current).
 ///
 /// **Test-only.** Production code must go through
 /// `Crypt::init_with_keyring` via `Server::from_config`.

@@ -80,6 +80,8 @@
 
 pub(crate) mod aead;
 pub mod key;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 pub use key::EncryptionKey;
 
@@ -257,9 +259,9 @@ pub enum AadVersion {
 /// one axis - which is how the re-encrypt warning would silently
 /// disappear for exactly the operator who most needs it.
 ///
-/// `#[non_exhaustive]` so a future axis is not a breaking change;
-/// construct it only inside this module, assert on the `key` / `aad`
-/// fields from tests.
+/// `#[non_exhaustive]` so a future axis is not a breaking change. It
+/// is built in this module alone and read everywhere:
+/// [`Crypt::decrypt_string_with_origin`] and its siblings return it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DecryptOrigin {
@@ -267,6 +269,28 @@ pub struct DecryptOrigin {
     pub key: KeyOrigin,
     /// The AAD axis.
     pub aad: AadVersion,
+}
+
+impl DecryptOrigin {
+    /// Whether the value is to be encrypted again: it was decrypted with
+    /// a previous key, or it matched the legacy label, or both.
+    ///
+    /// This is the question of a rotation: an entry of
+    /// `APP_KEY_PREVIOUS` can go when no value has it as its
+    /// [`key`](Self::key) any more.
+    ///
+    /// The value is written again by the function that is the pair of
+    /// the one that read it. A value that was read with a context, by
+    /// [`Crypt::decrypt_string_for_with_origin`], is written by
+    /// [`Crypt::encrypt_string_for`] with the same context, which gives
+    /// it the current key and the current label.
+    /// [`Crypt::encrypt_string`] gives it the label without a context,
+    /// and read with a context again that is the legacy label: the
+    /// answer here stays `true`, and a job that asks until it is `false`
+    /// does not end.
+    pub fn needs_reencryption(&self) -> bool {
+        self.key != KeyOrigin::Current || self.aad != AadVersion::Current
+    }
 }
 
 /// Process-wide encryption facade.
@@ -420,6 +444,71 @@ impl Crypt {
         Ok(plain)
     }
 
+    /// [`Self::decrypt_string`], and where the value came from: the key
+    /// of the ring that decrypted it, and the label it matched.
+    ///
+    /// This is for the job that ends a rotation of `APP_KEY`. It reads
+    /// every encrypted value, writes the ones whose origin
+    /// [`needs_reencryption`](DecryptOrigin::needs_reencryption) again,
+    /// and when it finds none the previous key can go.
+    /// [`Self::decrypt_string`] says the same in a warning, which is for
+    /// a person who reads the log and nothing a program can act on.
+    ///
+    /// No warning is logged here. The caller has the origin.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{Crypt, CryptPurpose};
+    ///
+    /// # fn ex(stored: &str) -> Result<Option<String>, suprnova::FrameworkError> {
+    /// let (plain, origin) = Crypt::decrypt_string_with_origin(CryptPurpose::Cast, stored)?;
+    /// if origin.needs_reencryption() {
+    ///     return Ok(Some(Crypt::encrypt_string(CryptPurpose::Cast, &plain)?));
+    /// }
+    /// # Ok(None) }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Every error of [`Self::decrypt_string`].
+    pub fn decrypt_string_with_origin(
+        purpose: CryptPurpose,
+        wire: &str,
+    ) -> Result<(String, DecryptOrigin), FrameworkError> {
+        Self::decrypt_string_inner(purpose, wire)
+    }
+
+    /// [`Self::decrypt_string_for`], and where the value came from. See
+    /// [`Self::decrypt_string_with_origin`].
+    ///
+    /// The label is the second thing the origin says here: a value that
+    /// was written before its label had the name of its context in it
+    /// matches the legacy label, and is to be written again, by
+    /// [`Self::encrypt_string_for`] with the same context.
+    ///
+    /// # Errors
+    ///
+    /// Every error of [`Self::decrypt_string_for`].
+    pub fn decrypt_string_for_with_origin(
+        purpose: CryptPurpose,
+        context: &str,
+        wire: &str,
+    ) -> Result<(String, DecryptOrigin), FrameworkError> {
+        Self::decrypt_string_for_inner(purpose, context, wire)
+    }
+
+    /// [`Self::decrypt`], and where the value came from. See
+    /// [`Self::decrypt_string_with_origin`].
+    ///
+    /// # Errors
+    ///
+    /// Every error of [`Self::decrypt`].
+    pub fn decrypt_with_origin<T: DeserializeOwned>(
+        purpose: CryptPurpose,
+        wire: &str,
+    ) -> Result<(T, DecryptOrigin), FrameworkError> {
+        Self::decrypt_inner(purpose, wire)
+    }
+
     /// Test-and-internal hook behind [`Self::decrypt_string_for`],
     /// reporting where the decrypt sourced its key and which AAD
     /// generation matched. Same reason [`Self::decrypt_string_inner`]
@@ -553,7 +642,8 @@ impl Crypt {
     /// rotation behaviour without wrestling with `tracing::Subscriber`
     /// capture.
     ///
-    /// Public surface: [`Crypt::decrypt_string`].
+    /// Public surface: [`Crypt::decrypt_string`], and
+    /// [`Crypt::decrypt_string_with_origin`] for the origin.
     #[doc(hidden)]
     pub fn decrypt_string_inner(
         purpose: CryptPurpose,
@@ -589,8 +679,8 @@ impl Crypt {
             .decode(wire.trim())
             .map_err(|e| FrameworkError::internal(format!("Crypt base64 decode failed: {e}")))?;
         let (plain_bytes, origin) = decrypt_with_ring(ring, purpose.aad(), &bytes)?;
-        let value: T = serde_json::from_slice(&plain_bytes)
-            .map_err(|e| FrameworkError::internal(format!("Crypt JSON decode failed: {e}")))?;
+        let value: T =
+            serde_json::from_slice(&plain_bytes).map_err(|e| json_decode_error("Crypt", &e))?;
         Ok((
             value,
             DecryptOrigin {
@@ -622,6 +712,38 @@ impl Crypt {
             );
         }
     }
+}
+
+/// Why a decrypted value did not decode as JSON, without the value.
+///
+/// The message of `serde_json` quotes what it read: `invalid type: string
+/// "...", expected u32`. What it read here was encrypted a moment before,
+/// and an error is logged and can be shown to a client. So this says
+/// which kind of mistake it was and where in the value, and nothing of
+/// the value.
+pub(crate) fn json_decode_reason(error: &serde_json::Error) -> String {
+    use serde_json::error::Category;
+
+    let kind = match error.classify() {
+        Category::Io => "could not be read",
+        Category::Syntax => "is not JSON",
+        Category::Data => "is JSON of another type than the one that was asked for",
+        Category::Eof => "ends before its JSON does",
+    };
+    format!(
+        "the value {kind} (line {}, column {})",
+        error.line(),
+        error.column()
+    )
+}
+
+/// The internal error for a decrypted value that does not decode as JSON.
+/// See [`json_decode_reason`].
+pub(crate) fn json_decode_error(what: &str, error: &serde_json::Error) -> FrameworkError {
+    FrameworkError::internal(format!(
+        "{what} JSON decode failed: {}",
+        json_decode_reason(error)
+    ))
 }
 
 /// Trial-decrypt `wire` against every key in `ring` with `aad` bound
@@ -1045,8 +1167,7 @@ pub fn _test_encrypt_with(
     purpose: CryptPurpose,
     plaintext: &str,
 ) -> Result<String, FrameworkError> {
-    let wire = aead::encrypt(key, purpose.aad(), plaintext.as_bytes())?;
-    Ok(URL_SAFE_NO_PAD.encode(wire))
+    testing::encrypt_string_under(key, purpose, plaintext)
 }
 
 /// [`_test_encrypt_with`]'s v2 sibling: mint ciphertext under an
@@ -1061,8 +1182,7 @@ pub fn _test_encrypt_with_for(
     context: &str,
     plaintext: &str,
 ) -> Result<String, FrameworkError> {
-    let wire = aead::encrypt(key, &purpose.aad_for(context), plaintext.as_bytes())?;
-    Ok(URL_SAFE_NO_PAD.encode(wire))
+    testing::encrypt_string_for_under(key, purpose, context, plaintext)
 }
 
 /// Process-wide flag backing [`_test_force_next_encrypt_failure`].

@@ -294,9 +294,8 @@ impl<T> CursorPaginator<T> {
                     e
                 }
             })?;
-        let payload: CursorPayload = serde_json::from_str(&json).map_err(|e| {
-            FrameworkError::internal(format!("Cursor payload JSON decode failed: {e}"))
-        })?;
+        let payload: CursorPayload = serde_json::from_str(&json)
+            .map_err(|e| crate::crypto::json_decode_error("Cursor payload", &e))?;
         let value = tagged_json_to_value(&payload.t, payload.v)?;
         let direction = CursorDirection::from_str(&payload.d)?;
         Ok((value, direction))

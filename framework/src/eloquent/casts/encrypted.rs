@@ -124,8 +124,13 @@ where
     fn from_storage(s: &String) -> Result<Vec<T>, FrameworkError> {
         let plain = Crypt::decrypt_string(CryptPurpose::Cast, s)
             .map_err(|e| FrameworkError::internal(format!("AsEncryptedArray decrypt: {e}")))?;
+        // The reason and not the error of the decoder, which quotes the
+        // decrypted value.
         serde_json::from_str(&plain).map_err(|e| {
-            FrameworkError::validation("AsEncryptedArray", format!("deserialize: {e}"))
+            FrameworkError::validation(
+                "AsEncryptedArray",
+                format!("deserialize: {}", crate::crypto::json_decode_reason(&e)),
+            )
         })
     }
 }
@@ -200,8 +205,13 @@ where
     fn from_storage(s: &String) -> Result<T, FrameworkError> {
         let plain = Crypt::decrypt_string(CryptPurpose::Cast, s)
             .map_err(|e| FrameworkError::internal(format!("AsEncryptedObject decrypt: {e}")))?;
+        // The reason and not the error of the decoder, which quotes the
+        // decrypted value.
         serde_json::from_str(&plain).map_err(|e| {
-            FrameworkError::validation("AsEncryptedObject", format!("deserialize: {e}"))
+            FrameworkError::validation(
+                "AsEncryptedObject",
+                format!("deserialize: {}", crate::crypto::json_decode_reason(&e)),
+            )
         })
     }
 }

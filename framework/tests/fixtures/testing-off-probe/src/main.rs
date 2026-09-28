@@ -95,6 +95,8 @@ fn main() {
 
     // --- A module gated as a whole (E0433 without `with-testing`) ---
     let _ = filesystem_testing_guard;
+    let _ = suprnova::crypto::testing::encrypt_string_under;
+    let _ = suprnova::crypto::testing::encrypt_string_for_under;
     let _ = suprnova::render_cache::middleware::race_points::arm;
     let _ = suprnova::render_cache::middleware::race_points::disarm;
     let _ = &suprnova::render_cache::middleware::race_points::EPOCH_CAPTURED;

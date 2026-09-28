@@ -351,6 +351,26 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   exported from `suprnova::workflow`. `with_config` stays the constructor with
   no check, and says so. `new()` makes its checks through `try_with_config`,
   so the two cannot come apart.
+- **`Crypt::decrypt_string_with_origin` and its siblings return where a value
+  came from.** `DecryptOrigin`, `KeyOrigin` and `AadVersion` were public, and
+  every function that returned one was hidden, so the two questions of a key
+  rotation, does this value still need a previous key and does it still use
+  the legacy label, were answered in log warnings alone.
+  `Crypt::decrypt_string_with_origin`, `Crypt::decrypt_string_for_with_origin`
+  and `Crypt::decrypt_with_origin` return the value and its `DecryptOrigin`,
+  and `DecryptOrigin::needs_reencryption()` says whether the value is to be
+  written again. With them the job that ends a rotation can be written: read
+  every encrypted value, write again what needs it, and remove the previous
+  key when nothing does. For tests, `crypto::testing::encrypt_string_under`
+  and `encrypt_string_for_under` write a value under a key and a label of the
+  test's choice; they are compiled with the `testing` feature and replace the
+  hidden `_test_encrypt_with` names the manual pointed at. The three types are
+  exported from the crate root. An error for a decrypted value that does not
+  decode as JSON no longer quotes the value: it says which kind of mistake it
+  was and at which line and column. That is the error of `Crypt::decrypt`, of
+  a pagination cursor, and of the casts `AsEncryptedArray`,
+  `AsEncryptedObject` and `AsEncryptedCollection`, whose error is a validation
+  error and was shown to the client with the decrypted value in it.
 
 ### Changed
 

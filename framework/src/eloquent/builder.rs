@@ -3780,8 +3780,14 @@ where
                         }
                     }
                 }
+                // The row has the values of the casts in it by now, the
+                // decrypted ones among them, and the error of the decoder
+                // quotes the value it could not read.
                 let coerced_model: M = serde_json::from_value(as_json).map_err(|e| {
-                    FrameworkError::database(format!("rehydrate model after runtime cast: {e}"))
+                    FrameworkError::database(format!(
+                        "rehydrate model after runtime cast: {}",
+                        crate::crypto::json_decode_reason(&e)
+                    ))
                 })?;
                 buf.push(coerced_model);
             }
