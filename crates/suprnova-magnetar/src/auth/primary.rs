@@ -118,7 +118,6 @@ impl VerifiedPrincipal {
     }
 
     /// Construct a principal at the primary-auth boundary.
-    #[allow(dead_code)]
     pub(crate) fn new(
         user_id: String,
         method: SignInMethod,
