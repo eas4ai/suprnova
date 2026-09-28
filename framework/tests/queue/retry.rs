@@ -1,6 +1,17 @@
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serial_test::serial;
+use std::sync::Arc;
 use std::time::Duration;
-use suprnova::queue::BackoffSchedule;
-use suprnova::queue::retry::next_delay;
+use suprnova::error::FrameworkError;
+use suprnova::events::{EventFacade, dispatched};
+use suprnova::queue::events::JobReleasedAfterException;
+use suprnova::queue::retry::{RETRY_HINT_CEILING, delay_after_failure, next_delay};
+use suprnova::queue::{
+    BackoffSchedule, Job, MemoryQueueDriver, Queue,
+    worker::{WorkerConfig, register_job, run_worker},
+};
+use tokio_util::sync::CancellationToken;
 
 #[test]
 fn fixed_backoff_returns_constant_delay() {
@@ -82,4 +93,103 @@ fn sequence_backoff_follows_explicit_steps() {
     assert_eq!(next_delay(&sched, 3, Some(0.0)), Duration::from_secs(9));
     // beyond the sequence -> last entry sticks
     assert_eq!(next_delay(&sched, 99, Some(0.0)), Duration::from_secs(9));
+}
+
+#[test]
+fn a_retry_hint_replaces_the_schedule_in_both_directions() {
+    let schedule = BackoffSchedule::Fixed { secs: 30 };
+    let longer = FrameworkError::rate_limited(Some(Duration::from_secs(90)), "push service");
+    let shorter = FrameworkError::rate_limited(Some(Duration::from_secs(2)), "push service");
+
+    assert_eq!(
+        delay_after_failure(&schedule, 1, &longer),
+        Duration::from_secs(90),
+        "retrying sooner would hit a service that already said no"
+    );
+    assert_eq!(
+        delay_after_failure(&schedule, 1, &shorter),
+        Duration::from_secs(2),
+        "waiting longer than the service asked helps nobody"
+    );
+}
+
+#[test]
+fn a_failure_without_a_hint_keeps_the_schedule() {
+    let schedule = BackoffSchedule::Fixed { secs: 30 };
+    let no_hint = FrameworkError::rate_limited(None, "push service");
+    let other = FrameworkError::internal("boom");
+
+    assert_eq!(
+        delay_after_failure(&schedule, 1, &no_hint),
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        delay_after_failure(&schedule, 4, &other),
+        Duration::from_secs(30)
+    );
+}
+
+#[test]
+fn a_retry_hint_is_capped() {
+    let schedule = BackoffSchedule::Fixed { secs: 30 };
+    let absurd = FrameworkError::rate_limited(Some(Duration::from_secs(u64::MAX)), "push service");
+
+    assert_eq!(
+        delay_after_failure(&schedule, 1, &absurd),
+        RETRY_HINT_CEILING
+    );
+    assert_eq!(RETRY_HINT_CEILING, Duration::from_secs(86_400));
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ThrottledJob;
+
+#[async_trait]
+impl Job for ThrottledJob {
+    fn job_name() -> &'static str {
+        "queue_retry::ThrottledJob"
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Err(FrameworkError::rate_limited(
+            Some(Duration::from_secs(90)),
+            "push service rejected (status 429)",
+        ))
+    }
+    fn max_tries() -> u32 {
+        3
+    }
+    fn backoff() -> BackoffSchedule {
+        BackoffSchedule::Fixed { secs: 5 }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn the_worker_releases_a_throttled_job_for_as_long_as_the_service_asked() {
+    register_job::<ThrottledJob>();
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let _events = EventFacade::fake();
+    Queue::push(ThrottledJob).await.unwrap();
+
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(30),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(1),
+        queues: Vec::new(),
+    };
+    run_worker(driver, cfg, CancellationToken::new()).await;
+
+    let released = dispatched::<JobReleasedAfterException>(|_| true);
+    assert_eq!(released.len(), 1, "one failed attempt, one release");
+    assert_eq!(
+        released[0].delay_secs, 90,
+        "the 90 second hint, not the job's 5 second backoff"
+    );
+    assert_eq!(
+        Queue::delayed_size().await.unwrap(),
+        1,
+        "the job waits on the queue for its next attempt"
+    );
 }

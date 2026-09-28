@@ -4,10 +4,43 @@
 //! - `attempts` is 1-indexed: 1 = first retry after the original failure.
 //! - `deterministic_jitter` is `Some(x)` where x ∈ [-1.0, 1.0] for tests
 //!   that need a known result; `None` draws from the thread RNG.
+//!
+//! `delay_after_failure(schedule, attempts, error)` is what the worker asks:
+//! the schedule's delay, unless the failure carries a retry hint from the
+//! service that refused the work.
 
+use crate::error::FrameworkError;
 use crate::queue::BackoffSchedule;
 use rand::RngExt;
 use std::time::Duration;
+
+/// The longest a retry hint may hold a job back: 24 hours.
+///
+/// A hint is a number a remote service chose. Without a ceiling, a wrong or
+/// hostile one parks the job for as long as it likes. The web push client
+/// caps the `Retry-After` it parses at the same value.
+pub const RETRY_HINT_CEILING: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The delay before the next attempt of a job that failed with `error`.
+///
+/// A [`FrameworkError::RateLimited`] that carries a hint is the refusing
+/// service saying when it will take the work again. The job's schedule
+/// cannot know that, so the hint replaces the schedule for this attempt, in
+/// both directions: retrying sooner than the hint hits a service that
+/// already said no, and the schedule may wait far longer than the service
+/// asked for. The hint is capped at [`RETRY_HINT_CEILING`].
+///
+/// Every other failure gets [`next_delay`].
+pub fn delay_after_failure(
+    schedule: &BackoffSchedule,
+    attempts: u32,
+    error: &FrameworkError,
+) -> Duration {
+    match error.retry_after() {
+        Some(hint) => hint.min(RETRY_HINT_CEILING),
+        None => next_delay(schedule, attempts, None),
+    }
+}
 
 /// Compute the next retry delay for `attempts` (1-indexed) under the
 /// supplied [`BackoffSchedule`]. When `deterministic_jitter` is

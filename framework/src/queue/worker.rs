@@ -36,7 +36,7 @@ use crate::queue::envelope::Envelope;
 use crate::queue::events as queue_events;
 use crate::queue::middleware::{JobMiddleware, Next};
 use crate::queue::outcome::JobOutcome;
-use crate::queue::retry::next_delay;
+use crate::queue::retry::{delay_after_failure, next_delay};
 use crate::telemetry::Metrics;
 use chrono::Utc;
 use futures::FutureExt;
@@ -882,12 +882,15 @@ pub async fn run_worker(
                         exception: e.to_string(),
                     })
                     .await;
-                    let delay = next_delay(&env.backoff, env.attempts, None);
+                    // A failure that carries a retry hint is retried when
+                    // the refusing service asked, not on the job's schedule.
+                    let delay = delay_after_failure(&env.backoff, env.attempts, &e);
                     tracing::warn!(
                         job = %env.job_name,
                         id = %env.id,
                         attempt = env.attempts,
                         retry_in = ?delay,
+                        retry_hint = e.retry_after().is_some(),
                         error = %e,
                         "queue job failed, will retry"
                     );

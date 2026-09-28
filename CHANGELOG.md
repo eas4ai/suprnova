@@ -339,6 +339,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `assert_nothing_chained`, with the records `FakedBatch` and `FakedChain`.
   The jobs of a batch and the head of a chain are recorded as pushes too, so
   `assert_pushed` sees them.
+- **The queue worker honors a retry hint.** A job that failed with
+  `FrameworkError::RateLimited` carrying a `retry_after` was retried on its
+  own backoff, so a queued web push that a push service refused with `429` and
+  `Retry-After` went back to the service early, or waited far longer than it
+  was asked to. The worker now releases such a job for the hinted time, capped
+  at 24 hours (`queue::retry::RETRY_HINT_CEILING`). Every other failure keeps
+  the job's backoff. `queue::retry::delay_after_failure` is the function the
+  worker calls.
 
 ### Security
 
