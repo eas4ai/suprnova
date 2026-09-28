@@ -376,6 +376,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   itself for that session, as before: it does not serve until the migrations
   pass. A project with no `src/migrations` directory is left to migrate by
   itself as well.
+- **`seed::clear()` is a supported function of the `testing` feature.** It was
+  hidden from the documentation as an internal helper, and it is the only way
+  for the tests of an application to reset the registry of the seeders, which
+  is one for the process and which the guard of the test container does not
+  reset. The manual told readers to call it and said in the same breath that
+  it was hidden. It is documented now and compiled with the `testing` feature
+  alone, which is a default feature, so a test suite needs no change. A build
+  with `default-features = false` and without `testing` no longer has the
+  function.
 
 ### Fixed
 

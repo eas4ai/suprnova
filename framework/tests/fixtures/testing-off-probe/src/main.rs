@@ -74,6 +74,7 @@ fn main() {
     let _ = suprnova::crypto::_test_encrypt_with;
     let _ = suprnova::crypto::_test_encrypt_with_for;
     let _ = suprnova::crypto::_test_force_next_encrypt_failure;
+    let _ = suprnova::seed::clear;
     let _ = suprnova::rbac::observed_rbac_statements_for_test;
     let _ = suprnova::testing::install_test_encryption_key;
     let _ = suprnova::testing::install_test_encryption_keyring;

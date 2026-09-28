@@ -460,3 +460,35 @@ mod without_events {
         );
     }
 }
+
+// ---- seed::clear is the reset a test asks for ---------------------------
+
+struct ClearedSeeder;
+
+#[async_trait]
+impl Seeder for ClearedSeeder {
+    fn name() -> &'static str {
+        "ClearedSeeder"
+    }
+    async fn run() -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn clear_forgets_every_registered_seeder() {
+    seed::clear();
+    seed::register::<ClearedSeeder>();
+    assert_eq!(seed::count(), 1);
+    assert!(seed::is_registered("ClearedSeeder"));
+
+    seed::clear();
+
+    assert_eq!(seed::count(), 0);
+    assert!(!seed::is_registered("ClearedSeeder"));
+    assert!(
+        seed::run_one("ClearedSeeder").await.is_err(),
+        "a seeder of the test before must not run in the next one"
+    );
+}
