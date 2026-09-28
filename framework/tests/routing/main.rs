@@ -3,6 +3,7 @@
 
 pub mod group_names;
 pub mod inertia;
+pub mod params;
 pub mod root_group_redirect;
 pub mod route_binding_route_param_scoped;
 pub mod router_middleware_keying;

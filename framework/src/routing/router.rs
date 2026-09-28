@@ -36,6 +36,7 @@
 use crate::FrameworkError;
 use crate::http::{Request, Response};
 use crate::middleware::{BoxedMiddleware, Middleware, boxed_as};
+use crate::routing::params::ParamConstraint;
 use crate::ws::BoxedWebSocketHandler;
 use hyper::Method;
 use matchit::Router as MatchitRouter;
@@ -313,12 +314,19 @@ where
 /// that returns the list of unfilled placeholder names instead, used
 /// by redirects so a missing param surfaces as a 500 rather than as
 /// a `Location` header with `{name}` baked into it.
+///
+/// An optional placeholder, `{id?}`, is looked up as `id`. One that has no
+/// value is left out with its segment, so `/posts/{id?}` becomes `/posts`.
+/// One that has no value while a later one has is kept verbatim like a
+/// required one: leaving it out would move the later value into its place.
 fn substitute<F>(pattern: &str, mut next_value: F) -> String
 where
     F: FnMut(&str) -> Option<String>,
 {
+    let values = optional_values(pattern, &mut next_value);
     let mut out = String::with_capacity(pattern.len() + 16);
     let mut rest = pattern;
+    let mut optional = values.iter();
     while let Some(open) = rest.find('{') {
         out.push_str(&rest[..open]);
         rest = &rest[open + 1..];
@@ -328,7 +336,17 @@ where
             return out;
         };
         let key = &rest[..close];
-        if let Some(encoded) = next_value(key) {
+        if let Some(name) = key.strip_suffix('?') {
+            match optional.next() {
+                Some(Filled::Value(encoded)) => out.push_str(encoded),
+                Some(Filled::LeftOut) => leave_segment_out(&mut out),
+                Some(Filled::Missing) | None => {
+                    out.push('{');
+                    out.push_str(name);
+                    out.push('}');
+                }
+            }
+        } else if let Some(encoded) = next_value(key) {
             out.push_str(&encoded);
         } else {
             out.push('{');
@@ -341,6 +359,52 @@ where
     out
 }
 
+/// What an optional placeholder becomes in a generated URL.
+enum Filled {
+    /// The caller gave a value.
+    Value(String),
+    /// No value, and none for any optional placeholder behind it: the
+    /// segment is left out.
+    LeftOut,
+    /// No value, but a later optional placeholder has one. Leaving this
+    /// one out would move the later value into its place.
+    Missing,
+}
+
+/// One entry for each optional placeholder of `pattern`, in order.
+fn optional_values<F>(pattern: &str, next_value: &mut F) -> Vec<Filled>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let values: Vec<Option<String>> = pattern
+        .split('{')
+        .skip(1)
+        .filter_map(|after| after.split_once('}'))
+        .filter_map(|(key, _)| key.strip_suffix('?'))
+        // An empty value is no value. `/posts/` is a URL no form of
+        // `/posts/{id?}` matches, so the segment is left out.
+        .map(|name| next_value(name).filter(|value| !value.is_empty()))
+        .collect();
+    let last_given = values.iter().rposition(Option::is_some);
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(at, value)| match value {
+            Some(value) => Filled::Value(value),
+            None if last_given.is_some_and(|last| at < last) => Filled::Missing,
+            None => Filled::LeftOut,
+        })
+        .collect()
+}
+
+/// Take the separator of a left-out segment back off the URL. The root
+/// stays: `/{locale?}` with no locale is `/`.
+fn leave_segment_out(out: &mut String) {
+    if out.len() > 1 && out.ends_with('/') {
+        out.pop();
+    }
+}
+
 /// Strict sibling of [`substitute`]: substitute placeholders, and
 /// return `Err` carrying the (ordered, deduplicated) list of
 /// unfilled placeholder names if any required substitution was
@@ -350,6 +414,8 @@ fn substitute_strict<F>(pattern: &str, mut next_value: F) -> Result<String, Vec<
 where
     F: FnMut(&str) -> Option<String>,
 {
+    let values = optional_values(pattern, &mut next_value);
+    let mut optional = values.iter();
     let mut out = String::with_capacity(pattern.len() + 16);
     let mut rest = pattern;
     let mut missing: Vec<String> = Vec::new();
@@ -368,7 +434,19 @@ where
             return Err(missing);
         };
         let key = &rest[..close];
-        if let Some(encoded) = next_value(key) {
+        if let Some(name) = key.strip_suffix('?') {
+            // An optional placeholder is missing only when a later one
+            // was given, see `Filled::Missing`.
+            match optional.next() {
+                Some(Filled::Value(encoded)) => out.push_str(encoded),
+                Some(Filled::LeftOut) => leave_segment_out(&mut out),
+                Some(Filled::Missing) | None => {
+                    if !missing.iter().any(|m| m == name) {
+                        missing.push(name.to_string());
+                    }
+                }
+            }
+        } else if let Some(encoded) = next_value(key) {
             out.push_str(&encoded);
         } else if !missing.iter().any(|m| m == key) {
             missing.push(key.to_string());
@@ -612,10 +690,36 @@ pub struct Router {
     render_cache_policies: crate::render_cache::registry::RenderCachePolicyTable,
     /// Version of the one permitted Live route installation.
     live_installation_version: Option<u16>,
+    /// What the parameters of a route may hold, keyed like
+    /// `route_middleware` by the method and the pattern as written.
+    route_constraints: HashMap<(Method, String), Vec<(String, ParamConstraint)>>,
     /// Fallback handler for when no routes match (overrides default 404)
     fallback_handler: Option<Arc<BoxedHandler>>,
     /// Middleware for the fallback route
     fallback_middleware: Vec<BoxedMiddleware>,
+}
+
+/// Register `pattern` with one method's matcher: once when it has no
+/// optional parameter, and once for every length it can have otherwise. Every
+/// form is stored under `pattern` as it was written, so the middleware, the
+/// name and the constraints of the route apply to each of them. See
+/// [`crate::routing::params`].
+///
+/// The error is the text of what went wrong and no `FrameworkError`: the
+/// caller puts the method and the path in front of it, and an error inside
+/// an error would say "Internal server error" twice.
+fn insert_every_form(
+    routes: &mut MatchitRouter<(String, Arc<BoxedHandler>)>,
+    pattern: &str,
+    handler: Arc<BoxedHandler>,
+) -> Result<(), String> {
+    let forms = super::params::expand_optional(pattern).map_err(|e| e.message().to_owned())?;
+    for form in forms {
+        routes
+            .insert(form, (pattern.to_string(), Arc::clone(&handler)))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn pattern_overlaps_live_namespace(pattern: &str) -> bool {
@@ -645,6 +749,7 @@ impl Router {
             registered_patterns: Vec::new(),
             render_cache_policies: crate::render_cache::registry::RenderCachePolicyTable::default(),
             live_installation_version: None,
+            route_constraints: HashMap::new(),
             fallback_handler: None,
             fallback_middleware: Vec::new(),
         }
@@ -849,6 +954,65 @@ impl Router {
             .push(middleware);
     }
 
+    /// Hold the parameter `param` of the route `(method, pattern)` to
+    /// `constraint` (internal use; the builders' `where_*` methods call it).
+    ///
+    /// # Errors
+    ///
+    /// When the pattern has no parameter of that name. A constraint on a
+    /// parameter that does not exist would never be checked, and the route
+    /// would look guarded while it is not.
+    pub(crate) fn add_constraint(
+        &mut self,
+        method: Method,
+        pattern: &str,
+        param: &str,
+        constraint: ParamConstraint,
+    ) -> Result<(), FrameworkError> {
+        let names = super::params::param_names(pattern);
+        if !names.iter().any(|name| name == param) {
+            return Err(FrameworkError::internal(format!(
+                "route `{pattern}` has no parameter `{param}` to constrain. Its parameters: {}",
+                if names.is_empty() {
+                    "none".to_owned()
+                } else {
+                    names.join(", ")
+                }
+            )));
+        }
+        self.route_constraints
+            .entry((method, pattern.to_string()))
+            .or_default()
+            .push((param.to_string(), constraint));
+        Ok(())
+    }
+
+    /// Whether the parameters of a matched request are ones the route's
+    /// constraints allow. A parameter the request did not fill, which is an
+    /// optional one left out, is not checked: there is no value to refuse.
+    fn constraints_allow(
+        &self,
+        method: &Method,
+        pattern: &str,
+        params: &HashMap<String, String>,
+    ) -> bool {
+        // Most routes have none. The table is asked before the key is built.
+        if self.route_constraints.is_empty() {
+            return true;
+        }
+        let Some(constraints) = self
+            .route_constraints
+            .get(&(method.clone(), pattern.to_string()))
+        else {
+            return true;
+        };
+        constraints.iter().all(|(param, constraint)| {
+            params
+                .get(param)
+                .is_none_or(|value| constraint.allows(value))
+        })
+    }
+
     /// Set the fallback handler for when no routes match
     pub(crate) fn set_fallback(&mut self, handler: Arc<BoxedHandler>) {
         self.fallback_handler = Some(handler);
@@ -889,11 +1053,9 @@ impl Router {
         path: &str,
         handler: Arc<BoxedHandler>,
     ) -> Result<(), FrameworkError> {
-        self.get_routes
-            .insert(path, (path.to_string(), handler))
-            .map_err(|e| {
-                FrameworkError::internal(format!("Failed to register GET route '{path}': {e}"))
-            })?;
+        insert_every_form(&mut self.get_routes, path, handler).map_err(|e| {
+            FrameworkError::internal(format!("Failed to register GET route '{path}': {e}"))
+        })?;
         self.registered_patterns.push(path.to_string());
         Ok(())
     }
@@ -916,11 +1078,9 @@ impl Router {
         path: &str,
         handler: Arc<BoxedHandler>,
     ) -> Result<(), FrameworkError> {
-        self.post_routes
-            .insert(path, (path.to_string(), handler))
-            .map_err(|e| {
-                FrameworkError::internal(format!("Failed to register POST route '{path}': {e}"))
-            })?;
+        insert_every_form(&mut self.post_routes, path, handler).map_err(|e| {
+            FrameworkError::internal(format!("Failed to register POST route '{path}': {e}"))
+        })?;
         self.registered_patterns.push(path.to_string());
         Ok(())
     }
@@ -943,11 +1103,9 @@ impl Router {
         path: &str,
         handler: Arc<BoxedHandler>,
     ) -> Result<(), FrameworkError> {
-        self.put_routes
-            .insert(path, (path.to_string(), handler))
-            .map_err(|e| {
-                FrameworkError::internal(format!("Failed to register PUT route '{path}': {e}"))
-            })?;
+        insert_every_form(&mut self.put_routes, path, handler).map_err(|e| {
+            FrameworkError::internal(format!("Failed to register PUT route '{path}': {e}"))
+        })?;
         self.registered_patterns.push(path.to_string());
         Ok(())
     }
@@ -970,11 +1128,9 @@ impl Router {
         path: &str,
         handler: Arc<BoxedHandler>,
     ) -> Result<(), FrameworkError> {
-        self.delete_routes
-            .insert(path, (path.to_string(), handler))
-            .map_err(|e| {
-                FrameworkError::internal(format!("Failed to register DELETE route '{path}': {e}"))
-            })?;
+        insert_every_form(&mut self.delete_routes, path, handler).map_err(|e| {
+            FrameworkError::internal(format!("Failed to register DELETE route '{path}': {e}"))
+        })?;
         self.registered_patterns.push(path.to_string());
         Ok(())
     }
@@ -997,11 +1153,9 @@ impl Router {
         path: &str,
         handler: Arc<BoxedHandler>,
     ) -> Result<(), FrameworkError> {
-        self.patch_routes
-            .insert(path, (path.to_string(), handler))
-            .map_err(|e| {
-                FrameworkError::internal(format!("Failed to register PATCH route '{path}': {e}"))
-            })?;
+        insert_every_form(&mut self.patch_routes, path, handler).map_err(|e| {
+            FrameworkError::internal(format!("Failed to register PATCH route '{path}': {e}"))
+        })?;
         self.registered_patterns.push(path.to_string());
         Ok(())
     }
@@ -1026,11 +1180,9 @@ impl Router {
         path: &str,
         handler: Arc<BoxedHandler>,
     ) -> Result<(), FrameworkError> {
-        self.head_routes
-            .insert(path, (path.to_string(), handler))
-            .map_err(|e| {
-                FrameworkError::internal(format!("Failed to register HEAD route '{path}': {e}"))
-            })?;
+        insert_every_form(&mut self.head_routes, path, handler).map_err(|e| {
+            FrameworkError::internal(format!("Failed to register HEAD route '{path}': {e}"))
+        })?;
         self.registered_patterns.push(path.to_string());
         Ok(())
     }
@@ -1056,11 +1208,9 @@ impl Router {
         path: &str,
         handler: Arc<BoxedHandler>,
     ) -> Result<(), FrameworkError> {
-        self.options_routes
-            .insert(path, (path.to_string(), handler))
-            .map_err(|e| {
-                FrameworkError::internal(format!("Failed to register OPTIONS route '{path}': {e}"))
-            })?;
+        insert_every_form(&mut self.options_routes, path, handler).map_err(|e| {
+            FrameworkError::internal(format!("Failed to register OPTIONS route '{path}': {e}"))
+        })?;
         self.registered_patterns.push(path.to_string());
         Ok(())
     }
@@ -1722,11 +1872,30 @@ impl Router {
             )));
         }
         let converted = crate::routing::macros::convert_route_params(path);
-        self.ws_routes
-            .insert(&converted, (converted.clone(), handler, middleware, config))
-            .map_err(|e| {
-                FrameworkError::internal(format!("Failed to register WS route '{path}': {e}"))
-            })?;
+        // One form for every length the pattern can have, as for an HTTP
+        // route. Without this `/ws/rooms/{room?}` registered a required
+        // parameter that was named `room?`.
+        let forms = super::params::expand_optional(&converted).map_err(|e| {
+            FrameworkError::internal(format!(
+                "Failed to register WS route '{path}': {}",
+                e.message()
+            ))
+        })?;
+        for form in forms {
+            self.ws_routes
+                .insert(
+                    form,
+                    (
+                        converted.clone(),
+                        handler.clone(),
+                        middleware.clone(),
+                        config.clone(),
+                    ),
+                )
+                .map_err(|e| {
+                    FrameworkError::internal(format!("Failed to register WS route '{path}': {e}"))
+                })?;
+        }
         self.registered_patterns.push(converted);
         Ok(self)
     }
@@ -1785,19 +1954,30 @@ impl Router {
                 if let Ok(matched) = self.head_routes.at(path) {
                     let params = decode_matched_params(matched.params.iter());
                     let (pattern, handler) = matched.value;
-                    return Some((pattern.clone(), handler.clone(), params));
+                    return self
+                        .constraints_allow(&hyper::Method::HEAD, pattern, &params)
+                        .then(|| (pattern.clone(), handler.clone(), params));
                 }
                 &self.get_routes
             }
             hyper::Method::OPTIONS => &self.options_routes,
             _ => return None,
         };
+        // A HEAD request with no HEAD route of its own runs the GET route,
+        // so it is held to the GET route's constraints.
+        let registered_as = if *method == hyper::Method::HEAD {
+            &hyper::Method::GET
+        } else {
+            method
+        };
 
-        router.at(path).ok().map(|matched| {
-            let params = decode_matched_params(matched.params.iter());
-            let (pattern, handler) = matched.value;
-            (pattern.clone(), handler.clone(), params)
-        })
+        let matched = router.at(path).ok()?;
+        let params = decode_matched_params(matched.params.iter());
+        let (pattern, handler) = matched.value;
+        // A value a constraint refuses is a route that did not match: the
+        // caller sees what it sees for an unknown path.
+        self.constraints_allow(registered_as, pattern, &params)
+            .then(|| (pattern.clone(), handler.clone(), params))
     }
 
     /// Whether `path` has a HEAD handler registered explicitly (as
@@ -2050,6 +2230,52 @@ impl RouteBuilder {
             .add_middleware(method, &path, boxed_as(middleware));
         self
     }
+
+    /// Hold a parameter of the most recently registered route to a
+    /// constraint. A request whose value the constraint refuses gets a
+    /// 404, as if the route had not matched, and the handler is not run.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{Router, Request, Response};
+    /// # async fn show(_req: Request) -> Response { suprnova::http::text("ok") }
+    /// Router::new()
+    ///     .get("/posts/{id}", show).where_number("id")
+    ///     .get("/archive/{year?}/{month?}", show)
+    ///     .where_pattern("year", "[0-9]{4}")
+    ///     .where_in("month", ["01", "02", "03"]);
+    /// ```
+    ///
+    /// An optional parameter the request left out is not checked.
+    ///
+    /// # Errors
+    ///
+    /// When the route has no parameter `param`.
+    pub fn try_constrain(
+        mut self,
+        param: &str,
+        constraint: ParamConstraint,
+    ) -> Result<Self, FrameworkError> {
+        let method = self.last_method.clone();
+        let path = self.last_path.clone();
+        self.router
+            .add_constraint(method, &path, param, constraint)?;
+        Ok(self)
+    }
+
+    /// Hold the parameter `param` to `constraint`. The `where_*` methods
+    /// are this with the constraint named.
+    ///
+    /// # Panics
+    ///
+    /// When the route has no parameter `param`. That is when the route is
+    /// registered, which is at boot. Use [`Self::try_constrain`] to get
+    /// the error instead.
+    pub fn constrain(self, param: &str, constraint: ParamConstraint) -> Self {
+        self.try_constrain(param, constraint)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    super::params::where_methods!();
 
     /// Apply pre-boxed middleware to the most recently registered route
     /// (Used internally by route macros)
@@ -2370,6 +2596,40 @@ impl MultiMethodRouteBuilder {
         }
         self
     }
+
+    /// Hold a parameter of this route to a constraint, for every method
+    /// the route was registered against. See
+    /// [`RouteBuilder::try_constrain`].
+    ///
+    /// # Errors
+    ///
+    /// When the route has no parameter `param`.
+    pub fn try_constrain(
+        mut self,
+        param: &str,
+        constraint: ParamConstraint,
+    ) -> Result<Self, FrameworkError> {
+        for method in &self.methods {
+            self.router
+                .add_constraint(method.clone(), &self.path, param, constraint.clone())?;
+        }
+        Ok(self)
+    }
+
+    /// Hold the parameter `param` to `constraint`, for every method. The
+    /// `where_*` methods are this with the constraint named.
+    ///
+    /// # Panics
+    ///
+    /// When the route has no parameter `param`. That is when the route is
+    /// registered, which is at boot. Use [`Self::try_constrain`] to get
+    /// the error instead.
+    pub fn constrain(self, param: &str, constraint: ParamConstraint) -> Self {
+        self.try_constrain(param, constraint)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    super::params::where_methods!();
 
     /// Pre-boxed sibling of [`MultiMethodRouteBuilder::middleware`]
     /// (used internally by the macro-layer `AnyRouteDefBuilder` so it

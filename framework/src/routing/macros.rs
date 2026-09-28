@@ -51,6 +51,7 @@ pub const fn validate_route_path(path: &'static str) -> &'static str {
     path
 }
 use crate::middleware::{BoxedMiddleware, Middleware, boxed_as};
+use crate::routing::params::ParamConstraint;
 use crate::routing::router::{BoxedHandler, Router, register_route_name};
 use crate::session::SessionBlock;
 use crate::session::blocking::register_route_block;
@@ -203,6 +204,7 @@ pub struct RouteDefBuilder<H> {
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
     block: Option<SessionBlock>,
+    constraints: Vec<(String, ParamConstraint)>,
 }
 
 impl<H, Fut> RouteDefBuilder<H>
@@ -219,8 +221,33 @@ where
             name: None,
             middlewares: Vec::new(),
             block: None,
+            constraints: Vec::new(),
         }
     }
+
+    /// Hold a parameter of this route to a constraint. A request whose
+    /// value the constraint refuses gets a 404, and the handler is not run.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{get, Request, Response};
+    /// # async fn show(_req: Request) -> Response { suprnova::http::text("ok") }
+    /// get!("/posts/{id}", show).where_number("id");
+    /// ```
+    ///
+    /// The `where_*` methods are this with the constraint named.
+    ///
+    /// # Panics
+    ///
+    /// Not here. The parameter may be one of the group the route is in,
+    /// so whether the route has it is known when the route is registered.
+    /// A constraint on a parameter the route does not have stops the boot
+    /// there, with the other errors of a route the macros register.
+    pub fn constrain(mut self, param: &str, constraint: ParamConstraint) -> Self {
+        self.constraints.push((param.to_owned(), constraint));
+        self
+    }
+
+    crate::routing::params::where_methods!();
 
     /// Name this route for URL generation
     pub fn name(mut self, name: &'static str) -> Self {
@@ -286,6 +313,12 @@ where
             .middlewares
             .into_iter()
             .fold(builder, |b, m| b.middleware_boxed(m));
+        let builder = self
+            .constraints
+            .into_iter()
+            .fold(builder, |b, (param, constraint)| {
+                b.constrain(&param, constraint)
+            });
         let builder = match self.block {
             Some(block) => builder.block_session(block),
             None => builder,
@@ -613,6 +646,7 @@ pub struct AnyRouteDefBuilder<H> {
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
     block: Option<SessionBlock>,
+    constraints: Vec<(String, ParamConstraint)>,
 }
 
 impl<H, Fut> AnyRouteDefBuilder<H>
@@ -627,8 +661,19 @@ where
             name: None,
             middlewares: Vec::new(),
             block: None,
+            constraints: Vec::new(),
         }
     }
+
+    /// Hold a parameter of this route to a constraint, for every method.
+    /// See [`RouteDefBuilder::constrain`], which says when a constraint
+    /// on a parameter the route does not have is refused.
+    pub fn constrain(mut self, param: &str, constraint: ParamConstraint) -> Self {
+        self.constraints.push((param.to_owned(), constraint));
+        self
+    }
+
+    crate::routing::params::where_methods!();
 
     /// Name this route. Registered once across all seven verbs since
     /// the path is shared.
@@ -677,6 +722,12 @@ where
             .middlewares
             .into_iter()
             .fold(multi, |b, m| b.middleware_boxed(m));
+        let multi = self
+            .constraints
+            .into_iter()
+            .fold(multi, |b, (param, constraint)| {
+                b.constrain(&param, constraint)
+            });
         let multi = match self.block {
             Some(block) => multi.block_session(block),
             None => multi,
@@ -1013,6 +1064,7 @@ pub struct GroupRoute {
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
     block: Option<SessionBlock>,
+    constraints: Vec<(String, ParamConstraint)>,
 }
 
 /// A multi-method route (`any!`) stored within a group. Holds a
@@ -1026,6 +1078,7 @@ pub struct GroupAnyRoute {
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
     block: Option<SessionBlock>,
+    constraints: Vec<(String, ParamConstraint)>,
 }
 
 /// An item that can be added to a route group - a single-method route,
@@ -1311,6 +1364,14 @@ impl GroupDef {
                     for mw in route.middlewares {
                         router.add_middleware(http_method.clone(), full_path, mw);
                     }
+                    // The full path is known here, so a constraint may name
+                    // a parameter of the group's prefix. One that names no
+                    // parameter stops the boot, as a duplicate route does.
+                    for (param, constraint) in route.constraints {
+                        router
+                            .add_constraint(http_method.clone(), full_path, &param, constraint)
+                            .unwrap_or_else(|e| panic!("{e}"));
+                    }
                     if let Some(block) = route.block.or(group_block) {
                         register_route_block(&http_method, full_path, block);
                     }
@@ -1364,6 +1425,16 @@ impl GroupDef {
                         for mw in &any_route.middlewares {
                             router.add_middleware(method.clone(), full_path, mw.clone());
                         }
+                        for (param, constraint) in &any_route.constraints {
+                            router
+                                .add_constraint(
+                                    method.clone(),
+                                    full_path,
+                                    param,
+                                    constraint.clone(),
+                                )
+                                .unwrap_or_else(|e| panic!("{e}"));
+                        }
                         if let Some(block) = any_route.block.or(group_block) {
                             register_route_block(method, full_path, block);
                         }
@@ -1403,6 +1474,7 @@ where
             name: self.name,
             middlewares: self.middlewares,
             block: self.block,
+            constraints: self.constraints,
         }
     }
 }
@@ -1444,6 +1516,7 @@ where
             name: self.name,
             middlewares: self.middlewares,
             block: self.block,
+            constraints: self.constraints,
         }
     }
 }

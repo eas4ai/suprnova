@@ -7,6 +7,7 @@
 
 mod group;
 mod macros;
+mod params;
 mod resource;
 mod router;
 mod signed;
@@ -37,6 +38,7 @@ pub use macros::{
     WsRouteDef,
     validate_route_path,
 };
+pub use params::{ParamConstraint, WholeValuePattern};
 pub use resource::{ResourceAction, ResourceController, ResourceRoutes};
 pub use router::{
     BoxedHandler, MultiMethodRouteBuilder, RouteBuilder, RouteUrlError, Router, WsMatch,

@@ -208,6 +208,26 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   alone. A handler written as a path is taken as it is written, and a group
   inside names its own controller. The path prefix stays the first argument of
   the macro.
+- **Optional route parameters and parameter constraints.** `/posts/{id?}` now
+  matches `/posts` and `/posts/42`, and the handler finds no `id` on the short
+  form. Several optional parameters fill from the left, the colon spelling
+  `/posts/:id?` works, and an optional parameter can only be followed by
+  optional ones. The route's middleware and name apply to every form, and
+  `route(...)` leaves an optional segment out when it has no value. A route
+  can hold a parameter to a constraint: `.where_number("id")`, `.where_alpha`,
+  `.where_alpha_numeric`, `.where_uuid`, `.where_ulid`, `.where_in("status",
+  [...])` and `.where_pattern("year", "[0-9]{4}")`, on `Router` routes and on
+  `get!`, `post!` and the other route macros, where a constraint may name a
+  parameter of the group's prefix. A value the constraint refuses is a 404, as
+  if the route had not matched, and neither the route's middleware nor its
+  handler runs. On a `Router` route `.try_constrain(param, ParamConstraint)`
+  returns the error a constraint on a parameter the route does not have gives;
+  `.constrain` and the `where_*` spellings stop the boot on it. A pattern has
+  to match the whole value, and `\d` matches the digits of every script, so
+  write `[0-9]` for ASCII digits. A WebSocket route takes optional parameters
+  as well. A pattern with an optional parameter and an empty segment, and a
+  second route for one form of an optional route, are refused when they are
+  registered.
 
 ### Changed
 
