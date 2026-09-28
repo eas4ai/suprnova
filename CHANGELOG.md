@@ -245,6 +245,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   gave them, and a question with no prepared answer fails the command. The
   framework's own commands, `db:seed` and `model:prune` among them, print
   through the console now, and `make:command` generates a command that does.
+- **`Schedule::command("emails:send --force")` puts a console command on the
+  schedule.** The schedule took a `Task` or a closure, so a command of the
+  application, or a builtin such as `model:prune`, could only be scheduled by
+  wrapping it by hand. `command` takes the line the way it is typed behind the
+  name of the console binary, splits it into words the way a shell does, and
+  returns the `TaskBuilder` every other task uses, so `daily()`,
+  `without_overlapping()` and `on_one_server()` apply. The command runs in the
+  scheduler's process. The line is checked when the schedule is built: a name
+  no command has, arguments the command does not take, and a quote that is not
+  closed stop the boot, and `try_command` returns the error. The task is named
+  by its command line and described by the command's about text.
 
 ### Changed
 

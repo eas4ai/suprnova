@@ -79,6 +79,7 @@
 //! ```
 
 pub mod builder;
+mod command;
 pub mod expression;
 pub mod task;
 pub(crate) mod tz_display;
@@ -318,6 +319,76 @@ impl Schedule {
         Fut: std::future::Future<Output = Result<(), FrameworkError>> + Send + 'static,
     {
         TaskBuilder::from_async(f)
+    }
+
+    /// Build a scheduled task that runs a console command, given the way
+    /// it is typed behind the name of the console binary.
+    ///
+    /// Returns a [`TaskBuilder`] for fluent configuration. **The builder
+    /// is not registered until it is passed to [`add`](Self::add).**
+    ///
+    /// The command runs in the scheduler's process, through the handler
+    /// the console runs, so it takes `without_overlapping`,
+    /// `on_one_server` and the rest of the builder as any other task
+    /// does. It is a command of the application, registered with
+    /// `#[command]` or `#[derive(Command)]`, or one the framework ships,
+    /// such as `model:prune`.
+    ///
+    /// The task is named by the command line, which is what
+    /// `schedule:list` shows. Two tasks cannot have one name, so give one
+    /// of them a name of its own with `.name(...)` when the same command
+    /// line is scheduled twice.
+    ///
+    /// The line is split into words the way a shell does it: quotes keep
+    /// a word together, and a backslash gives the character behind it.
+    /// It is not run by a shell, so there are no variables, no globbing
+    /// and no pipes.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Schedule;
+    /// # fn ex(schedule: &mut Schedule) {
+    /// schedule.add(schedule.command("model:prune --model=Session").daily().at("03:00"));
+    /// # }
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// When no command has the name, when the arguments do not parse for
+    /// the command, and when a quote is not closed. That is when the
+    /// schedule is built, which is at boot: a scheduled task runs when
+    /// nobody is watching, so a typing error must not wait for its first
+    /// run to show. Use [`try_command`](Self::try_command) to get the
+    /// error instead.
+    pub fn command(&self, command: &str) -> TaskBuilder {
+        self.try_command(command)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Fallible sibling of [`command`](Self::command).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::Internal`] when the command line is
+    /// empty or does not end (an open quote, a backslash at the end),
+    /// when no console command has the name, and when the arguments do
+    /// not parse for the command. The message of the last one carries
+    /// what the console prints for the same arguments.
+    pub fn try_command(&self, command: &str) -> Result<TaskBuilder, FrameworkError> {
+        let scheduled = Arc::new(command::ScheduledCommand::parse(command)?);
+        let name = scheduled.line.clone();
+        let about = scheduled.about.clone();
+
+        let mut builder = TaskBuilder::from_async(move || {
+            let scheduled = Arc::clone(&scheduled);
+            async move { scheduled.run().await }
+        })
+        .name(&name);
+        if let Some(about) = about {
+            builder = builder.description(&about);
+        }
+        Ok(builder)
     }
 
     /// Add a configured task builder to the schedule.
