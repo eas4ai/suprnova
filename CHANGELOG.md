@@ -387,6 +387,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `&str`. Two calls have to be written another way: an empty list,
   `inc_with(&[])`, is `inc()`, and a value that is `.as_ref()` names its type,
   `.as_str()`. `AttrValue` is `#[non_exhaustive]`.
+- **A WebSocket handler sends from another task: `WsSocket::sender()` and
+  `WsSocket::split()`.** Every method of `WsSocket` takes `&mut self`, so
+  while a handler waited in `recv` nothing could send on the connection, and a
+  broadcast, a timer or a finished job had to go through a `select!` loop and
+  a channel of the handler's own. `sender()` returns a `WsSender`: it clones,
+  its `send_text`, `send_binary` and `close` take `&self`, and every clone
+  sends on the same connection. `split()` takes the socket apart into a
+  `WsSender` and a `WsReceiver`, and the `WsReceiver` is also a `Stream` of
+  the messages. The connection does not wait for its senders: when the handler
+  returns the connection closes, every later send returns an error,
+  `is_closed()` returns `true` and `closed()` completes, so a task that keeps
+  a sender learns when to stop. The receiving half has to be read, because the
+  answer to the heartbeat's ping arrives there.
 
 ### Changed
 

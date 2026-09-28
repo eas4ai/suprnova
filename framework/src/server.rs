@@ -1516,7 +1516,7 @@ async fn handle_ws_upgrade(
                 // `outbound`, and we keep `outbound` itself for the
                 // final close frame. When both senders drop, the
                 // bridge task exits and the forwarder closes the sink.
-                let outbound = socket.sender();
+                let outbound = socket.message_sender();
                 let heartbeat_sender = outbound.clone();
 
                 let heartbeat = tokio::spawn(crate::ws::heartbeat::run(

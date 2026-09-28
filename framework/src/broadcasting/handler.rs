@@ -155,9 +155,9 @@ impl WebSocketHandler for BroadcastingWsHandler {
 
         // Outbound mpsc: forwarders push serialised ServerFrame::Event
         // strings here; the select! arm below drains them to the socket.
-        // Using a String channel rather than WsSocket::sender() (which
-        // is pub(crate) to the ws module) keeps serialisation concerns
-        // inside this module.
+        // A String channel, drained by this handler, keeps serialisation
+        // and the order of frames inside this module. A `WsSender` in each
+        // forwarder would send on the socket's queue directly.
         let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<String>(64);
 
         // Assign this connection a socket id and announce it first, so the

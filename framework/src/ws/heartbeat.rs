@@ -9,7 +9,7 @@
 //!
 //! The caller is responsible for aborting this task (`spawn(run(...))
 //! .abort_handle()`) when the handler future resolves. See the
-//! `WsSocket::sender()` doc for the teardown contract.
+//! `WsSocket::message_sender()` doc for the teardown contract.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,9 +22,9 @@ use tokio_tungstenite::tungstenite::{
 
 /// Drive periodic pings and enforce close-on-no-pong.
 ///
-/// The caller passes an `mpsc::Sender<Message>` (obtained from
-/// `WsSocket::sender()`) that feeds into the websocket sink via the
-/// forwarder task.
+/// The caller passes an `mpsc::Sender<Message>` (the framework takes
+/// it from `WsSocket::message_sender()`, which is private to the crate)
+/// that feeds into the websocket sink via the forwarder task.
 ///
 /// `missed_pings` is shared with `WsSocket`'s recv path: recv resets
 /// it to 0 on each Pong; this task increments it on each Ping send.

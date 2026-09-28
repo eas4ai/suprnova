@@ -553,7 +553,7 @@ pub use notifications::{
     NotificationSent, Notify, NotifyFakeGuard, SendNotificationJob, StoredNotification,
 };
 
-pub use ws::{WebSocketHandler, WsConfig, WsSocket};
+pub use ws::{WebSocketHandler, WsConfig, WsReceiver, WsSender, WsSocket};
 
 // Re-export async_trait for middleware implementations
 pub use async_trait::async_trait;

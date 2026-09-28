@@ -64,7 +64,7 @@ async fn ws_socket_close_sends_close_frame() {
     server.await.unwrap();
 }
 
-/// Regression: a `Message::Close` pushed through the `sender()` bridge
+/// Regression: a `Message::Close` pushed through the `message_sender()` bridge
 /// (which heartbeat / broadcaster tasks use) must take the internal
 /// `Outbound::Close` path that terminates the forwarder and closes the
 /// sink - not get forwarded as a normal `Outbound::Msg` that leaves the
@@ -76,7 +76,7 @@ async fn ws_socket_close_sends_close_frame() {
 ///
 /// Validate the fix end-to-end through the bridge:
 ///   1. Drive a close frame into the public bridge via the equivalent
-///      path heartbeat uses internally (`WsSocket::sender()` is
+///      path heartbeat uses internally (`WsSocket::message_sender()` is
 ///      `pub(crate)`, so we exercise the same shape via a small helper).
 ///   2. Assert the peer receives the Close frame.
 ///   3. Assert the connection finishes - the WebSocket stream returns
@@ -100,7 +100,7 @@ async fn bridge_close_terminates_the_forwarder() {
         // exposes for handler use; the `close()` public API takes the
         // internal `Outbound::Close` path, but the heartbeat task
         // doesn't see that path - it talks to the bridge created via
-        // `WsSocket::sender()`. We can't observe `sender()` from a
+        // `WsSocket::message_sender()`. We can't observe that one from a
         // public test (it's `pub(crate)`), but `close()` exercises the
         // identical forwarder-termination contract from the same socket
         // shape, and the regression test below
