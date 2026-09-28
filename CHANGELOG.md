@@ -82,6 +82,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   first releases that ship the native `popover` attribute the component
   library's overlays own their open state with. The compatibility matrix's
   minimum slots move with it; Firefox stays at 128.
+- **Magnetar's `CeremonyStore` takes a named request for its atomic
+  transition.** `transition_and_consume` and `transition_and_consume_exact`
+  took six and seven positional strings, so a transposed selector or state
+  compiled and acted on the wrong ceremony. Both take a `TransitionAndConsume
+  { transition, expected, next, consume }` whose two ceremonies are
+  `CeremonyRef { selector, kind }`, and the exact form takes the consume id as
+  its second argument. A store that overrides either method changes its
+  signature to match.
 
 ### Fixed
 

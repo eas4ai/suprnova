@@ -28,6 +28,7 @@ use magnetar::oauth::device::{
 use magnetar::sessions::SessionMetadata;
 use magnetar::storage::{
     CeremonyRecord, CeremonyStore, CredentialActor, DeviceStore, NewCeremony, SeaOrmStorage,
+    TransitionAndConsume,
 };
 use magnetar::{Error, Result};
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
@@ -117,45 +118,18 @@ impl CeremonyStore for ReplaceGrantAfterPeek {
 
     async fn transition_and_consume(
         &self,
-        transition_selector: &str,
-        transition_kind: &str,
-        expected: &str,
-        next: &str,
-        consume_selector: &str,
-        consume_kind: &str,
+        request: TransitionAndConsume<'_>,
     ) -> Result<Option<CeremonyRecord>> {
-        self.inner
-            .transition_and_consume(
-                transition_selector,
-                transition_kind,
-                expected,
-                next,
-                consume_selector,
-                consume_kind,
-            )
-            .await
+        self.inner.transition_and_consume(request).await
     }
 
     async fn transition_and_consume_exact(
         &self,
-        transition_selector: &str,
-        transition_kind: &str,
-        expected: &str,
-        next: &str,
-        consume_selector: &str,
-        consume_kind: &str,
+        request: TransitionAndConsume<'_>,
         consume_id: &str,
     ) -> Result<Option<CeremonyRecord>> {
         self.inner
-            .transition_and_consume_exact(
-                transition_selector,
-                transition_kind,
-                expected,
-                next,
-                consume_selector,
-                consume_kind,
-                consume_id,
-            )
+            .transition_and_consume_exact(request, consume_id)
             .await
     }
 }

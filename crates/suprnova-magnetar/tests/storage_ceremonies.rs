@@ -4,7 +4,9 @@
 mod storage_schema;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use magnetar::storage::{CeremonyStore, NewCeremony, SeaOrmStorage};
+use magnetar::storage::{
+    CeremonyRef, CeremonyStore, NewCeremony, SeaOrmStorage, TransitionAndConsume,
+};
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use storage_schema::{StorageSchema, database};
 
@@ -235,14 +237,18 @@ async fn delete_failure_rolls_back_transition_and_preserves_grant() {
     .expect("install scoped grant delete failure trigger");
 
     let error = store
-        .transition_and_consume(
-            "delete-failure-device",
-            "device-authorization",
-            "approved:delete-failure-grant",
-            "issued",
-            "delete-failure-grant",
-            "device-authorization-grant",
-        )
+        .transition_and_consume(TransitionAndConsume {
+            transition: CeremonyRef {
+                selector: "delete-failure-device",
+                kind: "device-authorization",
+            },
+            expected: "approved:delete-failure-grant",
+            next: "issued",
+            consume: CeremonyRef {
+                selector: "delete-failure-grant",
+                kind: "device-authorization-grant",
+            },
+        })
         .await
         .unwrap_err();
     assert!(matches!(
@@ -275,14 +281,18 @@ async fn delete_failure_rolls_back_transition_and_preserves_grant() {
     .expect("remove grant delete failure trigger before retry");
 
     let grant = store
-        .transition_and_consume(
-            "delete-failure-device",
-            "device-authorization",
-            "approved:delete-failure-grant",
-            "issued",
-            "delete-failure-grant",
-            "device-authorization-grant",
-        )
+        .transition_and_consume(TransitionAndConsume {
+            transition: CeremonyRef {
+                selector: "delete-failure-device",
+                kind: "device-authorization",
+            },
+            expected: "approved:delete-failure-grant",
+            next: "issued",
+            consume: CeremonyRef {
+                selector: "delete-failure-grant",
+                kind: "device-authorization-grant",
+            },
+        })
         .await
         .unwrap()
         .expect("retry returns the preserved grant");
@@ -298,14 +308,18 @@ async fn delete_failure_rolls_back_transition_and_preserves_grant() {
     );
     assert!(
         store
-            .transition_and_consume(
-                "delete-failure-device",
-                "device-authorization",
-                "issued",
-                "issued",
-                "delete-failure-grant",
-                "device-authorization-grant",
-            )
+            .transition_and_consume(TransitionAndConsume {
+                transition: CeremonyRef {
+                    selector: "delete-failure-device",
+                    kind: "device-authorization",
+                },
+                expected: "issued",
+                next: "issued",
+                consume: CeremonyRef {
+                    selector: "delete-failure-grant",
+                    kind: "device-authorization-grant",
+                },
+            },)
             .await
             .unwrap()
             .is_none()
@@ -366,12 +380,18 @@ async fn exact_transition_and_consume_rejects_replaced_consume_record() {
     assert!(
         store
             .transition_and_consume_exact(
-                "replacement-device",
-                "device-authorization",
-                "approved:replacement-grant",
-                "issued",
-                "replacement-grant",
-                "device-authorization-grant",
+                TransitionAndConsume {
+                    transition: CeremonyRef {
+                        selector: "replacement-device",
+                        kind: "device-authorization",
+                    },
+                    expected: "approved:replacement-grant",
+                    next: "issued",
+                    consume: CeremonyRef {
+                        selector: "replacement-grant",
+                        kind: "device-authorization-grant",
+                    },
+                },
                 &grant_a.id,
             )
             .await
@@ -434,12 +454,18 @@ async fn exact_transition_and_consume_selects_expected_duplicate_record() {
 
     let consumed = store
         .transition_and_consume_exact(
-            "duplicate-device",
-            "device-authorization",
-            "approved:duplicate-grant",
-            "issued",
-            "duplicate-grant",
-            "device-authorization-grant",
+            TransitionAndConsume {
+                transition: CeremonyRef {
+                    selector: "duplicate-device",
+                    kind: "device-authorization",
+                },
+                expected: "approved:duplicate-grant",
+                next: "issued",
+                consume: CeremonyRef {
+                    selector: "duplicate-grant",
+                    kind: "device-authorization-grant",
+                },
+            },
             &grant_b.id,
         )
         .await
@@ -493,14 +519,18 @@ async fn transition_and_consume_lost_comparison_is_non_destructive_and_single_wi
 
     assert!(
         store
-            .transition_and_consume(
-                "race-device",
-                "device-authorization",
-                "approved:stale-grant",
-                "issued",
-                "race-grant",
-                "device-authorization-grant",
-            )
+            .transition_and_consume(TransitionAndConsume {
+                transition: CeremonyRef {
+                    selector: "race-device",
+                    kind: "device-authorization",
+                },
+                expected: "approved:stale-grant",
+                next: "issued",
+                consume: CeremonyRef {
+                    selector: "race-grant",
+                    kind: "device-authorization-grant",
+                },
+            },)
             .await
             .unwrap()
             .is_none()
@@ -523,22 +553,30 @@ async fn transition_and_consume_lost_comparison_is_non_destructive_and_single_wi
     );
 
     let (left, right) = tokio::join!(
-        store.transition_and_consume(
-            "race-device",
-            "device-authorization",
-            "approved:race-grant",
-            "issued",
-            "race-grant",
-            "device-authorization-grant",
-        ),
-        store.transition_and_consume(
-            "race-device",
-            "device-authorization",
-            "approved:race-grant",
-            "issued",
-            "race-grant",
-            "device-authorization-grant",
-        )
+        store.transition_and_consume(TransitionAndConsume {
+            transition: CeremonyRef {
+                selector: "race-device",
+                kind: "device-authorization",
+            },
+            expected: "approved:race-grant",
+            next: "issued",
+            consume: CeremonyRef {
+                selector: "race-grant",
+                kind: "device-authorization-grant",
+            },
+        },),
+        store.transition_and_consume(TransitionAndConsume {
+            transition: CeremonyRef {
+                selector: "race-device",
+                kind: "device-authorization",
+            },
+            expected: "approved:race-grant",
+            next: "issued",
+            consume: CeremonyRef {
+                selector: "race-grant",
+                kind: "device-authorization-grant",
+            },
+        },)
     );
     let outcomes = [left.unwrap(), right.unwrap()];
     assert_eq!(

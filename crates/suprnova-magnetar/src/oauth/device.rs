@@ -20,7 +20,10 @@ use crate::auth::{
 };
 use crate::crypto::{CryptoPurpose, Encryptor};
 use crate::sessions::{SessionGrant, SessionMetadata, SessionQueries};
-use crate::storage::{CeremonyStore, CredentialActor, DeviceStore, NewCeremony, UserStore};
+use crate::storage::{
+    CeremonyRef, CeremonyStore, CredentialActor, DeviceStore, NewCeremony, TransitionAndConsume,
+    UserStore,
+};
 use crate::{Error, Result};
 
 const DEVICE_CEREMONY_KIND: &str = "device-authorization";
@@ -530,12 +533,18 @@ impl DeviceAuthorizationService {
                 let Some(_) = self
                     .ceremonies
                     .transition_and_consume_exact(
-                        &poll_payload.user_code,
-                        DEVICE_CEREMONY_KIND,
-                        state,
-                        ISSUED,
-                        grant_selector,
-                        DEVICE_GRANT_KIND,
+                        TransitionAndConsume {
+                            transition: CeremonyRef {
+                                selector: &poll_payload.user_code,
+                                kind: DEVICE_CEREMONY_KIND,
+                            },
+                            expected: state,
+                            next: ISSUED,
+                            consume: CeremonyRef {
+                                selector: grant_selector,
+                                kind: DEVICE_GRANT_KIND,
+                            },
+                        },
                         &grant_record.id,
                     )
                     .await?

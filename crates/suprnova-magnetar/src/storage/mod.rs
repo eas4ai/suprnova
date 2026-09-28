@@ -33,7 +33,9 @@ mod credential_write_tests;
 pub use accounts::{
     LinkedAccountInitializer, LinkedAccountRecord, LinkedAccountStore, NewLinkedAccount,
 };
-pub use ceremonies::{CeremonyRecord, CeremonyStore, NewCeremony};
+pub use ceremonies::{
+    CeremonyRecord, CeremonyRef, CeremonyStore, NewCeremony, TransitionAndConsume,
+};
 pub use credential_writes::{CredentialActor, fenced_credential_write};
 pub use device::{DeviceRecord, DeviceStore};
 pub use lockout::{AttemptFinalization, AttemptReservation, AttemptStats, LockoutStore};

@@ -41,6 +41,42 @@ pub struct CeremonyRecord {
     pub payload: Vec<u8>,
 }
 
+/// One ceremony row, named by its selector and kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CeremonyRef<'a> {
+    /// The row's selector.
+    pub selector: &'a str,
+    /// The row's kind.
+    pub kind: &'a str,
+}
+
+/// One atomic step: a ceremony moves from `expected` to `next` while another
+/// ceremony is consumed. Every part is a string, so the fields are named:
+/// a transposed selector or state would otherwise compile and act on the
+/// wrong row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransitionAndConsume<'a> {
+    /// The ceremony whose state moves.
+    pub transition: CeremonyRef<'a>,
+    /// The state the transition requires.
+    pub expected: &'a str,
+    /// The state the transition writes.
+    pub next: &'a str,
+    /// The ceremony that is consumed.
+    pub consume: CeremonyRef<'a>,
+}
+
+impl TransitionAndConsume<'_> {
+    fn has_empty_part(&self) -> bool {
+        self.transition.selector.is_empty()
+            || self.transition.kind.is_empty()
+            || self.expected.is_empty()
+            || self.next.is_empty()
+            || self.consume.selector.is_empty()
+            || self.consume.kind.is_empty()
+    }
+}
+
 /// Generic ceremony storage API.
 #[async_trait]
 pub trait CeremonyStore: Send + Sync {
@@ -65,12 +101,7 @@ pub trait CeremonyStore: Send + Sync {
     /// implementors remain source-compatible without weakening that guarantee.
     async fn transition_and_consume(
         &self,
-        _transition_selector: &str,
-        _transition_kind: &str,
-        _expected: &str,
-        _next: &str,
-        _consume_selector: &str,
-        _consume_kind: &str,
+        _request: TransitionAndConsume<'_>,
     ) -> Result<Option<CeremonyRecord>> {
         Err(Error::DependencyUnavailable {
             dependency: "ceremony store".to_owned(),
@@ -83,15 +114,9 @@ pub trait CeremonyStore: Send + Sync {
     /// `consume_id` binds the transaction to the record observed by a prior read,
     /// preventing a replacement under the same selector from being consumed. The
     /// default fails closed so existing external implementors remain compatible.
-    #[allow(clippy::too_many_arguments)]
     async fn transition_and_consume_exact(
         &self,
-        _transition_selector: &str,
-        _transition_kind: &str,
-        _expected: &str,
-        _next: &str,
-        _consume_selector: &str,
-        _consume_kind: &str,
+        _request: TransitionAndConsume<'_>,
         _consume_id: &str,
     ) -> Result<Option<CeremonyRecord>> {
         Err(Error::DependencyUnavailable {
@@ -126,24 +151,17 @@ where
         >,
     <S::Ceremony as EntityBinding>::Column: ColumnTrait,
 {
-    // The arguments describe both records participating in one atomic boundary.
-    #[allow(clippy::too_many_arguments)]
     async fn transition_and_consume_matching(
         &self,
-        transition_selector: &str,
-        transition_kind: &str,
-        expected: &str,
-        next: &str,
-        consume_selector: &str,
-        consume_kind: &str,
+        request: TransitionAndConsume<'_>,
         consume_id: Option<&str>,
     ) -> Result<Option<CeremonyRecord>> {
-        let transition_selector = transition_selector.to_owned();
-        let transition_kind = transition_kind.to_owned();
-        let expected = expected.to_owned();
-        let next = next.to_owned();
-        let consume_selector = consume_selector.to_owned();
-        let consume_kind = consume_kind.to_owned();
+        let transition_selector = request.transition.selector.to_owned();
+        let transition_kind = request.transition.kind.to_owned();
+        let expected = request.expected.to_owned();
+        let next = request.next.to_owned();
+        let consume_selector = request.consume.selector.to_owned();
+        let consume_kind = request.consume.kind.to_owned();
         let consume_id = consume_id.map(str::to_owned);
         let transaction = self.database().begin().await.map_err(db_error)?;
 
@@ -362,71 +380,31 @@ where
 
     async fn transition_and_consume(
         &self,
-        transition_selector: &str,
-        transition_kind: &str,
-        expected: &str,
-        next: &str,
-        consume_selector: &str,
-        consume_kind: &str,
+        request: TransitionAndConsume<'_>,
     ) -> Result<Option<CeremonyRecord>> {
-        if transition_selector.is_empty()
-            || transition_kind.is_empty()
-            || expected.is_empty()
-            || next.is_empty()
-            || consume_selector.is_empty()
-            || consume_kind.is_empty()
-        {
+        if request.has_empty_part() {
             return Err(Error::InvalidInput {
                 field: "ceremony state".to_owned(),
                 message: "selectors, kinds, and states must be non-empty".to_owned(),
             });
         }
 
-        self.transition_and_consume_matching(
-            transition_selector,
-            transition_kind,
-            expected,
-            next,
-            consume_selector,
-            consume_kind,
-            None,
-        )
-        .await
+        self.transition_and_consume_matching(request, None).await
     }
 
     async fn transition_and_consume_exact(
         &self,
-        transition_selector: &str,
-        transition_kind: &str,
-        expected: &str,
-        next: &str,
-        consume_selector: &str,
-        consume_kind: &str,
+        request: TransitionAndConsume<'_>,
         consume_id: &str,
     ) -> Result<Option<CeremonyRecord>> {
-        if transition_selector.is_empty()
-            || transition_kind.is_empty()
-            || expected.is_empty()
-            || next.is_empty()
-            || consume_selector.is_empty()
-            || consume_kind.is_empty()
-            || consume_id.is_empty()
-        {
+        if request.has_empty_part() || consume_id.is_empty() {
             return Err(Error::InvalidInput {
                 field: "ceremony state".to_owned(),
                 message: "selectors, kinds, states, and consume id must be non-empty".to_owned(),
             });
         }
 
-        self.transition_and_consume_matching(
-            transition_selector,
-            transition_kind,
-            expected,
-            next,
-            consume_selector,
-            consume_kind,
-            Some(consume_id),
-        )
-        .await
+        self.transition_and_consume_matching(request, Some(consume_id))
+            .await
     }
 }
