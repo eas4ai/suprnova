@@ -104,6 +104,16 @@ enum Commands {
         #[arg(long)]
         timestamps: bool,
 
+        /// When the pending migrations run: once when serve starts
+        /// (start), on every restart of the backend (always), or not at
+        /// all (never)
+        #[arg(long, value_enum, default_value_t, conflicts_with = "no_migrate")]
+        migrate: commands::serve::MigrateWhen,
+
+        /// Run no migrations. The same as --migrate never
+        #[arg(long)]
+        no_migrate: bool,
+
         /// Emit one JSON object per line on stdout (NDJSON) instead of
         /// colored [name]-prefixed text - one event per process start,
         /// output line, exit, restart, and session shutdown. Replaces
@@ -457,7 +467,14 @@ fn main() {
             restart_tries,
             timestamps,
             json,
+            migrate,
+            no_migrate,
         } => {
+            let migrate = if no_migrate {
+                commands::serve::MigrateWhen::Never
+            } else {
+                migrate
+            };
             commands::serve::run(
                 port,
                 frontend_port,
@@ -468,6 +485,7 @@ fn main() {
                 restart_tries,
                 timestamps,
                 json,
+                migrate,
             );
         }
         Commands::DevTls {
@@ -785,6 +803,49 @@ mod tests {
             "the curated help screen names the same commands as clap but not \
              the same number of times; a duplicated line is the usual cause"
         );
+    }
+
+    /// `serve` migrates when it starts unless it is told otherwise.
+    #[test]
+    fn serve_takes_when_to_migrate() {
+        use commands::serve::MigrateWhen;
+
+        let when = |argv: &[&str]| match Cli::try_parse_from(argv) {
+            Ok(Cli {
+                command:
+                    Some(Commands::Serve {
+                        migrate,
+                        no_migrate,
+                        ..
+                    }),
+                ..
+            }) => Ok((migrate, no_migrate)),
+            Ok(_) => panic!("`{}` must be serve", argv.join(" ")),
+            Err(e) => Err(e.to_string()),
+        };
+
+        assert_eq!(
+            when(&["suprnova", "serve"]),
+            Ok((MigrateWhen::Start, false))
+        );
+        assert_eq!(
+            when(&["suprnova", "serve", "--migrate", "always"]),
+            Ok((MigrateWhen::Always, false))
+        );
+        assert_eq!(
+            when(&["suprnova", "serve", "--migrate=never"]),
+            Ok((MigrateWhen::Never, false))
+        );
+        assert_eq!(
+            when(&["suprnova", "serve", "--no-migrate"]),
+            Ok((MigrateWhen::Start, true)),
+            "the flag alone; `main` reads it as never"
+        );
+        assert!(
+            when(&["suprnova", "serve", "--migrate", "always", "--no-migrate"]).is_err(),
+            "always and never at once is a mistake to report"
+        );
+        assert!(when(&["suprnova", "serve", "--migrate", "sometimes"]).is_err());
     }
 
     /// `schedule:list` takes the flag the application's own command

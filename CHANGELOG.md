@@ -295,6 +295,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   the accepted shape, `fn name(query: Builder<Self>, ...) -> Builder<Self>`. A
   method that handles no builder still passes through unchanged, and
   `#[not_scope]` marks a helper that does handle one.
+- **`suprnova serve` runs the pending migrations once, when it starts, and no
+  longer on every save.** The backend runs under a file watcher, and an
+  application started with no subcommand migrates before it serves, so every
+  save of a source file ran every pending migration against the developer's
+  database, the draft of a migration saved a moment ago included. A migration
+  that has run is not run again when its file changes, so the database kept
+  the schema of the first draft. `serve` now runs `migrate` once before the
+  backend starts and starts the watched backend with `serve --no-migrate`. The
+  frontend and the processes of `Suprnova.toml` start first and do not wait
+  for it. When a file under `src/migrations` changes after that, `serve` says
+  that it was not run and that `suprnova migrate` runs it; with `--json` that
+  is the new event `{"type":"migrations_changed","ts":...}`, and the run at
+  the start shows as a process named `migrate`. `--migrate always` restores
+  the old behaviour, and `--migrate never` or `--no-migrate` runs no migration
+  at all. When the run at the start fails, the backend is left to migrate by
+  itself for that session, as before: it does not serve until the migrations
+  pass. A project with no `src/migrations` directory is left to migrate by
+  itself as well.
 
 ### Fixed
 
