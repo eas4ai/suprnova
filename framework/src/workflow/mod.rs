@@ -51,6 +51,7 @@ pub mod entities;
 pub mod migrations;
 #[doc(hidden)]
 pub mod registry;
+pub use registry::assert_no_duplicates;
 pub mod store;
 pub mod types;
 
@@ -222,29 +223,48 @@ impl WorkflowWorker {
     /// negative `retry_backoff_secs`, etc.) is caught with `.expect` at
     /// boot, not at first job pickup, so a failed config crashes the
     /// daemon visibly instead of letting it hang quietly. Callers that
-    /// want non-panicking handling can use [`Self::with_config`] after
-    /// calling `WorkflowConfig::validate` themselves.
+    /// want non-panicking handling use [`Self::try_with_config`], which
+    /// makes the same checks and returns the error.
     pub fn new() -> Self {
         let config = Config::get::<WorkflowConfig>().unwrap_or_default();
-        // Clamp + warn happens inside `from_env`; this re-check guards
-        // programmatic configs that bypassed it.
-        if let Err(err) = config.validate() {
-            tracing::error!(error = %err, "WorkflowConfig validation failed");
-            panic!("WorkflowConfig validation failed: {err}");
+        // Clamp + warn happens inside `from_env`; the check in
+        // `try_with_config` guards programmatic configs that bypassed it.
+        match Self::try_with_config(config) {
+            Ok(worker) => worker,
+            Err(err) => {
+                tracing::error!(error = %err, "the workflow worker cannot start");
+                panic!("the workflow worker cannot start: {err}");
+            }
         }
-        if let Err(err) = registry::assert_no_duplicates() {
-            tracing::error!(error = %err, "duplicate workflow registrations detected at worker boot");
-            panic!("{err}");
-        }
-        Self::with_config(config)
     }
 
-    /// Create a worker with a custom config.
+    /// Create a worker with a custom config, and check what
+    /// [`Self::new`] checks: the config, and that no two `#[workflow]`
+    /// functions have one name. Where `new` panics, this returns the
+    /// error.
+    ///
+    /// With two workflows under one name, which of them runs is decided
+    /// by the order they were linked in. That has to stop the worker
+    /// before it claims its first run.
+    ///
+    /// # Errors
+    ///
+    /// When [`WorkflowConfig::validate`] refuses the config, and when
+    /// [`assert_no_duplicates`] finds a name twice.
+    pub fn try_with_config(config: WorkflowConfig) -> Result<Self, FrameworkError> {
+        config.validate()?;
+        registry::assert_no_duplicates()?;
+        Ok(Self::with_config(config))
+    }
+
+    /// Create a worker with a custom config, with no check.
     ///
     /// Construction does not validate the config or check the registry.
-    /// The worker validates config before its run loop starts; callers that
-    /// need construction-time validation can call [`WorkflowConfig::validate`].
-    /// Call [`registry::assert_no_duplicates`] separately when needed.
+    /// The worker validates config before its run loop starts, and it
+    /// does not look at the registry at all, so two workflows with one
+    /// name go unseen. Use [`Self::try_with_config`], which checks both,
+    /// or call [`WorkflowConfig::validate`] and [`assert_no_duplicates`]
+    /// where the worker is built.
     pub fn with_config(config: WorkflowConfig) -> Self {
         let random: u64 = rand::rng().random();
         let worker_id = format!("{}-{}", std::process::id(), random);
@@ -1746,6 +1766,38 @@ mod tests {
             .await
             .expect("decode migrated workflow step entity")
             .expect("migrated workflow step exists");
+    }
+
+    // The registry tests of this crate submit one name twice, so this test
+    // binary is an application with a duplicate: the checked constructor
+    // has to refuse it, where `with_config` builds a worker that would run.
+    #[test]
+    fn try_with_config_refuses_a_registry_with_a_name_twice() {
+        let error = WorkflowWorker::try_with_config(WorkflowConfig::default())
+            .err()
+            .expect("the registry of this binary has a duplicate");
+        assert!(
+            error
+                .to_string()
+                .contains("Duplicate `#[workflow]` registrations"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn try_with_config_refuses_a_config_that_is_none_before_it_looks_further() {
+        let config = WorkflowConfig {
+            concurrency: 0,
+            ..WorkflowConfig::default()
+        };
+        let expected = config
+            .validate()
+            .expect_err("no worker runs nothing at a time");
+
+        let error = WorkflowWorker::try_with_config(config)
+            .err()
+            .expect("the config is refused");
+        assert_eq!(error.to_string(), expected.to_string());
     }
 
     // A cancelled worker must drain in-flight workflows before returning.

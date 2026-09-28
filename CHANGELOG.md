@@ -340,6 +340,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   the crate `::fake`, so in an application without `fake` among its
   dependencies the struct says where the crate is: `#[dummy(crate_name =
   "suprnova::fake")]`.
+- **`WorkflowWorker::try_with_config(config)` and
+  `workflow::assert_no_duplicates()`.** `WorkflowWorker::new()` refuses to
+  start when two `#[workflow]` functions have one name. `with_config` skipped
+  that check and told the caller to run `registry::assert_no_duplicates`, a
+  function of a module that is hidden from the documentation and was exported
+  nowhere, so a worker with a config of the application's own lost the check
+  without a word. `try_with_config` checks the config and the registry and
+  returns the error where `new()` panics, and `assert_no_duplicates` is
+  exported from `suprnova::workflow`. `with_config` stays the constructor with
+  no check, and says so. `new()` makes its checks through `try_with_config`,
+  so the two cannot come apart.
 
 ### Changed
 
