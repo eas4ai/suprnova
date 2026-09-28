@@ -2,9 +2,53 @@
 
 use std::collections::BTreeMap;
 
-use suprnova_live::render_cache::{PolicyPatch, RenderCachePolicy};
+use suprnova_live::render_cache::{PolicyPatch, RenderCachePolicy, VarianceDimension};
 
 use crate::FrameworkError;
+
+/// Whether this host gives `dimension` a value when it builds a key.
+///
+/// The match names every dimension, so a dimension that the engine gains
+/// does not compile here until somebody decides which side it is on.
+pub(crate) fn has_a_producer(dimension: &VarianceDimension) -> bool {
+    match dimension {
+        VarianceDimension::Host
+        | VarianceDimension::Locale
+        | VarianceDimension::Media
+        | VarianceDimension::Encoding
+        | VarianceDimension::Tenant
+        | VarianceDimension::Principal => true,
+        VarianceDimension::FeatureVersion
+        | VarianceDimension::ConfigVersion
+        | VarianceDimension::Application(_) => false,
+    }
+}
+
+/// Refuses a policy that varies on a dimension without a producer.
+///
+/// The key of a stored response carries one value for every dimension its
+/// policy declares. A route whose policy declares a dimension that nothing
+/// gives a value can never build its key, so every request for it goes
+/// past the cache, and nothing about the route says so. The engine accepts
+/// such a policy, because another host can have the producer. This host
+/// refuses it where the application registers it, which is at boot.
+fn refuse_a_dimension_without_a_producer(
+    target: &str,
+    policy: &RenderCachePolicy,
+) -> Result<(), FrameworkError> {
+    match policy
+        .vary()
+        .iter()
+        .find(|dimension| !has_a_producer(dimension))
+    {
+        Some(dimension) => Err(FrameworkError::internal(format!(
+            "RenderCache policy for `{target}` varies on {dimension:?}, and nothing gives \
+             that dimension a value, so no response for `{target}` could be cached. \
+             Remove the dimension from the policy."
+        ))),
+        None => Ok(()),
+    }
+}
 
 /// A group's policy: a full policy at the root of a subtree or a patch of an
 /// enclosing group.
@@ -47,14 +91,15 @@ impl RenderCachePolicyTable {
                 "RenderCache group policy registered twice",
             ));
         }
-        if let GroupPolicy::Patch(patch) = &policy {
-            self.validate_patch(
+        match &policy {
+            GroupPolicy::Policy(full) => refuse_a_dimension_without_a_producer(prefix, full)?,
+            GroupPolicy::Patch(patch) => self.validate_patch(
                 prefix,
                 prefix,
                 patch,
                 "RenderCache group patch has no enclosing policy",
                 "RenderCache group patch widens sharing",
-            )?;
+            )?,
         }
         self.groups.insert(prefix.to_owned(), policy);
         Ok(())
@@ -71,23 +116,25 @@ impl RenderCachePolicyTable {
                 "RenderCache route policy registered twice",
             ));
         }
-        if let GroupPolicy::Patch(patch) = &policy {
-            self.validate_patch(
+        match &policy {
+            GroupPolicy::Policy(full) => refuse_a_dimension_without_a_producer(pattern, full)?,
+            GroupPolicy::Patch(patch) => self.validate_patch(
                 pattern,
                 "",
                 patch,
                 "RenderCache route patch has no group policy",
                 "RenderCache route patch widens sharing",
-            )?;
+            )?,
         }
         self.routes.insert(pattern.to_owned(), policy);
         Ok(())
     }
 
     /// Resolves the enclosing policy for `key` (excluding `exclude`) and
-    /// checks that `patch` only narrows it. Shared by `register_group` and
-    /// `register_route`, which differ only in the exclusion and the error
-    /// wording for their respective contexts.
+    /// checks that `patch` only narrows it, and that the policy the patch
+    /// makes varies only on dimensions this host gives a value. Shared by
+    /// `register_group` and `register_route`, which differ only in the
+    /// exclusion and the error wording for their respective contexts.
     fn validate_patch(
         &self,
         key: &str,
@@ -99,10 +146,10 @@ impl RenderCachePolicyTable {
         let enclosing = self
             .enclosing(key, exclude)
             .ok_or_else(|| FrameworkError::internal(missing_enclosing_message))?;
-        enclosing
+        let patched = enclosing
             .apply(patch)
             .map_err(|_| FrameworkError::internal(widens_message))?;
-        Ok(())
+        refuse_a_dimension_without_a_producer(key, &patched)
     }
 
     /// The effective policy for a matched route pattern, or `None`.

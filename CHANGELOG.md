@@ -715,6 +715,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   received the wrong example, and copying it gave an unresolved import. The
   comment now shows what `make:task` generates, with the registration in
   `src/schedule.rs`.
+- **A render cache policy that varies on `FeatureVersion`, `ConfigVersion` or
+  `Application(name)` is refused when it is registered.** Nothing gives these
+  three dimensions a value, so a route that declared one could not build its
+  key and every request for it went past the cache, while the route looked
+  cached in the code. `try_render_cache` and `try_render_cache_group` now
+  return an error that names the route or the group and the dimension, for a
+  full policy and for a patch that brings the dimension in, so the application
+  stops at boot. The other six dimensions register as before. This refuses one
+  arrangement that cached before: a group whose policy declared one of the
+  three, with a patch on every route that replaced the dimensions. The group
+  is refused now, and the dimension is to be taken out of its policy.
 
 ### Security
 

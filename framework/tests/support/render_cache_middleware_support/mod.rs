@@ -1096,16 +1096,15 @@ async fn boot(
             .vary(VarianceDimension::Principal)
             .build()
             .expect("named guard then default policy");
-    // Fix round 6, item 5: `FeatureVersion` has no producer on this host;
-    // `RenderCachePolicy::builder` now accepts declaring it (the rejection
-    // moved to `variance_descriptor`, see its own doc), so this route
-    // exercises the moved rejection rather than a build-time failure.
-    let feature_version_declared_policy =
-        RenderCachePolicy::builder(RepresentationClass::PublicShared)
-            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
-            .vary(VarianceDimension::FeatureVersion)
-            .build()
-            .expect("a host-neutral policy may declare FeatureVersion; only this host rejects it");
+    // The host is what the request says it is, and its value has a bound.
+    // A request with a host over the bound cannot build the key of this
+    // route, which is the one way a request reaches the arm of the
+    // middleware that goes past the cache for want of a key.
+    let host_declared_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .vary(VarianceDimension::Host)
+        .build()
+        .expect("host declared policy");
     // Iteration 006: Media and Encoding now negotiate against a route's own
     // closed declared set instead of resolving to a constant. Both share
     // `cached_handler`'s already-established discriminator (fix round 3's
@@ -1331,12 +1330,7 @@ async fn boot(
             reads_named_guard_then_touches_default_leaky_handler,
         )
         .into();
-    let router: Router = router
-        .get(
-            "/feature-version-declared/{id}",
-            feature_version_declared_handler,
-        )
-        .into();
+    let router: Router = router.get("/host-declared/{id}", cached_handler).into();
     let router: Router = router.get("/media-declared/{id}", cached_handler).into();
     let router: Router = router.get("/encoding-declared/{id}", cached_handler).into();
     // Fix round 7: the feature-flag and per-tenant-authorization routes.
@@ -1581,10 +1575,10 @@ async fn boot(
         )
         .expect("attach named guard then default policy")
         .try_render_cache(
-            "/feature-version-declared/{id}",
-            GroupPolicy::from(feature_version_declared_policy),
+            "/host-declared/{id}",
+            GroupPolicy::from(host_declared_policy),
         )
-        .expect("attach feature version declared policy")
+        .expect("attach host declared policy")
         .try_render_cache(
             "/reads-team-scoped-flag/{id}",
             GroupPolicy::from(no_variance_policy.clone()),
@@ -2502,16 +2496,6 @@ async fn reads_named_guard_then_touches_default_leaky_handler(_request: Request)
     )))
 }
 
-/// Fix round 6, item 5 (engine rule moved to the host): the key's own doc
-/// on `variance_descriptor` explains why this dimension is rejected here
-/// rather than at policy build time. The handler itself is unremarkable;
-/// the point under test is that the route never gets cached at all.
-async fn feature_version_declared_handler(_request: Request) -> Response {
-    counting_route::on_render_start().await;
-    let n = counting_route::renders();
-    Ok(HttpResponse::html(format!("feature-version render {n}")))
-}
-
 /// Installs the framework's own [`DatabaseEvaluator`](suprnova::features::DatabaseEvaluator)
 /// (as one half of a shared `Chain`) as featureflag's process-global
 /// default the way `features::bootstrap_database_cached` does in a real
@@ -3070,10 +3054,14 @@ async fn dispatch_recording(
     frames: Option<FrameLog>,
     server_timings: Option<ServerTimingLog>,
 ) -> TestResponse {
-    let mut builder = hyper::Request::builder()
-        .method(method)
-        .uri(path)
-        .header("host", "127.0.0.1");
+    let mut builder = hyper::Request::builder().method(method).uri(path);
+    // A test that names the host sends that host and no second one.
+    if !extra_headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        builder = builder.header("host", "127.0.0.1");
+    }
     for (name, value) in extra_headers {
         builder = builder.header(*name, *value);
     }

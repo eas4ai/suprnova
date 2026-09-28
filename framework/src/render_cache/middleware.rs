@@ -1100,14 +1100,15 @@ fn route_identity(pattern: &str) -> RouteIdentity {
 /// does not actually reflect what it claims to.
 ///
 /// Also fails for a declared `FeatureVersion`, `ConfigVersion`, or
-/// `Application` dimension - fix round 6 moved this rejection here from the
-/// engine's `RenderCachePolicy::validate` (see its own doc): this host has
-/// no producer for any of the three, and "this host has no producer" is a
-/// fact about the host, not about the host-neutral engine crate, which
-/// should not have to learn about a host's capabilities to justify refusing
-/// its own extension point. The same policies are rejected either way; only
-/// where the rejection is noticed moves, from policy construction to the
-/// first request against a route that declares one.
+/// `Application` dimension: this host has no producer for any of the
+/// three. "This host has no producer" is a fact about the host, not about
+/// the host-neutral engine crate, which should not have to learn about a
+/// host's capabilities to justify refusing its own extension point, so the
+/// engine's `RenderCachePolicy::validate` accepts such a policy and the
+/// host refuses it. The policy table refuses it when a route or a group
+/// registers it (see `registry::has_a_producer`), so the application
+/// learns it at boot. The arm here is for a policy that reaches this
+/// function in any other way: that request goes past the cache.
 ///
 /// Also returns the resolved `Media` and `Encoding` values alongside the
 /// descriptor - `"text/html"` and `None` when the route does not declare
@@ -1205,10 +1206,13 @@ fn variance_descriptor(
             VarianceDimension::FeatureVersion
             | VarianceDimension::ConfigVersion
             | VarianceDimension::Application(_) => {
-                // Fix round 6: this host has no producer for any of the
-                // three - see this function's own doc for why the
-                // rejection lives here now rather than in the engine's
-                // `RenderCachePolicy::validate`.
+                // This host has no producer for any of the three. The
+                // policy table refuses them at registration - see this
+                // function's own doc for what is left for this arm.
+                debug_assert!(
+                    !super::registry::has_a_producer(dimension),
+                    "the policy table and the key builder disagree about {dimension:?}"
+                );
                 return Err(RenderCacheError::new(RenderCacheErrorKind::VarianceInvalid));
             }
         };
@@ -3975,6 +3979,38 @@ mod tests {
             hit.is_some_and(|found| found.header().key == other_key && found.layer() == Layer::L0),
             "control: a correctly placed entry is served from L0"
         );
+    }
+
+    /// The policy table refuses these dimensions at registration, so no
+    /// request reaches this arm through a router. A policy that is handed
+    /// to the key builder directly still must not get a key that leaves
+    /// the declared dimension out.
+    ///
+    /// `Request::for_test` exists only with the `testing` feature, which
+    /// the minimal profile checked by scripts/check-feature-matrix.sh
+    /// leaves off.
+    #[cfg(feature = "testing")]
+    #[test]
+    fn a_dimension_without_a_producer_gets_no_key() {
+        let runtime = lookup_only_runtime(test_keys());
+        let request = Request::for_test("GET", "/posts/1");
+        for dimension in [
+            VarianceDimension::FeatureVersion,
+            VarianceDimension::ConfigVersion,
+            VarianceDimension::Application("region".to_owned()),
+        ] {
+            let policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+                .vary(dimension.clone())
+                .build()
+                .expect("the engine accepts the dimension");
+            let refused = variance_descriptor(&runtime, &request, &policy)
+                .expect_err("this host gives the dimension no value");
+            assert_eq!(
+                refused.kind(),
+                RenderCacheErrorKind::VarianceInvalid,
+                "{dimension:?}"
+            );
+        }
     }
 
     #[test]
