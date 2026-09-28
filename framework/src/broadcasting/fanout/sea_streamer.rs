@@ -863,8 +863,10 @@ fn send_presence_via_producer(
         PresenceEvent::MemberRemoved { .. } => "member_removed",
         PresenceEvent::Heartbeat { .. } => "heartbeat",
     };
-    let data = serde_json::to_value(event).map_err(|_| {
-        FrameworkError::internal("SeaStreamerBroadcastHub: presence heartbeat serialization failed")
+    let data = serde_json::to_value(event).map_err(|error| {
+        FrameworkError::internal(format!(
+            "SeaStreamerBroadcastHub: presence heartbeat serialization failed: {error}"
+        ))
     })?;
     // Build a dummy Uuid from the string for the TaggedEnvelope.
     let uuid = Uuid::parse_str(instance_id_str).unwrap_or_else(|_| Uuid::nil());
@@ -876,11 +878,15 @@ fn send_presence_via_producer(
             data,
         ),
     };
-    let bytes = serde_json::to_vec(&tagged).map_err(|_| {
-        FrameworkError::internal("SeaStreamerBroadcastHub: presence heartbeat serialization failed")
+    let bytes = serde_json::to_vec(&tagged).map_err(|error| {
+        FrameworkError::internal(format!(
+            "SeaStreamerBroadcastHub: presence heartbeat serialization failed: {error}"
+        ))
     })?;
-    producer.send(bytes.as_slice()).map_err(|_| {
-        FrameworkError::internal("SeaStreamerBroadcastHub: presence heartbeat enqueue failed")
+    producer.send(bytes.as_slice()).map_err(|error| {
+        FrameworkError::internal(format!(
+            "SeaStreamerBroadcastHub: presence heartbeat enqueue failed: {error}"
+        ))
     })
 }
 
