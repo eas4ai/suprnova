@@ -82,6 +82,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   message)` builds one, `is_timeout()` asks for it, and it renders as `504
   Gateway Timeout`. `wait_with_timeout` and `wait_with_options` return it when
   the deadline fires.
+- **`Queue::fake()` and `Bus::fake()` install their fakes.** Every other
+  facade had `fake()`; these two had only the free function
+  `testing::install_fake()`. Both return the same guard, and the free
+  functions stay.
 
 ### Changed
 
@@ -296,6 +300,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `MariaDbVectorDriver::from_url`, and `DB::driver_title()` answers `MariaDB`
   for it. The vector driver's pool error no longer quotes the connection URL,
   which carries the password.
+- **`QUEUE_DRIVER=sync` and `QUEUE_DRIVER=null` select their drivers.** Both
+  drivers existed, but the environment bootstrap knew only `memory`, `redis`
+  and `database`, so `sync` became an in-memory queue with a warning. A
+  `QUEUE_DRIVER` that names no driver is now a boot error in production, where
+  an in-memory queue taken by mistake loses every job at the next restart;
+  elsewhere it still falls back to memory, and the warning lists the accepted
+  names.
 
 ### Security
 

@@ -38,6 +38,17 @@ async fn queue_fake_captures_pushed_jobs_without_running_them() {
 }
 
 #[tokio::test]
+async fn queue_fake_is_installed_from_the_facade() {
+    let _guard = Queue::fake();
+    Queue::push(Greet {
+        name: "Grace".into(),
+    })
+    .await
+    .unwrap();
+    assert_pushed::<Greet>(|g| g.name == "Grace");
+}
+
+#[tokio::test]
 async fn queue_fake_isolates_per_test() {
     let _guard = install_fake();
     Queue::push(Greet {

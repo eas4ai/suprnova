@@ -129,6 +129,50 @@ async fn bootstrap_from_env_unknown_driver_resets_to_memory() {
     set_env("QUEUE_DRIVER", None);
 }
 
+/// `sync` and `null` are documented drivers; the environment selects them
+/// like any other.
+#[tokio::test]
+#[serial]
+async fn bootstrap_from_env_installs_the_sync_and_null_drivers() {
+    let _env = crate::env_lock::lock_env_async().await;
+    for name in ["sync", "null"] {
+        Queue::set_driver(Arc::new(BogusDriver));
+        set_env("QUEUE_DRIVER", Some(name));
+        let result = bootstrap_from_env().await;
+        set_env("QUEUE_DRIVER", None);
+
+        result.unwrap_or_else(|e| panic!("QUEUE_DRIVER={name} is a driver: {e}"));
+        assert_eq!(Queue::driver_name().unwrap(), name);
+    }
+}
+
+/// In production a name that is no driver stops the boot: an in-memory queue
+/// taken by mistake loses every job at the next restart.
+#[tokio::test]
+#[serial]
+async fn production_refuses_an_unknown_queue_driver() {
+    let _env = crate::env_lock::lock_env_async().await;
+    Queue::set_driver(Arc::new(BogusDriver));
+    set_env("APP_ENV", Some("production"));
+    set_env("QUEUE_DRIVER", Some("redsi"));
+    let result = bootstrap_from_env().await;
+    set_env("QUEUE_DRIVER", None);
+    set_env("APP_ENV", None);
+
+    let error = result.expect_err("a typo must not become an in-memory queue in production");
+    let message = error.to_string();
+    assert!(message.contains("QUEUE_DRIVER=`redsi`"), "{message}");
+    assert!(
+        message.contains("memory, sync, null, redis, database, failover"),
+        "the message lists what is accepted: {message}"
+    );
+    assert_eq!(
+        Queue::driver_name().unwrap(),
+        "bogus",
+        "a refused boot leaves the installed driver alone"
+    );
+}
+
 /// `QUEUE_DRIVER=database` must bring its failed-jobs store with it.
 ///
 /// The `failed_jobs` table is part of that driver's contract -

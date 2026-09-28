@@ -124,6 +124,19 @@ pub struct EnvelopeOverrides {
 pub struct Queue;
 
 impl Queue {
+    /// Install the queue fake for the current test. Returns an RAII guard
+    /// that uninstalls it on drop. While the guard is live, every push is
+    /// recorded instead of reaching a driver, and the `assert_*` functions
+    /// in [`testing`] read what was recorded.
+    ///
+    /// The guard holds a process-wide serialization mutex, so parallel
+    /// tests cannot share the fake store. It is the same guard
+    /// [`testing::install_fake`] returns; this is the spelling every other
+    /// facade's fake has.
+    pub fn fake() -> testing::QueueFakeGuard {
+        testing::install_fake()
+    }
+
     /// Route every future dispatch of `J` to a connection and/or queue.
     ///
     /// Mirrors Laravel 13's `Queue::route(...)`. Register in
@@ -1276,8 +1289,14 @@ pub async fn bootstrap_default() {
     Queue::set_driver(Arc::new(memory::MemoryQueueDriver::new()));
 }
 
-/// Read `QUEUE_DRIVER` env and configure the matching driver. Falls back to the
-/// in-memory default on any unrecognized value or when `QUEUE_DRIVER` is unset.
+/// Read `QUEUE_DRIVER` env and configure the matching driver: `memory`, `sync`,
+/// `null`, `redis`, `database` or `failover`. An unset `QUEUE_DRIVER` is
+/// `memory`.
+///
+/// A value that names no driver is a boot error in production, where falling
+/// back to an in-memory queue would lose every job at the next restart with a
+/// log line as the only sign. Anywhere else it is a warning that lists the
+/// accepted names, and the in-memory driver.
 ///
 /// `QUEUE_DRIVER=failover` additionally reads `QUEUE_FAILOVER_CONNECTIONS` (a
 /// comma-separated, priority-ordered list such as `redis,database`) and wires a
@@ -1300,14 +1319,36 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
         // existing in two places.
         other => match build_driver_from_env(other).await? {
             Some(driver) => driver,
-            None => {
-                tracing::warn!(driver = %other, "unknown QUEUE_DRIVER, falling back to memory");
-                Arc::new(memory::MemoryQueueDriver::new()) as Arc<dyn QueueDriver>
-            }
+            None => unknown_driver(other, crate::config::Environment::detect().is_production())?,
         },
     };
     Queue::set_driver(driver);
     Ok(())
+}
+
+/// Every name `QUEUE_DRIVER` accepts, for the message a wrong one gets.
+const QUEUE_DRIVER_NAMES: &str = "memory, sync, null, redis, database, failover";
+
+/// What a `QUEUE_DRIVER` that names no driver becomes: a boot error in
+/// production, and outside it a warning and the in-memory driver.
+fn unknown_driver(
+    requested: &str,
+    is_production: bool,
+) -> Result<Arc<dyn QueueDriver>, FrameworkError> {
+    if is_production {
+        return Err(FrameworkError::internal(format!(
+            "QUEUE_DRIVER=`{requested}` is not a queue driver this build knows; \
+             accepted values are {QUEUE_DRIVER_NAMES}. Refusing to fall back to the \
+             in-memory driver in production, where it would lose every queued job at \
+             the next restart"
+        )));
+    }
+    tracing::warn!(
+        driver = %requested,
+        accepted = QUEUE_DRIVER_NAMES,
+        "unknown QUEUE_DRIVER, falling back to memory"
+    );
+    Ok(Arc::new(memory::MemoryQueueDriver::new()))
 }
 
 fn redis_consumer_id(configured: Option<String>) -> String {
@@ -1334,6 +1375,11 @@ fn redis_consumer_id(configured: Option<String>) -> String {
 async fn build_driver_from_env(name: &str) -> Result<Option<Arc<dyn QueueDriver>>, FrameworkError> {
     match name {
         "memory" => Ok(Some(Arc::new(memory::MemoryQueueDriver::new()))),
+        // Runs each job inline at push time: the usual development and
+        // test setting.
+        "sync" => Ok(Some(Arc::new(sync::SyncQueueDriver::new()))),
+        // Accepts every job and runs none.
+        "null" => Ok(Some(Arc::new(null::NullQueueDriver::new()))),
         "redis" => {
             let url = std::env::var("QUEUE_REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
