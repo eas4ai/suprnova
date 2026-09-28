@@ -25,6 +25,7 @@ fn env(name: &str, payload: serde_json::Value) -> Envelope {
         debounce_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
+        context: None,
     }
 }
 
@@ -121,6 +122,7 @@ async fn delayed_jobs_become_visible_after_available_at() {
         debounce_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
+        context: None,
     };
     d.push(env).await.unwrap();
 

@@ -148,7 +148,7 @@ pub use config::{
     env_optional, env_required, try_env_required,
 };
 pub use container::{App, Container};
-pub use context::{Context, ContextStore};
+pub use context::{Context, ContextSnapshot, ContextStore};
 pub use crypto::{Crypt, CryptPurpose, EncryptionKey};
 pub use csrf::{CsrfMiddleware, OriginPolicy, csrf_field, csrf_meta_tag, csrf_token};
 pub use data::{

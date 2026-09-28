@@ -268,14 +268,50 @@ async fn reset_debounce_max_wait(env: &Envelope) {
     }
 }
 
+/// The envelope as a log may show it. A log is readable by a wider audience
+/// than the queue store, so two things are taken out.
+///
+/// `unique_lock_owner` is the bearer token for an owner-scoped lock release:
+/// anyone holding it can free a dedupe lock a newer dispatch already owns.
+/// Re-pushing does not need it, because a fresh push takes a fresh lock.
+///
+/// The hidden context is what the application asked to keep out of logs. A
+/// job re-pushed from the logged envelope runs without it.
+fn redacted_for_log(env: &Envelope) -> Envelope {
+    let mut redacted = env.clone();
+    redacted.unique_lock_owner = None;
+    redacted.context = redacted
+        .context
+        .as_ref()
+        .map(crate::context::ContextSnapshot::without_hidden)
+        .filter(|context| !context.is_empty());
+    redacted
+}
+
 /// Run the middleware pipeline ending in the raw dispatcher. Returns the
 /// terminal [`JobOutcome`] OR a handler error (which the worker translates
 /// into retry / dead-letter).
+///
+/// The job and its middleware run inside a [`Context`](crate::context::Context)
+/// scope restored from the envelope's snapshot.
 ///
 /// Exposed for test harnesses that want to settle one envelope without
 /// running the full worker loop; production code goes through
 /// [`run_worker`].
 pub async fn run_through_middleware(env: Envelope) -> Result<JobOutcome, FrameworkError> {
+    // The job and its middleware run in the context the pusher had, restored
+    // into a scope of its own. Under the sync driver that scope shadows the
+    // caller's for the length of the job, so a job run inline sees what a
+    // job on a worker sees: a copy, never the caller's live context, and no
+    // query parameters, which belong to the request and do not travel.
+    let context = env.context.clone();
+    crate::context::Context::restored(context, run_pipeline(env)).await
+}
+
+/// The middleware pipeline of [`run_through_middleware`], without the
+/// context scope around it. The worker calls this inside the scope it
+/// opened for the whole attempt.
+async fn run_pipeline(env: Envelope) -> Result<JobOutcome, FrameworkError> {
     let job_name = env.job_name.clone();
     let mw_stack = middleware_for(&job_name);
     let unique_until_processing = job_is_unique_until_processing(&job_name);
@@ -530,12 +566,58 @@ async fn raise_paused_queue_events(
 /// own per-job `timeout()` if set) before the worker exits, so in-flight
 /// side effects don't get torn mid-stride. Designed to run under
 /// `tokio::spawn`.
+///
+/// The worker is labelled with the default connection's name
+/// ([`Queue::connection_name`](crate::queue::Queue::connection_name)): that
+/// is the name on its events and its failed-job records, and the name its
+/// pauses and connection-scoped forwards are keyed by. To drain a connection
+/// registered with
+/// [`Queue::register_connection`](crate::queue::Queue::register_connection),
+/// use [`run_worker_on`], which labels the worker with that connection.
 pub async fn run_worker(
     driver: Arc<dyn QueueDriver>,
     cfg: WorkerConfig,
     shutdown: CancellationToken,
 ) {
-    let connection = crate::queue::Queue::connection_name();
+    run_labelled_worker(
+        driver,
+        crate::queue::Queue::connection_name(),
+        cfg,
+        shutdown,
+    )
+    .await;
+}
+
+/// [`run_worker`] for the queue connection `connection`: a connection
+/// registered with
+/// [`Queue::register_connection`](crate::queue::Queue::register_connection),
+/// or the default connection by its own name. `queue:work --connection` runs
+/// this.
+///
+/// The worker drains that connection's driver and carries its name, so a
+/// pause or a connection-scoped forward set for the connection reaches the
+/// pushes to it and this worker's claims alike.
+///
+/// # Errors
+///
+/// Returns before the first poll when `connection` names no connection. The
+/// errors are those of a push to it.
+pub async fn run_worker_on(
+    connection: &str,
+    cfg: WorkerConfig,
+    shutdown: CancellationToken,
+) -> Result<(), FrameworkError> {
+    let target = crate::queue::connections::target(connection)?;
+    run_labelled_worker(target.driver, target.label, cfg, shutdown).await;
+    Ok(())
+}
+
+async fn run_labelled_worker(
+    driver: Arc<dyn QueueDriver>,
+    connection: String,
+    cfg: WorkerConfig,
+    shutdown: CancellationToken,
+) {
     let worker_started_at = Utc::now().timestamp_millis();
     // Read once per worker lifetime, mirroring Laravel's `Worker::$pausable`
     // static: an operator's escape hatch, not something that should change
@@ -689,6 +771,13 @@ pub async fn run_worker(
         let mut env = res.envelope;
         env.attempts += 1;
 
+        // One context for this attempt, restored from what the pusher had.
+        // The job runs in it, and so does every lifecycle event around the
+        // job, so a listener of `JobProcessing` or `JobFailed` reads the
+        // trace id the job reads. Laravel restores the context on
+        // `JobProcessing` for the same reason.
+        let job_context = crate::context::Context::hydrate(env.context.as_ref());
+
         // Spend the budget *before* running, not only when settling.
         //
         // Every other dead-letter decision happens after the handler
@@ -712,15 +801,18 @@ pub async fn run_worker(
                 "queue job exhausted its attempts without ever settling - \
                  dead-lettering before it takes another worker down"
             );
-            handle_dead_letter(
-                &*driver,
-                &res.token,
-                &env,
-                &connection,
-                "attempts exhausted without settlement; the previous workers did not \
-                 survive this job",
-                false,
-                &SettlementDeps::current(),
+            crate::context::Context::scope(
+                job_context.clone(),
+                handle_dead_letter(
+                    &*driver,
+                    &res.token,
+                    &env,
+                    &connection,
+                    "attempts exhausted without settlement; the previous workers did not \
+                     survive this job",
+                    false,
+                    &SettlementDeps::current(),
+                ),
             )
             .await;
             processed += 1;
@@ -734,9 +826,12 @@ pub async fn run_worker(
         }
 
         let identity_pre = queue_events::JobIdentity::from_env(&env, &connection);
-        let _ = EventFacade::dispatch(queue_events::JobProcessing {
-            job: identity_pre.clone(),
-        })
+        let _ = crate::context::Context::scope(
+            job_context.clone(),
+            EventFacade::dispatch(queue_events::JobProcessing {
+                job: identity_pre.clone(),
+            }),
+        )
         .await;
 
         // Laravel checks this in `CallQueuedHandler::call`, after the worker
@@ -744,9 +839,12 @@ pub async fn run_worker(
         // superseded job runs no middleware at all. Same order here. This is a
         // settlement, not a failure: ack, report, move on.
         if envelope_was_superseded(&env).await {
-            let _ = EventFacade::dispatch(queue_events::JobDebounced {
-                job: identity_pre.clone(),
-            })
+            let _ = crate::context::Context::scope(
+                job_context.clone(),
+                EventFacade::dispatch(queue_events::JobDebounced {
+                    job: identity_pre.clone(),
+                }),
+            )
             .await;
             if let Err(e) = driver.ack(&res.token).await {
                 settlement_failure(&*driver, &env, "ack", "debounced", &e);
@@ -773,8 +871,11 @@ pub async fn run_worker(
         // through the existing retry / dead-letter path. Without the boundary,
         // a panic would unwind out of `run_worker`, kill the worker task, and
         // strand the envelope's reservation until visibility expiry.
-        let dispatch_fut =
-            AssertUnwindSafe(run_through_middleware(env_for_dispatch)).catch_unwind();
+        let dispatch_fut = AssertUnwindSafe(crate::context::Context::scope(
+            job_context.clone(),
+            run_pipeline(env_for_dispatch),
+        ))
+        .catch_unwind();
 
         let outcome = match timeout_opt {
             Some(t) => match tokio::time::timeout(t, dispatch_fut).await {
@@ -815,7 +916,7 @@ pub async fn run_worker(
         // put back on the queue has not started processing
         // (`! $job->isReleased()`). `TimedOut` splits on that same rule rather
         // than being exempt from it. The timeout above wraps
-        // `run_through_middleware`, which is the whole pipeline and not just its
+        // `run_pipeline`, which is the whole pipeline and not just its
         // core, so a middleware that stalls reaches `TimedOut` with the core
         // never run and the release at dispatch time never issued: the
         // dead-letter sub-arm sweeps, and the retry sub-arm does not, because
@@ -830,130 +931,137 @@ pub async fn run_worker(
         let sweep_unique_lock =
             env.unique_lock_owner.is_some() && job_is_unique_until_processing(&env.job_name);
 
-        match outcome {
-            DispatchOutcome::Settled(JobOutcome::Completed) => {
-                if sweep_unique_lock {
-                    release_unique_lock_if_held(&env).await;
-                }
-                handle_completed(&*driver, &res.token, &env, &connection, &deps).await;
-            }
-            DispatchOutcome::Settled(JobOutcome::Released { delay }) => {
-                handle_released(&*driver, &res.token, &env, delay, &connection, "middleware").await;
-            }
-            DispatchOutcome::Settled(JobOutcome::Failed { reason }) => {
-                if sweep_unique_lock {
-                    release_unique_lock_if_held(&env).await;
-                }
-                handle_dead_letter(
-                    &*driver,
-                    &res.token,
-                    &env,
-                    &connection,
-                    &reason,
-                    false,
-                    &deps,
-                )
-                .await;
-            }
-            DispatchOutcome::Settled(JobOutcome::Deleted) => {
-                if sweep_unique_lock {
-                    release_unique_lock_if_held(&env).await;
-                }
-                handle_deleted(&*driver, &res.token, &env, &deps).await;
-            }
-            DispatchOutcome::Failed(e) => {
-                if sweep_unique_lock {
-                    release_unique_lock_if_held(&env).await;
-                }
-                if env.attempts >= env.max_tries {
-                    handle_dead_letter(
-                        &*driver,
-                        &res.token,
-                        &env,
-                        &connection,
-                        &e.to_string(),
-                        false,
-                        &deps,
-                    )
-                    .await;
-                } else {
-                    let _ = EventFacade::dispatch(queue_events::JobExceptionOccurred {
-                        job: identity_pre.clone(),
-                        exception: e.to_string(),
-                    })
-                    .await;
-                    // A failure that carries a retry hint is retried when
-                    // the refusing service asked, not on the job's schedule.
-                    let delay = delay_after_failure(&env.backoff, env.attempts, &e);
-                    tracing::warn!(
-                        job = %env.job_name,
-                        id = %env.id,
-                        attempt = env.attempts,
-                        retry_in = ?delay,
-                        retry_hint = e.retry_after().is_some(),
-                        error = %e,
-                        "queue job failed, will retry"
-                    );
-                    if let Err(nack_err) = driver.nack(&res.token, delay).await {
-                        settlement_failure(&*driver, &env, "nack", "retry", &nack_err);
-                    } else {
-                        let _ = EventFacade::dispatch(queue_events::JobReleasedAfterException {
-                            job: identity_pre.clone(),
-                            exception: e.to_string(),
-                            delay_secs: delay.as_secs(),
-                        })
-                        .await;
-                    }
-                }
-            }
-            DispatchOutcome::TimedOut(t) => {
-                let _ = EventFacade::dispatch(queue_events::JobTimedOut {
-                    job: identity_pre.clone(),
-                    timeout: t,
-                })
-                .await;
-                let exhausted = env.fail_on_timeout || env.attempts >= env.max_tries;
-                if exhausted {
-                    // A stalled middleware times out the whole pipeline, so the
-                    // core may never have run and the release at processing
-                    // start may never have happened. This envelope is
-                    // dead-lettered and will not come back, so a held lock would
-                    // block re-dispatch for the rest of `unique_for` on a job
-                    // that no longer exists. Owner-scoped, so it costs one
-                    // no-op release when the core did run and already released.
+        // Settled inside the job's context, so the events a settlement raises
+        // carry what the job carried.
+        crate::context::Context::scope(job_context, async {
+            match outcome {
+                DispatchOutcome::Settled(JobOutcome::Completed) => {
                     if sweep_unique_lock {
                         release_unique_lock_if_held(&env).await;
                     }
-                    let reason = format!(
-                        "job exceeded per-attempt timeout of {} seconds",
-                        t.as_secs()
-                    );
+                    handle_completed(&*driver, &res.token, &env, &connection, &deps).await;
+                }
+                DispatchOutcome::Settled(JobOutcome::Released { delay }) => {
+                    handle_released(&*driver, &res.token, &env, delay, &connection, "middleware")
+                        .await;
+                }
+                DispatchOutcome::Settled(JobOutcome::Failed { reason }) => {
+                    if sweep_unique_lock {
+                        release_unique_lock_if_held(&env).await;
+                    }
                     handle_dead_letter(
                         &*driver,
                         &res.token,
                         &env,
                         &connection,
                         &reason,
-                        true,
+                        false,
                         &deps,
                     )
                     .await;
-                } else {
-                    let delay = next_delay(&env.backoff, env.attempts, None);
-                    tracing::warn!(
-                        job = %env.job_name,
-                        id = %env.id,
-                        attempt = env.attempts,
-                        retry_in = ?delay,
-                        timeout_secs = t.as_secs(),
-                        "queue job timed out, will retry"
-                    );
-                    if let Err(nack_err) = driver.nack(&res.token, delay).await {
-                        settlement_failure(&*driver, &env, "nack", "timeout_retry", &nack_err);
+                }
+                DispatchOutcome::Settled(JobOutcome::Deleted) => {
+                    if sweep_unique_lock {
+                        release_unique_lock_if_held(&env).await;
+                    }
+                    handle_deleted(&*driver, &res.token, &env, &deps).await;
+                }
+                DispatchOutcome::Failed(e) => {
+                    if sweep_unique_lock {
+                        release_unique_lock_if_held(&env).await;
+                    }
+                    if env.attempts >= env.max_tries {
+                        handle_dead_letter(
+                            &*driver,
+                            &res.token,
+                            &env,
+                            &connection,
+                            &e.to_string(),
+                            false,
+                            &deps,
+                        )
+                        .await;
+                    } else {
+                        let _ = EventFacade::dispatch(queue_events::JobExceptionOccurred {
+                            job: identity_pre.clone(),
+                            exception: e.to_string(),
+                        })
+                        .await;
+                        // A failure that carries a retry hint is retried when
+                        // the refusing service asked, not on the job's schedule.
+                        let delay = delay_after_failure(&env.backoff, env.attempts, &e);
+                        tracing::warn!(
+                            job = %env.job_name,
+                            id = %env.id,
+                            attempt = env.attempts,
+                            retry_in = ?delay,
+                            retry_hint = e.retry_after().is_some(),
+                            error = %e,
+                            "queue job failed, will retry"
+                        );
+                        if let Err(nack_err) = driver.nack(&res.token, delay).await {
+                            settlement_failure(&*driver, &env, "nack", "retry", &nack_err);
+                        } else {
+                            let _ =
+                                EventFacade::dispatch(queue_events::JobReleasedAfterException {
+                                    job: identity_pre.clone(),
+                                    exception: e.to_string(),
+                                    delay_secs: delay.as_secs(),
+                                })
+                                .await;
+                        }
+                    }
+                }
+                DispatchOutcome::TimedOut(t) => {
+                    let _ = EventFacade::dispatch(queue_events::JobTimedOut {
+                        job: identity_pre.clone(),
+                        timeout: t,
+                    })
+                    .await;
+                    let exhausted = env.fail_on_timeout || env.attempts >= env.max_tries;
+                    if exhausted {
+                        // A stalled middleware times out the whole pipeline, so the
+                        // core may never have run and the release at processing
+                        // start may never have happened. This envelope is
+                        // dead-lettered and will not come back, so a held lock would
+                        // block re-dispatch for the rest of `unique_for` on a job
+                        // that no longer exists. Owner-scoped, so it costs one
+                        // no-op release when the core did run and already released.
+                        if sweep_unique_lock {
+                            release_unique_lock_if_held(&env).await;
+                        }
+                        let reason = format!(
+                            "job exceeded per-attempt timeout of {} seconds",
+                            t.as_secs()
+                        );
+                        handle_dead_letter(
+                            &*driver,
+                            &res.token,
+                            &env,
+                            &connection,
+                            &reason,
+                            true,
+                            &deps,
+                        )
+                        .await;
+                    } else {
+                        let delay = next_delay(&env.backoff, env.attempts, None);
+                        tracing::warn!(
+                            job = %env.job_name,
+                            id = %env.id,
+                            attempt = env.attempts,
+                            retry_in = ?delay,
+                            timeout_secs = t.as_secs(),
+                            "queue job timed out, will retry"
+                        );
+                        if let Err(nack_err) = driver.nack(&res.token, delay).await {
+                            settlement_failure(&*driver, &env, "nack", "timeout_retry", &nack_err);
+                        }
                     }
                 }
             }
-        }
+        })
+        .await;
 
         // One settlement = one processed job for the max_jobs cap, regardless
         // of outcome (success/failure/timeout). Settlement-failure logging
@@ -1037,7 +1145,9 @@ async fn handle_completed(
     // `run_worker(driver, ...)`; resolving through `current_driver()` would
     // re-pick whichever driver is registered globally, which differs from the
     // bound one under multi-connection setups (e.g. one worker per connection)
-    // and would silently land the next link on the wrong queue.
+    // and would silently land the next link on the wrong queue. A chain runs
+    // on one connection for this reason, and `PendingChain::dispatch` refuses
+    // one that would not.
     let mut follow_ups: Vec<Envelope> = Vec::new();
     if !env.chain_remaining.is_empty() {
         let mut tail = env.chain_remaining.clone();
@@ -1047,9 +1157,13 @@ async fn handle_completed(
         // redelivers `env` and runs the push again. A random id made the second
         // push indistinguishable from a legitimate new step. See
         // `ChainLink::to_envelope_after`.
-        let mut next_env = next.to_envelope_after(env.id);
+        let mut next_env = next.to_envelope_after_on(env.id, connection);
         next_env.chain_remaining = tail;
         next_env.batch_id = env.batch_id.clone();
+        // The context of the code that dispatched the chain, not of the job
+        // that just ran: this runs outside that job's scope, and what one
+        // link adds to its own copy is not the next link's to inherit.
+        next_env.context = env.context.clone();
         follow_ups.push(next_env);
     }
 
@@ -1387,14 +1501,8 @@ async fn handle_dead_letter(
             // difference between work that can be recovered by hand and work
             // that silently ceased to exist.
             //
-            // `unique_lock_owner` is cleared first. It is the bearer token for
-            // an owner-scoped lock release, and a log is readable by a wider
-            // audience than the queue store - anyone holding the token can free
-            // a dedupe lock a newer dispatch already owns. Re-pushing does not
-            // need it: a fresh push takes a fresh lock.
-            let mut redacted = env.clone();
-            redacted.unique_lock_owner = None;
-            let payload = redacted
+            // Not the envelope as stored: see `redacted_for_log`.
+            let payload = redacted_for_log(env)
                 .to_json()
                 .unwrap_or_else(|e| format!("<envelope could not be serialised: {e}>"));
             tracing::error!(
@@ -2169,6 +2277,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_logged_envelope_carries_no_hidden_context_and_no_lock_token() {
+        let mut env = fresh_env("LoggedJob", 1);
+        env.unique_lock_owner = Some("owner-token".into());
+        env.context = Some(crate::context::ContextSnapshot {
+            data: [("trace_id".to_owned(), serde_json::json!("abc"))].into(),
+            hidden: [("api_key".to_owned(), serde_json::json!("s3cret"))].into(),
+        });
+
+        let logged = redacted_for_log(&env).to_json().unwrap();
+
+        assert!(
+            logged.contains("trace_id"),
+            "the visible bag stays: {logged}"
+        );
+        assert!(!logged.contains("s3cret"), "a hidden value was logged");
+        assert!(!logged.contains("api_key"), "a hidden key was logged");
+        assert!(!logged.contains("owner-token"), "the lock token was logged");
+        assert_eq!(
+            env.context.as_ref().map(|c| c.hidden.len()),
+            Some(1),
+            "the envelope itself is untouched"
+        );
+
+        // An envelope whose context is all hidden logs no context at all.
+        env.context = Some(crate::context::ContextSnapshot {
+            data: Default::default(),
+            hidden: [("api_key".to_owned(), serde_json::json!("s3cret"))].into(),
+        });
+        assert!(redacted_for_log(&env).context.is_none());
+    }
+
     fn fresh_env(name: &str, attempts: u32) -> Envelope {
         Envelope {
             schema_version: CURRENT_SCHEMA_VERSION,
@@ -2189,6 +2329,7 @@ mod tests {
             debounce_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
+            context: None,
         }
     }
 

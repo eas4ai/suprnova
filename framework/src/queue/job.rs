@@ -87,16 +87,15 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
         None
     }
 
-    /// Connection name this job resolves to. `None` (default) means the
-    /// globally configured connection name. Overridden by
+    /// Connection this job is pushed to. `None` (default) means the default
+    /// connection. Overridden by
     /// [`Queue::route`](crate::queue::Queue::route), same as [`Job::queue`].
     ///
-    /// One process-global driver currently receives every push: the resolved
-    /// name is carried on the `JobQueueing` / `JobQueued` lifecycle events so
-    /// listeners can attribute dispatches, but it does not select a different
-    /// driver. Declaring it is forward-compatible - when per-connection
-    /// drivers land, this is the name that will pick one - not behavioral
-    /// today. Contrast [`Job::queue`], which is honored end to end.
+    /// The name selects a driver among the connections registered with
+    /// [`Queue::register_connection`](crate::queue::Queue::register_connection),
+    /// and it is carried on the `JobQueueing` / `JobQueued` lifecycle events.
+    /// While no connection is registered there is one driver, and the name
+    /// is carried on those events and selects nothing.
     fn connection() -> Option<&'static str>
     where
         Self: Sized,

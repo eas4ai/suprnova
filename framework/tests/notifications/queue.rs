@@ -717,3 +717,37 @@ async fn a_notification_that_did_not_opt_in_is_queued_before_the_commit() {
 
     assert_eq!(driver.size().await.unwrap(), 1);
 }
+
+#[tokio::test]
+#[serial]
+async fn a_queued_notification_carries_the_context_of_the_code_that_queued_it() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    suprnova::Context::scope(suprnova::ContextStore::default(), async {
+        suprnova::Context::add("trace_id", "abc");
+        Notify::queue(
+            &User { id: 7 },
+            OrderShipped {
+                tracking: "1Z".into(),
+            },
+        )
+        .await
+        .unwrap();
+    })
+    .await;
+
+    let envelope = driver
+        .pop(Duration::from_secs(5))
+        .await
+        .unwrap()
+        .expect("the queued notification")
+        .envelope;
+    let context = envelope
+        .context
+        .expect("the notification job carries the context");
+    assert_eq!(
+        context.data.get("trace_id"),
+        Some(&serde_json::json!("abc"))
+    );
+}

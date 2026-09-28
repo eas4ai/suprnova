@@ -106,6 +106,7 @@ async fn skip_middleware_drops_job_without_running_handler() {
         debounce_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
+        context: None,
     };
     let outcome = run_through_middleware(env).await.unwrap();
     assert!(matches!(outcome, JobOutcome::Deleted));
@@ -136,6 +137,7 @@ async fn middleware_runs_outermost_first() {
         debounce_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
+        context: None,
     };
     let outcome = run_through_middleware(env).await.unwrap();
     assert!(matches!(outcome, JobOutcome::Completed));
@@ -261,6 +263,7 @@ async fn fail_on_exception_dead_letters_without_retries() {
         debounce_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
+        context: None,
     };
     let outcome = run_through_middleware(env).await.unwrap();
     assert!(matches!(outcome, JobOutcome::Failed { .. }));

@@ -190,6 +190,7 @@ async fn a_filtered_worker_takes_only_its_own_queue() {
             debounce_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
+            context: None,
         }
     }
 

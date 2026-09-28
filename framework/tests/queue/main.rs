@@ -6,6 +6,8 @@ pub mod batch_repository;
 pub mod batches;
 pub mod bootstrap;
 pub mod chains;
+pub mod connections;
+pub mod context;
 pub mod database;
 pub mod database_postgres;
 pub mod debounce;

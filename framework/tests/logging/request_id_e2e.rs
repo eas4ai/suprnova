@@ -264,3 +264,63 @@ async fn default_404_echoes_request_id() {
         "the static 404 must echo X-Request-Id"
     );
 }
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct QueuedByARequest;
+
+#[suprnova::async_trait]
+impl suprnova::Job for QueuedByARequest {
+    fn job_name() -> &'static str {
+        "request_id_e2e::QueuedByARequest"
+    }
+    async fn handle(self) -> Result<(), suprnova::FrameworkError> {
+        Ok(())
+    }
+}
+
+/// A job queued while a request is served carries the request's id, so the
+/// job and the log lines it writes can be traced to the request. The request
+/// middleware puts the id in the `Context`, and the push snapshots the
+/// `Context` into the envelope.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_job_queued_by_a_request_carries_the_requests_id() {
+    use suprnova::queue::{MemoryQueueDriver, Queue, QueueDriver};
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let router: Router = Router::new()
+        .get("/queue", |_req| async {
+            Queue::push(QueuedByARequest).await?;
+            text("queued")
+        })
+        .into();
+    let addr = spawn_server(router, MiddlewareRegistry::new(), 1).await;
+
+    let (status, headers, _body) = request(
+        addr,
+        "GET",
+        "/queue",
+        &[("X-Request-Id", "queued-by-request-0001")],
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        headers.get("x-request-id").map(String::as_str),
+        Some("queued-by-request-0001")
+    );
+    let envelope = driver
+        .pop(Duration::from_secs(5))
+        .await
+        .unwrap()
+        .expect("the handler queued a job")
+        .envelope;
+    let context = envelope
+        .context
+        .expect("a request always has its id to carry");
+    assert_eq!(
+        context.data.get("_request_id"),
+        Some(&serde_json::json!("queued-by-request-0001"))
+    );
+}

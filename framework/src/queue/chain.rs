@@ -77,8 +77,16 @@ impl ChainLink {
     /// The worker does **not** use this for chain continuation - see
     /// [`to_envelope_after`](Self::to_envelope_after) and the reason why.
     /// This remains for callers reifying a link outside a running chain.
+    ///
+    /// The envelope is for the default connection, and it carries no
+    /// [`Context`](crate::context::Context): a link stores neither. A chain
+    /// that is dispatched gets both from
+    /// [`PendingChain::dispatch`](crate::queue::PendingChain::dispatch).
     pub fn to_envelope(&self) -> Envelope {
-        self.to_envelope_with_id(uuid::Uuid::new_v4())
+        self.to_envelope_with_id(
+            uuid::Uuid::new_v4(),
+            &crate::queue::Queue::connection_name(),
+        )
     }
 
     /// Reify into a dispatchable envelope whose id is derived from the
@@ -115,11 +123,33 @@ impl ChainLink {
     /// and the acknowledgement commit together - the stable id is then what
     /// keeps a replayed settlement addressing the same logical step rather
     /// than minting a new one.
+    ///
+    /// As with [`to_envelope`](Self::to_envelope), the envelope is for the
+    /// default connection and carries no context. The worker adds both for
+    /// the chain it is running.
     pub fn to_envelope_after(&self, predecessor: uuid::Uuid) -> Envelope {
-        self.to_envelope_with_id(next_link_id(predecessor))
+        self.to_envelope_after_on(predecessor, &crate::queue::Queue::connection_name())
     }
 
-    fn to_envelope_with_id(&self, id: uuid::Uuid) -> Envelope {
+    /// [`Self::to_envelope_after`] for a chain that runs on the connection
+    /// labelled `connection`, which is what a worker on a named connection
+    /// passes. The label gates connection-scoped forwards, see
+    /// [`Queue::forward_on`](crate::queue::Queue::forward_on).
+    pub(crate) fn to_envelope_after_on(
+        &self,
+        predecessor: uuid::Uuid,
+        connection: &str,
+    ) -> Envelope {
+        self.to_envelope_with_id(next_link_id(predecessor), connection)
+    }
+
+    /// The head of a chain dispatched to the connection labelled
+    /// `connection`.
+    pub(crate) fn to_head_envelope_on(&self, connection: &str) -> Envelope {
+        self.to_envelope_with_id(uuid::Uuid::new_v4(), connection)
+    }
+
+    fn to_envelope_with_id(&self, id: uuid::Uuid, connection: &str) -> Envelope {
         let now = chrono::Utc::now();
         // The job's own `delay()`, as a direct push applies it. A delay too
         // large for the clock saturates instead of wrapping into the past.
@@ -147,13 +177,11 @@ impl ChainLink {
         // Without it a chained job is pushed to the source queue while every
         // worker started on that source queue is already claiming the
         // destination - work stranded on a queue nobody drains. The gate is the
-        // process connection name, the same value the push path and the
-        // worker's claim list use, so the two halves cannot disagree.
+        // label of the connection the chain runs on, the same value the push
+        // path and the worker's claim list use, so the two halves cannot
+        // disagree.
         if crate::queue::routing::has_forwards() {
-            queue = crate::queue::routing::forwarded_queue(
-                queue.as_deref(),
-                &crate::queue::Queue::connection_name(),
-            );
+            queue = crate::queue::routing::forwarded_queue(queue.as_deref(), connection);
         }
         Envelope {
             schema_version: crate::queue::CURRENT_SCHEMA_VERSION,
@@ -174,6 +202,7 @@ impl ChainLink {
             debounce_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
+            context: None,
         }
     }
 }
@@ -193,6 +222,10 @@ pub fn next_link_id(predecessor: uuid::Uuid) -> uuid::Uuid {
 #[derive(Debug)]
 pub struct PendingChain {
     links: Vec<ChainLink>,
+    /// The connection each link's job resolves to, in the order of `links`.
+    /// Kept beside the links and off the wire: it is read once, at dispatch,
+    /// to refuse a chain that would have to change connection midway.
+    connections: Vec<String>,
 }
 
 impl Default for PendingChain {
@@ -204,7 +237,10 @@ impl Default for PendingChain {
 impl PendingChain {
     /// Construct an empty pending chain with no links.
     pub fn new() -> Self {
-        Self { links: Vec::new() }
+        Self {
+            links: Vec::new(),
+            connections: Vec::new(),
+        }
     }
 
     /// Append a typed job to the chain.
@@ -221,6 +257,7 @@ impl PendingChain {
             )));
         }
         self.links.push(ChainLink::from_job(job)?);
+        self.connections.push(crate::queue::connection_of::<J>());
         Ok(self)
     }
 
@@ -240,20 +277,66 @@ impl PendingChain {
     /// The chain is recorded for
     /// [`assert_chained`](crate::queue::testing::assert_chained), and its
     /// head for [`assert_pushed`](crate::queue::testing::assert_pushed).
+    ///
+    /// # One connection
+    ///
+    /// A chain runs on the connection of its first job. The worker enqueues
+    /// the next link in the same step that settles the one before it, which
+    /// a driver can only do for its own queue. A chain whose links resolve
+    /// to different connections is refused here, before anything is pushed,
+    /// so a link's connection is never dropped without a word.
     pub async fn dispatch(self) -> Result<(), FrameworkError> {
-        let mut links = self.links.into_iter();
+        let Self { links, connections } = self;
+        let Some(head_connection) = connections.first() else {
+            return Ok(());
+        };
+        // The fake comes before the driver lookup, as it does in the
+        // `Queue::push` funnel: a faked test has no driver to find, and one
+        // that has must not be written to. It reads the labels without
+        // asking whether each connection has a driver, for the same reason,
+        // and still refuses the chain production would refuse.
+        let faked = crate::queue::testing::is_active();
+        let label_of = |connection: &str| -> Result<String, FrameworkError> {
+            if faked {
+                Ok(crate::queue::connections::label_for(connection))
+            } else {
+                crate::queue::connections::target(connection).map(|target| target.label)
+            }
+        };
+        let label = label_of(head_connection)?;
+        for (link, connection) in links.iter().zip(&connections).skip(1) {
+            let other = label_of(connection)?;
+            if other != label {
+                return Err(FrameworkError::internal(format!(
+                    "job `{}` resolves to the queue connection `{other}`, but it is a link \
+                     of a chain that runs on `{label}`, the connection of the chain's first \
+                     job. A chain runs on one connection: dispatch the job on its own, or \
+                     route every job of the chain to one connection",
+                    link.job_name
+                )));
+            }
+        }
+        let driver = if faked {
+            None
+        } else {
+            Some(crate::queue::connections::target(head_connection)?.driver)
+        };
+        let mut links = links.into_iter();
         let Some(head) = links.next() else {
             return Ok(());
         };
-        let mut env = head.to_envelope();
+        let mut env = head.to_head_envelope_on(&label);
         env.chain_remaining = links.collect();
-        // The fake comes before the driver lookup, as it does in the
-        // `Queue::push` funnel: a faked test has no driver to find, and one
-        // that has must not be written to.
-        if crate::queue::testing::is_active() {
-            crate::queue::testing::record_chain(&env);
-            return Ok(());
+        // A link is built without context, because only the head is pushed
+        // by the code that built the chain. The worker hands the head's
+        // snapshot to each link after it.
+        env.context = crate::context::Context::dehydrate();
+        match driver {
+            Some(driver) => driver.push(env).await,
+            None => {
+                crate::queue::testing::record_chain(&env);
+                Ok(())
+            }
         }
-        crate::queue::current_driver()?.push(env).await
     }
 }

@@ -268,6 +268,16 @@ pub fn install_fake() -> QueueFakeGuard {
     QueueFakeGuard { _serial: serial }
 }
 
+/// Remove every connection registered with
+/// [`Queue::register_connection`](crate::queue::Queue::register_connection).
+///
+/// The connections are process-wide. A test that registers one calls this
+/// when it is done, so a connection it registered does not change what a
+/// connection name means for the next test.
+pub fn forget_connections() {
+    crate::queue::connections::clear();
+}
+
 /// RAII guard returned by [`install_fake`]. Holds the process-wide
 /// serialization lock and clears the fake store on drop.
 pub struct QueueFakeGuard {

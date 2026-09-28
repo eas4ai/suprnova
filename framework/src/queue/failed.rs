@@ -30,11 +30,19 @@ use uuid::Uuid;
 /// One persisted failed-job record. The serialized envelope is held verbatim
 /// so an operator running `queue:retry <id>` can re-enqueue the exact
 /// payload that originally failed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The envelope holds the job's payload and the
+/// [`Context`](crate::context::Context) it was pushed with, hidden values
+/// included, because a retry has to run with what the first attempt had.
+/// The `Debug` output therefore gives the envelope's size, never its text:
+/// a record that is logged must not carry what the application asked to
+/// keep out of logs. Serializing a record writes the envelope in full.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct FailedJob {
     /// Record id assigned by the store on insert.
     pub id: Uuid,
-    /// Driver connection name the job ran on (e.g. `"sqs"`, `"database"`).
+    /// The connection the job ran on: the name the worker that ran it was
+    /// started with. A retry pushes the job back to this connection.
     pub connection: String,
     /// Queue name the job ran on (e.g. `"default"`, `"high"`).
     pub queue: String,
@@ -46,6 +54,23 @@ pub struct FailedJob {
     pub exception: String,
     /// When the record was logged.
     pub failed_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for FailedJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FailedJob")
+            .field("id", &self.id)
+            .field("connection", &self.connection)
+            .field("queue", &self.queue)
+            .field("job_name", &self.job_name)
+            .field(
+                "envelope_json",
+                &format_args!("<{} bytes>", self.envelope_json.len()),
+            )
+            .field("exception", &self.exception)
+            .field("failed_at", &self.failed_at)
+            .finish()
+    }
 }
 
 /// Storage backend for dead-lettered jobs. Drivers (memory, database,
@@ -488,6 +513,34 @@ mod tests {
     use super::*;
     use crate::queue::{BackoffSchedule, CURRENT_SCHEMA_VERSION};
 
+    #[tokio::test]
+    async fn the_debug_output_of_a_record_never_shows_the_envelope() {
+        let mut envelope = env("DebuggedJob");
+        envelope.context = Some(crate::context::ContextSnapshot {
+            data: Default::default(),
+            hidden: [("api_key".to_owned(), serde_json::json!("s3cret"))].into(),
+        });
+        let store = MemoryFailedJobStore::new();
+        let id = store
+            .log("memory", "default", &envelope, "boom")
+            .await
+            .unwrap();
+        let record = store.find(id).await.unwrap().unwrap();
+
+        let shown = format!("{record:?}");
+
+        assert!(
+            record.envelope_json.contains("s3cret"),
+            "the record keeps the envelope whole, a retry needs it"
+        );
+        assert!(
+            !shown.contains("s3cret"),
+            "a hidden value was shown: {shown}"
+        );
+        assert!(shown.contains("DebuggedJob") && shown.contains("boom"));
+        assert!(shown.contains("bytes>"));
+    }
+
     fn env(name: &str) -> Envelope {
         Envelope {
             schema_version: CURRENT_SCHEMA_VERSION,
@@ -508,6 +561,7 @@ mod tests {
             debounce_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
+            context: None,
         }
     }
 

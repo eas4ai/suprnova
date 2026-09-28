@@ -66,6 +66,7 @@ fn bootstrap_env() -> Envelope {
         debounce_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
+        context: None,
     }
 }
 
@@ -316,4 +317,60 @@ async fn failover_rejects_an_unknown_inner_connection_instead_of_falling_back() 
         err.to_string().contains("redsi"),
         "the error must name the offending entry, got {err}"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn queue_connections_registers_one_connection_per_entry() {
+    let _env = crate::env_lock::lock_env_async().await;
+    suprnova::queue::testing::forget_connections();
+    set_env("QUEUE_DRIVER", Some("memory"));
+    set_env("QUEUE_CONNECTIONS", Some("null, memory"));
+    let booted = bootstrap_from_env().await;
+    set_env("QUEUE_CONNECTIONS", None);
+    booted.unwrap();
+
+    assert_eq!(Queue::connection_names().unwrap(), ["memory", "null"]);
+    assert_eq!(Queue::connection("null").unwrap().name(), "null");
+
+    // `memory` is also QUEUE_DRIVER, so the entry is the default connection
+    // under its own name, not a second queue beside it.
+    Queue::connection("memory")
+        .unwrap()
+        .push(bootstrap_env())
+        .await
+        .unwrap();
+    assert_eq!(Queue::size().await.unwrap(), 1);
+    suprnova::queue::testing::forget_connections();
+}
+
+#[tokio::test]
+#[serial]
+async fn queue_connections_refuses_a_name_that_is_no_driver() {
+    let _env = crate::env_lock::lock_env_async().await;
+    suprnova::queue::testing::forget_connections();
+    set_env("QUEUE_DRIVER", Some("memory"));
+    set_env("QUEUE_CONNECTIONS", Some("redsi"));
+    let booted = bootstrap_from_env().await;
+    set_env("QUEUE_CONNECTIONS", None);
+
+    let err = booted.expect_err("a typo must not become a connection");
+    assert!(
+        err.to_string().contains("QUEUE_CONNECTIONS names `redsi`"),
+        "{err}"
+    );
+    assert!(Queue::connection_names().unwrap().is_empty());
+    suprnova::queue::testing::forget_connections();
+}
+
+#[tokio::test]
+#[serial]
+async fn without_queue_connections_no_connection_is_registered() {
+    let _env = crate::env_lock::lock_env_async().await;
+    suprnova::queue::testing::forget_connections();
+    set_env("QUEUE_DRIVER", Some("memory"));
+    set_env("QUEUE_CONNECTIONS", None);
+    bootstrap_from_env().await.unwrap();
+
+    assert!(Queue::connection_names().unwrap().is_empty());
 }

@@ -181,6 +181,9 @@ enum Commands {
         /// Omit to drain every queue. Jobs with no route count as `default`.
         #[arg(long = "queue", value_delimiter = ',')]
         queues: Vec<String>,
+        /// Drain this queue connection. Omit for the default connection.
+        #[arg(long)]
+        connection: Option<String>,
     },
     /// Pause job processing for a queue (or every queue with `--all`).
     /// Mirrors `php artisan queue:pause`.
@@ -191,6 +194,9 @@ enum Commands {
         /// Pause job processing for every queue on every connection.
         #[arg(long)]
         all: bool,
+        /// Connection the queue is on. Omit for the default connection.
+        #[arg(long)]
+        connection: Option<String>,
     },
     /// Resume job processing for a paused queue (or every queue with
     /// `--all`). Mirrors `php artisan queue:resume` (alias
@@ -203,6 +209,9 @@ enum Commands {
         /// Does not clear a per-queue pause set by `queue:pause <queue>`.
         #[arg(long)]
         all: bool,
+        /// Connection the queue is on. Omit for the default connection.
+        #[arg(long)]
+        connection: Option<String>,
     },
     /// List the failed jobs. Mirrors `php artisan queue:failed`.
     #[command(name = "queue:failed")]
@@ -994,6 +1003,7 @@ where
                 poll_interval_ms,
                 max_jobs,
                 queues,
+                connection,
             }) => {
                 Self::run_queue_worker_internal(
                     bootstrap_fn,
@@ -1001,14 +1011,23 @@ where
                     poll_interval_ms,
                     max_jobs,
                     queues,
+                    connection,
                 )
                 .await;
             }
-            Some(Commands::QueuePause { queue, all }) => {
-                Self::run_queue_pause_internal(bootstrap_fn, queue, all).await;
+            Some(Commands::QueuePause {
+                queue,
+                all,
+                connection,
+            }) => {
+                Self::run_queue_pause_internal(bootstrap_fn, queue, all, connection).await;
             }
-            Some(Commands::QueueResume { queue, all }) => {
-                Self::run_queue_resume_internal(bootstrap_fn, queue, all).await;
+            Some(Commands::QueueResume {
+                queue,
+                all,
+                connection,
+            }) => {
+                Self::run_queue_resume_internal(bootstrap_fn, queue, all, connection).await;
             }
             Some(Commands::QueueFailed) => {
                 Self::run_failed_jobs_internal(bootstrap_fn, FailedJobsCommand::Failed).await;
@@ -1453,7 +1472,8 @@ where
         }
     }
 
-    /// `queue:work`: drain the configured queue driver until cancelled.
+    /// `queue:work`: drain a queue connection until cancelled. The default
+    /// connection unless `--connection` names another.
     ///
     /// Runs the app's `bootstrap_fn` and then the runtime drivers (see
     /// [`Self::boot_worker_process`] for why that order), so popped jobs can
@@ -1468,6 +1488,7 @@ where
         poll_interval_ms: u64,
         max_jobs: Option<u64>,
         queues: Vec<String>,
+        connection: Option<String>,
     ) {
         let shutdown = Self::start_daemon();
         if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
@@ -1475,10 +1496,15 @@ where
             std::process::exit(1);
         }
 
-        let driver = match crate::queue::Queue::driver() {
-            Ok(d) => d,
+        // Resolved here as well as inside the worker: a connection nobody
+        // registered has to stop the process before the banner promises a
+        // worker. The banner names the connection the worker is labelled
+        // with, which is the default one while no connection is registered.
+        let requested = connection.unwrap_or_else(crate::queue::Queue::connection_name);
+        let (driver, connection) = match crate::queue::connections::target(&requested) {
+            Ok(target) => (target.driver, target.label),
             Err(e) => {
-                eprintln!("suprnova: no queue driver configured: {e}");
+                eprintln!("suprnova: the queue worker cannot start: {e}");
                 std::process::exit(1);
             }
         };
@@ -1495,6 +1521,7 @@ where
         println!("==============================================");
         println!("  suprnova Queue Worker");
         println!("==============================================");
+        println!("  connection:         {connection}");
         println!("  driver:             {}", driver.name());
         println!("  visibility timeout: {visibility_timeout}s");
         println!("  poll interval:      {poll_interval_ms}ms");
@@ -1520,7 +1547,12 @@ where
 
         let cancel_for_worker = cancel.clone();
         let mut worker = tokio::spawn(async move {
-            crate::queue::worker::run_worker(driver, cfg, cancel_for_worker).await;
+            if let Err(e) =
+                crate::queue::worker::run_worker_on(&connection, cfg, cancel_for_worker).await
+            {
+                eprintln!("suprnova: queue worker could not start: {e}");
+                std::process::exit(1);
+            }
         });
 
         // Either a stop signal fires (then we cancel and wait for in-flight
@@ -1556,6 +1588,7 @@ where
         bootstrap_fn: Option<BootstrapFn>,
         queue: Option<String>,
         all: bool,
+        connection: Option<String>,
     ) {
         if !crate::queue::pausable_from_env() {
             eprintln!("suprnova: queue pausing is currently disabled (QUEUE_PAUSABLE=false).");
@@ -1581,7 +1614,13 @@ where
                 println!("Job processing on all queues across all connections has been paused.");
             }
             PauseTarget::Named(queue) => {
-                let connection = crate::queue::Queue::connection_name();
+                let connection = match Self::pause_connection(connection) {
+                    Ok(connection) => connection,
+                    Err(e) => {
+                        eprintln!("suprnova: {e}");
+                        std::process::exit(1);
+                    }
+                };
                 if let Err(e) = crate::queue::Queue::pause(&connection, &queue).await {
                     eprintln!("suprnova: failed to pause queue [{connection}:{queue}]: {e}");
                     std::process::exit(1);
@@ -1633,6 +1672,7 @@ where
         bootstrap_fn: Option<BootstrapFn>,
         queue: Option<String>,
         all: bool,
+        connection: Option<String>,
     ) {
         let target = match resolve_pause_target(queue, all) {
             Ok(t) => t,
@@ -1654,13 +1694,33 @@ where
                 println!("Job processing on all queues across all connections has been resumed.");
             }
             PauseTarget::Named(queue) => {
-                let connection = crate::queue::Queue::connection_name();
+                // A name that is no connection any more is resumed as it
+                // was typed. Refusing it would leave a pause set for a
+                // connection that was since removed with no way to clear
+                // it, and the pause would be back in force the day the
+                // connection is registered again.
+                let connection = Self::pause_connection(connection.clone())
+                    .unwrap_or_else(|_| connection.unwrap_or_default());
                 if let Err(e) = crate::queue::Queue::resume(&connection, &queue).await {
                     eprintln!("suprnova: failed to resume queue [{connection}:{queue}]: {e}");
                     std::process::exit(1);
                 }
                 println!("Job processing on queue [{connection}:{queue}] has been resumed.");
             }
+        }
+    }
+
+    /// The connection a `queue:pause` or `queue:resume` of one queue acts
+    /// on: `--connection`, else the default connection.
+    ///
+    /// The answer is the label of the connection, the name its worker
+    /// carries, because that is the name the worker looks a pause up by.
+    /// A name that is no connection is an error: a pause keyed by it would
+    /// reach no worker while reporting success.
+    fn pause_connection(requested: Option<String>) -> Result<String, FrameworkError> {
+        match requested {
+            Some(name) => crate::queue::connections::target(&name).map(|target| target.label),
+            None => Ok(crate::queue::Queue::connection_name()),
         }
     }
 
@@ -2206,6 +2266,85 @@ mod queue_pause_target_tests {
         let err = resolve_pause_target(Some("   ".to_string()), false)
             .expect_err("a blank queue name must be refused, matching Laravel's falsy check");
         assert!(err.contains("--all"));
+    }
+}
+
+#[cfg(test)]
+mod queue_command_line_tests {
+    //! The queue commands as an operator types them. The failed-job
+    //! commands and `--connection` are read by `clap` from the definitions
+    //! above, so a renamed flag or a lost argument shows here.
+
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Commands {
+        Cli::try_parse_from(std::iter::once("app").chain(args.iter().copied()))
+            .unwrap_or_else(|e| panic!("{args:?} should parse: {e}"))
+            .command
+            .expect("a subcommand")
+    }
+
+    #[test]
+    fn queue_work_takes_a_connection_and_defaults_to_none() {
+        match parse(&["queue:work", "--connection", "durable", "--queue=a,b"]) {
+            Commands::QueueWork {
+                connection, queues, ..
+            } => {
+                assert_eq!(connection.as_deref(), Some("durable"));
+                assert_eq!(queues, ["a", "b"]);
+            }
+            _ => panic!("queue:work did not parse as the worker command"),
+        }
+        match parse(&["queue:work"]) {
+            Commands::QueueWork { connection, .. } => assert_eq!(connection, None),
+            _ => panic!("queue:work did not parse as the worker command"),
+        }
+    }
+
+    #[test]
+    fn queue_pause_and_resume_take_a_connection() {
+        match parse(&["queue:pause", "billing", "--connection", "durable"]) {
+            Commands::QueuePause {
+                queue,
+                all,
+                connection,
+            } => {
+                assert_eq!(queue.as_deref(), Some("billing"));
+                assert!(!all);
+                assert_eq!(connection.as_deref(), Some("durable"));
+            }
+            _ => panic!("queue:pause did not parse as the pause command"),
+        }
+        match parse(&["queue:continue", "billing"]) {
+            Commands::QueueResume { connection, .. } => assert_eq!(connection, None),
+            _ => panic!("queue:continue did not parse as the resume command"),
+        }
+    }
+
+    #[test]
+    fn the_failed_job_commands_parse_their_arguments() {
+        assert!(matches!(parse(&["queue:failed"]), Commands::QueueFailed));
+        match parse(&["queue:retry", "a", "b"]) {
+            Commands::QueueRetry { ids } => assert_eq!(ids, ["a", "b"]),
+            _ => panic!("queue:retry did not parse as the retry command"),
+        }
+        assert!(
+            Cli::try_parse_from(["app", "queue:retry"]).is_err(),
+            "queue:retry with nothing to retry must be refused"
+        );
+        match parse(&["queue:forget", "a"]) {
+            Commands::QueueForget { id } => assert_eq!(id, "a"),
+            _ => panic!("queue:forget did not parse as the forget command"),
+        }
+        match parse(&["queue:flush", "--hours", "48"]) {
+            Commands::QueueFlush { hours } => assert_eq!(hours, Some(48)),
+            _ => panic!("queue:flush did not parse as the flush command"),
+        }
+        match parse(&["queue:prune-failed"]) {
+            Commands::QueuePruneFailed { hours } => assert_eq!(hours, 24),
+            _ => panic!("queue:prune-failed did not parse as the prune command"),
+        }
     }
 }
 

@@ -2049,3 +2049,55 @@ async fn an_abort_after_commit_still_completes_every_callback_exactly_once() {
         "the unstarted remainder must divert, got: {names:?}"
     );
 }
+
+// --- The pusher's Context crosses the deferral ------------------------------
+
+#[tokio::test]
+#[serial]
+async fn a_deferred_push_carries_the_context_of_the_code_that_pushed_it() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+
+    // The callbacks run at the commit, on a task outside this scope. The
+    // envelopes must carry what the pusher had when it pushed.
+    suprnova::Context::scope(suprnova::ContextStore::default(), async {
+        suprnova::Context::add("trace_id", "abc");
+        suprnova::Context::hidden_add("api_key", "s3cret");
+        DB::transaction(|_tx| {
+            Box::pin(async {
+                Queue::push(AfterCommitJob).await?;
+                Queue::bulk(vec![AfterCommitJob]).await?;
+                Queue::push_unique(UniqueAfterCommitJob {
+                    key: "context-1".into(),
+                })
+                .await?;
+                assert_eq!(Queue::size().await?, 0, "all three wait for the commit");
+                Ok::<(), FrameworkError>(())
+            })
+        })
+        .await
+        .expect("commit");
+    })
+    .await;
+
+    let envelopes = driver.envelopes();
+    assert_eq!(envelopes.len(), 3);
+    for envelope in envelopes {
+        let context = envelope
+            .context
+            .unwrap_or_else(|| panic!("{} lost the context at the deferral", envelope.job_name));
+        assert_eq!(
+            context.data.get("trace_id"),
+            Some(&serde_json::json!("abc")),
+            "{}",
+            envelope.job_name
+        );
+        assert_eq!(
+            context.hidden.get("api_key"),
+            Some(&serde_json::json!("s3cret")),
+            "{}",
+            envelope.job_name
+        );
+    }
+}

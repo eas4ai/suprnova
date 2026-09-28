@@ -518,3 +518,33 @@ async fn a_mailable_that_did_not_opt_in_is_queued_before_the_commit() {
 
     assert_eq!(driver.size().await.unwrap(), 1);
 }
+
+#[tokio::test]
+#[serial]
+async fn queued_mail_carries_the_context_of_the_code_that_queued_it() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    suprnova::Context::scope(suprnova::ContextStore::default(), async {
+        suprnova::Context::add("trace_id", "abc");
+        Mail::to("alice@example.org")
+            .queue(WelcomeMail {
+                name: "Alice".into(),
+            })
+            .await
+            .unwrap();
+    })
+    .await;
+
+    let envelope = driver
+        .pop(Duration::from_secs(5))
+        .await
+        .unwrap()
+        .expect("the queued mail")
+        .envelope;
+    let context = envelope.context.expect("the mail job carries the context");
+    assert_eq!(
+        context.data.get("trace_id"),
+        Some(&serde_json::json!("abc"))
+    );
+}

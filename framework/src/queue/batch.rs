@@ -1214,6 +1214,9 @@ pub struct PendingBatch {
     /// Per-batch behavior switches (callbacks, fail policy).
     pub options: BatchOptions,
     envelopes: Vec<Envelope>,
+    /// The connection each envelope's job resolves to, in the order of
+    /// `envelopes`. The jobs of a batch may go to different connections.
+    connections: Vec<String>,
     /// Jobs added to this batch that declare a debounce window. Collected at
     /// `add` time because `add` returns `Self` and cannot fail; surfaced by
     /// [`PendingBatch::dispatch`] before anything is stored.
@@ -1237,6 +1240,7 @@ impl PendingBatch {
             name: String::new(),
             options: BatchOptions::default(),
             envelopes: Vec::new(),
+            connections: Vec::new(),
             debounce_rejected: Vec::new(),
             build_errors: Vec::new(),
         }
@@ -1260,7 +1264,10 @@ impl PendingBatch {
             return self;
         }
         let now = Utc::now();
-        let mut env = match crate::queue::build_envelope::<J>(&job, now) {
+        // The context of the code that adds the job, which is the code that
+        // builds the batch: `add` is where the envelope is built.
+        let context = crate::context::Context::dehydrate();
+        let mut env = match crate::queue::build_envelope::<J>(&job, now, context) {
             Ok(e) => e,
             Err(error) => {
                 self.build_errors
@@ -1270,6 +1277,7 @@ impl PendingBatch {
         };
         env.batch_id = None; // overwritten on dispatch with the batch id
         self.envelopes.push(env);
+        self.connections.push(crate::queue::connection_of::<J>());
         self
     }
 
@@ -1310,8 +1318,12 @@ impl PendingBatch {
         self.envelopes.is_empty()
     }
 
-    /// Persist the batch and dispatch every queued job via the configured
-    /// driver. Returns the batch id.
+    /// Persist the batch and push every queued job to the connection the
+    /// job resolves to. Returns the batch id.
+    ///
+    /// Every connection is resolved before the batch is stored. A job for a
+    /// name that is no connection rejects the whole batch, and nothing is
+    /// stored or pushed.
     ///
     /// # A push that fails mid-loop (DATA-02)
     ///
@@ -1367,6 +1379,19 @@ impl PendingBatch {
                 self.build_errors.join("; ")
             )));
         }
+        // Every job's connection is resolved before anything is stored or
+        // pushed, so a connection nobody registered rejects the whole batch
+        // and leaves no batch behind. Not under the fake, which resolves no
+        // driver.
+        let faked = crate::queue::testing::is_active();
+        let drivers = if faked {
+            Vec::new()
+        } else {
+            self.connections
+                .iter()
+                .map(|name| crate::queue::connections::target(name).map(|target| target.driver))
+                .collect::<Result<Vec<_>, _>>()?
+        };
         ensure_default_repository();
         let repo = current_repository()
             .ok_or_else(|| FrameworkError::internal("batch repository not initialized"))?;
@@ -1390,7 +1415,7 @@ impl PendingBatch {
         // The fake comes before the driver lookup, as it does in the
         // `Queue::push` funnel: a faked test has no driver to find, and one
         // that has must not be written to.
-        if crate::queue::testing::is_active() {
+        if faked {
             let envelopes: Vec<Envelope> = self
                 .envelopes
                 .into_iter()
@@ -1403,17 +1428,16 @@ impl PendingBatch {
             return Ok(id);
         }
 
-        let driver = crate::queue::current_driver()?;
-        let mut remaining = self.envelopes.into_iter();
+        let mut remaining = self.envelopes.into_iter().zip(drivers);
         let mut pushed = 0usize;
-        while let Some(mut env) = remaining.next() {
+        while let Some((mut env, driver)) = remaining.next() {
             env.batch_id = Some(id.clone());
             let undispatched = env.id;
             if let Err(e) = driver.push(env).await {
                 // Everything from here on never reached the queue, starting
                 // with the one that just failed.
                 let orphans: Vec<Uuid> = std::iter::once(undispatched)
-                    .chain(remaining.map(|e| e.id))
+                    .chain(remaining.map(|(e, _)| e.id))
                     .collect();
                 settle_undispatched(repo.as_ref(), &id, &orphans, pushed == 0).await;
                 return Err(e);

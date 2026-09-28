@@ -105,6 +105,64 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   process, as the `after_commit` option of a Laravel queue connection does;
   `EnvelopeOverrides { after_commit: Some(false), .. }` still sends one push
   ahead of the commit.
+- **Queue connections select a driver.** One process-global driver received
+  every push, and a job's connection was only a name on the lifecycle events.
+  `Queue::register_connection(name, driver)` now registers a named connection
+  next to the default one that `Queue::set_driver` installs, and a push goes
+  to the connection it resolves to: a per-push
+  `EnvelopeOverrides::connection`, then a `Queue::route`, then
+  `Job::connection()`, then the default. `Queue::push`, `push_with`, `later`,
+  `bulk` and `push_unique` all resolve it, the jobs of a batch each go to
+  their own connection, and a failed job is retried on the connection it
+  failed on. `queue:work --connection <name>` and
+  `queue::worker::run_worker_on` drain one connection, and the worker carries
+  its name on its events and failed-job records. `queue:pause` and
+  `queue:resume` take `--connection`. `Queue::connection(name)` returns a
+  connection's driver and `Queue::connection_names()` lists the registered
+  ones; `Queue::size()` and the other counts and listings read the default
+  connection. While no connection is registered nothing changes: every push
+  reaches the one driver, and a connection name is a label. Once one is
+  registered, a push to a name that is neither registered nor the default's is
+  an error and pushes nothing, and a push that waits for a commit is refused
+  before the commit. A chain runs on the connection of its first job, because
+  the worker enqueues the next link in the step that settles the one before
+  it; `Queue::chain().dispatch()` refuses a chain whose links resolve to
+  different connections. `QUEUE_CONNECTIONS=redis,database` registers one
+  connection per entry from the environment, each named for its driver. One
+  driver has one label: an entry that names the driver `QUEUE_DRIVER` selects
+  is a second name for the default connection, so a pause or a
+  `Queue::forward_on` set under either name reaches the whole queue, and an
+  entry that would put a second connection over a Redis stream or a jobs table
+  that is already in use is refused at boot.
+- **`Context` travels with queued work.** A value added to `Context` during a
+  request was gone when a queued job, a queued mail or notification, or a
+  queued event listener ran. A push now takes a `ContextSnapshot` of the
+  visible and hidden bags and stores it on the envelope, and the worker runs
+  the job inside a scope restored from it. The snapshot is taken when the push
+  is made, so a push that waits for a commit carries it too. The lifecycle
+  events around the job, such as `JobProcessing`, `JobProcessed` and
+  `JobFailed`, are dispatched in the same scope, so a listener reads what the
+  job read and what the job added. Every link of a chain and every job of a
+  batch gets the snapshot of the code that dispatched it, and a queued
+  listener gets the snapshot of the dispatch. The work runs on a copy, so what
+  a job adds reaches neither the request nor the next job, and every attempt
+  starts from the snapshot. Under the sync driver the copy shadows the
+  caller's context for the length of the job. The query bag does not travel,
+  so a job run inline no longer reads the request's query parameters. A job
+  queued while a request is served carries the request's id as `_request_id`,
+  which the request middleware adds to the context; a push made outside a
+  request with nothing in its context writes the envelope it wrote before.
+  `Context::dehydrating` and `Context::hydrated` register callbacks for the
+  two ends, as Laravel's hooks of those names do, with `Context::dehydrate`,
+  `Context::hydrate` and `Context::restored` as the functions behind them.
+  `Envelope` gains the public field `context`, so code that builds one with a
+  struct literal has to name it; an envelope written before the field existed
+  decodes without context. Hidden values reach the queue store and the
+  failed-job store, because the job needs them. They do not reach a log: the
+  envelope a worker logs when no failed-job store is bound carries no hidden
+  context, and the `Debug` output of `ContextSnapshot` and `ContextStore`
+  names hidden keys only, and that of `FailedJob` gives the size of the
+  envelope and not its text.
 
 ### Changed
 
