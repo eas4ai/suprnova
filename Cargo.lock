@@ -7688,6 +7688,7 @@ dependencies = [
  "tokio",
  "totp-rs",
  "tracing",
+ "tracing-test",
  "trybuild",
  "uuid",
  "webauthn-authenticator-rs",
