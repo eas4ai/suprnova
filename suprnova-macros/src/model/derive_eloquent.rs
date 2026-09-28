@@ -611,6 +611,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     //   `delete(&self)` override would silently lose to the trait's
     //   `delete(self)`.
     let soft_deletes_enabled = input.soft_deletes;
+    // Whether a factory insert leaves the primary key for the database.
+    let auto_increment = input.auto_increment;
     let soft_delete_col = &input.soft_deletes_column;
     let soft_delete_col_ident = quote::format_ident!("{}", soft_delete_col);
     let soft_delete_cast = input
@@ -1209,30 +1211,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         #[::suprnova::__async_trait::async_trait]
         impl ::suprnova::Persistable for #struct_ident {
             async fn persist(self) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
-                let inner: #module_name::Model = self.into();
-                // Route through `resolve_write` so factory persists honour
-                // the full write-side precedence chain - tx override →
-                // ambient CURRENT_TX → per-model `#[model(connection = ".")]`
-                // → primary - matching every other write path. The bare
-                // `resolve()` only consults CURRENT_TX, silently ignoring
-                // per-model connection routing.
-                let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
-                    ::core::option::Option::None,
-                    ::core::option::Option::None,
-                    <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
-                )
-                .await?;
-                let inserted = match &exec {
-                    ::suprnova::database::transaction::ExecutorChoice::Tx(t, _) => {
-                        ::suprnova::persist_via_seaorm(inner, t.as_ref()).await?
-                    }
-                    ::suprnova::database::transaction::ExecutorChoice::Pool(c, _) => {
-                        ::suprnova::persist_via_seaorm(inner, c.inner()).await?
-                    }
-                };
-                let result = <Self as ::core::convert::From<#module_name::Model>>::from(inserted);
-                ::suprnova::render_cache::orm::after_model_write(&result).await?;
-                ::core::result::Result::Ok(result)
+                // The same insert `Model::create` runs: `Creating` and
+                // `Saving` before it, `Created` and `Saved` after it, the
+                // write-side connection routing, the render cache's
+                // bookkeeping. A factory's rows reach every observer the
+                // application's rows reach.
+                <Self as ::suprnova::eloquent::Model>::__insert_built(self, #auto_increment).await
             }
         }
 

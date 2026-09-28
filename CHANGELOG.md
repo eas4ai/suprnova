@@ -281,6 +281,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   a `pub type __Suprnova_Cast_Storage_<field>` for each cast field, and each
   one appeared in the documentation of the application's own models. They are
   hidden now.
+- **A factory insert fires the model's lifecycle events.** `Factory::create`
+  and `create_many` inserted through SeaORM directly, so `creating`, `saving`,
+  `created` and `saved` never fired and no observer saw a factory's rows. They
+  now take the same insert `Model::create` takes: a `creating` observer can
+  change the attributes or cancel the insert, and `created` runs for every
+  row. `create_quietly()` and `create_many_quietly()` insert with the events
+  muted. A model whose key is not auto-increment keeps the key its factory
+  set.
 
 ### Security
 

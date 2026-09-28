@@ -21,6 +21,7 @@ pub mod eager_dispatcher;
 pub mod eager_named_connection;
 pub mod eager_query_count;
 pub mod events;
+pub mod factory_events;
 pub mod factory_persist;
 pub mod fillable;
 pub mod has;

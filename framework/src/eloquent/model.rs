@@ -494,6 +494,79 @@ where
         Ok(row)
     }
 
+    /// Insert this fully built row and fire the lifecycle events
+    /// [`Self::create`] fires, in the same order. This is the path a
+    /// factory takes, so an observer sees a factory's rows exactly as it
+    /// sees the application's.
+    ///
+    /// The row's values are the ones its builder produced, so the
+    /// fillable filter does not apply to them. A `Creating` or `Saving`
+    /// listener sees the row as attributes; whatever it changes there is
+    /// written over the built values, and a listener that cancels aborts
+    /// the insert.
+    ///
+    /// `database_assigns_key` says whether the primary key is left for
+    /// the database to assign, as an auto-increment key is, or written as
+    /// the row carries it.
+    ///
+    /// **Not part of the public API.** It is `pub` because the
+    /// `#[suprnova::model]` macro's `Persistable` impl calls it.
+    #[doc(hidden)]
+    async fn __insert_built(self, database_assigns_key: bool) -> Result<Self, FrameworkError> {
+        use sea_orm::{ActiveModelTrait, Iterable, PrimaryKeyToColumn};
+
+        let built = serde_json::to_value(&self).map_err(|e| {
+            FrameworkError::internal(format!("factory insert: serialize the built row: {e}"))
+        })?;
+        let built = Attrs::from(built);
+        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(built.clone()));
+        Self::__dispatch_creating(shared.clone()).await?;
+        Self::__dispatch_saving(shared.clone(), true).await?;
+
+        // Only what a listener changed goes over the built values. The
+        // attributes are the row as it serializes, which leaves out a
+        // hidden column and carries the placeholder key; writing them
+        // all back would lose the one and set the other.
+        let after = shared.lock().await.clone();
+        let mut changed = Attrs::new();
+        for (key, value) in after.iter() {
+            if built.get(key) != Some(value) {
+                changed.insert(key, value.clone());
+            }
+        }
+
+        let mut am = self.into_active_model_for_update()?;
+        if database_assigns_key {
+            for key in <<Self::Entity as EntityTrait>::PrimaryKey as Iterable>::iter() {
+                am.not_set(key.into_column());
+            }
+        }
+        Self::apply_attrs_to_active_model(&mut am, changed)?;
+
+        let row =
+            crate::render_cache::orm::atomic(Self::default_connection_name(), || async move {
+                let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                    None,
+                    None,
+                    Self::default_connection_name(),
+                )
+                .await?;
+                let inserted = exec
+                    .insert_active(am)
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                let row = Self::try_from_storage(inserted)?;
+                crate::render_cache::orm::after_model_write(&row).await?;
+                Ok(row)
+            })
+            .await?;
+
+        Self::__dispatch_created(&row).await?;
+        Self::__dispatch_saved(&row).await?;
+        row.touch_owners().await?;
+        Ok(row)
+    }
+
     /// Persist any field changes on this row. The full row is sent to
     /// the database - T4 doesn't track per-field dirty state.
     ///
