@@ -421,6 +421,15 @@ pub struct Builder<M> {
     /// Phase 10C T4 - if true, the registered global scopes for this
     /// model are bypassed entirely on this query.
     pub(crate) skip_all_scopes: bool,
+    /// Folds the model's soft-delete filter and its registered global
+    /// scopes into a builder. Set by [`Builder::__scoped`], which is what
+    /// `Model::query()` returns, and run when the query is rendered. An
+    /// opt-out chained anywhere before the terminal therefore lands, and
+    /// no `or_*` fold can reach a scope's terms, because they do not exist
+    /// until the caller's own terms are complete. `None` on a bare
+    /// [`Builder::new`], which the framework's row-level operations use
+    /// unscoped.
+    pub(crate) scope_resolver: Option<fn(Builder<M>) -> Builder<M>>,
     /// Eager-load plan - populated by [`Builder::with`] /
     /// [`Builder::with_count`] / [`Builder::with_sum`] /
     /// [`Builder::with_avg`] / [`Builder::with_min`] /
@@ -497,6 +506,7 @@ impl<M> Clone for Builder<M> {
             global_scopes_disabled: self.global_scopes_disabled.clone(),
             excluded_scopes: self.excluded_scopes.clone(),
             skip_all_scopes: self.skip_all_scopes,
+            scope_resolver: self.scope_resolver,
             // Carried, not dropped. `WithWhere`'s predicate is an
             // `Arc<dyn Fn>`, so this shares the closure rather than
             // duplicating it - every variant clones cheaply.
@@ -843,6 +853,30 @@ pub(crate) fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError
 }
 
 impl<M> Builder<M> {
+    /// This builder as it runs: itself when it carries no scope resolver,
+    /// and otherwise a copy with the soft-delete filter and the global
+    /// scopes folded in. Every renderer starts here, so no path reaches
+    /// the database unscoped because it forgot to ask.
+    pub(crate) fn effective(&self) -> std::borrow::Cow<'_, Self> {
+        match self.scope_resolver {
+            None => std::borrow::Cow::Borrowed(self),
+            Some(resolve) => {
+                let mut owned = self.clone();
+                owned.scope_resolver = None;
+                std::borrow::Cow::Owned(resolve(owned))
+            }
+        }
+    }
+
+    /// The owning form of [`Self::effective`], for a terminal that
+    /// consumes the builder.
+    pub(crate) fn into_effective(mut self) -> Self {
+        match self.scope_resolver.take() {
+            None => self,
+            Some(resolve) => resolve(self),
+        }
+    }
+
     /// Walk the builder's accumulated identifiers and operators and
     /// reject any that don't pass
     /// [`crate::database::validate_identifier`] /
@@ -889,9 +923,9 @@ impl<M> Builder<M> {
                 }
             }
         }
-        // UNION arms must also pass.
+        // UNION arms must also pass, as they run.
         for (other, _is_all) in &self.unions {
-            other.validate_inputs()?;
+            other.effective().validate_inputs()?;
         }
         Ok(())
     }
@@ -914,6 +948,7 @@ impl<M> Builder<M> {
             global_scopes_disabled: Vec::new(),
             excluded_scopes: Vec::new(),
             skip_all_scopes: false,
+            scope_resolver: None,
             eager_specs: Vec::new(),
             lock_mode: LockMode::None,
             tx_override: None,
@@ -1922,66 +1957,37 @@ impl<M> Builder<M> {
         self
     }
 
-    /// Append one global scope's `TypeId` to the per-builder
-    /// exclusion mask, consulted by
-    /// [`ScopeRegistry::apply_to`][reg_apply_to] when walking the
-    /// per-model registry.
+    /// Run this query without the global scope `S`. Every other
+    /// registered scope, and the soft-delete filter, still apply.
     ///
-    /// **Not part of the public API.** This is `pub` only because the
-    /// `#[suprnova::model]` macro emits the per-model static helper
-    /// `Self::without_global_scope::<S>()` into user crates, and that
-    /// helper needs to call this method to set the mask before the
-    /// registry runs. The macro-emitted helper is the correct surface
-    /// for end users - it constructs a fresh `Builder`, sets the mask,
-    /// THEN runs the registry, so the opt-out actually lands.
-    ///
-    /// Chaining this method onto the builder returned by
-    /// `Model::query()` is silently ineffective: `query()` applies
-    /// registered scopes EAGERLY at construction time, so the scope
-    /// has already mutated `where_terms` by the time
-    /// `.without_global_scope::<S>()` adds the `TypeId` to the
-    /// exclusion mask.
-    ///
-    /// Use the macro-emitted static helper instead:
+    /// Global scopes are folded in when the query runs, so the call
+    /// lands wherever it is written in the chain:
     ///
     /// ```ignore
-    /// // Constructs the builder, sets the mask, runs the registry -
-    /// // opt-out lands.
-    /// let everything = User::without_global_scope::<TenantScope>()
+    /// let everyone = User::query()
+    ///     .filter("active", true)
+    ///     .without_global_scope::<TenantScope>()
     ///     .get()
     ///     .await?;
     /// ```
     ///
-    /// [reg_apply_to]: crate::eloquent::ScopeRegistry
-    #[doc(hidden)]
+    /// `User::without_global_scope::<TenantScope>()` is the same query
+    /// started from the model.
     pub fn without_global_scope<S: 'static>(mut self) -> Self {
         self.excluded_scopes.push(std::any::TypeId::of::<S>());
         self
     }
 
-    /// Set `skip_all_scopes = true`. Consulted by
-    /// [`ScopeRegistry::apply_to`][reg_apply_to] to short-circuit
-    /// every registered scope for this builder.
+    /// Run this query without any registered global scope. The
+    /// soft-delete filter still applies; lift it with `with_trashed()`.
     ///
-    /// **Not part of the public API.** Same rationale as
-    /// [`Self::without_global_scope`]: this is `pub` only because the
-    /// `#[suprnova::model]` macro emits the per-model static helper
-    /// `Self::without_global_scopes()`, which needs to call this
-    /// method to set the bypass flag before the registry runs.
-    /// Chaining onto a builder returned by `Model::query()` is
-    /// silently ineffective - scopes already ran.
-    ///
-    /// Use the macro-emitted static helper instead:
+    /// Like [`Self::without_global_scope`], the call lands wherever it is
+    /// written in the chain:
     ///
     /// ```ignore
-    /// // Admin tooling: read every row.
-    /// let everything = User::without_global_scopes()
-    ///     .get()
-    ///     .await?;
+    /// // Admin tooling: read every tenant's rows.
+    /// let everything = User::query().without_global_scopes().get().await?;
     /// ```
-    ///
-    /// [reg_apply_to]: crate::eloquent::ScopeRegistry
-    #[doc(hidden)]
     pub fn without_global_scopes(mut self) -> Self {
         self.skip_all_scopes = true;
         self
@@ -2705,16 +2711,18 @@ impl<M> Builder<M> {
         // Raw-SQL escape hatches (`select_raw`, `WhereTerm::Raw`,
         // `OrderTerm::Raw`) are deliberately skipped - they exist
         // precisely so power users can opt past the validator.
-        self.validate_inputs()?;
+        let this = self.effective();
+        let this = &*this;
+        this.validate_inputs()?;
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n = 0;
-        let mut sql = self.render_select_into(backend, table, column_expr, &mut values, &mut n)?;
+        let mut sql = this.render_select_into(backend, table, column_expr, &mut values, &mut n)?;
         // Phase 10C T9 - row-lock hint goes at the very end of the
         // compound statement, after every UNION arm and every
         // ORDER BY / LIMIT / OFFSET. The lock applies to the outer
         // SELECT, so emitting it inside `render_select_into` would
         // place it mid-statement on union arms - wrong shape.
-        let lock_clause: &str = match (backend, self.lock_mode) {
+        let lock_clause: &str = match (backend, this.lock_mode) {
             (_, LockMode::None) => "",
             (DbBackend::Postgres, LockMode::ForUpdate) => " FOR UPDATE",
             (DbBackend::Postgres, LockMode::Shared) => " FOR SHARE",
@@ -2765,12 +2773,14 @@ impl<M> Builder<M> {
         // Audit HIGH `eloquent` #1 - same identifier validation as
         // `render_select_for`. Count uses the same WHERE / GROUP BY /
         // HAVING clauses, so the attack surface is identical.
-        self.validate_inputs()?;
+        let this = self.effective();
+        let this = &*this;
+        this.validate_inputs()?;
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n = 0;
         let mut sql = String::new();
 
-        let needs_subquery_wrap = !self.group_by.is_empty() || !self.unions.is_empty();
+        let needs_subquery_wrap = !this.group_by.is_empty() || !this.unions.is_empty();
 
         if needs_subquery_wrap {
             // Wrap: SELECT COUNT(*) AS count FROM (<inner>) AS sub.
@@ -2781,12 +2791,12 @@ impl<M> Builder<M> {
             sql.push_str("SELECT COUNT(*) AS count FROM (");
             sql.push_str("SELECT 1 AS __paginate_marker FROM ");
             sql.push_str(table);
-            self.render_count_body(backend, &mut sql, &mut values, &mut n)?;
+            this.render_count_body(backend, &mut sql, &mut values, &mut n)?;
 
             // Union arms - recurse with the same placeholder counter
             // so Postgres `$N` stays monotonic. Each arm projects the
             // same `1 AS __paginate_marker` column.
-            for (other, all) in &self.unions {
+            for (other, all) in &this.unions {
                 let connector = if *all { " UNION ALL " } else { " UNION " };
                 sql.push_str(connector);
                 sql.push_str("SELECT 1 AS __paginate_marker FROM ");
@@ -2798,7 +2808,7 @@ impl<M> Builder<M> {
         } else {
             sql.push_str("SELECT COUNT(*) AS count FROM ");
             sql.push_str(table);
-            self.render_count_body(backend, &mut sql, &mut values, &mut n)?;
+            this.render_count_body(backend, &mut sql, &mut values, &mut n)?;
         }
 
         Ok((sql, values))
@@ -2816,9 +2826,12 @@ impl<M> Builder<M> {
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<(), FrameworkError> {
-        if !self.where_terms.is_empty() {
+        // A union arm arrives here directly, so it resolves its own scopes.
+        let this = self.effective();
+        let this = &*this;
+        if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
-            let parts: Vec<String> = self
+            let parts: Vec<String> = this
                 .where_terms
                 .iter()
                 .map(|t| Self::render_where_term(backend, t, values, n))
@@ -2826,12 +2839,12 @@ impl<M> Builder<M> {
             sql.push_str(&parts.join(" AND "));
         }
 
-        if !self.group_by.is_empty() {
+        if !this.group_by.is_empty() {
             sql.push_str(" GROUP BY ");
-            sql.push_str(&self.group_by.join(", "));
+            sql.push_str(&this.group_by.join(", "));
         }
 
-        sql.push_str(&self.render_having(backend, values, n)?);
+        sql.push_str(&this.render_having(backend, values, n)?);
         Ok(())
     }
 
@@ -2850,15 +2863,18 @@ impl<M> Builder<M> {
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<String, FrameworkError> {
+        // A union arm arrives here directly, so it resolves its own scopes.
+        let this = self.effective();
+        let this = &*this;
         let mut sql = String::new();
 
         sql.push_str("SELECT ");
-        if self.distinct {
+        if this.distinct {
             sql.push_str("DISTINCT ");
         }
-        if let Some(raw) = &self.select_raw {
+        if let Some(raw) = &this.select_raw {
             sql.push_str(raw);
-        } else if let Some(cols) = &self.select_cols {
+        } else if let Some(cols) = &this.select_cols {
             sql.push_str(&cols.join(", "));
         } else {
             sql.push_str(column_expr);
@@ -2866,7 +2882,7 @@ impl<M> Builder<M> {
         sql.push_str(" FROM ");
         sql.push_str(table);
 
-        if !self.where_terms.is_empty() {
+        if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
             let parts: Vec<String> = self
                 .where_terms
@@ -2876,18 +2892,18 @@ impl<M> Builder<M> {
             sql.push_str(&parts.join(" AND "));
         }
 
-        if !self.group_by.is_empty() {
+        if !this.group_by.is_empty() {
             sql.push_str(" GROUP BY ");
-            sql.push_str(&self.group_by.join(", "));
+            sql.push_str(&this.group_by.join(", "));
         }
 
-        sql.push_str(&self.render_having(backend, values, n)?);
-        sql.push_str(&self.render_orders(backend, values, n)?);
+        sql.push_str(&this.render_having(backend, values, n)?);
+        sql.push_str(&this.render_orders(backend, values, n)?);
 
-        if let Some(l) = self.limit {
+        if let Some(l) = this.limit {
             sql.push_str(&format!(" LIMIT {l}"));
         }
-        if let Some(o) = self.offset {
+        if let Some(o) = this.offset {
             sql.push_str(&format!(" OFFSET {o}"));
         }
 
@@ -2900,7 +2916,7 @@ impl<M> Builder<M> {
         // The inner SELECT is appended verbatim (no parens) because
         // SQLite rejects `UNION (SELECT ...)` while Postgres / MySQL
         // accept either form. Standard SQL doesn't require the parens.
-        for (other, all) in &self.unions {
+        for (other, all) in &this.unions {
             let connector = if *all { " UNION ALL " } else { " UNION " };
             sql.push_str(connector);
             let other_sql = other.render_select_into(backend, table, column_expr, values, n)?;
@@ -2930,6 +2946,19 @@ where
     <<M::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
+    /// A builder whose soft-delete filter and global scopes are folded in
+    /// when it runs. `Model::query()` returns one, and so does every static
+    /// entry point the `#[suprnova::model]` macro emits.
+    ///
+    /// **Not part of the public API.** It is `pub` because the macro
+    /// expands into user crates; reach for `Model::query()`.
+    #[doc(hidden)]
+    pub fn __scoped() -> Self {
+        let mut builder = Self::new();
+        builder.scope_resolver = Some(crate::eloquent::scopes::resolve_scopes::<M>);
+        builder
+    }
+
     // ---- Has / where-has existence engine (Laravel parity) ---------------
     //
     // These methods produce correlated `EXISTS (...)` / `NOT EXISTS
@@ -3570,9 +3599,10 @@ where
         sql.push_str("DELETE FROM ");
         sql.push_str(M::TABLE);
 
-        if !self.where_terms.is_empty() {
+        let this = self.effective();
+        if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
-            let parts: Vec<String> = self
+            let parts: Vec<String> = this
                 .where_terms
                 .iter()
                 .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
@@ -3679,7 +3709,10 @@ where
     /// `.into_vec()`. The model-aware surface (`pluck("col")`,
     /// `group_by("col")`, `sort_by("col")`, `sum::<T>("col")`, ...)
     /// composes on top.
-    pub async fn get(mut self) -> Result<Collection<M>, FrameworkError> {
+    pub async fn get(self) -> Result<Collection<M>, FrameworkError> {
+        // Resolved before anything reads the builder, so a scope that adds
+        // an eager load or an order is honoured like one that adds a filter.
+        let mut this = self.into_effective();
         crate::render_cache::collector::observe_table_read(M::TABLE);
         // Phase 10C T1 - Retrieving fires ONCE per query (not per
         // row) before any SQL runs. Aligns with Laravel's
@@ -3691,16 +3724,16 @@ where
         // explicit `with_tx` override > ambient `CURRENT_TX` >
         // builder `on(name)` > per-model default conn >
         // `__read_replica__` auto-routing > default pool.
-        let exec = self.resolve_read_executor().await?;
+        let exec = this.resolve_read_executor().await?;
         let backend = exec.backend();
-        let runtime_casts = self.runtime_casts.clone();
+        let runtime_casts = this.runtime_casts.clone();
         // Move the eager plan out of `self` - `EagerSpec::WithWhere`
         // owns a `Box<dyn Any>` (the type-erased predicate) which is
         // not `Clone`. The base SELECT consumes `self`'s WHERE / ORDER
         // / LIMIT terms; afterwards we hand the plan to the eager
         // orchestrator.
-        let eager_specs = std::mem::take(&mut self.eager_specs);
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, "*")?;
+        let eager_specs = std::mem::take(&mut this.eager_specs);
+        let (sql, vals) = this.render_select_for(backend, M::TABLE, "*")?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
 
         // Fetch into the entity's `Model` - the SeaORM type that's
@@ -3774,8 +3807,8 @@ where
         // inside a tx, this `db` is effectively ignored.
         if !eager_specs.is_empty() && !out.is_empty() {
             let eager_db = crate::eloquent::relations::eager::resolve_eager_connection(
-                self.tx_override.as_ref(),
-                self.connection_override.as_deref(),
+                this.tx_override.as_ref(),
+                this.connection_override.as_deref(),
                 M::default_connection_name(),
             )
             .await?;
@@ -4745,10 +4778,13 @@ where
         for (k, _) in attrs.iter() {
             crate::database::validate_identifier(k)?;
         }
-        self.validate_inputs()?;
+        // A mass write is scoped like a read: the soft-delete filter and
+        // the global scopes decide which rows it may touch.
+        let this = self.into_effective();
+        this.validate_inputs()?;
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            self.tx_override.as_ref(),
-            self.connection_override.as_deref(),
+            this.tx_override.as_ref(),
+            this.connection_override.as_deref(),
             M::default_connection_name(),
         )
         .await?;
@@ -4770,9 +4806,9 @@ where
             .collect::<Result<Vec<_>, FrameworkError>>()?;
         sql.push_str(&set_parts.join(", "));
 
-        if !self.where_terms.is_empty() {
+        if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
-            let parts: Vec<String> = self
+            let parts: Vec<String> = this
                 .where_terms
                 .iter()
                 .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
@@ -4785,7 +4821,7 @@ where
             .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        match self.tx_override.as_ref() {
+        match this.tx_override.as_ref() {
             Some(handle) => {
                 crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?
             }
@@ -4794,26 +4830,98 @@ where
         Ok(result.rows_affected())
     }
 
-    /// `DELETE FROM table WHERE <where_terms>`. Returns the affected
-    /// row count. Mass-delete - no per-row Model events fire. For
-    /// soft-delete model behaviour iterate with `get()` and call
-    /// `.delete()` per row.
+    /// Delete every row the query matches and return how many. No
+    /// per-row model events fire.
+    ///
+    /// On a model declared with `soft_deletes` this is a soft delete:
+    /// one `UPDATE table SET deleted_at = <now> WHERE <where_terms>`,
+    /// which also sets `updated_at` when the model manages timestamps.
+    /// The rows stay readable through `with_trashed()` and can be
+    /// restored. [`Self::force_delete_all`] removes them for good. On
+    /// any other model it is `DELETE FROM table WHERE <where_terms>`.
     pub async fn delete_all(self) -> Result<u64, FrameworkError> {
-        self.validate_inputs()?;
+        let Some(stamp) = M::__soft_delete_stamp()? else {
+            return self.force_delete_all().await;
+        };
+        let this = self.into_effective();
+        this.validate_inputs()?;
+        crate::database::validate_identifier(M::SOFT_DELETES_COLUMN)?;
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            self.tx_override.as_ref(),
-            self.connection_override.as_deref(),
+            this.tx_override.as_ref(),
+            this.connection_override.as_deref(),
             M::default_connection_name(),
         )
         .await?;
         let backend = exec.backend();
-        let (sql, vals) = self.render_model_delete_sql_with_bindings(backend)?;
+
+        let mut values: Vec<SeaValue> = Vec::new();
+        let mut n: usize = 0;
+        n += 1;
+        values.push(stamp.deleted_at);
+        let mut sql = format!(
+            "UPDATE {} SET {} = {}",
+            M::TABLE,
+            M::SOFT_DELETES_COLUMN,
+            placeholder(backend, n)?
+        );
+        if let Some(updated_at) = stamp.updated_at {
+            crate::database::validate_identifier(M::UPDATED_AT_COLUMN)?;
+            n += 1;
+            values.push(updated_at);
+            sql.push_str(&format!(
+                ", {} = {}",
+                M::UPDATED_AT_COLUMN,
+                placeholder(backend, n)?
+            ));
+        }
+        if !this.where_terms.is_empty() {
+            sql.push_str(" WHERE ");
+            let parts: Vec<String> = this
+                .where_terms
+                .iter()
+                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
+                .collect::<Result<Vec<_>, _>>()?;
+            sql.push_str(&parts.join(" AND "));
+        }
+
+        let stmt = Statement::from_sql_and_values(backend, &sql, values);
+        let result = exec
+            .run(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        match this.tx_override.as_ref() {
+            Some(handle) => {
+                crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?
+            }
+            None => crate::render_cache::orm::after_bulk_write(M::TABLE).await?,
+        }
+        Ok(result.rows_affected())
+    }
+
+    /// `DELETE FROM table WHERE <where_terms>`: remove every row the
+    /// query matches, soft-delete model or not, and return how many. No
+    /// per-row model events fire.
+    ///
+    /// On a soft-delete model the query is still scoped to rows that are
+    /// not trashed; start from `with_trashed()` or `only_trashed()` to
+    /// remove trashed rows.
+    pub async fn force_delete_all(self) -> Result<u64, FrameworkError> {
+        let this = self.into_effective();
+        this.validate_inputs()?;
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            this.tx_override.as_ref(),
+            this.connection_override.as_deref(),
+            M::default_connection_name(),
+        )
+        .await?;
+        let backend = exec.backend();
+        let (sql, vals) = this.render_model_delete_sql_with_bindings(backend)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let result = exec
             .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        match self.tx_override.as_ref() {
+        match this.tx_override.as_ref() {
             Some(handle) => {
                 crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?
             }
@@ -4840,10 +4948,11 @@ where
         if owned.is_empty() {
             return Ok(0);
         }
-        self.validate_inputs()?;
+        let this = self.into_effective();
+        this.validate_inputs()?;
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            self.tx_override.as_ref(),
-            self.connection_override.as_deref(),
+            this.tx_override.as_ref(),
+            this.connection_override.as_deref(),
             M::default_connection_name(),
         )
         .await?;
@@ -4864,9 +4973,9 @@ where
             })
             .collect::<Result<Vec<_>, FrameworkError>>()?;
         sql.push_str(&set_parts.join(", "));
-        if !self.where_terms.is_empty() {
+        if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
-            let parts: Vec<String> = self
+            let parts: Vec<String> = this
                 .where_terms
                 .iter()
                 .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
@@ -4878,7 +4987,7 @@ where
             .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        match self.tx_override.as_ref() {
+        match this.tx_override.as_ref() {
             Some(handle) => {
                 crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?
             }

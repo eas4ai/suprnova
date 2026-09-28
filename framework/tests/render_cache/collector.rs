@@ -1096,9 +1096,10 @@ async fn an_undeclared_scope_reading_its_own_state_narrows_to_uncacheable_and_is
 
     let report = Collector::scope(async {
         collector::begin_handler();
-        // Building the query is enough: `Model::query()` runs the registry,
-        // and the registry is what records. No database is involved.
-        let _query = ScopedWidget::query();
+        // Rendering the query is enough: global scopes are folded in when a
+        // query is rendered, the registry runs there, and the registry is
+        // what records. No database is involved.
+        let _sql = ScopedWidget::query().to_sql();
         current_report().expect("active")
     })
     .await;

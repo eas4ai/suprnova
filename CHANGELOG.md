@@ -98,6 +98,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `CeremonyRef { selector, kind }`, and the exact form takes the consume id as
   its second argument. A store that overrides either method changes its
   signature to match.
+- **`delete_all` on a soft-delete model soft-deletes.** It issued `DELETE` on
+  every model, so `Post::query().filter(...).delete_all()` permanently removed
+  rows that a row-level `delete()` would have trashed. On a model declared
+  with `soft_deletes` it now writes the tombstone, and `updated_at` when the
+  model manages timestamps, and the rows stay readable through
+  `with_trashed()`. `force_delete_all()` is the explicit hard delete.
+  `Builder::without_global_scope::<S>()` and
+  `Builder::without_global_scopes()` are supported chain methods.
 
 ### Fixed
 
@@ -262,6 +270,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   retires expired uploads discarded the result of every run, so a store that
   kept failing left the uploads in place with nothing in the log. A failed run
   now logs a warning, and the loop retries on its next interval as before.
+
+### Security
+
+- **Global scopes can no longer be bypassed by a trashed view, a chained
+  opt-out, or an `or_where`.** Scopes were applied when `Model::query()` built
+  the builder, which left three holes. `with_trashed()` and `only_trashed()`
+  started from a bare builder and ran with no global scope, so on a model with
+  a tenant scope they returned every tenant's rows. `query().or_where(...)`
+  folded into the scope's own term and read `(tenant_id = ? OR ...)`, and on a
+  soft-delete model `(deleted_at IS NULL OR ...)`. And
+  `query().without_global_scope::<S>()` compiled and did nothing. The
+  soft-delete filter and the registered scopes are now folded in when the
+  query runs: the statement is `<scopes> AND <your terms>` with an `OR` group
+  as one atom, the trashed views lift only the soft-delete filter, and an
+  opt-out lands wherever it is chained. `update_all`, `delete_all` and
+  `increment_each` resolve the same way, so a mass write reaches only the rows
+  a read would return. A scope that reads per-request state reads it when the
+  query runs.
 
 ## 2.0.2 - 2026-09-14
 

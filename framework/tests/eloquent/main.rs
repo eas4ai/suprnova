@@ -54,6 +54,7 @@ pub mod restore_named_connection;
 pub mod save_listener_mutation;
 pub mod scopes_global;
 pub mod scopes_local;
+pub mod scopes_resolution;
 pub mod serialization;
 pub mod serialization_eager_pivot;
 pub mod soft_delete_postgres;

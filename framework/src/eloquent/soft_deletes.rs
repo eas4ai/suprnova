@@ -79,16 +79,12 @@ where
 /// - `user.posts().with_trashed()` - relation wrappers forward to
 ///   these methods on their inner `Builder<R>`.
 ///
-/// **Mutation strategy.** The soft-delete scope is installed by
-/// `Self::query()` as a direct `filter_null(deleted_at)` call (see
-/// the macro emission in
-/// `suprnova-macros/src/model/derive_eloquent.rs` for the
-/// `query_override`). The `Vec<WhereTerm>` is the canonical storage,
-/// so `with_trashed` retains every term that isn't the tombstone
-/// null-check; `only_trashed` swaps it for `NotNull(deleted_at)`.
-/// Both append the `"soft_deletes"` tag via the framework-internal
-/// `__disable_named_scope` so the typed Phase 10C T4 scope registry
-/// can layer on top without double-applying.
+/// **How they work.** The soft-delete filter is not a term on the
+/// builder: it is folded in when the query runs, unless the builder
+/// carries the `"soft_deletes"` opt-out. `with_trashed` sets that
+/// opt-out; `only_trashed` sets it and adds `deleted_at IS NOT NULL`.
+/// The model's registered global scopes are untouched by either, so a
+/// trashed view is still a tenant's own rows.
 impl<M> Builder<M>
 where
     M: SoftDeletes,
@@ -102,25 +98,20 @@ where
     <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
-    /// Widen the query to include trashed rows. Removes the
-    /// `deleted_at IS NULL` term the global scope installed via
-    /// `Self::query()`. Idempotent - calling it twice does nothing
-    /// the first call didn't already do.
+    /// Widen the query to include trashed rows. Every registered global
+    /// scope still applies. Idempotent.
     pub fn with_trashed(mut self) -> Self {
-        let col = M::deleted_at_column();
-        self.where_terms
-            .retain(|t| !matches!(t, WhereTerm::Null(c) if c == col));
-        self.global_scopes_disabled.push("soft_deletes");
+        if !self.global_scopes_disabled.contains(&"soft_deletes") {
+            self.global_scopes_disabled.push("soft_deletes");
+        }
         self
     }
 
-    /// Restrict the query to *only* trashed rows. Removes the
-    /// `deleted_at IS NULL` term and appends `deleted_at IS NOT NULL`.
-    /// Idempotent.
+    /// Restrict the query to *only* trashed rows: lifts the soft-delete
+    /// filter and appends `deleted_at IS NOT NULL`. Every registered
+    /// global scope still applies. Idempotent.
     pub fn only_trashed(mut self) -> Self {
         let col = M::deleted_at_column();
-        self.where_terms
-            .retain(|t| !matches!(t, WhereTerm::Null(c) if c == col));
         // Avoid double-stamping NotNull on repeated calls.
         if !self
             .where_terms
@@ -129,7 +120,9 @@ where
         {
             self = self.filter_not_null(col);
         }
-        self.global_scopes_disabled.push("soft_deletes");
+        if !self.global_scopes_disabled.contains(&"soft_deletes") {
+            self.global_scopes_disabled.push("soft_deletes");
+        }
         self
     }
 }

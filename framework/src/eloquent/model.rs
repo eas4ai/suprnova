@@ -412,11 +412,16 @@ where
         Ok(Collection::from_vec(out))
     }
 
-    /// Start a new builder against this model. Phase 10C T4 layers
-    /// registered global scopes onto the fresh builder so every read
-    /// path is scoped by default; callers opt out per-type with
-    /// [`Builder::without_global_scope::<S>`] or all-at-once with
-    /// [`Builder::without_global_scopes`].
+    /// Start a new builder against this model. The model's soft-delete
+    /// filter and its registered global scopes apply to every query the
+    /// builder runs, reads and mass writes alike; callers opt out
+    /// per-type with [`Builder::without_global_scope::<S>`] or
+    /// all-at-once with [`Builder::without_global_scopes`], anywhere in
+    /// the chain.
+    ///
+    /// The scopes are folded in when the query runs, not here. A scope
+    /// that reads per-request state, such as the current tenant, reads
+    /// it at that moment.
     ///
     /// The scope registry is keyed by `TypeId::of::<Self>()`. The
     /// `Model: 'static` supertrait bound makes that lookup well-defined
@@ -425,7 +430,7 @@ where
     /// [`Builder::without_global_scope::<S>`]: crate::eloquent::Builder::without_global_scope
     /// [`Builder::without_global_scopes`]: crate::eloquent::Builder::without_global_scopes
     fn query() -> Builder<Self> {
-        crate::eloquent::scopes::ScopeRegistry::apply_to::<Self>(Builder::new())
+        Builder::__scoped()
     }
 
     /// Mass-create a row from the given attributes. Attributes are

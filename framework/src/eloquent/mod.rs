@@ -60,6 +60,17 @@ pub use timestamps::{
 };
 pub use unique_id::{HasUniqueId, UniqueIdKind};
 
+/// The values a mass soft delete binds. Built by the `#[suprnova::model]`
+/// macro; not part of the public API.
+#[doc(hidden)]
+pub struct SoftDeleteStamp {
+    /// The tombstone, in the soft-delete column's storage form.
+    pub deleted_at: sea_orm::Value,
+    /// "Now" in the `updated_at` column's storage form, when the model
+    /// manages timestamps.
+    pub updated_at: Option<sea_orm::Value>,
+}
+
 /// Marker trait emitted by `#[suprnova::model]`. Indicates the struct
 /// is a Suprnova-managed model.
 ///
@@ -102,6 +113,18 @@ pub trait EloquentModel: Sized {
     /// EXISTS subqueries (a parent with only soft-deleted children
     /// must NOT match `has("children")`).
     const SOFT_DELETES_COLUMN: &'static str = "";
+
+    /// What a mass soft delete writes for "now", each value in its
+    /// column's own storage form: the tombstone for
+    /// [`Self::SOFT_DELETES_COLUMN`], and the value for
+    /// [`Self::UPDATED_AT_COLUMN`] when the model manages timestamps.
+    /// `None` on a model without soft deletes. The macro emits it from
+    /// the columns' casts, so the mass form writes what a row's own
+    /// `delete()` and `save()` write.
+    #[doc(hidden)]
+    fn __soft_delete_stamp() -> Result<Option<SoftDeleteStamp>, crate::FrameworkError> {
+        Ok(None)
+    }
 
     /// Names of the `BelongsTo` relations whose parent row gets its
     /// `updated_at` bumped after this model is created, saved,
