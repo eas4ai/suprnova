@@ -549,6 +549,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `#![allow(clippy::collapsible_if)]`.** The attribute turned the lint off for
   the whole file with no reason given. It is removed, and the nested
   conditions it hid are written as one.
+- **`mail::mailable_registry::render_outgoing` takes its values as a struct.**
+  The function had fourteen arguments in a row, four of them `Vec<Address>`
+  one after the other: the recipients, the copies, the blind copies and the
+  reply addresses. Two of them in the wrong order compile, and the mail goes
+  to the wrong list. It takes `any`, `mailable_name` and a
+  `RenderOutgoingParams` now, whose fields are named. `RenderOutgoingParams`
+  implements `Default`, so a caller names the fields it has. A caller of
+  `render_outgoing` has to build the struct. The framework has one, the job
+  that sends a queued mail.
 
 ### Fixed
 

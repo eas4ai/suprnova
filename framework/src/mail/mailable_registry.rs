@@ -127,6 +127,44 @@ pub fn build(
     factory(payload)
 }
 
+/// The routed recipients and the builder-side values that
+/// [`render_outgoing`] layers over a mailable's own. The four recipient
+/// lists share one type, so they travel as named fields: a caller that
+/// swapped `cc` and `bcc` would otherwise still compile and misroute mail.
+#[derive(Debug, Clone, Default)]
+pub struct RenderOutgoingParams {
+    /// Primary recipients.
+    pub to: Vec<Address>,
+    /// CC recipients.
+    pub cc: Vec<Address>,
+    /// BCC recipients.
+    pub bcc: Vec<Address>,
+    /// Reply-To addresses.
+    pub reply_to: Vec<Address>,
+    /// Builder-side `from`. Wins over the mailable's `from()`; with
+    /// neither, the message goes out from `noreply@localhost`.
+    pub from_override: Option<Address>,
+    /// Builder-side provider tags, appended after the mailable's own and
+    /// skipped when the same tag is already present.
+    pub extra_tags: Vec<String>,
+    /// Builder-side provider metadata. Wins over the mailable's entry on a
+    /// key collision.
+    pub extra_metadata: BTreeMap<String, String>,
+    /// Builder-side priority (1 = highest, 5 = lowest). Wins over the
+    /// mailable's.
+    pub extra_priority: Option<u8>,
+    /// Builder-side MIME headers, appended after the mailable's own and
+    /// skipped when the same name and value pair is already present.
+    pub extra_headers: Vec<(String, String)>,
+    /// Builder-side Return-Path. Wins over the mailable's.
+    pub return_path_override: Option<Address>,
+    /// Builder-side subject. When set, the mailable's subject is not
+    /// rendered at all, which matches the send path.
+    pub subject_override: Option<String>,
+    /// Builder-side attachments, appended after the mailable's own.
+    pub extra_attachments: Vec<Attachment>,
+}
+
 /// Build an [`OutgoingMessage`] from a registered mailable. The mailable's
 /// `render_html` / `render_text` (defaulted on the trait) run Tera with the
 /// mailable's serialized fields as the context - identical to the sync
@@ -136,23 +174,25 @@ pub fn build(
 /// concrete mailable type by name (the object-safe `AnyMailable` trait
 /// cannot expose `M::mailable_name()` because that method requires
 /// `Self: Sized`).
-#[allow(clippy::too_many_arguments)]
 pub fn render_outgoing(
     any: &dyn AnyMailable,
     mailable_name: &str,
-    to: Vec<Address>,
-    cc: Vec<Address>,
-    bcc: Vec<Address>,
-    reply_to: Vec<Address>,
-    from_override: Option<Address>,
-    extra_tags: Vec<String>,
-    extra_metadata: BTreeMap<String, String>,
-    extra_priority: Option<u8>,
-    extra_headers: Vec<(String, String)>,
-    return_path_override: Option<Address>,
-    subject_override: Option<String>,
-    extra_attachments: Vec<Attachment>,
+    params: RenderOutgoingParams,
 ) -> Result<OutgoingMessage, FrameworkError> {
+    let RenderOutgoingParams {
+        to,
+        cc,
+        bcc,
+        reply_to,
+        from_override,
+        extra_tags,
+        extra_metadata,
+        extra_priority,
+        extra_headers,
+        return_path_override,
+        subject_override,
+        extra_attachments,
+    } = params;
     let from = from_override
         .or_else(|| any.from())
         .unwrap_or_else(|| Address::new("noreply@localhost"));

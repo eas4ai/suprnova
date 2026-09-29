@@ -10,7 +10,7 @@
 
 use crate::error::FrameworkError;
 use crate::mail::address::Attachment;
-use crate::mail::mailable_registry;
+use crate::mail::mailable_registry::{self, RenderOutgoingParams};
 use crate::mail::{Address, Mail, dispatch_with_telemetry};
 use crate::queue::Job;
 use async_trait::async_trait;
@@ -77,18 +77,20 @@ impl Job for SendMailJob {
         let msg = mailable_registry::render_outgoing(
             any.as_ref(),
             &self.mailable_name,
-            self.to,
-            self.cc,
-            self.bcc,
-            self.reply_to,
-            self.from_override,
-            self.tags,
-            self.metadata,
-            self.priority,
-            self.headers,
-            self.return_path,
-            self.subject_override,
-            self.attachments,
+            RenderOutgoingParams {
+                to: self.to,
+                cc: self.cc,
+                bcc: self.bcc,
+                reply_to: self.reply_to,
+                from_override: self.from_override,
+                extra_tags: self.tags,
+                extra_metadata: self.metadata,
+                extra_priority: self.priority,
+                extra_headers: self.headers,
+                return_path_override: self.return_path,
+                subject_override: self.subject_override,
+                extra_attachments: self.attachments,
+            },
         )?;
         // Apply Mail::always_* defaults on the queue side too. Without
         // this the queue path would bypass `always_from` / `always_to`
