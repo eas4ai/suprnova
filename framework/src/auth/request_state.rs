@@ -12,7 +12,7 @@
 //! in separate fields so a web session or its cached user can never satisfy a
 //! [`TokenGuard`](super::TokenGuard).
 //!
-//! It serves three jobs:
+//! It serves four jobs:
 //!
 //! 1. **Current user** - the [`Authenticatable`] resolved for this
 //!    request. Set by `once`/`once_using_id`/`set_user`, and by a guard's
@@ -29,6 +29,9 @@
 //!    re-authenticated from a remember-me cookie *this request* (set by
 //!    `SessionMiddleware`'s hydration path) rather than from an active
 //!    session, surfaced through `StatefulGuard::via_remember`.
+//! 4. **Request-guard users** - what each `via_request` resolver returned,
+//!    keyed by guard name. The middleware that takes the guard's name binds
+//!    it once per request; only the guard of that name reads it.
 //!
 //! Session guard identities and remember provenance are keyed by the complete
 //! guard name. The generic slots remain the compatibility view used by
@@ -74,6 +77,10 @@ struct AuthRequestState {
     /// Whether the current user came from a remember-me cookie this
     /// request rather than an active session.
     via_remember: bool,
+    /// What each `via_request` resolver returned this request, keyed by
+    /// complete guard name. A `None` entry is a resolver that ran and found
+    /// nobody, so the middleware does not run it again.
+    request_guard_users: HashMap<String, Option<Arc<dyn Authenticatable>>>,
 }
 
 tokio::task_local! {
@@ -227,6 +234,9 @@ pub(crate) fn guard_user_id(guard_name: &str) -> Option<String> {
 }
 
 /// Clear one named session guard without touching sibling guards.
+///
+/// Clearing the default guard ends the request's authentication, so it also
+/// forgets the bearer provenance and every `via_request` binding.
 pub(crate) fn clear_guard_user(guard_name: &str) {
     let clear_generic = is_default_guard(guard_name);
     let _ = AUTH_STATE.try_with(|state| {
@@ -234,20 +244,70 @@ pub(crate) fn clear_guard_user(guard_name: &str) {
         state.guard_users.remove(guard_name);
         state.guard_user_ids.remove(guard_name);
         state.remembered_guards.remove(guard_name);
+        if let Some(user) = state.request_guard_users.get_mut(guard_name) {
+            *user = None;
+        }
         if clear_generic {
             state.current_user = None;
             state.current_user_id = None;
             state.bearer_user = None;
             state.bearer_user_id = None;
             state.via_remember = false;
+            forget_request_guard_users(&mut state);
         }
     });
 }
 
+/// Forget every user a `via_request` resolver bound this request.
+///
+/// Each binding stays resolved, so no later middleware in the same request
+/// runs its resolver again and signs the request back in.
+fn forget_request_guard_users(state: &mut AuthRequestState) {
+    for user in state.request_guard_users.values_mut() {
+        *user = None;
+    }
+}
+
+/// Whether the `via_request` resolver of one guard already ran this request.
+pub(crate) fn request_guard_resolved(guard_name: &str) -> bool {
+    read_state(|state| state.request_guard_users.contains_key(guard_name)).unwrap_or(false)
+}
+
+/// Bind what the `via_request` resolver of one guard returned this request.
+///
+/// No-op outside a request scope, matching the other setters.
+pub(crate) fn set_request_guard_user(guard_name: &str, user: Option<Arc<dyn Authenticatable>>) {
+    let _ = AUTH_STATE.try_with(|state| {
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        state
+            .request_guard_users
+            .insert(guard_name.to_owned(), user);
+    });
+}
+
+/// The user the `via_request` resolver of one guard bound this request.
+///
+/// Reads only that guard's binding: a guard of another name, or the generic
+/// slots of the default guard, never answer for it.
+pub(crate) fn request_guard_user(guard_name: &str) -> Option<Arc<dyn Authenticatable>> {
+    let binding = read_state(|state| state.request_guard_users.get(guard_name).cloned());
+    let user = binding.flatten().flatten();
+    if let Some(user) = &user {
+        crate::render_cache::collector::observe_principal_value(&user.get_auth_identifier());
+    }
+    user
+}
+
 /// Clear every authentication identity and provenance slot in this request.
+///
+/// The `via_request` bindings are forgotten but stay resolved, for the reason
+/// `forget_request_guard_users` gives.
 pub(crate) fn clear_all_authentication() {
     let _ = AUTH_STATE.try_with(|state| {
-        *state.lock().unwrap_or_else(|error| error.into_inner()) = AuthRequestState::default();
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        let resolved = std::mem::take(&mut state.request_guard_users);
+        *state = AuthRequestState::default();
+        state.request_guard_users = resolved.into_keys().map(|name| (name, None)).collect();
     });
 }
 
@@ -595,6 +655,9 @@ pub(crate) fn current_user_id() -> Option<String> {
 }
 
 /// Clear the resolved request user (used by `logout`).
+///
+/// Logging out ends the request's authentication, so this also forgets the
+/// bearer provenance and every `via_request` binding.
 pub(crate) fn clear_current_user() {
     let _ = AUTH_STATE.try_with(|state| {
         let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -602,6 +665,7 @@ pub(crate) fn clear_current_user() {
         guard.current_user_id = None;
         guard.bearer_user = None;
         guard.bearer_user_id = None;
+        forget_request_guard_users(&mut guard);
     });
 }
 
@@ -788,6 +852,54 @@ mod tests {
             assert_eq!(bearer_user_id(), None);
             assert!(bearer_user().is_none());
             assert!(!has_bearer_user());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn request_guard_users_are_keyed_by_guard_and_forgotten_with_authentication() {
+        scope(async {
+            assert!(!request_guard_resolved("partner"));
+            set_request_guard_user("partner", Some(Arc::new(TestUser { id: "7".into() })));
+            set_request_guard_user("second", None);
+
+            assert!(request_guard_resolved("partner"));
+            assert!(request_guard_resolved("second"));
+            assert!(!request_guard_resolved("third"));
+            let partner = request_guard_user("partner").expect("partner is bound");
+            assert_eq!(partner.get_auth_identifier(), "7");
+            assert!(request_guard_user("second").is_none());
+            // No other guard, and not the default guard's slots, answer for it.
+            assert_eq!(current_user_id(), None);
+            assert!(guard_user("partner").is_none());
+
+            // Forgotten, but still resolved: no middleware runs the resolver
+            // again in this request.
+            clear_all_authentication();
+            assert!(request_guard_resolved("partner"));
+            assert!(request_guard_user("partner").is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn logging_out_forgets_the_request_guard_users() {
+        let partner = || Some(Arc::new(TestUser { id: "7".into() }) as Arc<dyn Authenticatable>);
+        scope(async {
+            set_request_guard_user("partner", partner());
+            clear_current_user();
+            assert!(request_guard_resolved("partner"));
+            assert!(request_guard_user("partner").is_none());
+
+            // Clearing the default guard ends authentication the same way;
+            // clearing another guard forgets only that guard's binding.
+            set_request_guard_user("partner", partner());
+            set_request_guard_user("second", partner());
+            clear_guard_user("second");
+            assert!(request_guard_user("partner").is_some());
+            assert!(request_guard_user("second").is_none());
+            clear_guard_user("web");
+            assert!(request_guard_user("partner").is_none());
         })
         .await;
     }

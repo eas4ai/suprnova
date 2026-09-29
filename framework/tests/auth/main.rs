@@ -1,6 +1,10 @@
 //! Integration tests for the `auth` module: one binary per module,
 //! one former top-level test file per submodule (folded 2026-09-05).
 
+#[path = "../support/env_lock.rs"]
+mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
 #[path = "../support/http_wire.rs"]
 mod http_wire;
 #[cfg(feature = "testing")]
@@ -8,6 +12,7 @@ mod http_wire;
 mod magnetar_auth;
 
 pub mod bearer_token_without_session;
+pub mod custom_guard;
 pub mod database_provider;
 pub mod dummy_verify_timing;
 pub mod eloquent_provider;

@@ -4,7 +4,9 @@
 //! a [`Guard`] answers "who is the current user", and a [`StatefulGuard`] can
 //! additionally log users in and out across requests. Built-in implementors
 //! are the session guard and the token guard; apps reach them by name through
-//! [`crate::auth::AuthManager`] / `Auth::guard("name")`.
+//! [`crate::auth::AuthManager`] / `Auth::guard("name")`. An application
+//! registers its own [`Guard`] under a driver name with `Auth::extend` and
+//! reaches it the same way.
 
 use std::sync::Arc;
 

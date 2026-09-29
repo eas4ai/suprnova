@@ -4,6 +4,8 @@ use secrecy::ExposeSecret;
 use std::sync::Arc;
 
 use crate::container::App;
+use crate::error::FrameworkError;
+use crate::http::Request;
 use crate::session::middleware::{clear_guard_auth_user, set_guard_auth_user};
 use crate::session::{
     auth_user_id, clear_auth_user, generate_csrf_token, regenerate_session_id, session, session_mut,
@@ -11,7 +13,7 @@ use crate::session::{
 
 use super::authenticatable::Authenticatable;
 use super::contract::{Credentials, Guard, StatefulGuard};
-use super::manager::AuthManager;
+use super::manager::{AuthManager, RequestUserFuture};
 use super::provider::UserProvider;
 use super::{events, request_state};
 use crate::events::EventFacade;
@@ -90,11 +92,15 @@ impl Auth {
     /// signature silently dropped the write - a "successful login" that
     /// never landed - which the caller had no way to detect.
     ///
+    /// Also returns an error, and changes nothing, when the default guard is
+    /// a guard of the application (see [`Auth::extend`]): it is read-only.
+    ///
     /// # Security
     ///
     /// Regenerates the session ID to prevent session fixation, and rotates the
     /// CSRF token.
     pub fn login_id(user_id: impl Into<String>) -> Result<(), crate::error::FrameworkError> {
+        Self::refuse_custom_default_guard("login_id", "login")?;
         Self::login_guard_id(&Self::default_guard_name(), user_id)
     }
 
@@ -169,6 +175,7 @@ impl Auth {
         user_id: impl Into<String>,
         ttl_minutes: i64,
     ) -> Result<(), crate::error::FrameworkError> {
+        Self::refuse_custom_default_guard("login_remember", "login")?;
         Self::login_guard_remember(&Self::default_guard_name(), user_id, ttl_minutes).await
     }
 
@@ -605,7 +612,16 @@ impl Auth {
     /// Works without an [`AuthManager`]: the event is attributed to the
     /// configured default guard name when a manager is registered, and to
     /// `"web"` otherwise.
+    ///
+    /// # Errors
+    ///
+    /// When the default guard is a guard of the application (see
+    /// [`Auth::extend`] and [`Auth::via_request`]), this returns an error and
+    /// changes nothing: such a guard is read-only and has no logout.
+    /// Otherwise, the error of a remember-me revocation or of the `Logout`
+    /// event.
     pub async fn logout() -> Result<(), crate::error::FrameworkError> {
+        Self::refuse_custom_default_guard("logout", "logout")?;
         // Capture the id before clearing so the event is attributed.
         let user_id = Self::id();
         Self::clear_authentication().await?;
@@ -900,7 +916,7 @@ impl Auth {
 
     /// Resolve the [`AuthManager`] from the container, with a remediation
     /// message when it has not been registered.
-    fn manager() -> Result<AuthManager, crate::error::FrameworkError> {
+    pub(crate) fn manager() -> Result<AuthManager, crate::error::FrameworkError> {
         App::get::<AuthManager>().ok_or_else(|| {
             crate::error::FrameworkError::internal(
                 "No AuthManager registered. Register one in bootstrap.rs with: \
@@ -922,6 +938,34 @@ impl Auth {
         App::get::<AuthManager>()
             .map(|m| m.default_guard_name().to_string())
             .unwrap_or_else(|| "web".to_string())
+    }
+
+    /// The default guard's name when the default guard is a guard of the
+    /// application (a driver registered with [`Auth::extend`] or
+    /// [`Auth::via_request`]), `None` otherwise or without an
+    /// [`AuthManager`].
+    pub(crate) fn custom_default_guard() -> Option<String> {
+        let manager = App::get::<AuthManager>()?;
+        let name = manager.default_guard_name();
+        manager.is_custom_guard(name).then(|| name.to_owned())
+    }
+
+    /// The error of a function without a guard name that changes the session
+    /// identity, when the default guard is a guard of the application: such a
+    /// guard is read-only, and an identity written under its name is one it
+    /// never reads but `Auth::id` reports. Called before anything changes.
+    /// `what` names the missing operation of the guard.
+    fn refuse_custom_default_guard(
+        operation: &str,
+        what: &str,
+    ) -> Result<(), crate::error::FrameworkError> {
+        match Self::custom_default_guard() {
+            Some(guard) => Err(FrameworkError::internal(format!(
+                "Auth::{operation}: the default guard '{guard}' is a guard of the application, \
+                 which is read-only and has no {what}. Nothing was changed."
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Register a [`UserProvider`] under `name` on the [`AuthManager`].
@@ -947,6 +991,141 @@ impl Auth {
         Ok(())
     }
 
+    /// Register the factory of a custom guard driver on the [`AuthManager`].
+    /// Mirrors Laravel's `Auth::extend($driver, $callback)`.
+    ///
+    /// Each guard declared with
+    /// [`GuardConfig::custom`](crate::GuardConfig::custom) naming `driver`
+    /// resolves through `factory`, called with the guard's name and the
+    /// provider its configuration names; [`Auth::guard`](Self::guard) and
+    /// `AuthMiddleware::new().for_guard(name)` then reach it by name. See
+    /// [`AuthManager::extend`] for the rules.
+    ///
+    /// The guard's name cannot contain `:`: the principal a guard of the
+    /// application attests is `<guard>:<id>`. Resolving a guard whose
+    /// declaration breaks that rule is an error.
+    ///
+    /// # As the default guard
+    ///
+    /// A guard of the application can be the default guard. The functions
+    /// without a guard name then behave like this:
+    ///
+    /// - [`user`](Self::user), `user_or_fail`, `user_as`, `user_as_arc` and
+    ///   [`validate`](Self::validate) ask it.
+    /// - `attempt`, `once`, `login`, `login_using_id`, `once_using_id` and
+    ///   [`logout`](Self::logout) return an error and change nothing: it is
+    ///   read-only.
+    /// - [`id`](Self::id), `check`, `guest`, `has_user` and `via_remember`
+    ///   read the session and the request's generic user, which it never
+    ///   fills.
+    /// - [`set_user`](Self::set_user) sets that generic user, as it does when
+    ///   the token guard is the default; the guard does not see it.
+    /// - `login_id` and `login_remember` return the same error and change
+    ///   nothing: a session identity written under its name is one it never
+    ///   reads. `issue_remember_cookie` and the other remember-me functions
+    ///   act on the session, which it does not read. `logout_and_invalidate`
+    ///   destroys the session; what the guard keeps is its own.
+    /// - `AuthMiddleware::new()` asks it, as `for_guard` with its name does,
+    ///   and attests the user it returned. `GuestMiddleware::new()` reads the
+    ///   session, as `guest` does.
+    ///
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::{Auth, Guard, TokenGuard};
+    /// # fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Any `Guard` implementation; `TokenGuard` stands in for the
+    /// // application's own.
+    /// Auth::extend("api_key", |_name, provider| {
+    ///     Ok(Arc::new(TokenGuard::new(provider)) as Arc<dyn Guard>)
+    /// })?;
+    /// # Ok(()) }
+    /// ```
+    pub fn extend<F>(driver: impl Into<String>, factory: F) -> Result<(), FrameworkError>
+    where
+        F: Fn(&str, Arc<dyn UserProvider>) -> Result<Arc<dyn Guard>, FrameworkError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self::manager()?.extend(driver, factory)
+    }
+
+    /// Register `resolver` as the way the guard `name` authenticates a
+    /// request. Mirrors Laravel's `Auth::viaRequest`. The guard reports a
+    /// user only after `AuthMiddleware::for_guard(name)` or
+    /// `GuestMiddleware::for_guard(name)` ran the resolver for the request
+    /// (or `AuthMiddleware::new()`, when it is the default guard), as the
+    /// token guard needs `BearerTokenMiddleware`: resolved anywhere else,
+    /// such as a handler behind no such middleware, it reports no user.
+    ///
+    /// This declares nothing: declare the guard in the `AuthConfig` under the
+    /// driver [`AuthManager::via_request_driver`] derives from its name. The
+    /// middleware runs the resolver at most once per guard name in one
+    /// request; a resolver error fails the request, never lets it through as
+    /// a guest. See [`AuthManager::via_request`] for the rules.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a guard name that contains `:`, and registers nothing: the
+    /// principal a guard of the application attests is `<guard>:<id>`.
+    ///
+    /// # As the default guard
+    ///
+    /// A guard of `via_request` can be the default guard. The functions
+    /// without a guard name then behave as for a guard of
+    /// [`extend`](Self::extend):
+    ///
+    /// - [`user`](Self::user), `user_or_fail`, `user_as`, `user_as_arc` and
+    ///   [`validate`](Self::validate) ask it; `user` reports a user only
+    ///   after the middleware ran the resolver.
+    /// - `attempt`, `once`, `login`, `login_using_id`, `once_using_id` and
+    ///   [`logout`](Self::logout) return an error and change nothing: it is
+    ///   read-only.
+    /// - [`id`](Self::id), `check`, `guest`, `has_user` and `via_remember`
+    ///   read the session and the request's generic user, which it never
+    ///   fills.
+    /// - [`set_user`](Self::set_user) sets that generic user, as it does when
+    ///   the token guard is the default; the guard does not see it.
+    /// - `login_id` and `login_remember` return the same error and change
+    ///   nothing: a session identity written under its name is one it never
+    ///   reads. `issue_remember_cookie` and the other remember-me functions
+    ///   act on the session, which it does not read. `logout_and_invalidate`
+    ///   destroys the session and forgets the resolver's binding.
+    /// - `AuthMiddleware::new()` runs the resolver and asks the guard, as
+    ///   `for_guard` with its name does, and attests the user it returned.
+    ///   `GuestMiddleware::new()` reads the session, as `guest` does.
+    ///
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::{App, Auth, AuthConfig, AuthManager, GuardConfig, UserProvider};
+    /// # fn ex(partners: Arc<dyn UserProvider>) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Declare the guard under the driver `via_request` derives from its name.
+    /// let driver = AuthManager::via_request_driver("partner");
+    /// let entry = GuardConfig::custom(driver, "partners");
+    /// let config = AuthConfig::from_env().guard("partner", entry);
+    /// App::singleton(AuthManager::new(config));
+    /// Auth::register_provider("partners", partners.clone())?;
+    ///
+    /// // Authenticate the partner from the `X-Api-Key` header. Read what the
+    /// // future needs from the request first, so it owns its data.
+    /// Auth::via_request("partner", move |request| {
+    ///     let key = request.header("x-api-key").map(str::to_owned);
+    ///     let partners = partners.clone();
+    ///     Box::pin(async move {
+    ///         let Some(key) = key else { return Ok(None) };
+    ///         let credentials = serde_json::json!({ "api_key": key });
+    ///         partners.retrieve_by_credentials(&credentials).await
+    ///     })
+    /// })?;
+    /// # Ok(()) }
+    /// ```
+    pub fn via_request<F>(name: impl Into<String>, resolver: F) -> Result<(), FrameworkError>
+    where
+        F: for<'r> Fn(&'r Request) -> RequestUserFuture<'r> + Send + Sync + 'static,
+    {
+        Self::manager()?.via_request(name, resolver)
+    }
+
     /// Resolve a named guard as the read-only [`Guard`] contract.
     ///
     /// ```rust,no_run
@@ -961,7 +1140,8 @@ impl Auth {
 
     /// Resolve a named guard as a [`StatefulGuard`] (login/logout/attempt).
     ///
-    /// Errors if the named guard is stateless (a token guard).
+    /// Errors if the named guard is stateless (a token guard) or custom (a
+    /// custom guard is read-only through the manager).
     ///
     /// ```rust,no_run
     /// # use suprnova::{Auth, Credentials};
@@ -1086,6 +1266,10 @@ impl Auth {
     /// [`user`](Self::user) reflect `user` for the remainder of the request.
     /// The facade writes the configured default guard's request cache and its
     /// generic compatibility mirror. Named sibling guards are unchanged.
+    ///
+    /// When the default guard is the token guard or a guard of the
+    /// application, that guard does not read this cache: `id` and `check` see
+    /// `user`, but `user()` still answers from the guard itself.
     pub fn set_user(user: Arc<dyn Authenticatable>) {
         request_state::set_guard_user(&Self::default_guard_name(), user);
     }
@@ -1532,5 +1716,113 @@ mod tests {
             assert!(resolved.is_none(), "wrong-type downcast returns None");
         })
         .await;
+    }
+
+    /// A guard of the application that knows nobody.
+    struct Nobody;
+
+    #[async_trait]
+    impl Guard for Nobody {
+        async fn user(&self) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+            Ok(None)
+        }
+
+        async fn id(&self) -> Result<Option<String>, FrameworkError> {
+            Ok(None)
+        }
+
+        async fn validate(&self, _credentials: &Credentials) -> Result<bool, FrameworkError> {
+            Ok(false)
+        }
+
+        async fn set_user(&self, _user: Arc<dyn Authenticatable>) {}
+
+        async fn has_user(&self) -> bool {
+            false
+        }
+    }
+
+    fn nobody(
+        _name: &str,
+        _provider: Arc<dyn UserProvider>,
+    ) -> Result<Arc<dyn Guard>, FrameworkError> {
+        Ok(Arc::new(Nobody) as Arc<dyn Guard>)
+    }
+
+    /// A configuration whose default guard, `partner`, is a guard of the
+    /// application.
+    fn custom_default() -> AuthConfig {
+        let entry = crate::auth::GuardConfig::custom("api_key", "users");
+        AuthConfig::new("partner").guard("partner", entry)
+    }
+
+    /// What `Auth::id` and `Auth::user` report after `Auth::set_user` under
+    /// `config`.
+    async fn after_set_user(config: AuthConfig) -> (Option<String>, bool) {
+        let _scope = TestContainer::fake();
+        TestContainer::singleton(AuthManager::new(config));
+        Auth::register_provider("users", Arc::new(FakeProvider)).expect("register provider");
+        Auth::extend("api_key", nobody).expect("register driver");
+        request_state::request_state_scope_for_test(async {
+            Auth::set_user(Arc::new(TestUser));
+            let user = Auth::user().await.expect("user ok");
+            (Auth::id(), user.is_some())
+        })
+        .await
+    }
+
+    // Under a default guard of the application, `Auth::set_user` does what it
+    // does under the token guard: it sets the generic user, which that guard
+    // does not read.
+    #[tokio::test]
+    async fn set_user_under_a_custom_default_guard_matches_the_token_guard() {
+        let token = after_set_user(AuthConfig::new("api")).await;
+        let custom = after_set_user(custom_default()).await;
+        assert_eq!(token, (Some("7".to_string()), false));
+        assert_eq!(custom, token);
+    }
+
+    // Signing in under a default guard of the application writes an identity
+    // the guard never reads and `Auth::id` reports, so both refuse it and
+    // leave the session without one.
+    #[tokio::test]
+    async fn login_under_a_custom_default_guard_is_an_error_and_changes_nothing() {
+        let _scope = TestContainer::fake();
+        TestContainer::singleton(AuthManager::new(custom_default()));
+        let slot = crate::session::new_session_slot_for_test();
+        let body = request_state::scope(async {
+            let err = Auth::login_id("7").expect_err("read-only guard");
+            assert!(err.to_string().contains("read-only"), "got: {err}");
+            let err = Auth::login_remember("7", 60)
+                .await
+                .expect_err("read-only guard");
+            assert!(err.to_string().contains("read-only"), "got: {err}");
+            assert_eq!(Auth::id(), None);
+        });
+        crate::session::session_scope_for_test(slot.clone(), body).await;
+
+        let session = slot.lock().unwrap();
+        let identity = session.as_ref().and_then(|session| session.user_id.clone());
+        assert_eq!(identity, None);
+    }
+
+    // A guard of the application is read-only: `Auth::logout` refuses it and
+    // leaves the request's authentication and the session as they were.
+    #[tokio::test]
+    async fn logout_under_a_custom_default_guard_is_an_error_and_changes_nothing() {
+        let _scope = TestContainer::fake();
+        TestContainer::singleton(AuthManager::new(custom_default()));
+        let slot = crate::session::new_session_slot_for_test();
+        let body = request_state::scope(async {
+            Auth::login_guard_id("partner", "7").expect("sign-in inside a session scope");
+            let err = Auth::logout().await.expect_err("read-only guard");
+            assert!(err.to_string().contains("read-only"), "got: {err}");
+            assert_eq!(Auth::id().as_deref(), Some("7"));
+        });
+        crate::session::session_scope_for_test(slot.clone(), body).await;
+
+        let session = slot.lock().unwrap();
+        let session = session.as_ref().expect("the session stays");
+        assert_eq!(session.user_id.as_deref(), Some("7"));
     }
 }

@@ -134,8 +134,8 @@ pub use auth::{
     Auth, AuthConfig, AuthFlowUser, AuthManager, AuthMiddleware, Authenticatable,
     BasicAuthMiddleware, CanResetPassword, Credentials, DatabaseUserProvider, EloquentUserProvider,
     GenericUser, Guard, GuardConfig, GuardDriver, GuestMiddleware, LockoutStatus, MustVerifyEmail,
-    Session, SessionBuilder, SessionGuard, SessionToken, StatefulGuard, TokenGuard, User,
-    UserBuilder, UserId, UserProvider,
+    RequestUserFuture, RequestUserResult, Session, SessionBuilder, SessionGuard, SessionToken,
+    StatefulGuard, TokenGuard, User, UserBuilder, UserId, UserProvider,
 };
 pub use authorization::{Authorizable, Gate};
 // The crate root binds `Response` to the HTTP response contract, so the

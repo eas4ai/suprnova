@@ -517,6 +517,37 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   its own with it. A `Some(false)` from an async hook denies on the async
   forms only: a hook that must deny on every form belongs in `Gate::before`.
   Without the call nothing changes.
+- **An application registers guards of its own: `Auth::extend` and
+  `Auth::via_request`.** `Guard` was a public trait, but the manager built
+  guards from two drivers, session and token, so a guard for an API key, a
+  client certificate or a single sign-on could be written and not registered,
+  and `Auth::guard("api_key")` and the middleware that takes a guard name
+  could not use it. `Auth::extend(driver, factory)` registers the factory of a
+  driver, and `GuardConfig::custom(driver, provider)` declares a guard of it.
+  The factory gets the name of the guard and its provider.
+  `Auth::via_request(name, resolver)` is the short form for a guard that reads
+  the request: the resolver gets the request and answers with the user, and
+  the guard is declared with
+  `GuardConfig::custom(AuthManager::via_request_driver(name), provider)`. The
+  middleware for the guard runs the resolver once for a request. Outside that
+  middleware the guard reports no user, as the token guard does. An error of a
+  factory or of a resolver fails the request with 500 and is never a guest. A
+  guard of the application is read-only through the manager:
+  `Auth::stateful_guard` returns an error for it, and so do `Auth::logout`,
+  `Auth::login_id` and `Auth::login_remember` when such a guard is the default
+  guard, before they change anything. A guard of the application has no `:` in
+  its name: resolving such a guard, or registering a resolver for it with
+  `via_request`, is an error. A logout forgets the users that the guards of
+  the application resolved in the request, so the request does not sign itself
+  back in. Declared as the default guard, a guard of the application answers
+  `Auth::user` and the unnamed `AuthMiddleware::new()`. The principal that the
+  middleware attests for Live is `<guard>:<id>` for a guard of the
+  application, so the same id under two guards is two principals; a session
+  user attests its bare id. What you have to change:
+  `AuthManager::via_request` returns a `Result`. `GuardDriver` has the variant
+  `Custom(String)` and is no longer `Copy`, so code that copies a driver
+  borrows it or clones it, and a `match` that names every variant has one more
+  to name.
 
 ### Changed
 

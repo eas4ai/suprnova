@@ -77,7 +77,7 @@ pub use database_provider::DatabaseUserProvider;
 pub use eloquent_provider::EloquentUserProvider;
 pub use generic_user::GenericUser;
 pub use guard::Auth;
-pub use manager::AuthManager;
+pub use manager::{AuthManager, RequestUserFuture, RequestUserResult};
 pub use middleware::{AuthMiddleware, BasicAuthMiddleware, GuestMiddleware};
 pub use must_verify_email::{AuthFlowUser, CanResetPassword, MustVerifyEmail};
 pub use provider::UserProvider;
