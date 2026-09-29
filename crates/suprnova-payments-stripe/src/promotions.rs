@@ -10,11 +10,11 @@ use async_trait::async_trait;
 use serde::Serialize;
 use stripe_client_core::{RequestBuilder, StripeMethod};
 
-use suprnova::payments::{
-    CreatePromotionCodeRequest, PaymentError, PaymentResult, PromotionCode, Promotions,
-};
+use suprnova::payments::{CreatePromotionCodeRequest, PaymentResult, PromotionCode, Promotions};
 
 use crate::StripeProvider;
+use crate::deadline;
+use crate::sdk_error;
 
 #[derive(Serialize)]
 struct CreatePromotionCodeParams<'a> {
@@ -40,15 +40,13 @@ impl Promotions for StripeProvider {
             max_redemptions: req.max_redemptions,
         };
 
-        let code: stripe_shared::PromotionCode =
-            RequestBuilder::new(StripeMethod::Post, "/promotion_codes")
-                .form(&params)
-                .customize::<stripe_shared::PromotionCode>()
-                .send(self.client())
-                .await
-                .map_err(|e| {
-                    PaymentError::Provider(format!("stripe promotion_codes.create: {e}"))
-                })?;
+        let call = RequestBuilder::new(StripeMethod::Post, "/promotion_codes")
+            .form(&params)
+            .customize::<stripe_shared::PromotionCode>()
+            .send(self.client());
+        let code = deadline::change("promotion_codes.create", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("promotion_codes.create", e))?;
 
         Ok(PromotionCode {
             code: code.code,

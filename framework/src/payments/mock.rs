@@ -35,7 +35,7 @@ use crate::payments::{
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -258,9 +258,9 @@ impl Checkout for MockPaymentProvider {
         if known {
             Ok(CheckoutSessionState::Open)
         } else {
-            Err(PaymentError::NotFound(format!(
-                "mock session {provider_session_id}"
-            )))
+            Err(PaymentError::NotFound(
+                "mock session_status: no such session".into(),
+            ))
         }
     }
 }
@@ -278,6 +278,24 @@ impl Promotions for MockPaymentProvider {
             provider_promotion_id: id,
         })
     }
+}
+
+/// Refuse the price sets the provider adapters refuse: an empty one, which
+/// would leave the subscription with nothing to bill, and one that names a
+/// price twice, which says two different things about its quantity.
+fn check_price_set(prices: &[String]) -> PaymentResult<()> {
+    if prices.is_empty() {
+        return Err(PaymentError::Validation(
+            "new_price_refs requires at least one price".into(),
+        ));
+    }
+    let mut seen = HashSet::with_capacity(prices.len());
+    if !prices.iter().all(|price| seen.insert(price.as_str())) {
+        return Err(PaymentError::Validation(
+            "new_price_refs names a price more than once".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -309,22 +327,52 @@ impl Subscription for MockPaymentProvider {
     }
 
     async fn update(&self, req: UpdateSubscriptionRequest) -> PaymentResult<SubscriptionResult> {
+        if let Some(prices) = &req.new_price_refs {
+            check_price_set(prices)?;
+        }
         let mut store = self.subscriptions.write().await;
         let sub = store
             .get_mut(&req.provider_subscription_id)
-            .ok_or_else(|| PaymentError::NotFound(req.provider_subscription_id.clone()))?;
+            .ok_or_else(|| PaymentError::NotFound("mock update: no such subscription".into()))?;
         if let Some(c) = req.cancel_at_period_end {
             sub.cancel_at_period_end = c;
         }
         if let Some(prices) = req.new_price_refs {
+            // An item whose price stays is kept as it is, quantity
+            // included, the way the provider adapters keep it. A price that
+            // replaces exactly one removed item takes over its quantity; any
+            // other new price starts at 1.
             let sub_id = sub.provider_subscription_id.clone();
+            let current = std::mem::take(&mut sub.items);
+            let removed: Vec<&SubscriptionItemSnapshot> = current
+                .iter()
+                .filter(|item| !prices.contains(&item.provider_price_id))
+                .collect();
+            let added = prices
+                .iter()
+                .filter(|price_ref| {
+                    !current
+                        .iter()
+                        .any(|item| item.provider_price_id == **price_ref)
+                })
+                .count();
+            let new_quantity = match (removed.as_slice(), added) {
+                ([replaced], 1) => replaced.quantity,
+                _ => 1,
+            };
             sub.items = prices
                 .iter()
-                .map(|price_ref| SubscriptionItemSnapshot {
-                    provider_item_id: format!("{sub_id}_item_{price_ref}"),
-                    provider_price_id: price_ref.clone(),
-                    quantity: 1,
-                    unit_amount: None,
+                .map(|price_ref| {
+                    current
+                        .iter()
+                        .find(|item| item.provider_price_id == *price_ref)
+                        .cloned()
+                        .unwrap_or_else(|| SubscriptionItemSnapshot {
+                            provider_item_id: format!("{sub_id}_item_{price_ref}"),
+                            provider_price_id: price_ref.clone(),
+                            quantity: new_quantity,
+                            unit_amount: None,
+                        })
                 })
                 .collect();
         }
@@ -339,7 +387,7 @@ impl Subscription for MockPaymentProvider {
         let mut store = self.subscriptions.write().await;
         let sub = store
             .get_mut(provider_subscription_id)
-            .ok_or_else(|| PaymentError::NotFound(provider_subscription_id.to_string()))?;
+            .ok_or_else(|| PaymentError::NotFound("mock cancel: no such subscription".into()))?;
         if at_period_end {
             sub.cancel_at_period_end = true;
         } else {
@@ -354,7 +402,7 @@ impl Subscription for MockPaymentProvider {
             .await
             .get(provider_subscription_id)
             .cloned()
-            .ok_or_else(|| PaymentError::NotFound(provider_subscription_id.to_string()))
+            .ok_or_else(|| PaymentError::NotFound("mock get: no such subscription".into()))
     }
 }
 
@@ -374,9 +422,9 @@ impl CustomerStore for MockPaymentProvider {
 
     async fn update_customer(&self, req: UpdateCustomerRequest) -> PaymentResult<CustomerRef> {
         let mut store = self.customers.write().await;
-        let cr = store
-            .get_mut(&req.provider_customer_id)
-            .ok_or_else(|| PaymentError::NotFound(req.provider_customer_id.clone()))?;
+        let cr = store.get_mut(&req.provider_customer_id).ok_or_else(|| {
+            PaymentError::NotFound("mock update_customer: no such customer".into())
+        })?;
         if let Some(e) = req.email {
             cr.email = e;
         }
@@ -392,7 +440,7 @@ impl CustomerStore for MockPaymentProvider {
             .await
             .get(provider_customer_id)
             .cloned()
-            .ok_or_else(|| PaymentError::NotFound(provider_customer_id.to_string()))
+            .ok_or_else(|| PaymentError::NotFound("mock get_customer: no such customer".into()))
     }
 
     async fn delete_customer(&self, provider_customer_id: &str) -> PaymentResult<()> {
@@ -401,7 +449,7 @@ impl CustomerStore for MockPaymentProvider {
             .await
             .remove(provider_customer_id)
             .map(|_| ())
-            .ok_or_else(|| PaymentError::NotFound(provider_customer_id.to_string()))
+            .ok_or_else(|| PaymentError::NotFound("mock delete_customer: no such customer".into()))
     }
 }
 
@@ -763,5 +811,136 @@ mod tests {
             .await
             .expect_err("default impl must report NotSupported");
         assert!(matches!(err, PaymentError::NotSupported(_)));
+    }
+
+    #[tokio::test]
+    async fn not_found_errors_carry_no_ids() {
+        let provider = MockPaymentProvider::new();
+        let unknown_subscription = provider.get("sub_secret").await;
+        let unknown_customer = provider.get_customer("cus_secret").await;
+
+        let Err(PaymentError::NotFound(subscription)) = &unknown_subscription else {
+            panic!("expected NotFound: {unknown_subscription:?}");
+        };
+        assert!(!subscription.contains("sub_secret"), "{subscription}");
+        let Err(PaymentError::NotFound(customer)) = &unknown_customer else {
+            panic!("expected NotFound: {unknown_customer:?}");
+        };
+        assert!(!customer.contains("cus_secret"), "{customer}");
+    }
+
+    fn price_change(id: &str, prices: &[&str]) -> UpdateSubscriptionRequest {
+        UpdateSubscriptionRequest {
+            provider_subscription_id: id.into(),
+            new_price_refs: Some(prices.iter().map(|price| (*price).to_string()).collect()),
+            proration: None,
+            cancel_at_period_end: None,
+            idempotency_key: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_price_change_keeps_the_items_that_stay_and_refuses_a_bad_price_set() {
+        let provider = MockPaymentProvider::new();
+        let sub = provider
+            .subscribe(SubscribeRequest {
+                customer_ref: "cus_mock_1".into(),
+                price_refs: vec!["price_a".into(), "price_b".into()],
+                trial_days: None,
+                idempotency_key: None,
+                metadata: None,
+            })
+            .await
+            .expect("subscribe");
+        let id = sub.provider_subscription_id.as_str();
+        {
+            let mut store = provider.subscriptions.write().await;
+            let stored = store.get_mut(id).expect("stored subscription");
+            stored.items[0].quantity = 3;
+        }
+
+        for refused in [vec![], vec!["price_c", "price_c"]] {
+            let result = provider.update(price_change(id, &refused)).await;
+            assert!(
+                matches!(result, Err(PaymentError::Validation(_))),
+                "{refused:?}: {result:?}"
+            );
+        }
+        let changed = provider
+            .update(price_change(id, &["price_a", "price_c"]))
+            .await
+            .expect("price change");
+
+        let items: Vec<(&str, u32)> = changed
+            .items
+            .iter()
+            .map(|item| (item.provider_price_id.as_str(), item.quantity))
+            .collect();
+        assert_eq!(items, [("price_a", 3), ("price_c", 1)]);
+        assert_eq!(
+            changed.items[0].provider_item_id,
+            sub.items[0].provider_item_id
+        );
+    }
+
+    /// A mock subscription with one item per `(price, quantity)`, and its id.
+    async fn subscribed(provider: &MockPaymentProvider, items: &[(&str, u32)]) -> String {
+        let sub = provider
+            .subscribe(SubscribeRequest {
+                customer_ref: "cus_mock_1".into(),
+                price_refs: items
+                    .iter()
+                    .map(|(price, _)| (*price).to_string())
+                    .collect(),
+                trial_days: None,
+                idempotency_key: None,
+                metadata: None,
+            })
+            .await
+            .expect("subscribe");
+        let mut store = provider.subscriptions.write().await;
+        let stored = store
+            .get_mut(&sub.provider_subscription_id)
+            .expect("stored subscription");
+        for (item, (_, quantity)) in stored.items.iter_mut().zip(items) {
+            item.quantity = *quantity;
+        }
+        sub.provider_subscription_id
+    }
+
+    #[tokio::test]
+    async fn a_swap_of_one_price_for_another_keeps_the_quantity() {
+        let provider = MockPaymentProvider::new();
+        let id = subscribed(&provider, &[("price_a", 10)]).await;
+
+        let changed = provider
+            .update(price_change(&id, &["price_b"]))
+            .await
+            .expect("swap");
+
+        let items: Vec<(&str, u32)> = changed
+            .items
+            .iter()
+            .map(|item| (item.provider_price_id.as_str(), item.quantity))
+            .collect();
+        assert_eq!(items, [("price_b", 10)]);
+    }
+
+    #[tokio::test]
+    async fn one_price_replaced_by_two_gives_both_new_prices_quantity_one() {
+        let provider = MockPaymentProvider::new();
+        let id = subscribed(&provider, &[("price_a", 10)]).await;
+
+        let changed = provider
+            .update(price_change(&id, &["price_b", "price_c"]))
+            .await
+            .expect("change");
+
+        let items: Vec<(&str, u32)> = changed
+            .items
+            .iter()
+            .map(|item| (item.provider_price_id.as_str(), item.quantity))
+            .collect();
+        assert_eq!(items, [("price_b", 1), ("price_c", 1)]);
     }
 }

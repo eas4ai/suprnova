@@ -719,6 +719,7 @@ async fn every_unsupported_capability_is_explicit_and_offline() {
         p.update(UpdateSubscriptionRequest {
             provider_subscription_id: "s".into(),
             new_price_refs: None,
+            proration: None,
             cancel_at_period_end: None,
             idempotency_key: None
         })

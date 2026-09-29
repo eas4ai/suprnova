@@ -3,6 +3,8 @@
 //! Maps Suprnova's provider-neutral subscription lifecycle onto Stripe's
 //! `/v1/subscriptions` API.
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use serde::Serialize;
@@ -10,11 +12,13 @@ use stripe_client_core::{RequestBuilder, StripeMethod};
 use stripe_shared::{Subscription as StripeSubscription, SubscriptionStatus as StripeSubStatus};
 
 use suprnova::payments::{
-    Money, PaymentError, PaymentResult, SubscribeRequest, Subscription, SubscriptionItemSnapshot,
-    SubscriptionResult, SubscriptionStatus, UpdateSubscriptionRequest,
+    Money, PaymentError, PaymentResult, Proration, SubscribeRequest, Subscription,
+    SubscriptionItemSnapshot, SubscriptionResult, SubscriptionStatus, UpdateSubscriptionRequest,
 };
 
 use crate::StripeProvider;
+use crate::deadline;
+use crate::sdk_error;
 
 #[derive(Serialize)]
 struct CreateSubscriptionParams<'a> {
@@ -53,6 +57,78 @@ struct UpdateSubscriptionParams {
 struct CancelSubscriptionParams {
     invoice_now: bool,
     prorate: bool,
+}
+
+/// The form of a price change: `items[n][...]` for each item change, and
+/// the proration behavior only when an item changes.
+#[derive(Serialize)]
+struct ChangePricesParams<'a> {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    items: Vec<ItemChange<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proration_behavior: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cancel_at_period_end: Option<bool>,
+}
+
+/// One entry of `items` in a subscription update: an item to delete (`id`
+/// and `deleted`) or a price to add (`price` and `quantity`). An item that
+/// stays is not in the list, so Stripe leaves it and its quantity alone.
+#[derive(Serialize)]
+struct ItemChange<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deleted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    price: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quantity: Option<u32>,
+}
+
+/// Refuse a price set before any request: an empty one would leave the
+/// subscription with nothing to bill, and one that names a price twice says
+/// two different things about its quantity.
+fn check_price_set(prices: &[String]) -> PaymentResult<()> {
+    if prices.is_empty() {
+        return Err(PaymentError::Validation(
+            "new_price_refs requires at least one price".into(),
+        ));
+    }
+    let mut seen = HashSet::with_capacity(prices.len());
+    if !prices.iter().all(|price| seen.insert(price.as_str())) {
+        return Err(PaymentError::Validation(
+            "new_price_refs names a price more than once".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The Stripe `proration_behavior` of a [`Proration`]; no mode is
+/// `create_prorations`, the default of Stripe.
+fn proration_behavior(proration: Option<Proration>) -> PaymentResult<&'static str> {
+    match proration {
+        None | Some(Proration::ProrateAtRenewal) => Ok("create_prorations"),
+        Some(Proration::ProrateNow) => Ok("always_invoice"),
+        Some(Proration::DoNotProrate) => Ok("none"),
+        Some(other) => Err(PaymentError::NotSupported(format!(
+            "Stripe has no proration behavior for {other:?}"
+        ))),
+    }
+}
+
+/// The quantity of an item Stripe reported, as the `u32` of an item of an
+/// update: 1 for a price without quantities. A quantity that does not fit
+/// is refused, not sent changed.
+fn item_quantity(quantity: Option<u64>) -> PaymentResult<u32> {
+    match quantity {
+        None => Ok(1),
+        Some(quantity) => u32::try_from(quantity).map_err(|_| {
+            PaymentError::Provider(
+                "stripe subscriptions.retrieve: an item quantity is out of range".into(),
+            )
+        }),
+    }
 }
 
 fn ts_to_dt(ts: i64) -> DateTime<Utc> {
@@ -133,6 +209,101 @@ fn map_subscription(s: StripeSubscription) -> SubscriptionResult {
     }
 }
 
+impl StripeProvider {
+    /// Replace the prices of a subscription.
+    ///
+    /// Stripe changes the items of a subscription one by one, so the
+    /// subscription is read first: an item whose price is not in `prices`
+    /// is deleted, a price no item has is added, and an item whose price
+    /// stays is not sent. A price that replaces exactly one deleted item
+    /// takes over its quantity; any other new price has a quantity of 1. If
+    /// the read fails, nothing is sent.
+    async fn change_prices(
+        &self,
+        req: &UpdateSubscriptionRequest,
+        prices: &[String],
+    ) -> PaymentResult<SubscriptionResult> {
+        check_price_set(prices)?;
+        let behavior = proration_behavior(req.proration)?;
+        let key = crate::idempotency_key(req.idempotency_key.as_deref())?;
+
+        let path = format!("/subscriptions/{}", req.provider_subscription_id);
+        let call = RequestBuilder::new(StripeMethod::Get, &path)
+            .customize::<StripeSubscription>()
+            .send(self.client());
+        let current: StripeSubscription = deadline::read("subscriptions.retrieve", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("subscriptions.retrieve", e))?;
+        if current.items.has_more {
+            // The update would leave the items past the first page as they
+            // are, whatever `prices` says.
+            return Err(PaymentError::Provider(
+                "stripe subscriptions.retrieve: the items span more than one page".into(),
+            ));
+        }
+
+        let items = &current.items.data;
+        let removed: Vec<_> = items
+            .iter()
+            .filter(|item| {
+                !prices
+                    .iter()
+                    .any(|price| price.as_str() == item.price.id.as_str())
+            })
+            .collect();
+        let added: Vec<&str> = prices
+            .iter()
+            .map(String::as_str)
+            .filter(|price| !items.iter().any(|item| item.price.id.as_str() == *price))
+            .collect();
+
+        // A swap of one price for another keeps the quantity of the price
+        // it replaces; any other new price starts at 1.
+        let new_quantity = match (removed.as_slice(), added.len()) {
+            ([replaced], 1) => item_quantity(replaced.quantity)?,
+            _ => 1,
+        };
+
+        let mut changes = Vec::with_capacity(removed.len() + added.len());
+        for item in &removed {
+            changes.push(ItemChange {
+                id: Some(item.id.as_str().to_string()),
+                deleted: Some(true),
+                price: None,
+                quantity: None,
+            });
+        }
+        for price in added {
+            changes.push(ItemChange {
+                id: None,
+                deleted: None,
+                price: Some(price),
+                quantity: Some(new_quantity),
+            });
+        }
+        if changes.is_empty() && req.cancel_at_period_end.is_none() {
+            // The same prices: nothing is sent that could bill for a
+            // change, and a retry of an update that went through ends here.
+            return Ok(map_subscription(current));
+        }
+
+        let proration_behavior = (!changes.is_empty()).then_some(behavior);
+        let params = ChangePricesParams {
+            items: changes,
+            proration_behavior,
+            cancel_at_period_end: req.cancel_at_period_end,
+        };
+        let request = RequestBuilder::new(StripeMethod::Post, &path)
+            .form(&params)
+            .customize::<StripeSubscription>();
+        let call = crate::with_idempotency_key(request, key).send(self.client());
+        let sub = deadline::change("subscriptions.update", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("subscriptions.update", e))?;
+        Ok(map_subscription(sub))
+    }
+}
+
 #[async_trait]
 impl Subscription for StripeProvider {
     async fn subscribe(&self, req: SubscribeRequest) -> PaymentResult<SubscriptionResult> {
@@ -160,25 +331,18 @@ impl Subscription for StripeProvider {
         let request = RequestBuilder::new(StripeMethod::Post, "/subscriptions")
             .form(&params)
             .customize::<StripeSubscription>();
-        let sub = crate::apply_idempotency(request, req.idempotency_key.as_deref())?
-            .send(self.client())
-            .await
-            .map_err(|e| PaymentError::Provider(format!("stripe subscriptions.create: {e}")))?;
+        let call =
+            crate::apply_idempotency(request, req.idempotency_key.as_deref())?.send(self.client());
+        let sub = deadline::change("subscriptions.create", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("subscriptions.create", e))?;
 
         Ok(map_subscription(sub))
     }
 
     async fn update(&self, req: UpdateSubscriptionRequest) -> PaymentResult<SubscriptionResult> {
-        // v1 supports cancel_at_period_end only. Price-set replacement requires deleting +
-        // creating items and is shaped differently per provider; return NotSupported honestly
-        // rather than guess. Per advisor: this is the one place NotSupported is honest, not
-        // deferral.
-        if req.new_price_refs.is_some() {
-            return Err(PaymentError::NotSupported(
-                "Stripe price-set replacement on existing subscription not in v1. \
-                 Cancel the subscription and create a new one with the new price set."
-                    .into(),
-            ));
+        if let Some(prices) = &req.new_price_refs {
+            return self.change_prices(&req, prices).await;
         }
 
         let params = UpdateSubscriptionParams {
@@ -189,10 +353,11 @@ impl Subscription for StripeProvider {
         let request = RequestBuilder::new(StripeMethod::Post, &path)
             .form(&params)
             .customize::<StripeSubscription>();
-        let sub = crate::apply_idempotency(request, req.idempotency_key.as_deref())?
-            .send(self.client())
-            .await
-            .map_err(|e| PaymentError::Provider(format!("stripe subscriptions.update: {e}")))?;
+        let call =
+            crate::apply_idempotency(request, req.idempotency_key.as_deref())?.send(self.client());
+        let sub = deadline::change("subscriptions.update", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("subscriptions.update", e))?;
 
         Ok(map_subscription(sub))
     }
@@ -207,14 +372,13 @@ impl Subscription for StripeProvider {
             let params = UpdateSubscriptionParams {
                 cancel_at_period_end: Some(true),
             };
-            let sub: StripeSubscription = RequestBuilder::new(StripeMethod::Post, &path)
+            let call = RequestBuilder::new(StripeMethod::Post, &path)
                 .form(&params)
                 .customize::<StripeSubscription>()
-                .send(self.client())
-                .await
-                .map_err(|e| {
-                    PaymentError::Provider(format!("stripe subscriptions.update(cape): {e}"))
-                })?;
+                .send(self.client());
+            let sub: StripeSubscription = deadline::change("subscriptions.update(cape)", call)
+                .await?
+                .map_err(|e| sdk_error::provider_error("subscriptions.update(cape)", e))?;
             Ok(map_subscription(sub))
         } else {
             let path = format!("/subscriptions/{provider_subscription_id}");
@@ -222,24 +386,29 @@ impl Subscription for StripeProvider {
                 invoice_now: false,
                 prorate: false,
             };
-            let sub: StripeSubscription = RequestBuilder::new(StripeMethod::Delete, &path)
+            let call = RequestBuilder::new(StripeMethod::Delete, &path)
                 .form(&params)
                 .customize::<StripeSubscription>()
-                .send(self.client())
-                .await
-                .map_err(|e| PaymentError::Provider(format!("stripe subscriptions.cancel: {e}")))?;
+                .send(self.client());
+            let sub: StripeSubscription = deadline::change("subscriptions.cancel", call)
+                .await?
+                .map_err(|e| sdk_error::provider_error("subscriptions.cancel", e))?;
             Ok(map_subscription(sub))
         }
     }
 
     async fn get(&self, provider_subscription_id: &str) -> PaymentResult<SubscriptionResult> {
         let path = format!("/subscriptions/{provider_subscription_id}");
-        let sub: StripeSubscription = RequestBuilder::new(StripeMethod::Get, &path)
+        let call = RequestBuilder::new(StripeMethod::Get, &path)
             .customize::<StripeSubscription>()
-            .send(self.client())
-            .await
-            .map_err(|e| PaymentError::Provider(format!("stripe subscriptions.retrieve: {e}")))?;
+            .send(self.client());
+        let sub: StripeSubscription = deadline::read("subscriptions.retrieve", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("subscriptions.retrieve", e))?;
 
         Ok(map_subscription(sub))
     }
 }
+
+#[cfg(test)]
+mod tests;

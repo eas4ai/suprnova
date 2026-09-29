@@ -5,9 +5,10 @@
 use suprnova::payments::{
     ChargeRequest, ChargeResult, CheckoutSessionState, CountryCode, CreateCustomerRequest,
     CustomerRef, MobileMoneyOperator, NeutralEventKind, PaymentMethod, PaymentStatus, PhoneNumber,
-    RefundRequest, RefundResult, SessionMode, SessionPayload, StablecoinAsset, StartSessionRequest,
-    SubscribeRequest, SubscriptionItemSnapshot, SubscriptionResult, SubscriptionStatus,
-    UpdateCustomerRequest, UpdateSubscriptionRequest, WebhookContext, WebhookEvent,
+    Proration, RefundRequest, RefundResult, SessionMode, SessionPayload, StablecoinAsset,
+    StartSessionRequest, SubscribeRequest, SubscriptionItemSnapshot, SubscriptionResult,
+    SubscriptionStatus, UpdateCustomerRequest, UpdateSubscriptionRequest, WebhookContext,
+    WebhookEvent,
 };
 
 /// A use of `T`, so that the import of it is no unused import.
@@ -28,6 +29,7 @@ fn every_type_of_the_requests_and_results_has_its_name_in_payments() {
     named::<PaymentMethod>();
     named::<PaymentStatus>();
     named::<PhoneNumber>();
+    named::<Proration>();
     named::<RefundRequest>();
     named::<RefundResult>();
     named::<SessionMode>();

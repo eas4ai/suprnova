@@ -23,7 +23,7 @@ pub use payment_method::{MobileMoneyOperator, PaymentMethod, StablecoinAsset};
 pub use phone::PhoneNumber;
 pub use session::{CheckoutSessionState, SessionMode, SessionPayload, StartSessionRequest};
 pub use subscription::{
-    SubscribeRequest, SubscriptionItemSnapshot, SubscriptionResult, SubscriptionStatus,
+    Proration, SubscribeRequest, SubscriptionItemSnapshot, SubscriptionResult, SubscriptionStatus,
     UpdateSubscriptionRequest,
 };
 pub use webhook::{NeutralEventKind, WebhookContext, WebhookEvent};

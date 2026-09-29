@@ -271,6 +271,7 @@ async fn idempotency_keys_are_request_headers_on_every_supported_mutation() {
             .update(UpdateSubscriptionRequest {
                 provider_subscription_id: "sub_test".into(),
                 new_price_refs: None,
+                proration: None,
                 cancel_at_period_end: Some(true),
                 idempotency_key: Some(longest_key),
             })

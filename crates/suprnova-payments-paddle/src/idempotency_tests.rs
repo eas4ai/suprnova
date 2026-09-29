@@ -77,6 +77,7 @@ async fn unsupported_idempotency_keys_fail_before_paddle_mutations() {
         .update(UpdateSubscriptionRequest {
             provider_subscription_id: "sub_test".into(),
             new_price_refs: None,
+            proration: None,
             cancel_at_period_end: Some(true),
             idempotency_key: Some("update-key".into()),
         })

@@ -433,6 +433,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   through the loader of the collections: nested names, the one query for each
   relation and the transaction of the caller are the same. `load_missing` runs
   no query for a relation that the model has.
+- **`PaddleProvider::archive_customer` archives a Paddle customer.** Paddle
+  has no endpoint that deletes a customer, so `delete_customer` of the Paddle
+  adapter returns `PaymentError::NotSupported`, and its message named a way
+  that did nothing: an update with `metadata: {"status": "archived"}` writes a
+  key named `status` into the custom data of the customer, and the customer
+  stays active. `archive_customer(provider_customer_id)` sets the status of
+  the customer to `archived` at Paddle. A customer that Paddle does not know
+  is `PaymentError::NotFound`. The message of `delete_customer` names
+  `PaddleProvider::archive_customer`. What you have to change: code that
+  archived a customer through `metadata` calls `archive_customer`, and removes
+  the `status` key from the metadata if it does not want it there.
 
 ### Changed
 
@@ -596,6 +607,48 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   your own has, needs an arm for `WebPLossless`. Code that needs the pixels of
   a WebP to be exact asks for `WebPLossless`. A WebP source that is resized
   and not converted is written as `WebP`, so an opaque one is written lossy.
+- **`Subscription::update` changes the prices of a subscription on Stripe and
+  on Paddle, and the Paddle adapter cancels at once when it is asked to.**
+  `update` with `new_price_refs` returned `PaymentError::NotSupported` on both
+  adapters, so a change of plan was a cancellation and a new subscription. The
+  list is the set of prices the subscription has after the call: an item whose
+  price is in the list keeps its id and its quantity, an item whose price is
+  not in the list is removed, and a price that is new is added with the
+  quantity 1, except in a swap: when the change removes exactly one item and
+  adds exactly one price, the new price takes the quantity of the item it
+  replaces, so ten seats of one plan become ten seats of the other. The
+  adapter computes the change from a read of the subscription, and the change
+  is not atomic: a change made at the provider between the read and the write
+  can be undone (Paddle takes the whole list) or left in place (Stripe changes
+  items one by one), and the returned subscription shows the result. An empty
+  list, and a list that names a price twice, is `PaymentError::Validation`, on
+  both adapters and on the mock. The new field
+  `UpdateSubscriptionRequest::proration` takes a
+  `suprnova::payments::Proration`: `ProrateNow` bills the difference at once,
+  `ProrateAtRenewal` puts it on the next invoice, and `DoNotProrate` charges
+  nothing for the change. `None` is `ProrateAtRenewal`. On Paddle, a change of
+  prices in the same call as `cancel_at_period_end` or with an
+  `idempotency_key` is `NotSupported`. `cancel(id, false)` of the Paddle
+  adapter cancels the subscription at once, and `cancel(id, true)` cancels it
+  at the end of the billing period; it cancelled at the end of the period for
+  both. Every call of the Stripe and the Paddle adapter has a deadline of 30
+  seconds. A read that gets no answer in that time is a
+  `PaymentError::Provider` whose text ends in "timed out". A call that changes
+  something is a `PaymentError::Provider` whose text says that the outcome is
+  unknown: read the state at the provider before you send the call again. The
+  text of an error that the Stripe or the Paddle adapter builds from an error
+  of its SDK holds the operation and the kind and code of the provider's
+  error, and never the provider's message, an id or a URL: a Stripe API error
+  gives its type, its code and the HTTP status, a Paddle API error its type
+  and code, and a transport error comes without the URL of the request. Stripe
+  `void` of a payment that is already captured is a `Validation` error whose
+  text does not name the payment. The `NotFound` errors of
+  `MockPaymentProvider` carry no id. What you have to change: every struct
+  literal of `UpdateSubscriptionRequest` names the new field, `proration:
+  None` to keep the default. Code that called `cancel(id, false)` on Paddle
+  and counted on a cancellation at the end of the period passes `true`. A test
+  that read an id out of a `NotFound` error of the mock reads it from its own
+  request.
 
 ### Fixed
 
