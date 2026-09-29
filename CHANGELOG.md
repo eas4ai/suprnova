@@ -541,6 +541,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   read the field. The tasks are done and the fields are read, so the
   suppressions hid nothing and would have hidden a field that a later change
   leaves unread. They are removed with the comments that named the tasks.
+- **The dogfood application's `bootstrap.rs` imports what it uses.** Its
+  import of the framework had a blanket `#[allow(unused_imports)]`, which hid
+  that `singleton` was imported and never used, and would have hidden every
+  later one. The suppression and the import are removed.
 
 ### Fixed
 

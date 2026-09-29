@@ -29,12 +29,11 @@ use std::time::Duration;
 use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub};
 use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
 use suprnova::queue::worker::register_job;
-#[allow(unused_imports)]
 use suprnova::{
     App, CsrfMiddleware, DB, EloquentUserProvider, EventFacade, FrameworkError, IncludeMiddleware,
     Inertia, InertiaConfig, InertiaRequestExt, InertiaSharedData, LocaleMiddleware, LocaleShare,
     Prop, SessionBlock, SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
-    UserProvider, bind, global_middleware, singleton,
+    UserProvider, bind, global_middleware,
 };
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
