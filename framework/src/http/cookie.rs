@@ -484,25 +484,22 @@ impl Cookie {
     }
 
     /// Decrypt a cookie value produced by [`Self::encrypted`] under the
-    /// same logical `name`. Falls back to the un-contexted v1 AAD for
-    /// values written before name binding (removal: 1.4.0) - during
-    /// that window a pre-upgrade cookie still opens, but so does a
-    /// pre-upgrade ciphertext replayed from another cookie slot; the
-    /// name binding pays off fully when the fallback is removed.
+    /// same logical `name`.
+    ///
+    /// The value opens under the name it was written for and under no
+    /// other: the value of another cookie, or a value encrypted without
+    /// a cookie name, does not open, whichever key of the `APP_KEY` ring
+    /// wrote it. Such a value fails with the same error as a tampered
+    /// one, and no error quotes the plaintext or the ciphertext. A
+    /// reader treats the error as a request without this cookie.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `FrameworkError::Internal` when `Crypt` is not
+    /// initialized, the value is not base64, no key of the ring opens it
+    /// under `name`, or its plaintext is not UTF-8.
     pub fn read_encrypted_for(name: &str, wire: &str) -> Result<String, crate::FrameworkError> {
         crate::crypto::Crypt::decrypt_string_for(crate::crypto::CryptPurpose::Cookie, name, wire)
-    }
-
-    /// Decrypt a cookie value under the legacy un-contexted v1 AAD.
-    #[deprecated(
-        since = "1.3.0",
-        note = "Cookie::encrypted now binds the cookie's name into the AAD, and this \
-                reader CANNOT decrypt what it writes - the documented encrypted/read_encrypted \
-                pair is broken as of 1.3.0. Use read_encrypted_for(name, wire). This \
-                legacy reader and the v1 fallback are scheduled for removal in 1.4.0."
-    )]
-    pub fn read_encrypted(wire: &str) -> Result<String, crate::FrameworkError> {
-        crate::crypto::Crypt::decrypt_string(crate::crypto::CryptPurpose::Cookie, wire)
     }
 
     /// Queue a cookie to attach to the *next* outgoing response

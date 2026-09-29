@@ -37,6 +37,11 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 /// [`Crypt::decrypt_string_for`](super::Crypt::decrypt_string_for), it is
 /// a value under the legacy label as well.
 ///
+/// With [`CryptPurpose::Cookie`] it writes what `Crypt` refuses to write:
+/// a cookie value under the v1 label, which has no cookie name in it. No
+/// read of a cookie opens it, under any key of the ring; a test makes it
+/// to check exactly that.
+///
 /// # Errors
 ///
 /// When the cipher refuses, which it does for no input a test gives it.

@@ -66,17 +66,25 @@
 //!
 //! `CryptPurpose`'s v1 AAD binds one static label per surface, which
 //! stops cross-surface replay but leaves ciphertext *within* a surface
-//! interchangeable - any cookie's ciphertext decrypts as any other
+//! interchangeable - any cookie's ciphertext would decrypt as any other
 //! cookie. The v2 AAD additionally binds a caller-supplied *logical*
 //! context (e.g. the cookie name) into the AAD, so
 //! [`Crypt::encrypt_string_for`] / [`Crypt::decrypt_string_for`] close
-//! that gap for callers that adopt them. [`Crypt::decrypt_string_for`]
-//! keeps a compatibility window open: it trial-decrypts the v2 label
-//! first, then falls back to the un-contexted v1 label, so ciphertext
-//! written before a surface adopted name-bound AAD keeps decrypting.
-//! [`DecryptOrigin`] reports both the key-ring axis and this AAD axis
-//! independently, because they can be stale at the same time - a value
-//! can be both mid-key-rotation *and* legacy-AAD.
+//! that gap.
+//!
+//! [`CryptPurpose::Cookie`] has the v2 AAD and no other: the functions
+//! without a context refuse that purpose, and [`Crypt::decrypt_string_for`]
+//! tries the name-bound label alone for it. A cookie value opens under
+//! the name it was written for and under no other.
+//!
+//! For every other purpose [`Crypt::decrypt_string_for`] trial-decrypts
+//! the v2 label first, then falls back to the un-contexted v1 label.
+//! Those purposes hold stored values - cast columns, 2FA secrets - that
+//! were written before their caller bound a context, and a stored value
+//! does not expire the way a cookie does. [`DecryptOrigin`] reports both
+//! the key-ring axis and this AAD axis independently, because they can
+//! be stale at the same time - a value can be both mid-key-rotation
+//! *and* legacy-AAD.
 
 pub(crate) mod aead;
 pub mod key;
@@ -101,11 +109,11 @@ use crate::config::Environment;
 /// could be replayed into another that happens to accept the same
 /// plaintext shape - the crypto layer would not catch the mismatch.
 ///
-/// Each variant maps to a stable label (e.g. `b"suprnova:cookie:v1"`)
+/// Each variant maps to a stable label (e.g. `b"suprnova:cast:v1"`)
 /// that is passed as AAD to AES-256-GCM. GCM mixes the AAD into the
 /// authentication tag without including it in the wire bytes, so:
 ///
-/// - Encrypting with `Cookie` and decrypting with `Cursor` fails the
+/// - Encrypting with `Cast` and decrypting with `Cursor` fails the
 ///   tag check - replay across surfaces is rejected at the crypto
 ///   layer, before any post-decrypt parsing.
 /// - The on-wire format is unchanged: still
@@ -123,9 +131,10 @@ pub enum CryptPurpose {
     /// Encrypted HTTP cookies built via [`crate::http::Cookie::encrypted`]
     /// and read via [`crate::http::Cookie::read_encrypted_for`]. Includes
     /// the session cookie, the remember-me cookie, and the
-    /// maintenance-mode bypass cookie. `Cookie::read_encrypted` remains
-    /// available as the deprecated v1-only reader during the compatibility
-    /// window.
+    /// maintenance-mode bypass cookie. A cookie value is always bound to
+    /// its logical cookie name: the `Crypt` functions without a context
+    /// refuse this purpose, and the functions with a context have no
+    /// fallback to the label without the name for it.
     Cookie,
     /// Pagination cursors produced by
     /// [`crate::pagination::CursorPaginator::encode_value`] and consumed
@@ -159,6 +168,12 @@ pub enum CryptPurpose {
 impl CryptPurpose {
     /// The stable byte label bound as AAD when encrypting / decrypting
     /// under this purpose.
+    ///
+    /// No function of [`Crypt`] binds the label of [`Self::Cookie`]: a
+    /// cookie value is bound to its name through [`Self::aad_for`].
+    /// `crypto::testing::encrypt_string_under` writes that label, so a
+    /// test can make the value without a name that must not open as a
+    /// cookie.
     pub(crate) fn aad(self) -> &'static [u8] {
         match self {
             CryptPurpose::Cookie => b"suprnova:cookie:v1",
@@ -243,10 +258,12 @@ pub enum AadVersion {
     /// v2 name-bound label, for un-contexted calls the surface's own
     /// label. Normal happy path.
     Current,
-    /// The un-contexted v1 label, matched by the compatibility
-    /// fallback in a `_for` call. The value predates name-bound AAD
-    /// and should be re-issued; the fallback is scheduled for removal
-    /// in 1.4.0.
+    /// The un-contexted v1 label, matched by the fallback of a `_for`
+    /// call. The value was stored before its context was bound into its
+    /// label. A read of [`CryptPurpose::Cookie`] never reports it: that
+    /// purpose has no fallback. To retire such a value, read it with
+    /// [`Crypt::decrypt_string_for_with_origin`] and write it again with
+    /// [`Crypt::encrypt_string_for`] and the same context.
     Legacy,
 }
 
@@ -362,14 +379,23 @@ impl Crypt {
     /// [`CryptPurpose`]. The returned wire is rejected by any decrypt
     /// call that supplies a different purpose.
     ///
-    /// For [`CryptPurpose::Cookie`] this un-contexted entry point is
-    /// superseded by [`Self::encrypt_string_for`]; new v1 cookie
-    /// ciphertext keeps the legacy fallback alive, and the fallback is
-    /// scheduled for removal in 1.4.0.
+    /// # Errors
+    ///
+    /// [`CryptPurpose::Cookie`] is refused before anything is encrypted.
+    /// A cookie value is bound to the name of its cookie, and this
+    /// function has no name to bind: a value without the name would open
+    /// in every cookie. Build the cookie with
+    /// [`crate::http::Cookie::encrypted`], or call
+    /// [`Self::encrypt_string_for`] with the cookie's logical name.
+    ///
+    /// Otherwise, when `Crypt` is not initialized or the cipher refuses.
     pub fn encrypt_string(
         purpose: CryptPurpose,
         plaintext: &str,
     ) -> Result<String, FrameworkError> {
+        if purpose == CryptPurpose::Cookie {
+            return Err(cookie_encrypt_without_name());
+        }
         Self::encrypt_with_aad(purpose.aad(), plaintext)
     }
 
@@ -417,21 +443,34 @@ impl Crypt {
     ///
     /// The `purpose` must match the value supplied at encrypt time, or
     /// the GCM authentication tag check fails - see [`CryptPurpose`].
+    ///
+    /// # Errors
+    ///
+    /// [`CryptPurpose::Cookie`] is refused before anything is decrypted:
+    /// a cookie is read with its name, by
+    /// [`crate::http::Cookie::read_encrypted_for`].
+    ///
+    /// Otherwise, when `Crypt` is not initialized, the wire is not
+    /// base64, no key of the ring opens it, or the plaintext is not
+    /// UTF-8.
     pub fn decrypt_string(purpose: CryptPurpose, wire: &str) -> Result<String, FrameworkError> {
         let (plain, origin) = Self::decrypt_string_inner(purpose, wire)?;
         Self::log_rotation_warning(origin);
         Ok(plain)
     }
 
-    /// Decrypt a payload written by [`Self::encrypt_string_for`],
-    /// falling back to the un-contexted v1 AAD for values that predate
-    /// name binding.
+    /// Decrypt a payload written by [`Self::encrypt_string_for`] with
+    /// the same `context`.
     ///
     /// The wire format carries no version byte, so there is nothing to
     /// dispatch on: this is blind trial-decrypt, exactly the shape key
     /// rotation already uses. The v2 label is tried across the whole
-    /// ring first, then v1 across the whole ring. A wrong AAD cannot
-    /// spuriously succeed - AES-GCM tag mismatch, ~2^-128.
+    /// ring first. For every purpose but [`CryptPurpose::Cookie`], the
+    /// un-contexted v1 label is tried across the whole ring after it, for
+    /// values stored before their context was bound. A cookie has no
+    /// such fallback: its value opens under the name it was written for
+    /// and under no other, whichever key of the ring wrote it. A wrong
+    /// AAD cannot spuriously succeed - AES-GCM tag mismatch, ~2^-128.
     ///
     /// Emits the rotation warnings for whichever axes were stale.
     pub fn decrypt_string_for(
@@ -483,7 +522,9 @@ impl Crypt {
     /// The label is the second thing the origin says here: a value that
     /// was written before its label had the name of its context in it
     /// matches the legacy label, and is to be written again, by
-    /// [`Self::encrypt_string_for`] with the same context.
+    /// [`Self::encrypt_string_for`] with the same context. For
+    /// [`CryptPurpose::Cookie`] the label is always the current one:
+    /// that purpose has no legacy label to match.
     ///
     /// # Errors
     ///
@@ -529,10 +570,20 @@ impl Crypt {
     ///
     /// The `purpose` is bound as AEAD associated data - see
     /// [`CryptPurpose`].
+    ///
+    /// # Errors
+    ///
+    /// [`CryptPurpose::Cookie`] is refused before anything is encrypted,
+    /// for the reason [`Self::encrypt_string`] gives. Otherwise, when
+    /// `Crypt` is not initialized, the value does not encode as JSON, or
+    /// the cipher refuses.
     pub fn encrypt<T: Serialize>(
         purpose: CryptPurpose,
         value: &T,
     ) -> Result<String, FrameworkError> {
+        if purpose == CryptPurpose::Cookie {
+            return Err(cookie_encrypt_without_name());
+        }
         let ring = Self::ring()?;
         let json = serde_json::to_vec(value)
             .map_err(|e| FrameworkError::internal(format!("Crypt JSON encode failed: {e}")))?;
@@ -545,6 +596,13 @@ impl Crypt {
     /// previous key. On a previous-key hit, emits a `tracing::warn!`.
     ///
     /// The `purpose` must match the value supplied at encrypt time.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptPurpose::Cookie`] is refused before anything is decrypted,
+    /// as [`Self::decrypt_string`] refuses it. Otherwise, when `Crypt` is
+    /// not initialized, the wire is not base64, no key of the ring opens
+    /// it, or the plaintext does not decode as `T`.
     pub fn decrypt<T: DeserializeOwned>(
         purpose: CryptPurpose,
         wire: &str,
@@ -643,12 +701,17 @@ impl Crypt {
     /// capture.
     ///
     /// Public surface: [`Crypt::decrypt_string`], and
-    /// [`Crypt::decrypt_string_with_origin`] for the origin.
+    /// [`Crypt::decrypt_string_with_origin`] for the origin. The refusal
+    /// of [`CryptPurpose::Cookie`] lives here, so every read without a
+    /// context has it.
     #[doc(hidden)]
     pub fn decrypt_string_inner(
         purpose: CryptPurpose,
         wire: &str,
     ) -> Result<(String, DecryptOrigin), FrameworkError> {
+        if purpose == CryptPurpose::Cookie {
+            return Err(cookie_decrypt_without_name());
+        }
         let ring = Self::ring()?;
         let bytes = URL_SAFE_NO_PAD
             .decode(wire.trim())
@@ -668,12 +731,16 @@ impl Crypt {
 
     /// Test-and-internal hook: decrypt a JSON-encoded value under
     /// `purpose` AND report which key in the ring succeeded. See
-    /// [`Self::decrypt_string_inner`].
+    /// [`Self::decrypt_string_inner`], whose refusal of
+    /// [`CryptPurpose::Cookie`] this shares.
     #[doc(hidden)]
     pub fn decrypt_inner<T: DeserializeOwned>(
         purpose: CryptPurpose,
         wire: &str,
     ) -> Result<(T, DecryptOrigin), FrameworkError> {
+        if purpose == CryptPurpose::Cookie {
+            return Err(cookie_decrypt_without_name());
+        }
         let ring = Self::ring()?;
         let bytes = URL_SAFE_NO_PAD
             .decode(wire.trim())
@@ -706,9 +773,10 @@ impl Crypt {
         }
         if origin.aad == AadVersion::Legacy {
             tracing::warn!(
-                "Crypt decrypted a value through the legacy un-contexted AAD fallback; \
-                 re-issue this value (for cookies: the next response re-sets it) so it is \
-                 bound to its cookie name. The fallback is scheduled for removal in 1.4.0."
+                "Crypt decrypted a value through the legacy un-contexted AAD fallback: the \
+                 value was stored before its context was bound. Read it with \
+                 Crypt::decrypt_string_for_with_origin and write it again with \
+                 Crypt::encrypt_string_for and the same context to retire it."
             );
         }
     }
@@ -746,6 +814,32 @@ pub(crate) fn json_decode_error(what: &str, error: &serde_json::Error) -> Framew
     ))
 }
 
+/// The error of an encrypt without a context for [`CryptPurpose::Cookie`].
+///
+/// A cookie value is bound to the logical name of its cookie. A value
+/// without the name would open in every cookie of the application, so no
+/// function writes one. The message names the two that bind the name, and
+/// nothing of the value.
+fn cookie_encrypt_without_name() -> FrameworkError {
+    FrameworkError::internal(
+        "Crypt refuses to encrypt a cookie value without the name of its cookie: build \
+         the cookie with Cookie::encrypted(name, value), or call \
+         Crypt::encrypt_string_for(CryptPurpose::Cookie, name, value)",
+    )
+}
+
+/// The error of a decrypt without a context for [`CryptPurpose::Cookie`].
+///
+/// Only a read with the cookie's name checks the name the value was
+/// written for, so a read without it opens nothing. The message names the
+/// read to use, and nothing of the value.
+fn cookie_decrypt_without_name() -> FrameworkError {
+    FrameworkError::internal(
+        "Crypt refuses to decrypt a cookie value without the name of its cookie: a \
+         cookie is read with its name, by Cookie::read_encrypted_for(name, value)",
+    )
+}
+
 /// Trial-decrypt `wire` against every key in `ring` with `aad` bound
 /// into the GCM tag check. Current first, then each previous in order.
 /// Returns `(plain_bytes, origin)` on the first success; if every key
@@ -777,6 +871,10 @@ fn decrypt_with_ring(
 /// so unit tests can exercise the two-axis window without the sealed
 /// process-global ring, the same seam `decrypt_with_ring` provides for
 /// the key axis alone.
+///
+/// [`CryptPurpose::Cookie`] stops after the name-bound pass: the v1
+/// label of a cookie carries no name, so a value under it would open in
+/// every cookie.
 pub(crate) fn decrypt_string_for_with_ring(
     ring: &KeyRing,
     purpose: CryptPurpose,
@@ -794,6 +892,7 @@ pub(crate) fn decrypt_string_for_with_ring(
                 aad: AadVersion::Current,
             },
         ),
+        Err(v2_err) if purpose == CryptPurpose::Cookie => return Err(v2_err),
         Err(v2_err) => match decrypt_with_ring(ring, purpose.aad(), &bytes) {
             Ok((plain, key)) => (
                 plain,
@@ -1156,7 +1255,9 @@ pub fn _test_install_keyring(current: EncryptionKey, previous: Vec<EncryptionKey
 /// Calls `aead::encrypt` directly and applies the same base64 wire
 /// format as [`Crypt::encrypt_string`]. The returned string is byte-
 /// for-byte indistinguishable from a normal `Crypt::encrypt_string`
-/// output produced under `key` for the same `purpose`.
+/// output produced under `key` for the same `purpose`. For
+/// [`CryptPurpose::Cookie`], which `Crypt::encrypt_string` refuses, it
+/// is the cookie value without a name that no read of a cookie opens.
 ///
 /// **Test-only - do not call from production code.** Compiled out when
 /// the `testing` feature is disabled.
@@ -1617,7 +1718,8 @@ mod boot_tests {
 
     #[test]
     fn decrypt_for_reports_current_on_the_happy_path() {
-        // Proves the legacy fallback is not swallowing everything.
+        // The name-bound label opens on the first pass, under the
+        // current key, and says so on both axes.
         let key = test_key(2);
         let wire =
             _test_encrypt_with_for(&key, CryptPurpose::Cookie, "session", "s").expect("encrypt");
@@ -1635,17 +1737,18 @@ mod boot_tests {
 
     #[test]
     fn legacy_v1_ciphertext_decrypts_and_reports_legacy_aad() {
+        // A stored value written before its context was bound still
+        // opens through the fallback, and says so on the AAD axis.
         let key = test_key(3);
-        let wire =
-            _test_encrypt_with(&key, CryptPurpose::Cookie, "old-cookie").expect("encrypt v1");
+        let wire = _test_encrypt_with(&key, CryptPurpose::Cast, "stored").expect("encrypt v1");
         let ring = KeyRing {
             current: key,
             previous: vec![],
         };
         let (plain, origin) =
-            decrypt_string_for_with_ring(&ring, CryptPurpose::Cookie, "session", &wire)
-                .expect("compat window must decrypt v1");
-        assert_eq!(plain, "old-cookie");
+            decrypt_string_for_with_ring(&ring, CryptPurpose::Cast, "users.secret", &wire)
+                .expect("the fallback must decrypt a v1 stored value");
+        assert_eq!(plain, "stored");
         assert_eq!(origin.key, KeyOrigin::Current);
         assert_eq!(origin.aad, AadVersion::Legacy);
     }
@@ -1656,14 +1759,14 @@ mod boot_tests {
         // legacy-AAD must be visible simultaneously.
         let old_key = test_key(4);
         let new_key = test_key(5);
-        let wire = _test_encrypt_with(&old_key, CryptPurpose::Cookie, "ancient")
+        let wire = _test_encrypt_with(&old_key, CryptPurpose::Cast, "ancient")
             .expect("encrypt v1 under the old key");
         let ring = KeyRing {
             current: new_key,
             previous: vec![old_key],
         };
         let (plain, origin) =
-            decrypt_string_for_with_ring(&ring, CryptPurpose::Cookie, "session", &wire)
+            decrypt_string_for_with_ring(&ring, CryptPurpose::Cast, "users.secret", &wire)
                 .expect("decrypt");
         assert_eq!(plain, "ancient");
         assert_eq!(origin.key, KeyOrigin::Previous(0));
@@ -1671,9 +1774,32 @@ mod boot_tests {
     }
 
     #[test]
+    fn a_v1_cookie_value_does_not_open_under_any_key_of_the_ring() {
+        // A cookie value without the name opens in no cookie: not under
+        // the key that wrote it while that key is current, and not after
+        // a rotation moved that key into `previous`. The error is the
+        // one of any value that does not open.
+        let key = test_key(9);
+        let old_key = test_key(10);
+        let under_current =
+            _test_encrypt_with(&key, CryptPurpose::Cookie, "v1-current").expect("encrypt v1");
+        let under_previous =
+            _test_encrypt_with(&old_key, CryptPurpose::Cookie, "v1-old").expect("encrypt v1");
+        let ring = KeyRing {
+            current: key,
+            previous: vec![old_key],
+        };
+        for wire in [&under_current, &under_previous] {
+            let err = decrypt_string_for_with_ring(&ring, CryptPurpose::Cookie, "session", wire)
+                .expect_err("a cookie value without its name must not open");
+            assert!(format!("{err}").contains("AEAD decrypt failed"), "{err}");
+        }
+    }
+
+    #[test]
     fn wrong_purpose_still_fails_both_windows() {
         // Cross-surface replay stays dead: a Cursor wire must fail the
-        // cookie path's v2 attempt AND its v1 fallback.
+        // v2 attempt of a Cast read AND its v1 fallback.
         let key = test_key(6);
         let wire =
             _test_encrypt_with(&key, CryptPurpose::Cursor, "cursor-payload").expect("encrypt");
@@ -1682,7 +1808,7 @@ mod boot_tests {
             previous: vec![],
         };
         assert!(
-            decrypt_string_for_with_ring(&ring, CryptPurpose::Cookie, "session", &wire).is_err()
+            decrypt_string_for_with_ring(&ring, CryptPurpose::Cast, "users.secret", &wire).is_err()
         );
     }
 
@@ -1691,11 +1817,10 @@ mod boot_tests {
         // The "previous key + current AAD" quadrant: a cookie written
         // with name-bound (v2) AAD under the key that was current at
         // the time, decrypted after an `APP_KEY` rotation moved that
-        // key into `previous`. This is the mainline rotation path once
-        // callers adopt `_for` - every v2 cookie written before a flip
-        // must keep decrypting, not fall through to the legacy-AAD
-        // window (which would spuriously flag it for re-issue) or fail
-        // outright (which would log the user out mid-rotation).
+        // key into `previous`. This is the mainline rotation path for
+        // cookies - every v2 cookie written before a flip must keep
+        // decrypting, not fail outright (which would log the user out
+        // mid-rotation).
         //
         // Narrowing the v2 attempt in `decrypt_string_for_with_ring` to
         // `aead::decrypt(&ring.current, ...)` instead of walking

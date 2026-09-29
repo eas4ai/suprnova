@@ -989,6 +989,25 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   kind of the mistake and its position now, and nothing of the content. It can
   happen where a deployment changes the shape of the state while a ceremony is
   under way.
+- **An encrypted cookie opens under its own name and in no other way.**
+  Release 1.3.0 bound the name of a cookie into its encryption and kept a
+  fallback that still opened a value written without the name, to be removed
+  in 1.4.0, which was never released. While the fallback was there, such a
+  value opened in every cookie, so the binding protected nothing against it.
+  The fallback is removed for cookies. It stays for the other purposes, where
+  it opens stored values that do not expire as a cookie does: read those with
+  `decrypt_string_for_with_origin` and write them again. What you have to
+  change: `Cookie::read_encrypted(wire)` is removed, use
+  `Cookie::read_encrypted_for(name, wire)`. `Crypt::encrypt_string` and
+  `Crypt::encrypt` with `CryptPurpose::Cookie` return an error, use
+  `Cookie::encrypted(name, value)` or `Crypt::encrypt_string_for`.
+  `Crypt::decrypt_string`, `decrypt_string_with_origin`, `decrypt` and
+  `decrypt_with_origin` with `CryptPurpose::Cookie` return an error, use
+  `Cookie::read_encrypted_for` or `Crypt::decrypt_string_for`. A cookie that
+  was written before 1.3.0, or with `encrypt_string`, does not open any more.
+  For the session cookie and the remember cookie the user signs in again, and
+  for the maintenance bypass the operator visits the secret URL again. No
+  request fails for it.
 
 ## 2.0.2 - 2026-09-14
 

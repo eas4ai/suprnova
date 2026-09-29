@@ -240,12 +240,12 @@ fn decrypt_t_round_trip_via_fallback() {
         // as a UTF-8 string - JSON output is always valid UTF-8 for
         // safe primitives, so this is fine.
         let plaintext = std::str::from_utf8(&json).expect("json is utf-8");
-        encrypt_string_under(&keys.previous_oldest, CryptPurpose::Cookie, plaintext)
+        encrypt_string_under(&keys.previous_oldest, CryptPurpose::Cast, plaintext)
             .expect("encrypt JSON under legacy key")
     };
 
     let (decoded, origin): (Bag, DecryptOrigin) =
-        Crypt::decrypt_inner(CryptPurpose::Cookie, &aead_wire).expect("decrypt JSON via fallback");
+        Crypt::decrypt_inner(CryptPurpose::Cast, &aead_wire).expect("decrypt JSON via fallback");
     assert_eq!(decoded, bag);
     assert_eq!(origin.key, KeyOrigin::Previous(0));
     assert_eq!(origin.aad, AadVersion::Current);
