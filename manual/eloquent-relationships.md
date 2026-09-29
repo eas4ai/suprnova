@@ -125,9 +125,9 @@ let dead = user.posts().only_trashed().get().await?;   // trashed only
 
 `with_trashed` / `only_trashed` exist on `HasOne`, `HasMany`,
 `MorphOne`, `MorphMany`, `BelongsToMany`, `MorphToMany`,
-`MorphedByMany`, and `BelongsTo`. They are deliberately absent from
-`HasOneThrough` and `HasManyThrough` - see the [Through soft-delete
-gap](#through-soft-deletes-v1) below.
+`MorphedByMany`, and `BelongsTo`. `HasOneThrough` and `HasManyThrough`
+do not have them: they always leave trashed rows out, as
+[Through soft-deletes](#through-soft-deletes) below describes.
 
 ## One-to-one: `HasOne` and `BelongsTo`
 
@@ -383,6 +383,11 @@ Through relations filter both the intermediate and the target by their
 soft-delete column when those models declare `#[model(soft_deletes)]`,
 matching Laravel's `hasManyThrough`: trashed rows on either side stay
 out of the join.
+
+To include trashed rows, query the two hops yourself: load the
+intermediate models through their own relation, then query the target
+model by their keys, and add `with_trashed()` on the side whose trashed
+rows belong in the result.
 
 ## Polymorphic relations
 
