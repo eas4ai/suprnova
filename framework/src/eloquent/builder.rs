@@ -255,6 +255,36 @@ pub(crate) struct ExistsSpec {
     pub relation_value: Option<Value>,
 }
 
+/// Which rows an existence clause keeps. Stands in for a bare `bool` so
+/// every `has*` / `doesnt_have*` method names the polarity it builds.
+enum Existence {
+    /// Rows whose relation has at least one match: `EXISTS (...)`.
+    Has,
+    /// Rows whose relation has no match: `NOT EXISTS (...)`.
+    DoesntHave,
+}
+
+/// The count comparison of [`Builder::has_count`]: the subquery renders as
+/// `(SELECT COUNT(*) ...) <op> <value>` in place of a bare `EXISTS`.
+struct CountConstraint<'a> {
+    /// The comparison operator, such as `>=`.
+    op: &'a str,
+    /// The count the related rows are compared against.
+    value: i64,
+}
+
+/// The `whereRelation` predicate on one column of the related table,
+/// rendered inline in the `EXISTS` subquery. Named fields keep the column
+/// and the operator, both strings, from trading places.
+struct RelationPredicate {
+    /// The related table's column.
+    column: String,
+    /// The comparison operator, such as `=`.
+    op: String,
+    /// The value the column is compared against.
+    value: Value,
+}
+
 /// Which part of a temporal column to compare against. Mapped per
 /// backend by [`render_date_part`].
 #[derive(Debug, Clone, Copy)]
@@ -2968,18 +2998,26 @@ where
     // a typo silently returns an empty result set instead of leaking
     // a full-table scan.
 
-    #[allow(clippy::too_many_arguments)]
     fn build_exists_spec_for(
         &self,
         relation: &str,
-        positive: bool,
-        count_op: Option<&str>,
-        count_value: Option<i64>,
+        existence: Existence,
+        count: Option<CountConstraint<'_>>,
         inner_terms: Vec<WhereTerm>,
-        relation_column: Option<String>,
-        relation_op: Option<String>,
-        relation_value: Option<Value>,
+        predicate: Option<RelationPredicate>,
     ) -> ExistsSpec {
+        let positive = match existence {
+            Existence::Has => true,
+            Existence::DoesntHave => false,
+        };
+        let (count_op, count_value) = match count {
+            Some(CountConstraint { op, value }) => (Some(op.to_string()), Some(value)),
+            None => (None, None),
+        };
+        let (relation_column, relation_op, relation_value) = match predicate {
+            Some(RelationPredicate { column, op, value }) => (Some(column), Some(op), Some(value)),
+            None => (None, None, None),
+        };
         let entry = crate::eloquent::relations::find_relation::<M>(relation);
         match entry {
             Some(e) => ExistsSpec {
@@ -2999,7 +3037,7 @@ where
                 morph_type_value: e.morph_type_value.to_string(),
                 related_soft_deletes_column: e.related_soft_deletes_column.to_string(),
                 positive,
-                count_op: count_op.map(str::to_string),
+                count_op,
                 count_value,
                 inner_terms,
                 relation_column,
@@ -3019,7 +3057,7 @@ where
                 morph_type_value: String::new(),
                 related_soft_deletes_column: String::new(),
                 positive,
-                count_op: count_op.map(str::to_string),
+                count_op,
                 count_value,
                 inner_terms,
                 relation_column,
@@ -3037,8 +3075,7 @@ where
     /// let users = User::query().has("posts").get().await?;
     /// ```
     pub fn has(mut self, relation: &str) -> Self {
-        let spec =
-            self.build_exists_spec_for(relation, true, None, None, Vec::new(), None, None, None);
+        let spec = self.build_exists_spec_for(relation, Existence::Has, None, Vec::new(), None);
         self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
         self
     }
@@ -3053,12 +3090,9 @@ where
     pub fn has_count(mut self, relation: &str, op: &str, count: i64) -> Self {
         let spec = self.build_exists_spec_for(
             relation,
-            true,
-            Some(op),
-            Some(count),
+            Existence::Has,
+            Some(CountConstraint { op, value: count }),
             Vec::new(),
-            None,
-            None,
             None,
         );
         self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
@@ -3067,8 +3101,7 @@ where
 
     /// `OR EXISTS (...)` - disjunction form of [`Self::has`].
     pub fn or_has(mut self, relation: &str) -> Self {
-        let spec =
-            self.build_exists_spec_for(relation, true, None, None, Vec::new(), None, None, None);
+        let spec = self.build_exists_spec_for(relation, Existence::Has, None, Vec::new(), None);
         let new = WhereTerm::Exists(Box::new(spec));
         self.merge_or_term(new);
         self
@@ -3078,7 +3111,7 @@ where
     /// rows whose `relation` returns no matching children.
     pub fn doesnt_have(mut self, relation: &str) -> Self {
         let spec =
-            self.build_exists_spec_for(relation, false, None, None, Vec::new(), None, None, None);
+            self.build_exists_spec_for(relation, Existence::DoesntHave, None, Vec::new(), None);
         self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
         self
     }
@@ -3086,7 +3119,7 @@ where
     /// `OR NOT EXISTS (...)` - disjunction form of [`Self::doesnt_have`].
     pub fn or_doesnt_have(mut self, relation: &str) -> Self {
         let spec =
-            self.build_exists_spec_for(relation, false, None, None, Vec::new(), None, None, None);
+            self.build_exists_spec_for(relation, Existence::DoesntHave, None, Vec::new(), None);
         let new = WhereTerm::Exists(Box::new(spec));
         self.merge_or_term(new);
         self
@@ -3108,16 +3141,8 @@ where
         F: FnOnce(Builder<R>) -> Builder<R>,
     {
         let inner = predicate(Builder::<R>::new());
-        let spec = self.build_exists_spec_for(
-            relation,
-            true,
-            None,
-            None,
-            inner.where_terms,
-            None,
-            None,
-            None,
-        );
+        let spec =
+            self.build_exists_spec_for(relation, Existence::Has, None, inner.where_terms, None);
         self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
         self
     }
@@ -3129,16 +3154,8 @@ where
         F: FnOnce(Builder<R>) -> Builder<R>,
     {
         let inner = predicate(Builder::<R>::new());
-        let spec = self.build_exists_spec_for(
-            relation,
-            true,
-            None,
-            None,
-            inner.where_terms,
-            None,
-            None,
-            None,
-        );
+        let spec =
+            self.build_exists_spec_for(relation, Existence::Has, None, inner.where_terms, None);
         let new = WhereTerm::Exists(Box::new(spec));
         self.merge_or_term(new);
         self
@@ -3153,12 +3170,9 @@ where
         let inner = predicate(Builder::<R>::new());
         let spec = self.build_exists_spec_for(
             relation,
-            false,
-            None,
+            Existence::DoesntHave,
             None,
             inner.where_terms,
-            None,
-            None,
             None,
         );
         self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
@@ -3174,12 +3188,9 @@ where
         let inner = predicate(Builder::<R>::new());
         let spec = self.build_exists_spec_for(
             relation,
-            false,
-            None,
+            Existence::DoesntHave,
             None,
             inner.where_terms,
-            None,
-            None,
             None,
         );
         let new = WhereTerm::Exists(Box::new(spec));
@@ -3199,13 +3210,14 @@ where
     ) -> Self {
         let spec = self.build_exists_spec_for(
             relation,
-            true,
-            None,
+            Existence::Has,
             None,
             Vec::new(),
-            Some(col.col_name()),
-            Some("=".to_string()),
-            Some(val.into_val()),
+            Some(RelationPredicate {
+                column: col.col_name(),
+                op: "=".to_string(),
+                value: val.into_val(),
+            }),
         );
         self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
         self
@@ -3222,13 +3234,14 @@ where
     ) -> Self {
         let spec = self.build_exists_spec_for(
             relation,
-            true,
-            None,
+            Existence::Has,
             None,
             Vec::new(),
-            Some(col.col_name()),
-            Some(op.to_string()),
-            Some(val.into_val()),
+            Some(RelationPredicate {
+                column: col.col_name(),
+                op: op.to_string(),
+                value: val.into_val(),
+            }),
         );
         self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
         self
@@ -3243,13 +3256,14 @@ where
     ) -> Self {
         let spec = self.build_exists_spec_for(
             relation,
-            true,
-            None,
+            Existence::Has,
             None,
             Vec::new(),
-            Some(col.col_name()),
-            Some("=".to_string()),
-            Some(val.into_val()),
+            Some(RelationPredicate {
+                column: col.col_name(),
+                op: "=".to_string(),
+                value: val.into_val(),
+            }),
         );
         let new = WhereTerm::Exists(Box::new(spec));
         self.merge_or_term(new);
