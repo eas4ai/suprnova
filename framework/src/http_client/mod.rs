@@ -694,15 +694,7 @@ impl RequestBuilder {
             .max_response_bytes
             .unwrap_or_else(Http::max_response_bytes);
 
-        let policy = self.retry;
-        let max_attempts = policy.map(|p| p.max_attempts).unwrap_or(1);
-        // A request is eligible for retry only when a policy is set AND
-        // either the method is idempotent or the caller explicitly opted
-        // non-idempotent methods in. This prevents a blind replay of a
-        // POST/PATCH whose first attempt may have already taken effect.
-        let method_retryable = policy
-            .map(|p| p.retry_non_idempotent || self.method.is_idempotent())
-            .unwrap_or(false);
+        let max_attempts = self.retry.map(|p| p.max_attempts).unwrap_or(1);
 
         let mut last_err: Option<FrameworkError> = None;
         for attempt in 1..=max_attempts {
@@ -731,64 +723,33 @@ impl RequestBuilder {
             match outcome {
                 Ok(resp) => {
                     let status = resp.status();
-                    let is_transient = (500..600).contains(&status);
-                    if is_transient
-                        && method_retryable
-                        && attempt < max_attempts
-                        && let Some(p) = policy
+                    if (500..600).contains(&status)
+                        && let Some(backoff) =
+                            self.backoff_before_retry(attempt, RetryOutcome::Status(status))
                     {
-                        let allowed = self
-                            .retry_when
-                            .as_ref()
-                            .map(|predicate| {
-                                predicate(&RetryContext {
-                                    attempt,
-                                    method: self.method.as_str(),
-                                    url: self.url.clone(),
-                                    outcome: RetryOutcome::Status(status),
-                                })
-                            })
-                            .unwrap_or(true);
-                        if allowed {
-                            let backoff = backoff_for(attempt, p.base_backoff);
-                            let wait = if status == 503 {
-                                std::cmp::min(
-                                    std::cmp::max(backoff, retry_after_from(&resp)),
-                                    MAX_RETRY_WAIT,
-                                )
-                            } else {
-                                backoff
-                            };
-                            tokio::time::sleep(wait).await;
-                            continue;
-                        }
+                        // A 503 can say how long to wait. It is obeyed
+                        // when it asks for more than the backoff, up to
+                        // the cap.
+                        let wait = if status == 503 {
+                            std::cmp::min(
+                                std::cmp::max(backoff, retry_after_from(&resp)),
+                                MAX_RETRY_WAIT,
+                            )
+                        } else {
+                            backoff
+                        };
+                        tokio::time::sleep(wait).await;
+                        continue;
                     }
                     return Ok(resp.with_max_bytes(effective_max));
                 }
                 Err(e) => {
-                    // Like the 5xx branch above, transport-error retries
-                    // require `method_retryable`: replaying a POST/PATCH
-                    // whose first attempt may already have taken effect
-                    // needs the explicit `retry_non_idempotent` opt-in.
-                    if method_retryable && let Some(p) = policy.filter(|_| attempt < max_attempts) {
-                        let allowed = self
-                            .retry_when
-                            .as_ref()
-                            .map(|predicate| {
-                                predicate(&RetryContext {
-                                    attempt,
-                                    method: self.method.as_str(),
-                                    url: self.url.clone(),
-                                    outcome: RetryOutcome::TransportError,
-                                })
-                            })
-                            .unwrap_or(true);
-                        if allowed {
-                            let backoff = backoff_for(attempt, p.base_backoff);
-                            last_err = Some(e);
-                            tokio::time::sleep(backoff).await;
-                            continue;
-                        }
+                    if let Some(backoff) =
+                        self.backoff_before_retry(attempt, RetryOutcome::TransportError)
+                    {
+                        last_err = Some(e);
+                        tokio::time::sleep(backoff).await;
+                        continue;
                     }
                     return Err(e);
                 }
@@ -797,6 +758,36 @@ impl RequestBuilder {
         Err(last_err.unwrap_or_else(|| {
             FrameworkError::internal("Http::send retries exhausted without a response")
         }))
+    }
+
+    /// Whether the attempt that ended in `outcome` is followed by another
+    /// one, and how long to wait before it. `None` ends the request with
+    /// what the attempt gave.
+    ///
+    /// This is the one place that decides. A response with a status of
+    /// the server and an attempt that got no response are retried by the
+    /// same rule:
+    ///
+    /// - a retry policy is set, and this was not its last attempt;
+    /// - the method is idempotent, or the caller asked for
+    ///   `retry_non_idempotent`: a POST or a PATCH whose first attempt
+    ///   may have taken effect is not sent again unasked;
+    /// - the predicate of `retry_when`, when there is one, allows it.
+    fn backoff_before_retry(&self, attempt: u32, outcome: RetryOutcome) -> Option<Duration> {
+        let policy = self.retry?;
+        let method_retryable = policy.retry_non_idempotent || self.method.is_idempotent();
+        if !method_retryable || attempt >= policy.max_attempts {
+            return None;
+        }
+        let allowed = self.retry_when.as_ref().is_none_or(|predicate| {
+            predicate(&RetryContext {
+                attempt,
+                method: self.method.as_str(),
+                url: self.url.clone(),
+                outcome,
+            })
+        });
+        allowed.then(|| backoff_for(attempt, policy.base_backoff))
     }
 }
 
@@ -1077,6 +1068,117 @@ fn check_fake_within_cap(body: Bytes, max: usize) -> Result<Bytes, FrameworkErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The contexts the predicate of a request was asked about.
+    fn asked(
+        request: RequestBuilder,
+        allow: bool,
+    ) -> (
+        RequestBuilder,
+        std::sync::Arc<std::sync::Mutex<Vec<RetryContext>>>,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = std::sync::Arc::clone(&seen);
+        let request = request.retry_when(move |context| {
+            record
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(context.clone());
+            allow
+        });
+        (request, seen)
+    }
+
+    const BOTH_OUTCOMES: [RetryOutcome; 2] =
+        [RetryOutcome::Status(502), RetryOutcome::TransportError];
+
+    #[test]
+    fn a_request_without_a_policy_is_not_retried() {
+        let request = Http::get("https://api.example.test/things");
+        for outcome in BOTH_OUTCOMES {
+            assert_eq!(request.backoff_before_retry(1, outcome), None);
+        }
+    }
+
+    #[test]
+    fn the_two_outcomes_are_retried_by_one_rule() {
+        let base = Duration::from_millis(40);
+        let request = Http::get("https://api.example.test/things").retry(3, base);
+        for outcome in BOTH_OUTCOMES {
+            for attempt in [1, 2] {
+                let backoff = request
+                    .backoff_before_retry(attempt, outcome)
+                    .unwrap_or_else(|| panic!("attempt {attempt} of 3 is followed by another"));
+                assert!(
+                    backoff <= base.saturating_mul(1 << (attempt - 1)),
+                    "the backoff of attempt {attempt} is over its ceiling: {backoff:?}"
+                );
+            }
+            assert_eq!(
+                request.backoff_before_retry(3, outcome),
+                None,
+                "the last attempt is followed by none"
+            );
+        }
+    }
+
+    #[test]
+    fn a_post_is_retried_when_the_caller_asked_for_it() {
+        let base = Duration::from_millis(10);
+        let unasked = Http::post("https://api.example.test/things").retry(3, base);
+        let asked_for = Http::post("https://api.example.test/things").retry_non_idempotent(3, base);
+        for outcome in BOTH_OUTCOMES {
+            assert_eq!(unasked.backoff_before_retry(1, outcome), None);
+            assert!(asked_for.backoff_before_retry(1, outcome).is_some());
+        }
+    }
+
+    #[test]
+    fn the_predicate_is_asked_with_the_outcome_and_can_refuse() {
+        let base = Duration::from_millis(10);
+        let (refusing, seen) = asked(
+            Http::get("https://api.example.test/things").retry(3, base),
+            false,
+        );
+        for outcome in BOTH_OUTCOMES {
+            assert_eq!(refusing.backoff_before_retry(2, outcome), None);
+        }
+        let seen = seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            seen.iter()
+                .map(|context| context.outcome)
+                .collect::<Vec<_>>(),
+            BOTH_OUTCOMES
+        );
+        assert!(seen.iter().all(|context| context.attempt == 2
+            && context.method == "GET"
+            && context.url == "https://api.example.test/things"));
+
+        let (allowing, seen) = asked(
+            Http::get("https://api.example.test/things").retry(3, base),
+            true,
+        );
+        assert!(
+            allowing
+                .backoff_before_retry(1, RetryOutcome::TransportError)
+                .is_some()
+        );
+        // The rule of the policy comes first: the predicate is not asked
+        // about an attempt that the policy ends.
+        assert_eq!(
+            allowing.backoff_before_retry(3, RetryOutcome::TransportError),
+            None
+        );
+        assert_eq!(
+            seen.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
+        );
+    }
 
     #[test]
     fn idempotent_methods_are_get_put_delete() {

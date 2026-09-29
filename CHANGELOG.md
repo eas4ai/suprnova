@@ -530,6 +530,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   are named now. The paths through the modules, `payments::session::` and its
   seven siblings, are gone: the modules are reached as
   `payments::dto::session`.
+- **`Http::send` decides once whether an attempt is retried.** The loop had
+  the decision twice, for a response with a status of the server and for an
+  attempt that got no response: the same check of the policy, of the method
+  and of the `retry_when` predicate, in two blocks that a change had to keep
+  alike by hand. It is one function now, and the two outcomes are retried by
+  one rule. What is retried and how long the request waits is what it was.
 
 ### Fixed
 
