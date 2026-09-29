@@ -454,14 +454,31 @@ fn is_prop_type(ty: &syn::Type) -> bool {
     false
 }
 
-fn build_form_request(
-    struct_name: &Ident,
-    struct_opts: &StructOptions,
-    impl_generics: &syn::ImplGenerics,
-    ty_generics: &syn::TypeGenerics,
-    where_clause: Option<&syn::WhereClause>,
-    parsed: &[(&Field, FieldOptions)],
-) -> TokenStream2 {
+/// The inputs every `build_*` function of the derive reads, built once by
+/// `derive_data_impl`. Bundling them keeps the builders' signatures to what
+/// each one adds, and names the generics so an `impl` header cannot be fed the
+/// wrong `ImplGenerics` / `TypeGenerics` pair by position.
+struct DataCodegen<'a> {
+    /// The identifier of the struct the derive is applied to.
+    struct_name: &'a Ident,
+    /// `struct_name` as a string, for diagnostics and `expecting` messages.
+    struct_name_str: &'a str,
+    /// The struct's own `impl<...>` generics.
+    impl_generics: syn::ImplGenerics<'a>,
+    /// The struct's `<...>` type arguments.
+    ty_generics: syn::TypeGenerics<'a>,
+    /// The struct's `where` clause, when it has one.
+    where_clause: Option<&'a syn::WhereClause>,
+    /// Every named field with its parsed `#[data(...)]` options.
+    parsed: &'a [(&'a Field, FieldOptions)],
+}
+
+fn build_form_request(ctx: &DataCodegen<'_>, struct_opts: &StructOptions) -> TokenStream2 {
+    let struct_name = ctx.struct_name;
+    let impl_generics = &ctx.impl_generics;
+    let ty_generics = &ctx.ty_generics;
+    let where_clause = ctx.where_clause;
+    let parsed = ctx.parsed;
     // Build the `fn authorize` body. With `#[data(authorize = "path::fn")]`
     // we route to the user's function; without it, we keep Laravel's
     // permissive default (true). Either way the rest of the `FormRequest`
@@ -918,14 +935,15 @@ fn build_prop_entry(
 }
 
 fn build_into_inertia_props(
-    struct_name: &Ident,
-    struct_name_str: &str,
+    ctx: &DataCodegen<'_>,
     qualified_name_expr: &TokenStream2,
-    impl_generics: &syn::ImplGenerics,
-    ty_generics: &syn::TypeGenerics,
-    where_clause: Option<&syn::WhereClause>,
-    parsed: &[(&Field, FieldOptions)],
 ) -> TokenStream2 {
+    let struct_name = ctx.struct_name;
+    let struct_name_str = ctx.struct_name_str;
+    let impl_generics = &ctx.impl_generics;
+    let ty_generics = &ctx.ty_generics;
+    let where_clause = ctx.where_clause;
+    let parsed = ctx.parsed;
     // Two parallel entry lists: the infallible (panicking) escape hatch and
     // the `?`-propagating fallible sibling. They differ only in the eager
     // (default) serialize arm; lazy flavors are identical. See
@@ -1060,24 +1078,22 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
     // own extractor or use a separate input DTO without lazy fields.
     let has_lazy_fields = parsed.iter().any(|(_, o)| o.lazy.is_some());
 
-    let serialize_impl = build_serialize(
+    let ctx = DataCodegen {
         struct_name,
-        &impl_generics,
-        &ty_generics,
+        struct_name_str: &struct_name_str,
+        impl_generics,
+        ty_generics,
         where_clause,
-        &parsed,
-    );
+        parsed: &parsed,
+    };
+
+    let serialize_impl = build_serialize(&ctx);
     let deserialize_impl = if has_reference_fields || has_lazy_fields {
         proc_macro2::TokenStream::new()
     } else {
         build_deserialize(
-            struct_name,
-            &struct_name_str,
+            &ctx,
             &de_impl_generics,
-            &impl_generics,
-            &ty_generics,
-            where_clause,
-            &parsed,
             has_type_params,
             struct_opts.allow_unknown_fields,
         )
@@ -1100,35 +1116,13 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
     let form_request_impl = if is_generic || has_reference_fields || has_lazy_fields {
         proc_macro2::TokenStream::new()
     } else {
-        build_form_request(
-            struct_name,
-            &struct_opts,
-            &impl_generics,
-            &ty_generics,
-            where_clause,
-            &parsed,
-        )
+        build_form_request(&ctx, &struct_opts)
     };
 
-    let into_inertia_props_impl = build_into_inertia_props(
-        struct_name,
-        &struct_name_str,
-        &qualified_name_expr,
-        &impl_generics,
-        &ty_generics,
-        where_clause,
-        &parsed,
-    );
+    let into_inertia_props_impl = build_into_inertia_props(&ctx, &qualified_name_expr);
 
     let into_json_resource_impl = if let Some(jr_opts) = &struct_opts.json_resource {
-        build_into_json_resource(
-            struct_name,
-            &impl_generics,
-            &ty_generics,
-            where_clause,
-            &parsed,
-            jr_opts,
-        )
+        build_into_json_resource(&ctx, jr_opts)
     } else {
         proc_macro2::TokenStream::new()
     };
@@ -1177,13 +1171,12 @@ fn is_field_type(ty: &syn::Type) -> bool {
     false
 }
 
-fn build_serialize(
-    struct_name: &Ident,
-    impl_generics: &syn::ImplGenerics,
-    ty_generics: &syn::TypeGenerics,
-    where_clause: Option<&syn::WhereClause>,
-    parsed: &[(&Field, FieldOptions)],
-) -> TokenStream2 {
+fn build_serialize(ctx: &DataCodegen<'_>) -> TokenStream2 {
+    let struct_name = ctx.struct_name;
+    let impl_generics = &ctx.impl_generics;
+    let ty_generics = &ctx.ty_generics;
+    let where_clause = ctx.where_clause;
+    let parsed = ctx.parsed;
     // Build the output field list, tagging each entry as either always-emit
     // or `Field`-typed-conditional-emit. `Field<T>` honors its documented
     // contract: `Field::Absent` omits the key from the serialized output,
@@ -1240,18 +1233,18 @@ fn is_reference_type(ty: &syn::Type) -> bool {
     matches!(ty, syn::Type::Reference(_))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_deserialize(
-    struct_name: &Ident,
-    struct_name_str: &str,
+    ctx: &DataCodegen<'_>,
     de_impl_generics: &syn::ImplGenerics,
-    impl_generics: &syn::ImplGenerics,
-    ty_generics: &syn::TypeGenerics,
-    where_clause: Option<&syn::WhereClause>,
-    parsed: &[(&Field, FieldOptions)],
     has_type_params: bool,
     allow_unknown_fields: bool,
 ) -> TokenStream2 {
+    let struct_name = ctx.struct_name;
+    let struct_name_str = ctx.struct_name_str;
+    let impl_generics = &ctx.impl_generics;
+    let ty_generics = &ctx.ty_generics;
+    let where_clause = ctx.where_clause;
+    let parsed = ctx.parsed;
     let output_only_names: Vec<String> = parsed
         .iter()
         .filter(|(_, o)| o.output_only)
@@ -1445,14 +1438,12 @@ fn build_deserialize(
 ///   (lazy = Inertia/Prop fields; they can't satisfy `IntoJsonResource`).
 /// - id field: the field named by `opts.id_field` (default "id").
 /// - Default-deny: `resource_included` rejects unknown keys in the include tree.
-fn build_into_json_resource(
-    struct_name: &Ident,
-    impl_generics: &syn::ImplGenerics,
-    ty_generics: &syn::TypeGenerics,
-    where_clause: Option<&syn::WhereClause>,
-    parsed: &[(&Field, FieldOptions)],
-    opts: &JsonResourceOptions,
-) -> TokenStream2 {
+fn build_into_json_resource(ctx: &DataCodegen<'_>, opts: &JsonResourceOptions) -> TokenStream2 {
+    let struct_name = ctx.struct_name;
+    let impl_generics = &ctx.impl_generics;
+    let ty_generics = &ctx.ty_generics;
+    let where_clause = ctx.where_clause;
+    let parsed = ctx.parsed;
     let resource_type = &opts.resource_type;
     let id_field = syn::Ident::new(&opts.id_field, proc_macro2::Span::call_site());
 
