@@ -1194,14 +1194,18 @@ impl InertiaResponse {
 
         let page = build_page_object(
             &component,
-            materialized,
+            ResolvedProps {
+                props: materialized,
+                metadata,
+            },
             &config,
             url,
-            &metadata,
             flash,
-            resolved_encrypt_history,
-            resolved_clear_history,
-            resolved_preserve_fragment,
+            PageObjectFlags {
+                encrypt_history: resolved_encrypt_history,
+                clear_history: resolved_clear_history,
+                preserve_fragment: resolved_preserve_fragment,
+            },
             shared_keys,
         );
 
@@ -1278,14 +1282,18 @@ impl InertiaResponse {
 
         let page = build_page_object(
             &component,
-            materialized,
+            ResolvedProps {
+                props: materialized,
+                metadata,
+            },
             &config,
             url,
-            &metadata,
             flash,
-            resolved_encrypt_history,
-            resolved_clear_history,
-            resolved_preserve_fragment,
+            PageObjectFlags {
+                encrypt_history: resolved_encrypt_history,
+                clear_history: resolved_clear_history,
+                preserve_fragment: resolved_preserve_fragment,
+            },
             shared_keys,
         );
         staged_session.commit();
@@ -1335,6 +1343,29 @@ struct OnceMetadataEntry {
     /// when the user supplied `OnceOptions::as_key`.
     prop_name: String,
     expires_at: Option<i64>,
+}
+
+/// What `resolve_props` hands on to `build_page_object`: the materialized
+/// prop bag and the metadata that describes it. They are produced together
+/// and read together, so they travel as one value.
+struct ResolvedProps {
+    /// Emitted as `props`.
+    props: serde_json::Map<String, Value>,
+    /// Emitted as the optional `deferredProps` / `mergeProps` / ... fields.
+    metadata: PageMetadata,
+}
+
+/// The three page-object flags the client acts on after a visit. They
+/// share one type, so they travel as named fields: two positional `bool`s
+/// swapped at a call site would still compile and silently keep a history
+/// the handler asked to clear, or drop a fragment it asked to keep.
+struct PageObjectFlags {
+    /// Emitted as `encryptHistory: true` when set, and omitted otherwise.
+    encrypt_history: bool,
+    /// Emitted as `clearHistory: true` when set, and omitted otherwise.
+    clear_history: bool,
+    /// Emitted as `preserveFragment: true` when set, and omitted otherwise.
+    preserve_fragment: bool,
 }
 
 /// Outcome of a single prop's async resolution.
@@ -1942,19 +1973,24 @@ async fn resolve_props(
     Ok((materialized, metadata))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_page_object(
     component: &str,
-    materialized_props: serde_json::Map<String, Value>,
+    resolved: ResolvedProps,
     config: &InertiaConfig,
     url: String,
-    metadata: &PageMetadata,
     flash: serde_json::Map<String, Value>,
-    encrypt_history: bool,
-    clear_history: bool,
-    preserve_fragment: bool,
+    flags: PageObjectFlags,
     shared_keys: Vec<String>,
 ) -> Value {
+    let ResolvedProps {
+        props: materialized_props,
+        metadata,
+    } = resolved;
+    let PageObjectFlags {
+        encrypt_history,
+        clear_history,
+        preserve_fragment,
+    } = flags;
     let mut page = serde_json::Map::new();
     page.insert(
         "component".to_string(),
