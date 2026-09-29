@@ -12,8 +12,9 @@ something the URL or a JWT should carry.
 `SessionMiddleware` runs on every request and does five things in order:
 
 1. Reads the session id and last successful activity-touch timestamp from
-   the `suprnova_session` cookie (AES-256-GCM encrypted). Tampered,
-   undecryptable, or malformed cookies are treated as absent.
+   the `suprnova_session` cookie (AES-256-GCM encrypted, bound to the cookie
+   name). Tampered, undecryptable, or malformed cookies are treated as absent,
+   and so is a value that another cookie wrote.
 2. Loads `SessionData` from the store only when a valid cookie names a
    session. Cookieless requests start with a clean in-memory session and do
    not issue a guaranteed database miss. A cookie whose row no longer exists
@@ -91,6 +92,22 @@ started on, so the session has to live in a `task_local!` slot and be
 borrowed through a scope-bound critical section. The `|s|` shape makes
 that boundary explicit and stops you accidentally holding a mutex guard
 across an `.await`.
+
+### When the closure panics
+
+A panic in a `session_mut` closure can leave the session between two of
+its writes. Most panics end the request, and nothing else happens. Some
+boundaries below the middleware catch the panic and let the request go on:
+a Live action, or a listener that runs inside the request.
+
+In that case `session()` and `session_mut()` keep working, so the code that
+answers for the panic can still read the session. The middleware does not
+store the session. It answers `500`, keeps the stored session as it was
+before the request, and logs an error. Cookies that the request queued are
+still sent with the `500`.
+
+Keep the closure free of code that can panic, and do the fallible work
+before you call `session_mut`.
 
 ## Flash data
 

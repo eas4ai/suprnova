@@ -199,8 +199,9 @@ the cron and the next run.
 
 `next:` is the first minute after now at which the expression matches; an
 expression that can never match prints `next: never`. Times are shown in
-UTC unless `--timezone` names another IANA zone, and an unknown zone name
-exits with an error before anything is printed.
+UTC unless `--timezone` names another IANA zone. The CLI hands the flag to
+your application without checking it, and the application exits with an
+error before it prints anything when the zone name is unknown.
 
 A task that pinned its own zone with `.timezone(...)` has its expression
 rewritten into the listing's zone and labelled with it - `report:generate`

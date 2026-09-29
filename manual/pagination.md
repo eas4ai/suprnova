@@ -2,7 +2,7 @@
 
 Suprnova ships three paginators that match Laravel's surface line-for-line:
 length-aware (knows the total), simple (one query per page), and cursor
-(opaque keyset). All three derive `Serialize` into the Laravel-shaped
+(opaque keyset). All three serialize into the Laravel-shaped
 JSON Inertia and JSON:API consumers already understand - you fetch a
 page and return it; nothing else is required.
 
@@ -42,24 +42,31 @@ right index, regardless of where in the result set the user is.
 
 ### Why Suprnova diverges
 
-Laravel's paginators carry URL-building helpers - `nextPageUrl()`,
-`previousPageUrl()`, the `links` array of `{url, label, page, active}`
-descriptors that Blade renders. Suprnova's raw `Serialize` impl emits
-the data slice plus the counters; URL construction lives on the
-response-shape constructors that already own URL context:
-[`Inertia::paginate`](frontend-inertia-responses.md) attaches Inertia
-scroll metadata (page identifiers, not absolute URLs);
-[`Resource::paginated`](eloquent-resources.md) attaches JSON:API
-`links.{self,first,last,prev,next}` per the JSON:API recommendation.
+The JSON of the three paginators has the fields of Laravel's
+`toArray()`, so a front end that was written for Laravel's paginator
+reads it. That includes the pagination components of the Inertia starter
+kits, which draw the `links` array as it comes. Four differences matter
+to a reader who knows Laravel:
 
-Two reasons for the split. First, the URL the client should see depends
-on which protocol surface is rendering it - Inertia keys off page
-identifiers, JSON:API wants absolute hrefs. Second, the paginator
-doesn't know the request's base URL by default; the helpers that do
-know it can attach the URLs once, where they belong. If you do need
-URLs on the bare paginator (custom JSON envelope, telemetry payload,
-test assertion), call `with_path(...)` and use `url_for_page(n)` -
-covered in the [URL generation](#url-generation-and-paths) section.
+- A paginator does not know the base URL of the request. You give it
+  one with `with_path(...)`. With no `path`, the page URLs are relative
+  (`?page=2`) and `path` is left out of the JSON, where Laravel writes
+  `/`.
+- Give a `path` and a query string, never a URL with a host. The `path`
+  is written into every URL as you give it, and the host of a request is
+  whatever its `Host` header says, which the client chooses.
+- A paginator with no rows has a `last_page` of `0` and a `links` array
+  of two entries, the link before and the link behind. Laravel has a
+  `last_page` of `1` and a link to page 1. `last_page_url` is the URL of
+  page 1 in both.
+- `simple_paginate` keeps `has_more` beside Laravel's fields.
+
+[`Inertia::paginate`](frontend-inertia-responses.md) attaches Inertia
+scroll metadata (page identifiers, not absolute URLs), and
+[`Resource::paginated`](eloquent-resources.md) attaches JSON:API
+`links.{self,first,last,prev,next}` per the JSON:API recommendation. The
+page URLs and helpers of the bare paginator are covered in the
+[URL generation](#url-generation-and-paths) section.
 
 ## `paginate` - length-aware
 
@@ -90,27 +97,71 @@ pub struct LengthAwarePaginator<T> {
     pub from: Option<u64>,       // 1-based first row index on this page
     pub to: Option<u64>,         // 1-based last row index on this page
     pub path: Option<String>,    // base URL for url_for_page (optional)
+    pub page_name: Option<String>, // query key of the page; "page" when None
 }
 ```
 
-The JSON the derived `Serialize` emits:
+The JSON of a paginator with `with_path("/api/users")`, on page 2 of 3:
 
 ```json
 {
+  "current_page": 2,
   "data": [...],
-  "current_page": 1,
+  "first_page_url": "/api/users?page=1",
+  "from": 11,
   "last_page": 3,
+  "last_page_url": "/api/users?page=3",
+  "links": [
+    {"url": "/api/users?page=1", "label": "&laquo; Previous", "page": 1, "active": false},
+    {"url": "/api/users?page=1", "label": "1", "page": 1, "active": false},
+    {"url": "/api/users?page=2", "label": "2", "page": 2, "active": true},
+    {"url": "/api/users?page=3", "label": "3", "page": 3, "active": false},
+    {"url": "/api/users?page=3", "label": "Next &raquo;", "page": 3, "active": false}
+  ],
+  "next_page_url": "/api/users?page=3",
+  "path": "/api/users",
   "per_page": 10,
-  "total": 25,
-  "from": 1,
-  "to": 10,
-  "path": "/api/users"
+  "prev_page_url": "/api/users?page=1",
+  "to": 20,
+  "total": 25
 }
 ```
 
-`path` is omitted from the JSON when unset; `from` and `to` are `null`
+`path` is omitted from the JSON when unset. `from` and `to` are `null`
 when the page is empty (no rows on this page, or the requested page is
-past the last page).
+past the last page). `next_page_url` is `null` on the last page, and
+`prev_page_url` is `null` on the first page.
+
+### The `links` array
+
+`links` is the row of links that a pagination component draws. Each entry
+has `url`, `label`, `page`, and `active`:
+
+- The first entry is the link to the previous page. Its label is
+  `&laquo; Previous`, with the entity written out, because a front end
+  puts the label into the page as markup. Its `url` and `page` are `null`
+  on the first page.
+- One entry follows for each page in the window, labelled with the page
+  number. `active` is `true` for the current page only.
+- Where pages are left out, an entry with the label `...` stands in. It
+  has a `null` `url`, and it has no `page` key.
+- The last entry is the link to the next page. Its label is
+  `Next &raquo;`. Its `url` and `page` are `null` on the last page.
+
+The window is Laravel's. Up to 13 pages, every page is listed. With more
+pages, the row lists the first two pages, the last two pages, and seven
+pages around the current one, with `...` between the groups. Near either
+end, the pages of that end are listed in one run of ten instead. For 50
+pages with page 25 current, the labels are `1 2 ... 22 23 24 25 26 27 28
+... 49 50`.
+
+A paginator with no rows has `last_page` of `0`, both page URLs of page 1
+(`?page=1` with no path), and a `links` array of two entries with no page
+between them.
+
+In Rust, `links()` returns the same entries as `Vec<PageLink>`. A
+`PageLink` has the public fields `url: Option<String>`, `label: String`,
+`page: Option<u64>`, and `active: bool`.
 
 ### Reading `?page=N` automatically
 
@@ -183,23 +234,33 @@ pub struct Paginator<T> {
 }
 ```
 
-JSON:
+JSON, with `with_path("/api/users")`, on page 2:
 
 ```json
 {
+  "current_page": 2,
+  "current_page_url": "/api/users?page=2",
   "data": [...],
-  "current_page": 1,
-  "per_page": 10,
+  "first_page_url": "/api/users?page=1",
+  "from": 11,
   "has_more": true,
-  "path": "/api/users"
+  "next_page_url": "/api/users?page=3",
+  "path": "/api/users",
+  "per_page": 10,
+  "prev_page_url": "/api/users?page=1",
+  "to": 20
 }
 ```
+
+`next_page_url` is `null` when `has_more` is `false`, and `prev_page_url`
+is `null` on the first page. `from` and `to` are `null` for a page with no
+rows. `path` is omitted when unset. The page key is always `page`.
 
 The trick is in the SQL. `simple_paginate(20)` issues `LIMIT 21`, looks
 at whether the 21st row came back, sets `has_more` from that, and
 truncates `data` back to 20. One query per page; no `COUNT(*)`.
 
-You give up `total`, `last_page`, `from`, and `to`. In exchange you can
+You give up `total`, `last_page`, `last_page_url`, and `links`. In exchange you can
 paginate tables where `COUNT(*)` is too expensive to run on every page
 load. The UI surface is "Next" / "Previous" buttons, not "page 7 of
 142".
@@ -229,21 +290,25 @@ pub struct CursorPaginator<T> {
 }
 ```
 
-JSON:
+JSON, with `with_path("/api/users")`:
 
 ```json
 {
   "data": [...],
+  "path": "/api/users",
   "per_page": 10,
   "next_cursor": "...",
+  "next_page_url": "/api/users?cursor=...",
   "prev_cursor": null,
-  "path": "/api/users"
+  "prev_page_url": null
 }
 ```
 
-`next_cursor` and `prev_cursor` are always present as JSON keys (`null`
-when absent) so client schemas can rely on field presence; `path` is
-omitted when unset.
+`next_cursor`, `next_page_url`, `prev_cursor`, and `prev_page_url` are
+always present as JSON keys (`null` when absent) so client schemas can
+rely on field presence. A URL is the `path` with the cursor in the
+`cursor` key, and it is `null` when its cursor is. `path` is omitted when
+unset.
 
 ### How cursors work on the wire
 
@@ -384,7 +449,7 @@ framework bug worth flagging.
 
 ## URL generation and paths
 
-The raw paginator carries an optional `path` field. When set,
+The paginator carries an optional `path` field. When set,
 `url_for_page(n)` and the cursor link emission use it to build query
 strings:
 
@@ -417,13 +482,40 @@ sets it automatically so the generated URLs use the same key the
 paginator was driven from. The parameter name is form-urlencoded, so
 even a name with reserved characters can't corrupt the URL.
 
+A page parameter that the `path` already has is replaced, so you can give
+the path and query string of the current request as the `path`. A
+fragment of the `path` stays at the end of the URL:
+
+```rust
+let page = User::query()
+    .paginate(20)
+    .await?
+    .with_path("/users?role=admin&page=2#list");
+
+page.url_for_page(3);    // "/users?role=admin&page=3#list"
+```
+
+The JSON uses these URLs for `first_page_url`, `last_page_url`,
+`next_page_url`, `prev_page_url`, and each `url` in `links`.
+
+In Rust, each paginator returns the same values as methods:
+
+| Paginator | Methods |
+|---|---|
+| `LengthAwarePaginator` | `url_for_page(n)`, `next_page_url()`, `previous_page_url()`, `links()` |
+| `Paginator` | `url_for_page(n)`, `next_page_url()`, `previous_page_url()`, `first_item()`, `last_item()` |
+| `CursorPaginator` | `next_page_url()`, `previous_page_url()` |
+
+`next_page_url()` and `previous_page_url()` return `None` where the JSON
+has `null`.
+
 Cursor paginators have the same shape: `with_path(...)` sets the base,
 `with_cursor_name(...)` overrides the query key (defaults to `"cursor"`),
 and the JSON:API link builder picks them up automatically.
 
-Most apps don't call `url_for_page` directly - they hand the paginator
-to one of the two integration surfaces below, which build the URLs the
-right way for their protocol.
+Most apps hand the paginator straight to a response. The JSON already
+carries the URLs, and the two integration surfaces below build the URLs
+the right way for their protocol.
 
 ## Inertia integration - infinite scroll props
 
@@ -568,7 +660,7 @@ Ok(suprnova::json_response!({
 }))
 ```
 
-Or just hand the whole paginator across - the derived `Serialize` impl
+Or just hand the whole paginator across - its `Serialize` impl
 emits the shape documented above:
 
 ```rust

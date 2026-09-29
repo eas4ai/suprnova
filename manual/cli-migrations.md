@@ -115,11 +115,16 @@ Running migrations...
 Migrations completed successfully!
 ```
 
-The serve / web:run path auto-runs `migrate` before binding the socket
-unless you opt out with `--no-migrate` or set
+The application's `serve` and `web:run` subcommands auto-run `migrate` before
+binding the socket unless you opt out with `--no-migrate` or set
 `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT=true` to keep going past a failure.
 A migration error during auto-migrate exits non-zero before the server
 boots; see `framework/src/app/mod.rs` for the fail-closed contract.
+
+`suprnova serve` runs `migrate` once when it starts and then runs the backend
+with `serve --no-migrate`, so a restart of the backend does not migrate again.
+Pass `--migrate always` to migrate on every restart, or `--no-migrate` to run
+no migration. See [suprnova serve](cli-serve.md#migrations).
 
 ## migrate:status
 
@@ -281,19 +286,22 @@ console surface.
 
 ## db:seed
 
-Not a `suprnova` CLI command. Run seeders through the per-project
-console binary:
+Run the seeders with `suprnova db:seed`. It runs every registered seeder, or
+the one you name:
 
 ```bash
-cargo run --bin console -- db:seed
-cargo run --bin console -- db:seed --class=UsersSeeder
+suprnova db:seed
+suprnova db:seed UsersSeeder
+suprnova db:seed --class=UsersSeeder
 ```
 
-The seeder registry, ordering rules, and the `--class` matching are
-covered in [Seeding](seeding.md). The framework ships `db:seed` as a
-built-in console command - your scaffold gets it without any wiring on
-your side, but you do invoke it through `console`, not through
-`suprnova`.
+The CLI runs `cargo run --quiet --bin console -- db:seed` and passes the name
+as `--class=<name>`. It does not check the name: your `console` binary owns the
+seeder registry and reports an unknown seeder. The seeder registry, ordering
+rules, and the `--class` matching are covered in [Seeding](seeding.md). The
+framework ships `db:seed` as a built-in console command, so your scaffold gets
+it without any wiring on your side. You can also run it with
+`cargo run --bin console -- db:seed`.
 
 ## Summary
 
@@ -305,7 +313,7 @@ your side, but you do invoke it through `console`, not through
 | `suprnova migrate:rollback [--step N]` | Roll back the last `N` migrations (default 1) |
 | `suprnova migrate:fresh` | Drop all tables and re-run every migration |
 | `suprnova db:sync [--skip-migrations] [--regenerate-models]` | Regenerate SeaORM entities from the live schema |
-| `cargo run --bin console -- db:seed` | Run registered seeders (per-project console, not the `suprnova` CLI) |
+| `suprnova db:seed [<seeder>]` | Run registered seeders, through the per-project `console` binary |
 
 ## Next
 

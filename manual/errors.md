@@ -192,7 +192,7 @@ The message becomes `"creating new user: <original>"`. Structured
 variants (`Validation`, `ValidationError`, `ModelNotFound`,
 `ParamParse`, `PrecognitionFailure`, `PrecognitionSuccess`,
 `Unauthorized`, `UnsupportedMediaType`, `AlreadyReported`,
-`RateLimited`, `External`) keep their variant so the response renderer
+`RateLimited`, `Timeout`, `External`) keep their variant so the response renderer
 still emits the right shape (and, for `External`, so the wrapped
 source survives); flat message-carrying variants (`Internal`,
 `Database`, `Domain`) flatten into a `Domain` with the prefixed
@@ -278,6 +278,27 @@ Queue retry policies, jitter scheduling, and the HTTP `Retry-After` response hea
 hint back through `retry_after()`, which returns `None` for every other variant and for throttles
 that came without one. `.context(...)` preserves the variant, so adding operation context does not
 strip the duration.
+
+### Telling a passed deadline from a failure
+
+`FrameworkError::Timeout` means a deadline passed before the awaited work
+finished. `FrameworkError::timeout(elapsed, message)` builds one, and
+`is_timeout()` asks for it. It renders as `504 Gateway Timeout`, and the
+client sees the generic 5xx message. The workflow wait returns it, so a
+handler can tell a workflow that is still running from a failure:
+
+```rust
+use std::time::Duration;
+use suprnova::FrameworkError;
+
+let err = FrameworkError::timeout(Duration::from_secs(30), "waiting for the export");
+
+assert!(err.is_timeout());
+assert_eq!(err.status_code(), 504);
+```
+
+See [Error Model](error-model.md#telling-a-passed-deadline-from-a-failure) and
+[Workflows](workflows.md#waiting-on-results).
 
 ## Custom domain errors
 

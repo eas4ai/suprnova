@@ -84,7 +84,7 @@ filled memory.
 | `blur(amount)` | Gaussian blur, `0..=100`. `0` is a no-op |
 | `sharpen(amount)` | Unsharp mask, `0..=100`. `0` is a no-op. `50` is the classic strength |
 | `grayscale()` | Desaturate. Spelled the Laravel way |
-| `to_format(format)` | Choose the output container |
+| `to_format(format)` | Choose the output container: `Jpeg`, `Png`, `WebP`, `WebPLossless`, `Gif` or `Bmp` |
 | `quality(q)` | Encode quality, clamped to `1..=100`, default `70` |
 
 Values that would be nonsense are clamped rather than rejected:
@@ -146,7 +146,8 @@ BMP**.
 |---|---|---|---|
 | PNG | yes | yes | ignored (lossless) |
 | JPEG | yes | yes | honoured |
-| WebP | yes | yes | honoured (lossless when unset) |
+| WebP (`OutputFormat::WebP`) | yes | yes | honoured (lossy; see below for the lossless cases) |
+| WebP (`OutputFormat::WebPLossless`) | yes | yes | ignored (lossless) |
 | GIF | yes | yes | ignored (palette) |
 | BMP | yes | yes | ignored (lossless) |
 
@@ -157,8 +158,49 @@ GIF output is palette-quantised to at most 256 colours with
 Floyd-Steinberg dithering before encoding, so a photographic source
 converts cleanly rather than erroring.
 
-WebP is written lossless by default; setting `quality()` switches it to
-lossy encoding at that quality, the same dial JPEG has.
+### WebP
+
+`OutputFormat::WebP` is lossy and uses the quality of the pipeline, the
+same dial JPEG has. The quality is `70` when you set none.
+`OutputFormat::WebPLossless` is always lossless and ignores the quality.
+Use it when the pixels of the file must be exact. Both variants have the
+content type `image/webp` and the extension `webp`.
+
+```rust
+use suprnova::{FrameworkError, Image, OutputFormat};
+
+async fn encode() -> Result<(), FrameworkError> {
+    // Lossy at quality 80.
+    let small = Image::from_path("storage/photos/hero.jpg")
+        .to_format(OutputFormat::WebP)
+        .quality(80)
+        .to_bytes()
+        .await?;
+
+    // Lossless: the quality has no effect.
+    let exact = Image::from_path("storage/photos/hero.jpg")
+        .to_format(OutputFormat::WebPLossless)
+        .to_bytes()
+        .await?;
+
+    Ok(())
+}
+```
+
+The built-in driver writes `OutputFormat::WebP` lossless, and ignores the
+quality, in two cases. In both the lossy form of WebP cannot hold the
+image:
+
+- A pixel is not fully opaque. The lossy encoder has no alpha channel,
+  so a lossy file would lose the transparency.
+- A side is longer than 16383 px, the largest side a lossy frame can
+  have.
+
+The ImageMagick driver writes `WebP` lossy at every quality, and keeps
+the alpha channel. It writes `WebPLossless` lossless.
+
+A WebP source that you resize and do not convert is written as `WebP`.
+An opaque one is therefore written lossy.
 
 ## Storage
 
@@ -311,7 +353,9 @@ impl ImageDriver for MyDriver {
         pipeline: &ImagePipeline,
     ) -> Result<Vec<u8>, FrameworkError> {
         // Decode `contents`, replay `pipeline.transformations`, then encode
-        // to `pipeline.format` at `pipeline.quality`.
+        // to `pipeline.format` at `pipeline.quality`. Give every
+        // `OutputFormat` variant an arm, `WebPLossless` included: the
+        // enum is not `#[non_exhaustive]`.
         todo!()
     }
 

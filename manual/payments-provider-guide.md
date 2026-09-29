@@ -79,6 +79,8 @@ crates/suprnova-payments-mollie/src/
 
 ## 3. `lib.rs` - the Provider Struct
 
+Import every payments type from `suprnova::payments` by its name, as the examples in this guide do. The modules of the request and result types are under `suprnova::payments::dto`, so `suprnova::payments::session::StartSessionRequest` is not a path.
+
 ```rust,ignore
 use async_trait::async_trait;
 use suprnova::payments::{Payment, PaymentProvider};
@@ -234,6 +236,8 @@ impl Subscription for MollieProvider {
 
     async fn update(&self, req: UpdateSubscriptionRequest) -> PaymentResult<SubscriptionResult> {
         // PATCH /v2/customers/{id}/subscriptions/{sub_id}
+        // Follow the contract of `req.new_price_refs` and `req.proration`
+        // (see below).
         Err(PaymentError::Internal("not yet implemented".into()))
     }
 
@@ -256,6 +260,12 @@ impl Subscription for MollieProvider {
     }
 }
 ```
+
+`UpdateSubscriptionRequest::new_price_refs` has one meaning on every adapter. The list is the set of prices the subscription has after the call. An item whose price is in the list keeps its id and quantity, and an item whose price is not in the list is removed. A price with no item is added with a quantity of 1. The exception is a swap: when exactly one item is removed and exactly one price is added, the new price takes the quantity of the removed item. Refuse an empty list and a list that names a price twice with `PaymentError::Validation`, before any request. Compute the change from a read of the subscription. The change is not atomic: a change made at the provider between your read and your write can be undone or left in place, depending on whether the provider takes the whole list of items or one item at a time. Return the provider's view of the outcome in the `SubscriptionResult`. `MockPaymentProvider` follows the same contract, so a test that runs against it sees what an adapter does.
+
+Build the text of a `PaymentError::Provider` from the SDK error yourself, without the message of the provider and without any id or URL, because the text ends up in logs and in responses. Name the operation and give the kind of the error, its code and the HTTP status, and use a fixed text for the other variants. The `sdk_error.rs` files of `suprnova-payments-stripe` and `suprnova-payments-paddle` show the shape: `provider_error(operation, error)` returns `PaymentError::Provider("stripe customers.retrieve: api error invalid_request_error resource_missing, status 404")` for a Stripe API error.
+
+`UpdateSubscriptionRequest::proration` is an `Option<Proration>` that you read only when `new_price_refs` is `Some`. Map `None` and `Proration::ProrateAtRenewal` to your provider's mode that adds the difference to the next invoice, `ProrateNow` to the mode that bills it at once, and `DoNotProrate` to the mode that bills nothing for the change. `Proration` is `#[non_exhaustive]`, so end the `match` with an arm that returns `PaymentError::NotSupported`. If the provider cannot take a part of a request, such as a price change together with `cancel_at_period_end`, return `NotSupported` and send nothing.
 
 If your provider doesn't support a method, return `PaymentError::NotSupported`:
 
@@ -596,6 +606,9 @@ The full enum lives in `framework/src/payments/error.rs`. Pick the variant that 
 | `InvalidPhoneNumber(String)` | E.164 validation failed in mobile-money flows |
 | `InvalidCountryCode(String)` | ISO-3166-1 alpha-2 validation failed |
 | `Internal(String)` | Unexpected SDK error, network failure, HMAC init failure, or any other framework-side problem |
+| `Database { context, source }` | A statement against the payments tables failed. `source` is the `suprnova::DbErr`; `?` converts a `DbErr` into this variant |
+
+Give every call of your adapter a deadline. The Stripe and Paddle adapters use 30 seconds and report a call that runs out of time as `Provider`. For a call that only reads, the text is `<provider> <operation> timed out`. For a call that changes something, the text adds `; outcome is unknown, reconcile before retrying`, because the provider may have carried out the change. The error of a change never says that the call failed.
 
 The webhook route maps these to status codes: `WebhookSignature(_)` → 401, `Validation(_)` from `parse_event` → 400, anything else from hydration → 503 (so the provider retries).
 

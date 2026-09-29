@@ -389,6 +389,189 @@ let user = Auth::stateful_guard("web")?
 guard returns an error with a remediation message rather than silently
 limiting the API.
 
+## Guards of your application
+
+The framework ships two guard drivers, `session` and `token`. For a
+guard it does not ship (an API key, a client certificate, a single
+sign-on cookie), you register a driver of your own and declare a guard
+that uses it. `GuardDriver` has three variants: `Session`, `Token`, and
+`Custom(String)`. It is not `Copy`, so borrow a driver or call
+`.clone()` where you copied it, and give a `match` that names every
+variant a `GuardDriver::Custom(_)` arm.
+
+The name of a guard of your application cannot contain `:`. The manager
+returns an error when you resolve such a guard, and `via_request` refuses
+to register a resolver for it, before either changes anything. The rule
+keeps two guards from attesting the same principal (see [Guards and
+Live](#guards-and-live)). A session or token guard may have a `:` in its
+name.
+
+### `Auth::extend`
+
+`Auth::extend(driver, factory)` registers the factory of a driver.
+`GuardConfig::custom(driver, provider)` declares a guard of that driver:
+
+```rust
+use std::sync::Arc;
+use suprnova::{Auth, AuthConfig, Guard, GuardConfig, TokenGuard};
+
+let config = AuthConfig::from_env()
+    .guard("partner", GuardConfig::custom("api_key", "partners"));
+
+// The factory gets the name of the guard and its provider. It returns
+// any `Guard`; `TokenGuard` stands in for your own type here.
+Auth::extend("api_key", |_name, provider| {
+    Ok(Arc::new(TokenGuard::new(provider)) as Arc<dyn Guard>)
+})?;
+```
+
+The factory has the type
+`Fn(&str, Arc<dyn UserProvider>) -> Result<Arc<dyn Guard>, FrameworkError>`.
+The manager builds a guard each time you resolve it, so the factory runs
+on every `Auth::guard("partner")`. Keep the state of a guard in
+request-scoped state, not in the guard value.
+
+If you resolve a guard whose driver has no factory, you get an error
+that names the guard and the driver and tells you to call
+`Auth::extend`. It never falls back to a built-in driver. Registering a
+driver twice keeps the last factory, and `Auth::extend` never replaces
+`session` or `token`. It refuses a driver name that starts with
+`via_request:`, because that prefix belongs to `Auth::via_request`.
+
+### `Auth::via_request`
+
+Most custom guards read one thing from the request and look up a user.
+`Auth::via_request(name, resolver)` is the short form for that. The
+resolver gets the `&Request` and answers with the user (`Ok(Some(user))`),
+with no user (`Ok(None)`), or with an error. You declare the guard with
+the driver that `AuthManager::via_request_driver(name)` derives from its
+name.
+
+This example authenticates a partner from the `X-Api-Key` header, from
+the config to the route:
+
+```rust
+use std::sync::Arc;
+use suprnova::http::text;
+use suprnova::{
+    handler, App, Auth, AuthConfig, AuthManager, AuthMiddleware, GuardConfig,
+    Request, Response, Router, UserProvider,
+};
+
+pub async fn bootstrap() -> Result<(), suprnova::FrameworkError> {
+    // `PartnerProvider` is your `UserProvider`. Its
+    // `retrieve_by_credentials` looks the partner up by a hash of the
+    // key, so the code never compares a secret with `==`.
+    let partners: Arc<dyn UserProvider> = Arc::new(PartnerProvider);
+
+    // Declare the guard under the driver that `via_request` derives.
+    let driver = AuthManager::via_request_driver("partner");
+    let entry = GuardConfig::custom(driver, "partners");
+    let config = AuthConfig::from_env().guard("partner", entry);
+    App::singleton(AuthManager::new(config));
+    Auth::register_provider("partners", partners.clone())?;
+
+    // Read what the future needs from the request first, so the future
+    // owns its data.
+    Auth::via_request("partner", move |request| {
+        let key = request.header("x-api-key").map(str::to_owned);
+        let partners = partners.clone();
+        Box::pin(async move {
+            let Some(key) = key else { return Ok(None) };
+            let credentials = serde_json::json!({ "api_key": key });
+            partners.retrieve_by_credentials(&credentials).await
+        })
+    })?;
+    Ok(())
+}
+
+#[handler]
+pub async fn me(_req: Request) -> Response {
+    match Auth::guard("partner")?.user().await? {
+        Some(user) => text(format!("partner {}", user.get_auth_identifier())),
+        None => text("no partner"),
+    }
+}
+
+pub fn routes() -> Router {
+    Router::new()
+        .get("/partner/me", me)
+        .middleware(AuthMiddleware::new().for_guard("partner"))
+}
+```
+
+`GuestMiddleware::for_guard("partner")` runs the resolver the same way.
+
+These rules hold for a guard of `Auth::via_request`:
+
+- The resolver runs once for a request, inside the middleware for that
+  guard. `AuthMiddleware::for_guard` and `GuestMiddleware::for_guard`
+  run it, and the guard reads the answer.
+- Outside that middleware, `Auth::guard("partner")` reports no user,
+  as the token guard does without `BearerTokenMiddleware`. A handler
+  that no such middleware protects sees a guest.
+- An error of a factory or of a resolver fails the request with `500`.
+  It is never a guest, and `AuthMiddleware::optional()` does not change
+  that.
+- The guard is read-only through the manager. `Auth::stateful_guard`
+  returns an error for it, and so does `BasicAuthMiddleware::for_guard`.
+- Each guard sees its own user. A guard of your application never reads
+  the user of the default guard or of another guard, and
+  `AuthMiddleware::for_guard` takes the principal of the request from
+  the user of that guard.
+
+`AuthManager::via_request(name, resolver)` is the method of the manager
+behind `Auth::via_request`. It returns a `Result`, so end the call with
+`?`.
+
+The same rules hold for a guard that `Auth::extend` registers, except
+that no resolver runs. A middleware earlier in the chain validates the
+credential and records what it proved in request-scoped state, and your
+guard reads that state, as the token guard reads the bearer id.
+
+### A guard of your application as the default guard
+
+A guard of your application is read-only through the manager. When you
+declare one as the default guard, the functions of `Auth` that take no
+guard name act as follows:
+
+- `Auth::user` and the other functions that load the user ask that guard.
+- `Auth::logout`, `Auth::login_id` and `Auth::login_remember` return an
+  error and change nothing. So do the stateful functions that go through
+  `Auth::stateful_guard`, such as `Auth::login` and `Auth::attempt`.
+- `Auth::set_user` behaves as it does with the token guard: `Auth::id` and
+  `Auth::check` see the user, and `Auth::user` still answers from the guard
+  itself.
+- `AuthMiddleware::new()`, with no `for_guard`, asks that guard, runs its
+  resolver, and attests the user it returns.
+
+A logout forgets the users that the guards of your application resolved in
+the request, so the request does not sign itself back in through a later
+middleware.
+
+### Guards and Live
+
+The principal that `AuthMiddleware` attests for a Live component is
+`<guard>:<id>` for a guard of your application, and the bare id for a
+session user. The same id under two guards of your application is two
+principals, and web user `7` differs from partner `7`.
+
+Because a session user attests its bare id, a session user id that has the
+form `<guard>:<id>` attests the same principal as that guard's user. If the
+session ids of your application can contain `:`, name your guards so that no
+id starts with `<guard>:`.
+
+Live's gated actions read the session identity, not the guard. See
+[Live](live.md#security-boundaries).
+
+### Why Suprnova diverges
+
+In Laravel, the closure of `Auth::viaRequest` runs when the guard
+resolves its user, and it gets the current request. A Rust guard cannot
+reach the request from `user()`. So the middleware for the guard runs
+the resolver with the request, and the guard reads the answer. That is
+why the guard reports no user outside that middleware.
+
 ## User providers
 
 A `UserProvider` tells the auth stack how to fetch and validate users.
@@ -473,6 +656,12 @@ specific guard, chain `for_guard`:
 A token guard (`for_guard("api")`) relies on whatever bearer-token
 middleware runs earlier in the chain to populate the request's auth id;
 without it the guard always reports unauthenticated.
+
+A guard of your application (see [Guards of your
+application](#guards-of-your-application)) decides alone. The user it
+resolves is the principal of the request, and the middleware attests it as
+`<guard>:<id>`. With no `for_guard`, `AuthMiddleware::new()` does the same
+when the default guard is a guard of your application.
 
 ### `GuestMiddleware`
 

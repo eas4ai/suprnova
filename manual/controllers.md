@@ -396,7 +396,7 @@ The methods you'll reach for most often when taking `Request` directly:
 | `bearer_token()` | `Option<String>` | parsed `Authorization: Bearer …` |
 | `cookie(name)` | `Option<String>` | single cookie value |
 | `cookies()` | `HashMap<String, String>` | all cookies |
-| `ip()` | `Option<String>` | peer IP, X-Forwarded-For-aware |
+| `ip()` | `Option<String>` | client IP: the peer, or the client a trusted proxy names in `X-Forwarded-For` |
 | `secure()` | `bool` | HTTPS detection (incl. proxies) |
 | `is_method(m)` | `bool` | case-insensitive |
 | `is_inertia()` | `bool` | Inertia XHR header |

@@ -263,8 +263,8 @@ entry.
 A test that asserts a cached route responds correctly passes whether the
 response came out of the store or out of a fresh render. Every claim has to
 be made against something only a stored entry actually being served can
-produce. Four patterns do that, and this repository's own dogfood tests use
-all four: `app/tests/live_render_cache.rs` with the harness in
+produce. Four patterns do that, and this repository's own dogfood tests make
+all four claims: `app/tests/live_render_cache.rs` with the harness in
 `app/tests/live_support/mod.rs`.
 
 **1. Count renders on the handler side of the cache.** Register a counting
@@ -300,7 +300,7 @@ Assert instead on what the store holds, what the served document is made of,
 and how old it is - which is what
 `the_dashboard_is_stitched_per_principal_from_one_shared_shell` does: the
 stored entry is `EntryKind::Composite` with the expected slot count
-(`inspect_route_for_test`), two principals' documents differ in their island
+(read with the probe's `l0()`), two principals' documents differ in their island
 tags and nowhere else, and the second principal's response reports an `Age`
 of the whole seconds that have passed since the shell was published.
 
@@ -326,41 +326,85 @@ honest reading rather than a failure.
 **2. Read the entry back.** Two facade calls are ordinary public API:
 `RenderCache::store_inspection()` reports L0 occupancy, bytes, and the
 current epoch, and `RenderCache::inspect(key_text)` reports one entry's
-body-free metadata. Alongside them the framework exposes hidden test seams -
-`#[doc(hidden)]`, and named `_for_test` so nothing mistakes them for
-application API:
+body-free metadata. To find the entry of one route, use
+`suprnova::render_cache::testing::RenderCacheProbe`:
 
-| Seam | What it gives a test |
+| Call | What it gives a test |
 |---|---|
-| `RenderCache::key_for_route_for_test(pattern, params, login)` | the key text the middleware derives **at epoch 1**, the value the migration seeds |
-| `RenderCache::key_for_route_at_epoch_for_test(pattern, params, login, epoch)` | the same, under an epoch you name |
-| `RenderCache::inspect_route_for_test(pattern)` | that epoch-1 key's L0 entry: class, kind, status, `body_bytes`, slots |
-| `RenderCache::inspect_l1_for_test(pattern, params, login)` | the same, out of the configured L1 tier |
-| `RenderCache::clear_l0_for_test()` | empties L0 and leaves L1, the epoch, and the coordinator alone |
+| `RenderCacheProbe::route(pattern)` | a probe for the route registered under `pattern`, written as the router holds it (`/posts/{id}`, not `/posts/1`) |
+| `.params(&[("id", "1")])` | the route parameters of the request, as name and value pairs |
+| `.at_epoch(epoch)` | the epoch to derive the key under; without it the probe uses epoch 1, the value the migration seeds |
+| `.key()` | the key text the middleware derives, the text `RenderCache::inspect` and `render-cache:inspect` take |
+| `.l0().await` | the entry L0 holds under that key: class, kind, status, `body_bytes`, slots |
+| `.l1().await` | the same, out of the configured L1 tier |
+| `RenderCacheProbe::clear_l0()` | empties L0 and leaves L1, the epoch, and the coordinator alone |
 
-The epoch matters because it is part of the key. `key_for_route_for_test`
-hardcodes epoch 1, so a test that has advanced the epoch - on this node or,
-through the ledger, on another - must name the new one with
-`key_for_route_at_epoch_for_test` or it will look up a key nothing was
-published under.
+`key()` returns `Result<String, FrameworkError>`, `l0()` and `l1()` return
+`Result<Option<EntryInspection>, FrameworkError>`, and `clear_l0()` returns
+`Result<(), FrameworkError>`. None of them panics. Each error names the route
+pattern and what went wrong: no runtime installed, no policy covering the
+route, a key that cannot be derived, no L1 tier configured, a failed L1 read,
+an entry that does not decode. An error never carries a login, a parameter
+value, or a key.
 
-`the_public_document_is_a_hit_whose_seed_still_promotes` uses
-`store_inspection` and `inspect_route_for_test` to assert the entry exists
-and is stored under the declared class;
-`the_database_profile_serves_a_hit_through_the_sql_stores` uses
-`inspect_l1_for_test` and then `clear_l0_for_test`, which is the only way to
-prove a later request came out of L1 rather than out of memory.
+```rust
+use suprnova::render_cache::testing::RenderCacheProbe;
+
+// After the request to /posts/1 has been served:
+let probe = RenderCacheProbe::route("/posts/{id}").params(&[("id", "1")]);
+assert!(probe.l0().await?.is_some(), "the request published the page");
+
+// Prove that the next request comes out of L1 and not out of memory.
+RenderCacheProbe::clear_l0()?;
+assert!(probe.l0().await?.is_none());
+assert!(probe.l1().await?.is_some());
+```
+
+The probe builds the key with the function the middleware builds its own
+with, so an entry it finds is the entry the request is served from. That has
+one consequence you must act on: **tell the probe each dimension the route's
+policy varies on.** A key derived without them is a key nothing was stored
+under, so the probe reads `None` whether or not the page was cached. A test
+that proves nothing looks the same as a test that proves a miss.
+
+| The policy varies on | Tell the probe | Left out |
+|---|---|---|
+| `Principal` | `.login(id)`, the identifier `get_auth_identifier` returns for the user | the key of an anonymous request |
+| `Tenant` | `.tenant(id)`, the identifier the tenant middleware set | the key of a request with no tenant |
+| `Locale` | `.locale(tag)`, written as `Lang::locale().as_str()` writes it (`fr`, `pt-BR`) | the current locale of the process |
+| `Host` | `.host(host)`, written as `Request::http_host` reports it (`shop.example.test`, `shop.example.test:8080`) | an error that names the dimension, because a request always names a host |
+| `Media`, `Encoding` | nothing | the policy's declared default, as a request that negotiates nothing gets |
+
+A dimension the policy does not declare has no effect on the key, whatever the
+probe is told. The probe takes the request to carry no query string.
+
+The epoch is part of the key too. A test that has advanced the epoch, on this
+node or through the ledger on another, names the new one with `.at_epoch(..)`
+or it looks up a key nothing was published under.
+
+Two reads differ in what they do to the eviction order. `l0()` does not count
+as a use of the entry, so a test of eviction can probe between two requests
+without changing which entry the next publication evicts. `RenderCache::inspect`
+does count as a use: it moves the key to the most recently used end of L0, as a
+request that hits it would.
+
+`the_probe_derives_the_key_a_request_is_stored_under` and
+`clear_l0_empties_memory_and_leaves_the_entry_in_l1` in
+`framework/tests/render_cache/operations.rs` show both uses: the first finds an
+entry under the key the probe derives for a login and finds none under the
+anonymous key, and the second empties L0 and shows the next request came out of
+L1, which is the only way to prove that it did not come out of memory.
 
 **3. Move the clock instead of waiting.** The clock the runtime reads is
 settable on a `RenderCacheConfig` and never by `from_env`, so a test that
-needs a freshness band installs its own:
+needs a freshness band installs its own with `with_clock`:
 
 ```rust
 let clock = Arc::new(AdjustableTestClock::new(unix_now_ms()));
 // Bound to its own name first: passing `Arc::clone(&clock)` inline leaves
 // the compiler inferring the trait object as the clone's return type.
 let for_runtime = Arc::clone(&clock);
-let config = RenderCacheConfig::from_env()?.with_clock_for_test(for_runtime);
+let config = RenderCacheConfig::from_env()?.with_clock(for_runtime);
 // ... install through the application's own configuration seam, then:
 clock.advance_ms(300_001);
 ```
@@ -376,29 +420,57 @@ rather than silently doing nothing when the boot took the system clock.
 
 **4. Count SQL statements.** A cache that skipped the handler but still
 consulted the database on every hit satisfies every handler-side counter and
-still costs a round trip. `DbConnection::observe_statements_for_test` points
-SeaORM's metric callback at a counter of your own, and it sees statements on
-the pool and on every transaction started from it:
+still costs a round trip. `suprnova::database::testing::StatementCounter`
+counts the prepared statements run through a connection: the queries and
+executes SeaORM builds from a statement. It sees statements on the pool and on
+every transaction started from it. Unprepared SQL and transaction control are
+not counted, so a `BEGIN` or a savepoint does not move the count.
 
 ```rust
+use suprnova::database::testing::StatementCounter;
+
 // Immediately after connecting, before the connection is cloned or bound
-// into the container: installing needs sole ownership of the pool, and the
-// call reports `false` rather than counting nothing silently.
-let installed = conn.observe_statements_for_test(|| {
-    STATEMENTS.fetch_add(1, Ordering::SeqCst);
-});
-assert!(installed, "the statement observer needs an unshared connection");
+// into the container: installing needs sole ownership of the pool.
+let mut conn = DbConnection::connect(&config).await?;
+let statements = StatementCounter::install(&mut conn)?;
+
+// ... bind `conn`, boot the app, dispatch the request under test ...
+statements.reset();
+let hit = dispatch_get("/posts/1").await;
+assert_eq!(statements.count(), 0, "the cache answered without the database");
 ```
 
-The callback is told nothing about the statement - no SQL text, no bound
-value - because a count is the whole point.
-`framework/tests/render_cache/bypass.rs` is written entirely on this
-pattern: `a_lease_mode_hit_runs_nothing_and_issues_no_statement` holds a
-lease-mode hit to zero statements,
-`an_authority_mode_hit_issues_exactly_one_statement` holds an
-authority-mode hit to one, and
-`the_epoch_is_read_once_at_first_use` measures two misses against each other
-to show the epoch costs one read per runtime.
+`install` returns an error, and installs nothing, when the connection is
+already shared, because a counter that read zero would be a false proof.
+`count()` returns a `u64` and `reset()` sets it back to zero. A clone of the
+counter reads the same count. The counter is told nothing about a statement:
+no SQL text, no bound value, because a count is the whole point.
+
+Read a count only after a request you know the cache stored. The render that
+publishes an entry runs statements, and under `CoherenceMode::Lease` the first
+hit grants the lease, so measure the second hit.
+`a_lease_mode_hit_runs_no_statement_and_its_render_does` in
+`framework/tests/render_cache/operations.rs` shows the sequence: the render
+costs more than zero statements, and the hit that follows costs none.
+`an_authority_mode_hit_issues_exactly_one_statement` in
+`framework/tests/render_cache/bypass.rs` holds an authority-mode hit to one,
+and `the_epoch_is_read_once_at_first_use` measures two misses against each
+other to show the epoch costs one read per runtime.
+
+**Every item in this section needs the `testing` feature.**
+`RenderCacheProbe`, `RenderCacheConfig::with_clock` and `StatementCounter`
+do not exist in a build without it. A scaffolded application and the
+dogfood `app` turn it on for tests only, through a dev-dependency on the
+framework:
+
+```toml
+[dev-dependencies]
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "<version>", features = ["testing"] }
+```
+
+The application's own `[dependencies]` entry leaves the feature off, so the
+binaries carry none of it. See "Production build shape" in
+[Deployment](deployment.md).
 
 Two habits worth keeping. Boot the harness through your own application's
 configuration seam rather than through a hand-built router, so the test

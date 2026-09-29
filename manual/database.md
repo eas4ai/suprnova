@@ -35,9 +35,18 @@ URL → driver detection:
 postgres://user:pass@host/db       → DatabaseType::Postgres
 postgresql://user:pass@host/db     → DatabaseType::Postgres
 mysql://user:pass@host/db          → DatabaseType::Mysql
+mariadb://user:pass@host/db        → DatabaseType::Mysql
 sqlite://./file.db                 → DatabaseType::Sqlite
 sqlite::memory:                    → DatabaseType::Sqlite
 ```
+
+A `mariadb://` URL selects the MySQL driver, because MariaDB speaks the
+MySQL protocol. Wherever a URL reaches the driver, the framework hands it
+over with the `mariadb` scheme written as `mysql`: the primary connection,
+each named connection and read replica, the migrator, and
+`MariaDbVectorDriver::from_url`. Only the scheme changes. `DB::driver_title()`
+answers `MariaDB` for a `mariadb://` URL and `MySQL` for a `mysql://` one,
+so a MariaDB server reached through `mysql://` reports as MySQL.
 
 ### Pool liveness
 
@@ -543,6 +552,74 @@ events. A leaked manual `Transaction` handle that gets dropped without
 explicit commit/rollback emits no event - SeaORM's `Drop` impl is
 synchronous and can't reach the async dispatcher.
 
+### Busy database - `DB::monitor` and `db:monitor`
+
+`DatabaseBusy` is a real `suprnova::Event`. It reports that the database
+server has as many connections as you allow, or more. Its fields are
+`connection_name` and `connections`. Nothing dispatches it by itself.
+Two calls dispatch it:
+
+- `DB::monitor(max)` asks the server of every connection the application
+  has, the default one and each named one. It dispatches `DatabaseBusy`
+  for each server with `max` connections or more, and returns the events
+  it dispatched. `max` must be at least 1.
+- The `db:monitor --max <n>` console command does the same and prints the
+  count for each connection. Without `--max` it prints the counts and
+  dispatches nothing.
+
+The server does the counting, from every client of it, so the answer is
+the same from every process. That lets you run the check from the
+scheduler, which is a process of its own:
+
+```rust
+use suprnova::Schedule;
+
+pub fn register(schedule: &mut Schedule) {
+    schedule.add(schedule.command("db:monitor --max 80").every_minute());
+}
+```
+
+A listener decides what a busy database means: a page, a metric, a log
+line.
+
+```rust
+use std::sync::Arc;
+use suprnova::{DatabaseBusy, EventFacade, FrameworkError, Listener};
+
+struct PageOnCall;
+
+#[suprnova::async_trait]
+impl Listener<DatabaseBusy> for PageOnCall {
+    async fn handle(&self, event: &DatabaseBusy) -> Result<(), FrameworkError> {
+        tracing::error!(
+            connection = %event.connection_name,
+            connections = event.connections,
+            "the database is busy"
+        );
+        Ok(())
+    }
+}
+
+// In bootstrap.rs.
+EventFacade::listen::<DatabaseBusy, _>(Arc::new(PageOnCall)).await;
+```
+
+A listener that fails does not stop the check. The count comes from the
+server:
+
+| Engine | Count |
+|---|---|
+| PostgreSQL | The rows of `pg_stat_activity`, which include the server's own workers |
+| MySQL and MariaDB | `threads_connected` |
+| SQLite | None. SQLite has no server, so it is never busy. |
+
+`DB::connection_counts()` returns the counts as a `Vec<ConnectionCount>`,
+each with a `connection_name` and `connections: Option<u32>`, and
+`DbConnection::server_connections()` returns the count of one connection.
+`DbConnection::connections_in_use()` is a different number: the
+connections of this process's own pool that are out of the pool now. It
+says nothing about another process.
+
 ### `QueryExecuted` payload
 
 ```rust
@@ -588,7 +665,7 @@ intended for log output only. Never feed the result back into a query.
 ```rust
 let name = DB::database_name()?;        // "myapp" for postgres://.../myapp
 let driver = DB::driver_name()?;        // "postgres" | "mysql" | "sqlite"
-let title = DB::driver_title()?;        // "Postgres" | "MySQL" | "SQLite"
+let title = DB::driver_title()?;        // "Postgres" | "MySQL" | "MariaDB" | "SQLite"
 let version = DB::server_version().await?;  // "15.5" | "8.0.36" | "3.42.0"
 ```
 
@@ -686,6 +763,7 @@ collide.
 | `DB::transaction` / `transaction_with_attempts` / `begin_transaction` | `DB::transaction($cb, $attempts)` / `DB::beginTransaction` |
 | `Transaction::commit` / `rollback` / `savepoint` / `rollback_to` | `DB::commit` / `rollBack` / savepoint helpers |
 | `DB::listen(callback)` | `DB::listen` |
+| `DB::monitor` / `connection_counts` / `DbConnection::server_connections` / `connections_in_use` | `db:monitor` |
 | `DB::enable_query_log` / `disable_query_log` / `get_query_log` / `flush_query_log` / `logging` | `DB::enableQueryLog` / `disableQueryLog` / `getQueryLog` / `flushQueryLog` / `logging` |
 | `DB::database_name` / `driver_name` / `driver_title` / `server_version` | `getDatabaseName` / `getDriverName` / `getDriverTitle` / `getServerVersion` |
 | `DB::register_named` / `named` / `select_on` / `table_on` / `statement_on` / `affecting_statement_on` | multi-connection `DB::connection($name)` |

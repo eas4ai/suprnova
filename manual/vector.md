@@ -99,6 +99,22 @@ let driver = QdrantVectorDriver::from_url_with_api_key(
 )?;
 ```
 
+To choose the store by environment, call `from_env`:
+
+```rust
+let driver = QdrantVectorDriver::from_env()?;
+```
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `QDRANT_URL` | Yes | The gRPC URL, by default port 6334 |
+| `QDRANT_API_KEY` | No | The key of Qdrant Cloud, or of a self-hosted instance that asks for one |
+
+A missing or blank `QDRANT_URL` is an error at boot. The error names the
+variable and never repeats its value. `from_env` builds the client without
+the Qdrant client's version check, which connects to the server and blocks
+the thread while the application boots. The first request connects.
+
 **ID mapping.** Qdrant requires point IDs to be either `u64` or a valid UUID. The framework bridges arbitrary strings with three rules:
 
 1. If the string parses as `u64`, use the `Num(u64)` variant.
@@ -218,7 +234,15 @@ let driver = MariaDbVectorDriver::from_url(
 Vector::register("documents", Arc::new(driver));
 ```
 
-`from_url` is lazy - it validates the URL syntax but does NOT open a connection until first use, so calling it at app bootstrap is safe even before the database is reachable. Wrap an existing pool with `MariaDbVectorDriver::from_pool(pool)` when you need custom pool options.
+`from_url` takes a `mysql://` or a `mariadb://` URL. It is lazy - it validates the URL syntax but does NOT open a connection until first use, so calling it at app bootstrap is safe even before the database is reachable. Wrap an existing pool with `MariaDbVectorDriver::from_pool(pool)` when you need custom pool options.
+
+To choose the store by environment, call `from_env`. It reads `MARIADB_URL`. When `MARIADB_URL` is not set, it reads `DATABASE_URL` and takes it if the URL names a MariaDB or a MySQL database. That fallback suits an application with one database, a MariaDB, that holds both its rows and its vectors. A `DATABASE_URL` of another engine is not taken.
+
+```rust
+let driver = MariaDbVectorDriver::from_env()?;
+```
+
+A `mysql://` URL is taken because a MariaDB server is written that way too. If it is the URL of a MySQL server, the driver fails on its first query, because MySQL has no vector functions. When no variable gives a usable URL, `from_env` returns an error that names the variables and never the URL, which carries the password.
 
 **Schema is yours.** The driver does not auto-create tables - schema is a migration concern. The recommended path is `driver.ensure_table_sql_for(name, dim)`, which inherits the driver's configured distance so the migration's `DISTANCE=` clause and the query function `similar` uses are guaranteed to match:
 

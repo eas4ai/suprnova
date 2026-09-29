@@ -275,6 +275,50 @@ Laravel parity. They are backed by `Operator::presign_read` /
 that do not implement presigning (the in-memory and local-filesystem
 drivers fall in this bucket; S3, Azure Blob, and GCS support it).
 
+### Public URLs
+
+A pre-signed URL expires. For a file that is meant to be public, give the
+disk a public base URL and ask `Storage::url` for the link.
+
+```rust,ignore
+use suprnova::Storage;
+
+Storage::register_fs("public", "./storage/public")?;
+Storage::set_public_url("public", "https://cdn.example.com/files")?;
+
+let url = Storage::url("public", "avatars/7.png")?;
+assert_eq!(url, "https://cdn.example.com/files/avatars/7.png");
+```
+
+`Storage::set_public_url(disk, base_url)` takes the name of a registered
+disk and the place where the root of that disk is served from. The base URL
+is an absolute URL or a path of your own host, such as `/storage`.
+`Storage::url(disk, path)` joins the base URL and the path and returns a
+`String`. It does not ask the disk, so it returns a URL for a file that
+does not exist.
+
+`Storage::url` takes the name of the disk, not the `Operator` that
+`Storage::disk` returns, because the operator carries no name.
+
+`Storage::url` writes each path segment so that it stays one segment. Every
+character that a URL gives a meaning to becomes `%XX`, so `c++ notes.pdf`
+is written `c%2B%2B%20notes.pdf`.
+
+Both functions return an error in these cases:
+
+- `set_public_url` is called for a disk that is not registered.
+- The base URL has a scheme other than `http` or `https`, no host, a user or
+  a password, a query or a fragment, a backslash, a `.` or `..` segment, or
+  a space or control character. A path base must begin with one `/`, not
+  two. The error does not repeat the URL, because a URL can carry a token.
+- `url` is called for a disk with no public base URL. A private disk hands
+  out no link that can be guessed. Use `temporary_url` for those files.
+- The path is empty or has a `.` or `..` segment.
+
+Suprnova does not serve the files. A local disk needs a route or a web
+server in front of its directory. A bucket needs to be public or behind a
+CDN.
+
 ## Cross-disk streaming copy
 
 `copy_between_disks(src, src_path, dest, dest_path)` streams the source
@@ -640,22 +684,84 @@ so production code cannot reach for them.
 
 ## Configuration
 
-Storage configuration lives entirely in Rust code, not in `.env`. Disks
-are registered by name in `bootstrap()` via `Storage::register_*` and
-addressed by name at the call site (`Storage::disk("public")`). There is
-no `FILESYSTEM_DISK` env var the framework reads and no implicit default
-disk - each driver is a peer. Apps decide which disk name a given upload
-or download targets, and pass any URLs / keys / credentials the chosen
-driver needs as their own env vars.
+You register disks in two ways. In code, `bootstrap()` calls
+`Storage::register_*` and you address a disk by name at the call site
+(`Storage::disk("public")`). From the environment, the server registers one
+S3 disk named `s3` when it boots, beside the queue, the rate limiter and the
+mail transport.
+
+### An S3 disk from the environment
+
+When `S3_BUCKET` is set, the server registers an S3 disk under the name `s3`
+(the constant `suprnova::ENV_S3_DISK`). With `S3_BUCKET` not set, it
+registers nothing. A value that is blank counts as not set.
+
+| Variable | Meaning |
+|----------|---------|
+| `S3_BUCKET` | The bucket. Without it there is no disk. |
+| `S3_REGION` | The region. The driver needs one. When `S3_REGION` is not set, `AWS_REGION` is read, then `AWS_DEFAULT_REGION`. A service that is not AWS takes any name, such as `us-east-1` or `auto`. |
+| `S3_ENDPOINT` | The endpoint of a service that is not AWS: MinIO, RustFS, R2, B2. |
+| `S3_ACCESS_KEY`, `S3_SECRET_KEY` | The keys. Set both or neither. |
+| `S3_ROOT` | A prefix inside the bucket. Every path is under it. |
+| `S3_PUBLIC_URL` | The public base URL of the disk, as `Storage::set_public_url` takes it. See [Public URLs](#public-urls). |
+
+With no keys set, the driver uses the default credential chain of AWS. That
+chain reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, the profile and
+the role of the instance.
+
+```env
+S3_ENDPOINT=http://localhost:9000
+S3_ACCESS_KEY=<access key>
+S3_SECRET_KEY=<secret key>
+S3_BUCKET=local
+S3_REGION=us-east-1
+S3_PUBLIC_URL=http://localhost:9000/local
+```
+
+```rust,ignore
+use suprnova::{DiskExt, Storage};
+
+let disk = Storage::disk("s3")?;
+disk.put("reports/2026.pdf", bytes).await?;
+```
+
+The server does not boot when the variables describe no usable disk. The
+cases are no region, one key without the other, a driver that refuses the
+configuration, and an `S3_PUBLIC_URL` that is not a valid base URL. No error
+repeats the value of a variable.
+
+If your bootstrap already registered a disk named `s3`, that disk stays and
+the variables are not read. Your registration is a decision, and a fault in
+variables that describe nothing in use must not stop the boot.
+
+To register the environment's disk under a name of your own, call
+`S3Config::from_env()`. It returns `Ok(None)` when `S3_BUCKET` is not set.
+
+```rust,ignore
+use suprnova::{S3Config, Storage};
+
+if let Some(config) = S3Config::from_env()? {
+    Storage::register_s3("uploads", config)?;
+}
+```
+
+The disk exists after the server has booted its drivers. A `booted` callback
+runs before that, and the console binary boots no driver of the environment.
+If a callback or a console command needs the disk, call
+`suprnova::filesystem::bootstrap_from_env()?` in your own bootstrap.
+
+There is no implicit default disk, and the framework does not read
+`FILESYSTEM_DISK`. Every call names the disk it uses, and each driver is a
+peer. Azure Blob and GCS disks have no environment variables: register them
+in code.
 
 See [Configuration](configuration.md) for the wider rule on where the
-framework reads from the environment versus where it expects code-side
-registration.
+framework reads from the environment.
 
 ## Next
 
 - [Configuration](configuration.md) - what the framework reads from
-  `.env` (and why storage isn't on that list)
+  `.env`
 - [Requests](requests.md) - file uploads land on a disk via
   `UploadedFile::store_as`
 - [Responses](responses.md) - streaming bytes back out of a disk

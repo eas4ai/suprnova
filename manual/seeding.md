@@ -234,6 +234,11 @@ seeder-specific surface.
 cargo run --bin console -- db:seed
 ```
 
+The `suprnova` CLI runs the same command through your project's console
+binary. `suprnova db:seed` runs every seeder, `suprnova db:seed UsersSeeder`
+and `suprnova db:seed --class=UsersSeeder` run one. The CLI checks no name;
+the console binary does.
+
 Runs every registered seeder in order. On an empty registry it prints a
 warning to stderr (`db:seed: no seeders registered - nothing to run`) and
 exits zero - that's correct behavior for "someone ran the command before
@@ -448,21 +453,18 @@ Concurrent work on other tasks (HTTP request handlers, queue workers running
 in the background, other seeders) continues to fire events normally. Nested
 calls compose: an inner `without_events` block inherits the outer flag.
 
-### Factories already bypass model events
+### Factories fire model events
 
-Worth knowing because it changes when you reach for `without_events`:
-factories persist via `ActiveModelTrait::insert` (the `Persistable` impl
-on the SeaORM model), which does not go through the `Model` trait's
-`create` / `save` methods. There is no model-event dispatch to mute on a
-factory-driven path. `seed::without_events` is for code that drives the
-`Model` trait directly - typically because you need the runtime-shape
-ergonomics that factories sidestep, or because you're touching a model
-mid-seed that an observer is supposed to react to in production but not
-during a fixture load.
+A factory insert of a `#[suprnova::model]` struct takes the same insert
+as `Model::create`. It dispatches `Creating`, `Saving`, `Created`, and
+`Saved`, so an observer sees a factory's rows as it sees the
+application's. `seed::without_events` mutes a factory path too. For a
+single factory call, `create_quietly()` and `create_many_quietly()` insert
+with the events muted.
 
-In practice: if your seeder is a stack of `UserFactory::new().create_many()`
-calls, you don't need `without_events`. If it's a hand-rolled loop of
-`User::create(attrs)`, you probably do.
+In practice: if a seeder should not wake observers, wrap its inserts in
+`without_events`, whether they are factory calls or a hand-rolled loop of
+`User::create(attrs)`.
 
 ## Using seeders in tests
 
@@ -504,8 +506,11 @@ Two notes on the test shape:
 - `#[serial]` is required when the test mutates the process-global registry -
   parallel tests sharing the same registry will race. Add `serial_test`
   as a dev-dependency in your project's `Cargo.toml` to get the attribute.
-- `seed::clear()` is a `#[doc(hidden)]` test-only helper. Don't call it from
-  production code; the registry is built once at boot and never reset.
+- `seed::clear()` forgets every registered seeder. It is compiled with the
+  `testing` feature, which is a default feature, and it is meant for tests:
+  the registry is built once at boot and needs no reset in production. The
+  guard of `TestContainer` does not reset the registry, so a test that
+  registers a seeder calls `clear()` first and again when it finishes.
 
 See [Testing](testing.md) for the broader test-harness conventions
 (`#[suprnova_test]`, `TestContainer`, `TestDatabase::fresh::<Migrator>()`,

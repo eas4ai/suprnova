@@ -60,7 +60,9 @@ run_worker(driver, cfg, shutdown).await;
 In a scaffolded app, the worker is started by the binary's `queue:work`
 subcommand - `cargo run -- queue:work` - which runs the same bootstrap your
 HTTP server does, so observers and listeners registered in `bootstrap()`
-fire identically for inserts from a queue handler.
+fire identically for inserts from a queue handler. `queue:work --connection
+<name>` drains a named connection instead of the default one - see
+[Connections](#connections).
 
 ## Drivers
 
@@ -79,6 +81,14 @@ Five drivers ship in-tree. Configure via `QUEUE_DRIVER` env or by calling
 driver; `suprnova::queue::bootstrap_default()` always wires the memory driver. The
 server boot path calls one of these for you - most apps only configure via
 env.
+
+`QUEUE_DRIVER` accepts `memory`, `sync`, `null`, `redis`, `database` and
+`failover`, and defaults to `memory`. `sync` selects `SyncQueueDriver` and
+`null` selects `NullQueueDriver`. A value that names no driver is a boot
+error when `APP_ENV` is `production`, because an in-memory queue chosen by
+mistake loses every job at the next restart. In any other environment the
+boot logs a warning that lists the accepted names and uses the memory
+driver.
 
 `FailoverQueueDriver` isn't a sixth backend. It wraps an ordered list of
 the drivers above so a push one connection refuses falls through to the
@@ -118,6 +128,124 @@ because its request-per-process model makes "do this later, in another
 process" hard to model otherwise. Tokio doesn't - explicit `Bus::dispatch`
 vs `Queue::push` is clearer, faster, and surfaces the durability choice
 at the call site. See [`bus.md`](bus.md) for the side-by-side.
+
+## Connections
+
+A connection is a name bound to a driver. The driver you install with
+`Queue::set_driver`, or that `QUEUE_DRIVER` selects, is the **default
+connection**. Its name is `Queue::connection_name()`: the name you gave
+`Queue::set_connection_name`, or else the driver's own name. Every other
+connection you register by name:
+
+```rust
+use std::sync::Arc;
+use suprnova::queue::{MemoryQueueDriver, Queue};
+
+// bootstrap::register()
+Queue::register_connection("reports", Arc::new(MemoryQueueDriver::new()));
+```
+
+A push goes to the connection it resolves to. The first of these that names
+one wins:
+
+1. `EnvelopeOverrides::connection` on `Queue::push_with` or
+   `Queue::later_with`
+2. a route registered with [`Queue::route`](#queue-routing)
+3. the job's own `Job::connection()`
+4. the default connection
+
+`Queue::push`, `push_with`, `later`, `bulk` and `push_unique` all resolve it.
+The jobs of a [batch](#queued-batches) each go to their own connection. A
+failed job goes back to the connection it failed on when you retry it.
+
+```rust
+impl Job for BuildReport {
+    fn job_name() -> &'static str { "BuildReport" }
+    fn connection() -> Option<&'static str> { Some("reports") }
+    // ...
+}
+```
+
+### What a connection name means
+
+While you register no connection, the process has one driver and every push
+reaches it. A connection name is then a label on the lifecycle events and
+selects nothing, so a job can name a connection before you configure it.
+
+Once you register one connection, a name selects a driver. It is either a
+registered connection or the default connection by its own name. A push to
+any other name returns an error and pushes nothing. A push that waits for a
+commit returns the error before the commit, while you can still abandon the
+transaction.
+
+`Queue::connection(name)` returns the driver of one connection, and
+`Queue::connection_names()` lists the registered names. `Queue::size()` and
+the other counts and listings read the default connection. Read another
+connection with `Queue::connection("reports")?.size().await`.
+
+### Register connections from the environment
+
+`QUEUE_CONNECTIONS` registers one connection per entry, next to the default
+one:
+
+```bash
+QUEUE_DRIVER=memory
+QUEUE_CONNECTIONS=redis,database
+```
+
+Each connection is named for its driver and reads that driver's own
+variables, as it would if it were `QUEUE_DRIVER`. An entry takes the same
+names as `QUEUE_DRIVER`. An unknown name is a boot error in every
+environment.
+
+One queue has one connection. An entry that names the driver `QUEUE_DRIVER`
+selects is a second name for the default connection, so a pause or a
+`Queue::forward_on` that you set under either name reaches the whole queue.
+An entry that would put a second connection over a Redis stream or a jobs
+table that another connection already uses is refused at boot.
+
+### Workers, pauses and chains
+
+Start a worker for one connection with `--connection`, and pause a queue on
+it the same way:
+
+```bash
+./app queue:work --connection=reports
+./app queue:pause billing --connection=reports
+./app queue:resume billing --connection=reports
+```
+
+Without `--connection` each command acts on the default connection. A
+`--connection` that names no connection stops `queue:work` and
+`queue:pause` before they do anything. In code, `queue::worker::run_worker_on`
+does what `queue:work --connection` does:
+
+```rust
+use suprnova::queue::worker::{WorkerConfig, run_worker_on};
+use tokio_util::sync::CancellationToken;
+
+let shutdown = CancellationToken::new();
+run_worker_on("reports", WorkerConfig::default(), shutdown).await?;
+```
+
+The worker carries the name of its connection on its lifecycle events and on
+the failed-job records it writes. A pause and a `Queue::forward_on` gate on
+that name, so the push and the worker's claim agree on it.
+
+A chain runs on the connection of its first job, because the worker enqueues
+the next link in the step that settles the one before it. Dispatching a
+chain whose links resolve to different connections returns an error and
+pushes nothing.
+
+### Why Suprnova diverges
+
+Laravel fails on a connection name that `config/queue.php` does not define.
+Suprnova accepts any name while you register no connection, because
+applications with one driver often name a connection on their jobs to label
+their events. The first `Queue::register_connection` turns names into
+selectors, and from then on an unknown name is an error rather than a push
+to the default connection, where no worker of the intended connection would
+run it.
 
 ## Failover connections
 
@@ -180,46 +308,47 @@ fallback `QUEUE_DRIVER` applies to itself: inside a failover chain, a
 typo that quietly became an in-memory connection would put an ephemeral
 backend in a durable list.
 
-### Writes fail over, reads don't
+### A worker drains every connection
 
-Only `push` and `bulk_push` walk the connection list. Every other
-operation - `pop`, `ack`, `nack`, `release`, `settle`, `clear`, the four
-counters and the three inspection listings - goes to the **first**
-connection and no other.
+A push walks the list and stops at the first connection that accepts it. A
+read covers the whole list:
 
-That asymmetry is the contract, not an omission. A reservation token is
-meaningful only to the driver that issued it, so acking against a
-different connection would settle nothing and corrupt both. The counters
-and listings follow the same rule so that what you inspect is what the
-worker on this connection drains, rather than a sum across backends that
-matches no worker's view.
+- `pop` and `pop_from` begin at a different connection on each call and
+  then try every connection in order, one after the other. A primary that
+  is busy again after an outage cannot starve the jobs that went to a
+  fallback during it.
+- `ack`, `nack`, `release` and `settle` go to the connection that issued
+  the reservation. A reservation token means something to the driver that
+  issued it and to no other, and two backends can issue the same token.
+  The failover driver gives each reservation a token of its own and keeps
+  the origin until the visibility timeout ends. A token that it does not
+  know, or whose timeout is over, is treated as stale and is sent to no
+  connection.
+- The four counters and the three inspection listings add up every
+  connection, in the order of the list. `clear` clears every connection.
 
-**A worker on the failover connection drains the primary only.** Jobs
-that failed over to a fallback need a worker running against that
-fallback connection directly:
+So one worker on the failover connection runs the jobs of the primary and
+the jobs that went to a fallback:
 
 ```bash
-# Drains the primary of the failover chain.
 QUEUE_DRIVER=failover QUEUE_FAILOVER_CONNECTIONS=redis,database ./app queue:work
-
-# Drains what failed over to the database. Run this too.
-QUEUE_DRIVER=database ./app queue:work
 ```
 
-Laravel's documentation carries the same warning for the same reason.
+A worker with `--queue` needs every connection of the list to support
+queue filtering. When one connection does not, `pop_from` returns an error
+that names it, and the worker claims nothing.
 
-This reaches chains, but only through one door. A worker settles a job and
-enqueues the next link of a [queued chain](#queued-chains) in one call,
-`settle`, and the decorator delegates that call to the primary alone. So
-with a transactional primary such as the database driver, a primary that is
-down fails the settle and nothing falls over: the worker leaves the
-reservation intact and visibility expiry redelivers the job. The
-fall-through happens when the primary answers `Settled::Unsupported`, which
-the memory and Redis drivers do, because the worker then pushes the next
-link through the bound driver like any other push - and that push falls
-over. The rest of that chain then waits for a worker on the fallback
-connection. Without one, the chain stalls - the link is durable and nothing
-is lost, but nothing runs it either.
+A [queued chain](#queued-chains) stays on the connection of the link that
+ran. The worker settles a job and enqueues the next link in one call,
+`settle`, and that call goes to the connection that issued the
+reservation. The database driver and the Redis driver settle in one step,
+so the next link is written to that connection with the acknowledgement.
+When that connection is down, the settle fails and nothing falls over: the
+worker leaves the reservation as it is and the visibility timeout
+redelivers the job. A driver that cannot settle in one step, such as the
+memory driver, answers `Settled::Unsupported`. The worker then pushes the
+next link through the failover driver like any other push, so the link
+goes to the first connection that accepts it.
 
 ### The `QueueFailedOver` event
 
@@ -253,11 +382,13 @@ handler idempotency a requirement everywhere else - see
 ### Why Suprnova diverges
 
 Laravel's failover connection is a `connections` array in
-`config/queue.php`, resolved through the connection registry. Suprnova
-has no per-connection driver registry - one driver is bound
-process-wide - so the labels come from `QUEUE_FAILOVER_CONNECTIONS` (or
-from the `String` you pass to `FailoverQueueDriver::new`) and reads
-delegate to the first *driver* rather than to a named connection.
+`config/queue.php`, resolved through the connection registry. Suprnova's
+failover driver takes the drivers themselves rather than names in the
+[connection registry](#connections), so the labels come from
+`QUEUE_FAILOVER_CONNECTIONS` (or from the `String` you pass to
+`FailoverQueueDriver::new`) and reads go to the drivers of the list rather
+than to named connections. The failover driver is one driver, and it is
+the default connection or a registered connection like any other.
 
 Laravel's `FailoverQueue::bulk` loops the jobs individually so each one's
 delay survives. Suprnova resolves the delay onto the envelope before any
@@ -484,7 +615,7 @@ and the job's own `Job::*` declaration for that field:
 | `fail_on_timeout` | `Job::fail_on_timeout()` |
 | `max_tries` | `Job::max_tries()` |
 | `backoff` | `Job::backoff()` |
-| `after_commit` | `Job::after_commit()` |
+| `after_commit` | `Job::after_commit()`, `QUEUE_AFTER_COMMIT` |
 
 `EnvelopeOverrides` is the primitive `Mail::on_queue`/`.on_connection()` and
 `Notify::queue`'s per-notification queue tuning are both built on - see
@@ -517,13 +648,17 @@ dispatch of a job type should start delayed by default; reach for one of
 the `later`/`push_later` variants for a delay one specific dispatch needs
 but the type doesn't otherwise declare.
 
-Batches and chains don't consult it either: `Queue::batch()...add(job)` and
-`Queue::chain()...add(job)?` both build their envelopes with `available_at`
-set to the moment you called `add`, so a job with a declared `Job::delay()`
-dispatches immediately as part of a batch or a chain even though a bare
-`Queue::push(job)` of the same job would wait. Give the job an explicit
-delay some other way - a field on the job itself, applied in `handle()` - if
-a batched or chained step needs one.
+A chain honors it: every link of `Queue::chain()...add(job)?` records the
+job's `Job::delay()` when you add it. The head becomes available that long
+after `dispatch()`, and each later link becomes available that long after
+the link before it completes. See [Queued chains](#queued-chains).
+
+A batch doesn't consult it: `Queue::batch()...add(job)` builds its envelopes
+with `available_at` set to the moment you called `add`, so a job with a
+declared `Job::delay()` dispatches immediately as part of a batch even though
+a bare `Queue::push(job)` of the same job would wait. Give the job an
+explicit delay some other way - a field on the job itself, applied in
+`handle()` - if a batched step needs one.
 
 ### Why Suprnova diverges
 
@@ -631,21 +766,35 @@ including a refused `COMMIT`. The one bound on that guarantee is the TTL
 itself: a transaction that stays open longer than `unique_for` can have its
 lock expire and be re-taken by another dispatch mid-flight, so give
 `unique_for` room above your longest transaction if the dedupe matters. The
-`push_unique*` family takes no `EnvelopeOverrides`, so `Job::after_commit()` is
-the only thing that decides whether a unique push defers - there is no per-push
-override for it.
+`push_unique*` family takes no `EnvelopeOverrides`, so `Job::after_commit()` and
+`QUEUE_AFTER_COMMIT` are the only things that decide whether a unique push
+defers - there is no per-push override for it.
 
-Batches and chains do not defer, the same way they do not consult
-`Job::delay()`: `Queue::batch()` and `Queue::chain()` build and push their
-envelopes directly. Wrap the `.dispatch()` call so it runs after the
-transaction returns if a batch has to wait for a commit.
+Batches and chains do not defer: `Queue::batch()` and `Queue::chain()` build
+and push their envelopes directly. Wrap the `.dispatch()` call so it runs
+after the transaction returns if a batch or a chain has to wait for a
+commit.
 
-Queued [mail](mail.md#queueing) and [notifications](notifications.md) do not
-defer either. Each rides a single shared job type (`SendMailJob` /
-`SendNotificationJob`), and there is no
-`ShouldQueueAfterCommit` equivalent on `Mailable` or `Notification` yet, so a
-`Mail::queue` or `Notify::queue` call inside a transaction reaches the driver
-immediately. Send those after the transaction returns.
+Queued [mail](mail.md#queueing) and [notifications](notifications.md) defer
+when the message asks. Each rides a single shared job type (`SendMailJob` /
+`SendNotificationJob`), so the job's own `Job::after_commit()` cannot answer
+for one message. Instead `Mailable::after_commit(&self)` and
+`Notification::after_commit(&self)` return `false` by default. When one
+returns `true`, `Mail::queue`, `Mail::later` and `Notify::queue` inside
+`DB::transaction` push at the commit, and a rollback discards the push.
+Outside a transaction they push at once. A message that returns `false`
+keeps the default, so the per-push and process-wide settings below still
+apply to it.
+
+To defer every job push, queued mail and queued notification in the process,
+whatever the job or the message declares, set `QUEUE_AFTER_COMMIT=true` (`1`
+works too). Batches and chains still push at once. Suprnova reads the
+variable at each push. It is the `after_commit` option of a Laravel queue
+connection.
+`Job::after_commit()` answers `false` both for a job that never chose and
+for one that chose `false`, so a job cannot turn the process-wide setting
+off. One push can go ahead of the commit with `EnvelopeOverrides {
+after_commit: Some(false), .. }`.
 
 Under `Queue::fake()` a push is recorded immediately, deferral and all, so a
 test can assert on it without committing anything. This matches Laravel's
@@ -668,9 +817,11 @@ that happens too early. Reach for `DB::transaction` when a dispatch has to
 wait for the commit.
 
 Laravel also reads a connection-level `after_commit` config key as the last
-fallback in its precedence chain. Suprnova stops at the per-push override and
-then the job's own `Job::after_commit()`: queue connections here do not carry
-their own dispatch policy.
+fallback in its precedence chain. Suprnova reads one process-wide switch,
+`QUEUE_AFTER_COMMIT`, in that place: the order is the per-push override, then
+the job's own `Job::after_commit()` or the switch. Queue connections here do
+not carry their own dispatch policy, so the switch applies to every
+connection.
 
 ## Job configuration
 
@@ -739,18 +890,19 @@ Resolution runs highest-priority first:
    [Per-push overrides with `EnvelopeOverrides`](#per-push-overrides-with-envelopeoverrides))
 2. a route registered with `Queue::route`
 3. the job's own `Job::queue` / `Job::connection`
-4. the driver / global default
+4. the default: the default queue of the driver, and the default connection
 
 Passing `None` for a field leaves that dimension alone, so routing a job's
 connection does not disturb the queue it already declared.
 
 Both dimensions are honored end to end. The **queue** is stamped on the
 envelope, stored by the driver, and filtered by `--queue`. The
-**connection** selects the driver a job is pushed to, and its name is
-carried on the `JobQueueing` / `JobQueued` lifecycle events that listeners
-and dashboards see.
+**connection** selects the driver a job is pushed to, as
+[Connections](#connections) describes, and its name is carried on the
+`JobQueueing` / `JobQueued` lifecycle events that listeners and dashboards
+see.
 
-Then dedicate a worker to it:
+Then dedicate a worker to the queue:
 
 ```bash
 ./app queue:work --queue=billing
@@ -775,14 +927,18 @@ Queue::forward("default", "high");
 Queue::forward_on("exports", "heavy", "redis");   // only on the `redis` connection
 ```
 
-The connection in `forward_on` is a gate, and it is compared against this
-process's connection name - `Queue::set_connection_name` if you set one, the
-driver's own name otherwise. It is not compared against the job's
-`Job::connection`, a `Queue::route`'s connection, or a per-push
-`EnvelopeOverrides` connection: those name what the lifecycle events report, and
-a worker has only the process name to gate its claim list on. Both halves of the
-redirect gate on that one value, so a forward can never move the push without
-moving the claim.
+The connection in `forward_on` is a gate. It is compared against the name of
+the [connection](#connections) the push goes to, which is the name the worker
+on that connection was started with (`queue:work --connection`, or the default
+connection's name when you pass none). Both halves of the redirect gate on that
+one value, so a forward can never move the push without moving the claim. On
+any other connection the forward does nothing and the queue name passes
+through.
+
+While you register no connection, every push goes to the default connection.
+The gate then compares with the default's name - `Queue::set_connection_name`
+if you set one, the driver's own name otherwise - whatever connection the job,
+a `Queue::route` or a per-push `EnvelopeOverrides` names.
 
 The redirect applies on both sides, which is what keeps it from stranding work:
 
@@ -847,20 +1003,20 @@ per-queue storage - will error rather than mislead.
 
 `Queue::forward` ports the queue-to-queue half of Laravel's `Queue::forward`
 in full, and only that half. Laravel's third argument can move a forwarded queue
-onto a different *connection*, because its queue manager resolves a driver per
-connection name. Suprnova has one process-global driver and a connection name
-only labels lifecycle events, so `Queue::forward_on(from, to, connection)`
-treats the connection as a **gate** - it decides whether the queue-name redirect
-applies - and never as a destination. For the same reason `to` is required here,
-while Laravel's is optional: an omitted `to` in Laravel means "move only the
-connection", which is precisely the dimension Suprnova cannot honor, so a
-`forward(from, None)` would be a no-op dressed as a configuration change.
+onto a different *connection*. Suprnova selects the connection by job, route or
+push, and a forward only renames the queue, so `Queue::forward_on(from, to,
+connection)` treats the connection as a **gate** - it decides whether the
+queue-name redirect applies - and never as a destination. To move a job to
+another connection, route the job with `Queue::route`. For the same reason
+`to` is required here, while Laravel's is optional: an omitted `to` in
+Laravel means "move only the connection", which a forward here does not do,
+so a `forward(from, None)` would be a no-op dressed as a configuration
+change.
 
 Laravel's inspection calls follow a forward, because `pendingJobs($queue)` and
 its siblings run through the same driver-level `getQueue()` the push and the pop
 do. Suprnova's `Queue::pending_jobs` / `delayed_jobs` / `reserved_jobs` report
-the literal queue you name instead. With one process-global driver, the literal
-view is the only way to see the envelopes that stayed behind on a queue you have
+the literal queue you name instead. The literal view is the only way to see the envelopes that stayed behind on a queue you have
 just forwarded away - the backlog this section tells you to drain first. Ask for
 the destination queue by name to see where new work is landing.
 
@@ -1037,6 +1193,49 @@ that in mind, and prefer idempotent handlers: at-least-once delivery was
 always the contract, and this makes the redelivery path count honestly
 rather than silently.
 
+## Context on queued work
+
+A job runs after the request that queued it, often in another process.
+Suprnova carries the [`Context`](context.md) to it. Every push takes a
+`ContextSnapshot` of the caller's visible and hidden bags and stores it in
+the `context` field of the `Envelope`. The field is `None` when the caller
+had nothing to carry.
+
+```rust
+use suprnova::Context;
+
+// In a handler:
+Context::add("tenant_id", "acme");
+Queue::push(SendInvoice { invoice_id: 7 }).await?;
+
+// In SendInvoice::handle, on a worker:
+let tenant: Option<String> = Context::get("tenant_id");
+```
+
+The worker restores one scope from the snapshot for each attempt. The job,
+its middleware and the lifecycle events around it (`JobProcessing`,
+`JobProcessed`, `JobFailed` and the rest) all run in that scope, so a
+listener reads what the job read and what the job added. The rules:
+
+- The snapshot is taken when you push. A push that waits for a
+  [commit](#after-commit-dispatch) carries the snapshot of the code that
+  called `push`.
+- Every link of a chain and every job of a batch carries the snapshot of the
+  code that built it. A queued event listener carries the snapshot of the
+  dispatch.
+- The job works on a copy. What it adds reaches neither the request nor the
+  next job, and every retry starts from the snapshot again.
+- The query bag does not travel. A job that runs inline under the `sync`
+  driver does not read the request's query parameters.
+- A job queued while a request is served carries the request's id as
+  `_request_id`.
+- Hidden values travel too, because the job needs them. They reach the queue
+  store and the failed-job store. They do not reach a log: the envelope a
+  worker logs when no failed-job store is bound carries no hidden context.
+
+`Context::dehydrating` and `Context::hydrated` register callbacks for the
+two ends of the trip. See [Context](context.md#queued-work).
+
 ## Lifecycle events
 
 Workers emit Laravel-shape lifecycle events through the
@@ -1146,11 +1345,52 @@ Queue::retry_failed(some_id).await?;
 let count = Queue::retry_all_failed(None).await?;
 ```
 
-`retry_failed` loads the envelope, resets `attempts`, `available_at`, and
-the `idempotency_key`, pushes through the configured driver, then deletes
-the failed-job record. Mirrors `php artisan queue:retry <id>` plus
-`queue:flush` semantics (each retried envelope is pushed AND removed
-from the store).
+`retry_failed` loads the envelope, resets `attempts`, `available_at`, the
+`idempotency_key` and the uniqueness lock owner, pushes it to the
+[connection](#connections) it failed on, then deletes the failed-job record.
+Mirrors `php artisan queue:retry <id>` plus `queue:flush` semantics (each
+retried envelope is pushed AND removed from the store).
+
+`retry_all_failed` keeps a record whose connection is not registered, as it
+keeps a record whose envelope does not decode, and logs a warning.
+It carries on with the records after it. `retry_failed` returns the error
+instead.
+
+### Failed-job commands
+
+The application binary has five commands over the failed-job store. Run them
+as you run `queue:work`, with `./app` or `cargo run --bin app --`:
+
+| Command | Effect |
+| --- | --- |
+| `queue:failed` | list every failed job: id, connection, queue, job, failure time and the first line of the error |
+| `queue:retry <id>...` | push the failed jobs with these ids back onto the queue |
+| `queue:retry all` | push every failed job back onto the queue |
+| `queue:forget <id>` | delete one failed job |
+| `queue:flush [--hours N]` | delete every failed job, or only those that failed more than `N` hours ago |
+| `queue:prune-failed [--hours N]` | delete the failed jobs older than `N` hours; `N` defaults to `24` |
+
+```bash
+./app queue:failed
+./app queue:retry 3f2a9c1e-5b7d-4c8e-9a10-2d6e4b8f7a11
+./app queue:retry all
+./app queue:flush --hours 168
+```
+
+`queue:retry` calls `Queue::retry_failed` for each id, or
+`Queue::retry_all_failed` for `all`. A command exits non-zero when part of
+the request fails: an id that names no failed job, or an id that is not a
+UUID. The `suprnova` CLI forwards the same five commands to your
+application's binary, so `suprnova queue:failed` from the project directory
+does the same as `./app queue:failed`.
+
+The commands run the application's bootstrap, as `queue:work` does, and use
+the failed-job store that boot bound. `QUEUE_DRIVER=database` binds one. With
+any other driver, call `Queue::set_failed_store(...)` in `bootstrap::register()`.
+With no store bound, a command exits non-zero and says so. A retry pushes to
+the queue that boot configured, so with the `memory` driver the retried job
+goes into the memory of the command's own process, not into the process that runs
+your workers.
 
 ### `failed_jobs` schema
 
@@ -1333,12 +1573,16 @@ Queue::chain()
     .await?;
 ```
 
-The first envelope is pushed immediately; the rest travel on its
+The first envelope is pushed at dispatch; the rest travel on its
 `chain_remaining` payload field. On every successful settlement the
-worker pops the next entry and dispatches it. A link whose job declares
-`Job::delay()` becomes available that long after its predecessor
-settles, as it would after a direct push. A failure breaks the
+worker pops the next entry and dispatches it. A failure breaks the
 chain - subsequent links are never enqueued.
+
+Each link applies its job's own `Job::delay()`, as a direct push does. A
+delay of 30 seconds on the head makes the head available 30 seconds after
+`dispatch()`. A delay on any later link makes that link available that long
+after the link before it completes. A chain runs on one connection, the one
+its first job resolves to - see [Workers, pauses and chains](#workers-pauses-and-chains).
 
 ### Terminal settlement
 
@@ -1502,7 +1746,12 @@ or from the CLI:
 ./app queue:pause --all
 ./app queue:resume billing
 ./app queue:resume --all      # alias: queue:continue
+./app queue:pause billing --connection reports
 ```
+
+A pause belongs to one connection. `queue:pause` and `queue:resume` take
+`--connection <name>` and act on the default connection without it. See
+[Connections](#connections).
 
 A paused worker finishes whatever it already popped - pausing never
 interrupts a job in flight - then stops claiming new work until resumed.
@@ -1596,20 +1845,26 @@ of substring-searching the error message.
 
 ## Connection naming
 
-Workers tag every lifecycle event with a connection name. By default
-this is the driver's `name()` (e.g. `"memory"`, `"redis"`, `"database"`).
-Apps that run multiple connections at once can override:
+Workers tag every lifecycle event with a connection name. A worker on the
+default connection uses that connection's name, which is by default the
+driver's `name()` (e.g. `"memory"`, `"redis"`, `"database"`). Override it
+with:
 
 ```rust
 Queue::set_connection_name("orders-redis");
 ```
 
+A worker started with `--connection reports` tags its events, and the
+failed-job records it writes, with the name of that connection. See
+[Connections](#connections).
+
 ## Testing
 
-`Queue::fake()` semantics live in `queue::testing`:
+`Queue::fake()` installs the fake, and the assertions live in `queue::testing`.
+`queue::testing::install_fake()` is the same call and returns the same guard:
 
 ```rust
-let _guard = suprnova::queue::testing::install_fake();
+let _guard = suprnova::Queue::fake();
 my_code_that_dispatches_jobs().await;
 
 suprnova::queue::testing::assert_pushed::<SendWelcomeEmail>(|j| j.user_id == 42);
@@ -1624,7 +1879,7 @@ The fake guard serialises parallel tests via a process-wide mutex; it
 captures `(payload, available_at, overrides)` per push and clears on
 `Drop`. The `overrides` field is `EnvelopeOverrides::default()` for
 every entry point except `push_with`/`later_with` - see
-[Mocking](mocking.md#queue---queuetestinginstall_fake) for
+[Mocking](mocking.md#queue---queuefake) for
 `assert_pushed_on_queue`/`assert_pushed_on_connection` and
 `pushed_with_overrides`, the assertions over it. In fake mode,
 `push_unique` always records the push as fresh - dedupe is irrelevant
@@ -1637,6 +1892,49 @@ fake does still catch is a job declaring both `debounce_for` and
 `unique_id` - that pair cannot hold whatever the environment is, so the
 push returns an error under `Queue::fake()` exactly as it would in
 production.
+
+### Batches, chains and failed-job retries
+
+Every path that would write to the driver records in the fake instead:
+`Queue::batch()...dispatch()`, `Queue::chain()...dispatch()`,
+`Queue::retry_failed` and `Queue::retry_all_failed`. None of them needs a
+driver under the fake, and none writes to one that is installed.
+
+- A batch records as a `FakedBatch` with its `id`, `name` and `jobs`. The
+  repository still stores the batch, so the id you receive names a batch.
+  No job runs, so the batch stays pending.
+- A chain records as a `FakedChain` whose `links` run head first. A chain
+  whose links resolve to different connections is refused under the fake, as
+  it is in production.
+- A retry records the retried envelope as a push. The failed-job record still
+  leaves the store.
+
+The jobs of a batch, the head of a chain and every retried job also record as
+ordinary pushes, so `assert_pushed` sees them whichever path queued them.
+Assert on the batch or the chain itself with these functions of
+`queue::testing`:
+
+```rust
+use suprnova::queue::testing::{
+    assert_batch_count, assert_batched, assert_chained, assert_nothing_chained,
+    batched, chained,
+};
+
+let _guard = suprnova::Queue::fake();
+import_users(vec![1, 2, 3]).await?;
+
+assert_batch_count(1);
+assert_batched(|batch| batch.name == "import-users" && batch.jobs.len() == 3);
+assert_eq!(batched()[0].jobs_of::<ImportUser>().len(), 3);
+
+assert_chained(&["GenerateReport", "UploadToBucket"]);
+let report: Option<GenerateReport> = chained()[0].link::<GenerateReport>(0);
+```
+
+`assert_chained` takes the `Job::job_name()` of every link, head first, and
+matches a chain made of exactly those jobs. `assert_nothing_batched` and
+`assert_nothing_chained` assert the opposite. See
+[Mocking](mocking.md#queue---queuefake) for the whole table.
 
 ## Idempotency is the contract between the worker and you
 

@@ -88,7 +88,7 @@ different machinery.
 
 Every error path inside the framework - extractors, route binding,
 the container, validation, the database layer, storage - produces a
-`FrameworkError`. It's an enum with sixteen variants, each tagged
+`FrameworkError`. It's an enum with seventeen variants, each tagged
 with its HTTP status:
 
 ```rust
@@ -108,6 +108,7 @@ pub enum FrameworkError {
     PrecognitionFailure(ValidationErrors),               // 422
     AlreadyReported,                                     // CLI-only
     RateLimited { retry_after: Option<Duration>, message: String }, // 429
+    Timeout { elapsed: Duration, message: String },      // 504
     External { message: String, source: Arc<dyn Error + Send + Sync> }, // 500
 }
 ```
@@ -116,6 +117,7 @@ You rarely match on the variant. You construct one through a
 convenience constructor and let `?` do the rest:
 
 ```rust
+use std::time::Duration;
 use suprnova::FrameworkError;
 
 // All of these produce a FrameworkError with the right status:
@@ -127,6 +129,7 @@ FrameworkError::validation("email", "required");      // → ValidationError, 42
 FrameworkError::domain("Conflict", 409);              // → Domain, 409
 FrameworkError::internal("disk full");                // → Internal, 500
 FrameworkError::database("timeout");                  // → Database, 500
+FrameworkError::timeout(Duration::from_secs(30), "waiting for the export"); // → Timeout, 504
 ```
 
 There are no `unauthorized()` or `forbidden()` constructors on
@@ -175,7 +178,7 @@ The message becomes `"creating new user: <original>"`. The variant is
 preserved where it matters - `Validation`, `ValidationError`,
 `PrecognitionFailure`, `PrecognitionSuccess`, `Unauthorized`,
 `ModelNotFound`, `ParamParse`, `UnsupportedMediaType`,
-`AlreadyReported`, `RateLimited`, and `External` keep their structure
+`AlreadyReported`, `RateLimited`, `Timeout`, and `External` keep their structure
 so the response renderer still emits the correct shape (and, for
 `External`, so the wrapped source survives). Plain message-carrying
 variants (`Internal`, `Database`, `Domain`) flatten into a `Domain`
@@ -234,6 +237,32 @@ assert_eq!(err.status_code(), 429);
 `retry_after()` returns `None` for every other variant and for throttles that arrived without a
 hint. The variant renders as HTTP 429, and `.context(...)` preserves it rather than flattening to
 `Domain`, so the duration is never stripped by adding operation context.
+
+### Telling a passed deadline from a failure
+
+`Timeout` says that a deadline passed before the awaited work finished. It
+carries the deadline as `elapsed` and what was awaited as `message`. The
+workflow wait returns it: `WorkflowHandle::wait_with_timeout` and
+`wait_with_options` end with `FrameworkError::Timeout` when the workflow is
+still pending or running at the deadline (see
+[Workflows](workflows.md#waiting-on-results)). A failed status query is a
+different error, so a caller can match the two apart:
+
+```rust
+use std::time::Duration;
+use suprnova::FrameworkError;
+
+let err = FrameworkError::timeout(Duration::from_secs(30), "waiting for the export");
+
+assert!(err.is_timeout());
+assert_eq!(err.status_code(), 504);
+assert_eq!(err.to_string(), "Timed out after 30s: waiting for the export");
+```
+
+The error does not cancel the work. It renders as HTTP 504, and like every
+5xx the client sees the generic `Internal Server Error` message while the
+detail goes to the logs. `.context(...)` preserves the variant, so a caller
+further up can still match on it.
 
 ## `AppError` - ad-hoc domain errors
 

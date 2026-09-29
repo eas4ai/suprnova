@@ -136,12 +136,29 @@ pub fn register(dto: &'static str, fields: &'static [&'static str]) {
 Subsequent reads and writes proceed normally - the lock stays poisoned
 for `is_poisoned()` queries, but data flow is restored.
 
+The framework has an internal `pub(crate)` helper for this half,
+`lock::recover`, which takes a `Mutex` and goes on with the value when the
+lock is poisoned. It is for a value that is whole after any panic: a list
+that code of the framework pushes to and drains, or a value that code of
+the framework replaces as one. The session middleware takes the locks of
+its pending cookies, its remember tokens that wait to be revoked and its
+list of fresh Magnetar sessions this way. The clean-up task that runs after
+the request shares the list of fresh sessions, so a lock that refused after
+a panic would end the clean-up.
+
+The value must be whole because every code path that runs under the guard
+is code of the framework. A closure of your application that runs under
+the guard can panic between two of its writes. Where such a closure runs,
+the code that goes on with the value must not keep what it finds. The
+session is the example, and [Session](session.md) describes what the
+middleware does with it.
+
 The framework uses this pattern in `data::registry` (the include-set
 allowlist read on every JSON:API response), `auth::manager` (the named
 auth-provider map), `app::paths` (the resolved-paths cache), the
-testing fakes for mail and events, and the loaded-env-keys map in
-config. Every one is a place where either no caller has a `Result` to
-return, or the state is append-only and structurally safe to keep using.
+testing fakes for mail and events, the loaded-env-keys map in
+config, and the session middleware's pending lists. Every one is a place
+where either no caller has a `Result` to return, or the state is append-only and structurally safe to keep using.
 
 Use this pattern when:
 

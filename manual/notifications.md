@@ -102,6 +102,7 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
     fn fail_on_timeout(&self) -> bool { false }
     fn max_tries(&self) -> u32 { 3 }
     fn backoff(&self) -> BackoffSchedule { BackoffSchedule::default() }
+    fn after_commit(&self) -> bool { false }
 }
 ```
 
@@ -117,6 +118,7 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 | `fail_on_timeout(&self)` | If `true`, a timeout is a permanent failure (dead-letter, no retry). Default: `false`. |
 | `max_tries(&self)` | Max attempts for this notification's queued jobs. Default: `3`. |
 | `backoff(&self)` | Backoff schedule for this notification's queued jobs. Default: the framework default. |
+| `after_commit(&self)` | `true` makes `Notify::queue` inside `DB::transaction` wait for the commit before it pushes the jobs. Default: `false`. See [Queued notifications inside a transaction](#queued-notifications-inside-a-transaction). |
 
 `should_send` and `after_sending` are honored on **both** paths. `Notify::send`
 consults them in the dispatcher; `Notify::queue` checks `should_send` before
@@ -474,6 +476,40 @@ timeout instead of retrying up to `max_tries`.
 
 These five methods apply only to `Notify::queue` - `Notify::send` runs
 in-process and has no queue envelope to tune.
+
+### Queued notifications inside a transaction
+
+A notification queued inside a `DB::transaction` races that transaction. A
+worker can pop the job before the commit and notify about a row the transaction has not committed, or about a row that a rollback then removes. Return `true` from
+`Notification::after_commit` for a notification about rows the transaction
+writes:
+
+```rust
+impl Notification for OrderPlaced {
+    fn notification_name() -> &'static str { "OrderPlaced" }
+    fn channels(&self) -> Vec<&'static str> { vec!["mail", "database"] }
+    fn data(&self) -> serde_json::Value { serde_json::json!({ "order_id": self.order_id }) }
+
+    fn after_commit(&self) -> bool { true }
+}
+
+DB::transaction(|_tx| {
+    Box::pin(async move {
+        let order = Order::create(suprnova::attrs! { total: 4999i64 }).await?;
+        // Nothing reaches the queue here.
+        Notify::queue(&user, OrderPlaced { order_id: order.id }).await?;
+        Ok::<(), FrameworkError>(())
+    })
+})
+.await?;
+// The jobs are on the queue now, and only now.
+```
+
+Inside a transaction, `Notify::queue` pushes the per-channel jobs at the
+commit, and a rollback discards them. Outside a transaction it pushes them at
+once. A notification that returns `false` defers to the process-wide
+`QUEUE_AFTER_COMMIT` setting, which makes every push wait for the commit. See
+[After-commit dispatch](queues.md#after-commit-dispatch).
 
 ### Why Suprnova diverges
 

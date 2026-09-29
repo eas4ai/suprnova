@@ -396,33 +396,72 @@ subscription stays active until the end of the billing period, then
 Stripe finalises it. Immediate cancel is `DELETE /v1/subscriptions/{id}`
 with `prorate=false` and `invoice_now=false`.
 
-### `update()` is intentionally limited
+### `update()` changes prices and the cancellation flag
 
-`UpdateSubscriptionRequest` has two fields the adapter acts on:
-`cancel_at_period_end` and `new_price_refs`. The first is supported;
-the second returns `PaymentError::NotSupported`:
+`Subscription::update` acts on two fields of `UpdateSubscriptionRequest`:
+`new_price_refs` and `cancel_at_period_end`. A third field, `proration`,
+says how a price change is billed. With `new_price_refs: None` and
+`cancel_at_period_end: Some(_)`, the adapter posts the flag to
+`/v1/subscriptions/{id}` and nothing else.
+
+`new_price_refs` is the set of prices the subscription has after the call:
+
+- An item whose price is in the list keeps its id and its quantity.
+- An item whose price is not in the list is removed.
+- A price that has no item is added with a quantity of 1, except in a swap.
+  When the change removes exactly one item and adds exactly one price, the new
+  price takes the quantity of the removed item.
+- An empty list, or a list that names a price twice, is
+  `PaymentError::Validation`, and no request is sent.
 
 ```rust
-provider.update(UpdateSubscriptionRequest {
-    provider_subscription_id: "sub_1234".into(),
+use suprnova::payments::{Proration, UpdateSubscriptionRequest};
+
+let sub = provider.update(UpdateSubscriptionRequest {
+    provider_subscription_id: "sub_123".into(),
     new_price_refs: Some(vec!["price_team_yearly".into()]),
+    proration: Some(Proration::ProrateNow),
     cancel_at_period_end: None,
-    idempotency_key: None,
-}).await
-// → Err(PaymentError::NotSupported(
-//      "Stripe price-set replacement on existing subscription not in v1. \
-//       Cancel the subscription and create a new one with the new price set."
-//   ))
+    idempotency_key: Some("plan-change-42".into()),
+}).await?;
+// sub.items now holds one item, for price_team_yearly.
 ```
 
-This is one of the few places `NotSupported` is the honest answer
-rather than a deferral. Stripe price-set replacement requires deleting
-and re-creating subscription items - the shape varies by provider
-(proration, billing-cycle anchoring, retained-trial behaviour) and
-collapsing it into a single neutral API would hide more than it
-helped. The recommended path is to cancel the existing subscription
-and `subscribe` again with the new price set, applying your own
-proration policy if you need one.
+`proration` is read only when `new_price_refs` is `Some`. The adapter sends
+it as the `proration_behavior` of the update:
+
+| `proration` | Stripe `proration_behavior` |
+|---|---|
+| `None` or `Some(Proration::ProrateAtRenewal)` | `create_prorations` |
+| `Some(Proration::ProrateNow)` | `always_invoice` |
+| `Some(Proration::DoNotProrate)` | `none` |
+
+The adapter reads the subscription first, because a Stripe update names the
+item changes and not the final list. It then sends one
+`POST /v1/subscriptions/{id}` with a delete for each item to remove and an
+item for each new price, with the quantity that the swap rule gives. Items
+that stay are not sent.
+`cancel_at_period_end`, when set, goes in the same request. The
+`idempotency_key` goes on that request only.
+
+If the list names the prices the subscription has and `cancel_at_period_end`
+is `None`, the adapter sends nothing and returns the subscription it read.
+
+The change is computed from that read and is not atomic. A change made at
+Stripe between the read and the write can be left in place, because the adapter
+changes the items one by one.
+A retry of a price change that already went through ends there.
+
+`update` returns an error and sends nothing in these cases:
+
+- The read of the subscription fails: `PaymentError::Provider`.
+- The items of the subscription span more than one page of Stripe's list:
+  `PaymentError::Provider`. The adapter cannot see every item, so it does not
+  change any.
+- The `idempotency_key` is blank or is not a valid header value:
+  `PaymentError::Validation`.
+- `proration` holds a variant the adapter has no Stripe behavior for:
+  `PaymentError::NotSupported`.
 
 ## Webhooks
 
@@ -574,6 +613,34 @@ Persist a stable key per operation and reuse it with identical parameters
 when retrying. A different operation needs a different key. Provider replay
 retention is finite, so retain your own operation record and reconcile an
 uncertain outcome before retrying outside that window.
+
+### Error text
+
+The text of a `PaymentError::Provider` that the adapter builds from an SDK
+error names the operation, such as `stripe customers.retrieve`, and keeps only
+the kind and the code of the Stripe error and the HTTP status. It carries no
+id and no URL, so it is safe to log. An example is `stripe customers.retrieve:
+api error invalid_request_error resource_missing, status 404`. An error that
+is not an API error has a fixed text, such as `the request timed out`.
+
+### Deadlines and unknown outcomes
+
+Every call of the adapter to Stripe has a deadline of 30 seconds, from the
+request to the whole answer. A call that runs out of time returns
+`PaymentError::Provider`. The text depends on what the call does:
+
+| Call | Error text |
+|---|---|
+| A read (`retrieve`) | `stripe <operation> timed out` |
+| A call that changes something (create, update, capture, refund, cancel, delete) | `stripe <operation> timed out; outcome is unknown, reconcile before retrying` |
+
+After a read times out, you can read again. After a change times out, Stripe
+may have carried out the change, so the outcome is unknown. Read the object
+at Stripe before you send the change again. You can also send it again with
+the same `idempotency_key` and the same parameters: Stripe then returns the
+result of the first attempt and does not repeat the change. That works only
+for the calls that take a key (see the list above) and only while Stripe
+keeps the key.
 
 ### Inbound: webhook deduplication
 

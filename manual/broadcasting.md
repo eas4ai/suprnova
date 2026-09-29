@@ -552,6 +552,8 @@ ws!("/ws/broadcast", broadcasting_handler())
     .middleware(RateLimitMiddleware::connections_per_ip(100)),
 ```
 
+`RateLimitMiddleware::connections_per_ip(100)` allows each client address 100 open connections on the route and answers the next upgrade with `429 Too Many Requests`. A connection counts until its session ends. The counts are per process, and an IPv6 address counts with its /64 network. See [Rate Limiting](rate-limiting.md#capping-open-connections-with-connections_per_ip).
+
 The split is intentional: **transport-level** (who may open the
 connection at all) lives in middleware; **channel-level** (who may
 subscribe to which channel) lives in `Channel::authorize`.

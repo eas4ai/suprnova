@@ -21,7 +21,7 @@ V = [
         "relations", "morph_type", "observers")],
     ("model", "`unique_id = \"uuid\" | \"uuid_v7\" | \"uuid_v4\" | \"ulid\"`", "model/parse.rs", "parse", "unique_id"),
     *[("model", f"relation option `{k}`", "model/parse.rs", "parse_relation_options", k) for k in (
-        "fk", "lk", "with_pivot", "with_timestamps", "with_default", "scope", "name",
+        "fk", "lk", "with_pivot", "with_timestamps", "with_default", "name",
         "morph_name", "targets", "first_key", "second_key", "second_local_key", "pivot_table",
         "pivot_foreign_key", "pivot_related_key", "related_key", "target_morph_type")],
     # #[suprnova::observer(M)] impl: lifecycle method names it wires

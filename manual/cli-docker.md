@@ -187,6 +187,11 @@ S3_BUCKET=local
 S3_REGION=us-east-1
 ```
 
+The server reads the `S3_*` variables when it boots. When `S3_BUCKET` is
+set, it registers an S3 disk named `s3`, so `Storage::disk("s3")` works
+against MinIO with no Rust code. See [Filesystem](filesystem.md#an-s3-disk-from-the-environment)
+for every variable.
+
 To override a port (e.g. because 5432 is already in use), set the
 matching env var before bringing the stack up:
 

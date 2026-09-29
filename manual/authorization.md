@@ -452,9 +452,41 @@ Gate::after::<User>(|user, action, decided| {
 ```
 
 Hooks are keyed by the **user type** `U`, not by resource - a hook fires for
-every `(action, U, R)`. Put resource-specific logic in the gate. Hooks are
-synchronous predicates and apply to the async evaluation path too; for async
-authorization logic, use `define_async` / `define_async_with`.
+every `(action, U, R)`. Put resource-specific logic in the gate. A `before`
+hook is a synchronous predicate and applies to the async evaluation path too;
+for async authorization logic in a gate, use `define_async` /
+`define_async_with`.
+
+### Async `before` hooks
+
+A hook that has to wait on I/O, such as a database read, cannot be a
+synchronous closure. Register it with `Gate::before_async`. The closure must
+return an owned future, as `define_async` requires:
+
+```rust
+// Staff, as the directory service lists them, may do anything.
+Gate::before_async::<User, _, _>(|user, _action| {
+    let id = user.id;
+    async move { is_staff(id).await.then_some(true) }
+});
+```
+
+Sync and async `before` hooks share one list per user type. Evaluation walks
+the list in the order you registered the hooks, and the first `Some(decision)`
+wins. Only the async forms of the gate (`allows_async`, `denies_async`,
+`authorize_async`, `inspect_async`, `raw_async` and the async multi-action
+methods) wait on an async hook. Never block a thread on I/O inside a
+synchronous hook to get around this: it stalls a runtime worker on every check.
+
+#### A denial here is not enforced everywhere
+
+A hook that answers `Some(false)` denies only on the async forms. The forms
+that cannot wait skip the hook and go on as if it had answered nothing, so a
+gate that allows still allows there. These forms are `Gate::allows`,
+`denies`, `authorize`, `inspect`, `raw`, `any`, `none` and `check`, and `can`,
+`cannot` and `authorize` on [`Authorizable`](#the-authorizable-trait). A hook
+that must deny belongs in `Gate::before`. Otherwise every check your
+application makes has to use an async form.
 
 ### Why Suprnova diverges
 
@@ -477,6 +509,111 @@ than accepted. Laravel's `defaultDenialResponse` has no such guard, but this
 is a *denial* default - accepting an allow-shaped one would silently invert
 every bare `false` gate result to allowed, the one fail-open direction on
 this surface.
+
+## Roles and permissions
+
+Suprnova ships a small role and permission system in `suprnova::rbac`. It is
+optional. You add the tables, implement one trait on your user model, and
+assign roles and permissions to users.
+
+- A **permission** is a name, such as `"posts.publish"`.
+- A **role** is a named set of permissions, such as `"editor"`.
+- A user holds a permission **directly**, or **through a role** that carries it.
+
+Add `suprnova::rbac::migrations::CreateRbacTables` to your migrator. It
+creates the `roles`, `permissions`, `role_permissions`, `model_roles` and
+`model_permissions` tables. Every role and permission has a guard name. The
+helpers that take no guard use `"web"`, and so does every check on this
+page.
+
+Implement `HasRoles` on the user model. It has no required methods:
+
+```rust
+use suprnova::HasRoles;
+use suprnova::rbac::{create_role, give_permission_to_role};
+
+impl HasRoles for User {}
+
+// Setup, for example in a seeder:
+create_role("editor").await?;
+give_permission_to_role("editor", "posts.publish").await?;
+
+user.assign_role("editor").await?;
+user.give_permission_to("posts.delete").await?;
+
+user.has_role("editor").await?;                  // true
+user.has_permission_to("posts.publish").await?;  // true, through the role
+user.has_permission_to("posts.delete").await?;   // true, held directly
+```
+
+For a route, `RoleMiddleware::<User>::new("editor")` and
+`PermissionMiddleware::<User>::new("posts.publish")` require the role or the
+permission. Put them after `AuthMiddleware`. A user who lacks it gets a `403`,
+or a redirect if you build the middleware with `redirect_to`. A failed
+database read also refuses the request.
+
+### Answering the gate with permissions
+
+Without more setup, the gate does not know about permissions:
+`Gate::allows_async("posts.publish", &user, &post)` asks only the gate
+definitions and the policies. Call `register_gate_bridge` once, in
+`bootstrap::register()`, to connect the two:
+
+```rust
+suprnova::rbac::register_gate_bridge::<User>();
+
+// Allowed when the user holds "posts.publish", directly or through a role.
+if Gate::allows_async("posts.publish", &user, &post).await {
+    // ...
+}
+```
+
+The bridge is a `before` hook of the gate, built on `Gate::before_async`. It
+follows these rules:
+
+- **It allows and never denies.** If the ability is a permission the user
+  holds, the gate allows. For any other ability the bridge has no opinion, and
+  the gate goes on to its definitions and policies. A user who does not hold
+  the permission can still be allowed by a gate or a policy.
+- **A `before` hook answers first.** A held permission allows the ability of
+  the same name even where a gate definition or a policy would deny it. This
+  is why the bridge is opt-in: keep permission names and policy ability names
+  apart unless you want them to overlap.
+- **Only the async forms see permissions.** The bridge reads the database,
+  so `allows_async`, `authorize_async`, `inspect_async` and the other async
+  forms use it. `allows`, `authorize` and `inspect` skip it, and a permission
+  never answers them.
+- **One read per request.** The bridge reads all the permissions of a user
+  with one query the first time a check in a request needs them, and answers
+  the rest of the request from that set. It keeps nothing after the request.
+  A grant or a revocation made before the first check of a user in a request
+  is seen by that check. After that check, it is seen from the next request.
+- **A check in a transaction reads for itself.** Inside `DB::transaction` a
+  check neither uses the set nor adds to it. It reads on the transaction, so it
+  sees what the transaction changed, and it keeps nothing.
+- **A unit of work with its own scope reads for itself.** A job that the sync
+  queue driver runs inline, or a future you run with `App::run_scoped`, opens
+  its own container scope inside the request. Its checks read the database
+  again and leave nothing for the request.
+- **Outside a request, every check reads the database.** A queued job, a
+  console command or a task you spawn from a handler is not inside the request.
+- **A failed read allows nothing.** The bridge logs the error, without the id
+  of the user, and answers nothing. The gate then denies unless a definition
+  or a policy allows.
+- **The guard is `"web"`.** Permissions on another guard do not answer the
+  gate.
+
+`register_gate_bridge` also adds `GateBridgeMiddleware` to the front of the
+global middleware, which holds the per-request set. Calling it twice for the
+same user type changes nothing. If you never call it, nothing changes: the gate
+answers as before.
+
+### Why Suprnova diverges
+
+The gate takes the user explicitly and has a sync surface and an async
+surface. A permission is a database read, so it can answer only the async
+surface. Use `allows_async` and `authorize_async` wherever a permission
+decides.
 
 ## Next
 

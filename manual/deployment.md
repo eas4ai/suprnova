@@ -97,9 +97,17 @@ relational backends. The recommendation is environment-specific:
 DATABASE_URL=mysql://app_user:secret@db.internal:3306/app_production
 ```
 
-Use the `mysql://` scheme - SeaORM's MySQL driver handles MariaDB
-natively, and Suprnova's `MariaDbVectorDriver` (`VECTOR(N)` + HNSW)
-hooks in directly for vector workloads.
+Use the `mysql://` or the `mariadb://` scheme. Both select the MySQL family
+driver, which handles MariaDB natively. The framework accepts `mariadb://`
+for the primary connection, named connections, read replicas, the migrator
+and `MariaDbVectorDriver::from_url`. `DB::driver_title()` returns `MariaDB`
+for a `mariadb://` URL and `MySQL` for a `mysql://` URL, because the URL is
+the only thing that tells them apart. Suprnova's `MariaDbVectorDriver`
+(`VECTOR(N)` + HNSW) hooks in directly for vector workloads.
+
+```bash
+DATABASE_URL=mariadb://app_user:secret@db.internal:3306/app_production
+```
 
 The other relational backends are first-class too:
 

@@ -440,8 +440,8 @@ or version-control before you run it).
 
 ### Auto-migrate on serve
 
-`suprnova serve` and `suprnova web:run` apply any pending migrations before
-opening the HTTP socket. The default policy is **fail-closed**: if `up()`
+Your application's `serve` and `web:run` subcommands apply any pending
+migrations before opening the HTTP socket. The default policy is **fail-closed**: if `up()`
 errors, the process aborts non-zero before bind, so a broken migration can
 never reach traffic.
 
@@ -451,6 +451,12 @@ Two escape hatches:
 |---|---|
 | `--no-migrate` (on `serve` / `web:run`) | Skip the auto-migrate step entirely. Useful when migrations run from a separate deploy step. |
 | `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT=true` | Opt back into the legacy log-and-continue behaviour. The process keeps booting on a migration error. Not recommended in production. |
+
+`suprnova serve`, the development command, runs the pending migrations once
+when it starts, then starts the watched backend as `serve --no-migrate`, so a
+save of a source file does not run them again. Pass `--migrate always` to
+`suprnova serve` to migrate on every restart of the backend. See
+[suprnova serve](cli-serve.md#migrations).
 
 Background workers (`queue:work`, `workflow:work`, `schedule:run`) do *not*
 auto-migrate - they assume schema is already in place when they boot, since

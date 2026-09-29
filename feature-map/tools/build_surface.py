@@ -36,6 +36,7 @@ PATH_RULES = {
     "framework/src/broadcasting/": "broadcasting",
     "framework/src/bus/": "bus",
     "framework/src/cache/": "cache",
+    "framework/src/clock": "testing",
     "framework/src/redis_retry": "cache",
     "framework/src/config/": "configuration",
     "framework/src/console/": "console",
@@ -180,6 +181,9 @@ CLI_RULES = [  # (binary, command prefix, chapter)
     ("app", "schedule:", "cli-scheduling"), ("app", "workflow:", "workflows"), ("app", "queue:", "queues"),
     ("app", "down", "deployment"), ("app", "up", "deployment"),
     ("console", "db:seed", "seeding"), ("console", "model:prune", "eloquent"),
+    ("console", "db:monitor", "database"),
+    ("suprnova", "db:seed", "seeding"), ("suprnova", "model:prune", "eloquent"),
+    ("suprnova", "queue:", "queues"),
     ("console", "render-cache:", "render-cache-operations"), ("console", "__suprnova:live-tool", "live"),
 ]
 ENDPOINT_RULES = [("/_suprnova/health", "deployment"), ("/_suprnova/lang", "localization"),

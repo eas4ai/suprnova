@@ -174,7 +174,8 @@ events, and a `BatchRepository`, use [`Queue::batch`](queues.md).
 
 ## Testing
 
-Install the fake at the top of the test. `install_fake()` acquires a
+Install the fake at the top of the test with `Bus::fake()`.
+`bus::testing::install_fake()` is the same call. Either one acquires a
 process-wide mutex for the guard's lifetime, so two
 parallel `Bus::fake()` tests can't clobber each other's captured-store -
 the second blocks until the first guard drops. You still mark the
@@ -192,13 +193,12 @@ use suprnova::bus::testing::{
     assert_dispatched_times,
     assert_not_dispatched,
     assert_nothing_dispatched,
-    install_fake,
 };
 
 #[tokio::test]
 #[serial]
 async fn order_placed_dispatches_charge() {
-    let _guard = install_fake();
+    let _guard = Bus::fake();
 
     place_order(/* … */).await.unwrap();
 
@@ -214,9 +214,14 @@ output) instead of `Executed`. Real errors - encode/decode failures, a
 missing registered handler before the fake was installed - still surface
 as `Err(_)`.
 
-`install_fake()` returns a `BusFakeGuard`. Drop it (it's RAII) and the
+`Bus::fake()` returns a `BusFakeGuard`. Drop it (it's RAII) and the
 fake is cleared and the mutex is released. The typical
-idiom is `let _guard = install_fake();` at the top of the test.
+idiom is `let _guard = Bus::fake();` at the top of the test.
+
+`Bus::fake()` covers `Bus::dispatch`. The persisted `Queue::batch` and
+`Queue::chain` dispatchers go through `Queue::fake()` instead, which records
+them for `assert_batched` and `assert_chained` - see
+[Queues](queues.md#batches-chains-and-failed-job-retries).
 
 ### Assertion surface
 

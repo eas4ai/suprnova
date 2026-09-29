@@ -25,6 +25,7 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Scopes](#scopes)
 - [Relationships](#relationships)
 - [Eager loading](#eager-loading)
+- [Preventing lazy loading](#preventing-lazy-loading)
 - [Pagination](#pagination)
 - [Chunking and lazy iteration](#chunking-and-lazy-iteration)
 - [Collections](#collections)
@@ -112,7 +113,7 @@ configuration.
 | `timestamps` | flag / bool | `true` when both `created_at` and `updated_at` exist | Disable auto-managed timestamps |
 | `created_at` | string | `"created_at"` | Override the column name |
 | `updated_at` | string | `"updated_at"` | Override the column name |
-| `touches` | list of relation names | `[]` | `BelongsTo` relations whose parent row gets its `updated_at` bumped after this model is created, saved, updated, or deleted |
+| `touches` | list of relation names | `[]` | `BelongsTo` or `MorphTo` relations whose owner row gets its `updated_at` bumped after this model is created, saved, updated, or deleted |
 | `mutators` | list of strings | `[]` | Field names whose JSON-fill path routes through a `set_<field>(value)` mutator method |
 
 ### Full example
@@ -517,6 +518,17 @@ let only_dead = User::only_trashed().get().await?;
 let all_including_dead = User::with_trashed().get().await?;
 
 user.force_delete().await?;       // actual DELETE
+```
+
+The mass form follows the row form. `delete_all()` on a builder soft-deletes
+every row the query matches with one `UPDATE`, and it sets `updated_at` when
+the model manages timestamps. `force_delete_all()` removes the rows for good.
+Neither fires per-row events. See
+[Mass mutation](#mass-mutation---update_all--delete_all--upsert--_each).
+
+```rust
+User::query().filter("active", false).delete_all().await?;        // soft delete
+User::only_trashed().force_delete_all().await?;                   // actual DELETE
 ```
 
 ### Default scope
@@ -1213,8 +1225,26 @@ let active_users  = User::active().get().await?;
 let popular_users = User::query().active().popular(500).get().await?;
 ```
 
-Non-scope methods declared in the same `impl` block (anything whose
-first parameter isn't `query: Builder<Self>`) pass through unchanged.
+A method that does not handle a `Builder` passes through unchanged, so
+scopes and ordinary methods can share one `impl` block.
+
+A method that takes or returns a `Builder` in any other form is a scope
+written wrong, and the macro refuses it with a compile error that names
+the accepted shape. This covers a first parameter of `&mut Builder<User>`
+or `&Builder<Self>`, a model name in place of `Self` (`Builder<User>`),
+and a missing `Builder<Self>` return type. Left alone, such a method would
+be an ordinary method and no `.name()` would reach the builder. Put
+`#[not_scope]` on a helper that handles a builder and is not a scope:
+
+```rust
+#[suprnova::scopes(User)]
+impl User {
+    #[not_scope]
+    fn describe(query: &Builder<User>) -> String {
+        query.to_sql()
+    }
+}
+```
 
 ### Global scopes
 
@@ -1261,11 +1291,18 @@ let all_tenants = Article::without_global_scope::<TenantScope>().get().await?;
 let everything = Article::without_global_scopes().get().await?;
 ```
 
-The opt-outs also chain: `Model::query().without_global_scope::<S>()`
-and `Model::query().without_global_scopes()` return the same rows as the
-static helpers. `Model::query()` applies scopes when it builds the
-query, and the builder remembers which constraint each scope added, so
-removing a scope afterwards takes its constraint back out.
+The opt-outs also chain on a `Builder`:
+`Model::query().without_global_scope::<S>()` and
+`Model::query().without_global_scopes()` return the same rows as the
+static helpers, wherever you write them in the chain.
+
+The builder applies global scopes when the query runs, not when
+`Model::query()` builds it. The statement reads `<scopes> AND <your
+terms>`. Your own terms stay together after the scopes: an `or_where`
+never widens past a scope. `update_all`, `delete_all`, and
+`increment_each` resolve scopes the same way, so a mass write reaches
+only the rows a read returns. A scope that reads per-request state reads
+it when the query runs.
 
 ### Where global scopes apply
 
@@ -1274,6 +1311,7 @@ removing a scope afterwards takes its constraint back out.
 | `Model::query()` | Yes - the canonical scoped entry point |
 | `Model::without_global_scope::<S>()` | Yes, minus `S` |
 | `Model::without_global_scopes()` | No |
+| `Model::query().without_global_scope::<S>()` | Yes, minus `S`, wherever it is chained |
 | `Model::with_trashed()` / `Model::only_trashed()` | Yes - only the soft-delete filter is lifted |
 | `Model::find(id)` | No - PK lookup goes through SeaORM directly |
 | `Model::find_many([...])` | No - same reason |
@@ -1370,7 +1408,7 @@ Common options:
 | `with_default = \|\| { ... }` | `BelongsTo`                 | Closure producing a default when the FK is null OR the parent is missing. |
 | `first_key`, `second_key`, `second_local_key` | `HasOneThrough`, `HasManyThrough` | JOIN key overrides - see the Through section below. |
 | `name = "..."`             | every morph kind              | Morph family name (e.g. `"commentable"`, `"taggable"`). Drives the `<name>_id` / `<name>_type` columns on the child/pivot. |
-| `targets = [T1, T2, ...]`  | `MorphTo`                     | The list of concrete morph targets. The macro emits a `<Name>Morph` enum at the declaration site with one variant per target plus `Unknown(String, i64)`. |
+| `targets = [T1, T2, ...]`  | `MorphTo`                     | The list of concrete morph targets. The macro emits a `<Name>Morph` enum at the declaration site with one variant per target plus `Unknown(String, serde_json::Value)`. |
 | `target_morph_type = "..."` | `MorphedByMany`              | The morph-type string identifying the target family on the pivot. |
 | `pivot_table`, `pivot_foreign_key`, `pivot_related_key` | `BelongsToMany`, `MorphToMany` | Pivot-side column / table overrides when the defaults don't fit. |
 
@@ -1576,8 +1614,10 @@ families. The child carries a `(<name>_id, <name>_type)` pair; the
 family it can point at via `targets = [...]`. The macro emits a
 per-family enum named `<RelationName>Morph` (matching the relation
 name's PascalCase form, suffixed with `Morph`) with one variant per
-target type plus `Unknown(String, i64)` for legacy rows whose
-`<name>_type` value doesn't match any registered target.
+target type plus `Unknown(String, serde_json::Value)` for legacy rows whose
+`<name>_type` value doesn't match any registered target. The second field
+is the value of `<name>_id` as JSON: a number for an integer key, a string
+for a `String`, UUID or ULID key, `null` for a null column.
 
 ```rust
 #[model(table = "posts", morph_type = "post")]
@@ -1773,15 +1813,50 @@ eager-load, count, aggregate, and predicate-filter.
 
 - **Morph IDs follow the target's primary key.** A `MorphTo` target
   can declare an `i64`, `String`, UUID or ULID primary key, and the
-  child table's `<name>_id` column takes the same type.
+  child table's `<name>_id` column takes the same type. All targets of
+  one `MorphTo` relation share one key type. A relation that mixes key
+  types, or a child whose `<name>_id` field has another type than the
+  key, is a compile error.
+- **The parent side is not checked.** `MorphMany` and `MorphOne` are
+  not compared with the child's `<name>_id` field. Keep that field at
+  the key type of every parent that owns it.
+- **`MorphTo::morph_id` is a `serde_json::Value`.** So is the id in the
+  `Unknown` variant. Call `as_i64()` or `as_str()` to read it as a
+  number or a string.
+- **Lazy and eager reads treat global scopes differently.** The lazy
+  `comment.commentable().get()` finds the target by its key and applies
+  no global scope of the target. The eager `with(["commentable"])` runs
+  the query of the target and applies its global scopes, so a target
+  that a scope hides comes back as `Unknown`.
 - **Nested eager loading through `MorphTo`.** A dotted path like
   `with(["commentable.user"])` loads `user` on every morph target,
-  one query per target type.
+  one query per target type. The loader groups the targets by type and
+  loads the rest of the path once for each type that is present.
+
+```rust
+// Comments on posts and on videos; both models declare `user`.
+// 1 query for comments + 1 for posts + 1 for videos
+// + 2 for the users (one per target type) = 5 queries,
+// however many comments there are.
+let comments = Comment::query()
+    .with(["commentable.user"])
+    .get()
+    .await?;
+```
+
+Every target of the relation must declare the next relation of the
+path. A target that does not is an error that names the type and the
+relation. The check covers all targets, so it fails also when no row of
+that type is loaded, and when no row is loaded at all.
+
 ## Eager loading
 
 Eager loading avoids N+1 queries. Instead of `posts.len()` queries to
 fetch every user's posts, Suprnova issues ONE query per top-level
 relation regardless of how many parent rows are loaded.
+
+To find the reads that should be eager loads, see
+[Preventing lazy loading](#preventing-lazy-loading).
 
 The full surface - flat list, nested paths, count, aggregates, and
 predicate-filtered eager loads - is reached through the
@@ -1988,6 +2063,138 @@ The same per-row partition repeats at every further segment of a
 longer dotted path (`"posts.comments.author"` etc.) - at each step
 only the rows missing that segment get the bulk-load.
 
+#### `load` / `load_missing` on one model
+
+When you hold one model, call the same methods on it. They are methods of
+the `Model` trait, so they work on any model and through an `M: Model`
+bound:
+
+```rust
+use suprnova::Model;
+
+let mut post = Post::find_or_fail(id).await?;
+post.load(["comments"]).await?;
+post.load_missing(["comments.user", "tags"]).await?;
+```
+
+The relations land in the model's own relation cache. Read them with the
+`<relation>_loaded()` accessors, which do not query again.
+
+Both methods take the same relation names as the collection methods,
+including dotted names, and run the same loader, so each relation costs
+one query. Inside a `DB::transaction` closure the reads go through the
+transaction.
+
+`load` loads a relation again when the model already has it.
+`load_missing` runs no query for a relation the model has. It checks a
+dotted name at every level: with `comments` loaded,
+`load_missing(["comments.user"])` loads only the users that the cached
+comments lack.
+
+## Preventing lazy loading
+
+A relation read on one model runs one query. A template that reads
+`post.author()` for each of 50 posts runs 51 queries. Eager loading
+(`with`, `load`, `load_missing`) reads the relation for every row with
+one query. `prevent_lazy_loading(true)` makes the 51-query loop fail
+where it is written, instead of under load in production.
+
+Turn it on in the bootstrap of the application, outside production.
+`Config::is_production()` reads `APP_ENV` (see
+[Configuration](configuration.md)):
+
+```rust
+use suprnova::{Config, prevent_lazy_loading};
+
+prevent_lazy_loading(!Config::is_production());
+```
+
+The switch is process-wide and off by default. With it off, every read
+behaves as if this section did not exist.
+
+### What is refused
+
+With the switch on, a relation read is refused when both hold:
+
+- The model came out of a query that returned more than one row: a
+  `get`, `all` or `find_many`, a page of a paginator, a batch of
+  `chunk`, `lazy` or `cursor`, a row of `each` over a query that matches
+  more than one row, the rows of a `HasManyThrough` relation, or the
+  related rows of an eager load that fetched more than one.
+- The relation is not in the model's cache, because it was not loaded
+  with `with`, `load` or `load_missing`.
+
+The reads are `get()` and `first()` of every relation kind. A refused
+read runs no query and returns an error that names the model and the
+relation and says to use `with` or `load`. The error holds no key and no
+value of the row.
+
+These reads are not refused:
+
+- A model from `find`, `first`, a `get` that returned one row, or
+  `create`. Its relations load lazily, as in Laravel.
+- A model you build in the process, and a replica from `replicate`.
+- A relation that is loaded.
+- `count()` of a relation. It loads no model. Its eager form is
+  `with_count`.
+- `attach`, `detach` and `sync`, which write.
+
+The last batch of a `chunk` walk that holds one row is not marked, in the
+same way that a `get` of one row is not.
+
+```rust
+prevent_lazy_loading(true);
+
+let posts = Post::query().get().await?;   // several rows
+for post in &posts {
+    // Err: lazy loading of the relation `author` of `Post` is prevented
+    let author = post.author().first().await?;
+}
+
+let posts = Post::with(["author"]).get().await?;
+for post in &posts {
+    let author = post.author_loaded();    // no query
+}
+```
+
+### Logging instead of failing
+
+`handle_lazy_loading_violation` registers one handler for the process.
+With a handler, a violation calls it and the read goes on and runs its
+query. A staging system can log the reads and keep serving:
+
+```rust
+use suprnova::{LazyLoadingViolation, handle_lazy_loading_violation, prevent_lazy_loading};
+
+prevent_lazy_loading(true);
+handle_lazy_loading_violation(|violation: &LazyLoadingViolation| {
+    tracing::warn!(
+        model = violation.model,
+        relation = violation.relation,
+        "lazy loading of a relation",
+    );
+})?;
+```
+
+`LazyLoadingViolation` has two fields: `model`, the struct name of the
+model (such as `"Post"`), and `relation`, the relation name as
+`relations = { ... }` declares it (such as `"author"`). Both are
+`&'static str`. The handler runs with no framework lock held, so a
+handler that panics does not break the next read.
+
+`clear_lazy_loading_violation_handler()` removes the handler, so a
+violation is an error again. `preventing_lazy_loading()` returns whether
+the switch is on.
+
+### Why Suprnova diverges
+
+The rule is Laravel's `preventLazyLoading`. Two behaviours differ:
+
+- `refresh()` replaces the row with a fresh `find`, so the row loses its
+  mark. Laravel keeps it.
+- `cursor()` and `lazy()` hydrate in batches, so their rows are marked.
+  Laravel's `cursor()` hydrates one row at a time and marks nothing.
+
 ## Pagination
 
 Three paginator types compose on top of `Builder<M>`:
@@ -2030,22 +2237,29 @@ let posts = Post::query().paginate_using("posts_page", 10).await?;
 let comments = Comment::query().paginate_using("comments_page", 25).await?;
 ```
 
-**JSON shape:**
+**JSON shape** (with `with_path("/api/users")`, page 1 of 3):
 
 ```json
 {
-  "data": [...],
   "current_page": 1,
-  "last_page": 3,
-  "per_page": 10,
-  "total": 25,
+  "data": [...],
+  "first_page_url": "/api/users?page=1",
   "from": 1,
+  "last_page": 3,
+  "last_page_url": "/api/users?page=3",
+  "links": [...],
+  "next_page_url": "/api/users?page=2",
+  "path": "/api/users",
+  "per_page": 10,
+  "prev_page_url": null,
   "to": 10,
-  "path": "/api/users"
+  "total": 25
 }
 ```
 
-`path` is omitted from JSON when unset.
+`path` is omitted from JSON when unset. The fields are Laravel's, and
+`links` is the row of page links. See [Pagination](pagination.md) for the
+`links` entries and the page URLs.
 
 ### Simple paginate (no count)
 
@@ -2067,14 +2281,21 @@ let page: Paginator<User> = User::query()
 // page.current_page, page.per_page, page.data, page.path: as above.
 ```
 
-**JSON shape:**
+**JSON shape** (with `with_path("/api/users")`, page 1):
 
 ```json
 {
-  "data": [...],
   "current_page": 1,
+  "current_page_url": "/api/users?page=1",
+  "data": [...],
+  "first_page_url": "/api/users?page=1",
+  "from": 1,
+  "has_more": true,
+  "next_page_url": "/api/users?page=2",
+  "path": "/api/users",
   "per_page": 10,
-  "has_more": true
+  "prev_page_url": null,
+  "to": 10
 }
 ```
 
@@ -2122,16 +2343,19 @@ slice deterministically.
 ```json
 {
   "data": [...],
+  "path": "/api/users",
   "per_page": 10,
   "next_cursor": "...",
+  "next_page_url": "/api/users?cursor=...",
   "prev_cursor": null,
-  "path": "/api/users"
+  "prev_page_url": null
 }
 ```
 
-`next_cursor` and `prev_cursor` are always present as JSON keys
-(emitted as `null` when absent) so client schemas can rely on the
-field's presence; `path` is omitted when unset.
+`next_cursor`, `next_page_url`, `prev_cursor`, and `prev_page_url` are
+always present as JSON keys (emitted as `null` when absent) so client
+schemas can rely on the field's presence; `path` is omitted when unset.
+A page URL is the `path` with the cursor in the `cursor` key.
 
 ### Errors
 
@@ -2225,10 +2449,36 @@ so rows inserted mid-iteration with PKs above the cursor land in a
 later batch (or are picked up by a subsequent run) - they never cause
 an original row to skip or duplicate.
 
-`chunk_by_id` works with any orderable primary key: `i64`, `String`,
-UUID or ULID. For time-ordered keys (auto-increment, ULID, UUIDv7), rows
-inserted mid-run land in a later batch; with random UUIDv4 keys, a row
-inserted below the cursor is picked up by the next run instead.
+The cursor is the value of the primary key, in the order of the key.
+These keys work:
+
+- An integer key (`i64`, `i32`, and the other integer types).
+- A text key: `String`, and the keys of `unique_id = "uuid"`,
+  `"uuid_v4"` and `"ulid"`, which the model stores as text.
+
+For a key that grows with the creation time of its row (auto-increment,
+UUID v7, ULID), a row inserted mid-run lands after the cursor, and a
+later batch finds it. A random key (UUID v4) has no such order: a row
+inserted mid-run with a key below the cursor is not seen by that walk,
+and the next run picks it up. Every row that existed when the walk
+started is seen once.
+
+`chunk_by_id` refuses a key that cannot carry the cursor with
+`FrameworkError::internal`. The error names the model and the column and
+never the value of the key. Two cases are refused before the first
+query:
+
+- A composite key.
+- A key column that is neither an integer nor text, such as a native
+  `uuid::Uuid` column, a timestamp or a decimal.
+
+A third case is found while the walk runs. A row whose key is null, or is
+not of the kind of its column, ends the walk with the same error. The
+check runs on each batch before the closure sees it, so the closure never
+processes a batch that holds such a row.
+
+For a key that `chunk_by_id` refuses, use `chunk()`. It paginates by
+OFFSET, so it needs no cursor, and it has the concurrency limits above.
 
 ### chunk_map - chunk + per-chunk map
 
@@ -2278,7 +2528,11 @@ batch only fetches when the in-memory buffer drains.
 Override the batch size with `lazy_by_id(500)`. `cursor()` is the
 Laravel name and is a zero-cost alias for `lazy()`.
 
-Same `i64`-PK constraint as `chunk_by_id`.
+`lazy()`, `lazy_by_id()` and `cursor()` use the same keyset cursor as
+`chunk_by_id`, so the same keys work and the same keys are refused. The
+error is the first item of the stream. Refusal by column type happens
+before the first query. A row with a null or mismatched key is refused
+when its batch arrives, before the stream yields any row of that batch.
 
 ### Eager loads inside chunks
 
@@ -2828,15 +3082,42 @@ After a comment is created, saved, updated, or deleted, its post's
 a cache key hanging off `post.updated_at` needs to stay honest when
 only a child changed.
 
-Every name in `touches` must be a `BelongsTo` relation declared in the
-same `relations = { ... }` block. A name that doesn't resolve, or one
-that resolves to a different relation kind, is a compile error rather
-than a surprise on the first save. Polymorphic (`MorphTo`) owners
-aren't touchable yet.
+Every name in `touches` must be a `BelongsTo` or a `MorphTo` relation
+declared in the same `relations = { ... }` block. A name that doesn't
+resolve, or one that resolves to a different relation kind, is a compile
+error rather than a surprise on the first save.
+
+A `MorphTo` name touches the owner that the row's `<name>_type` and
+`<name>_id` columns point at:
+
+```rust
+#[model(
+    table = "comments",
+    touches = ["commentable"],
+    relations = {
+        commentable: MorphTo { targets = [Post, Video] },
+    },
+)]
+pub struct Comment {
+    pub id: i64,
+    pub commentable_id: i64,
+    pub commentable_type: String,
+    // ...
+}
+```
+
+The write finds the owner after the pre-write listeners (`Creating`,
+`Saving`, `Updating`, `Deleting`) have run and before the statement, from
+the values the statement writes. A listener that rewrites `<name>_type`
+or `<name>_id` therefore decides which owner is touched. A
+`<name>_type` that names none of the targets makes the write fail: the
+write returns `Err`, no row is written, no post-write event is
+dispatched and no owner is touched.
 
 An owner whose model has `timestamps = false` is **skipped**: no error,
 no write, and the child's save still returns `Ok`. Same for an owner
-reached through a `NULL` foreign key, and for a soft-deleted owner.
+reached through a `NULL` foreign key or a `NULL` `<name>_id`, and for a
+soft-deleted owner.
 
 The touch runs on the same executor as the write that triggered it, so
 inside a `DB::transaction` closure it joins that transaction and a
@@ -3153,15 +3434,22 @@ impl MassPrunable for AuditLog {
 
 ### Triggering pruning
 
-Run via the per-project console (which `app/cmd/main.rs` calls
-`suprnova::console::dispatch_argv` for, after `db:seed` and the
-other built-ins):
+Run it with the `suprnova` CLI. The CLI runs your project's console
+binary, which owns the command:
 
 ```bash
 suprnova model:prune                          # prune every registered type
 suprnova model:prune --model=ExpiredSession   # filter to one model
-suprnova model:prune --pretend                # dry run; logs what would delete
+suprnova model:prune --pretend                # dry run; deletes nothing
 ```
+
+`cargo run --bin console -- model:prune` runs the same command without the
+CLI.
+
+`--model` matches the last segment of the type name. When no registered
+pruner has that name, the command prints
+``model:prune: no pruner registered for `<name>` `` on the error stream,
+deletes nothing and exits with code 0.
 
 Programmatically the runners are at
 `suprnova::eloquent::{prune_all, prune_all_dry, prune_one}`.
@@ -4035,6 +4323,9 @@ without_touching_on::<Post, _, _>(async {
     comment.save().await
 }).await?;
 ```
+
+The per-type form also holds for a `MorphTo` owner: when the owner the
+row points at is a `Post`, the touch is skipped.
 
 Scopes nest, and both are `tokio::task_local`-backed.
 

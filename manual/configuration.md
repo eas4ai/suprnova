@@ -327,7 +327,7 @@ Your app reads more on top.
 | `SESSION_SAME_SITE` | `Lax` | `Strict`, `Lax`, or `None` |
 | `MAIL_DRIVER` | `log` | One of `smtp`, `ses`, `mailgun`, `postmark`, `sendgrid`, `resend`, `log`, `memory` |
 | `CACHE_DRIVER` | `memory` | One of `memory`, `redis`, `database` |
-| `QUEUE_DRIVER` | `memory` | One of `memory`, `redis`, `database` (unknown values warn and fall back to `memory`) |
+| `QUEUE_DRIVER` | `memory` | One of `memory`, `sync`, `null`, `redis`, `database`, `failover`. An unknown value is a boot error in production; elsewhere it logs a warning and uses `memory` |
 | `RATE_LIMIT_DRIVER` | `memory` | One of `memory`, `redis` |
 | `LOG_FORMAT` | env-aware (`pretty` in dev/local, `json` in production) | `pretty` or `json` |
 | `LOG_LEVEL` | `info` | One of `error`, `warn`, `info`, `debug`, `trace` |

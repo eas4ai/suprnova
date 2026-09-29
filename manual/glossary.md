@@ -629,7 +629,7 @@ the subscribing user. Useful for per-user notification streams. See
 ### Prunable
 
 The trait that marks a soft-deleted (or queryable) model as eligible
-for cleanup by `model:prune` - `Prunable::prunable()` returns
+for cleanup by `suprnova model:prune` - `Prunable::prunable()` returns
 the builder for rows that should go. `MassPrunable` deletes in a
 single `DELETE WHERE`; the default issues per-row deletes so observers
 fire. Tagged for the registry via the `#[prunable]` macro. See
@@ -754,7 +754,8 @@ counterpart of [Global scope](#global-scope). See
 ### Seeder
 
 A type implementing the `Seeder` trait that populates the database
-with starting data - registered through `suprnova db:seed`. Often
+with starting data. `suprnova db:seed` runs every seeder, and
+`suprnova db:seed UserSeeder` runs one. Often
 backed by a [Factory](#factory-eloquent). See [Eloquent](eloquent.md).
 
 ### Signed URL
@@ -904,9 +905,13 @@ timeout, origin policy. Used by `ws!()` routes. See [WebSockets](websockets.md).
 ### `WsSocket`
 
 The framework's typed WebSocket handle handed to a `ws!()` handler.
-Split into a `Sink` (send) and a `Stream` (receive) half via
-`WsSocket::split()`; pings/pongs are managed by a heartbeat task with
-an `AbortHandle` so a dropped handler always tears down cleanly. See
+`WsSocket::sender()` returns a cloneable `WsSender`, so another task can
+send while the handler waits in `recv`. `WsSocket::split()` takes the socket
+apart into a `WsSender` and a `WsReceiver`. The sending half is not a `Sink`:
+it has `send_text` and `send_binary` methods that take `&self`. The receiving
+half is a `Stream` of `Result<Message, FrameworkError>`, and also has `recv`
+and `recv_text`. Pings/pongs are managed by a heartbeat task with an
+`AbortHandle` so a dropped handler always tears down cleanly. See
 [WebSockets](websockets.md).
 
 ## Next

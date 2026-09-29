@@ -133,6 +133,105 @@ Enqueues a close frame and returns. The forwarder writes the frame to the sink, 
 - `code` must satisfy `CloseCode::is_allowed()`. Reserved or invalid codes (1004, 1005, 1006, 1015, anything below 1000, anything above 4999) are rejected with `Err` and **no frame is sent** - the connection stays open and the caller can retry with a valid code. Use 1000 for normal closure, 1001-1013 for the defined reasons, 3000-3999 for IANA-registered codes, or 4000-4999 for application-private codes.
 - `reason` is capped at 123 bytes (the 125-byte control-frame limit minus the two-byte code). Longer reasons are rejected without enqueuing anything.
 
+### `sender`
+
+Every method above takes `&mut self`. While the handler waits in `recv`, nothing else can send on the same `WsSocket`. `socket.sender()` takes `&self` and returns a `WsSender`, a handle on the same connection that you can move to another task:
+
+```rust
+use suprnova::{FrameworkError, ws::WsSocket};
+
+async fn handle(mut socket: WsSocket) -> Result<(), FrameworkError> {
+    let sender = socket.sender();
+    let ticker = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            if sender.send_text("tick").await.is_err() {
+                // The connection has ended.
+                return;
+            }
+        }
+    });
+
+    while let Some(text) = socket.recv_text().await? {
+        socket.send_text(format!("echo: {text}")).await?;
+    }
+    ticker.abort();
+    Ok(())
+}
+```
+
+A `WsSender` is cheap to clone, and every clone sends on the same connection, in the order the queue accepted the frames. The queue is bounded, so a send waits while the queue is full. A peer that reads slowly slows its senders down, and memory does not grow.
+
+### `split`
+
+`socket.split()` consumes the socket and returns `(WsSender, WsReceiver)`. Move each half into the task that owns that direction:
+
+```rust
+use suprnova::{FrameworkError, ws::WsSocket};
+
+async fn handle(socket: WsSocket) -> Result<(), FrameworkError> {
+    let (sender, mut receiver) = socket.split();
+
+    let announcer = sender.clone();
+    tokio::spawn(async move {
+        let _ = announcer.send_text("welcome").await;
+    });
+
+    while let Some(text) = receiver.recv_text().await? {
+        sender.send_text(format!("echo: {text}")).await?;
+    }
+    Ok(())
+}
+```
+
+The `WsSender` clones. The `WsReceiver` has one owner.
+
+### `WsSender`
+
+| Method | Behaviour |
+|---|---|
+| `send_text(text)` | Enqueue a text frame. Takes `&self`. Returns `Err` when the connection has ended. |
+| `send_binary(bytes)` | Enqueue a binary frame. Takes `&self`. Same error rule. |
+| `close(code, reason)` | Send a close frame and end the connection for every sender. Takes the same `code` and `reason` rules as `WsSocket::close`. A frame that another sender queued behind the close frame is not sent. |
+| `is_closed()` | `true` once the connection has ended: a close frame went out, a write to the peer failed, or the handler returned. |
+| `closed()` | An async fn that completes when the connection has ended. |
+
+The connection does not wait for its senders. When the handler returns, the framework sends the close frame and stops the forwarder, however many `WsSender` values are still alive. From then on every send returns `Err`, `is_closed()` returns `true` and `closed()` completes. A `WsSender` that outlives the handler does not hold the connection open. A task that keeps a sender treats any of the three as its signal to stop. A task that sends only rarely has no failed send to tell it the peer is gone, so it waits on `closed()` beside its own work:
+
+```rust
+use suprnova::ws::WsSender;
+
+async fn pump(sender: WsSender, mut events: tokio::sync::mpsc::Receiver<String>) {
+    loop {
+        tokio::select! {
+            _ = sender.closed() => break,
+            event = events.recv() => match event {
+                Some(text) => {
+                    if sender.send_text(text).await.is_err() {
+                        break;
+                    }
+                }
+                None => break,
+            },
+        }
+    }
+}
+```
+
+### `WsReceiver`
+
+`WsReceiver` has the read methods of `WsSocket`, with the same behaviour:
+
+| Method | Behaviour |
+|---|---|
+| `recv_text()` | The next text message. Drops frames of every other kind. `Ok(None)` when the connection ends. |
+| `recv()` | The next message of any kind. `Ok(None)` when the connection ends. |
+
+It is also a `Stream` with `Item = Result<Message, FrameworkError>`, for code that combines it with other streams. The stream gives every message, as `recv` does, and ends when the connection ends.
+
+**Read the receiving half.** The peer's answer to the framework's ping arrives on the receiving half, and the count of unanswered pings returns to zero only when that half reads the answer. If you drop the `WsReceiver`, or never read it, the connection closes with code 1011 after `max_missed_pings` pings. A handler that only sends must still read, and stop when the read returns `None`. See [Heartbeat and close-on-no-pong](#heartbeat-and-close-on-no-pong).
+
 ### Why Suprnova diverges
 
 PHP frameworks bolt WebSocket support on as a separate process (ratchet, soketi, pusher). Suprnova's WebSocket route lives in the same `routes! { ... }` as your HTTP routes, served by the same hyper listener, drained by the same graceful-shutdown path. There is one binary, one config, one deploy. Long-lived connections are first-class because Tokio makes them cheap; the framework doesn't have to apologize for them.
@@ -180,6 +279,10 @@ ws!("/ws/private", PrivateHandler)
     .middleware(AuthMiddleware::new())
     .middleware(RateLimitMiddleware::connections_per_ip(100)),
 ```
+
+`RateLimitMiddleware::connections_per_ip(100)` allows each client address 100 open sockets on the route and refuses the next upgrade with `429 Too Many Requests`. A socket counts until its session ends, which is when the handler has returned and the close handshake is done. An upgrade that a later middleware refuses gives its place back at once. The counts are kept in one process, and an IPv6 address counts with its /64 network. The address is `Request::ip()`, so set `APP_TRUSTED_PROXIES` behind a proxy. See [Rate Limiting](rate-limiting.md#capping-open-connections-with-connections_per_ip) for the full rules.
+
+`connections_per_ip` counts through `Request::hold_for_connection(guard)`. A middleware calls it with a value whose `Drop` gives back what the middleware took. The server moves those values into the task that runs the socket and drops them when the task ends, so they outlive the middleware chain, which has returned by then.
 
 A non-2xx response from any middleware short-circuits the upgrade. The peer receives the rejection (e.g. 401, 403) with `X-Request-Id` set, the unwoken WebSocket future drops cleanly, and the handler is never called. This is the right layer for transport-level checks: who may open the connection at all, where the connection is coming from, how many concurrent connections per identity.
 
@@ -311,11 +414,11 @@ Apply the override per route either on the `ws!` entry or on `Router::ws_with_co
 ws!("/ws/chat", ChatHandler).config(chat),
 ```
 
-`WsConfig` is validated at route registration. A zero `ping_interval` or a zero `max_missed_pings` would corrupt the heartbeat task; both are rejected at boot rather than panicking at first connection.
+`WsConfig` is validated at route registration. A zero `ping_interval` would panic the heartbeat task, and a `max_missed_pings` below 2 would close every connection on its first ping; both are rejected at boot rather than failing at the first connection.
 
 ### Heartbeat and close-on-no-pong
 
-For each upgraded connection the framework spawns a heartbeat task that sends `Ping(b"")` every `ping_interval`. On each tick the missed-ping counter increments; on each peer Pong it resets to zero. If the counter reaches `max_missed_pings`, the heartbeat sends Close(1011 "no pong response") and the connection tears down. Set `max_missed_pings` to `usize::MAX` to disable enforcement (pings still flow, but the connection is never closed for missing pongs).
+For each upgraded connection the framework spawns a heartbeat task that sends `Ping(b"")` every `ping_interval`. On each tick the missed-ping counter increments; on each peer Pong it resets to zero. The peer's Pong is read by the code that reads the socket (`recv`, `recv_text`, or the `WsReceiver` after `split`), so a connection nobody reads is closed. If the counter reaches `max_missed_pings`, the heartbeat sends Close(1011 "no pong response") and the connection tears down. Set `max_missed_pings` to `usize::MAX` to disable enforcement (pings still flow, but the connection is never closed for missing pongs).
 
 The first tick is consumed at task start so the peer gets at least one full interval of grace before the first ping.
 
@@ -412,7 +515,9 @@ Completed handles are reaped opportunistically during the lifetime of the server
 | Symbol | Purpose |
 |---|---|
 | `suprnova::ws::WebSocketHandler` | Trait: `async fn handle(&self, socket: WsSocket, request: Request) -> Result<(), FrameworkError>`. `Send + Sync + 'static`. |
-| `suprnova::ws::WsSocket` | Bidirectional handle. Methods: `send_text`, `send_binary`, `recv_text`, `recv`, `close`. `close` validates code + reason length up front. |
+| `suprnova::ws::WsSocket` | Bidirectional handle. Methods: `send_text`, `send_binary`, `recv_text`, `recv`, `close`, `sender`, `split`. `close` validates code + reason length up front. |
+| `suprnova::ws::WsSender` | Sending half. Clones, and every method takes `&self`: `send_text`, `send_binary`, `close`, `is_closed`, `closed`. From `WsSocket::sender` or `WsSocket::split`. |
+| `suprnova::ws::WsReceiver` | Receiving half, one owner. `recv`, `recv_text`, and a `Stream` of `Result<Message, FrameworkError>`. Has to be read for the heartbeat to work. From `WsSocket::split`. |
 | `suprnova::ws::WsConfig` | Per-connection config. Fields: `ping_interval`, `max_message_size`, `max_frame_size`, `max_missed_pings`, `origin_policy`, `accepted_protocols`. `Default` + `generous()` constructors. Validated at registration. |
 | `suprnova::ws::OriginPolicy` | `SameOrigin` (default), `AllowAny`, `AllowList(Vec<String>)`. Enforced at upgrade time. |
 | `ws!(path, Handler)` | Macro form for `routes! { ... }`. Returns a `WsRouteDef` supporting `.config(WsConfig)` and `.middleware(M)` in either order. |

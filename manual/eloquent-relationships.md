@@ -446,7 +446,7 @@ The macro emits a per-family enum at the declaration site:
 pub enum CommentableMorph {
     Post(Post),
     Video(Video),
-    Unknown(String, i64),     // fallback for unregistered <name>_type
+    Unknown(String, serde_json::Value), // fallback for unregistered <name>_type
 }
 ```
 
@@ -484,9 +484,48 @@ A `MorphTo` target can use any primary key type the model declares:
 `i64`, `String`, UUID or ULID. The morph table's `<name>_id` column takes
 the same type as its targets' keys.
 
-This is a polymorphic-inverse-only restriction. `MorphOne` /
-`MorphMany` / `MorphToMany` / `MorphedByMany` work fine with any PK
-shape - they read the parent's already-typed `id` directly.
+```rust
+#[model(
+    table = "notes",
+    relations = {
+        subject: MorphTo { targets = [Article, Recipe] },
+    },
+)]
+pub struct Note {
+    pub id: i64,
+    pub subject_id: String,      // the key type of Article and Recipe
+    pub subject_type: String,
+    pub body: String,
+}
+```
+
+Three rules hold:
+
+- All targets of one `MorphTo` relation have one key type. A relation
+  that mixes them does not compile.
+- The child's `<name>_id` field has that key type. A field of another
+  type does not compile.
+- The parent side is not checked. `MorphOne`, `MorphMany`,
+  `MorphToMany` and `MorphedByMany` read the parent's own key, and the
+  framework does not compare it with the child's `<name>_id` field. If
+  several parents own the same child, keep `<name>_id` at the key type
+  of every one of them.
+
+The id in the per-family enum's `Unknown` variant, and the
+`morph_id` field of `MorphTo`, are a `serde_json::Value`: the key as
+JSON. Read it with `as_i64()` or `as_str()`.
+
+The lazy `comment.commentable().get()` finds the target by its key and
+applies no global scope of the target. The eager
+`with(["commentable"])` runs the query of the target and applies its
+global scopes, so a target that a scope hides comes back as `Unknown`.
+
+A nested path goes through `MorphTo`: `with(["commentable.user"])` loads
+`user` on the targets, one query for each target type that is present.
+Every target of the relation must declare `user`. A target that does not
+is an error that names the type and the relation, even when no row of
+that type is loaded. See
+[Eloquent - Polymorphic keys and nested loads](eloquent.md#polymorphic-keys-and-nested-loads).
 
 ### `MorphToMany` and `MorphedByMany`
 
@@ -673,6 +712,10 @@ for u in &users {
 }
 ```
 
+`prevent_lazy_loading(true)` turns that loop into an error, so you find
+it in development. See
+[Eloquent - Preventing lazy loading](eloquent.md#preventing-lazy-loading).
+
 `with(["posts"])` collapses that to two queries total - regardless of
 the parent count:
 
@@ -853,14 +896,20 @@ pub struct Comment {
 }
 ```
 
-Only `BelongsTo` relations can be touched - the touched row has to be
-identifiable from a column on the child, which is exactly what the
+`BelongsTo` and `MorphTo` relations can be touched - the touched row has
+to be identifiable from columns on the child, which is exactly what the
 owning side gives you. The framework resolves the owner through the
 relation registry, so the touch costs one `UPDATE` and no `SELECT`.
 
+For a `MorphTo` name (`touches = ["commentable"]`), the owner is the row
+that `<name>_type` and `<name>_id` point at. The framework finds it
+after the pre-write listeners have run and before the statement. A
+`<name>_type` that names none of the targets makes the write fail with
+nothing written.
+
 Owners that disclaim timestamps (`#[model(timestamps = false)]`), are
-reached through a `NULL` foreign key, or are soft-deleted are skipped
-silently. Suppress the cascade for a block of work with
+reached through a `NULL` foreign key (or a `NULL` `<name>_id`), or are
+soft-deleted are skipped silently. Suppress the cascade for a block of work with
 `without_touching` (all owners) or `without_touching_on::<Post, _, _>`
 (one type). Full semantics in
 [Eloquent - Parent touching](eloquent.md#parent-touching).

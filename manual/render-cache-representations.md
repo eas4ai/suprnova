@@ -37,8 +37,9 @@ The class you declare in the policy decides which form is even reachable.
 `/live/todos`'s published entry back out of the store and asserts it is an
 `EntryKind::Complete` one, and
 `the_public_document_is_a_hit_whose_seed_still_promotes` reads
-`/live/public`'s back through `RenderCache::inspect_route_for_test` and
-asserts the class it was stored under. That matters, because "it was stored"
+`/live/public`'s back out of L0 and asserts the class it was stored under;
+`RenderCacheProbe::route("/live/public").l0()` reads the same entry in your
+own test. That matters, because "it was stored"
 and "it was silently declined" produce the same response: the claim has to
 be made against the entry, not against what the visitor sees.
 
@@ -52,10 +53,10 @@ the request but is not named by `QueryPolicy::declared` bypasses the cache
 for that request rather than being quietly dropped from the key, because
 dropping it would serve the wrong page to whoever sent it.
 
-The key is text an operator can hold: `RenderCache::key_for_route_for_test`
-in `the_operator_commands_inspect_without_a_body_and_advance_the_epoch`
-asserts that it starts with `rk1.`, and `render-cache:inspect` takes exactly
-that text.
+The key is text an operator can hold:
+`the_operator_commands_inspect_without_a_body_and_advance_the_epoch` asserts
+that the key of `/live/todos` starts with `rk1.`, and `render-cache:inspect`
+takes exactly that text. `RenderCacheProbe::key` derives it in your own test.
 
 Because the epoch is part of the key, an epoch advance does not have to find
 and delete anything. Every previously stored entry simply stops being

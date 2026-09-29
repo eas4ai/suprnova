@@ -762,10 +762,51 @@ pub async fn show(req: Request) -> Response {
 | `req.scheme_and_http_host()` | `Option<String>` | `scheme://host:port`. |
 | `req.scheme()` | `&'static str` | `"https"` when [`secure`] is true, else `"http"`. |
 | `req.secure()` | `bool` | URI scheme → `X-Forwarded-Proto` → `X-Forwarded-Ssl: on`. |
-| `req.ip()` | `Option<String>` | `X-Forwarded-For[0]` → `X-Real-IP` → peer addr. |
-| `req.ips()` | `Vec<String>` | Full chain: proxy headers, then peer addr. |
+| `req.ip()` | `Option<String>` | From a trusted proxy: `X-Forwarded-For`, read from the right, then `X-Real-IP` when there is no `X-Forwarded-For`. Otherwise the peer address. |
+| `req.ips()` | `Vec<String>` | Every address the request names: `X-Forwarded-For` left to right, `X-Real-IP`, then the peer address. For logs only. |
 | `req.user_agent()` | `Option<&str>` | `User-Agent` header. |
 | `req.port()` | `Option<u16>` | Host header port → `X-Forwarded-Port` → URI port. |
+
+`req.ip()` is the address to key a limit on or to check against an
+allowlist. It reads the proxy headers only when the TCP peer is a trusted
+proxy, and it returns the peer address in every other case:
+
+1. When the peer is not in the trusted proxies, `req.ip()` is the peer
+   address. The headers are ignored, because any client can send them.
+2. When the peer is a trusted proxy and the request has an
+   `X-Forwarded-For` header, `req.ip()` reads the list **from the right**.
+   It skips every entry that is a trusted proxy and returns the first
+   entry that is not. A proxy adds the address it saw to the right end of
+   the header, so the left end is what the client wrote and the client
+   chooses it. The header may arrive as several lines. They count as one
+   list, in order.
+3. When the peer is a trusted proxy and the request has no
+   `X-Forwarded-For`, `req.ip()` reads `X-Real-IP`. With both headers
+   present, `X-Real-IP` is not read.
+4. An entry that is not an address ends the walk, and `req.ip()` returns
+   the proxy that wrote that entry. An entry with a port, such as
+   `203.0.113.5:54321`, is read as its address.
+
+Three rules keep this safe:
+
+- **List every proxy of the chain.** A proxy that is not in the trusted
+  proxies is taken for the client, and all of its clients share its
+  address.
+- **List proxies and nothing else.** `APP_TRUSTED_PROXIES` takes
+  addresses and CIDR ranges, such as
+  `10.0.0.5,173.245.48.0/20,2400:cb00::/32`. A client that connects from a
+  listed range is believed like a proxy and chooses its own address. A
+  range of `/0`, which is every address, is refused, and boot fails.
+- **Let the proxy write the header.** A trusted proxy has to add to
+  `X-Forwarded-For` or replace it. A proxy that passes the client's header
+  on unchanged lets the client write all of it. A proxy that sets
+  `X-Real-IP` has to remove any `X-Forwarded-For` from the request.
+
+The `Forwarded` header of RFC 7239 is not read. See
+[Rate Limiting](rate-limiting.md#the-client-address-behind-a-proxy) for
+what this means for per-address limits and
+[Environment Variables](env-vars.md#behind-a-reverse-proxy-set-app_trusted_proxies)
+for the variable.
 
 ### Headers and method
 

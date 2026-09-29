@@ -175,10 +175,9 @@ Four convenience constructors cover common patterns:
 - `Cookie::encrypted(name, plaintext)` - writes AES-256-GCM ciphertext
   whose AAD is bound to the cookie's logical name. Read it with
   `Cookie::read_encrypted_for(name, wire)` using the same name.
-  `Cookie::read_encrypted(wire)` is the deprecated, un-contexted v1
-  reader; it cannot decrypt current `Cookie::encrypted` output and is
-  scheduled for removal together with the v1 fallback. Requires
-  `APP_KEY` to be set at boot. See [Encryption](encryption.md).
+  The value opens under that name and in no other way: the value of
+  another cookie does not open, and `read_encrypted_for` returns an
+  error for it. Requires `APP_KEY` to be set at boot. See [Encryption](encryption.md).
 
 Removing several cookies at once - the usual logout shape - is
 `without_cookies`, available on `HttpResponse`, on `Response` through

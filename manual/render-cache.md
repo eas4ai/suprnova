@@ -167,10 +167,27 @@ actually depends on needs to be declared, with two mechanisms:
   the wire, is always the one stored representation for it.
 
 `VarianceDimension::FeatureVersion`, `VarianceDimension::ConfigVersion`, and
-a custom `VarianceDimension::Application(name)` exist on the type but have
-no resolver in this release: a route that declares one bypasses the cache
-on every request, silently, rather than failing to build. Do not declare
-them yet.
+a custom `VarianceDimension::Application(name)` exist on the type, but
+nothing gives them a value, so no key can be built for a policy that
+declares one. The framework refuses such a policy when you register it.
+`try_render_cache` and `try_render_cache_group` return an error, so your
+application stops at boot. The refusal applies to a full policy and to a
+patch that brings one of the three in. The other six dimensions register
+without error.
+
+The error is a `FrameworkError`. Its message names the route pattern (or the
+group prefix) and the dimension, and tells you to remove the dimension from
+the policy:
+
+```text
+RenderCache policy for `/blog` varies on FeatureVersion, and nothing gives that
+dimension a value, so no response for `/blog` could be cached. Remove the
+dimension from the policy.
+```
+
+A group whose policy declares one of the three is refused even when every
+route under it has a patch that replaces the dimensions. Take the dimension
+out of the group's policy.
 
 ## Reading the response headers
 

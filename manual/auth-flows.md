@@ -538,13 +538,20 @@ request to the handler.
 
 `LoginThrottleMiddleware` is per-account - it gates a single email
 when the threshold is crossed. For per-IP quotas, layer it with
-[`RateLimitMiddleware`](rate-limiting.md). The two compose naturally:
+[`RateLimitMiddleware::ip_based`](rate-limiting.md#per-address-limit-with-ip_based).
+It counts requests for each client address, using the rate limiter your
+application installed. The two compose naturally:
 
 ```rust
+use std::time::Duration;
+use suprnova::auth_flows::LoginThrottleMiddleware;
+use suprnova::rate_limit::RateLimitMiddleware;
+use suprnova::Router;
+
 let router = Router::new()
     .post("/login", login_handler)
     .middleware(LoginThrottleMiddleware::new(|req| { /* ... */ }))
-    .middleware(RateLimitMiddleware::ip_based(20, std::time::Duration::from_secs(60)));
+    .middleware(RateLimitMiddleware::ip_based(20, Duration::from_secs(60)));
 ```
 
 Together they cover the realistic shapes of credential stuffing:
