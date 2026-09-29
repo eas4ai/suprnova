@@ -154,7 +154,7 @@ so production code can't accidentally call `disk.assert_exists(…)`.
 ## Parallel safety, in one paragraph
 
 Six of the seven fakes guard a process-global static. Each one's
-guard, on construction, takes a dedicated `FAKE_SERIAL`
+guard, on construction, takes a dedicated process-wide
 `std::sync::Mutex` and holds it until drop. The effect is that any
 two `#[tokio::test]`s that install the same fake run serialized
 under one process - no need for `#[serial]` from the

@@ -31,7 +31,7 @@ others degrade into - each driver is a peer.
 |--------------------------------------|-------------------------------|---------------------|
 | `Storage::register_fs(name, root)`   | Local filesystem              | `filesystem`        |
 | `Storage::register_memory(name)`     | In-process memory (tests)     | `filesystem`        |
-| `Storage::register_s3(name, cfg)`    | Amazon S3 or S3-compatible    | `filesystem`        |
+| `Storage::register_s3(name, cfg)`    | Amazon S3 or S3-compatible (e.g. RustFS, MinIO, R2, B2) | `filesystem`        |
 | `Storage::register_azblob(name, cfg)`| Azure Blob Storage            | `filesystem-azure`  |
 | `Storage::register_gcs(name, cfg)`   | Google Cloud Storage          | `filesystem-gcs`    |
 | `Storage::register_read_through(name, cfg)` | Read-through composite | `filesystem` |

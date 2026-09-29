@@ -10,9 +10,9 @@ sibling chapters listed under [Next](#next).
 
 ## Install
 
-The CLI is distributed via `cargo install --git`. Suprnova isn't on
-crates.io yet - see the [Pre-launch note in
-Installation](installation.md#pre-launch-note) for why.
+The CLI is distributed via `cargo install --git`. Suprnova is
+distributed through git tags, not crates.io - see [Distribution
+model](installation.md#distribution-model).
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v2.1.0 suprnova-cli

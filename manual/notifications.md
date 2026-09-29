@@ -145,7 +145,7 @@ and/or `text` (at least one required), optional `from`, `cc`, `bcc`,
 `reply_to`, and `attachments`. The mail channel assembles an outgoing
 message from this rendering plus the recipient's `route_for("mail")`,
 applies the configured sender defaults (`Mail::always_from(...)`,
-`always_to(...)`, etc.), and dispatches through `Mail::current_transport`.
+`always_to(...)`, etc.), and dispatches through the configured mail transport.
 
 If the renderer returns a rendering with neither `html` nor `text`,
 delivery fails fast - blank notification mail is never sent silently.

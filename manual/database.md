@@ -570,8 +570,7 @@ intended for log output only. Never feed the result back into a query.
 
 ### Coverage scope
 
-Today, `QueryExecuted` fires for every query that goes through the
-instrumented `ExecutorChoice` helpers:
+`QueryExecuted` fires for every query:
 
 - Every raw helper on `DB` (`select` / `select_one` / `scalar` /
   `insert` / `update` / `delete` / `statement` / `affecting_statement` /
@@ -580,11 +579,9 @@ instrumented `ExecutorChoice` helpers:
 - `DB::transaction` / `DB::begin_transaction` BEGIN / COMMIT / ROLLBACK
   fire transaction events.
 - `DbConnection::connect` fires `ConnectionEstablished`.
-
-The Eloquent ORM (`Builder<M>::get` / `first` / `count`, model CRUD)
-matches the `ExecutorChoice` `Tx` / `Pool` arms directly today rather
-than calling through the instrumented helpers - adopting the helpers
-(and therefore the observation hook) lands in the Eloquent module.
+- Every Eloquent read and write: `Builder<M>::get` / `first` /
+  `count` / pagination / chunking, `Model::find` / `all`, and model
+  CRUD, including the `IN (...)` queries behind eager loading.
 
 ## Connection metadata
 

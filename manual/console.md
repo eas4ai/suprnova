@@ -207,12 +207,7 @@ Make sure `pub mod commands;` is declared in `src/lib.rs` so the inventory submi
 
 ### Why Suprnova diverges
 
-The framework deliberately does **not** make a global `suprnova` CLI command for runtime tasks like `db:seed`. A global binary can't statically load your app's seeders, factories, or `#[command]` async fns without either:
-
-- shelling out to `cargo run --bin app -- ...` (slow - full compile per invocation, defeats the point), or
-- dynamic loading (too much complexity for v1)
-
-So the user's project produces a `console` binary. Run it directly:
+A global binary can't statically load your app's seeders, factories, or `#[command]` async fns, so the work runs in your project's own binaries. The `suprnova` CLI forwards framework tasks (`migrate`, `db:seed`, `schedule:list`, and the rest) to them through `cargo run`, which compiles on first use. Your own `#[command]`s live in the project's `console` binary. Run it directly:
 
 ```bash
 ./target/debug/console db:seed

@@ -193,9 +193,9 @@ in flight.
 The window preserves the old replay weakness for its whole duration. A v1
 cookie from one cookie slot can still be replayed into another slot while the
 un-contexted fallback exists; the name-binding benefit begins when that
-fallback is removed in 1.4.0. Nothing retires the fallback automatically:
+fallback is removed. Nothing retires the fallback automatically:
 `Crypt::encrypt_string(CryptPurpose::Cookie, ...)` still mints v1, and the
-un-contexted entry point is superseded with removal scheduled for 1.4.0. Move
+un-contexted entry point is superseded and scheduled for removal. Move
 cookie writes to `Cookie::encrypted` and reads to `read_encrypted_for` before
 that deadline.
 

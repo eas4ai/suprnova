@@ -119,7 +119,7 @@ the structured log.
 ### Reading the id
 
 ```rust
-use suprnova::{current_request_id, spawn_with_request_id};
+use suprnova::{current_request_id, spawn_with_request_id, HttpResponse};
 
 pub async fn checkout(req: suprnova::Request) -> suprnova::Response {
     // Inside a request, the id is always present.
@@ -137,7 +137,7 @@ pub async fn checkout(req: suprnova::Request) -> suprnova::Response {
         tracing::info!("post-checkout fanout running");
     });
 
-    Ok(suprnova::ok!())
+    Ok(HttpResponse::ok())
 }
 ```
 
@@ -307,10 +307,9 @@ configure them the normal way:
 | `OTEL_EXPORTER_OTLP_COMPRESSION` | exporter |
 
 Per-signal endpoint overrides (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
-`_METRICS_ENDPOINT`, `_LOGS_ENDPOINT`) are currently shadowed by the
-base endpoint - all three signals go to `OTEL_EXPORTER_OTLP_ENDPOINT`.
-If you need to fan signals to different collectors, run a local
-collector that routes them.
+`_METRICS_ENDPOINT`, `_LOGS_ENDPOINT`) take precedence over
+`OTEL_EXPORTER_OTLP_ENDPOINT` for their signal, so traces, metrics and
+logs can go to different collectors.
 
 ## Metrics
 
@@ -348,9 +347,8 @@ before initialization resolves against the no-op provider and stays
 inert. The idiomatic pattern is a `once_cell` / `LazyLock` handle
 resolved on first emit, well after boot.
 
-Attribute values are string-typed (`&[(&'static str, &str)]`). Numeric
-and boolean attributes are a planned enhancement; format them as strings
-at the call site for now.
+Attribute values are typed: strings, integers, floats and booleans each
+arrive at the backend as their own OpenTelemetry type.
 
 Naming: stable, ASCII, dot-delimited (e.g. `"http.requests.total"`,
 `"http.request.duration"`). The standard OTel semantic conventions live

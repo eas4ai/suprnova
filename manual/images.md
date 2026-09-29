@@ -139,28 +139,26 @@ async fn describe() -> Result<(), FrameworkError> {
 
 ## Formats
 
-Five formats are read and written today: **PNG, JPEG, WebP, GIF, and
+Five formats are read and written: **PNG, JPEG, WebP, GIF, and
 BMP**.
 
 | Format | Reads | Writes | Quality knob |
 |---|---|---|---|
 | PNG | yes | yes | ignored (lossless) |
 | JPEG | yes | yes | honoured |
-| WebP | yes | yes (lossless) | no effect today |
+| WebP | yes | yes | honoured (lossless when unset) |
 | GIF | yes | yes | ignored (palette) |
 | BMP | yes | yes | ignored (lossless) |
 
-AVIF is neither read nor written yet. The in-house AV1 encoder it
-depends on has not published, and shipping an `OutputFormat::Avif` that
-always failed would be a promise the framework could not keep. It
-arrives with that publish, as a new enum variant and nothing else.
+AVIF is neither read nor written: there is no AVIF encoder crate with a
+license compatible with Suprnova's. WebP is the modern-format path.
 
 GIF output is palette-quantised to at most 256 colours with
 Floyd-Steinberg dithering before encoding, so a photographic source
 converts cleanly rather than erroring.
 
-WebP is written losslessly, so `quality()` currently has no effect on
-WebP output. Use JPEG when you need a size/quality dial.
+WebP is written lossless by default; setting `quality()` switches it to
+lossy encoding at that quality, the same dial JPEG has.
 
 ## Storage
 
@@ -410,17 +408,13 @@ compiled into **both** the system ImageMagick binary and the PHP
 `imagick` extension. In Suprnova the default driver does not read HEIC,
 and `IMAGE_DRIVER=magick` reads it whenever the host's ImageMagick
 carries the libheif delegate - no extension layer in between. So HEIC
-ingestion works today: install ImageMagick with libheif through your
+ingestion works: install ImageMagick with libheif through your
 package manager and flip the env var. The licensing sits where it
 belongs, with the host.
 
 When the `oxideav` driver meets a HEIC file it says so by name, points
 at this chapter, and names both ways forward, rather than returning a
 generic "unsupported format".
-
-**AVIF is pending, not skipped.** It is royalty-free and it is the
-modern-format answer we want; the in-house AV1 encoder simply has not
-published yet. WebP is the modern-format path in the meantime.
 
 **No base64 or URL constructors.** Laravel's `ImageManager` has
 `->read($base64)` and `->read($url)`. `from_bytes` composes with

@@ -75,8 +75,8 @@ Five drivers ship in-tree. Configure via `QUEUE_DRIVER` env or by calling
 | `SyncQueueDriver` | dev, CI | runs the handler inline on `push`, no worker |
 | `NullQueueDriver` | testing wrappers | drops every push without running |
 
-`Queue::bootstrap_from_env()` reads `QUEUE_DRIVER` and wires the matching
-driver; `Queue::bootstrap_default()` always wires the memory driver. The
+`suprnova::queue::bootstrap_from_env()` reads `QUEUE_DRIVER` and wires the matching
+driver; `suprnova::queue::bootstrap_default()` always wires the memory driver. The
 server boot path calls one of these for you - most apps only configure via
 env.
 
@@ -101,11 +101,12 @@ QUEUE_DB_TABLE=jobs
 
 The database driver validates `QUEUE_DB_TABLE` as a SQL identifier at
 construction, so a malformed env value fails boot rather than reaching SQL
-composition. Redis uses sea-streamer-redis under the hood with
-`AutoCommit::Disabled`; the visibility timeout is fixed at consumer-group
-construction time, so the per-pop `visibility_timeout` argument is ignored
-on Redis (a documented divergence from the trait contract imposed by
-Redis Streams).
+composition. Redis uses Streams consumer groups directly (`XREADGROUP`
+for new work, `XAUTOCLAIM` to reclaim unacknowledged entries, Redis 6.2 or
+newer). The visibility timeout is the `XAUTOCLAIM` idle threshold, set once
+per connection, so the per-pop `visibility_timeout` argument is ignored on
+Redis (a documented divergence from the trait contract imposed by Redis
+Streams).
 
 ### Why Suprnova diverges
 
@@ -743,13 +744,11 @@ Resolution runs highest-priority first:
 Passing `None` for a field leaves that dimension alone, so routing a job's
 connection does not disturb the queue it already declared.
 
-The two dimensions run at different depths today. The **queue** is honored end
-to end - stamped on the envelope, stored by the driver, filtered by `--queue`.
-The **connection** resolves the connection *name* carried on the `JobQueueing`
-/ `JobQueued` lifecycle events, which is what listeners and dashboards see;
-one process-global driver still receives every push, so routing a job's
-connection does not yet select a different driver. Declaring connections now
-is forward-compatible for when per-connection drivers land, not behavioral.
+Both dimensions are honored end to end. The **queue** is stamped on the
+envelope, stored by the driver, and filtered by `--queue`. The
+**connection** selects the driver a job is pushed to, and its name is
+carried on the `JobQueueing` / `JobQueued` lifecycle events that listeners
+and dashboards see.
 
 Then dedicate a worker to it:
 
@@ -1336,7 +1335,9 @@ Queue::chain()
 
 The first envelope is pushed immediately; the rest travel on its
 `chain_remaining` payload field. On every successful settlement the
-worker pops the next entry and dispatches it. A failure breaks the
+worker pops the next entry and dispatches it. A link whose job declares
+`Job::delay()` becomes available that long after its predecessor
+settles, as it would after a direct push. A failure breaks the
 chain - subsequent links are never enqueued.
 
 ### Terminal settlement

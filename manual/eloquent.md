@@ -168,7 +168,7 @@ Function-level macros work alongside the struct attribute:
   `Model::scope_name(args)` shortcut. There is no function-level
   `#[scope]` form - scopes are declared per impl-block.
 - Global scopes are a runtime registration via the `GlobalScope`
-  trait, applied through `Model::global_scope::<GS>()`. There is no
+  trait, registered with `ScopeRegistry::register::<M, _>(scope)`. There is no
   function-level `#[global_scope]` macro - see
   [Macros](macros.md#suprnova-scopes-model) for the full pattern.
 - `#[prunable]` on `impl Prunable for T { ... }` registers the
@@ -903,11 +903,11 @@ If you need cross-row contention guarantees on SQLite, wrap the
 critical section in an explicit `BEGIN IMMEDIATE` transaction - at
 the file level that blocks every other writer.
 
-### What's not in v1
+### Not provided
 
 - **`NOWAIT` / `SKIP LOCKED`** - useful for job-queue claim
-  workflows but they add API surface. Deferred until a real
-  consumer needs them.
+  workflows but they add API surface, so they are added only when a
+  real consumer needs them.
 
 ## Transactions
 
@@ -922,8 +922,8 @@ without callers threading a handle through every call site.
 The closure form is the common case. The closure receives a
 `&Transaction` it can use to checkpoint with `savepoint(name)`;
 every `Model::*` / `Builder::*` operation inside the closure
-auto-routes through the transaction via a `tokio::task_local!`
-called `CURRENT_TX`.
+auto-routes through the transaction: the closure's task carries it as
+the ambient transaction.
 
 ```rust
 use suprnova::{DB, FrameworkError, Model};
@@ -948,7 +948,7 @@ DB::transaction(|_tx| {
   on unwind; SeaORM's `DatabaseTransaction::drop` rolls back).
 
 Reads inside the closure see writes from the same transaction
-(via `CURRENT_TX` lookup at every leaf SQL call). The first
+(every leaf SQL call looks up the ambient transaction). The first
 `DB::transaction` call after process start picks the database
 backend off `DB::connection()`; subsequent calls reuse the same
 connection registry.
@@ -1023,7 +1023,7 @@ SeaORM's `DatabaseConnection::begin()` doesn't compose - calling
 it on a connection that's already holding a transaction starts a
 brand-new physical transaction that commits / rolls back
 independently of the outer scope. That's a silent data-integrity
-footgun, so `DB::transaction` checks `CURRENT_TX` up front and
+footgun, so `DB::transaction` checks for an ambient transaction up front and
 returns a database error instead of producing the wrong
 semantics. Use `tx.savepoint(name)` for nested behaviour.
 
@@ -1108,7 +1108,7 @@ if some_condition {
 tx.commit().await?;  // or tx.rollback().await?;
 ```
 
-Manual mode does **not** install `CURRENT_TX`. Scope individual
+Manual mode does **not** install an ambient transaction. Scope individual
 operations through the transaction with `Builder::with_tx(&tx)`
 or the `Model::*_with_tx(&tx, ...)` shims:
 
@@ -1144,7 +1144,7 @@ Three-way precedence for routing an operation through a connection:
 
 1. **Builder-level override** - `Builder::with_tx(&tx)` or any
    `Model::*_with_tx(&tx, ...)` shim. Explicit beats ambient.
-2. **Ambient `CURRENT_TX`** - installed by `DB::transaction` /
+2. **The ambient transaction** - installed by `DB::transaction` /
    `DB::transaction_with_attempts` for the closure's task scope.
    A read that names another connection, through `on(name)` or a
    model's declared connection, still runs on that connection: the
@@ -1157,7 +1157,7 @@ Three-way precedence for routing an operation through a connection:
 
 Inside `DB::transaction(|tx| ...)`, calling
 `Builder::with_tx(&other_tx)` explicitly routes that one query
-through `other_tx` - bypassing the ambient `CURRENT_TX`. That's
+through `other_tx` - bypassing the ambient transaction. That's
 almost certainly a bug; the override path exists for the manual
 form, not for overriding the closure's own tx.
 
@@ -1167,27 +1167,17 @@ A builder carrying a `tx_override` still respects global scopes,
 named scopes, and the eager-load plan - the override only changes
 the connection routing, not the SQL.
 
-### Limitations (v1)
+### Relations and DDL inside a transaction
 
 - **Relation eager loads** - `Builder::with(["posts"])` and
-  `Collection::load(["posts"])` route the eager `IN (...)`
-  sub-queries through `DB::connection()`, not through the active
-  transaction. Pending writes inside a `DB::transaction` closure
-  are **not** visible to relations loaded via `.with(...)`. For
-  now, scope tx work to direct `Model::*` / `Builder::*` /
-  `DB::table(...)` calls; defer relation loads until after the
-  outer write lands (or before `DB::begin_transaction` on the
-  manual path). This is a known seam - the routing helper
-  (`ExecutorChoice`) is already in place at every SQL leaf; the
-  blocker is `EagerLoadDispatch::eager_load` taking
-  `&DatabaseConnection` (concrete), which the macro emits for
-  every relation kind. A follow-up sweep will adapt the trait to
-  the dispatch helper.
-- **DDL on Postgres** - `DB::statement(...)` inside a transaction
-  runs the DDL against the tx connection, which Postgres allows;
-  MySQL implicitly commits and is therefore unsupported inside a
-  Suprnova transaction (this matches Laravel's `DB::transaction`
-  caveat).
+  `Collection::load(["posts"])` run their `IN (...)` sub-queries
+  through the active transaction, so pending writes inside a
+  `DB::transaction` closure are visible to relations loaded there.
+- **DDL** - `DB::statement(...)` inside a transaction runs the DDL
+  against the transaction's connection, which Postgres allows;
+  MySQL and MariaDB commit implicitly on DDL, so DDL is unsupported
+  inside a Suprnova transaction on those engines (the same caveat as
+  Laravel's `DB::transaction`).
 
 ## Scopes
 
@@ -1271,12 +1261,11 @@ let all_tenants = Article::without_global_scope::<TenantScope>().get().await?;
 let everything = Article::without_global_scopes().get().await?;
 ```
 
-**Important:** the opt-out helpers must be the entry point. Chaining
-`.without_global_scope::<S>()` onto a builder already returned by
-`Model::query()` doesn't undo scopes that have already run -
-`Model::query()` applies scopes eagerly at construction time, so the
-mask is set too late. Use the per-model static helpers (above) for
-correct semantics.
+The opt-outs also chain: `Model::query().without_global_scope::<S>()`
+and `Model::query().without_global_scopes()` return the same rows as the
+static helpers. `Model::query()` applies scopes when it builds the
+query, and the builder remembers which constraint each scope added, so
+removing a scope afterwards takes its constraint back out.
 
 ### Where global scopes apply
 
@@ -1285,6 +1274,7 @@ correct semantics.
 | `Model::query()` | Yes - the canonical scoped entry point |
 | `Model::without_global_scope::<S>()` | Yes, minus `S` |
 | `Model::without_global_scopes()` | No |
+| `Model::with_trashed()` / `Model::only_trashed()` | Yes - only the soft-delete filter is lifted |
 | `Model::find(id)` | No - PK lookup goes through SeaORM directly |
 | `Model::find_many([...])` | No - same reason |
 | `Model::all()` | No - same reason |
@@ -1304,10 +1294,10 @@ through the typed scope registry. Both layers compose:
 - `Model::without_global_scopes()` drops registered scopes but
   preserves the soft-delete filter - admin tooling that wants to read
   every column-set still excludes trashed rows by default.
-- `Model::with_trashed()` and `Model::only_trashed()` skip soft-delete
-  filtering and also bypass the registry (they build a fresh unscoped
-  builder). Pair with `.without_global_scope::<S>()` if you need
-  scope-aware reads over trashed rows.
+- `Model::with_trashed()` and `Model::only_trashed()` lift only the
+  soft-delete filter. Every registered scope still runs, so a tenant
+  scope keeps trashed reads inside the tenant, as Laravel's
+  `withTrashed()` does.
 
 ## Relationships
 
@@ -1320,7 +1310,7 @@ into. This section covers the per-kind shape and option table; the
 deep dive on join-key resolution, the morph registry, pivot rows,
 and the polymorphic enum lowering lives in
 [Eloquent Relationships](eloquent-relationships.md). The relation
-kinds shipped today:
+kinds:
 
 | Kind                | One/many | Across families | Backed by |
 |---------------------|----------|-----------------|-----------|
@@ -1779,20 +1769,14 @@ will error because the dispatcher has no arm for `posts_touched`. The
 in-macro declarations remain the path the framework knows how to
 eager-load, count, aggregate, and predicate-filter.
 
-### v1 restrictions
+### Polymorphic keys and nested loads
 
-A handful of things the v1 surface holds off on. Each is documented at
-its declaration site too - collected here for visibility:
-
-- **Morph IDs are `i64`-only.** `MorphTo::morph_id` is hardcoded to
-  `i64`, so any model used as a `MorphTo` target must declare an `i64`
-  primary key, and the child table's `<name>_id` column must also be
-  `i64`. String / UUID-as-string morph FKs are v2.
-- **No nested eager loading through `MorphTo`.** The per-family enum
-  erases the child type, so a dotted path like
-  `with(["commentable.user"])` can't tail-recurse - the dispatcher
-  returns a typed error. Resolve per-family by matching on the enum
-  and calling `with(["user"])` on each variant individually.
+- **Morph IDs follow the target's primary key.** A `MorphTo` target
+  can declare an `i64`, `String`, UUID or ULID primary key, and the
+  child table's `<name>_id` column takes the same type.
+- **Nested eager loading through `MorphTo`.** A dotted path like
+  `with(["commentable.user"])` loads `user` on every morph target,
+  one query per target type.
 ## Eager loading
 
 Eager loading avoids N+1 queries. Instead of `posts.len()` queries to
@@ -1971,9 +1955,8 @@ query - not the pivot scan.
 `with_where` is supported on every relation kind EXCEPT `MorphTo`.
 MorphTo's per-family enum erases the child type, so no single
 `Builder<R>` covers all variants. Nested eager loading through
-MorphTo is also not supported in v1 - `with(["commentable.user"])`
-where `commentable` is a `MorphTo` returns an error from the
-recurse-eager-load dispatcher.
+MorphTo does work: `with(["commentable.user"])` groups the loaded
+targets by type and loads `user` once per type.
 
 ### `Collection::load` / `load_missing`
 
@@ -2242,9 +2225,10 @@ so rows inserted mid-iteration with PKs above the cursor land in a
 later batch (or are picked up by a subsequent run) - they never cause
 an original row to skip or duplicate.
 
-`chunk_by_id` requires an `i64` primary key. Models with `String` /
-`Uuid` PKs use `chunk` with the OFFSET caveat. (Generalising the
-cursor shape to non-`i64` keys is on the follow-up list.)
+`chunk_by_id` works with any orderable primary key: `i64`, `String`,
+UUID or ULID. For time-ordered keys (auto-increment, ULID, UUIDv7), rows
+inserted mid-run land in a later batch; with random UUIDv4 keys, a row
+inserted below the cursor is picked up by the next run instead.
 
 ### chunk_map - chunk + per-chunk map
 
@@ -3107,7 +3091,7 @@ trait defaults make non-overridden methods cheap no-ops.
   outside the name-match and don't register listeners.
 
 - **Observer structs the macro inspects must be zero-sized** (no
-  fields) in v1. The macro constructs the observer via `let obs =
+  fields). The macro constructs the observer via `let obs =
   MyObserver;` inside each adapter. Stateful observers (carrying
   `Arc<Inner>`) need the runtime `Model::observe()` path, which
   takes the observer by value and clones it into each adapter.
@@ -3314,8 +3298,7 @@ replica - useful when read-your-writes consistency matters
 
 ### Routing precedence
 
-The dispatch chain runs every operation through
-`ExecutorChoice::resolve_read` or `resolve_write`. The order is:
+Every read and every write resolves its connection in this order:
 
 1. **Active transaction wins absolutely.** Inside `DB::transaction`
    every read AND every write uses the tx connection. `on(name)` is
@@ -3855,7 +3838,10 @@ fire per-row model events. Use them when scope-narrowing is sufficient
 and you don't need lifecycle hooks; for per-row hooks iterate with
 `.get()` and call `.update()` / `.delete()` per row.
 `delete_all` always targets the model's static `M::TABLE`; runtime table
-names are not accepted as executable SQL.
+names are not accepted as executable SQL. On a `soft_deletes` model it
+soft-deletes: one `UPDATE` sets the deleted-at column across the scope,
+as Laravel's builder `delete()` does. `force_delete_all` removes the rows
+for good.
 Explicit null attributes are emitted as SQL `NULL`, so nullable bigint,
 integer, boolean, timestamp, and other non-text columns retain their database
 type on PostgreSQL. Every non-null attribute remains parameter-bound. Upsert

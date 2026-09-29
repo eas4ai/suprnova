@@ -297,7 +297,7 @@ function for both relative-from-now and explicit-absolute deadlines.
 On the inbound side, you verify the signature against the live request:
 
 ```rust
-use suprnova::{url, FrameworkError, Request, Response, HttpResponse};
+use suprnova::{url, AppError, FrameworkError, Request, Response, HttpResponse};
 
 pub async fn reset(req: Request) -> Response {
     reset_inner(req).await.map_err(HttpResponse::from)
@@ -305,7 +305,7 @@ pub async fn reset(req: Request) -> Response {
 
 async fn reset_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
     if !url::has_valid_signature(&req)? {
-        return Err(FrameworkError::forbidden("Invalid or expired link"));
+        return Err(AppError::forbidden("Invalid or expired link").into());
     }
     // Signature is good and not expired - proceed.
     let user_id = req.param("user").unwrap();
@@ -319,7 +319,7 @@ URL is not expired. For the three-way distinction between *invalid*,
 *expired*, and *valid*, use `signature_verdict`:
 
 ```rust
-use suprnova::{url, FrameworkError, HttpResponse, Request, Response};
+use suprnova::{url, AppError, FrameworkError, HttpResponse, Request, Response};
 use suprnova::routing::SignatureVerdict;
 
 pub async fn reset(req: Request) -> Response {
@@ -341,7 +341,7 @@ async fn reset_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
         SignatureVerdict::Invalid => {
             // Render a generic 403 - don't leak whether the signature
             // was malformed, missing, or just wrong.
-            return Err(FrameworkError::forbidden("Invalid link"));
+            return Err(AppError::forbidden("Invalid link").into());
         }
     }
     // ...

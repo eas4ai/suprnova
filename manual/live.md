@@ -485,7 +485,7 @@ binary and start the application from the directory that holds it, or set
 application refuses to start and names it.
 
 The checker expands the macros, so `live:check` proves a library view like any
-other. The form family today: field, label, input, textarea, number input,
+other. The form family: field, label, input, textarea, number input,
 slider, search input, password input with reveal, checkbox and checkbox group,
 radio group, switch, select, button and link button, button group, fieldset,
 form actions, validation summary, and file input. Library components are named

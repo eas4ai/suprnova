@@ -264,7 +264,7 @@ In both cases, ranking is preserved (best result first), but the absolute score 
 
 **Dimension is pinned at table creation.** `VECTOR(N)` fixes the dimension; switching embedding models from a 768-dim model to a 1536-dim model means a full table migration (new table, re-embed, swap). Plan model upgrades the same way you'd plan a schema migration - there is no "ALTER COLUMN VECTOR(768) → VECTOR(1536)" path.
 
-**Pool sizing.** `from_url` uses sqlx's default `MySqlPoolOptions` - `max_connections = 10` at the time of writing. For high-QPS workloads (hundreds of `similar` calls per second), build the pool yourself with `MySqlPoolOptions::new().max_connections(N).connect_lazy(url)` and pass to `from_pool`. The driver doesn't impose its own connection cap.
+**Pool sizing.** `from_url` uses sqlx's default `MySqlPoolOptions` - `max_connections = 10` in sqlx 0.9, the version the framework pins. For high-QPS workloads (hundreds of `similar` calls per second), build the pool yourself with `MySqlPoolOptions::new().max_connections(N).connect_lazy(url)` and pass to `from_pool`. The driver doesn't impose its own connection cap.
 
 **Local setup.** Run MariaDB 11.7+ via Docker:
 

@@ -528,7 +528,7 @@ the framework's bound `DB::connection()` directly - they do **not**
 join an ambient `DB::transaction(...)` scope. If you need atomicity
 across a batch of inserts, drop into the Model trait's
 `Model::create(attrs!{...})` inside the closure (that path routes
-through the same executor that honours `CURRENT_TX`):
+through the ambient transaction):
 
 ```rust
 use suprnova::{DB, Model, attrs};

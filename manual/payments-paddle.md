@@ -278,14 +278,14 @@ rest work, with the noted caveats.
 | `Checkout::session_status` | Retrieves the transaction and reports collection state. |
 | `Subscription::subscribe` | Always `NotSupported`. Subscriptions are born from checkout completion + webhook. |
 | `Subscription::update(cancel_at_period_end: Some(true), new_price_refs: None)` | Works. Wires to `subscription_cancel` with default `EffectiveFrom::NextBillingPeriod`. |
-| `Subscription::update(new_price_refs: Some(...))` | `NotSupported` in v1. Paddle reserves price-set replacement for its own migration flows. |
+| `Subscription::update(new_price_refs: Some(...))` | Works. Replaces the subscription's items with the new prices, prorated. |
 | `Subscription::update` (no-op) | Works. Re-fetches current state via `subscription_get`. |
 | `Subscription::cancel` | Works, but `at_period_end` is **ignored** - always schedules to next billing period. See [below](#cancellation-is-always-scheduled). |
 | `Subscription::get` | Works. |
 | `CustomerStore::create_customer` | Works. |
 | `CustomerStore::update_customer` | Works. |
 | `CustomerStore::get_customer` | Works. |
-| `CustomerStore::delete_customer` | `NotSupported`. Use `update_customer` with `archived` status if needed. |
+| `CustomerStore::delete_customer` | `NotSupported`. Archive with `PaddleProvider::archive_customer`. |
 | `Payment::*` | Trait is not implemented. `provider.as_payment()` returns `None`. |
 | `WebhookHandler::*` | Works. |
 
@@ -309,25 +309,21 @@ your own `subscription.status != Canceled && subscription.cancel_at_period_end =
 flag and update the UI right after `cancel()` returns - the next webhook
 will confirm.
 
-### Customer deletion is "archive via update"
+### Customer deletion is "archive"
 
 `delete_customer` returns `PaymentError::NotSupported` because Paddle's
-public API does not expose a delete endpoint at all. If you need to
-suppress a customer record in Paddle, call `update_customer` with the
-`archived` status. The framework adapter does not wrap this directly -
-the metadata field is the escape hatch:
+public API does not expose a delete endpoint at all. Archiving is Paddle's
+only way to take a customer out of use, and the Paddle provider exposes it
+directly:
 
 ```rust
-provider.update_customer(UpdateCustomerRequest {
-    provider_customer_id: customer_id,
-    email: None,
-    name: None,
-    metadata: Some(serde_json::json!({ "status": "archived" })),
-}).await?;
+paddle.archive_customer(&customer_id).await?;
 ```
 
-Confirm the exact field path against your Paddle API version when shipping
-this - the SDK does not currently model the `status` enum directly.
+This sets the customer's Paddle `status` to `archived`: it keeps its history
+and can't be used for new checkouts. Don't try to archive through
+`update_customer`'s `metadata`: that field is Paddle's `custom_data`, so a
+`"status"` key there is stored as data and changes nothing.
 
 ## Webhook signature verification
 
@@ -338,7 +334,7 @@ like `ts=1716000000,h1=abcdef…`. The adapter delegates verification to
 - Parses the header
 - Recomputes the HMAC using your `PADDLE_WEBHOOK_KEY`
 - Rejects signatures whose timestamp is outside `MaximumVariance::default()`
-  (5 seconds at time of writing - replays older than that are dropped)
+  (5 seconds in paddle-rust-sdk 0.18, the version the adapter pins - replays older than that are dropped)
 
 The framework's `webhook_routes` handler calls `verify` before doing
 anything else; a failure returns `401 invalid-signature` with no body
@@ -435,9 +431,7 @@ Each `NotSupported` error message points at the supported workflow:
 
 - `subscribe`: "use `Checkout::start_session` with `SessionMode::Subscription`
   and await the `SubscriptionCreated` webhook"
-- `update` with `new_price_refs`: "Paddle price-set replacement on existing
-  subscription not in v1"
-- `delete_customer`: "use `UpdateCustomer` with `archived` status"
+- `delete_customer`: "archive with `PaddleProvider::archive_customer`"
 
 Branch on this error explicitly when you're writing provider-agnostic
 domain code:
@@ -446,13 +440,8 @@ domain code:
 match provider.delete_customer(&cus_id).await {
     Ok(()) => { /* Stripe path */ }
     Err(PaymentError::NotSupported(_)) => {
-        // Paddle path - archive via update instead
-        provider.update_customer(UpdateCustomerRequest {
-            provider_customer_id: cus_id,
-            email: None,
-            name: None,
-            metadata: Some(serde_json::json!({ "status": "archived" })),
-        }).await?;
+        // Paddle path - archive instead
+        paddle.archive_customer(&cus_id).await?;
     }
     Err(e) => return Err(e),
 }

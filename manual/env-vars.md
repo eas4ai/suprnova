@@ -400,11 +400,13 @@ A few subsystems are configured entirely in Rust code via the
 container or service registration - they have **zero** env vars the
 framework reads:
 
-- **Filesystem / Storage.** Disks are registered with
-  `FilesystemRegistry::add_disk(name, driver)` in `bootstrap()`. There
-  is no `FILESYSTEM_DISK` env var (the name appears in some starter
-  `.env` files but is not consulted by the framework - see "Variables
-  the framework does not read" below).
+- **Filesystem / Storage.** Disks are registered by name with
+  `Storage::register_*` in `bootstrap()` and addressed by name at the
+  call site (`Storage::disk("public")`). There is no default disk, so
+  there is no `FILESYSTEM_DISK` env var (see "Variables the framework
+  does not read" below). The one exception is an S3-compatible disk,
+  which a generated project configures from `S3_*` variables (see
+  [Docker](cli-docker.md)).
 - **Broadcasting & WebSockets.** Channels are registered with the
   `ws!()` macro and `BroadcastHub` configuration in code. The driver
   itself rides on whatever the configured `CACHE_DRIVER` selects.
@@ -434,8 +436,9 @@ here so a reader searching for them isn't left wondering:
   `env_optional` if you want to keep the Laravel name, but nothing in
   `suprnova::*` does. (`MAIL_FROM_NAME` **is** read as of 0.5.9 - see the
   Mail chapter - so it's no longer listed here.)
-- `FILESYSTEM_DISK` - placeholder for the default disk name. Set the
-  default in code via `FilesystemRegistry::set_default(name)` instead.
+- `FILESYSTEM_DISK` - Laravel's default disk name. Suprnova has no
+  default disk: every call names the disk it uses
+  (`Storage::disk("s3")`).
 
 ## How values are parsed
 
@@ -473,7 +476,7 @@ overrides both for secrets that should never land in a committed
 file.
 
 See [Configuration](configuration.md#how-env-loading-works) for the
-exact loader behaviour and the `LOADED_KEYS` tracking that prevents
+exact loader behaviour and the tracking of loaded keys that prevents
 stale `.env` values from promoting into the "real system env" tier
 across reloads.
 

@@ -127,9 +127,10 @@ PostgreSQL and Redis are written into every generated compose file:
 | Redis | 6379 | `redis:7-alpine` |
 
 Both services have health checks, persistent named volumes, and live on
-a project-scoped network (`<project>_network`). The Postgres user,
-password, and database default to `suprnova` / `suprnova_secret` /
-`suprnova_db`.
+a project-scoped network (`<project>_network`). The Postgres user and
+database default to `suprnova` / `suprnova_db`; the password is generated
+per project, written into `docker-compose.yml`, and printed once as a
+ready-to-paste `DATABASE_URL`.
 
 ### Optional services
 
@@ -143,7 +144,9 @@ When you opt in:
 Mailpit defaults to accepting any SMTP auth so you don't have to
 configure credentials during development; the web UI at
 `http://localhost:8025` shows every email your app sends. MinIO's
-default credentials are `minioadmin` / `minioadmin`.
+root user defaults to `suprnova`; its password is generated per project
+and printed once by `docker:compose`. Override them with
+`MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`.
 
 ### Running the stack
 
@@ -168,7 +171,7 @@ override anything by setting it in `.env` or your shell. A typical
 `.env` for the default stack:
 
 ```env
-DATABASE_URL=postgres://suprnova:suprnova_secret@localhost:5432/suprnova_db
+DATABASE_URL=postgres://suprnova:<generated password>@localhost:5432/suprnova_db
 REDIS_URL=redis://localhost:6379
 
 # Mailpit (if enabled)
@@ -177,10 +180,9 @@ MAIL_HOST=localhost
 MAIL_PORT=1025
 
 # MinIO (if enabled)
-FILESYSTEM_DISK=s3
 S3_ENDPOINT=http://localhost:9000
-S3_ACCESS_KEY=minioadmin
-S3_SECRET_KEY=minioadmin
+S3_ACCESS_KEY=suprnova
+S3_SECRET_KEY=<MinIO root password from docker:compose>
 S3_BUCKET=local
 S3_REGION=us-east-1
 ```

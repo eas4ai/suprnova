@@ -72,7 +72,7 @@ These are the principles the framework's authors hold themselves to.
 They explain why a chapter says what it says.
 
 **1. Parity comes from the Laravel changelog.** When Laravel ships a
-feature, Suprnova tracks it. Today's baseline is Laravel 13.x and every
+feature, Suprnova tracks it. The baseline is Laravel 13.x and every
 shipped subsystem has been audited against it. The
 [Laravel Parity Map](parity.md) is the explicit feature-by-feature table.
 
@@ -112,7 +112,7 @@ A non-exhaustive map. The full list is in [`documentation.md`](documentation.md)
 | **Realtime** | `ws!()` macro for typed WebSocket handlers, broadcasting channels (public, private, presence), sea-streamer fanout, server-sent events, web push (VAPID) |
 | **Cache & Storage** | Memory, Redis, Database cache drivers; atomic operations; tagged cache; cache locks; filesystem with fs/memory/s3/azblob/gcs drivers; path-traversal protection; vector storage with multiple backends |
 | **Mail & Notify** | `Mailable` trait, SMTP/SES/Mailgun/Postmark/SendGrid/Resend drivers, RFC 5322 file previews, in-memory/log transports, and `Notifiable` with mail/database/broadcast/webpush channels |
-| **Validation & Data** | `#[derive(Validate)]`, form requests, async validation, `#[derive(Data)]` for partial-reload include sets, `#[derive(Resource)]` for JSON:API |
+| **Validation & Data** | `#[derive(Validate)]`, form requests, async validation, `#[derive(Data)]` for partial-reload include sets, `#[json_resource]` on `Data` for JSON:API |
 | **Payments** | Generic provider surface (gateway/MoR/redirect-flow), reference adapters for Stripe and Paddle, mirror tables with webhook idempotency, Inertia checkout components |
 | **Feature flags** | Database evaluator, cached evaluator with TTL, feature middleware, sub-second propagation via sync trait |
 | **Testing** | `#[suprnova_test]`, `expect!`, `TestDatabase`, fakes for every external surface (Mail, Notify, Queue, Bus, Events, Storage, Http) |

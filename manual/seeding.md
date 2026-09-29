@@ -76,8 +76,9 @@ impl Seeder for UsersSeeder {
 
 `Seeder` is re-exported at the crate root, so `use suprnova::Seeder` is
 enough - you do not need to reach into `suprnova::seed::Seeder`. `async_trait`
-is also re-exported (`use suprnova::async_trait`) because the trait method
-returns a future and Rust does not yet allow `async fn` in traits without it.
+is also re-exported (`use suprnova::async_trait`) because `Seeder` is an
+`#[async_trait]` trait: the seeder registry stores each run as a boxed `Send`
+future, which `#[async_trait]` produces.
 
 The `FrameworkError` return type is the same error envelope every other async
 surface in the framework uses; bubbling the `?` out of a factory call or a
@@ -369,8 +370,8 @@ UserFactory::times(10)
 `make` / `make_one` / `make_many` are the in-memory siblings (no insert) for
 unit tests that don't want a database round-trip. See the
 [Eloquent](eloquent.md) chapter for the full factory surface (including
-`prepend`, `Sequence`, and the `#[derive(Factory)]` macro that generates the
-marker struct from a `#[factory(model = "…")]` attribute).
+`prepend`, `Sequence`, and the `#[derive(Factory)]` macro, with `#[factory(name = "…")]` to rename
+the generated factory).
 
 ### Idempotency is the seeder's responsibility
 

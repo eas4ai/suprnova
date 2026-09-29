@@ -202,8 +202,10 @@ A short triage list for the most common dev-loop hiccups:
   `--port 8001`.
 - **`cargo-watch` keeps recompiling.** Some editor is rewriting files
   on save (formatters, linters with autofix). Disable on-save format
-  for the project, or scope your watcher with `CARGO_WATCH_IGNORE`
-  patterns.
+  for the project, or list the paths it rewrites in a `.ignore` file at
+  the project root (gitignore syntax). cargo-watch always honors
+  `.ignore`; `suprnova serve` turns off `.gitignore` filtering when the
+  project has a `.env`, so `.gitignore` alone may not be enough.
 - **TypeScript types not updating.** Either `--skip-types` was passed,
   or the watcher tripped over a `.rs` parse error. Look at the
   `[types]` lines - it prints a warning and continues rather than

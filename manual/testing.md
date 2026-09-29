@@ -306,18 +306,18 @@ TestContainer::scope(async {
 .await;
 ```
 
-### Why there's a `FAKE_GUARDS` refcount
+### Why named connections survive parallel tests
 
 The thread-local container is per-test, but Suprnova also has a
 process-global `ConnectionRegistry` keyed by name (`__read_replica__`,
 custom connection labels) that survives a thread-local reset. A naive
-`Drop` impl would call `ConnectionRegistry::clear()` every time *any*
+`Drop` impl would clear that registry every time *any*
 `TestContainerGuard` went away - wiping another concurrent test's
 named connection halfway through it running.
 
-The fix is a process-wide `AtomicUsize` (`FAKE_GUARDS`). `fake()`
-increments it; `drop` decrements; only the transition back to zero
-clears the named registry. Two parallel tests using
+So the guards are refcounted process-wide: `fake()` counts up, each
+guard's drop counts down, and only the last guard to drop clears the
+named registry. Two parallel tests using
 `__read_replica__` are safe: whichever guard drops last owns the
 clear.
 
@@ -420,8 +420,8 @@ next test's lookup the instant they overlap on a worker thread.
 
 That's why `TestContainer` has both flavours - thread-local for the
 common `current_thread` case, task-local for `multi_thread`. The
-refcounted `FAKE_GUARDS` clear on the process-global
-`ConnectionRegistry` exists for the same reason: shared state that
+refcounted clear of the process-global
+named-connection registry exists for the same reason: shared state that
 can't be made per-test must at least know not to wipe itself while
 another test is still leaning on it.
 
@@ -439,7 +439,7 @@ matcher is a build error, not a flaky test.
 | `expect!` macro + `Expect<T>` matchers | `framework/src/lib.rs` (macro), `framework/src/testing/expect.rs` (impls) |
 | `TestDatabase::fresh` / `sqlite_memory` / helpers | `framework/src/database/testing.rs` |
 | `test_database!` macro | `framework/src/database/testing.rs` |
-| `TestContainer` + `TestContainerGuard` + `FAKE_GUARDS` | `framework/src/container/testing.rs` |
+| `TestContainer` + `TestContainerGuard` | `framework/src/container/testing.rs` |
 | `install_test_encryption_key[ring]` | `framework/src/testing/mod.rs` |
 | Per-surface fakes (Mail, Notify, Queue, Bus, Events, Storage, HTTP) | per-domain `testing` submodules - see [Mocking](mocking.md) |
 | `TestResponse` | `framework/src/testing/response.rs` |
