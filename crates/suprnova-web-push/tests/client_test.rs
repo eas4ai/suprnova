@@ -264,6 +264,10 @@ async fn strict_default_rejects_http_endpoint() {
         format!("{err}").contains("https"),
         "Strict policy must reject http://, got: {err}"
     );
+    assert!(
+        matches!(err, WebPushError::InvalidSubscription(_)),
+        "a refused endpoint is a fault of the subscription: {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -285,6 +289,10 @@ async fn strict_default_rejects_ip_literal_endpoint() {
         format!("{err}").contains("IP literal"),
         "Strict policy must reject IP-literal hosts, got: {err}"
     );
+    assert!(
+        matches!(err, WebPushError::InvalidSubscription(_)),
+        "a refused endpoint is a fault of the subscription: {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -305,6 +313,10 @@ async fn strict_default_rejects_metadata_host() {
     assert!(
         format!("{err}").contains("not a valid push service host"),
         "Strict policy must reject cloud-metadata hostnames, got: {err}"
+    );
+    assert!(
+        matches!(err, WebPushError::InvalidSubscription(_)),
+        "a refused endpoint is a fault of the subscription: {err:?}"
     );
 }
 

@@ -476,6 +476,27 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   A page parameter that the `path` has already is replaced, so the URL of the
   current request can be given as the `path`, and a fragment of the `path`
   stays at the end of the URL.
+- **A web push subscription that cannot be used is
+  `WebPushError::InvalidSubscription`.** An endpoint that is no URL, that is
+  not `https`, that names an address in place of a host, or that names a host
+  that is no push service was `WebPushError::Internal`, with the text
+  `internal:` in front. A key that is not what RFC 8291 asks for was
+  `WebPushError::Encryption`: a `p256dh` or an `auth` that is no base64url or
+  has the wrong length, a `p256dh` that is not in uncompressed form or is no
+  point of the P-256 curve. Bad stored data read as a fault of the crate, and
+  no caller could tell the two apart. The new variant says which rule refused
+  the subscription and is not retryable. `WebPushChannel` handles it as it
+  handles a subscription that is gone: it logs a warning and the dispatch
+  succeeds, so a queue does not send the job again, with every channel that
+  delivered before this one. A stored route that is no subscription at all is
+  handled the same way. It was an internal error. No warning of the channel
+  has the endpoint, because the path of an endpoint is the token that reaches
+  the browser: a warning has the host and `endpoint_sha256`, the first 16
+  hexadecimal digits of the SHA-256 of the stored endpoint, which finds the
+  row. The warning for a subscription that is gone had the whole endpoint. The
+  errors of the crate's own headers stay `Internal`, and a payload that is too
+  large and a failure of the encryption stay `Encryption`. A `match` on
+  `WebPushError` that names every variant has one more to name.
 
 ### Fixed
 

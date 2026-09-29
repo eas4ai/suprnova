@@ -1,4 +1,4 @@
-use suprnova_web_push::{ContentEncoding, Payload};
+use suprnova_web_push::{ContentEncoding, Payload, WebPushError};
 
 const RECEIVER_P256DH_B64URL: &str =
     "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
@@ -58,7 +58,7 @@ fn encrypt_with_bad_p256dh_returns_error() {
 // ---------------------------------------------------------------------------
 // Key-length validation - RFC 8291 fixes p256dh at a 65-byte uncompressed
 // SEC1 point and auth at a 16-byte secret. A short / long / wrong-tag value
-// must surface a framework-typed Encryption error with the offending size or
+// must surface `WebPushError::InvalidSubscription` with the offending size or
 // tag in the message, not get passed to `ece::encrypt` (which would surface
 // a generic crypto error from a layer below).
 // ---------------------------------------------------------------------------
@@ -170,4 +170,47 @@ fn encrypt_rejects_long_auth_secret() {
         s.contains("16"),
         "error must cite the expected length, got: {s}"
     );
+}
+
+/// A key that is not what RFC 8291 asks for is a fault of the stored
+/// subscription, so the caller can tell it from a fault of the encryption
+/// and removes the subscription. A payload that is too large is no fault of
+/// the subscription.
+#[test]
+fn a_bad_key_is_an_invalid_subscription() {
+    let compressed = {
+        let mut point = vec![0x04u8; 65];
+        point[0] = 0x02;
+        b64url(&point)
+    };
+    let cases = [
+        ("not-base64url!".to_owned(), RECEIVER_AUTH_B64URL.to_owned()),
+        (b64url(&[0x04u8; 64]), RECEIVER_AUTH_B64URL.to_owned()),
+        (compressed, RECEIVER_AUTH_B64URL.to_owned()),
+        // The right length and the right tag, and no point of the curve.
+        (b64url(&[0x04u8; 65]), RECEIVER_AUTH_B64URL.to_owned()),
+        (
+            RECEIVER_P256DH_B64URL.to_owned(),
+            "not-base64url!".to_owned(),
+        ),
+        (RECEIVER_P256DH_B64URL.to_owned(), b64url(&[7u8; 15])),
+    ];
+    for (p256dh, auth) in cases {
+        let err = Payload::encrypt(b"hi", &p256dh, &auth, ContentEncoding::Aes128Gcm).unwrap_err();
+        assert!(
+            matches!(err, WebPushError::InvalidSubscription(_)),
+            "p256dh {p256dh}, auth {auth}: {err:?}"
+        );
+        assert!(!err.is_retryable(), "a retry changes no key");
+    }
+
+    let too_large = vec![0u8; suprnova_web_push::payload::MAX_PLAINTEXT_BYTES + 1];
+    let err = Payload::encrypt(
+        &too_large,
+        RECEIVER_P256DH_B64URL,
+        RECEIVER_AUTH_B64URL,
+        ContentEncoding::Aes128Gcm,
+    )
+    .unwrap_err();
+    assert!(matches!(err, WebPushError::Encryption(_)), "{err:?}");
 }

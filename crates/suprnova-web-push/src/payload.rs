@@ -67,9 +67,9 @@ impl Payload {
         }
         let p256dh = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(p256dh_b64url)
-            .map_err(|e| WebPushError::Encryption(format!("p256dh base64: {e}")))?;
+            .map_err(|e| WebPushError::InvalidSubscription(format!("p256dh base64: {e}")))?;
         if p256dh.len() != P256DH_KEY_LEN {
-            return Err(WebPushError::Encryption(format!(
+            return Err(WebPushError::InvalidSubscription(format!(
                 "p256dh must decode to {P256DH_KEY_LEN} bytes (got {})",
                 p256dh.len()
             )));
@@ -81,16 +81,22 @@ impl Payload {
         // would surface this as a generic crypto error; surfacing it here
         // with the tag in hex makes the failure actionable.
         if p256dh[0] != 0x04 {
-            return Err(WebPushError::Encryption(format!(
+            return Err(WebPushError::InvalidSubscription(format!(
                 "p256dh must be an uncompressed SEC1 point (tag 0x04, got 0x{:02x})",
                 p256dh[0]
             )));
         }
+        // The tag says what the bytes claim to be. The curve says whether
+        // they are a key: 65 bytes that are no point of P-256 fail in the
+        // key agreement, where the failure reads as one of the encryption.
+        p256::PublicKey::from_sec1_bytes(&p256dh).map_err(|_| {
+            WebPushError::InvalidSubscription("p256dh is no point of the P-256 curve".into())
+        })?;
         let auth = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(auth_b64url)
-            .map_err(|e| WebPushError::Encryption(format!("auth base64: {e}")))?;
+            .map_err(|e| WebPushError::InvalidSubscription(format!("auth base64: {e}")))?;
         if auth.len() != AUTH_SECRET_LEN {
-            return Err(WebPushError::Encryption(format!(
+            return Err(WebPushError::InvalidSubscription(format!(
                 "auth secret must decode to {AUTH_SECRET_LEN} bytes (got {})",
                 auth.len()
             )));
