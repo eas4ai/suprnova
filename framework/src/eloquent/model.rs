@@ -1138,35 +1138,6 @@ where
         Self::find(self.primary_key_value()).await
     }
 
-    /// Build an unsaved clone with the PK reset and any auto-managed
-    /// columns cleared. Caller saves explicitly.
-    ///
-    /// ## Relation state
-    ///
-    /// Eager-loaded relations and pivot context are preserved on the
-    /// replica (Laravel parity: `clone $user` retains `$user->posts`).
-    /// The macro-emitted `replicate_with` clones the source's
-    /// `__eager` cache via `EagerLoadCache::clone` - each cell
-    /// carries a clone trampoline so the replica's loaded rows are
-    /// independent of the source's - and `Arc`-clones the pivot slot.
-    /// Use [`Self::replicate_except`] if a specific relation should
-    /// be dropped on the replica (column names only; relation cache
-    /// keys are out of scope for the `except` filter).
-    ///
-    /// ## Lifecycle events
-    ///
-    /// Fires `Replicating { source, replica }` AFTER the in-memory
-    /// clone is constructed and BEFORE this method returns. The
-    /// `replica` field is an `Arc<tokio::sync::Mutex<Self>>` so
-    /// listeners can mutate the replica (clear timestamps, reset
-    /// flags, append a `(copy)` prefix to the title, etc.) before
-    /// the caller sees it.
-    async fn replicate(&self) -> Result<Self, FrameworkError>
-    where
-        Self: ReplicateExt,
-    {
-        // ReplicateExt::replicate_with takes Vec<String>; match the
-        // element type. `Vec::<&str>::new()` would compile-error here
     /// Eager-load the named relations onto this row after the fact.
     /// Laravel's `$model->load(...)`.
     ///
@@ -1236,6 +1207,35 @@ where
         .await
     }
 
+    /// Build an unsaved clone with the PK reset and any auto-managed
+    /// columns cleared. Caller saves explicitly.
+    ///
+    /// ## Relation state
+    ///
+    /// Eager-loaded relations and pivot context are preserved on the
+    /// replica (Laravel parity: `clone $user` retains `$user->posts`).
+    /// The macro-emitted `replicate_with` clones the source's
+    /// `__eager` cache via `EagerLoadCache::clone` - each cell
+    /// carries a clone trampoline so the replica's loaded rows are
+    /// independent of the source's - and `Arc`-clones the pivot slot.
+    /// Use [`Self::replicate_except`] if a specific relation should
+    /// be dropped on the replica (column names only; relation cache
+    /// keys are out of scope for the `except` filter).
+    ///
+    /// ## Lifecycle events
+    ///
+    /// Fires `Replicating { source, replica }` AFTER the in-memory
+    /// clone is constructed and BEFORE this method returns. The
+    /// `replica` field is an `Arc<tokio::sync::Mutex<Self>>` so
+    /// listeners can mutate the replica (clear timestamps, reset
+    /// flags, append a `(copy)` prefix to the title, etc.) before
+    /// the caller sees it.
+    async fn replicate(&self) -> Result<Self, FrameworkError>
+    where
+        Self: ReplicateExt,
+    {
+        // ReplicateExt::replicate_with takes Vec<String>; match the
+        // element type. `Vec::<&str>::new()` would compile-error here
         // even though the vec is empty.
         let copy = self.replicate_with(Vec::<String>::new());
         let shared = std::sync::Arc::new(tokio::sync::Mutex::new(copy));
