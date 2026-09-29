@@ -16,12 +16,20 @@
 //! resolution, so the whole sequence joins the transaction in scope and
 //! commits or rolls back as one unit; a rollback puts back exactly what the
 //! revocation removed.
+//!
+//! RBAC and the [`Gate`](crate::Gate) do not know each other until the
+//! application opts in with [`register_gate_bridge`]: from then on every
+//! permission a user holds also answers the gate's async forms as an ability
+//! of the same name, and every other ability still goes to the gate's
+//! definitions and policies.
 
 pub mod entity;
+mod gate_bridge;
 mod has_roles;
 mod middleware;
 pub mod migrations;
 
+pub use gate_bridge::{GateBridgeMiddleware, register_gate_bridge};
 #[cfg(any(test, feature = "testing"))]
 pub use has_roles::observed_rbac_statements_for_test;
 pub use has_roles::{

@@ -889,6 +889,115 @@ async fn gate_before_hook_applies_to_async_path() {
     assert!(!Gate::allows_async("ah-async-edit", &regular, &post).await);
 }
 
+// ── Gate::before_async ───────────────────────────────────────────────────────
+
+#[derive(Debug)]
+struct AsyncBeforeUser {
+    is_admin: bool,
+}
+
+#[tokio::test]
+#[serial]
+async fn gate_before_async_hook_answers_the_async_path_only() {
+    // The gate always denies; the async hook grants admins everything.
+    Gate::define::<AsyncBeforeUser, Post>("abh-edit", |_u, _p| false);
+    Gate::before_async::<AsyncBeforeUser, _, _>(|u, _action| {
+        let is_admin = u.is_admin;
+        async move {
+            // Stands in for the I/O the hook exists to wait on.
+            tokio::task::yield_now().await;
+            is_admin.then_some(true)
+        }
+    });
+
+    let admin = AsyncBeforeUser { is_admin: true };
+    let regular = AsyncBeforeUser { is_admin: false };
+    let post = Post {
+        id: 1,
+        author_id: 1,
+        is_public: false,
+    };
+
+    assert!(Gate::allows_async("abh-edit", &admin, &post).await);
+    assert!(
+        !Gate::allows_async("abh-edit", &regular, &post).await,
+        "a hook that answers None leaves the decision to the gate"
+    );
+    assert!(
+        !Gate::allows("abh-edit", &admin, &post),
+        "the sync path cannot await the hook, so it skips it"
+    );
+    let authorized = Gate::authorize_async("abh-edit", &admin, &post).await;
+    assert!(authorized.is_ok());
+    assert!(matches!(
+        Gate::authorize("abh-edit", &admin, &post),
+        Err(FrameworkError::Unauthorized)
+    ));
+}
+
+struct OrderedHookUser;
+
+#[tokio::test]
+#[serial]
+async fn gate_before_hooks_run_in_registration_order_across_sync_and_async() {
+    // Registered first: the async hook allows one action and abstains on
+    // every other.
+    Gate::before_async::<OrderedHookUser, _, _>(|_u, action| {
+        let first = action == "ohu-first";
+        async move { first.then_some(true) }
+    });
+    // Registered second: the sync hook denies everything.
+    Gate::before::<OrderedHookUser>(|_u, _action| Some(false));
+
+    let user = OrderedHookUser;
+    let post = Post {
+        id: 1,
+        author_id: 1,
+        is_public: true,
+    };
+
+    assert!(
+        Gate::allows_async("ohu-first", &user, &post).await,
+        "the async hook comes first, so its allow wins over the later deny"
+    );
+    assert!(
+        !Gate::allows_async("ohu-second", &user, &post).await,
+        "where the async hook abstains, the next hook in order decides"
+    );
+    assert!(
+        !Gate::allows("ohu-first", &user, &post),
+        "the sync path skips the async hook, so the sync hook decides"
+    );
+}
+
+struct AsyncDenyUser;
+
+/// Pins the limit `Gate::before_async` documents: a denial from an async
+/// hook binds the async forms only, so a hook that must deny belongs in
+/// `Gate::before`.
+#[tokio::test]
+#[serial]
+async fn gate_before_async_denial_is_enforced_by_the_async_forms_only() {
+    Gate::define::<AsyncDenyUser, Post>("adh-edit", |_u, _p| true);
+    Gate::before_async::<AsyncDenyUser, _, _>(|_u, _action| async { Some(false) });
+
+    let user = AsyncDenyUser;
+    let post = Post {
+        id: 1,
+        author_id: 1,
+        is_public: true,
+    };
+
+    assert!(
+        !Gate::allows_async("adh-edit", &user, &post).await,
+        "the async form waits for the hook and enforces its denial"
+    );
+    assert!(
+        Gate::allows("adh-edit", &user, &post),
+        "the sync form skips the hook, so the gate's allow stands"
+    );
+}
+
 // ── Gate::default_denial_response ────────────────────────────────────────────
 
 /// RAII guard around the process-global default denial response. Clears on

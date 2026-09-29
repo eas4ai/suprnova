@@ -354,7 +354,7 @@ pub use rate_limit::{
     RateLimiter, RateLimiterDriver, SlidingWindowConfig, ThrottleRequestsMiddleware, Unlimited,
     identity_key, names_identity,
 };
-pub use rbac::{HasRoles, PermissionMiddleware, RoleMiddleware};
+pub use rbac::{GateBridgeMiddleware, HasRoles, PermissionMiddleware, RoleMiddleware};
 pub use render_cache::RenderCache;
 pub use resources::{
     AsRelationshipValue, DEFAULT_MAX_RELATIONSHIP_DEPTH, IncludeResolutionError, IncludeTree,

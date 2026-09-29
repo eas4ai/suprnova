@@ -73,11 +73,21 @@ impl Gate {
     /// apply. Calling `allows` on an async-registered gate returns `false`
     /// (default deny). Use [`Self::allows_async`](Self::allows_async) to invoke async
     /// gates correctly.
+    ///
+    /// An async before-hook ([`Self::before_async`]) does not run here, because
+    /// this path cannot wait for it: neither its allow nor its deny reaches
+    /// this answer. The permissions that
+    /// [`register_gate_bridge`](crate::rbac::register_gate_bridge) connects to
+    /// the gate are answered by such a hook, so they answer
+    /// [`Self::allows_async`] and never this function.
     pub fn allows<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> bool {
         Self::inspect(action, user, resource).allowed()
     }
 
     /// Returns `true` when the gate denies the action.
+    ///
+    /// Skips async before-hooks like [`Self::allows`], so a denial from
+    /// [`Self::before_async`] is not enforced here; see [`Self::denies_async`].
     pub fn denies<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> bool {
         !Self::allows(action, user, resource)
     }
@@ -89,6 +99,11 @@ impl Gate {
     /// `Response` with a custom message/status - maps to
     /// `FrameworkError::Domain` carrying that message and status (e.g. 404 from
     /// `Response::deny_as_not_found()`).
+    ///
+    /// Like [`Self::allows`], this skips async before-hooks, their denials
+    /// included, so a permission connected by
+    /// [`register_gate_bridge`](crate::rbac::register_gate_bridge) authorizes
+    /// through [`Self::authorize_async`] only.
     pub fn authorize<U: 'static, R: 'static>(
         action: &str,
         user: &U,
@@ -176,7 +191,10 @@ impl Gate {
     ///
     /// This is the evaluation core: [`Self::allows`](Self::allows),
     /// [`Self::denies`](Self::denies), and [`Self::authorize`](Self::authorize) all route
-    /// through it, so `before`/`after` hooks apply uniformly.
+    /// through it, so `before`/`after` hooks apply uniformly. It runs the
+    /// synchronous before-hooks only; an async one, such as the hook
+    /// [`register_gate_bridge`](crate::rbac::register_gate_bridge) installs,
+    /// answers [`Self::inspect_async`].
     pub fn inspect<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Response {
         let window = crate::render_cache::collector::begin_authorization_decision();
         let response = global()
@@ -207,7 +225,9 @@ impl Gate {
     /// deny), `raw` returns `None` when nothing decided - no `before` hook
     /// fired, no gate is registered for `(action, U, R)`, and no `after` hook
     /// filled in. This distinguishes "explicitly denied" from "no rule
-    /// defined", mirroring Laravel's `Gate::raw`.
+    /// defined", mirroring Laravel's `Gate::raw`. As in
+    /// [`inspect`](Self::inspect), async before-hooks do not run here; use
+    /// [`Self::raw_async`] for them.
     pub fn raw<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Option<Response> {
         let window = crate::render_cache::collector::begin_authorization_decision();
         let response = global().raw::<U, R>(action, user, resource);
@@ -244,10 +264,61 @@ impl Gate {
     /// fires for every `(action, U, R)` regardless of resource - put
     /// resource-specific logic in the gate. Hooks are synchronous predicates;
     /// for async authorization logic use [`define_async`](Self::define_async)
-    /// or [`define_async_with`](Self::define_async_with). They apply to the
-    /// async evaluation path too.
+    /// or [`define_async_with`](Self::define_async_with), and for a hook that
+    /// has to wait on I/O use [`before_async`](Self::before_async). They apply
+    /// to the async evaluation path too.
     pub fn before<U: 'static>(f: impl Fn(&U, &str) -> Option<bool> + Send + Sync + 'static) {
         global().register_before::<U>(f);
+    }
+
+    /// Register an **async** hook that runs **before** any gate for the user
+    /// type `U`: the sibling of [`Self::before`] for a decision that has to
+    /// wait on I/O, such as a database read.
+    ///
+    /// It shares one ordered list with the synchronous hooks: evaluation walks
+    /// them in registration order, the first `Some(decision)` short-circuits,
+    /// and `None` lets evaluation continue. Only the async evaluation path
+    /// awaits it - [`Self::allows_async`], [`Self::denies_async`],
+    /// [`Self::authorize_async`], [`Self::inspect_async`], [`Self::raw_async`],
+    /// and the async multi-action forms. The synchronous path cannot wait for
+    /// a future and skips the hook, so what it alone decides is invisible
+    /// there. Never block a thread on the I/O inside a synchronous hook
+    /// instead: that stalls a runtime worker for every check.
+    ///
+    /// Like [`define_async`](Self::define_async), the closure must return an
+    /// *owned* future: copy what it needs out of `user` and `action` before
+    /// building it.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Gate;
+    /// # struct User { id: i64 }
+    /// # async fn is_staff(_id: i64) -> bool { false }
+    /// // Staff, as the directory service lists them, may do anything.
+    /// Gate::before_async::<User, _, _>(|user, _action| {
+    ///     let id = user.id;
+    ///     async move { is_staff(id).await.then_some(true) }
+    /// });
+    /// ```
+    ///
+    /// # A denial here is not enforced everywhere
+    ///
+    /// A hook that answers `Some(false)` denies only on the async forms. The
+    /// forms that cannot wait - [`Self::allows`], [`Self::denies`],
+    /// [`Self::authorize`], [`Self::inspect`], [`Self::raw`], [`Self::any`],
+    /// [`Self::none`], [`Self::check`], and
+    /// [`Authorizable::can`](crate::Authorizable::can),
+    /// [`Authorizable::cannot`](crate::Authorizable::cannot) and
+    /// [`Authorizable::authorize`](crate::Authorizable::authorize) - skip the
+    /// hook and go on as if it had answered nothing, so a gate that allows
+    /// still allows there. A hook that must deny belongs in [`Self::before`],
+    /// or else every check the application makes has to use an async form.
+    pub fn before_async<U, F, Fut>(f: F)
+    where
+        U: 'static,
+        F: Fn(&U, &str) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<bool>> + Send + 'static,
+    {
+        global().register_before_async::<U, F, Fut>(f);
     }
 
     /// Register a hook that runs **after** the gate for the user type `U`.
@@ -352,6 +423,9 @@ impl Gate {
     ///
     /// A missing gate among `actions` is treated as deny (matches
     /// the single-action [`Self::allows`] semantic).
+    ///
+    /// Skips async before-hooks like [`Self::allows`], their denials
+    /// included; see [`Self::any_async`].
     pub fn any<U: 'static, R: 'static>(actions: &[&str], user: &U, resource: &R) -> bool {
         actions.iter().any(|a| Self::allows(a, user, resource))
     }
@@ -360,6 +434,9 @@ impl Gate {
     /// same `(user, resource)`. Mirrors Laravel's
     /// `Gate::none($abilities, $arguments)`. Short-circuits on the
     /// first allow (returning `false`).
+    ///
+    /// Skips async before-hooks like [`Self::allows`], their denials
+    /// included; see [`Self::none_async`].
     pub fn none<U: 'static, R: 'static>(actions: &[&str], user: &U, resource: &R) -> bool {
         !Self::any(actions, user, resource)
     }
@@ -371,6 +448,9 @@ impl Gate {
     ///
     /// An empty `actions` slice returns `true` (vacuously) -
     /// matches the standard `Iterator::all` semantic.
+    ///
+    /// Skips async before-hooks like [`Self::allows`], their denials
+    /// included; see [`Self::check_async`].
     pub fn check<U: 'static, R: 'static>(actions: &[&str], user: &U, resource: &R) -> bool {
         actions.iter().all(|a| Self::allows(a, user, resource))
     }

@@ -494,6 +494,29 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   factory is synchronous and runs once: a second task of the scope that asks
   for the value while it is built waits for it on its thread, and a cycle of
   scoped factories, in one task or across tasks, is an error.
+- **The permissions of a user answer the gate: `rbac::register_gate_bridge`.**
+  The roles and permissions of RBAC and the gate did not know each other, so
+  `Gate::allows_async("edit posts", ..)` did not see a permission that the
+  user holds, and an application had two systems of authorization side by
+  side. `suprnova::rbac::register_gate_bridge::<User>()`, called once in the
+  bootstrap, makes every permission that a user holds, directly or through a
+  role, an ability of the gate. An ability that is no permission of the user
+  goes on to the gate definitions and the policies, so the bridge allows and
+  never denies. It reads the permissions of a user once for a request, through
+  `GateBridgeMiddleware`, which the call installs as the first global
+  middleware. A grant or a revocation made before the first check of a request
+  is seen by that check; after it, from the next request on. A check inside
+  `DB::transaction` reads for itself and keeps nothing, so a grant that is
+  rolled back does not answer after the rollback. A unit of work that runs
+  inside a request in a scope of its own, such as a job that the sync queue
+  driver runs inline, reads for itself too. A read that fails is logged and
+  allows nothing. The permissions answer the async forms of the gate,
+  `allows_async`, `authorize_async` and `inspect_async`. The forms without
+  `async` cannot wait for a database and skip them. `Gate::before_async` is
+  the hook the bridge is built on, and an application can register hooks of
+  its own with it. A `Some(false)` from an async hook denies on the async
+  forms only: a hook that must deny on every form belongs in `Gate::before`.
+  Without the call nothing changes.
 
 ### Changed
 
