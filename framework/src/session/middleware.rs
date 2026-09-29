@@ -8,6 +8,7 @@ use crate::middleware::{Middleware, Next};
 use async_trait::async_trait;
 use rand::RngExt;
 use secrecy::{ExposeSecret, SecretString};
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1036,6 +1037,73 @@ impl crate::supervisor::Supervisor for SessionGcSupervisor {
     }
 }
 
+/// The Magnetar password engine, which signs a request in from a
+/// remember-me cookie.
+type PasswordEngine = Arc<dyn crate::magnetar_integration::engine::MagnetarPasswordAuthEngine>;
+
+/// The Magnetar session owner, which validates the web-session bindings that
+/// a session carries.
+type SessionAuthority = Arc<dyn crate::magnetar_integration::engine::MagnetarFactorAuthEngine>;
+
+/// The session a request starts with, and what the read of its stored row
+/// found.
+struct LoadedSession {
+    /// The id the cookie named, or the fresh id minted for a request without
+    /// one.
+    session_id: String,
+    /// The stored session, or a fresh one when none could be loaded.
+    session: SessionData,
+    /// The cookie named a row that the store does not hold.
+    stale_session_cookie: bool,
+    /// The store failed to read the row that the cookie named.
+    session_read_failed: bool,
+}
+
+/// The facts of a request that decide, after the handler, whether its URL
+/// becomes `_previous.url`. They are read before `next()` consumes the
+/// request.
+struct PreviousUrlCandidate {
+    /// The request is a GET.
+    is_get: bool,
+    /// The request is an Inertia visit.
+    is_inertia: bool,
+    /// The request accepts JSON and not HTML.
+    wants_json: bool,
+    /// The request path, with its query string when it has one.
+    current_url: String,
+}
+
+/// Everything the persistence phase of `handle_session` reads: the response
+/// of the handler, the slot and the lists that the handler shared, and what
+/// the phases before the handler found.
+struct PersistInput {
+    /// The response of the handler.
+    response: Response,
+    /// The slot through which the handler read and wrote the session.
+    slot: Arc<Mutex<Option<SessionData>>>,
+    /// The cookies queued for the response.
+    pending: Arc<Mutex<Vec<Cookie>>>,
+    /// The fresh Magnetar sessions that wait for the framework row and the
+    /// response cookie.
+    pending_opaque_session: Arc<Mutex<Vec<PendingOpaqueSession>>>,
+    /// The installed Magnetar session owner, if any.
+    magnetar_session_authority: Option<SessionAuthority>,
+    /// The facts that decide whether the URL becomes `_previous.url`.
+    previous_url: PreviousUrlCandidate,
+    /// The valid session id that the cookie named, if any.
+    original_session_id: Option<String>,
+    /// When the session was last touched, as the cookie says.
+    last_touch_at: Option<u64>,
+    /// The id the request started with, as `LoadedSession` holds it.
+    session_id: String,
+    /// The cookie named a row that the store does not hold.
+    stale_session_cookie: bool,
+    /// The store failed to read the row that the cookie named.
+    session_read_failed: bool,
+    /// The loaded row carried a pending second-factor challenge.
+    loaded_two_factor_pending: bool,
+}
+
 impl SessionMiddleware {
     /// Read the session ID from the inbound cookie. The cookie
     /// value is AES-256-GCM ciphertext; decrypt failure (tamper,
@@ -1101,44 +1169,12 @@ impl SessionMiddleware {
         original_session_id: Option<String>,
         last_touch_at: Option<u64>,
     ) -> Response {
-        let session_id = original_session_id
-            .clone()
-            .unwrap_or_else(generate_session_id);
-
-        // A request without a valid session cookie cannot name a stored
-        // session, so do not issue a guaranteed database miss. Keep a clean
-        // session in memory for handlers that need one; it is persisted only
-        // if request handling actually mutates it.
-        let (mut session, stale_session_cookie, session_read_failed) =
-            if original_session_id.is_none() {
-                (
-                    SessionData::new(session_id.clone(), generate_csrf_token()),
-                    false,
-                    false,
-                )
-            } else {
-                match self.store.read(&session_id).await {
-                    Ok(Some(s)) => (s, false, false),
-                    Ok(None) => (
-                        SessionData::new(generate_session_id(), generate_csrf_token()),
-                        true,
-                        false,
-                    ),
-                    Err(e) => {
-                        // Store read failed (outage, corruption). Degrade
-                        // gracefully by minting a fresh session - same posture as
-                        // Laravel when the session row is unreadable. `warn!`, not
-                        // `error!`: this fires once per request, so during an
-                        // outage an error-level line would spam at request rate.
-                        tracing::warn!(error = %e, "session read failed; minting a fresh session");
-                        (
-                            SessionData::new(session_id.clone(), generate_csrf_token()),
-                            false,
-                            true,
-                        )
-                    }
-                }
-            };
+        let LoadedSession {
+            session_id,
+            mut session,
+            stale_session_cookie,
+            session_read_failed,
+        } = self.load_session(&original_session_id).await;
 
         // Only a row actually loaded with pending 2FA state can enter the
         // atomic promotion path after the handler. A fresh same-request
@@ -1172,6 +1208,163 @@ impl SessionMiddleware {
             pending: pending_opaque_session.clone(),
         };
 
+        Self::validate_magnetar_identity(
+            &magnetar_session_authority,
+            &magnetar_engine,
+            &mut session,
+        )
+        .await;
+
+        if let ControlFlow::Break(response) = self
+            .hydrate_remember_me(
+                &request,
+                &mut session,
+                &magnetar_engine,
+                &magnetar_session_authority,
+                &pending,
+                &pending_opaque_session,
+            )
+            .await
+        {
+            return response;
+        }
+
+        // Live accepts session identity only from this successful session
+        // resolution branch. A store outage deliberately leaves the proof
+        // absent even though ordinary non-Live requests retain the existing
+        // graceful-degradation behavior.
+        if !session_read_failed {
+            let session_id = session.id.as_bytes().to_vec();
+            request.record_live_security_check(
+                crate::live::attestation::SecurityCheck::Session,
+                Some(&session_id),
+            );
+        }
+
+        // Capture the current URL before `next()` consumes the
+        // request. We write it to the session under `_previous.url`
+        // AFTER the handler runs, but only when the response indicates
+        // a normal GET HTML page (200/300-range, not an Inertia
+        // partial, not an AJAX endpoint). This mirrors Laravel's
+        // `StartSession::storeCurrentUrl` behaviour and is what
+        // [`Redirect::back`] reads.
+        let previous_url = Self::capture_previous_url_candidate(&request);
+
+        // Bind both the session and the pending-cookies slot to
+        // `tokio::task_local!` so they survive `.await` points that
+        // resume on a different worker thread. Handlers read/write
+        // through `session()` / `session_mut()` / `push_pending_cookie`.
+        let slot: Arc<Mutex<Option<SessionData>>> = Arc::new(Mutex::new(Some(session)));
+        let response = SESSION_CONFIG_CONTEXT
+            .scope(
+                self.config.clone(),
+                SESSION_CONTEXT.scope(
+                    slot.clone(),
+                    PENDING_COOKIES.scope(
+                        pending.clone(),
+                        PENDING_REMEMBER_REVOCATIONS.scope(
+                            pending_remember_revocations.clone(),
+                            PENDING_OPAQUE_SESSION
+                                .scope(pending_opaque_session.clone(), next(request)),
+                        ),
+                    ),
+                ),
+            )
+            .await;
+
+        retire_superseded_opaque_sessions(
+            magnetar_session_authority.as_ref(),
+            &pending_opaque_session,
+            &slot,
+        )
+        .await;
+
+        if let ControlFlow::Break(response) = Self::revoke_deferred_remember_credentials(
+            &pending_remember_revocations,
+            &magnetar_session_authority,
+            &pending_opaque_session,
+            &pending,
+        )
+        .await
+        {
+            return response;
+        }
+
+        self.persist_and_rotate(PersistInput {
+            response,
+            slot,
+            pending,
+            pending_opaque_session,
+            magnetar_session_authority,
+            previous_url,
+            original_session_id,
+            last_touch_at,
+            session_id,
+            stale_session_cookie,
+            session_read_failed,
+            loaded_two_factor_pending,
+        })
+        .await
+    }
+
+    /// Reads the session that the cookie names from the store, or starts a
+    /// fresh one when the request names none or its row cannot be loaded.
+    async fn load_session(&self, original_session_id: &Option<String>) -> LoadedSession {
+        let session_id = original_session_id
+            .clone()
+            .unwrap_or_else(generate_session_id);
+
+        // A request without a valid session cookie cannot name a stored
+        // session, so do not issue a guaranteed database miss. Keep a clean
+        // session in memory for handlers that need one; it is persisted only
+        // if request handling actually mutates it.
+        let (session, stale_session_cookie, session_read_failed) = if original_session_id.is_none()
+        {
+            (
+                SessionData::new(session_id.clone(), generate_csrf_token()),
+                false,
+                false,
+            )
+        } else {
+            match self.store.read(&session_id).await {
+                Ok(Some(s)) => (s, false, false),
+                Ok(None) => (
+                    SessionData::new(generate_session_id(), generate_csrf_token()),
+                    true,
+                    false,
+                ),
+                Err(e) => {
+                    // Store read failed (outage, corruption). Degrade
+                    // gracefully by minting a fresh session - same posture as
+                    // Laravel when the session row is unreadable. `warn!`, not
+                    // `error!`: this fires once per request, so during an
+                    // outage an error-level line would spam at request rate.
+                    tracing::warn!(error = %e, "session read failed; minting a fresh session");
+                    (
+                        SessionData::new(session_id.clone(), generate_csrf_token()),
+                        false,
+                        true,
+                    )
+                }
+            }
+        };
+
+        LoadedSession {
+            session_id,
+            session,
+            stale_session_cookie,
+            session_read_failed,
+        }
+    }
+
+    /// Checks the guard identities of the loaded session against the
+    /// installed Magnetar session owner, before the remember-me cookie and the
+    /// handler rely on them.
+    async fn validate_magnetar_identity(
+        magnetar_session_authority: &Option<SessionAuthority>,
+        magnetar_engine: &Option<PasswordEngine>,
+        session: &mut SessionData,
+    ) {
         // The installed factor/session owner validates every digest-only
         // binding, including bindings issued by other provider adapters. Named
         // guard records without a binding remain valid for provider-backed
@@ -1270,7 +1463,22 @@ impl SessionMiddleware {
                 }
             }
         }
+    }
 
+    /// Signs the request in from its remember-me cookie when the session has
+    /// no identity for the guard of the cookie, and queues the rotated
+    /// credential. Ends the request with an error response when the
+    /// configured remember lifetime is out of the range of Magnetar, or when a
+    /// rotated credential cannot be turned into a cookie.
+    async fn hydrate_remember_me(
+        &self,
+        request: &Request,
+        session: &mut SessionData,
+        magnetar_engine: &Option<PasswordEngine>,
+        magnetar_session_authority: &Option<SessionAuthority>,
+        pending: &Arc<Mutex<Vec<Cookie>>>,
+        pending_opaque_session: &Arc<Mutex<Vec<PendingOpaqueSession>>>,
+    ) -> ControlFlow<Response> {
         // Remember-me hydration uses Magnetar whenever its engine is installed.
         // The legacy auth::remember table is consulted only with no engine.
         if let Some(raw_cookie) = request.cookie(
@@ -1293,8 +1501,7 @@ impl SessionMiddleware {
                 DecodedRememberCarrier::UnknownVersion => None,
                 DecodedRememberCarrier::Malformed => {
                     crate::auth::request_state::clear_active_remember_carrier();
-                    crate::lock::recover(&pending)
-                        .push(create_forget_remember_cookie(&self.config));
+                    crate::lock::recover(pending).push(create_forget_remember_cookie(&self.config));
                     None
                 }
             };
@@ -1322,7 +1529,11 @@ impl SessionMiddleware {
                             FrameworkError::internal(
                                 "configured remember lifetime exceeds Magnetar range",
                             )
-                        })?;
+                        });
+                        let replacement_lifetime = match replacement_lifetime {
+                            Ok(replacement_lifetime) => replacement_lifetime,
+                            Err(error) => return ControlFlow::Break(Err(error.into())),
+                        };
                         match engine
                               .remember_sign_in_attempt(
                                 magnetar::sessions::RememberCredential::from_host(
@@ -1337,7 +1548,7 @@ impl SessionMiddleware {
                                       let user_id = outcome.session.session.user_id.to_string();
                                       let opaque_session_id = outcome.session.session_id.clone();
                                       let binding = outcome.session.web_binding.clone();
-                                      crate::lock::recover(&pending_opaque_session).push(
+                                      crate::lock::recover(pending_opaque_session).push(
                                           PendingOpaqueSession {
                                               guard_name: guard_name.clone(),
                                               session_id: opaque_session_id.clone(),
@@ -1370,7 +1581,7 @@ impl SessionMiddleware {
                                                   "remember selector validation failed",
                                               )
                                               .await;
-                                              return Err(error.into());
+                                              return ControlFlow::Break(Err(error.into()));
                                           }
                                     };
                                   let cookie = match encode_remember_carrier(&guard_name, replacement)
@@ -1405,7 +1616,7 @@ impl SessionMiddleware {
                                                   "remember cookie construction failed",
                                               )
                                               .await;
-                                              return Err(error.into());
+                                              return ControlFlow::Break(Err(error.into()));
                                           }
                                       };
 
@@ -1428,7 +1639,7 @@ impl SessionMiddleware {
                                     &guard_name,
                                     true,
                                   );
-                                  crate::lock::recover(&pending).push(cookie);
+                                  crate::lock::recover(pending).push(cookie);
                               }
                               Ok(crate::magnetar_integration::engine::MagnetarRememberSignInAttempt::RotationCommitted {
                                   user_id,
@@ -1457,7 +1668,7 @@ impl SessionMiddleware {
                                                               "Magnetar remember replacement cleanup did not complete"
                                                           );
                                                       }
-                                                    return Err(host_error.into());
+                                                    return ControlFlow::Break(Err(host_error.into()));
                                                 }
                                           };
                                           let cookie = match encode_remember_carrier(
@@ -1487,7 +1698,7 @@ impl SessionMiddleware {
                                                               "Magnetar remember replacement cleanup did not complete"
                                                           );
                                                       }
-                                                    return Err(host_error.into());
+                                                    return ControlFlow::Break(Err(host_error.into()));
                                                 }
                                           };
                                           crate::auth::request_state::set_verified_active_remember_carrier(
@@ -1495,7 +1706,7 @@ impl SessionMiddleware {
                                               &user_id,
                                               &selector,
                                           );
-                                          crate::lock::recover(&pending).push(cookie);
+                                          crate::lock::recover(pending).push(cookie);
                                           tracing::warn!(
                                               %error,
                                               "Magnetar remember sign-in will retry with the rotated credential"
@@ -1517,7 +1728,7 @@ impl SessionMiddleware {
                                                   );
                                               }
                                             crate::auth::request_state::clear_active_remember_carrier();
-                                          crate::lock::recover(&pending)
+                                          crate::lock::recover(pending)
                                               .push(create_forget_remember_cookie(&self.config));
                                           tracing::warn!(
                                               %error,
@@ -1538,7 +1749,7 @@ impl SessionMiddleware {
                                 | magnetar::Error::Conflict { .. },
                             ) => {
                                 crate::auth::request_state::clear_active_remember_carrier();
-                                crate::lock::recover(&pending)
+                                crate::lock::recover(pending)
                                     .push(create_forget_remember_cookie(&self.config));
                             }
                             Err(error) => tracing::warn!(
@@ -1554,14 +1765,25 @@ impl SessionMiddleware {
                             .await
                         {
                             Ok(Some((user_id, new_credential))) => {
-                                let selector = remember_selector(&new_credential)?;
-                                let carrier =
-                                    encode_remember_carrier(&guard_name, &new_credential)?;
+                                let selector = remember_selector(&new_credential);
+                                let selector = match selector {
+                                    Ok(selector) => selector,
+                                    Err(error) => return ControlFlow::Break(Err(error.into())),
+                                };
+                                let carrier = encode_remember_carrier(&guard_name, &new_credential);
+                                let carrier = match carrier {
+                                    Ok(carrier) => carrier,
+                                    Err(error) => return ControlFlow::Break(Err(error.into())),
+                                };
                                 let cookie = create_remember_cookie(
                                     &self.config,
                                     &carrier,
                                     self.config.remember_lifetime,
-                                )?;
+                                );
+                                let cookie = match cookie {
+                                    Ok(cookie) => cookie,
+                                    Err(error) => return ControlFlow::Break(Err(error.into())),
+                                };
 
                                 session.rotate_id(generate_session_id());
                                 session.csrf_token = generate_csrf_token();
@@ -1579,11 +1801,11 @@ impl SessionMiddleware {
                                     &guard_name,
                                     true,
                                 );
-                                crate::lock::recover(&pending).push(cookie);
+                                crate::lock::recover(pending).push(cookie);
                             }
                             Ok(None) => {
                                 crate::auth::request_state::clear_active_remember_carrier();
-                                crate::lock::recover(&pending)
+                                crate::lock::recover(pending)
                                     .push(create_forget_remember_cookie(&self.config));
                             }
                             Err(error) => tracing::warn!(
@@ -1596,25 +1818,12 @@ impl SessionMiddleware {
             }
         }
 
-        // Live accepts session identity only from this successful session
-        // resolution branch. A store outage deliberately leaves the proof
-        // absent even though ordinary non-Live requests retain the existing
-        // graceful-degradation behavior.
-        if !session_read_failed {
-            let session_id = session.id.as_bytes().to_vec();
-            request.record_live_security_check(
-                crate::live::attestation::SecurityCheck::Session,
-                Some(&session_id),
-            );
-        }
+        ControlFlow::Continue(())
+    }
 
-        // Capture the current URL before `next()` consumes the
-        // request. We write it to the session under `_previous.url`
-        // AFTER the handler runs, but only when the response indicates
-        // a normal GET HTML page (200/300-range, not an Inertia
-        // partial, not an AJAX endpoint). This mirrors Laravel's
-        // `StartSession::storeCurrentUrl` behaviour and is what
-        // [`Redirect::back`] reads.
+    /// Reads the facts of `request` that decide, after the handler, whether
+    /// its URL becomes `_previous.url`.
+    fn capture_previous_url_candidate(request: &Request) -> PreviousUrlCandidate {
         let is_get = *request.method() == hyper::Method::GET;
         let is_inertia = request.is_inertia();
         let wants_json = request
@@ -1631,37 +1840,25 @@ impl SessionMiddleware {
             }
         };
 
-        // Bind both the session and the pending-cookies slot to
-        // `tokio::task_local!` so they survive `.await` points that
-        // resume on a different worker thread. Handlers read/write
-        // through `session()` / `session_mut()` / `push_pending_cookie`.
-        let slot: Arc<Mutex<Option<SessionData>>> = Arc::new(Mutex::new(Some(session)));
-        let response = SESSION_CONFIG_CONTEXT
-            .scope(
-                self.config.clone(),
-                SESSION_CONTEXT.scope(
-                    slot.clone(),
-                    PENDING_COOKIES.scope(
-                        pending.clone(),
-                        PENDING_REMEMBER_REVOCATIONS.scope(
-                            pending_remember_revocations.clone(),
-                            PENDING_OPAQUE_SESSION
-                                .scope(pending_opaque_session.clone(), next(request)),
-                        ),
-                    ),
-                ),
-            )
-            .await;
+        PreviousUrlCandidate {
+            is_get,
+            is_inertia,
+            wants_json,
+            current_url,
+        }
+    }
 
-        retire_superseded_opaque_sessions(
-            magnetar_session_authority.as_ref(),
-            &pending_opaque_session,
-            &slot,
-        )
-        .await;
-
+    /// Revokes the remember credentials that identity transitions queued
+    /// during the handler. Ends the request with a 500 when one cannot be
+    /// revoked: the identity transition is then discarded.
+    async fn revoke_deferred_remember_credentials(
+        pending_remember_revocations: &Arc<Mutex<Vec<PendingRememberRevocation>>>,
+        magnetar_session_authority: &Option<SessionAuthority>,
+        pending_opaque_session: &Arc<Mutex<Vec<PendingOpaqueSession>>>,
+        pending: &Arc<Mutex<Vec<Cookie>>>,
+    ) -> ControlFlow<Response> {
         let pending_revocations =
-            std::mem::take(&mut *crate::lock::recover(&pending_remember_revocations));
+            std::mem::take(&mut *crate::lock::recover(pending_remember_revocations));
         for (guard_name, user_id, selector) in pending_revocations {
             if crate::auth::Auth::revoke_remember_selector(&guard_name, &user_id, &selector)
                 .await
@@ -1669,7 +1866,7 @@ impl SessionMiddleware {
             {
                 retire_unpersisted_opaque_session(
                     magnetar_session_authority.as_ref(),
-                    &pending_opaque_session,
+                    pending_opaque_session,
                     "deferred remember cleanup failed",
                 )
                 .await;
@@ -1679,14 +1876,45 @@ impl SessionMiddleware {
                     classification = "backend_failure",
                     "deferred remember credential revocation failed; discarding identity transition"
                 );
-                let pending_cookies = std::mem::take(&mut *crate::lock::recover(&pending));
+                let pending_cookies = std::mem::take(&mut *crate::lock::recover(pending));
                 let failure = Err(crate::http::HttpResponse::text(
                     "Internal Server Error: identity transition cleanup failed",
                 )
                 .status(500));
-                return attach_pending_cookies(failure, pending_cookies);
+                return ControlFlow::Break(attach_pending_cookies(failure, pending_cookies));
             }
         }
+
+        ControlFlow::Continue(())
+    }
+
+    /// Takes the session back out of the slot of the handler, stores it, and
+    /// builds the final response with the session cookie and the queued
+    /// cookies. Destroys the old row when the id changed, migrates a promoted
+    /// two-factor session atomically, and fails closed with a 500 when it
+    /// cannot store the session safely. It is the last phase: every path
+    /// through it ends the request, so it returns the response itself.
+    async fn persist_and_rotate(&self, input: PersistInput) -> Response {
+        let PersistInput {
+            response,
+            slot,
+            pending,
+            pending_opaque_session,
+            magnetar_session_authority,
+            previous_url,
+            original_session_id,
+            last_touch_at,
+            session_id,
+            stale_session_cookie,
+            session_read_failed,
+            loaded_two_factor_pending,
+        } = input;
+        let PreviousUrlCandidate {
+            is_get,
+            is_inertia,
+            wants_json,
+            current_url,
+        } = previous_url;
 
         // Take the potentially-modified session back out of the slot.
         let slot_poisoned = slot.is_poisoned();
