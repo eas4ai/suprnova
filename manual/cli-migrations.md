@@ -96,7 +96,9 @@ enum Users {
 ```
 
 Edit the generated file to declare your columns, indexes, and constraints.
-See [Migrations](migrations.md) for the full schema-builder surface.
+The generated file uses SeaORM's builder. You can write the same migration
+with the shorter [schema builder](migrations.md#the-schema-builder),
+`suprnova::schema::Schema`. See [Migrations](migrations.md) for both forms.
 
 ## migrate
 
@@ -317,8 +319,8 @@ it without any wiring on your side. You can also run it with
 
 ## Next
 
-- [Migrations](migrations.md) - schema-builder API: tables, columns,
-  indexes, foreign keys
+- [Migrations](migrations.md) - the SeaORM form and the schema builder:
+  tables, columns, indexes, foreign keys
 - [Seeding](seeding.md) - authoring seeders and the `db:seed` console
   command
 - [Console](console.md) - the per-project `console` binary and

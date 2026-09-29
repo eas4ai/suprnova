@@ -41,10 +41,6 @@
    "class": "verified",
    "evidence": "Matched on 'follow-up' (follow-up work), not a time claim. The behavior holds in the pinned @inertiajs 3.6.1 (and already in 3.3.1): core awaits requestParams.onSuccess before Request.finish fires onFinish, and useForm clears processing in onFinish (@inertiajs/core dist/index.js:2493, 2915-2935; @inertiajs/react dist/index.js:814-841)."
   },
-  "AppUploadFinalizer::default": {
-   "class": "noise",
-   "evidence": "The reader's own finalizer type in the example (the dogfood app's is app/src/live/providers/upload_finalizer.rs); it implements Default there."
-  },
   "As of v1.0.0 the public API is stable: apps pin a release tag (`tag = \"v<version>\"` - the tag is the release; there is no crates.io publish), and a breaking change lands only behind a version bump whose CHANGELOG section says so.": {
    "class": "verified",
    "evidence": "A dated historical fact: API stability from 1.0.0; releases are git tags (CHANGELOG.md)."
@@ -220,10 +216,6 @@
   "MYSQL_TEST_URL": {
    "class": "noise",
    "evidence": "The reader's own env-var convention for their tests (database-testing.md); correct as written."
-  },
-  "MaximumVariance::default()": {
-   "class": "noise",
-   "evidence": "A third-party type used as documented; `paddle-rust-sdk 0.18 webhooks::MaximumVariance, Default is 5 seconds (src/webhooks.rs:27-31); used at crates/suprnova-payments-paddle/src/webhook.rs:322`. Not a Suprnova API."
   },
   "Middleware::resolveValidationErrors": {
    "class": "noise",

@@ -37,6 +37,7 @@ PATH_RULES = {
     "framework/src/bus/": "bus",
     "framework/src/cache/": "cache",
     "framework/src/clock": "testing",
+    "framework/src/schema/": "migrations",
     "framework/src/redis_retry": "cache",
     "framework/src/config/": "configuration",
     "framework/src/console/": "console",

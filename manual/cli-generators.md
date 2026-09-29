@@ -579,7 +579,9 @@ The migration name is preserved verbatim and prefixed with a
 `YYYYMMDDHHMMSS_` stamp so files sort chronologically. The generated
 file lands in `migrations/`.
 
-See [Migrations](migrations.md) for the schema-builder surface and
+The generated file uses SeaORM's builder. The
+[schema builder](migrations.md#the-schema-builder) is the alternative you write
+by hand. See [Migrations](migrations.md) for both forms and
 [Database Testing](database-testing.md) for the `TestDatabase::fresh`
 pattern that runs migrations against an isolated database per test.
 

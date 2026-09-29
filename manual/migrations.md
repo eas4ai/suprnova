@@ -136,17 +136,33 @@ The scaffolder writes this for you on `suprnova new`.
 
 Most of the framework deliberately hides SeaORM - you write `#[suprnova::model]`
 and `User::query().db_where(...)`, not `Entity::find().filter(...)`. Migrations
-are the one place we leave `sea_orm_migration::prelude::*` visible. Two reasons.
+are the one place where SeaORM stays visible. Two reasons.
 
-First, the schema-builder DSL is genuinely good and re-aliasing every name in
-it (`Table`, `ColumnDef`, `Index`, `ForeignKey`, `Expr`, `ForeignKeyAction`,
-`DeriveIden`, ...) would buy a longer import line and nothing else. Second,
-migration files are pure Rust - your CI compiler verifies them - and that
-catches more typos than any DSL re-aliasing would. We treat migrations like
-schema-as-code, and the canonical SeaORM names *are* the schema vocabulary.
+First, the schema builder compiles to SeaORM's own statements
+(`Table::create()`, `Table::alter()`, `Index`, `ForeignKey`) and runs them on
+the migration's `SchemaManager`. It adds no migration engine, so SeaORM is one
+step away for everything the builder does not cover: a column type change, a
+check constraint, a raw statement. You write that step with
+`sea_orm_migration::prelude::*` in the same `up()`. Second, migration files are
+pure Rust - your CI compiler verifies them.
 
-If you ever do need a SeaORM type the framework hasn't re-exported, the
-escape hatch is `use suprnova::sea_orm;`. You almost never need it.
+If you need a SeaORM type the framework has not re-exported, the escape hatch
+is `use suprnova::sea_orm;`.
+
+The builder differs from Laravel's `Blueprint` in four ways:
+
+- `timestamps()` and `soft_deletes()` create string columns, not native
+  date-time columns. A model stores a `DateTime<Utc>` field as RFC 3339 text
+  by default, and the string column is the one type that round-trips on all
+  three backends.
+- There is no table rebuild on SQLite. An operation SQLite cannot run in place
+  returns an error that names the operation.
+- There is no column type change. `Schema::table` adds, renames and drops
+  columns, but it does not alter the type of an existing column.
+- `suprnova make:migration` generates the SeaORM form. The schema builder is
+  the alternative you write by hand.
+
+See [The schema builder](#the-schema-builder).
 
 ## Migration structure
 
@@ -166,7 +182,227 @@ impl MigrationTrait for Migration {
 Both arms return `Result<(), DbErr>` - bubble errors with `?` and the framework
 turns a failed migration into a non-zero exit so deploy pipelines abort.
 
+## The schema builder
+
+`suprnova::schema::Schema` is a shorter way to write the common migration. A
+closure records columns, indexes and foreign keys on a `Blueprint`, and the
+builder turns the description into SQL. This is the posts migration as a
+complete file:
+
+```rust
+use sea_orm_migration::prelude::*;
+use suprnova::schema::Schema;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        Schema::create(manager, "posts", |t| {
+            t.id();
+            t.string("title");
+            t.text("body").nullable();
+            t.string("slug").length(120).unique();
+            t.boolean("published").default(false);
+            t.foreign_id("author_id")
+                .constrained("users")
+                .on_delete(ForeignKeyAction::Cascade);
+            t.index(&["published", "created_at"]);
+            t.timestamps();
+            t.soft_deletes();
+        })
+        .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        Schema::drop_if_exists(manager, "posts").await
+    }
+}
+```
+
+Every `Schema` function is `async`, takes the migration's `manager`, and
+returns `Result<_, DbErr>`. The builder opens no connection of its own, so each
+statement runs on the migration's connection and inside its transaction.
+
+The layer lives at `suprnova::schema::Schema`. Import it by that path.
+`suprnova::Schema` at the crate root is SeaORM's `Schema`, a different type.
+
+### Entry points
+
+| Function | Effect |
+|----------|--------|
+| `Schema::create(manager, table, closure)` | Creates the table, then its indexes. Foreign keys are part of `CREATE TABLE`. |
+| `Schema::table(manager, table, closure)` | Alters an existing table. |
+| `Schema::drop(manager, table)` | Drops the table. It is an error if the table does not exist. |
+| `Schema::drop_if_exists(manager, table)` | Drops the table if it exists. |
+| `Schema::rename(manager, from, to)` | Renames a table. |
+| `Schema::has_table(manager, table)` | Returns `Result<bool, DbErr>`: whether the table exists. |
+| `Schema::has_column(manager, table, column)` | Returns `Result<bool, DbErr>`: whether the column exists. |
+
+### Column methods
+
+A column is `NOT NULL` unless you call `.nullable()`. The table lists the column
+each method creates. The SQLite column is the type name SQLite stores, and its
+affinity is what the database reports.
+
+| Method | SQLite | Postgres | MySQL |
+|--------|--------|----------|-------|
+| `id()` | `integer`, auto-increment, primary key | `bigserial`, primary key | `bigint`, auto-increment, primary key |
+| `foreign_id(name)` | `integer` | `bigint` | `bigint` |
+| `big_integer(name)` | `integer` | `bigint` | `bigint` |
+| `integer(name)` | `integer` | `integer` | `int` |
+| `small_integer(name)` | `integer` | `smallint` | `smallint` |
+| `boolean(name)` | `boolean` | `boolean` | `tinyint(1)` |
+| `string(name)` | `varchar(255)` | `varchar(255)` | `varchar(255)` |
+| `char(name, length)` | `char(length)` | `char(length)` | `char(length)` |
+| `text(name)` | `text` | `text` | `text` |
+| `float(name)` | `float` | `real` | `float` |
+| `double(name)` | `double` | `double precision` | `double` |
+| `decimal(name, precision, scale)` | `decimal(precision, scale)` | `numeric(precision, scale)` | `decimal(precision, scale)` |
+| `date(name)` | `date_text` | `date` | `date` |
+| `time(name)` | `time_text` | `time` | `time` |
+| `date_time(name)` | `datetime_text` | `timestamp` | `datetime` |
+| `timestamp_tz(name)` | `timestamp_with_timezone_text` | `timestamp with time zone` | `timestamp` |
+| `json(name)` | `json_text` | `jsonb` | `json` |
+| `uuid(name)` | `char(36)` | `uuid` | `char(36)` |
+| `ulid(name)` | `char(26)` | `char(26)` | `char(26)` |
+| `binary(name)` | `blob` | `bytea` | `blob` |
+
+`id()` is a `BIGINT` on Postgres and MySQL, and `foreign_id` has the same type.
+The types match because MySQL refuses a foreign key between columns of
+different types. A table has one `id()`.
+
+### Modifiers
+
+Each column method returns a builder. Chain the modifiers on it.
+
+| Modifier | Effect |
+|----------|--------|
+| `.nullable()` | Allows `NULL`. |
+| `.default(value)` | Sets the value the database stores when an insert leaves the column out. It takes a plain Rust value (`7`, `"draft"`, `false`) or a SeaQuery `Expr` such as `Expr::current_timestamp()`. |
+| `.unique()` | Adds a unique index over this column alone, named `{table}_{column}_unique`. |
+| `.length(n)` | Sets the length of a `string` column. On any other column type the migration fails with an error that names the column. Use `char(name, length)` for a fixed length. |
+
+### Timestamps and soft deletes
+
+`t.timestamps()` adds `created_at` and `updated_at`, both `NOT NULL`.
+`t.soft_deletes()` adds a nullable `deleted_at`. These are `VARCHAR(255)`
+columns on every backend, not native date-time columns.
+
+The reason is the model. A `#[suprnova::model]` field of type `DateTime<Utc>`
+with no declared cast uses `AsDateTime`, which stores RFC 3339 text
+(see [Eloquent Mutators](eloquent-mutators.md)). Postgres refuses a text
+parameter for a `timestamp` column. A string column round-trips on all three
+backends.
+
+For a native column, declare it with `t.timestamp_tz("published_at")` and give
+the model field a cast of your own. The [`Cast`](eloquent-mutators.md) trait
+sets the storage type, so its `Storage` must be a native date-time type.
+No shipped cast has one: `AsDateTime` and the other temporal casts store text,
+and `AsTimestamp` stores an integer.
+
+### Indexes and foreign keys
+
+```rust
+Schema::create(manager, "comments", |t| {
+    t.id();
+    t.foreign_id("post_id")
+        .constrained("posts")
+        .on_delete(ForeignKeyAction::Cascade)
+        .on_update(ForeignKeyAction::Cascade);
+    t.string("author");
+    t.index(&["post_id", "author"]);
+    t.unique(&["post_id", "author"]);
+})
+.await
+```
+
+- `t.index(&["a", "b"])` creates an index named `{table}_{columns}_index`.
+- `t.unique(&["a", "b"])` creates a unique index named `{table}_{columns}_unique`.
+- The columns are joined with `_` in the name.
+- Indexes are separate `CREATE INDEX` statements that run after the table.
+- `foreign_id(name).constrained(table)` creates a foreign key to the `id`
+  column of `table`, named `{table}_{column}_foreign`.
+- `.references(table, column)` points the key at another column. On MySQL that
+  column must be a `BIGINT`.
+- `.on_delete(action)` and `.on_update(action)` take a `ForeignKeyAction`. The
+  database default (`NO ACTION`) applies when you do not call them.
+- A `foreign_id` with no `constrained` or `references` call is a plain `BIGINT`
+  column.
+
+The builder refuses a name longer than 63 bytes for an index or a foreign key,
+on every backend. It is the limit Postgres keeps, so a migration that runs on
+one backend runs on all three.
+
+### Altering a table
+
+`Schema::table` accepts:
+
+- new columns of any type, with the same modifiers
+- `rename_column(from, to)` and `drop_column(name)`
+- `index`, `unique` and `drop_index(name)`
+- `foreign_id(..).constrained(..)` and `drop_foreign(name)`
+
+```rust
+Schema::table(manager, "posts", |t| {
+    t.string("subtitle").nullable();
+    t.rename_column("body", "content");
+    t.index(&["subtitle"]);
+})
+.await
+```
+
+It runs the operations in the order you write them, each as its own statement.
+Changing the type of an existing column is not supported. `rename_column`,
+`drop_column`, `drop_index` and `drop_foreign` belong to `Schema::table`:
+`Schema::create` returns an error if its closure records one.
+
+The builder checks the description for the mistakes it can see before it runs
+the first statement: a duplicate column, an index over a column the table does
+not declare, an empty table name. A statement the database refuses stops the
+call. On MySQL and SQLite the migrator runs a migration without a transaction,
+so the statements before the refused one stay applied. On Postgres the
+migration's transaction rolls them back.
+
+Every refusal the builder makes is a `DbErr::Migration` whose text starts with
+`schema:` and names the table, the column and the operation.
+
+### SQLite limits
+
+SQLite cannot run some alterations in place, and the builder does not rebuild
+the table. `Schema::table` on SQLite returns an error, before it runs any
+statement of the call, for:
+
+- Adding or dropping a foreign key.
+- Adding a primary key column.
+- Adding a `NOT NULL` column with no default.
+
+The errors read:
+
+```text
+schema: cannot add the foreign key `{name}` on the existing table `{table}`: SQLite cannot add or drop a foreign key on an existing table; create the key with the table in Schema::create, or write this step with SeaORM's SchemaManager
+schema: cannot add the primary key column `{column}` to the existing table `{table}`: SQLite cannot add a PRIMARY KEY column; create the table with id() instead
+schema: cannot add the NOT NULL column `{column}` to the existing table `{table}` without a default: SQLite refuses it; call .nullable() or .default(value)
+```
+
+Dropping a foreign key reads `cannot drop the foreign key` in the first text.
+
+SQLite also refuses `CURRENT_TIMESTAMP` as the default of a column added to an
+existing table, so use a constant default there. It refuses to drop a column
+that an index, a unique constraint or a foreign key covers: record the
+`drop_index` earlier in the same closure.
+
+### Both styles in one Migrator
+
+A `Schema` migration and a SeaORM migration implement the same
+`MigrationTrait`, so both sit in one `Migrator`. One `up()` can mix them:
+call `Schema::create` for the table, then a `manager` call of your own for
+the step the builder does not cover.
+
 ## Schema operations
+
+These are the SeaORM forms of the same operations. The [schema builder](#the-schema-builder) is the shorter alternative for the common cases.
 
 ### Creating tables
 
@@ -256,8 +492,8 @@ ColumnDef::new(Column::Name)
 
 For surrogate primary keys, prefer `big_integer().auto_increment().primary_key()`
 on real tables - `INTEGER` (32-bit) is fine for tiny lookup tables but the
-scaffolded `users`, `sessions`, and similar tables all use `BIGINT` because
-a 4-byte counter is the kind of constraint you regret three years in.
+scaffolded `users` table uses `BIGINT` because a 4-byte counter is the kind of
+constraint you regret three years in.
 
 ## Adding columns
 
