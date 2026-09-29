@@ -126,9 +126,16 @@ pub trait EloquentModel: Sized {
         Ok(None)
     }
 
-    /// Names of the `BelongsTo` relations whose parent row gets its
-    /// `updated_at` bumped after this model is created, saved,
-    /// updated, or deleted. Populated by `#[model(touches = [...])]`.
+    /// Names of the `BelongsTo` and `MorphTo` relations whose parent
+    /// row gets its `updated_at` bumped after this model is created,
+    /// saved, updated, or deleted. Populated by
+    /// `#[model(touches = [...])]`. A `MorphTo` owner is the row its
+    /// `<name>_type` and `<name>_id` columns name. A `<name>_type` that
+    /// names none of the relation's targets is an error of the write:
+    /// the owners are resolved once the pre-write listeners have run
+    /// and before the statement, so it returns `Err` with no statement
+    /// run and no post-write event dispatched. A pre-write listener that
+    /// rewrites `<name>_type` or `<name>_id` decides the owner.
     ///
     /// Read by [`crate::eloquent::Model::touch_owners`], which is a
     /// trait default - so the list has to live on a trait too, or the

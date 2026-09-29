@@ -521,6 +521,10 @@ where
 /// row whose relation cache receives the loaded relations, and a
 /// single row loads through the same dispatcher, nested-path
 /// resolution and connection routing as a collection does.
+///
+/// An empty slice still walks every dotted path, so a path with a tail
+/// that one target of a `MorphTo` lacks is an error with no row, as it
+/// is with rows.
 pub(crate) async fn load_relations<M, I, S>(
     rows: &mut [M],
     relations: I,
@@ -534,7 +538,7 @@ where
         .into_iter()
         .map(|s| EagerSpec::With(s.into()))
         .collect();
-    if specs.is_empty() || rows.is_empty() {
+    if specs.is_empty() {
         return Ok(());
     }
     let db = crate::eloquent::relations::eager::resolve_eager_connection(
@@ -551,6 +555,8 @@ where
 /// [`Model::load_missing`] calls it with its one row as a one-row
 /// slice, for the same reason as [`load_relations`]. A relation the row
 /// already has in its cache is partitioned out before any query runs.
+/// An empty slice still walks every dotted path, as [`load_relations`]
+/// does.
 pub(crate) async fn load_missing_relations<M, I, S>(
     rows: &mut [M],
     relations: I,
@@ -561,7 +567,7 @@ where
     S: Into<String>,
 {
     let paths: Vec<String> = relations.into_iter().map(|s| s.into()).collect();
-    if paths.is_empty() || rows.is_empty() {
+    if paths.is_empty() {
         return Ok(());
     }
     let db = crate::eloquent::relations::eager::resolve_eager_connection(

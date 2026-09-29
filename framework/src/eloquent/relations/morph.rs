@@ -5,11 +5,21 @@
 //! that points at a row in one of several "parent" tables. Because the
 //! parent type varies per row, the macro emits a per-family enum
 //! (`CommentableMorph { MorphPost(MorphPost), MorphVideo(MorphVideo),
-//! Unknown(String, i64) }`) at the declaration site. The runtime
-//! [`MorphTo<C>`] struct in this module is only a metadata carrier for
-//! the `RelationEntry` inventory + the user-side `pub use` re-export;
-//! it does NOT participate in the per-family dispatch (that happens in
-//! the macro-generated `<Name>MorphFetch::get` async method).
+//! Unknown(String, serde_json::Value) }`) at the declaration site. The
+//! runtime [`MorphTo<C>`] struct in this module is only a metadata
+//! carrier for the `RelationEntry` inventory + the user-side `pub use`
+//! re-export; it does NOT participate in the per-family dispatch (that
+//! happens in the macro-generated `<Name>MorphFetch::get` async method).
+//!
+//! The id of a morph target travels as the JSON value of its primary
+//! key, the same form the keyset cursor of
+//! [`Builder::chunk_by_id`] carries and the form
+//! [`Model::field_value`] returns. Every morph relation binds that value
+//! as it is, so a target may have an `i64`, `String`, UUID or ULID key.
+//! The targets of one `MorphTo` relation share one key type, and the
+//! child's `<name>_id` field has that type: the macro checks both at
+//! compile time, through [`MorphTargetsShareKey`] and
+//! [`MorphIdColumnHoldsKey`].
 //!
 //! [`MorphOne`] / [`MorphMany`] live on the parent side. They mirror
 //! [`HasOne`](super::HasOne) / [`HasMany`](super::HasMany) but layer
@@ -25,7 +35,18 @@
 //! parent-side relation method also passes the parent's
 //! `morph_type = "..."` attribute value into the morph runtime (so the
 //! filter knows which type-string to send).
+//!
+//! ## Lazy and eager loading of a `MorphTo`
+//!
+//! The lazy read (`comment.commentable().get()`) finds the target by its
+//! key and applies no global scope of the target: a target hidden by a
+//! global scope is found, and only a soft-delete target stays scoped,
+//! because its `find` is. The eager load (`with(["commentable"])`) runs
+//! the target's own query and applies its global scopes, so a target
+//! hidden by a scope comes back as the `Unknown` variant. For a target
+//! without a global scope the two agree.
 
+use std::any::TypeId;
 use std::marker::PhantomData;
 
 use crate::eloquent::EloquentModel;
@@ -202,7 +223,7 @@ where
     ///
     /// Returns a [`Collection<R>`](crate::eloquent::Collection); see
     /// [`HasMany::get`](super::HasMany::get) for return-type
-    /// rationale.
+    /// rationale. Checked for lazy loading as [`Self::first`] is.
     pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
         self.inner.get().await
     }
@@ -467,27 +488,38 @@ where
 /// `Target::find(id)` for each branch directly; it does not flow
 /// through this struct.
 ///
-/// # v1 restriction: `i64`-only morph IDs
+/// # Key types
 ///
-/// `MorphTo::morph_id` is hardcoded to `i64`. Polymorphic targets
-/// must therefore use `i64` primary keys, and the morph table's
-/// `<name>_id` column must also be `i64`. Models whose primary key
-/// is `String` or a UUID-as-string cannot be `MorphTo` targets in
-/// v1 - the per-family fetch helper calls
-/// `<Target as Model>::find(self.morph_id)` with an `i64`, which
-/// will fail to type-check at the user's call site against a target
-/// whose `Model::Key` is anything other than `i64`.
+/// The id is the JSON value of the target's primary key, as the
+/// child's `<name>_id` column holds it: a number for an `i64` key, a
+/// string for a `String`, UUID or ULID key. It is bound as it is, so
+/// one morph family works for any of those key types. The fetch helper
+/// turns it back into the target's typed key before it calls `find`.
 ///
-/// v2 will parameterise `morph_id` on the FK column type so the
-/// morph machinery accepts the full PK shape lattice (`i64` /
-/// `String` / `Uuid`). Until then, declare polymorphic models with
-/// `i64` primary keys.
+/// Every target of one `MorphTo` relation has the same key type, and
+/// the child's `<name>_id` field has that type too (or `Option` of it
+/// for a nullable morph). One column cannot hold two kinds of key, so
+/// the macro refuses a family that mixes them at compile time; the
+/// error names the two models (see [`MorphTargetsShareKey`] and
+/// [`MorphIdColumnHoldsKey`]).
+///
+/// The check covers the `MorphTo` side only. A parent's [`MorphMany`]
+/// or [`MorphOne`] binds its own key against the child's `<name>_id`
+/// column, and its declaration cannot see the child's field types: the
+/// child is a separate `#[model]` expansion, it need not declare a
+/// `MorphTo` (a child may hold just the two columns), and the model
+/// macro emits no per-column type trait a parent could assert against.
+/// A parent whose key type differs from the child's `<name>_id` type
+/// therefore compiles; the lookup then finds nothing on SQLite and
+/// fails with a type error on PostgreSQL. Keep the child's `<name>_id`
+/// field at the key type of every parent that owns it.
 pub struct MorphTo<C>
 where
     C: EloquentModel,
 {
-    /// FK value on the child row (`<name>_id` column).
-    pub morph_id: i64,
+    /// FK value on the child row (`<name>_id` column): the JSON value
+    /// of the target's primary key, `Null` when the column is null.
+    pub morph_id: serde_json::Value,
     /// Type-string on the child row (`<name>_type` column).
     pub morph_type: String,
     _phantom: PhantomData<fn() -> C>,
@@ -501,7 +533,7 @@ where
     /// emitted code only - user code uses the per-family fetch helper
     /// instead of touching this struct directly.
     #[doc(hidden)]
-    pub fn __new(morph_id: i64, morph_type: String) -> Self {
+    pub fn __new(morph_id: serde_json::Value, morph_type: String) -> Self {
         Self {
             morph_id,
             morph_type,
@@ -529,4 +561,234 @@ where
     fn foreign_key(&self) -> &str {
         ""
     }
+}
+
+/// The owner row a `MorphTo` relation of a child row points at, as the
+/// parent-touch cascade of `#[model(touches = [...])]` writes it: the
+/// owner model's table and columns, and the key the child's
+/// `<name>_id` column holds.
+///
+/// Built by the fetch helper the `#[suprnova::model]` macro emits for a
+/// `MorphTo` relation, from the target that the child's `<name>_type`
+/// column names, and read by
+/// [`Model::touch_owners`](crate::eloquent::Model::touch_owners). The
+/// owner is never loaded: the touch is one `UPDATE` by key, as it is
+/// for a `BelongsTo` owner.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct MorphOwner {
+    /// The owner model's `TypeId`, for the per-type
+    /// `without_touching_on` scope.
+    pub(crate) type_id: TypeId,
+    /// The owner model's table.
+    pub(crate) table: &'static str,
+    /// The owner model's primary-key column.
+    pub(crate) key_column: &'static str,
+    /// The owner model's `updated_at` column, `""` when the model
+    /// manages no timestamps and the touch skips it.
+    pub(crate) updated_at_column: &'static str,
+    /// The owner model's soft-delete column, `""` when it has none. A
+    /// trashed owner is not touched.
+    pub(crate) soft_deletes_column: &'static str,
+    /// The owner's key, the JSON value of the child's `<name>_id`
+    /// column, bound as it is.
+    pub(crate) key: serde_json::Value,
+}
+
+impl MorphOwner {
+    /// The owner row of model `T` whose primary key is `key`. Called by
+    /// the macro-emitted fetch helper once the child's `<name>_type`
+    /// column has named `T`.
+    pub fn of<T>(key: serde_json::Value) -> Self
+    where
+        T: EloquentModel + 'static,
+    {
+        Self {
+            type_id: TypeId::of::<T>(),
+            table: T::TABLE,
+            key_column: T::PRIMARY_KEY,
+            updated_at_column: super::touch_column(T::HAS_TIMESTAMPS, T::UPDATED_AT_COLUMN),
+            soft_deletes_column: T::SOFT_DELETES_COLUMN,
+            key,
+        }
+    }
+}
+
+/// Proof that two targets of one `MorphTo` relation have keys of one
+/// type. `Self` is the key type of the target `First`, `Other` the key
+/// type of the target `Second`.
+///
+/// The child's `<name>_id` column holds the key of whichever target a
+/// row points at, so an `i64` column cannot also hold a `String` key.
+/// The `#[suprnova::model]` macro asks for this bound between the first
+/// target of a `MorphTo` relation and each other target, and the only
+/// implementation is the one where `Self` and `Other` are the same
+/// type. A family that mixes key types is therefore a compile error,
+/// and the error names the two models.
+///
+/// `Relation` is the per-family enum the relation emits
+/// (`CommentableMorph` for a relation named `commentable`). It is there
+/// only so the error can name the relation.
+///
+/// A family whose targets have an `i64` key and a `String` key does not
+/// compile:
+///
+/// ```compile_fail
+/// use suprnova::model;
+///
+/// #[model(table = "numbered_posts")]
+/// pub struct NumberedPost {
+///     pub id: i64,
+/// }
+///
+/// #[model(table = "coded_videos", key_type = "String", auto_increment = false)]
+/// pub struct CodedVideo {
+///     pub id: String,
+/// }
+///
+/// #[model(table = "notes", relations = {
+///     subject: MorphTo { targets = [NumberedPost, CodedVideo] },
+/// })]
+/// pub struct Note {
+///     pub id: i64,
+///     pub subject_id: i64,
+///     pub subject_type: String,
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// The same family compiles once both targets have `i64` keys:
+///
+/// ```
+/// use suprnova::model;
+///
+/// #[model(table = "numbered_posts")]
+/// pub struct NumberedPost {
+///     pub id: i64,
+/// }
+///
+/// #[model(table = "numbered_videos")]
+/// pub struct NumberedVideo {
+///     pub id: i64,
+/// }
+///
+/// #[model(table = "notes", relations = {
+///     subject: MorphTo { targets = [NumberedPost, NumberedVideo] },
+/// })]
+/// pub struct Note {
+///     pub id: i64,
+///     pub subject_id: i64,
+///     pub subject_type: String,
+/// }
+///
+/// fn main() {}
+/// ```
+#[diagnostic::on_unimplemented(
+    message = "the `MorphTo` relation behind `{Relation}` mixes key types: its target `{First}` \
+               has a `{Self}` key and its target `{Second}` has a `{Other}` key",
+    label = "every target of one `MorphTo` relation needs the same key type",
+    note = "the child's `<name>_id` column holds the key of any target, so it can hold only one \
+            kind of key"
+)]
+pub trait MorphTargetsShareKey<Other, First, Second, Relation> {}
+
+impl<Key, First, Second, Relation> MorphTargetsShareKey<Key, First, Second, Relation> for Key {}
+
+/// Proof that the child's `<name>_id` field can hold the key of the
+/// targets of its `MorphTo` relation. `Self` is the field's type
+/// (the `T` of an `Option<T>` field, for a nullable morph), `Key` the
+/// key type of the target `Target`.
+///
+/// The field's JSON value is what the relation binds against the
+/// target's primary key, and what the fetch helper turns back into the
+/// target's typed key, so the two types must be the same. The
+/// `#[suprnova::model]` macro asks for this bound against the first
+/// target; [`MorphTargetsShareKey`] ties the other targets to it.
+///
+/// `Child` is the model that declares the relation and `Relation` the
+/// per-family enum it emits; both are there only so the error can name
+/// them.
+///
+/// A `String` id field over targets with an `i64` key does not compile:
+///
+/// ```compile_fail
+/// use suprnova::model;
+///
+/// #[model(table = "numbered_posts")]
+/// pub struct NumberedPost {
+///     pub id: i64,
+/// }
+///
+/// #[model(table = "numbered_videos")]
+/// pub struct NumberedVideo {
+///     pub id: i64,
+/// }
+///
+/// #[model(table = "notes", relations = {
+///     subject: MorphTo { targets = [NumberedPost, NumberedVideo] },
+/// })]
+/// pub struct Note {
+///     pub id: i64,
+///     pub subject_id: String,
+///     pub subject_type: String,
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// The same declaration compiles once the id field has the key type of
+/// the targets:
+///
+/// ```
+/// use suprnova::model;
+///
+/// #[model(table = "numbered_posts")]
+/// pub struct NumberedPost {
+///     pub id: i64,
+/// }
+///
+/// #[model(table = "numbered_videos")]
+/// pub struct NumberedVideo {
+///     pub id: i64,
+/// }
+///
+/// #[model(table = "notes", relations = {
+///     subject: MorphTo { targets = [NumberedPost, NumberedVideo] },
+/// })]
+/// pub struct Note {
+///     pub id: i64,
+///     pub subject_id: i64,
+///     pub subject_type: String,
+/// }
+///
+/// fn main() {}
+/// ```
+#[diagnostic::on_unimplemented(
+    message = "the `MorphTo` relation behind `{Relation}` keeps its id in a `{Self}` field of \
+               `{Child}`, but its target `{Target}` has a `{Key}` key",
+    label = "the `<name>_id` field needs the key type of the relation's targets"
+)]
+pub trait MorphIdColumnHoldsKey<Key, Child, Target, Relation> {}
+
+impl<Key, Child, Target, Relation> MorphIdColumnHoldsKey<Key, Child, Target, Relation> for Key {}
+
+/// The check behind [`MorphTargetsShareKey`]. The `#[suprnova::model]`
+/// macro evaluates it in a `const` item, once for each target of a
+/// `MorphTo` relation after the first. Not part of the public API.
+#[doc(hidden)]
+pub const fn assert_morph_targets_share_key<Key, Other, First, Second, Relation>()
+where
+    Key: MorphTargetsShareKey<Other, First, Second, Relation>,
+{
+}
+
+/// The check behind [`MorphIdColumnHoldsKey`]. The `#[suprnova::model]`
+/// macro evaluates it in a `const` item, once for each `MorphTo`
+/// relation. Not part of the public API.
+#[doc(hidden)]
+pub const fn assert_morph_id_column_holds_key<Column, Key, Child, Target, Relation>()
+where
+    Column: MorphIdColumnHoldsKey<Key, Child, Target, Relation>,
+{
 }

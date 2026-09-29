@@ -3825,7 +3825,11 @@ where
         // `CURRENT_TX` and routes through the active transaction when
         // present. Outside a tx, leaves use the same pool we pass here;
         // inside a tx, this `db` is effectively ignored.
-        if !eager_specs.is_empty() && !out.is_empty() {
+        //
+        // An empty result still reaches the orchestrator: a dotted path
+        // is checked against its relations even when no row loads, so a
+        // path that fails with rows fails without them.
+        if !eager_specs.is_empty() {
             let eager_db = crate::eloquent::relations::eager::resolve_eager_connection(
                 this.tx_override.as_ref(),
                 this.connection_override.as_deref(),

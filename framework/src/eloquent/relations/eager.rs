@@ -29,10 +29,15 @@
 //!   does NOT swallow `FrameworkError::internal("no relation X")`;
 //!   the user typo'ed a relation name, the error message names what
 //!   went wrong.
-//! - For nested-morph: the v1 contract is that `MorphTo` relations
-//!   can NOT be the head of a nested path. The per-model
-//!   `__recurse_eager_load` arm for any MorphTo relation returns a
-//!   clear "nested morph recursion not supported in v1" error.
+//! - A `MorphTo` relation can be the head of a nested path
+//!   (`"commentable.user"`). Its eager arm loads each target type
+//!   present with one query and caches the per-family enum on each
+//!   parent; its batched recurse arm splits the loaded values
+//!   by variant and runs the tail through each target model's own
+//!   dispatcher, one query per (target type, relation) pair. Every
+//!   target of the family must declare the tail's next relation: a
+//!   target without it is an error naming the target and the
+//!   relation, even when no loaded row is of that type.
 
 use std::any::Any;
 
@@ -98,6 +103,17 @@ where
     M: EagerLoadDispatch + Send + Sync,
 {
     if parents.is_empty() {
+        // No row to load into. A dotted path still walks its relations
+        // with no rows, so a nested `MorphTo` checks its whole family and
+        // a path that fails with rows fails without them.
+        for spec in &specs {
+            if let EagerSpec::With(path) = spec
+                && let Some((head, rest)) = path.split_once('.')
+            {
+                let mut none: Vec<&mut M> = Vec::new();
+                M::recurse_eager_load_batched(none.as_mut_slice(), head, rest, db, false).await?;
+            }
+        }
         return Ok(());
     }
 

@@ -753,6 +753,39 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   and counted on a cancellation at the end of the period passes `true`. A test
   that read an id out of a `NotFound` error of the mock reads it from its own
   request.
+- **A polymorphic relation takes a target with any key, loads nested
+  relations, and can be touched.** Three limits of `MorphTo` are gone. The id
+  of a morph relation was an `i64`, so a model with a `String`, UUID or ULID
+  key could not be the target: the id is the value of the key of the target,
+  and the `<name>_id` column of the child has the type of that key. All
+  targets of one relation have keys of one type, and a relation that mixes
+  them does not compile, nor does a child whose `<name>_id` field has another
+  type. A parent's `MorphMany` or `MorphOne` is not checked against the
+  child's `<name>_id`, so keep that field at the key type of every parent that
+  owns it. The lazy read of a `MorphTo` finds the target by its key and
+  applies no global scope of the target; the eager load runs the query of the
+  target and applies its global scopes. A nested eager load through `MorphTo`,
+  `with(["commentable.user"])`, returned an error: the loader groups the
+  targets by their type and loads the rest of the path once for each type, and
+  a target type that does not have the relation is an error that names the
+  type and the relation, whether or not a row of that type was loaded.
+  `#[model(touches = [...])]` took `BelongsTo` relations only: it takes the
+  name of a `MorphTo` relation, and a save or a delete of the child writes the
+  `updated_at` of its owner, inside the transaction of the write when there is
+  one. An owner without timestamps is skipped, a soft-deleted owner is not
+  touched, and a null `<name>_id` touches nothing. A `<name>_type` that names
+  none of the targets is an error of the write: `create`, `save`, `update`,
+  `delete` and `force_delete` (and their `_with_tx` forms) resolve every
+  `MorphTo` owner of `touches` after the `Creating`, `Saving`, `Updating` and
+  `Deleting` listeners have run and before the statement, from the values the
+  statement writes, so a listener that rewrites `<name>_type` or `<name>_id`
+  decides the owner, and an owner that cannot be resolved returns `Err` with
+  no row written, no later event dispatched and no owner touched. An empty
+  collection checks a dotted path of `Collection::load` and `load_missing`
+  too. What you have to change: `MorphTo::morph_id` and the id in the
+  `Unknown` variant of the generated enum are a `serde_json::Value`, so code
+  that reads the id as an integer calls `as_i64()`. `<relation>_loaded()` of a
+  `MorphTo` returns the generated enum.
 
 ### Fixed
 

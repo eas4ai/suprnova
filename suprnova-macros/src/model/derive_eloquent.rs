@@ -24,6 +24,7 @@ use syn::Result;
 
 use super::casts;
 use super::parse::{ModelInput, RelationKindAttr};
+use super::relations;
 use super::serialization;
 
 pub fn emit(input: &ModelInput) -> Result<TokenStream> {
@@ -48,14 +49,18 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             .iter()
             .find(|r| r.name == name.as_str())
         {
-            Some(rel) if rel.kind == RelationKindAttr::BelongsTo => {}
+            Some(rel)
+                if matches!(
+                    rel.kind,
+                    RelationKindAttr::BelongsTo | RelationKindAttr::MorphTo
+                ) => {}
             Some(rel) => {
                 return Err(syn::Error::new_spanned(
                     &rel.name,
                     format!(
-                        "`touches = [\"{name}\"]` needs a `BelongsTo` relation - `{name}` is \
-                         declared as {:?}. Only the owning side of a relation can be touched; \
-                         polymorphic (`MorphTo`) owners are not supported yet.",
+                        "`touches = [\"{name}\"]` needs a `BelongsTo` or `MorphTo` relation - \
+                         `{name}` is declared as {:?}. Only the owning side of a relation can \
+                         be touched.",
                         rel.kind,
                     ),
                 ));
@@ -65,7 +70,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     struct_ident,
                     format!(
                         "`touches = [\"{name}\"]` names a relation that isn't declared. Add \
-                         `{name}: BelongsTo<Parent>` to this model's `relations = {{ ... }}`.",
+                         `{name}: BelongsTo<Parent>` (or a `MorphTo`) to this model's \
+                         `relations = {{ ... }}`.",
                     ),
                 ));
             }
@@ -175,6 +181,13 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // through this accessor.
     let field_value_method = serialization::emit_field_value(&field_idents);
 
+    // `__morph_owner(relation, base, attrs)`: resolves the owner row a
+    // `MorphTo` relation of a row points at, for the parent-touch
+    // cascade `Model::__plan_touches` prepares before the statement. Empty
+    // for a model without `MorphTo` relations, which keeps the trait
+    // default.
+    let morph_owner_method = relations::emit_morph_owner_method(input);
+
     // Every Self { ... } constructor that materialises a user struct
     // from a fresh-row source (`From<inner::Model>`, `Default`,
     // `try_from_storage`) must initialise the auto-injected `__eager`
@@ -192,9 +205,11 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // `self` in scope and must preserve relation state. Laravel's
     // `Model::replicate` carries the source's loaded relations onto
     // the replica (`clone $user` preserves `$user->posts`), and our
-    // `EagerLoadCache` docstring explicitly promises the same parity
-    // via its `Clone` impl. The pivot context is a cheap `Arc` clone
-    // and follows the same parity rule.
+    // `EagerLoadCache` docstring explicitly promises the same parity.
+    // The copy leaves out the cache's mark of a multi-row query: the
+    // replica is a model built in the process, which lazy-loading
+    // prevention never refuses. The pivot context is a cheap `Arc`
+    // clone and follows the same parity rule.
     let replicate_relations_init = quote! {
         __eager: self.__eager.clone(),
         __pivot: self.__pivot.clone(),
@@ -694,6 +709,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 /// only care about the tombstone case.
                 pub async fn delete(self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleting(&self, false).await?;
+                    let touch_plan = <Self as ::suprnova::eloquent::Model>::__plan_touches(
+                        ::core::option::Option::Some(&self),
+                        &::suprnova::eloquent::Attrs::new(),
+                    )?;
 
                     let now = ::core::option::Option::Some(::suprnova::chrono::Utc::now());
                     let deleted_at =
@@ -739,7 +758,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_trashed(&self).await?;
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleted(&self, false).await?;
-                    <Self as ::suprnova::eloquent::Model>::touch_owners(&self).await?;
+                    <Self as ::suprnova::eloquent::Model>::__touch_planned(&self, &touch_plan).await?;
                     ::core::result::Result::Ok(())
                 }
 
@@ -841,6 +860,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 pub async fn force_delete(self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleting(&self, true).await?;
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_force_deleting(&self).await?;
+                    let touch_plan = <Self as ::suprnova::eloquent::Model>::__plan_touches(
+                        ::core::option::Option::Some(&self),
+                        &::suprnova::eloquent::Attrs::new(),
+                    )?;
 
                     let snapshot = ::core::clone::Clone::clone(&self);
                     let row: <<Self as ::suprnova::eloquent::EloquentModel>::Entity as ::suprnova::sea_orm::EntityTrait>::Model = self.into();
@@ -864,7 +887,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_force_deleted(&snapshot).await?;
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleted(&snapshot, true).await?;
-                    <Self as ::suprnova::eloquent::Model>::touch_owners(&snapshot).await?;
+                    <Self as ::suprnova::eloquent::Model>::__touch_planned(&snapshot, &touch_plan).await?;
                     ::core::result::Result::Ok(())
                 }
 
@@ -1081,6 +1104,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             #find_trait_override
 
             #field_value_method
+
+            #morph_owner_method
 
             #to_array_override
 
