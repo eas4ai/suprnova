@@ -78,6 +78,36 @@ struct InertiaPropsVisitor {
     plain_structs: Vec<InertiaPropsStruct>,
 }
 
+/// Whether the `#[derive(...)]` lists of `attrs` name the derive `name`,
+/// written bare (`Name`) or through the framework crate root
+/// (`suprnova::Name`). A path from another crate (`other::Name`) is not
+/// the framework derive, so it does not count. Every scanner that picks
+/// structs by derive goes through here so a qualified spelling is
+/// recognised the same way by all of them.
+pub(crate) fn derive_list_names(attrs: &[Attribute], name: &str) -> bool {
+    attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("derive"))
+        .filter_map(|attr| {
+            attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+            )
+            .ok()
+        })
+        .flatten()
+        .any(|path| names_framework_item(&path, name))
+}
+
+/// Whether `path` names the item `name` of the framework: written bare
+/// (`name`) or through the crate root (`suprnova::name`). A path from
+/// another crate does not count.
+pub(crate) fn names_framework_item(path: &syn::Path, name: &str) -> bool {
+    path.is_ident(name)
+        || (path.segments.len() == 2
+            && path.segments[0].ident == "suprnova"
+            && path.segments[1].ident == name)
+}
+
 impl InertiaPropsVisitor {
     fn new() -> Self {
         Self {
@@ -87,53 +117,11 @@ impl InertiaPropsVisitor {
     }
 
     fn has_inertia_props_derive(&self, attrs: &[Attribute]) -> bool {
-        for attr in attrs {
-            if attr.path().is_ident("derive")
-                && let Ok(nested) = attr.parse_args_with(
-                    syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
-                )
-            {
-                for path in nested {
-                    if path.is_ident("InertiaProps") {
-                        return true;
-                    }
-                    // Also check for suprnova::InertiaProps
-                    if path.segments.len() == 2 {
-                        let first = &path.segments[0].ident;
-                        let second = &path.segments[1].ident;
-                        if first == "suprnova" && second == "InertiaProps" {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-        false
+        derive_list_names(attrs, "InertiaProps")
     }
 
     fn has_data_derive(&self, attrs: &[Attribute]) -> bool {
-        for attr in attrs {
-            if attr.path().is_ident("derive")
-                && let Ok(nested) = attr.parse_args_with(
-                    syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
-                )
-            {
-                for path in nested {
-                    if path.is_ident("Data") {
-                        return true;
-                    }
-                    // Also check for suprnova::Data
-                    if path.segments.len() == 2 {
-                        let first = &path.segments[0].ident;
-                        let second = &path.segments[1].ident;
-                        if first == "suprnova" && second == "Data" {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-        false
+        derive_list_names(attrs, "Data")
     }
 
     fn parse_type(ty: &Type) -> RustType {
@@ -3201,5 +3189,47 @@ mod lang_keys_tests {
         let written = fs::read_to_string(&output_path).expect("read generated file");
         assert!(written.contains(r#"| "only-a""#));
         assert!(written.contains(r#"| "only-b""#));
+    }
+}
+
+#[cfg(test)]
+mod derive_list_names_tests {
+    use super::*;
+
+    fn attrs_of(source: &str) -> Vec<Attribute> {
+        let item: ItemStruct = syn::parse_str(source).expect("parse struct");
+        item.attrs
+    }
+
+    #[test]
+    fn bare_name_is_recognised() {
+        let attrs = attrs_of("#[derive(Debug, FormRequest)] struct A;");
+        assert!(derive_list_names(&attrs, "FormRequest"));
+    }
+
+    #[test]
+    fn framework_qualified_name_is_recognised() {
+        let attrs = attrs_of("#[derive(Debug, suprnova::FormRequest)] struct A;");
+        assert!(derive_list_names(&attrs, "FormRequest"));
+    }
+
+    #[test]
+    fn another_crates_path_is_not_recognised() {
+        let attrs = attrs_of("#[derive(other::FormRequest)] struct A;");
+        assert!(!derive_list_names(&attrs, "FormRequest"));
+    }
+
+    #[test]
+    fn a_struct_without_the_derive_is_not_recognised() {
+        let attrs = attrs_of("#[derive(Debug, Clone)] #[serde(default)] struct A;");
+        assert!(!derive_list_names(&attrs, "FormRequest"));
+        let none = attrs_of("struct B;");
+        assert!(!derive_list_names(&none, "FormRequest"));
+    }
+
+    #[test]
+    fn the_name_is_matched_whole() {
+        let attrs = attrs_of("#[derive(suprnova::DataExt, DataX)] struct A;");
+        assert!(!derive_list_names(&attrs, "Data"));
     }
 }

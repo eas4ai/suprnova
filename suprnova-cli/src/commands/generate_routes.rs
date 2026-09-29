@@ -14,6 +14,7 @@ use syn::visit::Visit;
 use syn::{Attribute, Fields, FnArg, ItemFn, ItemStruct, Type};
 use walkdir::WalkDir;
 
+use super::generate_types::{derive_list_names, names_framework_item};
 use crate::ui;
 
 /// HTTP methods for routes
@@ -231,7 +232,7 @@ impl<'ast> Visit<'ast> for HandlerVisitor {
     }
 }
 
-/// Visitor that collects #[form_request] structs
+/// Visitor that collects the form request structs
 struct FormRequestVisitor {
     structs: Vec<FormRequestStruct>,
 }
@@ -243,26 +244,20 @@ impl FormRequestVisitor {
         }
     }
 
+    /// Whether the attributes of a struct make it a form request.
+    ///
+    /// A form request is declared in one of three ways, and the scan reads
+    /// the source, so it has to know each by its name: the attribute
+    /// `#[request]`, the derive that the crate root exports as
+    /// `FormRequestDerive` (`FormRequest` is the name of the trait there,
+    /// and the name of the derive in the macro crate), and the helper
+    /// attribute `#[form_request(..)]` that only the derive accepts.
     fn has_form_request_attr(&self, attrs: &[Attribute]) -> bool {
-        for attr in attrs {
-            // Check for #[form_request]
-            if attr.path().is_ident("form_request") {
-                return true;
-            }
-            // Check for #[derive(FormRequest)]
-            if attr.path().is_ident("derive")
-                && let Ok(nested) = attr.parse_args_with(
-                    syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
-                )
-            {
-                for path in nested {
-                    if path.is_ident("FormRequest") {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+        attrs.iter().any(|attr| {
+            let path = attr.path();
+            path.is_ident("form_request") || names_framework_item(path, "request")
+        }) || derive_list_names(attrs, "FormRequestDerive")
+            || derive_list_names(attrs, "FormRequest")
     }
 
     fn parse_type(ty: &Type) -> RustType {
@@ -773,5 +768,66 @@ pub fn run(output: Option<String>) {
             ui::error(&e);
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod form_request_scan_tests {
+    use super::*;
+
+    fn scan(source: &str) -> HashMap<String, FormRequestStruct> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).expect("mkdir src");
+        fs::write(src.join("requests.rs"), source).expect("write source");
+        scan_form_requests(dir.path())
+    }
+
+    #[test]
+    fn scan_sees_a_bare_derive() {
+        let found = scan("#[derive(FormRequest)] pub struct Store { pub title: String }");
+        assert!(found.contains_key("Store"));
+    }
+
+    #[test]
+    fn scan_sees_a_qualified_derive() {
+        let found = scan("#[derive(suprnova::FormRequest)] pub struct Store { pub title: String }");
+        let store = found.get("Store").expect("qualified derive recognised");
+        assert_eq!(store.fields.len(), 1);
+    }
+
+    #[test]
+    fn scan_sees_the_attribute_form() {
+        let found = scan("#[form_request] pub struct Store { pub title: String }");
+        assert!(found.contains_key("Store"));
+    }
+
+    /// The names an application writes: the derive as the crate root exports
+    /// it, and the attribute macro.
+    #[test]
+    fn scan_sees_the_names_of_the_crate_root() {
+        for declaration in [
+            "#[derive(FormRequestDerive)]",
+            "#[derive(Deserialize, Validate, suprnova::FormRequestDerive)]",
+            "#[request]",
+            "#[suprnova::request]",
+        ] {
+            let found = scan(&format!(
+                "{declaration} pub struct Store {{ pub title: String }}"
+            ));
+            assert!(found.contains_key("Store"), "{declaration}");
+        }
+    }
+
+    #[test]
+    fn scan_skips_the_attribute_of_another_crate() {
+        let found = scan("#[other::request] pub struct Store { pub title: String }");
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn scan_skips_a_struct_with_another_crates_derive() {
+        let found = scan("#[derive(other::FormRequest)] pub struct Store { pub title: String }");
+        assert!(found.is_empty());
     }
 }

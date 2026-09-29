@@ -866,6 +866,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   factor issued, answers 500, and the stored session stays as it was, which is
   what such a request did before. The policy of the framework for locks is
   that a poisoned lock is an error or is recovered, and never a panic.
+- **`generate-routes` finds a form request by every name it is declared
+  with.** The command read the source for `#[derive(FormRequest)]` and for the
+  helper attribute `#[form_request(..)]`. An application writes neither: the
+  crate root exports the derive as `FormRequestDerive`, because `FormRequest`
+  is the trait there, and the short form is the attribute `#[request]`. A
+  struct with one of those was left out of the generated routes, so its
+  request type was missing in the TypeScript, and no message said so. The
+  command reads `#[request]`, `#[derive(FormRequestDerive)]` and
+  `#[derive(FormRequest)]`, each bare or behind `suprnova::`, and the helper
+  attribute. `generate-types` read `InertiaProps` and `Data` in both forms
+  already, and the three detectors ask one function.
 
 ### Security
 
