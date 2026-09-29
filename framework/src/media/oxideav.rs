@@ -130,6 +130,20 @@ impl Canvas {
         }
     }
 
+    /// True when every pixel is fully opaque.
+    ///
+    /// The canvas is always RGBA, and a source format with no alpha channel
+    /// decodes with every alpha byte at 255, so such an image is opaque by
+    /// construction. One pass over the alpha bytes, reading the pixels in
+    /// place and stopping at the first one that is not fully opaque.
+    fn is_opaque(&self) -> bool {
+        self.pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| pixel[3] == u8::MAX)
+    }
+
     /// Rebuild from a filter's output frame.
     ///
     /// The filters that change shape (resize, crop, rotate) report the new
@@ -285,6 +299,15 @@ impl OxideAvImageDriver {
         format: OutputFormat,
         quality: u8,
     ) -> Result<Vec<u8>, FrameworkError> {
+        // Every `WebP` canvas `webp_is_lossy` turns down goes to the
+        // lossless arm below, rather than into a file that drops the
+        // transparency or an encoder that refuses the size.
+        if format == OutputFormat::WebP
+            && webp_is_lossy(canvas.width, canvas.height, canvas.is_opaque())
+        {
+            return encode_lossy_webp(canvas, quality);
+        }
+
         let (codec, frame, pixel_format) = match format {
             // The MJPEG encoder rejects RGBA outright, so the conversion is
             // mandatory rather than an optimisation.
@@ -294,9 +317,12 @@ impl OxideAvImageDriver {
                 PixelFormat::Rgb24,
             ),
             OutputFormat::Png => ("png", canvas.frame(), PixelFormat::Rgba),
-            // Only the VP8L (lossless) encoder is registered; codec id
-            // "webp" has a decoder but no encoder.
-            OutputFormat::WebP => ("webp_vp8l", canvas.frame(), PixelFormat::Rgba),
+            // The VP8L (lossless) encoder is the only WebP encoder in the
+            // registry; codec id "webp" has a decoder but no encoder. `WebP`
+            // reaches this arm only when `webp_is_lossy` says no.
+            OutputFormat::WebP | OutputFormat::WebPLossless => {
+                ("webp_vp8l", canvas.frame(), PixelFormat::Rgba)
+            }
             OutputFormat::Gif => ("gif", quantise_for_gif(canvas)?, PixelFormat::Rgba),
             OutputFormat::Bmp => ("bmp", canvas.frame(), PixelFormat::Rgba),
         };
@@ -315,13 +341,7 @@ impl OxideAvImageDriver {
         let mut encoder = self.context.codecs.first_encoder(&params).map_err(|e| {
             FrameworkError::internal(format!("image encode failed: no {codec} encoder: {e}"))
         })?;
-        encoder
-            .send_frame(&Frame::Video(frame))
-            .map_err(|e| FrameworkError::internal(format!("image encode failed: {codec}: {e}")))?;
-        encoder
-            .flush()
-            .map_err(|e| FrameworkError::internal(format!("image encode failed: {codec}: {e}")))?;
-        drain(encoder.as_mut(), codec)
+        encode_frame(encoder.as_mut(), frame, codec)
     }
 }
 
@@ -756,6 +776,108 @@ fn convert_frame(
         .map_err(|e| FrameworkError::internal(format!("image pixel conversion failed: {e}")))
 }
 
+/// The largest width or height a VP8 frame can have.
+///
+/// The VP8 key frame header stores each dimension in 14 bits (RFC 6386,
+/// section 9.1), and the upstream lossy encoder refuses anything larger.
+/// VP8L stores `size - 1` in its 14 bits, so lossless WebP reaches one
+/// pixel further, to 16384.
+const VP8_MAX_DIMENSION: u32 = 16_383;
+
+/// Whether [`OutputFormat::WebP`] takes the lossy encoder for a canvas of
+/// this size and opacity.
+///
+/// Lossy needs both an opaque canvas, because the lossy encoder has no
+/// alpha channel, and sides a VP8 frame can have. Anything else is written
+/// lossless, which keeps the transparency and takes the larger size.
+fn webp_is_lossy(width: u32, height: u32, opaque: bool) -> bool {
+    opaque && width <= VP8_MAX_DIMENSION && height <= VP8_MAX_DIMENSION
+}
+
+/// Encode an opaque canvas as lossy WebP: a simple container around one
+/// `VP8 ` bitstream, at `quality` on the `0..=100` WebP scale.
+///
+/// Upstream reserves the `webp_vp8` codec id but registers no factory under
+/// it, so the encoder is built directly instead of looked up in the
+/// registry. It is built before the pixels are converted, so a parameter
+/// the factory refuses costs no conversion.
+fn encode_lossy_webp(canvas: &Canvas, quality: u8) -> Result<Vec<u8>, FrameworkError> {
+    let codec = oxideav_webp::CODEC_ID_VP8;
+    let mut params = CodecParameters::video(CodecId::new(codec));
+    params.width = Some(canvas.width);
+    params.height = Some(canvas.height);
+    params.pixel_format = Some(PixelFormat::Yuv420P);
+    let mut encoder =
+        oxideav_webp::encoder_vp8::make_encoder_with_quality(&params, f32::from(quality))
+            .map_err(|e| FrameworkError::internal(format!("image encode failed: {codec}: {e}")))?;
+    let frame = yuv420_frame(canvas)?;
+    encode_frame(encoder.as_mut(), frame, codec)
+}
+
+/// Convert the canvas to the planar 4:2:0 layout the VP8 encoder takes.
+///
+/// The converter's default colour space, BT.601 limited range, is the one
+/// WebP decoders assume, so no option is set.
+///
+/// The converter refuses odd dimensions, because one chroma sample covers a
+/// 2x2 block. An odd right or bottom edge is therefore extended by one
+/// column or row that repeats the edge, which is also how the encoder pads
+/// a partial macroblock. The encoder is still told the true size, so it
+/// reads no padded luma, and each edge chroma sample is the average of the
+/// real pixels it covers.
+fn yuv420_frame(canvas: &Canvas) -> Result<VideoFrame, FrameworkError> {
+    let even = |side: u32| {
+        side.checked_next_multiple_of(2).ok_or_else(|| {
+            FrameworkError::internal("image dimensions overflow the addressable pixel buffer")
+        })
+    };
+    let (width, height) = (even(canvas.width)?, even(canvas.height)?);
+    let frame = if width == canvas.width && height == canvas.height {
+        canvas.frame()
+    } else {
+        edge_extended_frame(canvas, width, height)?
+    };
+    let info = FrameInfo::new(PixelFormat::Rgba, width, height);
+    pix_convert(
+        &frame,
+        info,
+        PixelFormat::Yuv420P,
+        &ConvertOptions::default(),
+    )
+    .map_err(|e| FrameworkError::internal(format!("image pixel conversion failed: {e}")))
+}
+
+/// Copy the canvas into an RGBA frame of `width x height`, filling the
+/// extra columns with each row's last pixel and the extra rows with the
+/// last row.
+fn edge_extended_frame(
+    canvas: &Canvas,
+    width: u32,
+    height: u32,
+) -> Result<VideoFrame, FrameworkError> {
+    let row_bytes = canvas.width as usize * 4;
+    let stride = width as usize * 4;
+    let last_row = canvas.height.saturating_sub(1) as usize;
+    let mut data = Vec::with_capacity(stride * height as usize);
+    for y in 0..height as usize {
+        let start = y.min(last_row) * row_bytes;
+        let row = canvas
+            .pixels
+            .get(start..start + row_bytes)
+            .ok_or_else(|| FrameworkError::internal("image canvas is shorter than its size"))?;
+        data.extend_from_slice(row);
+        if let Some(edge) = row.last_chunk::<4>() {
+            for _ in canvas.width..width {
+                data.extend_from_slice(edge);
+            }
+        }
+    }
+    Ok(VideoFrame {
+        pts: Some(0),
+        planes: vec![VideoPlane { stride, data }],
+    })
+}
+
 /// Reduce a full-colour frame to at most 256 colours so the GIF encoder can
 /// take it.
 ///
@@ -796,6 +918,22 @@ fn quantise_for_gif(canvas: &Canvas) -> Result<VideoFrame, FrameworkError> {
             data: pixels,
         }],
     })
+}
+
+/// Feed a still image's one frame to `encoder` and collect the file it
+/// emits.
+fn encode_frame(
+    encoder: &mut dyn Encoder,
+    frame: VideoFrame,
+    codec: &str,
+) -> Result<Vec<u8>, FrameworkError> {
+    encoder
+        .send_frame(&Frame::Video(frame))
+        .map_err(|e| FrameworkError::internal(format!("image encode failed: {codec}: {e}")))?;
+    encoder
+        .flush()
+        .map_err(|e| FrameworkError::internal(format!("image encode failed: {codec}: {e}")))?;
+    drain(encoder, codec)
 }
 
 /// Collect the encoded file out of an encoder.
@@ -1078,6 +1216,7 @@ mod tests {
             (OutputFormat::Png, &b"\x89PNG"[..]),
             (OutputFormat::Jpeg, &[0xFF, 0xD8, 0xFF][..]),
             (OutputFormat::WebP, &b"RIFF"[..]),
+            (OutputFormat::WebPLossless, &b"RIFF"[..]),
             (OutputFormat::Gif, &b"GIF"[..]),
             (OutputFormat::Bmp, &b"BM"[..]),
         ] {
@@ -1123,6 +1262,94 @@ mod tests {
             .encode(&source, OutputFormat::Gif, 70)
             .expect("quantised gif");
         assert!(out.starts_with(b"GIF"), "expected a GIF file");
+    }
+
+    #[test]
+    fn opacity_is_read_from_every_alpha_byte() {
+        assert!(canvas(3, 2, [10, 20, 30, 255]).is_opaque());
+
+        let mut one_translucent = canvas(3, 2, [10, 20, 30, 255]);
+        one_translucent.pixels[4 * 5 + 3] = 254;
+        assert!(
+            !one_translucent.is_opaque(),
+            "the last pixel alone must be enough to count"
+        );
+    }
+
+    #[test]
+    fn edge_extension_repeats_the_last_column_and_row() {
+        let source = Canvas {
+            width: 3,
+            height: 1,
+            pixels: vec![1, 1, 1, 255, 2, 2, 2, 255, 3, 3, 3, 255],
+        };
+        let frame = edge_extended_frame(&source, 4, 2).expect("extend");
+        let row: [u8; 16] = [1, 1, 1, 255, 2, 2, 2, 255, 3, 3, 3, 255, 3, 3, 3, 255];
+        assert_eq!(frame.planes[0].stride, 16);
+        assert_eq!(frame.planes[0].data, [row, row].concat());
+    }
+
+    #[test]
+    fn an_odd_sized_opaque_canvas_encodes_as_lossy_webp() {
+        // The 4:2:0 converter only takes even sizes; the edge extension is
+        // what lets a 5x3 image reach the lossy encoder at all.
+        let driver = OxideAvImageDriver::new();
+        let out = driver
+            .encode(&canvas(5, 3, [200, 120, 40, 255]), OutputFormat::WebP, 70)
+            .expect("lossy webp");
+        assert!(out.starts_with(b"RIFF"), "expected a WebP file");
+        assert_eq!(&out[12..16], b"VP8 ", "an opaque canvas must encode lossy");
+        assert_eq!(driver.dimensions(&out).expect("decodes"), (5, 3));
+    }
+
+    #[test]
+    fn webp_falls_back_to_lossless_past_the_largest_vp8_frame() {
+        // The decision is tested on the numbers alone, so no canvas of this
+        // size is ever allocated.
+        assert!(
+            webp_is_lossy(16_383, 16_383, true),
+            "the largest VP8 frame must stay lossy"
+        );
+        assert!(
+            !webp_is_lossy(16_384, 1, true),
+            "one column wider than a VP8 frame must be lossless"
+        );
+        assert!(
+            !webp_is_lossy(1, 16_384, true),
+            "one row taller than a VP8 frame must be lossless"
+        );
+        assert!(
+            !webp_is_lossy(1, 1, false),
+            "transparency must be lossless at any size"
+        );
+    }
+
+    #[test]
+    fn a_canvas_with_transparency_keeps_webp_lossless() {
+        let driver = OxideAvImageDriver::new();
+        let mut source = canvas(4, 2, [10, 20, 30, 255]);
+        source.pixels[3] = 0;
+        let out = driver
+            .encode(&source, OutputFormat::WebP, 70)
+            .expect("lossless webp");
+        // VP8L with alpha is written in the extended layout: a VP8X header
+        // chunk first, then the VP8L bitstream.
+        assert_eq!(&out[12..16], b"VP8X");
+        assert!(out.windows(4).any(|chunk| chunk == b"VP8L"));
+        assert!(!out.windows(4).any(|chunk| chunk == b"VP8 "));
+
+        let lossless = driver
+            .encode(
+                &canvas(4, 2, [10, 20, 30, 255]),
+                OutputFormat::WebPLossless,
+                70,
+            )
+            .expect("lossless webp");
+        assert_eq!(
+            &lossless[12..16],
+            b"VP8L",
+            "WebPLossless stays lossless on an opaque canvas"
+        );
     }
 
     #[test]

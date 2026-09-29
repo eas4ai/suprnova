@@ -573,6 +573,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   implements `Default`, so a caller names the fields it has. A caller of
   `render_outgoing` has to build the struct. The framework has one, the job
   that sends a queued mail.
+- **`OutputFormat::WebP` is lossy and honours `quality`, and
+  `OutputFormat::WebPLossless` is new.** WebP was always written lossless, so
+  `.quality(80).format(OutputFormat::WebP)` gave the same file for every
+  quality, and for a photo a larger file than the JPEG it replaced. `WebP` is
+  lossy now, at the quality of the pipeline, which is 70 when none is set. The
+  built-in driver writes it lossless in two cases, because the lossy form of
+  WebP cannot hold the image: when a pixel is not fully opaque, and when a
+  side is longer than 16383 px. `WebPLossless` is always lossless and ignores
+  the quality. Both have the content type `image/webp` and the extension
+  `webp`. The ImageMagick driver writes `WebP` lossy with its alpha channel,
+  and passes `-define webp:lossless=true` for `WebPLossless`. What you have to
+  change: a `match` on `OutputFormat` that names every variant, as a driver of
+  your own has, needs an arm for `WebPLossless`. Code that needs the pixels of
+  a WebP to be exact asks for `WebPLossless`. A WebP source that is resized
+  and not converted is written as `WebP`, so an opaque one is written lossy.
 
 ### Fixed
 
