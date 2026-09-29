@@ -88,6 +88,7 @@ use crate::eloquent::EloquentModel;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::{Builder, IntoColumn, IntoVal, WhereTerm};
 use crate::eloquent::collection::Collection;
+use crate::eloquent::lazy_loading::LazyLoadGuard;
 use crate::eloquent::model::{Model, json_value_to_sea_value};
 use crate::eloquent::relations::pivot_filters::{PivotFilters, pivot_filter_methods};
 use crate::eloquent::relations::{Relation, RelationKind};
@@ -187,6 +188,10 @@ where
     /// all, so an unfiltered relation issues exactly the statements it
     /// issued before pivot filtering existed.
     pivot_filters: PivotFilters,
+    /// The lazy-loading check [`Self::get`] runs before its first query
+    /// ([`Self::first`] goes through it). The mutators do not run it: a
+    /// write is no lazy load. Set by the macro-emitted relation method.
+    lazy_load: LazyLoadGuard,
     /// `PhantomData` carries `L`, `R`, `P` so the [`Relation`] impl
     /// can name `type Parent = L` / `type Target = R` without runtime
     /// fields.
@@ -248,8 +253,18 @@ where
             with_timestamps: false,
             scope_rewrite: None,
             pivot_filters: PivotFilters::default(),
+            lazy_load: LazyLoadGuard::default(),
             _phantom: PhantomData,
         }
+    }
+
+    /// Attach the lazy-loading check of the row this relation was read
+    /// from. Invoked by the macro-emitted relation method; not part of
+    /// the public API.
+    #[doc(hidden)]
+    pub fn __lazy_load(mut self, guard: LazyLoadGuard) -> Self {
+        self.lazy_load = guard;
+        self
     }
 
     /// Declare extra pivot columns to surface on each loaded R via
@@ -619,7 +634,11 @@ where
     /// Two-query strategy: fetch related rows by IN-set on the pivot's
     /// related-FK values (filtered by the parent's id + type), then
     /// fetch pivot rows separately and zip via `(parent_id, related_id)`.
+    ///
+    /// Refused without a query when it is a lazy load that
+    /// [lazy-loading prevention](crate::eloquent::lazy_loading) catches.
     pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
+        self.lazy_load.check()?;
         self.validate_meta()?;
         // Phase 10C audit-fix AF2 - route the pivot-id SELECT through
         // ExecutorChoice so it honors CURRENT_TX. Downstream
@@ -962,6 +981,10 @@ where
     /// mutator to refuse. Empty by default, and an empty set renders no
     /// SQL at all.
     pivot_filters: PivotFilters,
+    /// The lazy-loading check [`Self::get`] runs before its first query
+    /// ([`Self::first`] goes through it). Set by the macro-emitted
+    /// relation method.
+    lazy_load: LazyLoadGuard,
     /// `PhantomData` carries `L`, `R`, `P` so the [`Relation`] impl
     /// can name `type Parent = L` / `type Target = R`.
     #[allow(clippy::type_complexity)]
@@ -1020,8 +1043,18 @@ where
             parent_key: "id".into(),
             scope_rewrite: None,
             pivot_filters: PivotFilters::default(),
+            lazy_load: LazyLoadGuard::default(),
             _phantom: PhantomData,
         }
+    }
+
+    /// Attach the lazy-loading check of the row this relation was read
+    /// from. Invoked by the macro-emitted relation method; not part of
+    /// the public API.
+    #[doc(hidden)]
+    pub fn __lazy_load(mut self, guard: LazyLoadGuard) -> Self {
+        self.lazy_load = guard;
+        self
     }
 
     /// Override the related-side primary-key column name used by the
@@ -1060,7 +1093,11 @@ where
     /// matches the declared target morph type. Query 2: SELECT R rows
     /// by IN-set on those `<morph_name>_id` values. Zip via the pivot's
     /// `<morph_name>_id` column to stamp `__pivot` per R.
+    ///
+    /// Refused without a query when it is a lazy load that
+    /// [lazy-loading prevention](crate::eloquent::lazy_loading) catches.
     pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
+        self.lazy_load.check()?;
         let id_col = format!("{}_id", self.morph_name);
         let type_col = format!("{}_type", self.morph_name);
 

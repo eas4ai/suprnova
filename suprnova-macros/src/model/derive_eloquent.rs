@@ -211,7 +211,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // prevention never refuses. The pivot context is a cheap `Arc`
     // clone and follows the same parity rule.
     let replicate_relations_init = quote! {
-        __eager: self.__eager.clone(),
+        __eager: self.__eager.__clone_for_replica(),
         __pivot: self.__pivot.clone(),
     };
 
@@ -1152,6 +1152,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
             fn reset_primary_key(&mut self) {
                 self.#pk_ident = ::core::default::Default::default();
+            }
+
+            // The mark lazy-loading prevention reads lives in the
+            // row's relation cache, which only the macro can name.
+            fn __mark_from_multi_row_query(&mut self) {
+                self.__eager.__mark_from_multi_row_query();
             }
 
             fn active_model_from_attrs(

@@ -52,6 +52,7 @@ use std::marker::PhantomData;
 use crate::eloquent::EloquentModel;
 use crate::eloquent::builder::{Builder, Direction, IntoColumn, IntoVal};
 use crate::eloquent::collection::Collection;
+use crate::eloquent::lazy_loading::LazyLoadGuard;
 use crate::eloquent::model::Model;
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::error::FrameworkError;
@@ -117,6 +118,9 @@ where
     /// `<name>_id = <parent_id>` AND `<name>_type = <morph_type>`
     /// applied at construction.
     inner: Builder<R>,
+    /// The lazy-loading check [`Self::first`] and [`Self::get`] run
+    /// before their query. Set by the macro-emitted relation method.
+    lazy_load: LazyLoadGuard,
     /// PhantomData carries the parent type so the [`Relation`] impl
     /// can name `type Parent = L` without a runtime field.
     _phantom: PhantomData<fn() -> L>,
@@ -169,8 +173,18 @@ where
             morph_name,
             morph_type_value,
             inner,
+            lazy_load: LazyLoadGuard::default(),
             _phantom: PhantomData,
         }
+    }
+
+    /// Attach the lazy-loading check of the row this relation was read
+    /// from. Invoked by the macro-emitted relation method; not part of
+    /// the public API.
+    #[doc(hidden)]
+    pub fn __lazy_load(mut self, guard: LazyLoadGuard) -> Self {
+        self.lazy_load = guard;
+        self
     }
 
     /// Chainable `WHERE col = val` on the inner builder. Same shape
@@ -215,7 +229,11 @@ where
     }
 
     /// Execute and return the first matching child row.
+    ///
+    /// Refused without a query when it is a lazy load that
+    /// [lazy-loading prevention](crate::eloquent::lazy_loading) catches.
     pub async fn first(self) -> Result<Option<R>, FrameworkError> {
+        self.lazy_load.check()?;
         self.inner.first().await
     }
 
@@ -225,6 +243,7 @@ where
     /// [`HasMany::get`](super::HasMany::get) for return-type
     /// rationale. Checked for lazy loading as [`Self::first`] is.
     pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
+        self.lazy_load.check()?;
         self.inner.get().await
     }
 
@@ -374,6 +393,16 @@ where
         Self {
             inner: MorphMany::__new(parent_key_value, morph_name, morph_type_value),
         }
+    }
+
+    /// Attach the lazy-loading check of the row this relation was read
+    /// from. Held by the inner relation, whose read [`Self::first`] goes
+    /// through. Invoked by the macro-emitted relation method; not part
+    /// of the public API.
+    #[doc(hidden)]
+    pub fn __lazy_load(mut self, guard: LazyLoadGuard) -> Self {
+        self.inner = self.inner.__lazy_load(guard);
+        self
     }
 
     /// Chainable `WHERE col = val` on the inner builder.

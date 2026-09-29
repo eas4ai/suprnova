@@ -19,6 +19,16 @@
 //! (the `ClonedBox` struct) so cloning a model also clones any rows
 //! the eager loader had attached. This matches Laravel's behaviour:
 //! `clone $user` preserves `$user->posts`.
+//!
+//! ## Where the model came from
+//!
+//! Beside the relations the cache records whether its model came out of
+//! a query that returned more than one row, the mark lazy-loading
+//! prevention reads (see [`crate::eloquent::lazy_loading`]). The mark is
+//! a `bool`, so it costs a model no allocation. The `__eager` field is
+//! `#[serde(skip)]`, so the mark is never serialised, and `Debug` shows
+//! the relations only. A clone keeps the mark; a replica, which is a new
+//! model built in the process, does not.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -34,6 +44,9 @@ use std::fmt;
 #[derive(Default)]
 pub struct EagerLoadCache {
     rows: HashMap<String, RelationCell>,
+    /// Whether the model came out of a query that returned more than
+    /// one row. Set once, by the read path that hydrated the model.
+    from_multi_row_query: bool,
 }
 
 /// Internal storage variant. One per relation kind plus a generic
@@ -59,12 +72,62 @@ impl EagerLoadCache {
     pub fn new() -> Self {
         Self {
             rows: HashMap::new(),
+            from_multi_row_query: false,
         }
     }
 
     /// Whether this cache has a value for the given relation name.
     pub fn has(&self, name: &str) -> bool {
         self.rows.contains_key(name)
+    }
+
+    /// Whether the rows of the named relation are loaded: a `Many` or a
+    /// `One` cell. A `with_count` count is stored under the relation's
+    /// name too, but it loads no row, so it does not count here.
+    pub(crate) fn has_rows(&self, name: &str) -> bool {
+        matches!(
+            self.rows.get(name),
+            Some(RelationCell::Many(_) | RelationCell::One(_))
+        )
+    }
+
+    /// Record that the model came out of a query that returned more
+    /// than one row. Called through `Model::__mark_from_multi_row_query`,
+    /// which the `#[suprnova::model]` macro overrides.
+    ///
+    /// **Not part of the public API.** It is `pub` because the macro
+    /// emits the call.
+    #[doc(hidden)]
+    pub fn __mark_from_multi_row_query(&mut self) {
+        self.from_multi_row_query = true;
+    }
+
+    /// Whether the model came out of a query that returned more than
+    /// one row.
+    pub(crate) fn is_from_multi_row_query(&self) -> bool {
+        self.from_multi_row_query
+    }
+
+    /// A copy of the loaded relations for a replica of the model. The
+    /// replica is a new model built in the process, so it does not carry
+    /// the mark of the query its source came from.
+    ///
+    /// **Not part of the public API.** It is `pub` because the
+    /// `replicate_with` the macro emits calls it.
+    #[doc(hidden)]
+    pub fn __clone_for_replica(&self) -> Self {
+        Self {
+            rows: self.clone_rows(),
+            from_multi_row_query: false,
+        }
+    }
+
+    /// A deep copy of every cell, through each cell's clone trampoline.
+    fn clone_rows(&self) -> HashMap<String, RelationCell> {
+        self.rows
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone_cell()))
+            .collect()
     }
 
     /// Store an eager-loaded HasMany / BelongsToMany row vector.
@@ -238,11 +301,8 @@ impl EagerLoadCache {
 impl Clone for EagerLoadCache {
     fn clone(&self) -> Self {
         Self {
-            rows: self
-                .rows
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone_cell()))
-                .collect(),
+            rows: self.clone_rows(),
+            from_multi_row_query: self.from_multi_row_query,
         }
     }
 }

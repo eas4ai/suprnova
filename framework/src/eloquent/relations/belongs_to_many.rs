@@ -63,6 +63,7 @@ use crate::eloquent::EloquentModel;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::{Builder, IntoColumn, IntoVal, WhereTerm};
 use crate::eloquent::collection::Collection;
+use crate::eloquent::lazy_loading::LazyLoadGuard;
 use crate::eloquent::model::{Model, json_value_to_sea_value};
 use crate::eloquent::relations::pivot_filters::{PivotFilters, pivot_filter_methods};
 use crate::eloquent::relations::{Relation, RelationKind};
@@ -160,6 +161,10 @@ where
     /// all, so an unfiltered relation issues exactly the statements it
     /// issued before pivot filtering existed.
     pivot_filters: PivotFilters,
+    /// The lazy-loading check [`Self::get`] runs before its first query
+    /// ([`Self::first`] goes through it). The mutators do not run it: a
+    /// write is no lazy load. Set by the macro-emitted relation method.
+    lazy_load: LazyLoadGuard,
     /// PhantomData carries `L`, `R`, `P` so the [`Relation`] impl can
     /// name `type Parent = L` / `type Target = R` without runtime
     /// fields. `fn() -> (L, R, P)` keeps the type covariant +
@@ -225,8 +230,18 @@ where
             with_timestamps: false,
             scope_rewrite: None,
             pivot_filters: PivotFilters::default(),
+            lazy_load: LazyLoadGuard::default(),
             _phantom: PhantomData,
         }
+    }
+
+    /// Attach the lazy-loading check of the row this relation was read
+    /// from. Invoked by the macro-emitted relation method; not part of
+    /// the public API.
+    #[doc(hidden)]
+    pub fn __lazy_load(mut self, guard: LazyLoadGuard) -> Self {
+        self.lazy_load = guard;
+        self
     }
 
     /// Declare extra pivot columns to surface on each loaded R via
@@ -670,7 +685,11 @@ where
     /// SeaORM's deserialisation path, which is not first-class on the
     /// `FromQueryResult` derive. Two homogeneous queries each round-
     /// trip the rows cleanly through each model's own deserialiser.
+    ///
+    /// Refused without a query when it is a lazy load that
+    /// [lazy-loading prevention](crate::eloquent::lazy_loading) catches.
     pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
+        self.lazy_load.check()?;
         self.validate_meta()?;
         // Route the pivot-id SELECT through ExecutorChoice so it
         // honours CURRENT_TX and the parent model's

@@ -69,6 +69,7 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use crate::database::transaction::ExecutorChoice;
 use crate::eloquent::EloquentModel;
 use crate::eloquent::collection::Collection;
+use crate::eloquent::lazy_loading::LazyLoadGuard;
 use crate::eloquent::model::{Model, json_value_to_sea_value};
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::error::FrameworkError;
@@ -119,6 +120,10 @@ where
     /// the `INNER JOIN ... ON C.{second_key} = B.{second_local_key}`
     /// predicate.
     second_local_key: String,
+    /// The lazy-loading check [`Self::get`] runs before its query
+    /// ([`Self::first`] goes through it). Set by the macro-emitted
+    /// relation method.
+    lazy_load: LazyLoadGuard,
     /// PhantomData carries `A`, `B`, `C` so the [`Relation`] impl can
     /// name `type Parent = A` / `type Target = C` without runtime
     /// fields. `fn() -> (A, B, C)` keeps the type covariant +
@@ -165,8 +170,18 @@ where
             second_key,
             local_key: "id".into(),
             second_local_key: "id".into(),
+            lazy_load: LazyLoadGuard::default(),
             _phantom: PhantomData,
         }
+    }
+
+    /// Attach the lazy-loading check of the row this relation was read
+    /// from. Invoked by the macro-emitted relation method; not part of
+    /// the public API.
+    #[doc(hidden)]
+    pub fn __lazy_load(mut self, guard: LazyLoadGuard) -> Self {
+        self.lazy_load = guard;
+        self
     }
 
     /// Override the column on `B` pointing at `A`.
@@ -229,7 +244,11 @@ where
     /// so the query honours an ambient `CURRENT_TX`, the final
     /// target's `#[model(connection = "...")]` default, and the
     /// read-replica auto-routing chain.
+    ///
+    /// Refused without a query when it is a lazy load that
+    /// [lazy-loading prevention](crate::eloquent::lazy_loading) catches.
     pub async fn get(self) -> Result<Collection<C>, FrameworkError> {
+        self.lazy_load.check()?;
         self.validate_meta()?;
         let exec = ExecutorChoice::resolve_read(
             None,
@@ -250,9 +269,11 @@ where
             ExecutorChoice::Pool(c, _) => find.all(c.inner()).await,
         }
         .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(Collection::from_vec(
-            rows.into_iter().map(C::from).collect(),
-        ))
+        let mut rows: Vec<C> = rows.into_iter().map(C::from).collect();
+        // The JOIN hydrates here rather than through `Builder::get`, so
+        // it sets the mark of a multi-row query itself.
+        C::__mark_query_result(&mut rows);
+        Ok(Collection::from_vec(rows))
     }
 
     /// Convenience over `.get()` - drop everything after the first row.
@@ -448,6 +469,16 @@ where
         Self {
             inner: HasManyThrough::__new(parent_key_value, first_key, second_key),
         }
+    }
+
+    /// Attach the lazy-loading check of the row this relation was read
+    /// from. Held by the inner relation, whose read both [`Self::first`]
+    /// and [`Self::get`] go through. Invoked by the macro-emitted
+    /// relation method; not part of the public API.
+    #[doc(hidden)]
+    pub fn __lazy_load(mut self, guard: LazyLoadGuard) -> Self {
+        self.inner = self.inner.__lazy_load(guard);
+        self
     }
 
     /// Override the column on `B` pointing at `A`.

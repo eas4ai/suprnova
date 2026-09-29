@@ -27,6 +27,7 @@ use std::marker::PhantomData;
 use crate::eloquent::EloquentModel;
 use crate::eloquent::builder::{Builder, IntoColumn, IntoVal};
 use crate::eloquent::collection::Collection;
+use crate::eloquent::lazy_loading::LazyLoadGuard;
 use crate::eloquent::model::Model;
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::error::FrameworkError;
@@ -74,6 +75,9 @@ where
     parent_key: String,
     /// Pre-filtered builder against the child table.
     inner: Builder<R>,
+    /// The lazy-loading check [`Self::first`] and [`Self::get`] run
+    /// before their query. Set by the macro-emitted relation method.
+    lazy_load: LazyLoadGuard,
     /// PhantomData carries the parent type so the [`Relation`] impl
     /// can name `type Parent = L` without a runtime field. `fn() -> L`
     /// keeps the type covariant + `Send + Sync` regardless of `L`.
@@ -125,8 +129,18 @@ where
             foreign_key,
             parent_key,
             inner,
+            lazy_load: LazyLoadGuard::default(),
             _phantom: PhantomData,
         }
+    }
+
+    /// Attach the lazy-loading check of the row this relation was read
+    /// from. Invoked by the macro-emitted relation method; not part of
+    /// the public API.
+    #[doc(hidden)]
+    pub fn __lazy_load(mut self, guard: LazyLoadGuard) -> Self {
+        self.lazy_load = guard;
+        self
     }
 
     /// Override the FK column post-construction. Rare in practice
@@ -167,7 +181,11 @@ where
     /// Execute the inner builder and return the first matching row.
     /// Returns `None` when the child table has no row pointing at
     /// this parent.
+    ///
+    /// Refused without a query when it is a lazy load that
+    /// [lazy-loading prevention](crate::eloquent::lazy_loading) catches.
     pub async fn first(self) -> Result<Option<R>, FrameworkError> {
+        self.lazy_load.check()?;
         self.inner.first().await
     }
 
@@ -178,8 +196,9 @@ where
     ///
     /// Returns a [`Collection<R>`](crate::eloquent::Collection); see
     /// [`HasMany::get`](super::HasMany::get) for return-type
-    /// rationale.
+    /// rationale. Checked for lazy loading as [`Self::first`] is.
     pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
+        self.lazy_load.check()?;
         self.inner.get().await
     }
 }

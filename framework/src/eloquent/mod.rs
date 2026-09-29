@@ -17,6 +17,7 @@ pub mod console;
 pub mod events;
 pub mod fillable;
 pub mod lazy;
+pub mod lazy_loading;
 pub mod model;
 pub mod observers;
 pub mod prunable;
@@ -41,6 +42,10 @@ pub use fillable::{
     unguarded,
 };
 pub use lazy::LazyCollection;
+pub use lazy_loading::{
+    LazyLoadingViolation, clear_lazy_loading_violation_handler, handle_lazy_loading_violation,
+    prevent_lazy_loading, preventing_lazy_loading,
+};
 pub use model::{FirstOrCreate, Model, ReplicateExt};
 pub use prunable::{
     MassPrunable, Prunable, PrunerEntry, PrunerFn, prune_all, prune_all_dry, prune_one, pruners,

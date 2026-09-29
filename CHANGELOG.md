@@ -548,6 +548,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `Custom(String)` and is no longer `Copy`, so code that copies a driver
   borrows it or clones it, and a `match` that names every variant has one more
   to name.
+- **`suprnova::eloquent::prevent_lazy_loading(true)` refuses a relation read
+  that runs one query for each row of a list.** A template that reads
+  `post.author()` for each of 50 posts runs 51 queries, and nothing said so
+  until the load of production. With the switch on, a relation read on a model
+  that came out of a query that returned more than one row, when the relation
+  was not loaded with `with(..)`, `load(..)` or `load_missing(..)`, runs no
+  query and returns an error that names the model and the relation. A model
+  from `find`, `first`, a `get` that returned one row, or `create` reads its
+  relations as before, as in Laravel. `count()` of a relation is not refused.
+  `handle_lazy_loading_violation(handler)` registers one handler for the
+  process, which gets a `LazyLoadingViolation` with the names of the model and
+  the relation; with a handler the read goes on, so a staging system can log
+  the reads and keep serving. `clear_lazy_loading_violation_handler()` removes
+  it, and `preventing_lazy_loading()` reads the switch. The switch is off by
+  default, and with it off every read behaves as before. Turn it on in the
+  bootstrap of the application outside production.
 
 ### Changed
 

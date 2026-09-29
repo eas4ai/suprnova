@@ -1461,6 +1461,22 @@ fn field_is_optional(input: &ModelInput, field_name: &str) -> bool {
     false
 }
 
+/// The lazy-loading check a relation method hands the relation it
+/// builds, over the row's relation cache. The read of every kind
+/// (`get` and `first`, and `get` of a `MorphTo` fetch helper) runs it
+/// before its query, so this one expression is where the macro wires
+/// lazy-loading prevention into every relation method.
+fn emit_lazy_load_guard(parent_name: &str, rel: &RelationDecl) -> TokenStream {
+    let name_str = rel.name.to_string();
+    quote! {
+        ::suprnova::eloquent::lazy_loading::LazyLoadGuard::for_relation(
+            &self.__eager,
+            #parent_name,
+            #name_str,
+        )
+    }
+}
+
 /// Emit the relation method (`fn profile(&self) -> HasOne<Self, Profile>`)
 /// per declared HasOne / BelongsTo. Other kinds will land in T3-T7;
 /// T2 returns an empty stream for them so the macro compiles for
@@ -1473,6 +1489,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
     let pk_ident = quote::format_ident!("{pk_name}");
     let method_ident = &rel.name;
     let target_ty = &rel.target;
+    let lazy_load = emit_lazy_load_guard(&parent_name, rel);
 
     match rel.kind {
         RelationKindAttr::HasOne => {
@@ -1498,6 +1515,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                             ::std::string::String::from(#fk),
                             ::std::string::String::from(#lk),
                         )
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })
@@ -1558,6 +1576,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                             ::std::string::String::from(#fk),
                             ::std::string::String::from(#owner_key),
                         )#with_default_chain
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })
@@ -1586,6 +1605,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                             ::std::string::String::from(#fk),
                             ::std::string::String::from(#lk),
                         )
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })
@@ -1676,6 +1696,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                         #related_key_chain
                         #with_pivot_chain
                         #with_timestamps_chain
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })
@@ -1770,6 +1791,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                         )
                         #local_key_chain
                         #second_local_key_chain
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })
@@ -1823,6 +1845,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                             ::std::string::String::from(#morph_name),
                             ::std::string::String::from(#morph_type_value),
                         )
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })
@@ -2012,6 +2035,9 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                 pub struct #fetch_ident {
                     morph_id: ::suprnova::serde_json::Value,
                     morph_type: ::std::string::String,
+                    /// The lazy-loading check `get()` runs before its
+                    /// query.
+                    lazy_load: ::suprnova::eloquent::lazy_loading::LazyLoadGuard,
                 }
 
                 impl #fetch_ident {
@@ -2099,6 +2125,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                     pub async fn get(
                         self,
                     ) -> ::core::result::Result<#enum_ident, ::suprnova::FrameworkError> {
+                        self.lazy_load.check()?;
                         if self.morph_id.is_null() {
                             return ::core::result::Result::Ok(#enum_ident::Unknown(
                                 self.morph_type,
@@ -2142,6 +2169,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                                 ) => s,
                                 _ => ::std::string::String::new(),
                             },
+                            lazy_load: #lazy_load,
                         }
                     }
                 }
@@ -2230,6 +2258,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                         #related_key_chain
                         #with_pivot_chain
                         #with_timestamps_chain
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })
@@ -2305,6 +2334,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                         )
                         #local_key_chain
                         #related_key_chain
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })

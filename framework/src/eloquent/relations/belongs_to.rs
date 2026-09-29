@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use crate::eloquent::EloquentModel;
 use crate::eloquent::builder::Builder;
+use crate::eloquent::lazy_loading::LazyLoadGuard;
 use crate::eloquent::model::Model;
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::error::FrameworkError;
@@ -93,6 +94,9 @@ where
     /// [`Self::__default_fn`] for that dispatcher; not part of the
     /// public API.
     default_fn: Option<Arc<dyn Fn() -> P + Send + Sync>>,
+    /// The lazy-loading check [`Self::first`] runs before its query.
+    /// Set by the macro-emitted relation method.
+    lazy_load: LazyLoadGuard,
     /// PhantomData for the child type - see `HasOne::_phantom`.
     _phantom: PhantomData<fn() -> C>,
 }
@@ -135,8 +139,18 @@ where
             owner_key,
             scope_rewrite: None,
             default_fn: None,
+            lazy_load: LazyLoadGuard::default(),
             _phantom: PhantomData,
         }
+    }
+
+    /// Attach the lazy-loading check of the row this relation was read
+    /// from. Invoked by the macro-emitted relation method; not part of
+    /// the public API.
+    #[doc(hidden)]
+    pub fn __lazy_load(mut self, guard: LazyLoadGuard) -> Self {
+        self.lazy_load = guard;
+        self
     }
 
     /// Override the FK column on the child post-construction.
@@ -179,7 +193,12 @@ where
     /// implemented via the `__apply_soft_delete_scope` helper that's
     /// only present in the `P: SoftDeletes` impl block - calls
     /// monomorphise away to a no-op for non-soft-delete parents.
+    ///
+    /// Refused without a query when it is a lazy load that
+    /// [lazy-loading prevention](crate::eloquent::lazy_loading) catches,
+    /// whether or not the foreign key is null, as in Laravel.
     pub async fn first(self) -> Result<Option<P>, FrameworkError> {
+        self.lazy_load.check()?;
         let key_value = match &self.parent_key_value {
             None => {
                 // FK is null - short-circuit to the default if set.

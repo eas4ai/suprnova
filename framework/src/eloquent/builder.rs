@@ -3807,6 +3807,9 @@ where
             }
             buf
         };
+        // Lazy-loading prevention reads this mark. Every paginator, chunk
+        // walk and eager load hydrates through here, so they all set it.
+        M::__mark_query_result(&mut out);
 
         // T9 - eager loading. After the base SELECT lands, the
         // orchestrator walks each recorded `EagerSpec` and dispatches
@@ -4463,6 +4466,12 @@ where
                 "Builder::each does not support eager loading (`.with(...)`); apply `.with(...)` inside the per-row closure instead",
             ));
         }
+        // Lazy-loading prevention refuses a relation read on a row of a
+        // multi-row read, and this walk is one query per row. The row
+        // count is asked once, and only while the switch is on, so a walk
+        // with the switch off runs the queries it always ran.
+        let mark_rows =
+            crate::eloquent::preventing_lazy_loading() && self.clone().count().await? > 1;
         let mut offset: u64 = 0;
         loop {
             let q = self.clone().limit(1).offset(offset);
@@ -4471,7 +4480,10 @@ where
                 break;
             }
             let count = batch.len() as u64;
-            for row in batch.into_vec() {
+            for mut row in batch.into_vec() {
+                if mark_rows {
+                    row.__mark_from_multi_row_query();
+                }
                 f(row).await?;
             }
             if count < 1 {

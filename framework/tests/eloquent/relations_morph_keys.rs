@@ -244,6 +244,10 @@ async fn integer_keys_resolve_eagerly_as_they_do_lazily() {
 
 #[tokio::test]
 async fn string_keys_resolve_lazily_eagerly_and_from_the_parent() {
+    // The lazy reads below are on notes of a three-row query, which
+    // lazy-loading prevention refuses; the guard keeps this test from
+    // running while a test of `lazy_loading.rs` has it on.
+    let _switch = crate::lazy_loading::SwitchGuard::off();
     let _db = fixture().await;
     let post = MkStrPost::create(attrs! { id: "post-a", title: "a" })
         .await

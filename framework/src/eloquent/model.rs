@@ -212,6 +212,33 @@ where
         ::core::option::Option::None
     }
 
+    /// Record that this row came out of a query that returned more than
+    /// one row: the mark lazy-loading prevention reads (see
+    /// [`crate::eloquent::lazy_loading`]).
+    ///
+    /// The `#[suprnova::model]` macro overrides it to set the mark in
+    /// the row's relation cache. The default does nothing: a model
+    /// without that cache has no relation methods to refuse.
+    ///
+    /// **Not part of the public API.** It is `pub` because the macro
+    /// emits the override.
+    #[doc(hidden)]
+    fn __mark_from_multi_row_query(&mut self) {}
+
+    /// Mark every row of one query's result when the query returned more
+    /// than one row. The one place that rule lives: every read path that
+    /// hydrates several rows at once calls it with the rows it hydrated.
+    ///
+    /// **Not part of the public API.**
+    #[doc(hidden)]
+    fn __mark_query_result(rows: &mut [Self]) {
+        if rows.len() > 1 {
+            for row in rows {
+                row.__mark_from_multi_row_query();
+            }
+        }
+    }
+
     /// Look up a row by primary key. `None` if no row matches.
     ///
     /// The trait default uses SeaORM's `find_by_id` directly - no
@@ -352,6 +379,7 @@ where
             .into_iter()
             .filter_map(|id| by_id.remove(&id))
             .collect();
+        Self::__mark_query_result(&mut ordered);
         if crate::render_cache::collector::is_active() {
             for row in &ordered {
                 crate::render_cache::collector::observe_record_read_json(
@@ -406,6 +434,7 @@ where
             .into_iter()
             .map(Self::try_from_storage)
             .collect::<Result<Vec<_>, _>>()?;
+        Self::__mark_query_result(&mut out);
         for row in &out {
             Self::__dispatch_retrieved(row).await?;
         }
@@ -1330,10 +1359,13 @@ where
     ///
     /// Eager-loaded relations and pivot context are preserved on the
     /// replica (Laravel parity: `clone $user` retains `$user->posts`).
-    /// The macro-emitted `replicate_with` clones the source's
-    /// `__eager` cache via `EagerLoadCache::clone` - each cell
-    /// carries a clone trampoline so the replica's loaded rows are
-    /// independent of the source's - and `Arc`-clones the pivot slot.
+    /// The macro-emitted `replicate_with` copies the relations of the
+    /// source's `__eager` cache - each cell carries a clone trampoline
+    /// so the replica's loaded rows are independent of the source's -
+    /// and `Arc`-clones the pivot slot. The copy leaves out the mark of
+    /// a multi-row query: the replica is built in the process, and
+    /// [lazy-loading prevention](crate::eloquent::lazy_loading) never
+    /// refuses a relation read on such a model.
     /// Use [`Self::replicate_except`] if a specific relation should
     /// be dropped on the replica (column names only; relation cache
     /// keys are out of scope for the `except` filter).
