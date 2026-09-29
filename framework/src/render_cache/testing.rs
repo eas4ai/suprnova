@@ -162,7 +162,7 @@ impl RenderCacheProbe {
     /// returns for that user.
     ///
     /// It changes the key only on a route that varies on
-    /// [`VarianceDimension::Principal`](super::VarianceDimension::Principal).
+    /// [`VarianceDimension::Principal`].
     /// Without it the probe derives the key an anonymous request derives.
     ///
     /// # Example
@@ -269,7 +269,7 @@ impl RenderCacheProbe {
     ///
     /// The probe has to be told the login, tenant, locale and host of the
     /// dimensions the route varies on: see the table on
-    /// [`RenderCacheProbe`](crate::render_cache::testing::RenderCacheProbe).
+    /// [`RenderCacheProbe`].
     /// A key derived without what the route varies on is a key nothing was
     /// stored under, so a probe of it reads `None` whether or not the page
     /// was cached.
