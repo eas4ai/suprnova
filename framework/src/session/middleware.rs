@@ -50,6 +50,23 @@ impl Drop for PendingOpaqueCleanupOwner {
 // middleware needs to read the saved session back out *after* the
 // scope returns. Closures passed to `session_mut` do not await, so a
 // synchronous `std::sync::Mutex` is sound - guards drop before `.await`.
+//
+// Every lock of this module is taken with `crate::lock::recover`, and a
+// poisoned lock is no panic. A lock that refused after a panic would fail
+// the clean-up task that shares the list of pending sessions, and a
+// second panic while the first one unwinds ends the process.
+//
+// The three lists are pushed to and drained by code of this crate alone,
+// and none of it can panic between two writes, so a list is whole after
+// any panic.
+//
+// The session is the exception: a closure of `session_mut` is code of the
+// application and runs under the guard. When it panics and a panic
+// boundary below this middleware catches it (a Live action, a listener
+// that runs in the request), the request goes on with a session that can
+// be between two writes of that closure. Reads go on, so that the code
+// that answers for the panic can run. The middleware does not store such
+// a session: it answers 500 and leaves the stored session as it was.
 tokio::task_local! {
     pub(crate) static SESSION_CONTEXT: Arc<Mutex<Option<SessionData>>>;
     /// Active request session configuration. Auth flows use this to build
@@ -82,7 +99,7 @@ pub(crate) fn register_pending_opaque_session(
 ) -> Result<(), FrameworkError> {
     PENDING_OPAQUE_SESSION
         .try_with(|slot| {
-            let mut slot = slot.lock().unwrap();
+            let mut slot = crate::lock::recover(slot);
             if slot
                 .iter()
                 .any(|existing| existing.session_id == pending.session_id)
@@ -109,7 +126,7 @@ pub(crate) fn confirm_pending_opaque_session_retired(
     pending: &Arc<Mutex<Vec<PendingOpaqueSession>>>,
     session_id: &str,
 ) -> bool {
-    let mut pending = pending.lock().unwrap();
+    let mut pending = crate::lock::recover(pending);
     let Some(index) = pending
         .iter()
         .position(|candidate| candidate.session_id == session_id)
@@ -124,7 +141,7 @@ fn release_committed_opaque_sessions(
     pending: &Arc<Mutex<Vec<PendingOpaqueSession>>>,
     session: &SessionData,
 ) {
-    pending.lock().unwrap().retain(|candidate| {
+    crate::lock::recover(pending).retain(|candidate| {
         session
             .auth_guard_magnetar_binding(&candidate.guard_name)
             .as_ref()
@@ -141,9 +158,7 @@ pub(crate) fn push_pending_remember_revocation(
 ) -> bool {
     PENDING_REMEMBER_REVOCATIONS
         .try_with(|slot| {
-            slot.lock()
-                .unwrap()
-                .push((guard_name.to_owned(), user_id, selector));
+            crate::lock::recover(slot).push((guard_name.to_owned(), user_id, selector));
         })
         .is_ok()
 }
@@ -151,7 +166,7 @@ pub(crate) fn push_pending_remember_revocation(
 /// Remove every exact remember credential queued in the active request.
 pub(crate) fn take_pending_remember_revocations() -> Option<Vec<PendingRememberRevocation>> {
     PENDING_REMEMBER_REVOCATIONS
-        .try_with(|slot| std::mem::take(&mut *slot.lock().unwrap()))
+        .try_with(|slot| std::mem::take(&mut *crate::lock::recover(slot)))
         .ok()
 }
 
@@ -162,7 +177,7 @@ pub(crate) fn restore_pending_remember_revocations(
 ) -> bool {
     PENDING_REMEMBER_REVOCATIONS
         .try_with(|slot| {
-            let mut queued = slot.lock().unwrap();
+            let mut queued = crate::lock::recover(slot);
             revocations.append(&mut queued);
             *queued = revocations;
         })
@@ -214,7 +229,7 @@ pub(super) async fn session_bind_scopes_for_test<F: std::future::Future>(
 pub(crate) fn push_pending_cookie(cookie: Cookie) -> bool {
     PENDING_COOKIES
         .try_with(|slot| {
-            slot.lock().unwrap().push(cookie);
+            crate::lock::recover(slot).push(cookie);
         })
         .is_ok()
 }
@@ -242,7 +257,7 @@ pub(crate) fn queue_cookie(cookie: Cookie) {
 pub(crate) fn replace_pending_cookie(cookie: Cookie) -> bool {
     PENDING_COOKIES
         .try_with(|slot| {
-            let mut guard = slot.lock().unwrap();
+            let mut guard = crate::lock::recover(slot);
             guard.retain(|c| c.name() != cookie.name());
             guard.push(cookie);
         })
@@ -256,8 +271,7 @@ pub(crate) fn replace_pending_cookie(cookie: Cookie) -> bool {
 pub(crate) fn queued_cookie(name: &str) -> Option<Cookie> {
     PENDING_COOKIES
         .try_with(|slot| {
-            slot.lock()
-                .unwrap()
+            crate::lock::recover(slot)
                 .iter()
                 .find(|c| c.name() == name)
                 .cloned()
@@ -270,7 +284,7 @@ pub(crate) fn queued_cookie(name: &str) -> Option<Cookie> {
 /// queued under that name, or outside a request scope.
 pub(crate) fn unqueue_cookie(name: &str) {
     let _ = PENDING_COOKIES.try_with(|slot| {
-        slot.lock().unwrap().retain(|c| c.name() != name);
+        crate::lock::recover(slot).retain(|c| c.name() != name);
     });
 }
 
@@ -410,7 +424,7 @@ pub(crate) fn session_scope_installed() -> bool {
 pub fn session() -> Option<SessionData> {
     crate::render_cache::collector::observe_session_read();
     SESSION_CONTEXT
-        .try_with(|slot| slot.lock().unwrap().clone())
+        .try_with(|slot| crate::lock::recover(slot).clone())
         .ok()
         .flatten()
 }
@@ -439,7 +453,7 @@ where
     // read is not.
     crate::render_cache::collector::observe_session_read();
     SESSION_CONTEXT
-        .try_with(|slot| slot.lock().unwrap().as_mut().map(f))
+        .try_with(|slot| crate::lock::recover(slot).as_mut().map(f))
         .ok()
         .flatten()
 }
@@ -802,7 +816,7 @@ async fn retire_unpersisted_opaque_session(
     pending: &Arc<Mutex<Vec<PendingOpaqueSession>>>,
     reason: &'static str,
 ) {
-    let snapshot = pending.lock().unwrap().clone();
+    let snapshot = crate::lock::recover(pending).clone();
     retire_pending_opaque_session_snapshot(engine, pending, snapshot, reason).await;
 }
 
@@ -844,8 +858,8 @@ async fn retire_superseded_opaque_sessions(
     session: &Arc<Mutex<Option<SessionData>>>,
 ) {
     let superseded = {
-        let session = session.lock().unwrap();
-        let pending = pending.lock().unwrap();
+        let session = crate::lock::recover(session);
+        let pending = crate::lock::recover(pending);
         let mut superseded = Vec::new();
         for candidate in pending.iter() {
             let is_current = session
@@ -1279,9 +1293,7 @@ impl SessionMiddleware {
                 DecodedRememberCarrier::UnknownVersion => None,
                 DecodedRememberCarrier::Malformed => {
                     crate::auth::request_state::clear_active_remember_carrier();
-                    pending
-                        .lock()
-                        .unwrap()
+                    crate::lock::recover(&pending)
                         .push(create_forget_remember_cookie(&self.config));
                     None
                 }
@@ -1325,7 +1337,7 @@ impl SessionMiddleware {
                                       let user_id = outcome.session.session.user_id.to_string();
                                       let opaque_session_id = outcome.session.session_id.clone();
                                       let binding = outcome.session.web_binding.clone();
-                                      pending_opaque_session.lock().unwrap().push(
+                                      crate::lock::recover(&pending_opaque_session).push(
                                           PendingOpaqueSession {
                                               guard_name: guard_name.clone(),
                                               session_id: opaque_session_id.clone(),
@@ -1416,7 +1428,7 @@ impl SessionMiddleware {
                                     &guard_name,
                                     true,
                                   );
-                                  pending.lock().unwrap().push(cookie);
+                                  crate::lock::recover(&pending).push(cookie);
                               }
                               Ok(crate::magnetar_integration::engine::MagnetarRememberSignInAttempt::RotationCommitted {
                                   user_id,
@@ -1483,7 +1495,7 @@ impl SessionMiddleware {
                                               &user_id,
                                               &selector,
                                           );
-                                          pending.lock().unwrap().push(cookie);
+                                          crate::lock::recover(&pending).push(cookie);
                                           tracing::warn!(
                                               %error,
                                               "Magnetar remember sign-in will retry with the rotated credential"
@@ -1505,9 +1517,7 @@ impl SessionMiddleware {
                                                   );
                                               }
                                             crate::auth::request_state::clear_active_remember_carrier();
-                                          pending
-                                              .lock()
-                                              .unwrap()
+                                          crate::lock::recover(&pending)
                                               .push(create_forget_remember_cookie(&self.config));
                                           tracing::warn!(
                                               %error,
@@ -1528,9 +1538,7 @@ impl SessionMiddleware {
                                 | magnetar::Error::Conflict { .. },
                             ) => {
                                 crate::auth::request_state::clear_active_remember_carrier();
-                                pending
-                                    .lock()
-                                    .unwrap()
+                                crate::lock::recover(&pending)
                                     .push(create_forget_remember_cookie(&self.config));
                             }
                             Err(error) => tracing::warn!(
@@ -1571,13 +1579,11 @@ impl SessionMiddleware {
                                     &guard_name,
                                     true,
                                 );
-                                pending.lock().unwrap().push(cookie);
+                                crate::lock::recover(&pending).push(cookie);
                             }
                             Ok(None) => {
                                 crate::auth::request_state::clear_active_remember_carrier();
-                                pending
-                                    .lock()
-                                    .unwrap()
+                                crate::lock::recover(&pending)
                                     .push(create_forget_remember_cookie(&self.config));
                             }
                             Err(error) => tracing::warn!(
@@ -1655,7 +1661,7 @@ impl SessionMiddleware {
         .await;
 
         let pending_revocations =
-            std::mem::take(&mut *pending_remember_revocations.lock().unwrap());
+            std::mem::take(&mut *crate::lock::recover(&pending_remember_revocations));
         for (guard_name, user_id, selector) in pending_revocations {
             if crate::auth::Auth::revoke_remember_selector(&guard_name, &user_id, &selector)
                 .await
@@ -1673,7 +1679,7 @@ impl SessionMiddleware {
                     classification = "backend_failure",
                     "deferred remember credential revocation failed; discarding identity transition"
                 );
-                let pending_cookies = std::mem::take(&mut *pending.lock().unwrap());
+                let pending_cookies = std::mem::take(&mut *crate::lock::recover(&pending));
                 let failure = Err(crate::http::HttpResponse::text(
                     "Internal Server Error: identity transition cleanup failed",
                 )
@@ -1683,7 +1689,37 @@ impl SessionMiddleware {
         }
 
         // Take the potentially-modified session back out of the slot.
-        let mut session = slot.lock().unwrap().take();
+        let slot_poisoned = slot.is_poisoned();
+        let mut session = crate::lock::recover(&slot).take();
+        if slot_poisoned {
+            retire_unpersisted_opaque_session(
+                magnetar_session_authority.as_ref(),
+                &pending_opaque_session,
+                "a panic left the session between two writes",
+            )
+            .await;
+            tracing::error!(
+                "a closure of session_mut panicked and the panic was caught; \
+                 the session is not stored and the request fails closed"
+            );
+            let mut pending_cookies = std::mem::take(&mut *crate::lock::recover(&pending));
+            // The promotion of a second factor is not stored either, so a
+            // remember credential that it issued must not reach the
+            // browser, as in every other branch that does not store it.
+            if loaded_two_factor_pending && let Some(session) = session.as_ref() {
+                suppress_and_retire_uncommitted_remember(
+                    session,
+                    &self.config,
+                    &mut pending_cookies,
+                )
+                .await;
+            }
+            let failure = Err(crate::http::HttpResponse::text(
+                "Internal Server Error: session state unavailable",
+            )
+            .status(500));
+            return attach_pending_cookies(failure, pending_cookies);
+        }
 
         // Record the current URL as `_previous.url` if this turned out
         // to be a "real" HTML page navigation - successful, GET, not
@@ -1736,7 +1772,7 @@ impl SessionMiddleware {
         // middleware (remember-me rotation / clear) and any queued by
         // handlers via `Auth::login_remember` etc.
         let mut response = response;
-        let mut pending_cookies = std::mem::take(&mut *pending.lock().unwrap());
+        let mut pending_cookies = std::mem::take(&mut *crate::lock::recover(&pending));
 
         let touched_at = unix_timestamp_now();
         let touch_due = original_session_id.is_some()
@@ -2157,7 +2193,7 @@ fn session_identity(field: SessionIdentityField<'_>) -> Option<String> {
     crate::render_cache::collector::observe_principal_read();
     let identity = SESSION_CONTEXT
         .try_with(|slot| {
-            let slot = slot.lock().unwrap();
+            let slot = crate::lock::recover(slot);
             let session = slot.as_ref()?;
             match field {
                 SessionIdentityField::DefaultGuardUser => session.user_id.clone(),
@@ -2487,6 +2523,139 @@ mod tests {
 
     fn slot_with(session: SessionData) -> Arc<Mutex<Option<SessionData>>> {
         Arc::new(Mutex::new(Some(session)))
+    }
+
+    /// Poison `lock` the way a request does: a task that panics while it
+    /// holds the guard.
+    async fn poison<T: Send + 'static>(lock: &Arc<Mutex<T>>) {
+        let held = Arc::clone(lock);
+        let ended = tokio::spawn(async move {
+            let _guard = held.lock().expect("the lock is whole");
+            panic!("a panic while the guard is held");
+        })
+        .await;
+        assert!(ended.is_err(), "the task panicked");
+        assert!(lock.is_poisoned());
+    }
+
+    /// A closure of `session_mut` that panics is the one place where code
+    /// of the application runs under a lock of this module. The code that
+    /// answers for the panic can still read and write the session. That
+    /// the middleware stores none of it is pinned in
+    /// `tests/session/persistence_fail_closed.rs`.
+    #[tokio::test]
+    async fn a_panic_in_a_closure_of_session_mut_does_not_fail_the_next_read() {
+        let mut stored = SessionData::new("a".repeat(40), "b".repeat(40));
+        stored.put("color", "blue");
+        let slot = slot_with(stored);
+
+        let panicking = slot.clone();
+        let ended = tokio::spawn(SESSION_CONTEXT.scope(panicking, async {
+            session_mut(|_| panic!("the closure of the application panics"));
+        }))
+        .await;
+        assert!(ended.is_err(), "the request ended with the panic");
+        assert!(slot.is_poisoned());
+
+        SESSION_CONTEXT
+            .scope(slot.clone(), async {
+                let color: Option<String> = session().and_then(|session| session.get("color"));
+                assert_eq!(color.as_deref(), Some("blue"));
+                assert_eq!(
+                    session_mut(|session| session.put("color", "green")),
+                    Some(())
+                );
+                let color: Option<String> = session().and_then(|session| session.get("color"));
+                assert_eq!(color.as_deref(), Some("green"));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_list_of_cookies_takes_and_gives_cookies() {
+        let pending: Arc<Mutex<Vec<Cookie>>> = Arc::new(Mutex::new(Vec::new()));
+        poison(&pending).await;
+
+        PENDING_COOKIES
+            .scope(pending.clone(), async {
+                assert!(push_pending_cookie(Cookie::new("theme", "dark")));
+                assert!(replace_pending_cookie(Cookie::new("theme", "light")));
+                assert_eq!(
+                    queued_cookie("theme").map(|cookie| cookie.value().to_owned()),
+                    Some("light".to_owned())
+                );
+                unqueue_cookie("theme");
+                assert!(queued_cookie("theme").is_none());
+            })
+            .await;
+    }
+
+    /// The list of the pending sessions is shared with the clean-up task,
+    /// which runs after the request. It must not panic for what a request
+    /// did.
+    #[tokio::test]
+    async fn a_poisoned_list_of_pending_sessions_is_still_cleaned_up() {
+        let pending = Arc::new(Mutex::new(vec![
+            pending_opaque("first"),
+            pending_opaque("second"),
+        ]));
+        poison(&pending).await;
+
+        assert!(confirm_pending_opaque_session_retired(&pending, "first"));
+        assert!(!confirm_pending_opaque_session_retired(&pending, "first"));
+        let left: Vec<String> = crate::lock::recover(&pending)
+            .iter()
+            .map(|candidate| candidate.session_id.clone())
+            .collect();
+        assert_eq!(left, ["second"]);
+
+        PENDING_OPAQUE_SESSION
+            .scope(pending.clone(), async {
+                register_pending_opaque_session(pending_opaque("third"))
+                    .expect("a session is registered");
+                assert!(
+                    register_pending_opaque_session(pending_opaque("third")).is_err(),
+                    "and not a second time"
+                );
+            })
+            .await;
+    }
+
+    /// The clean-up that runs when a request ends reads the list twice:
+    /// to see whether there is work, and to take the ids.
+    #[tokio::test]
+    async fn a_poisoned_list_of_pending_sessions_is_handed_to_the_clean_up() {
+        let pending = Arc::new(Mutex::new(vec![pending_opaque("blocked")]));
+        poison(&pending).await;
+
+        // With no authority there is nothing to retire the session with.
+        // The list is read, the fault is logged, the entry stays owned.
+        crate::magnetar_integration::schedule_pending_issued_session_cleanup(
+            None,
+            pending.clone(),
+            "test without an authority",
+        );
+        assert_eq!(crate::lock::recover(&pending).len(), 1);
+
+        let authority_impl = Arc::new(CleanupAuthority::default());
+        authority_impl.set_outcomes("blocked", [CleanupOutcome::Blocked]);
+        let authority: Arc<dyn crate::magnetar_integration::engine::MagnetarFactorAuthEngine> =
+            authority_impl.clone();
+        let started = authority_impl.started.notified();
+        tokio::pin!(started);
+        started.as_mut().enable();
+
+        crate::magnetar_integration::schedule_pending_issued_session_cleanup(
+            Some(authority),
+            pending.clone(),
+            "test with an authority",
+        );
+
+        // The task that was started asks the authority to retire the
+        // session whose id it read from the poisoned list.
+        started.await;
+        assert_eq!(authority_impl.started_count.load(Ordering::SeqCst), 1);
+        authority_impl.release.notify_waiters();
     }
 
     #[tokio::test]

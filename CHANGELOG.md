@@ -820,6 +820,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   exporters log about their own requests is printed and not exported, so a
   process at debug level does not send lines about its own sending without
   end.
+- **The session middleware does not panic on a poisoned lock.** The session,
+  the cookies that wait for the response, the remember tokens that wait to be
+  revoked and the list of the fresh Magnetar sessions were locked with
+  `.lock().unwrap()` in thirty places, which panics when an earlier panic left
+  the lock poisoned. The list of the fresh sessions is shared with the
+  clean-up task that runs after the request, so a panic in one request could
+  end the clean-up of it. The locks are taken with a function that goes on
+  with the value of a poisoned lock. The three lists are changed by code of
+  the framework alone, which cannot panic between two writes, so they are
+  whole after any panic. The session is changed by closures of the
+  application: when a closure of `session_mut` panics and a Live action or a
+  listener catches the panic, the request goes on and can read the session,
+  but the middleware does not store it. It retires a Magnetar session that the
+  request issued, takes back a remember cookie that the promotion of a second
+  factor issued, answers 500, and the stored session stays as it was, which is
+  what such a request did before. The policy of the framework for locks is
+  that a poisoned lock is an error or is recovered, and never a panic.
 
 ### Security
 

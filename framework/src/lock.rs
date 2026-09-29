@@ -1,9 +1,16 @@
 //! Small helpers to handle poisoned locks consistently across the framework.
 //!
-//! Policy (2026-05):
-//! - We treat a poisoned lock as an internal error.
-//! - Callers should almost always get a `FrameworkError` instead of panicking.
-//! - This prevents one bad request from taking down an entire subsystem.
+//! Policy:
+//! - A poisoned lock is never a panic. One bad request must not take down
+//!   an entire subsystem.
+//! - [`read`], [`write`] and [`lock`] treat a poisoned lock as an internal
+//!   error and return a `FrameworkError`. This is the rule.
+//! - [`recover`] goes on with the value of a poisoned lock. It is for two
+//!   kinds of value, where an error would fail a clean-up that has to run:
+//!   a value that is whole after any panic, and a value that code of the
+//!   application changes under the guard, when the code that goes on reads
+//!   it and never stores it. The session of a request is the second kind.
+//!   The documentation of [`recover`] says more.
 //!
 //! Each helper takes a `context` label naming the subsystem that owns the
 //! lock (e.g. `"connection registry"`, `"payments registry"`, `"db event
@@ -53,6 +60,32 @@ pub(crate) fn lock<'a, T>(
 ) -> Result<MutexGuard<'a, T>, FrameworkError> {
     lock.lock()
         .map_err(|_| FrameworkError::internal(format!("{context} lock poisoned")))
+}
+
+/// Acquire a guard on a `Mutex`, and keep going when the lock is poisoned.
+///
+/// A lock is poisoned when a thread panicked while it held the guard. That
+/// matters where the panic can have left the value between two states that
+/// the code after it must not see. It does not matter for a value that is
+/// whole at every point where its critical sections can panic: a list that
+/// is pushed to and drained, or a value that is replaced as one. Such a
+/// value is as good after the panic as it was before it, and an error for
+/// every later use of it would make one panic into many.
+///
+/// A value is of that kind only when every critical section of it is code
+/// of this crate: a closure of the application that runs under the guard
+/// can panic between any two of its writes.
+///
+/// A value that such a closure changes is recovered on one condition: the
+/// code that goes on with it reads it and must not keep what it finds. The
+/// session middleware is the example. It reads a session whose lock is
+/// poisoned, so that the code that answers for the panic can run, and it
+/// does not store that session.
+///
+/// Use [`lock`] for a value that is neither.
+pub(crate) fn recover<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -151,5 +184,28 @@ mod tests {
         rw.write().unwrap_or_else(|e| e.into_inner()).push(4);
         let snapshot = rw.read().unwrap_or_else(|e| e.into_inner()).clone();
         assert_eq!(snapshot, vec![1, 2, 3, 4], "recovered guard must be usable");
+    }
+
+    /// A panic while the guard is held, which is what poisons the lock.
+    fn poisoned(values: Vec<u8>) -> Arc<Mutex<Vec<u8>>> {
+        let shared = Arc::new(Mutex::new(values));
+        let held = Arc::clone(&shared);
+        let ended = thread::spawn(move || {
+            let _guard = held.lock().expect("the lock is whole");
+            panic!("a panic while the guard is held");
+        })
+        .join();
+        assert!(ended.is_err(), "the thread panicked");
+        assert!(shared.is_poisoned());
+        shared
+    }
+
+    #[test]
+    fn recover_gives_the_value_of_a_poisoned_lock() {
+        let shared = poisoned(vec![1, 2, 3]);
+
+        assert_eq!(*recover(&shared), [1, 2, 3]);
+        recover(&shared).push(4);
+        assert_eq!(*recover(&shared), [1, 2, 3, 4]);
     }
 }
