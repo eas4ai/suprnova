@@ -49,7 +49,10 @@ pub mod registry;
 /// middleware, never an application-facing API.
 pub(crate) mod stitch;
 pub mod telemetry;
-#[doc(hidden)]
+/// How a test proves that the cache served a route: the key the route
+/// derives, the entry each tier holds under it, and emptying L0 alone.
+/// Compiled only with the `testing` feature.
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 /// Whether this process advances generations: the probe, its decision
 /// table, and the process-wide tri-state that holds the answer.
@@ -731,6 +734,11 @@ impl RenderCache {
 
     /// Body-free inspection of a stored L0 entry by its encoded key text.
     ///
+    /// The read counts as a use of the entry: it moves the key to the most
+    /// recently used end of L0's eviction order, as a request that hits it
+    /// does. The `RenderCacheProbe::l0` read of the `testing` feature reads
+    /// without that effect.
+    ///
     /// # Errors
     ///
     /// Returns [`RenderCacheError`] when no runtime is installed, the key
@@ -810,19 +818,23 @@ impl RenderCache {
 
     /// Test-only: the key text for a route with default variance and an
     /// optional login.
+    ///
+    /// # Panics
+    ///
+    /// Panics where [`testing::RenderCacheProbe::key`] returns an error: no
+    /// runtime is installed, the route has no effective policy, or the key
+    /// cannot be derived.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn key_for_route_for_test(
         pattern: &str,
         params: &[(&str, &str)],
         login: Option<&str>,
     ) -> String {
-        let runtime = Self::runtime().expect("RenderCache installed");
-        let policy = runtime.table.effective_policy(pattern).expect("policy");
-        let input = middleware::key_input_for_test(&runtime, pattern, params, login, &policy);
-        suprnova_live::render_cache::key::RenderKey::derive(&input, &runtime.keys)
-            .expect("key")
-            .to_base64url()
+        Self::probe_for_test(pattern, params, login)
+            .key()
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 
     /// Test-only: the same key text as [`Self::key_for_route_for_test`], but
@@ -835,7 +847,12 @@ impl RenderCache {
     /// task 5b, on another one - needs to name the key the *new* epoch
     /// derives, which that helper cannot express. This one takes the epoch
     /// rather than reading it, so the caller states which epoch it means.
+    ///
+    /// # Panics
+    ///
+    /// Panics where [`testing::RenderCacheProbe::key`] returns an error.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn key_for_route_at_epoch_for_test(
         pattern: &str,
@@ -843,21 +860,25 @@ impl RenderCache {
         login: Option<&str>,
         epoch: u64,
     ) -> String {
-        let runtime = Self::runtime().expect("RenderCache installed");
-        let policy = runtime.table.effective_policy(pattern).expect("policy");
-        let mut input = middleware::key_input_for_test(&runtime, pattern, params, login, &policy);
-        input.epoch = epoch;
-        suprnova_live::render_cache::key::RenderKey::derive(&input, &runtime.keys)
-            .expect("key")
-            .to_base64url()
+        Self::probe_for_test(pattern, params, login)
+            .at_epoch(epoch)
+            .key()
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 
     /// Test-only: L0 inspection of a route with empty params and anonymous
     /// variance.
+    ///
+    /// # Panics
+    ///
+    /// Panics where [`testing::RenderCacheProbe::l0`] returns an error.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     pub async fn inspect_route_for_test(pattern: &str) -> Option<EntryInspection> {
-        let key = Self::key_for_route_for_test(pattern, &[], None);
-        Self::inspect(&key).await.expect("inspect")
+        testing::RenderCacheProbe::route(pattern)
+            .l0()
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 
     /// Test-only: empties L0 and leaves everything else - L1, the authority
@@ -876,9 +897,9 @@ impl RenderCache {
     ///
     /// Panics if no runtime is installed.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn clear_l0_for_test() {
-        let runtime = Self::runtime().expect("RenderCache installed");
-        runtime.l0.clear();
+        testing::RenderCacheProbe::clear_l0().unwrap_or_else(|error| panic!("{error}"));
     }
 
     /// Test-only: the shell bytes of the Composite entry stored for a route
@@ -897,7 +918,8 @@ impl RenderCache {
     pub async fn shell_for_test(pattern: &str) -> Option<bytes::Bytes> {
         let runtime = Self::runtime().expect("RenderCache installed");
         let policy = runtime.table.effective_policy(pattern).expect("policy");
-        let input = middleware::key_input_for_test(&runtime, pattern, &[], None, &policy);
+        let input = middleware::key_input_for_test(&runtime, pattern, &[], None, &policy)
+            .expect("key input");
         let key = suprnova_live::render_cache::key::RenderKey::derive(&input, &runtime.keys)
             .expect("key");
         let stored = runtime.l0.get(&key).await.expect("l0 get")?;
@@ -933,7 +955,8 @@ impl RenderCache {
     pub async fn stored_fence_token_for_test(pattern: &str) -> Option<u64> {
         let runtime = Self::runtime().expect("RenderCache installed");
         let policy = runtime.table.effective_policy(pattern).expect("policy");
-        let input = middleware::key_input_for_test(&runtime, pattern, &[], None, &policy);
+        let input = middleware::key_input_for_test(&runtime, pattern, &[], None, &policy)
+            .expect("key input");
         let key = suprnova_live::render_cache::key::RenderKey::derive(&input, &runtime.keys)
             .expect("key");
         let stored = runtime.l0.get(&key).await.expect("l0 get")?;
@@ -949,22 +972,36 @@ impl RenderCache {
     /// # Panics
     ///
     /// Panics if no runtime is installed, no L1 provider is configured, the
-    /// route has no effective policy, the L1 read fails, or a found entry
-    /// fails to decode.
+    /// route has no effective policy, the key cannot be derived, the L1 read
+    /// fails, or a found entry fails to decode: every error
+    /// [`testing::RenderCacheProbe::l1`] returns.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     pub async fn inspect_l1_for_test(
         pattern: &str,
         params: &[(&str, &str)],
         login: Option<&str>,
     ) -> Option<EntryInspection> {
-        let runtime = Self::runtime().expect("RenderCache installed");
-        let l1 = runtime.l1.as_ref().expect("L1 configured");
-        let policy = runtime.table.effective_policy(pattern).expect("policy");
-        let input = middleware::key_input_for_test(&runtime, pattern, params, login, &policy);
-        let key = suprnova_live::render_cache::key::RenderKey::derive(&input, &runtime.keys)
-            .expect("key");
-        let stored = l1.get(&key).await.expect("l1 get")?;
-        Some(suprnova_live::render_cache::inspect(&stored.bytes, &runtime.limits).expect("inspect"))
+        Self::probe_for_test(pattern, params, login)
+            .l1()
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// The probe the route-keyed `_for_test` hooks above read through, so a
+    /// hook and [`testing::RenderCacheProbe`] can never derive different
+    /// keys for the same request.
+    #[cfg(any(test, feature = "testing"))]
+    fn probe_for_test(
+        pattern: &str,
+        params: &[(&str, &str)],
+        login: Option<&str>,
+    ) -> testing::RenderCacheProbe {
+        let probe = testing::RenderCacheProbe::route(pattern).params(params);
+        match login {
+            Some(id) => probe.login(id),
+            None => probe,
+        }
     }
 
     /// Test-only: whether the L0 entry stored under `key_text` is served

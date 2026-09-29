@@ -1130,7 +1130,7 @@ fn route_identity(pattern: &str) -> RouteIdentity {
 /// in a debug build if such a policy is ever actually constructed.
 fn variance_descriptor(
     runtime: &RenderCacheRuntime,
-    request: &Request,
+    facts: &dyn KeyFacts,
     policy: &RenderCachePolicy,
 ) -> Result<(VarianceDescriptor, String, Option<String>), RenderCacheError> {
     let mut variance = VarianceDescriptor::new();
@@ -1138,23 +1138,8 @@ fn variance_descriptor(
     let mut encoding: Option<String> = None;
     for dimension in policy.vary() {
         let value = match dimension {
-            VarianceDimension::Locale => {
-                #[cfg(feature = "localization")]
-                let value = Lang::locale().as_str();
-                // R96: without `localization` there is no negotiated
-                // locale and nothing records locale material, so a route
-                // declaring `Locale` variance resolves to one fixed public
-                // value ("und", BCP 47 for "undetermined") rather than
-                // failing to compile. This is honest, not merely
-                // convenient: every request resolves the same value, so
-                // such a route partitions nothing on this dimension -
-                // there is genuinely no locale to vary on without the
-                // feature.
-                #[cfg(not(feature = "localization"))]
-                let value = "und".to_owned();
-                DimensionValue::Public(value)
-            }
-            VarianceDimension::Principal => match Auth::id() {
+            VarianceDimension::Locale => DimensionValue::Public(facts.locale()),
+            VarianceDimension::Principal => match facts.principal() {
                 Some(id) => DimensionValue::Private(PrivateMaterial::principal(
                     &runtime.keys,
                     &id,
@@ -1162,7 +1147,7 @@ fn variance_descriptor(
                 )),
                 None => DimensionValue::Anonymous,
             },
-            VarianceDimension::Tenant => match request.live_tenant() {
+            VarianceDimension::Tenant => match facts.tenant() {
                 Some(id) => DimensionValue::Private(PrivateMaterial::tenant(&runtime.keys, id)),
                 None => DimensionValue::Anonymous,
             },
@@ -1179,11 +1164,11 @@ fn variance_descriptor(
                 // Only read here, inside the `Encoding` arm - this
                 // function's own doc promises it reads only what the
                 // policy actually declared.
-                let negotiated = declared.negotiate(request.header("accept-encoding"));
+                let negotiated = declared.negotiate(facts.accept_encoding());
                 encoding = Some(negotiated.clone());
                 DimensionValue::Public(negotiated)
             }
-            VarianceDimension::Host => match request.http_host() {
+            VarianceDimension::Host => match facts.host() {
                 Some(host) => DimensionValue::Public(host),
                 None => DimensionValue::Anonymous,
             },
@@ -1199,7 +1184,7 @@ fn variance_descriptor(
                 };
                 // Only read here, inside the `Media` arm - see the note on
                 // the `Encoding` arm above.
-                let negotiated = declared.negotiate(request.header("accept"));
+                let negotiated = declared.negotiate(facts.accept());
                 media = negotiated.clone();
                 DimensionValue::Public(negotiated)
             }
@@ -1221,37 +1206,160 @@ fn variance_descriptor(
     Ok((variance, media, encoding))
 }
 
-/// Builds the lookup key input for `request` against `policy`. Callers
+/// The epoch the RenderCache migration seeds, which every key is derived
+/// under until an advance moves it.
+pub(super) const SEEDED_EPOCH: u64 = 1;
+
+/// What a key input reads from the request it describes, each read made
+/// only for a dimension the route's policy declared.
+///
+/// [`build_key_input`] is the one function that turns a policy and these
+/// reads into the key input. The middleware answers them from a live
+/// request and the test probe answers them from values a test names, so
+/// the two derive a key by the same code and cannot disagree about which
+/// dimension a key holds or how its value is resolved.
+pub(super) trait KeyFacts {
+    /// The locale the route is rendered in.
+    fn locale(&self) -> String;
+    /// The signed-in user's identifier, or `None` when nobody is.
+    fn principal(&self) -> Option<String>;
+    /// The tenant the request resolved to, or `None` when it has none.
+    fn tenant(&self) -> Option<&str>;
+    /// The host being requested, as `Request::http_host` reports it.
+    fn host(&self) -> Option<String>;
+    /// The `Accept` header, when the request carries one.
+    fn accept(&self) -> Option<&str>;
+    /// The `Accept-Encoding` header, when the request carries one.
+    fn accept_encoding(&self) -> Option<&str>;
+}
+
+/// The locale a request without a locale of its own is rendered in: the
+/// process's current one.
+///
+/// R96: without `localization` there is no negotiated locale and nothing
+/// records locale material, so a route declaring `Locale` variance resolves
+/// to one fixed public value ("und", BCP 47 for "undetermined") rather than
+/// failing to compile. This is honest, not merely convenient: every request
+/// resolves the same value, so such a route partitions nothing on this
+/// dimension - there is genuinely no locale to vary on without the feature.
+pub(super) fn ambient_locale() -> String {
+    #[cfg(feature = "localization")]
+    {
+        Lang::locale().as_str()
+    }
+    #[cfg(not(feature = "localization"))]
+    {
+        "und".to_owned()
+    }
+}
+
+/// The reads of a live request, taken from the request and from the
+/// task-locals the middleware runs inside.
+struct RequestFacts<'a>(&'a Request);
+
+impl KeyFacts for RequestFacts<'_> {
+    fn locale(&self) -> String {
+        ambient_locale()
+    }
+
+    fn principal(&self) -> Option<String> {
+        Auth::id()
+    }
+
+    fn tenant(&self) -> Option<&str> {
+        self.0.live_tenant()
+    }
+
+    fn host(&self) -> Option<String> {
+        self.0.http_host()
+    }
+
+    fn accept(&self) -> Option<&str> {
+        self.0.header("accept")
+    }
+
+    fn accept_encoding(&self) -> Option<&str> {
+        self.0.header("accept-encoding")
+    }
+}
+
+/// Reads a value a caller named, for a request that carries no header to
+/// negotiate against, so a declared `Media` or `Encoding` dimension
+/// resolves to its policy's declared default.
+///
+/// A locale left unnamed is the process's current one; a tenant or host left
+/// unnamed is the value a request without one carries.
+#[derive(Default)]
+pub(super) struct FixedFacts<'a> {
+    /// The locale, or `None` for [`ambient_locale`].
+    pub(super) locale: Option<String>,
+    /// The signed-in user's identifier.
+    pub(super) principal: Option<&'a str>,
+    /// The tenant's identifier.
+    pub(super) tenant: Option<&'a str>,
+    /// The host, as `Request::http_host` reports it.
+    pub(super) host: Option<&'a str>,
+}
+
+impl KeyFacts for FixedFacts<'_> {
+    fn locale(&self) -> String {
+        self.locale.clone().unwrap_or_else(ambient_locale)
+    }
+
+    fn principal(&self) -> Option<String> {
+        self.principal.map(str::to_owned)
+    }
+
+    fn tenant(&self) -> Option<&str> {
+        self.tenant
+    }
+
+    fn host(&self) -> Option<String> {
+        self.host.map(str::to_owned)
+    }
+
+    fn accept(&self) -> Option<&str> {
+        None
+    }
+
+    fn accept_encoding(&self) -> Option<&str> {
+        None
+    }
+}
+
+/// Builds the lookup key input for a request against `policy`. Callers
 /// must have already confirmed [`declared_query_ok`].
 ///
-/// `media` and `encoding` come from the same [`variance_descriptor`] call
-/// that builds `variance`, not a second resolution - the negotiated value a
-/// declared `Media` or `Encoding` dimension carries in the descriptor is
-/// exactly the value this key is built from, so the two can never disagree.
+/// `params` are the route parameters and `query` every query pair of the
+/// request; only the pairs the policy declares reach the key. `media` and
+/// `encoding` come from the same [`variance_descriptor`] call that builds
+/// `variance`, not a second resolution - the negotiated value a declared
+/// `Media` or `Encoding` dimension carries in the descriptor is exactly the
+/// value this key is built from, so the two can never disagree.
 ///
 /// # Errors
 ///
 /// Propagates [`variance_descriptor`]'s error - see its own doc.
-fn key_input(
+pub(super) fn build_key_input(
     runtime: &RenderCacheRuntime,
-    request: &Request,
+    facts: &dyn KeyFacts,
     pattern: &str,
     policy: &RenderCachePolicy,
     epoch: u64,
+    params: BTreeMap<String, String>,
+    query: Vec<(String, String)>,
 ) -> Result<RenderKeyInput, RenderCacheError> {
     let declared = policy.query().declared_names();
-    let query: BTreeMap<String, String> = request
-        .query_params()
+    let query: BTreeMap<String, String> = query
         .into_iter()
         .filter(|(name, _)| declared.contains(name))
         .collect();
-    let params: BTreeMap<String, String> = request.params().clone().into_iter().collect();
     let host = if policy.vary().contains(&VarianceDimension::Host) {
-        request.http_host()
+        facts.host()
     } else {
         None
     };
-    let (variance, media, encoding) = variance_descriptor(runtime, request, policy)?;
+    let (variance, media, encoding) = variance_descriptor(runtime, facts, policy)?;
     Ok(RenderKeyInput {
         route: route_identity(pattern),
         route_pattern: pattern.to_owned(),
@@ -1264,6 +1372,30 @@ fn key_input(
         epoch,
         variance,
     })
+}
+
+/// Builds the lookup key input for `request` against `policy`. Callers
+/// must have already confirmed [`declared_query_ok`].
+///
+/// # Errors
+///
+/// Propagates [`build_key_input`]'s error - see [`variance_descriptor`].
+fn key_input(
+    runtime: &RenderCacheRuntime,
+    request: &Request,
+    pattern: &str,
+    policy: &RenderCachePolicy,
+    epoch: u64,
+) -> Result<RenderKeyInput, RenderCacheError> {
+    build_key_input(
+        runtime,
+        &RequestFacts(request),
+        pattern,
+        policy,
+        epoch,
+        request.params().clone().into_iter().collect(),
+        request.query_params().into_iter().collect(),
+    )
 }
 
 /// Reads a key from L0, then L1 (promoting a decodable L1 hit to L0). A
@@ -3566,17 +3698,19 @@ fn response_signals(http: &HttpResponse, method: &str) -> ResponseSignals {
     }
 }
 
-/// Test-only: wraps [`key_input`] with explicit route params and an
-/// optional login instead of a `Request`.
+/// Test-only: the key input of a request with explicit route params and an
+/// optional login, built by `build_key_input`, the function the middleware
+/// builds its own with.
 ///
-/// Carries no headers to negotiate against, so a declared `Media` or
-/// `Encoding` dimension resolves to its policy's declared default here -
-/// exactly the value a real request negotiating nothing would resolve to
-/// (see [`variance_descriptor`]) - rather than the plain `"text/html"` /
-/// `None` fallback that only applies when the route declares neither. A
-/// literal fallback here regardless of what the policy declares would let
-/// this test helper and a real request for the same route derive different
-/// keys the moment a route declares a non-`"text/html"` default.
+/// The request carries no headers to negotiate against, so a declared
+/// `Media` or `Encoding` dimension resolves to its policy's declared default
+/// - exactly the value a real request negotiating nothing resolves to. It
+/// carries no tenant and no host, and its locale is the process's current
+/// one.
+///
+/// # Errors
+///
+/// Fails for the reasons `build_key_input` does.
 #[doc(hidden)]
 pub fn key_input_for_test(
     runtime: &RenderCacheRuntime,
@@ -3584,60 +3718,24 @@ pub fn key_input_for_test(
     params: &[(&str, &str)],
     login: Option<&str>,
     policy: &RenderCachePolicy,
-) -> RenderKeyInput {
+) -> Result<RenderKeyInput, RenderCacheError> {
     let params: BTreeMap<String, String> = params
         .iter()
         .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
         .collect();
-    let mut variance = VarianceDescriptor::new();
-    let mut media = "text/html".to_owned();
-    let mut encoding: Option<String> = None;
-    for dimension in policy.vary() {
-        match dimension {
-            VarianceDimension::Principal => {
-                let value = match login {
-                    Some(id) => DimensionValue::Private(PrivateMaterial::principal(
-                        &runtime.keys,
-                        id,
-                        FROZEN_PERMISSION_VERSION,
-                    )),
-                    None => DimensionValue::Anonymous,
-                };
-                let _ = variance.declare(dimension.clone(), value);
-            }
-            VarianceDimension::Media => {
-                if let Some(declared) = policy.media() {
-                    media = declared.default_value().to_owned();
-                    let _ =
-                        variance.declare(dimension.clone(), DimensionValue::Public(media.clone()));
-                }
-            }
-            VarianceDimension::Encoding => {
-                if let Some(declared) = policy.encoding() {
-                    let value = declared.default_value().to_owned();
-                    encoding = Some(value.clone());
-                    let _ = variance.declare(dimension.clone(), DimensionValue::Public(value));
-                }
-            }
-            _ => {}
-        }
-    }
-    RenderKeyInput {
-        route: route_identity(pattern),
-        route_pattern: pattern.to_owned(),
+    let facts = FixedFacts {
+        principal: login,
+        ..FixedFacts::default()
+    };
+    build_key_input(
+        runtime,
+        &facts,
+        pattern,
+        policy,
+        SEEDED_EPOCH,
         params,
-        query: BTreeMap::new(),
-        host: None,
-        media,
-        encoding,
-        build: runtime.build.clone(),
-        // A fixed baseline matching the RenderCache migration's seeded
-        // epoch: this test helper never advances the epoch, so every call
-        // deriving a key for the same route and login always lands on the
-        // same key regardless of when it runs in a test.
-        epoch: 1,
-        variance,
-    }
+        Vec::new(),
+    )
 }
 
 /// Test-only race-injection seams for this module's own coherence checks.
@@ -4003,7 +4101,7 @@ mod tests {
                 .vary(dimension.clone())
                 .build()
                 .expect("the engine accepts the dimension");
-            let refused = variance_descriptor(&runtime, &request, &policy)
+            let refused = variance_descriptor(&runtime, &RequestFacts(&request), &policy)
                 .expect_err("this host gives the dimension no value");
             assert_eq!(
                 refused.kind(),

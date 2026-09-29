@@ -26,6 +26,7 @@ use suprnova::attrs;
 use suprnova::render_cache::DependencyIdentity;
 use suprnova::render_cache::console::{epoch_advance_report_for_test, inspect_report_for_test};
 use suprnova::render_cache::telemetry;
+use suprnova::render_cache::testing::RenderCacheProbe;
 use suprnova::render_cache::{RenderCache, RepresentationClass};
 
 #[tokio::test]
@@ -629,9 +630,10 @@ fn the_write_side_decision_table() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_closed_write_side_is_not_probed_again() {
-    use render_cache_operations_support::{Post, statements};
+    use render_cache_operations_support::{Post, statement_counter};
 
-    let _harness = boot_with_render_cache().await;
+    let harness = boot_with_render_cache().await;
+    let statements = statement_counter(&harness);
     suprnova::render_cache::RenderCache::uninstall_for_test();
     suprnova::render_cache::RenderCache::set_write_side_enabled_for_test(Some(false));
 
@@ -640,20 +642,20 @@ async fn a_closed_write_side_is_not_probed_again() {
         .await
         .expect("first write");
 
-    statements::reset();
+    statements.reset();
     Post::create(attrs! { title: "second" })
         .await
         .expect("second write");
-    let one_write = statements::count();
+    let one_write = statements.count();
 
-    statements::reset();
+    statements.reset();
     Post::create(attrs! { title: "third" })
         .await
         .expect("third write");
     Post::create(attrs! { title: "fourth" })
         .await
         .expect("fourth write");
-    let two_writes = statements::count();
+    let two_writes = statements.count();
 
     suprnova::render_cache::RenderCache::set_write_side_enabled_for_test(None);
     suprnova::render_cache::mark_installed();
@@ -885,4 +887,393 @@ fn every_decline_reason_is_documented_in_the_operations_chapter() {
         missing.is_empty(),
         "the operations chapter is missing these reason labels: {missing:?}"
     );
+}
+
+// ── The supported testing surface ───────────────────────────────────────
+//
+// What the operations chapter's "Testing a cached route" section teaches,
+// written against `render_cache::testing::RenderCacheProbe` and
+// `database::testing::StatementCounter`: the key a route derives, the entry
+// each tier holds under it, emptying L0 alone, the statements a request
+// costs, and an error rather than a panic for every read the probe cannot
+// answer. The route-keyed `_for_test` hooks read through the same probe, and
+// the first test holds the two to the same keys.
+
+/// The text of a probe's error, once it is shown to name `pattern` and
+/// `reason` and to carry neither the login `login-7` nor a `param-value-*`
+/// parameter value, which is what the probes below are built with.
+fn assert_probe_error(error: suprnova::FrameworkError, pattern: &str, reason: &str) -> String {
+    let message = error.to_string();
+    assert!(message.contains(pattern), "{message}");
+    assert!(message.contains(reason), "{message}");
+    assert!(
+        !message.contains("param-value") && !message.contains("login-7"),
+        "a probe error carries no parameter value and no login: {message}"
+    );
+    message
+}
+
+/// The probe derives the key the middleware derives. The entry a signed-in
+/// request published is found under the probe's key for that login and not
+/// under the anonymous one, and the route-keyed hooks derive the same keys
+/// as the probe with a login, without one, and at a named epoch.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_probe_derives_the_key_a_request_is_stored_under() {
+    let harness = boot_with_render_cache().await;
+    dispatch_get(&harness, "/private/1", &[("x-test-login", "user-7")]).await;
+
+    let anonymous = RenderCacheProbe::route("/private/{id}").params(&[("id", "1")]);
+    let signed_in = anonymous.clone().login("user-7");
+    let anonymous_key = anonymous.key().expect("derive the anonymous key");
+    let signed_in_key = signed_in.key().expect("derive the signed-in key");
+    assert!(
+        RenderCache::inspect(&signed_in_key)
+            .await
+            .expect("inspect")
+            .is_some(),
+        "the request is stored under the key the probe derives for its login"
+    );
+    assert!(
+        RenderCache::inspect(&anonymous_key)
+            .await
+            .expect("inspect")
+            .is_none(),
+        "the route varies on Principal, so nothing is stored under the anonymous key"
+    );
+    assert_eq!(
+        anonymous_key,
+        RenderCache::key_for_route_for_test("/private/{id}", &[("id", "1")], None)
+    );
+    assert_eq!(
+        signed_in_key,
+        RenderCache::key_for_route_for_test("/private/{id}", &[("id", "1")], Some("user-7"))
+    );
+
+    let epoch_one = signed_in.clone().at_epoch(1).key().expect("derive at 1");
+    let epoch_two = signed_in.at_epoch(2).key().expect("derive at 2");
+    assert_eq!(epoch_one, signed_in_key, "the seeded epoch is the default");
+    assert_ne!(epoch_two, signed_in_key, "the epoch is part of the key");
+    let hook_epoch_two = RenderCache::key_for_route_at_epoch_for_test(
+        "/private/{id}",
+        &[("id", "1")],
+        Some("user-7"),
+        2,
+    );
+    assert_eq!(epoch_two, hook_epoch_two);
+}
+
+/// An entry is in L0 after the request that published it and not after
+/// `clear_l0`, while L1 still holds it. The next request is then served from
+/// L1 without a render, and the L1 hit puts the entry back in memory.
+#[tokio::test]
+#[serial_test::serial]
+async fn clear_l0_empties_memory_and_leaves_the_entry_in_l1() {
+    let (harness, _l1_dir) = boot_with_file_l1().await;
+    let probe = RenderCacheProbe::route("/stale/{id}").params(&[("id", "1")]);
+    assert!(
+        probe.l0().await.expect("read L0").is_none(),
+        "nothing is stored before the first request"
+    );
+
+    dispatch_get(&harness, "/stale/1", &[]).await;
+    let renders = counting_route::renders();
+    let in_memory = probe.l0().await.expect("read L0");
+    assert!(in_memory.is_some(), "the request published to L0");
+    assert_eq!(
+        probe.l1().await.expect("read L1"),
+        in_memory,
+        "and the same entry to L1"
+    );
+
+    RenderCacheProbe::clear_l0().expect("clear L0");
+    assert!(
+        probe.l0().await.expect("read L0").is_none(),
+        "clear_l0 empties memory"
+    );
+    assert_eq!(
+        probe.l1().await.expect("read L1"),
+        in_memory,
+        "and leaves L1 as it was"
+    );
+
+    dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        renders,
+        "with L0 empty and the epoch unchanged, only L1 can have served the request"
+    );
+    assert_eq!(
+        probe.l0().await.expect("read L0"),
+        in_memory,
+        "and the L1 hit put the entry back in memory"
+    );
+}
+
+/// The statement counter sees the statements of the render that published
+/// an entry, and holds a lease-mode hit on that entry to none at all.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_lease_mode_hit_runs_no_statement_and_its_render_does() {
+    use render_cache_operations_support::{LEASED_POSTS_ROUTE, statement_counter};
+
+    let harness = boot_with_render_cache().await;
+    let statements = statement_counter(&harness);
+    let path = LEASED_POSTS_ROUTE.replace("{id}", "1");
+
+    statements.reset();
+    dispatch_get(&harness, &path, &[]).await;
+    assert_eq!(counting_route::renders(), 1, "the first request rendered");
+    assert!(
+        statements.count() > 0,
+        "and its render read the posts table"
+    );
+
+    // The lease is granted by the first hit, not by the publication, so the
+    // request measured below is the second hit.
+    dispatch_get(&harness, &path, &[]).await;
+    statements.reset();
+    let hit = dispatch_get(&harness, &path, &[]).await;
+    assert_eq!(hit.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1, "no handler ran");
+    assert_eq!(
+        statements.count(),
+        0,
+        "the lease answered coherence, so the hit never reached the database"
+    );
+}
+
+/// A route that varies on `Locale` is stored under the locale the request
+/// was rendered in. The probe finds the entry under that locale and under no
+/// other, so a probe that ignored the locale would read `None` for the right
+/// one.
+#[cfg(feature = "localization")]
+#[tokio::test]
+#[serial_test::serial]
+async fn a_locale_route_is_found_under_the_locale_of_the_request() {
+    use render_cache_operations_support::LOCALIZED_ROUTE;
+
+    let harness = boot_with_render_cache().await;
+    dispatch_get(&harness, "/localized/1", &[("x-test-locale", "fr")]).await;
+    assert_eq!(counting_route::renders(), 1);
+
+    let probe = RenderCacheProbe::route(LOCALIZED_ROUTE).params(&[("id", "1")]);
+    let french = probe.clone().locale("fr");
+    assert!(
+        french.l0().await.expect("read L0").is_some(),
+        "the entry is stored under the locale the request carried"
+    );
+    assert!(
+        RenderCache::inspect(&french.key().expect("derive the key"))
+            .await
+            .expect("inspect")
+            .is_some(),
+        "and the probe's key is the key the store holds it under"
+    );
+    assert!(
+        probe
+            .clone()
+            .locale("de")
+            .l0()
+            .await
+            .expect("read L0")
+            .is_none(),
+        "no entry is stored under another locale"
+    );
+    assert_ne!(
+        french.key().expect("derive the key"),
+        probe.locale("de").key().expect("derive the key"),
+        "the locale is part of the key"
+    );
+}
+
+/// A route that varies on `Tenant` is stored under the tenant the request
+/// resolved to, and a request with no tenant has a key of its own.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_tenant_route_is_found_under_the_tenant_of_the_request() {
+    use render_cache_operations_support::TENANTED_ROUTE;
+
+    let harness = boot_with_render_cache().await;
+    dispatch_get(&harness, "/tenanted/1", &[("x-test-tenant", "acme")]).await;
+    assert_eq!(counting_route::renders(), 1);
+
+    let probe = RenderCacheProbe::route(TENANTED_ROUTE).params(&[("id", "1")]);
+    assert!(
+        probe
+            .clone()
+            .tenant("acme")
+            .l0()
+            .await
+            .expect("read L0")
+            .is_some(),
+        "the entry is stored under the tenant the request resolved to"
+    );
+    assert!(
+        probe
+            .clone()
+            .tenant("globex")
+            .l0()
+            .await
+            .expect("read L0")
+            .is_none(),
+        "no entry is stored under another tenant"
+    );
+    assert!(
+        probe.l0().await.expect("read L0").is_none(),
+        "and none under a request that has no tenant"
+    );
+
+    dispatch_get(&harness, "/tenanted/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        2,
+        "a request with no tenant is not served the tenant's page"
+    );
+}
+
+/// A route that varies on `Host` is stored under the host of the request.
+/// The probe needs one, and its error names the dimension and no host.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_host_route_is_found_under_the_host_of_the_request() {
+    use render_cache_operations_support::HOSTED_ROUTE;
+
+    let harness = boot_with_render_cache().await;
+    dispatch_get(&harness, "/hosted/1", &[("host", "shop-a.example.test")]).await;
+    assert_eq!(counting_route::renders(), 1);
+
+    let probe = RenderCacheProbe::route(HOSTED_ROUTE).params(&[("id", "1")]);
+    assert!(
+        probe
+            .clone()
+            .host("shop-a.example.test")
+            .l0()
+            .await
+            .expect("read L0")
+            .is_some(),
+        "the entry is stored under the host the request named"
+    );
+    assert!(
+        probe
+            .clone()
+            .host("shop-b.example.test")
+            .l0()
+            .await
+            .expect("read L0")
+            .is_none(),
+        "no entry is stored under another host"
+    );
+
+    let error = probe.key().expect_err("a Host route needs a host");
+    let message = assert_probe_error(error, HOSTED_ROUTE, "varies on Host");
+    assert!(!message.contains("shop-"), "{message}");
+}
+
+/// After an invalidation the probe reads `None`, and a test of that is worth
+/// something only when the probe found the entry before it: the entry is read
+/// first, then the epoch advances, then the entry under the old epoch is gone
+/// and the next request is stored under the new one. Leaving the
+/// `advance_epoch` call out fails the second assertion.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_invalidation_empties_the_entry_the_probe_found_before_it() {
+    use render_cache_operations_support::TENANTED_ROUTE;
+
+    let harness = boot_with_render_cache().await;
+    let probe = RenderCacheProbe::route(TENANTED_ROUTE)
+        .params(&[("id", "1")])
+        .tenant("acme");
+    dispatch_get(&harness, "/tenanted/1", &[("x-test-tenant", "acme")]).await;
+    assert!(
+        probe.l0().await.expect("read L0").is_some(),
+        "the probe finds the entry before the invalidation"
+    );
+
+    RenderCache::advance_epoch().await.expect("advance");
+    assert!(
+        probe.l0().await.expect("read L0").is_none(),
+        "the invalidation emptied the entry"
+    );
+
+    dispatch_get(&harness, "/tenanted/1", &[("x-test-tenant", "acme")]).await;
+    assert_eq!(counting_route::renders(), 2, "the request rendered again");
+    assert!(
+        probe.l0().await.expect("read L0").is_none(),
+        "the seeded epoch names nothing once the epoch has advanced"
+    );
+    assert!(
+        probe.at_epoch(2).l0().await.expect("read L0").is_some(),
+        "the new render is stored under the new epoch"
+    );
+}
+
+/// A route no policy covers, a key that cannot be derived, and a runtime
+/// with no L1 tier are each an error that says so and names the route.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_probe_that_cannot_answer_returns_an_error_naming_the_route() {
+    let _harness = boot_with_render_cache().await;
+
+    let unregistered = RenderCacheProbe::route("/nowhere/{id}")
+        .params(&[("id", "param-value-7")])
+        .login("login-7");
+    let error = unregistered.key().expect_err("no policy, no key");
+    assert_probe_error(error, "/nowhere/{id}", "no RenderCache policy covers");
+
+    let unnamed = RenderCacheProbe::route("/cached/{id}")
+        .params(&[("", "param-value-7")])
+        .login("login-7");
+    let error = unnamed.l0().await.expect_err("no name, no key");
+    assert_probe_error(error, "/cached/{id}", "the key cannot be derived");
+
+    let without_l1 = RenderCacheProbe::route("/cached/{id}")
+        .params(&[("id", "param-value-7")])
+        .login("login-7");
+    let error = without_l1.l1().await.expect_err("no L1 is configured");
+    assert_probe_error(error, "/cached/{id}", "no L1 tier is configured");
+}
+
+/// An L1 read that fails and an L1 entry that does not decode are errors
+/// too, and neither names the key.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_failed_l1_read_and_an_undecodable_l1_entry_are_errors() {
+    use bytes::Bytes;
+    use suprnova::render_cache::file_store::FileRenderStore;
+    use suprnova_live::render_cache::key::RenderKey;
+    use suprnova_live::render_cache::store::{PublicationFence, PublishOutcome, RenderStore as _};
+
+    let (_harness, l1_dir) = boot_with_file_l1().await;
+
+    // A directory where the entry's file would be: the read fails, where a
+    // missing file would only be a miss.
+    let unreadable = RenderCacheProbe::route("/stale/{id}").params(&[("id", "param-value-7")]);
+    let key = unreadable.key().expect("derive the key");
+    let entry_path = l1_dir.path().join(format!("{key}.snrc"));
+    std::fs::create_dir(&entry_path).expect("a directory where the file would be");
+    let error = unreadable.l1().await.expect_err("unreadable");
+    let message = assert_probe_error(error, "/stale/{id}", "the L1 read failed");
+    assert!(!message.contains(&key), "{message}");
+
+    // Bytes the file store frames faithfully but that are no entry: the read
+    // succeeds and the decode fails.
+    let undecodable = RenderCacheProbe::route("/stale/{id}").params(&[("id", "param-value-8")]);
+    let key = undecodable.key().expect("derive the key");
+    let parsed = RenderKey::from_base64url(&key).expect("parse the key");
+    let garbage = Bytes::from_static(b"not a render cache entry");
+    let fence = PublicationFence {
+        epoch: 1,
+        generation_digest: [0; 32],
+        token: 0,
+    };
+    let store = FileRenderStore::open(l1_dir.path(), 1024 * 1024).expect("open");
+    let outcome = store
+        .publish(&parsed, garbage, fence, 0, u64::MAX)
+        .await
+        .expect("publish");
+    assert_eq!(outcome, PublishOutcome::Published);
+    let error = undecodable.l1().await.expect_err("no entry");
+    let message = assert_probe_error(error, "/stale/{id}", "does not decode");
+    assert!(!message.contains(&key), "{message}");
 }

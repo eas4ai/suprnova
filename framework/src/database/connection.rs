@@ -212,6 +212,22 @@ impl DbConnection {
     where
         F: Fn() + Send + Sync + 'static,
     {
+        self.observe_statements(observer)
+    }
+
+    /// Points SeaORM's metric callback at `observer` and reports whether it
+    /// did, which needs sole ownership of the pool.
+    ///
+    /// `observer` is told nothing: the callback's statement text and bound
+    /// values stay here. Shared by
+    /// [`StatementCounter`](crate::database::testing::StatementCounter) and
+    /// [`Self::observe_statements_for_test`], so the two can never observe
+    /// different statements.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn observe_statements<F>(&mut self, observer: F) -> bool
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
         match Arc::get_mut(&mut self.inner) {
             Some(connection) => {
                 connection.set_metric_callback(move |_info| observer());

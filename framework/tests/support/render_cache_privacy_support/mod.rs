@@ -1110,7 +1110,7 @@ async fn boot(auth_before_install: bool) -> Arc<Harness> {
 
     let mut config = RenderCacheConfig::from_env()
         .expect("the test environment configures a valid render cache")
-        .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
+        .with_clock(Arc::clone(&clock) as Arc<dyn Clock>);
     config.enabled = true;
     config.l1 = L1Config::Disabled;
     // Pinned alongside the L1 tier, and for the same reason: an ambient

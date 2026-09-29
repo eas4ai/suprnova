@@ -1632,7 +1632,7 @@ async fn boot(
 
     let config = RenderCacheConfig::from_env()
         .expect("the test environment configures a valid render cache")
-        .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>)
+        .with_clock(Arc::clone(&clock) as Arc<dyn Clock>)
         .with_coordinator_for_test(Arc::clone(&waiting) as Arc<dyn RebuildCoordinator>);
     let mut config = config;
     config.enabled = true;

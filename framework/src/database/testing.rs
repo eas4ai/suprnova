@@ -214,6 +214,130 @@ impl TestDatabase {
     }
 }
 
+/// Counts the statements one database connection executes, so a test can
+/// prove what a request cost the database: a response the RenderCache
+/// served from a validation lease costs no statement at all.
+///
+/// It counts the prepared statements run through the connection, on its
+/// pool and on every transaction started from it: the queries and executes
+/// built from a `Statement`, which is what the query builder, the Eloquent
+/// models and `DB::statement` run. Unprepared SQL (`DB::unprepared`, the
+/// SQL the framework runs for a savepoint) and transaction control (`BEGIN`,
+/// `COMMIT`) are not counted, so a request whose only database work is one
+/// of those reads zero. It sees nothing else of a statement: not the SQL
+/// text and not a bound value, because a count is all a test needs. Clones
+/// share one count, so a test can keep one handle and give another to its
+/// harness.
+///
+/// Compiled only with the `testing` feature.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use suprnova::database::testing::StatementCounter;
+/// use suprnova::database::{DatabaseConfig, DbConnection};
+///
+/// # async fn example() -> Result<(), suprnova::FrameworkError> {
+/// let config = DatabaseConfig::builder().url("sqlite::memory:").build();
+/// let mut conn = DbConnection::connect(&config).await?;
+/// // Before the connection is cloned or bound into the container.
+/// let statements = StatementCounter::install(&mut conn)?;
+///
+/// // ... bind `conn`, then dispatch the request under test ...
+/// assert_eq!(statements.count(), 0, "the cache answered without the database");
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(any(test, feature = "testing"))]
+#[derive(Clone, Debug)]
+pub struct StatementCounter {
+    count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl StatementCounter {
+    /// Installs a counter on `conn` and returns its handle, starting at
+    /// zero. It counts the prepared statements run through the connection;
+    /// unprepared SQL and transaction control are not counted.
+    ///
+    /// Installing needs sole ownership of the connection pool, which a
+    /// connection has only before it is cloned or shared: in practice,
+    /// immediately after [`DbConnection::connect`]. A second install on the
+    /// same connection replaces the first counter, which stops counting.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FrameworkError`] when `conn` is already shared. Nothing is
+    /// installed then, and a counter that read zero would be a false proof.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use suprnova::database::testing::StatementCounter;
+    /// use suprnova::database::{DatabaseConfig, DbConnection};
+    ///
+    /// # async fn example() -> Result<(), suprnova::FrameworkError> {
+    /// let config = DatabaseConfig::builder().url("sqlite::memory:").build();
+    /// let mut conn = DbConnection::connect(&config).await?;
+    /// let statements = StatementCounter::install(&mut conn)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn install(conn: &mut DbConnection) -> Result<Self, FrameworkError> {
+        let counter = Self {
+            count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        };
+        let observed = std::sync::Arc::clone(&counter.count);
+        let installed = conn.observe_statements(move || {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        if installed {
+            Ok(counter)
+        } else {
+            Err(FrameworkError::internal(
+                "StatementCounter::install: the connection is already shared (cloned, or bound \
+                 into the container), so its statement callback cannot be set; install the \
+                 counter immediately after DbConnection::connect",
+            ))
+        }
+    }
+
+    /// The number of prepared statements the connection has run since the
+    /// install or since the last [`Self::reset`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::database::testing::StatementCounter;
+    /// # fn example(statements: &StatementCounter) {
+    /// let before = statements.count();
+    /// // ... dispatch the request under test ...
+    /// assert_eq!(statements.count(), before, "the request reached no database");
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn count(&self) -> u64 {
+        self.count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Sets the count back to zero, so the next reading covers only the
+    /// statements that run after this call.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::database::testing::StatementCounter;
+    /// # fn example(statements: &StatementCounter) {
+    /// statements.reset();
+    /// // ... dispatch the request under test ...
+    /// assert_eq!(statements.count(), 0, "the request reached no database");
+    /// # }
+    /// ```
+    pub fn reset(&self) {
+        self.count.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Create a test database with default migrator
 ///
 /// This macro creates a `TestDatabase` using `crate::migrations::Migrator` as the
@@ -252,4 +376,95 @@ macro_rules! test_database {
             .await
             .expect("Failed to set up test database")
     };
+}
+
+#[cfg(test)]
+mod statement_counter_tests {
+    use sea_orm::{ConnectionTrait, Statement};
+
+    use super::StatementCounter;
+    use crate::database::{DatabaseConfig, DbConnection};
+
+    async fn connect() -> DbConnection {
+        let config = DatabaseConfig::builder()
+            .url("sqlite::memory:")
+            .max_connections(1)
+            .min_connections(1)
+            .logging(false)
+            .build();
+        DbConnection::connect(&config)
+            .await
+            .expect("connect an in-memory database")
+    }
+
+    async fn run_one_statement(conn: &DbConnection) {
+        let backend = conn.inner().get_database_backend();
+        let row = conn
+            .inner()
+            .query_one_raw(Statement::from_string(backend, "SELECT 1"))
+            .await
+            .expect("run a statement");
+        assert!(row.is_some(), "SELECT 1 returns one row");
+    }
+
+    #[tokio::test]
+    async fn it_counts_every_statement_and_resets_to_zero() {
+        let mut conn = connect().await;
+        let statements =
+            StatementCounter::install(&mut conn).expect("an unshared connection takes a counter");
+        let shared = statements.clone();
+        assert_eq!(statements.count(), 0, "a new counter starts at zero");
+
+        run_one_statement(&conn).await;
+        assert_eq!(statements.count(), 1);
+        run_one_statement(&conn).await;
+        assert_eq!(statements.count(), 2);
+        assert_eq!(shared.count(), 2, "a clone reads the same count");
+
+        statements.reset();
+        assert_eq!(shared.count(), 0, "one reset clears both handles");
+        run_one_statement(&conn).await;
+        assert_eq!(statements.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn unprepared_sql_is_not_counted_and_a_prepared_statement_is() {
+        let mut conn = connect().await;
+        let statements =
+            StatementCounter::install(&mut conn).expect("an unshared connection takes a counter");
+
+        conn.inner()
+            .execute_unprepared("CREATE TABLE counted (id INTEGER)")
+            .await
+            .expect("run unprepared SQL");
+        conn.inner()
+            .execute_unprepared("SELECT 1")
+            .await
+            .expect("run unprepared SQL");
+        assert_eq!(
+            statements.count(),
+            0,
+            "unprepared SQL leaves the count unchanged"
+        );
+
+        run_one_statement(&conn).await;
+        assert_eq!(
+            statements.count(),
+            1,
+            "the prepared statement after them is the one counted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shared_connection_is_refused_with_an_error() {
+        let mut conn = connect().await;
+        let _container_copy = conn.clone();
+
+        let error = StatementCounter::install(&mut conn)
+            .expect_err("a shared connection cannot take a counter");
+        assert!(
+            error.to_string().contains("already shared"),
+            "the error says why nothing was installed: {error}"
+        );
+    }
 }

@@ -150,7 +150,7 @@ pub enum CacheBoot {
     /// Exactly what `suprnova serve` installs.
     FromEnv,
     /// `from_env` with an adjustable clock in place of the system one, so a
-    /// test can drive a freshness band. `RenderCacheConfig::with_clock_for_test`
+    /// test can drive a freshness band. `RenderCacheConfig::with_clock`
     /// is the only way in, and `from_env` never calls it.
     TestClock,
     /// `from_env` with the two providers `RENDER_CACHE_PROFILE=database`
@@ -269,7 +269,7 @@ async fn boot(accepts: usize, cache: CacheBoot) -> TestApp {
             // parameter, rather than an `Arc::clone` whose return type it
             // would try to infer as the trait object directly.
             let for_runtime = Arc::clone(&clock);
-            config = config.with_clock_for_test(for_runtime);
+            config = config.with_clock(for_runtime);
             render_cache_clock = Some(clock);
         }
         CacheBoot::DatabaseProfile => {

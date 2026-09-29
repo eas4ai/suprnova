@@ -584,7 +584,7 @@ async fn boot_with_stitched_freshness(
 
     let mut render_cache_config = RenderCacheConfig::from_env()
         .expect("the test environment configures a valid render cache")
-        .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
+        .with_clock(Arc::clone(&clock) as Arc<dyn Clock>);
     render_cache_config.enabled = true;
     // Pinned, never inherited: an ambient RENDER_CACHE_PROFILE,
     // RENDER_CACHE_L1, or RENDER_CACHE_COORDINATOR must not change which

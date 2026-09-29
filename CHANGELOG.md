@@ -444,6 +444,35 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `PaddleProvider::archive_customer`. What you have to change: code that
   archived a customer through `metadata` calls `archive_customer`, and removes
   the `status` key from the metadata if it does not want it there.
+- **A supported way to test a cached route:
+  `render_cache::testing::RenderCacheProbe`, `RenderCacheConfig::with_clock`
+  and `database::testing::StatementCounter`.** A test that has to prove that
+  the render cache served a response had the hidden hooks of the framework's
+  own tests and nothing else: `key_for_route_for_test`,
+  `inspect_route_for_test`, `inspect_l1_for_test`, `clear_l0_for_test`,
+  `with_clock_for_test`, `observe_statements_for_test`.
+  `RenderCacheProbe::route(pattern)`, with `.params(..)` and `.at_epoch(..)`,
+  gives the key the route derives (`key()`), the entry of each tier for that
+  key (`l0()`, `l1()`), and `RenderCacheProbe::clear_l0()` empties the first
+  tier and leaves the second as it is. The probe derives the key with the
+  function the middleware uses, so you tell it each dimension the policy of
+  the route varies on: `.login(id)` for `Principal`, `.tenant(id)` for
+  `Tenant`, `.locale(tag)` for `Locale` (the current locale of the process
+  when you leave it out) and `.host(host)` for `Host`; a route that varies on
+  `Host` and a probe with no host is an error that names the dimension. `l0()`
+  reads through `MemoryRenderStore::peek`, which does not count as a use, so a
+  probe between two requests does not change what the first tier evicts next;
+  `RenderCache::inspect` counts as a use. `RenderCacheConfig::with_clock`
+  installs the clock the runtime reads, so a test moves an entry through its
+  freshness bands without a sleep. `StatementCounter::install(&mut
+  connection)` counts the prepared statements run through a connection, so a
+  test shows that a request the cache served ran none; unprepared SQL and
+  transaction control are not counted. All of it is compiled with the
+  `testing` feature, and no function of it panics: an error names the route
+  and never a login, a parameter or a key. What you have to change: a test
+  that called `RenderCacheConfig::with_clock_for_test` calls `with_clock`. The
+  other hooks stay for the framework's own tests, and are compiled with the
+  `testing` feature only.
 
 ### Changed
 
