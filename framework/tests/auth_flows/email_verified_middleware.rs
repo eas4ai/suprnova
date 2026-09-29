@@ -27,17 +27,15 @@
 //! installs a fixed user id into request state (what `Auth::id()` reads),
 //! then the middleware under test checks that user's verification flag.
 
+use crate::http_wire::request;
+
 use std::any::Any;
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::Duration;
 
-use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -255,45 +253,6 @@ async fn spawn(registry: MiddlewareRegistry, accepts: usize) -> SocketAddr {
     addr
 }
 
-async fn get(addr: SocketAddr) -> (u16, HashMap<String, String>, String) {
-    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let io = TokioIo::new(stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-        .await
-        .unwrap();
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
-
-    let req = hyper::Request::builder()
-        .method("GET")
-        .uri("/protected")
-        .header("Host", "localhost")
-        .header("Content-Length", "0")
-        .body(Full::new(Bytes::new()))
-        .unwrap();
-
-    let resp = tokio::time::timeout(Duration::from_secs(5), sender.send_request(req))
-        .await
-        .expect("send_request timeout")
-        .expect("hyper send_request");
-
-    let (parts, body) = resp.into_parts();
-    let status = parts.status.as_u16();
-    let headers = parts
-        .headers
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_lowercase(),
-                v.to_str().unwrap_or("").to_string(),
-            )
-        })
-        .collect();
-    let bytes = body.collect().await.unwrap().to_bytes();
-    (status, headers, String::from_utf8_lossy(&bytes).to_string())
-}
-
 #[test]
 fn verified_user_reaches_handler() {
     Lazy::force(&SETUP);
@@ -307,7 +266,7 @@ fn verified_user_reaches_handler() {
             .append(LoginAs(id.to_string()))
             .append(EnsureEmailVerifiedMiddleware::new());
         let addr = spawn(registry, 1).await;
-        let (status, _headers, body) = get(addr).await;
+        let (status, _headers, body) = request(addr, "GET", "/protected", &[]).await;
 
         assert_eq!(status, 200, "verified user must reach the handler");
         assert_eq!(body, "reached");
@@ -326,7 +285,7 @@ fn unverified_user_gets_403_in_api_form() {
             .append(LoginAs(id.to_string()))
             .append(EnsureEmailVerifiedMiddleware::new());
         let addr = spawn(registry, 1).await;
-        let (status, _headers, body) = get(addr).await;
+        let (status, _headers, body) = request(addr, "GET", "/protected", &[]).await;
 
         assert_eq!(status, 403);
         assert!(
@@ -347,7 +306,7 @@ fn unverified_user_redirects_in_web_form() {
             .append(LoginAs(id.to_string()))
             .append(EnsureEmailVerifiedMiddleware::redirect_to("/email/verify"));
         let addr = spawn(registry, 1).await;
-        let (status, headers, _body) = get(addr).await;
+        let (status, headers, _body) = request(addr, "GET", "/protected", &[]).await;
 
         assert_eq!(status, 302);
         assert_eq!(
@@ -369,7 +328,7 @@ fn no_auth_user_falls_into_same_branch() {
         // consulting the provider (the id-None check comes first).
         let registry = MiddlewareRegistry::new().append(EnsureEmailVerifiedMiddleware::new());
         let addr = spawn(registry, 1).await;
-        let (status, _headers, body) = get(addr).await;
+        let (status, _headers, body) = request(addr, "GET", "/protected", &[]).await;
 
         assert_eq!(status, 403);
         assert!(body.contains("not verified"));

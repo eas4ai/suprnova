@@ -3,6 +3,8 @@
 
 #[path = "../support/env_lock.rs"]
 mod env_lock;
+#[path = "../support/http_wire.rs"]
+mod http_wire;
 #[cfg(feature = "testing")]
 #[path = "../support/magnetar_auth.rs"]
 mod magnetar_auth;

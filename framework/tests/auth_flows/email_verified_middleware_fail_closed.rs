@@ -41,17 +41,15 @@
 //! reads), then the middleware under test consults the provider - which here
 //! errors, driving the 500.
 
+use crate::http_wire::request;
+
 use std::any::Any;
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use async_trait::async_trait;
-use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -191,45 +189,6 @@ async fn spawn(registry: MiddlewareRegistry, accepts: usize) -> SocketAddr {
     addr
 }
 
-async fn get(addr: SocketAddr) -> (u16, HashMap<String, String>, String) {
-    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let io = TokioIo::new(stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-        .await
-        .unwrap();
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
-
-    let req = hyper::Request::builder()
-        .method("GET")
-        .uri("/protected")
-        .header("Host", "localhost")
-        .header("Content-Length", "0")
-        .body(Full::new(Bytes::new()))
-        .unwrap();
-
-    let resp = tokio::time::timeout(Duration::from_secs(5), sender.send_request(req))
-        .await
-        .expect("send_request timeout")
-        .expect("hyper send_request");
-
-    let (parts, body) = resp.into_parts();
-    let status = parts.status.as_u16();
-    let headers = parts
-        .headers
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_lowercase(),
-                v.to_str().unwrap_or("").to_string(),
-            )
-        })
-        .collect();
-    let bytes = body.collect().await.unwrap().to_bytes();
-    (status, headers, String::from_utf8_lossy(&bytes).to_string())
-}
-
 /// When the active provider cannot answer `is_email_verified` (here: a
 /// token-only provider that returns the unsupported error), the middleware
 /// fails CLOSED - the request collapses to a 500 and the protected handler is
@@ -251,7 +210,7 @@ fn provider_error_fails_closed_with_500() {
             .append(LoginAs("token-user-1".to_string()))
             .append(EnsureEmailVerifiedMiddleware::new());
         let addr = spawn(registry, 1).await;
-        let (status, _headers, _body) = get(addr).await;
+        let (status, _headers, _body) = request(addr, "GET", "/protected", &[]).await;
 
         // KEY assertion: 500, never 200. The provider error must not let the
         // unverifiable user through.

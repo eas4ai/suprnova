@@ -15,14 +15,12 @@
 //! `TwoFactorChallengeMiddleware` reads
 //! `TwoFactor::pending_user_id()` it sees the slot the test set up.
 
-use std::collections::HashMap;
+use crate::http_wire::request;
+
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
-use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -99,45 +97,6 @@ async fn spawn(registry: MiddlewareRegistry, accepts: usize) -> SocketAddr {
     addr
 }
 
-async fn get(addr: SocketAddr) -> (u16, HashMap<String, String>, String) {
-    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let io = TokioIo::new(stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-        .await
-        .unwrap();
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
-
-    let req = hyper::Request::builder()
-        .method("GET")
-        .uri("/protected")
-        .header("Host", "localhost")
-        .header("Content-Length", "0")
-        .body(Full::new(Bytes::new()))
-        .unwrap();
-
-    let resp = tokio::time::timeout(Duration::from_secs(5), sender.send_request(req))
-        .await
-        .expect("send_request timeout")
-        .expect("hyper send_request");
-
-    let (parts, body) = resp.into_parts();
-    let status = parts.status.as_u16();
-    let headers = parts
-        .headers
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_lowercase(),
-                v.to_str().unwrap_or("").to_string(),
-            )
-        })
-        .collect();
-    let bytes = body.collect().await.unwrap().to_bytes();
-    (status, headers, String::from_utf8_lossy(&bytes).to_string())
-}
-
 #[tokio::test]
 async fn pending_session_gets_403_in_api_form() {
     let registry = MiddlewareRegistry::new()
@@ -147,7 +106,7 @@ async fn pending_session_gets_403_in_api_form() {
         .append(TwoFactorChallengeMiddleware::new());
     let addr = spawn(registry, 1).await;
 
-    let (status, _headers, body) = get(addr).await;
+    let (status, _headers, body) = request(addr, "GET", "/protected", &[]).await;
 
     assert_eq!(status, 403);
     assert!(
@@ -167,7 +126,7 @@ async fn pending_session_redirects_in_web_form() {
         ));
     let addr = spawn(registry, 1).await;
 
-    let (status, headers, _body) = get(addr).await;
+    let (status, headers, _body) = request(addr, "GET", "/protected", &[]).await;
 
     assert_eq!(status, 302);
     assert_eq!(
@@ -186,7 +145,7 @@ async fn non_pending_session_passes_through() {
         .append(TwoFactorChallengeMiddleware::new());
     let addr = spawn(registry, 1).await;
 
-    let (status, _headers, body) = get(addr).await;
+    let (status, _headers, body) = request(addr, "GET", "/protected", &[]).await;
 
     assert_eq!(
         status, 200,
