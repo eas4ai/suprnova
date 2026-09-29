@@ -4,76 +4,10 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
-## 2.1.0 - 2026-09-18
+## 3.0.0 - 2026-09-29
 
 ### Added
 
-- **Live ships the foundations of its component library.** A token stylesheet
-  with a base layer arrives as the `ui-styles` runtime artifact when a
-  document opts in with `with_suprnova_ui()`; every rule sits in the
-  `suprnova-ui` cascade layer and every visual value is a `--sn-` token with
-  light and dark values, so the skin is removable with nothing breaking.
-  `live:add` installs a component as one directory under
-  `templates/suprnova-ui/` from its manifest, keeps files you edited, and
-  accepts a third-party manifest under its own root; the framework serves the
-  vendored stylesheet and script at `/suprnova-ui/<component>/<file>`. The
-  form family ships as Askama macros the checker now expands, so a library
-  view passes `live:check` like any other. The `suprnova.` namespace is
-  reserved to the library and the registry refuses it from any other crate.
-- **The Live component library gains its overlay family.** Tooltip, collapsible
-  and accordion, popover, a single-level dropdown menu, dialog, sheet, and
-  drawer install with `live:add` beside the form family. Each owns its open
-  state through the native primitive (`details`, the `popover` attribute,
-  `dialog`) before any script, makes no Live request to open or close, returns
-  focus to its trigger on close, and keeps its open state across a morph under
-  a stable key with `live:preserve.self`.
-- **The Live component library gains its feedback and navigation families.**
-  Alert, skeleton, spinner, progress, empty state, toast region and flash
-  region; header bar, footer, sidebar, breadcrumbs, tabs, pagination and load
-  more install with `live:add` beside the form and overlay families. Feedback
-  presents state the server or runtime holds: an alert's role follows its
-  variant with a non-color cue, loading presentation is bound through
-  `live:loading` and shows on the runtime's own timing, progress is the native
-  element with a label and readout, the empty state's reason is server state,
-  and a toast announces once without taking focus while a critical error also
-  renders as an alert. Navigation keeps route semantics: anchors with real
-  URLs, `aria-current` from the server, an explicit local or route mode for
-  tabs and pagination, Live pagination reflected with `history.replaceState`
-  and no history entry, and load more as a keyed append from a button. The
-  `live_key` view filter lands with them: a `live:key` inside a `{% for %}`
-  loop passes through it, and it enforces at render time the key rule the
-  checker enforces on literal keys.
-- **The Live component library gains its data display family, and with it
-  the built-in set is complete.** Separator, scroll area, aspect image, card,
-  badge, avatar and avatar group, list group, description list and stat card
-  install with `live:add` beside the earlier families; every one keeps
-  document order and native semantics, and every status carries text. The
-  chart renders on the server through `charts-rs`: `render_chart` in
-  `suprnova::live::charts` draws bar or line marks from bounded typed series
-  as trusted SVG, and the macro places a summary and a data table beside it,
-  so no charting script reaches the browser. The datatable is a native table
-  with one island per table whose sort, filter and page are `#[url]` fields
-  reflected into a shareable URL after every action.
-- **The Live component library gains its live-native family, the last one.**
-  The upload widget renders the shipped upload protocol's states from the
-  runtime's progress root and claims nothing durable before the finalizing
-  action; the live feed and notification bell carry the runtime's stream
-  status announcements, so a degraded, reconnecting or closed stream says
-  so; the account menu is a details disclosure with a CSRF-protected
-  sign-out form and a documented stitch slot under RenderCache. The
-  custom-element tier, input OTP, date picker and combobox, enhances native
-  controls it never replaces: each `sn-` element is a light-DOM
-  `HTMLElement` defined by its own vendored file and holds no form value, so
-  the form submits the same value with the script blocked. The combobox
-  refuses a listbox rendered for an older query.
-- **Session blocking serializes the requests that carry one session.**
-  `SESSION_BLOCK=true`, or `SessionConfig::block(SessionBlock::default())`,
-  makes the session middleware hold a cache lock for the session from load
-  to write, and `block_session` on a route or group enables it for those
-  routes alone. Both bounds are yours, the hold and the wait, and a request
-  that waits past the bound answers `503` with `Retry-After`. Without it,
-  two concurrent requests on one session wrote back last-writer-wins, so a
-  flash set by a redirect could be lost to a request that started earlier.
 - **`FrameworkError::Timeout` tells a passed deadline from a failure.**
   `WorkflowHandle::wait_with_timeout` documented a timeout error that did not
   exist and returned `FrameworkError::Internal`, so a caller could not tell a
@@ -614,11 +548,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
-- **Live's supported browser baseline is Chrome and Edge 114, Firefox 128, and
-  Safari 17.** The floor rises from Chrome and Edge 111 and Safari 16.4 to the
-  first releases that ship the native `popover` attribute the component
-  library's overlays own their open state with. The compatibility matrix's
-  minimum slots move with it; Firefox stays at 128.
 - **Magnetar's `CeremonyStore` takes a named request for its atomic
   transition.** `transition_and_consume` and `transition_and_consume_exact`
   took six and seven positional strings, so a transposed selector or state
@@ -852,132 +781,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
-- **A template's `live:key` reaches the Live runtime.** The checker validated
-  `live:key` and the manual named it, but the browser runtime's morph
-  identity, morph controls and preservation scopes read only the engine's
-  `data-suprnova-live-key`, so a keyed control written as the checker
-  requires had no effect and every library component wrote the key twice.
-  The runtime now reads `live:key`, keeps the engine spelling for the roots
-  it renders, refuses an element carrying both with different values, and
-  the components write `live:key` alone. The form gallery's save form also
-  gained the `.prevent` modifier it lacked, so a Live submit no longer
-  reloads the page from the form's own query.
-- **A Live form holding an empty number input or an unselected select
-  submits.** The runtime read such a control's null value as a mismatch with
-  itself and refused the whole submit, so the action never ran and the
-  browser submitted the form natively. The search input's model binding also
-  used a debounce the runtime does not accept; it now uses 250 ms.
-- **`live:check` checks every element a view renders.** A view that called a
-  macro splicing `caller()` with an empty call block, as the validation summary
-  is called, rendered no content after that call to the checker, so the
-  component proved clean while the rest of the view went unchecked. The empty
-  call is now empty content, and a view that renders nothing fails the check.
-  Fixing it exposed errors the dogfood form gallery had hidden.
-- **A declared model debounce is 100, 250, or 500 milliseconds.**
-  `#[model(debounce = N)]` accepted 1 to 60000 ms, but the directive grammar
-  the checker and the browser runtime share lists three durations, so any
-  other value could never be bound by a template; it now fails to compile.
-  `live:error` also accepts an action as its target, as a validation summary
-  names one, matching what the runtime resolves.
-- **A Live form of more than seven model fields submits.** The browser runtime
-  refused any request carrying more than eight operations or model proposals,
-  and any response with more than sixteen validation entries or eight events,
-  though the framework's server accepts 128 of each; the refused submit never
-  left the browser and was reported as a network failure. The browser now
-  admits the server's counts, `live:check` refuses a `live:submit` form of
-  more than 127 model fields, and a request refused for a limit is reported as
-  a resource limit that shows the action's error feedback.
-- **The combobox stays responsive and shows what the server answered.** Text
-  that no option matched froze the page, because the element's observer
-  watched attributes its own render rewrote even when nothing changed. The
-  element also filtered the server's options by substring, hiding results a
-  server search matched another way, such as an accent-insensitive or code
-  match. It now writes only what changed, shows every option while the
-  listbox answers the input's current text, keeps an answer to older text
-  hidden, and filters by the typed text only for a fixed list, which
-  `remote=false` selects.
-- **A library custom element binds once however a morph moves it.** The
-  combobox, input OTP, date picker, and password input bound their listeners
-  on every connection, and the dialog, sheet, and drawer guarded on an
-  attribute a morph removes, so a moved element answered one click twice and
-  the password reveal toggled back at once. Every element now binds per
-  connection, releases its listeners and observers when it leaves the
-  document, and keeps them across an atomic move.
-- **A toast holds while the pointer is anywhere on it or focus is inside it.**
-  The region resumed its timers when the pointer left any child element, so
-  moving from a toast's text to its padding let it time out under the
-  pointer, and a toast could hide while its dismiss button had focus.
-- **Nested tabs act on their own tabs.** A local tabs instance selected every
-  tab below it and handled the events of a nested instance, so a click on an
-  inner tab hid the outer panel.
-- **The tooltip bubble stays open while the pointer moves onto it.** The
-  bubble ignored the pointer, so it hid as the pointer left the trigger and
-  its text could not be read or selected.
-- **The select's dropdown indicator follows the text color.** It was a
-  data-URI SVG, whose `currentColor` does not inherit the document's color, so
-  it drew black on the dark scheme's surface.
-- **The form controls show the island's values.** No form macro took a value,
-  so a number input mounted at 1 rendered empty and a submit that changed
-  nothing proposed an empty value. Each value control now takes `value=`,
-  `checked=`, or `selected=`, radio and checkbox group inputs are keyed by
-  value so a choice the user has not sent survives a re-render, and
-  `authority=` marks the render that must replace what the user typed.
-- **A checkbox group proposes the list of checked values.** The runtime read
-  every checkbox as a boolean, so a group whose boxes disagreed could not be
-  submitted. A checkbox group of any size, and any field that more than one
-  checkbox binds, now proposes the checked values in document order; a single
-  checkbox stays a boolean.
-- **A model proposal its field cannot decode is a validation error on that
-  field.** A proposal such as null for a `u64` field or a boolean for a list
-  field was dropped silently: the action ran and the response carried no
-  validation. The field now reports the error through `live:error` and keeps
-  its value, and the action does not run.
-- **The checker, the `live_key` filter, and the runtime accept one key
-  alphabet.** The checker and the filter accepted a key beginning with `_`,
-  `-`, `.`, or `:`, which the runtime refuses, so the island's first morph
-  failed. A key now begins with an ASCII letter or digit everywhere, and
-  `live:check` holds the element ids inside an island to the rule the runtime
-  checks, refusing an invalid id (`invalid_element_id`) and a repeated one
-  (`duplicate_element_id`), a literal id inside a loop included.
-- **`live_key_digest` keys any value.** `live_key` fails the island's render
-  for a value outside the key alphabet, so a row keyed by an email address
-  failed the island for every viewer. The new filter turns any value into a
-  stable key, one value always yielding the same key.
-- **`live:check` checks a loop or match binding as that binding.** Inside a
-  macro body, a name that a `for`, a `match` arm, or an `if let` bound was
-  checked as the macro parameter of the same name, so a literal argument
-  proved a directive that the loop's own values render.
-- **`render_chart` returns an error for a value beyond 1e9.** The renderer's
-  axis arithmetic overflowed and panicked from about 1e12; a value whose
-  magnitude exceeds 1e9 is now an input error.
-- **An application that cannot read its vendored components refuses to
-  start.** `try_live_ui_assets()` reads `templates/suprnova-ui/` under the
-  application base path on each request, so an application started
-  elsewhere, such as from a container image that holds only the binary,
-  answered 404 for every component stylesheet and script and started
-  cleanly. Installing the route now fails and names the directory.
-- **`live:add` replaces a file you never edited.** It compared bytes only, so
-  after a library update it kept every installed file and reported it edited
-  locally. It now records each file's digest beside the component and
-  replaces a file whose bytes still match the record; a file you edited, or
-  one no record vouches for, is kept and reported.
-- **`live:add --manifest` refuses a file that is a symbolic link.** Each
-  third-party file was read through links, so a component could install the
-  bytes of any readable file as a template. A named file must be a regular
-  file inside the manifest's directory.
-- **A model edit that a render replaced is sent when it is typed again.** The
-  browser compared each edit with the value it last proposed, so after a
-  refused value and a render that replaced it, such as a reset, typing the same
-  value again sent nothing: the control showed it with no error while the
-  island held another value. The render an island applies is now the baseline
-  the next edit is compared with, and a field's dirty state compares with the
-  value that render gave its control.
-- **A tooltip can be dismissed where it is shown.** A bubble that covers
-  content could be dismissed only by moving the pointer or focus away, which
-  WCAG 2.2 success criterion 1.4.13 does not accept. Escape now hides it with
-  neither moved, and the next hover or focus of that trigger shows it again.
-  The bubble still shows with no script in the page; the new `sn-tooltip`
-  element carries the dismissal alone, and `live:add tooltip` installs it.
 - **Magnetar logs a lockout status failure before the sign-in fails closed.**
   The password plugin answered `503` when the lockout store could not report
   an identity's status and logged nothing, while the failed-attempt path
@@ -1283,6 +1086,214 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   For the session cookie and the remember cookie the user signs in again, and
   for the maintenance bypass the operator visits the secret URL again. No
   request fails for it.
+
+## 2.1.0 - 2026-09-18
+
+### Added
+
+- **Live ships the foundations of its component library.** A token stylesheet
+  with a base layer arrives as the `ui-styles` runtime artifact when a
+  document opts in with `with_suprnova_ui()`; every rule sits in the
+  `suprnova-ui` cascade layer and every visual value is a `--sn-` token with
+  light and dark values, so the skin is removable with nothing breaking.
+  `live:add` installs a component as one directory under
+  `templates/suprnova-ui/` from its manifest, keeps files you edited, and
+  accepts a third-party manifest under its own root; the framework serves the
+  vendored stylesheet and script at `/suprnova-ui/<component>/<file>`. The
+  form family ships as Askama macros the checker now expands, so a library
+  view passes `live:check` like any other. The `suprnova.` namespace is
+  reserved to the library and the registry refuses it from any other crate.
+- **The Live component library gains its overlay family.** Tooltip, collapsible
+  and accordion, popover, a single-level dropdown menu, dialog, sheet, and
+  drawer install with `live:add` beside the form family. Each owns its open
+  state through the native primitive (`details`, the `popover` attribute,
+  `dialog`) before any script, makes no Live request to open or close, returns
+  focus to its trigger on close, and keeps its open state across a morph under
+  a stable key with `live:preserve.self`.
+- **The Live component library gains its feedback and navigation families.**
+  Alert, skeleton, spinner, progress, empty state, toast region and flash
+  region; header bar, footer, sidebar, breadcrumbs, tabs, pagination and load
+  more install with `live:add` beside the form and overlay families. Feedback
+  presents state the server or runtime holds: an alert's role follows its
+  variant with a non-color cue, loading presentation is bound through
+  `live:loading` and shows on the runtime's own timing, progress is the native
+  element with a label and readout, the empty state's reason is server state,
+  and a toast announces once without taking focus while a critical error also
+  renders as an alert. Navigation keeps route semantics: anchors with real
+  URLs, `aria-current` from the server, an explicit local or route mode for
+  tabs and pagination, Live pagination reflected with `history.replaceState`
+  and no history entry, and load more as a keyed append from a button. The
+  `live_key` view filter lands with them: a `live:key` inside a `{% for %}`
+  loop passes through it, and it enforces at render time the key rule the
+  checker enforces on literal keys.
+- **The Live component library gains its data display family, and with it
+  the built-in set is complete.** Separator, scroll area, aspect image, card,
+  badge, avatar and avatar group, list group, description list and stat card
+  install with `live:add` beside the earlier families; every one keeps
+  document order and native semantics, and every status carries text. The
+  chart renders on the server through `charts-rs`: `render_chart` in
+  `suprnova::live::charts` draws bar or line marks from bounded typed series
+  as trusted SVG, and the macro places a summary and a data table beside it,
+  so no charting script reaches the browser. The datatable is a native table
+  with one island per table whose sort, filter and page are `#[url]` fields
+  reflected into a shareable URL after every action.
+- **The Live component library gains its live-native family, the last one.**
+  The upload widget renders the shipped upload protocol's states from the
+  runtime's progress root and claims nothing durable before the finalizing
+  action; the live feed and notification bell carry the runtime's stream
+  status announcements, so a degraded, reconnecting or closed stream says
+  so; the account menu is a details disclosure with a CSRF-protected
+  sign-out form and a documented stitch slot under RenderCache. The
+  custom-element tier, input OTP, date picker and combobox, enhances native
+  controls it never replaces: each `sn-` element is a light-DOM
+  `HTMLElement` defined by its own vendored file and holds no form value, so
+  the form submits the same value with the script blocked. The combobox
+  refuses a listbox rendered for an older query.
+- **Session blocking serializes the requests that carry one session.**
+  `SESSION_BLOCK=true`, or `SessionConfig::block(SessionBlock::default())`,
+  makes the session middleware hold a cache lock for the session from load
+  to write, and `block_session` on a route or group enables it for those
+  routes alone. Both bounds are yours, the hold and the wait, and a request
+  that waits past the bound answers `503` with `Retry-After`. Without it,
+  two concurrent requests on one session wrote back last-writer-wins, so a
+  flash set by a redirect could be lost to a request that started earlier.
+
+### Changed
+
+- **Live's supported browser baseline is Chrome and Edge 114, Firefox 128, and
+  Safari 17.** The floor rises from Chrome and Edge 111 and Safari 16.4 to the
+  first releases that ship the native `popover` attribute the component
+  library's overlays own their open state with. The compatibility matrix's
+  minimum slots move with it; Firefox stays at 128.
+
+### Fixed
+
+- **A template's `live:key` reaches the Live runtime.** The checker validated
+  `live:key` and the manual named it, but the browser runtime's morph
+  identity, morph controls and preservation scopes read only the engine's
+  `data-suprnova-live-key`, so a keyed control written as the checker
+  requires had no effect and every library component wrote the key twice.
+  The runtime now reads `live:key`, keeps the engine spelling for the roots
+  it renders, refuses an element carrying both with different values, and
+  the components write `live:key` alone. The form gallery's save form also
+  gained the `.prevent` modifier it lacked, so a Live submit no longer
+  reloads the page from the form's own query.
+- **A Live form holding an empty number input or an unselected select
+  submits.** The runtime read such a control's null value as a mismatch with
+  itself and refused the whole submit, so the action never ran and the
+  browser submitted the form natively. The search input's model binding also
+  used a debounce the runtime does not accept; it now uses 250 ms.
+- **`live:check` checks every element a view renders.** A view that called a
+  macro splicing `caller()` with an empty call block, as the validation summary
+  is called, rendered no content after that call to the checker, so the
+  component proved clean while the rest of the view went unchecked. The empty
+  call is now empty content, and a view that renders nothing fails the check.
+  Fixing it exposed errors the dogfood form gallery had hidden.
+- **A declared model debounce is 100, 250, or 500 milliseconds.**
+  `#[model(debounce = N)]` accepted 1 to 60000 ms, but the directive grammar
+  the checker and the browser runtime share lists three durations, so any
+  other value could never be bound by a template; it now fails to compile.
+  `live:error` also accepts an action as its target, as a validation summary
+  names one, matching what the runtime resolves.
+- **A Live form of more than seven model fields submits.** The browser runtime
+  refused any request carrying more than eight operations or model proposals,
+  and any response with more than sixteen validation entries or eight events,
+  though the framework's server accepts 128 of each; the refused submit never
+  left the browser and was reported as a network failure. The browser now
+  admits the server's counts, `live:check` refuses a `live:submit` form of
+  more than 127 model fields, and a request refused for a limit is reported as
+  a resource limit that shows the action's error feedback.
+- **The combobox stays responsive and shows what the server answered.** Text
+  that no option matched froze the page, because the element's observer
+  watched attributes its own render rewrote even when nothing changed. The
+  element also filtered the server's options by substring, hiding results a
+  server search matched another way, such as an accent-insensitive or code
+  match. It now writes only what changed, shows every option while the
+  listbox answers the input's current text, keeps an answer to older text
+  hidden, and filters by the typed text only for a fixed list, which
+  `remote=false` selects.
+- **A library custom element binds once however a morph moves it.** The
+  combobox, input OTP, date picker, and password input bound their listeners
+  on every connection, and the dialog, sheet, and drawer guarded on an
+  attribute a morph removes, so a moved element answered one click twice and
+  the password reveal toggled back at once. Every element now binds per
+  connection, releases its listeners and observers when it leaves the
+  document, and keeps them across an atomic move.
+- **A toast holds while the pointer is anywhere on it or focus is inside it.**
+  The region resumed its timers when the pointer left any child element, so
+  moving from a toast's text to its padding let it time out under the
+  pointer, and a toast could hide while its dismiss button had focus.
+- **Nested tabs act on their own tabs.** A local tabs instance selected every
+  tab below it and handled the events of a nested instance, so a click on an
+  inner tab hid the outer panel.
+- **The tooltip bubble stays open while the pointer moves onto it.** The
+  bubble ignored the pointer, so it hid as the pointer left the trigger and
+  its text could not be read or selected.
+- **The select's dropdown indicator follows the text color.** It was a
+  data-URI SVG, whose `currentColor` does not inherit the document's color, so
+  it drew black on the dark scheme's surface.
+- **The form controls show the island's values.** No form macro took a value,
+  so a number input mounted at 1 rendered empty and a submit that changed
+  nothing proposed an empty value. Each value control now takes `value=`,
+  `checked=`, or `selected=`, radio and checkbox group inputs are keyed by
+  value so a choice the user has not sent survives a re-render, and
+  `authority=` marks the render that must replace what the user typed.
+- **A checkbox group proposes the list of checked values.** The runtime read
+  every checkbox as a boolean, so a group whose boxes disagreed could not be
+  submitted. A checkbox group of any size, and any field that more than one
+  checkbox binds, now proposes the checked values in document order; a single
+  checkbox stays a boolean.
+- **A model proposal its field cannot decode is a validation error on that
+  field.** A proposal such as null for a `u64` field or a boolean for a list
+  field was dropped silently: the action ran and the response carried no
+  validation. The field now reports the error through `live:error` and keeps
+  its value, and the action does not run.
+- **The checker, the `live_key` filter, and the runtime accept one key
+  alphabet.** The checker and the filter accepted a key beginning with `_`,
+  `-`, `.`, or `:`, which the runtime refuses, so the island's first morph
+  failed. A key now begins with an ASCII letter or digit everywhere, and
+  `live:check` holds the element ids inside an island to the rule the runtime
+  checks, refusing an invalid id (`invalid_element_id`) and a repeated one
+  (`duplicate_element_id`), a literal id inside a loop included.
+- **`live_key_digest` keys any value.** `live_key` fails the island's render
+  for a value outside the key alphabet, so a row keyed by an email address
+  failed the island for every viewer. The new filter turns any value into a
+  stable key, one value always yielding the same key.
+- **`live:check` checks a loop or match binding as that binding.** Inside a
+  macro body, a name that a `for`, a `match` arm, or an `if let` bound was
+  checked as the macro parameter of the same name, so a literal argument
+  proved a directive that the loop's own values render.
+- **`render_chart` returns an error for a value beyond 1e9.** The renderer's
+  axis arithmetic overflowed and panicked from about 1e12; a value whose
+  magnitude exceeds 1e9 is now an input error.
+- **An application that cannot read its vendored components refuses to
+  start.** `try_live_ui_assets()` reads `templates/suprnova-ui/` under the
+  application base path on each request, so an application started
+  elsewhere, such as from a container image that holds only the binary,
+  answered 404 for every component stylesheet and script and started
+  cleanly. Installing the route now fails and names the directory.
+- **`live:add` replaces a file you never edited.** It compared bytes only, so
+  after a library update it kept every installed file and reported it edited
+  locally. It now records each file's digest beside the component and
+  replaces a file whose bytes still match the record; a file you edited, or
+  one no record vouches for, is kept and reported.
+- **`live:add --manifest` refuses a file that is a symbolic link.** Each
+  third-party file was read through links, so a component could install the
+  bytes of any readable file as a template. A named file must be a regular
+  file inside the manifest's directory.
+- **A model edit that a render replaced is sent when it is typed again.** The
+  browser compared each edit with the value it last proposed, so after a
+  refused value and a render that replaced it, such as a reset, typing the same
+  value again sent nothing: the control showed it with no error while the
+  island held another value. The render an island applies is now the baseline
+  the next edit is compared with, and a field's dirty state compares with the
+  value that render gave its control.
+- **A tooltip can be dismissed where it is shown.** A bubble that covers
+  content could be dismissed only by moving the pointer or focus away, which
+  WCAG 2.2 success criterion 1.4.13 does not accept. Escape now hides it with
+  neither moved, and the next hover or focus of that trigger shows it again.
+  The bubble still shows with no script in the page; the new `sn-tooltip`
+  element carries the dismissal alone, and `live:add tooltip` installs it.
 
 ## 2.0.2 - 2026-09-14
 
