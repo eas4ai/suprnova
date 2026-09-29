@@ -818,25 +818,25 @@ fn emit_relation_inventory(
             let related_pivot_col = pivot_related_override(rel)
                 .map(str::to_string)
                 .unwrap_or_else(|| default_belongs_to_fk(target_ty));
-            return emit_inventory_token(
+            return emit_inventory_token(&InventoryFields {
                 struct_ident,
                 target_ty,
-                &name_str,
-                &kind_variant,
-                &parent_type_name,
-                &target_type_name,
-                &target_table_expr,
-                "",
-                &parent_key_str,
-                &pivot_table_token,
-                &parent_pivot_col,
-                &related_pivot_col,
-                "",
-                "",
-                &target_primary_key_expr,
-                &related_soft_deletes_column_expr,
-                &related_updated_at_column_expr,
-            );
+                name: &name_str,
+                kind_variant: &kind_variant,
+                parent_type_name: &parent_type_name,
+                target_type_name: &target_type_name,
+                target_table_expr: &target_table_expr,
+                foreign_key: "",
+                parent_key: &parent_key_str,
+                pivot_table_expr: &pivot_table_token,
+                pivot_parent_key: &parent_pivot_col,
+                pivot_related_key: &related_pivot_col,
+                morph_type_column: "",
+                morph_type_value: "",
+                target_primary_key_expr: &target_primary_key_expr,
+                related_soft_deletes_column_expr: &related_soft_deletes_column_expr,
+                related_updated_at_column_expr: &related_updated_at_column_expr,
+            });
         }
         RelationKindAttr::MorphToMany | RelationKindAttr::MorphedByMany => {
             let pivot_table_token: TokenStream = match pivot_table_override(rel) {
@@ -875,25 +875,25 @@ fn emit_relation_inventory(
                 RelationKindAttr::MorphedByMany => (related_col.clone(), morph_col.clone()),
                 _ => (morph_col.clone(), related_col.clone()),
             };
-            return emit_inventory_token(
+            return emit_inventory_token(&InventoryFields {
                 struct_ident,
                 target_ty,
-                &name_str,
-                &kind_variant,
-                &parent_type_name,
-                &target_type_name,
-                &target_table_expr,
-                "",
-                &parent_key_str,
-                &pivot_table_token,
-                &pivot_parent_col,
-                &pivot_related_col,
-                &parent_morph_type_col,
-                &morph_type_value_str,
-                &target_primary_key_expr,
-                &related_soft_deletes_column_expr,
-                &related_updated_at_column_expr,
-            );
+                name: &name_str,
+                kind_variant: &kind_variant,
+                parent_type_name: &parent_type_name,
+                target_type_name: &target_type_name,
+                target_table_expr: &target_table_expr,
+                foreign_key: "",
+                parent_key: &parent_key_str,
+                pivot_table_expr: &pivot_table_token,
+                pivot_parent_key: &pivot_parent_col,
+                pivot_related_key: &pivot_related_col,
+                morph_type_column: &parent_morph_type_col,
+                morph_type_value: &morph_type_value_str,
+                target_primary_key_expr: &target_primary_key_expr,
+                related_soft_deletes_column_expr: &related_soft_deletes_column_expr,
+                related_updated_at_column_expr: &related_updated_at_column_expr,
+            });
         }
         _ => (String::new(), String::new(), String::new()),
     };
@@ -910,50 +910,74 @@ fn emit_relation_inventory(
         _ => (String::new(), String::new()),
     };
 
-    emit_inventory_token(
+    let pivot_table_expr = quote! { #pivot_table_str };
+    emit_inventory_token(&InventoryFields {
         struct_ident,
         target_ty,
-        &name_str,
-        &kind_variant,
-        &parent_type_name,
-        &target_type_name,
-        &target_table_expr,
-        &foreign_key_str,
-        &parent_key_str,
-        &quote! { #pivot_table_str },
-        &pivot_parent_key_str,
-        &pivot_related_key_str,
-        &morph_type_column_str,
-        &morph_type_value_str,
-        &target_primary_key_expr,
-        &related_soft_deletes_column_expr,
-        &related_updated_at_column_expr,
-    )
+        name: &name_str,
+        kind_variant: &kind_variant,
+        parent_type_name: &parent_type_name,
+        target_type_name: &target_type_name,
+        target_table_expr: &target_table_expr,
+        foreign_key: &foreign_key_str,
+        parent_key: &parent_key_str,
+        pivot_table_expr: &pivot_table_expr,
+        pivot_parent_key: &pivot_parent_key_str,
+        pivot_related_key: &pivot_related_key_str,
+        morph_type_column: &morph_type_column_str,
+        morph_type_value: &morph_type_value_str,
+        target_primary_key_expr: &target_primary_key_expr,
+        related_soft_deletes_column_expr: &related_soft_deletes_column_expr,
+        related_updated_at_column_expr: &related_updated_at_column_expr,
+    })
+}
+
+/// One named field per slot of the `RelationEntry` inventory record.
+/// Naming the slots at each call site keeps two same-typed values (the
+/// pivot keys, the morph column and value) from being swapped unnoticed.
+struct InventoryFields<'a> {
+    struct_ident: &'a syn::Ident,
+    target_ty: &'a syn::Type,
+    name: &'a str,
+    kind_variant: &'a TokenStream,
+    parent_type_name: &'a str,
+    target_type_name: &'a str,
+    target_table_expr: &'a TokenStream,
+    foreign_key: &'a str,
+    parent_key: &'a str,
+    pivot_table_expr: &'a TokenStream,
+    pivot_parent_key: &'a str,
+    pivot_related_key: &'a str,
+    morph_type_column: &'a str,
+    morph_type_value: &'a str,
+    target_primary_key_expr: &'a TokenStream,
+    related_soft_deletes_column_expr: &'a TokenStream,
+    related_updated_at_column_expr: &'a TokenStream,
 }
 
 /// Single emission point for the inventory token. Keeps the kind-arms
 /// in [`emit_relation_inventory`] readable - every branch tail-calls
 /// here with the per-kind values.
-#[allow(clippy::too_many_arguments)]
-fn emit_inventory_token(
-    struct_ident: &syn::Ident,
-    target_ty: &syn::Type,
-    name_str: &str,
-    kind_variant: &TokenStream,
-    parent_type_name: &str,
-    target_type_name: &str,
-    target_table_expr: &TokenStream,
-    foreign_key: &str,
-    parent_key: &str,
-    pivot_table_expr: &TokenStream,
-    pivot_parent_key: &str,
-    pivot_related_key: &str,
-    morph_type_column: &str,
-    morph_type_value: &str,
-    target_primary_key_expr: &TokenStream,
-    related_soft_deletes_column_expr: &TokenStream,
-    related_updated_at_column_expr: &TokenStream,
-) -> TokenStream {
+fn emit_inventory_token(fields: &InventoryFields<'_>) -> TokenStream {
+    let InventoryFields {
+        struct_ident,
+        target_ty,
+        name: name_str,
+        kind_variant,
+        parent_type_name,
+        target_type_name,
+        target_table_expr,
+        foreign_key,
+        parent_key,
+        pivot_table_expr,
+        pivot_parent_key,
+        pivot_related_key,
+        morph_type_column,
+        morph_type_value,
+        target_primary_key_expr,
+        related_soft_deletes_column_expr,
+        related_updated_at_column_expr,
+    } = fields;
     quote! {
         ::suprnova::inventory::submit! {
             ::suprnova::RelationEntry {
