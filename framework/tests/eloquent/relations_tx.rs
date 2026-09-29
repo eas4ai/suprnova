@@ -613,3 +613,35 @@ async fn belongs_to_with_inside_tx_sees_in_tx_insert() {
     assert!(result.is_err());
     assert_eq!(Af1Owner::query().count().await.unwrap(), 0);
 }
+
+// ---- `Model::load` on one row --------------------------------------------
+//
+// A single row loads through the same path as a collection. Inside a
+// transaction that path has to read through the transaction, or it misses
+// the rows written there.
+
+#[tokio::test]
+async fn model_load_inside_tx_reads_through_the_transaction() {
+    let (conn, _guard, _tmp) = fresh_multiconn_sqlite().await;
+    migrate_plain(&conn).await;
+
+    let result: Result<(), FrameworkError> = DB::transaction(move |_tx| {
+        Box::pin(async move {
+            let mut owner = Af1Owner::create(attrs! { name: "Alice" }).await?;
+            Af1Pet::create(attrs! { af1_owner_id: owner.id, name: "Rex" }).await?;
+            Af1Pet::create(attrs! { af1_owner_id: owner.id, name: "Tom" }).await?;
+
+            owner.load(["pets"]).await?;
+            assert_eq!(
+                owner.pets_loaded().len(),
+                2,
+                "a single row's load reads through the transaction"
+            );
+
+            Err(FrameworkError::internal("rollback"))
+        })
+    })
+    .await;
+    assert!(result.is_err());
+    assert_eq!(Af1Pet::query().count().await.unwrap(), 0);
+}

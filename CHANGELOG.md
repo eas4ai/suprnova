@@ -425,6 +425,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   the same way for a mount, private or public, and `MountError::ledger_kind()`
   is the kind of the ledger when the ledger refused. Neither value holds a
   text, an identifier of an instance or anything of a request.
+- **`load` and `load_missing` on one model.** Both were methods of a
+  collection only, so code with one `Post` in hand wrapped it in a collection
+  of one to load its comments, or ran the query of the relation by hand and
+  lost the cache of the model. `post.load(["comments"]).await?` and
+  `post.load_missing(["comments.user"]).await?` load into the model itself,
+  through the loader of the collections: nested names, the one query for each
+  relation and the transaction of the caller are the same. `load_missing` runs
+  no query for a relation that the model has.
 
 ### Changed
 

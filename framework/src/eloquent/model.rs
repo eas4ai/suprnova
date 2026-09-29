@@ -1167,6 +1167,75 @@ where
     {
         // ReplicateExt::replicate_with takes Vec<String>; match the
         // element type. `Vec::<&str>::new()` would compile-error here
+    /// Eager-load the named relations onto this row after the fact.
+    /// Laravel's `$model->load(...)`.
+    ///
+    /// Runs the loader of
+    /// [`Collection::load`](crate::eloquent::Collection::load) with this
+    /// row as a one-row slice, so the relations land in this row's own
+    /// relation cache, and a dotted name (`"comments.author"`), the
+    /// eager-load dispatcher and the connection routing behave exactly
+    /// as they do for a collection. Read the result with the
+    /// macro-emitted `<relation>_loaded()` accessors, which do not query
+    /// again. Inside a `DB::transaction` closure the reads go through the
+    /// transaction.
+    ///
+    /// A relation that is already loaded is loaded again, as in Laravel;
+    /// [`Self::load_missing`] skips it instead.
+    ///
+    /// A trait method rather than a macro-emitted inherent one, so code
+    /// that holds a model through an `M: Model` bound can call it.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// let mut post = Post::find_or_fail(id).await?;
+    /// post.load(["comments.author"]).await?;
+    /// println!("{} comments", post.comments_loaded().len());
+    /// ```
+    async fn load<I, S>(&mut self, relations: I) -> Result<(), FrameworkError>
+    where
+        Self: crate::eloquent::EagerLoadDispatch,
+        I: IntoIterator<Item = S> + Send,
+        S: Into<String> + Send,
+    {
+        crate::eloquent::collection::load_relations::<Self, I, S>(
+            std::slice::from_mut(self),
+            relations,
+        )
+        .await
+    }
+
+    /// Eager-load the named relations onto this row, skipping any this
+    /// row already has loaded. Laravel's `$model->loadMissing(...)`.
+    ///
+    /// Runs the loader of
+    /// [`Collection::load_missing`](crate::eloquent::Collection::load_missing)
+    /// with this row as a one-row slice. A relation already in this
+    /// row's cache runs no query. A dotted name is checked at every
+    /// level: with `comments` loaded, `load_missing(["comments.author"])`
+    /// loads only the authors the cached comments lack.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// let mut post = Post::find_or_fail(id).await?;
+    /// post.load(["comments"]).await?;
+    /// post.load_missing(["comments", "tags"]).await?; // queries `tags` only
+    /// ```
+    async fn load_missing<I, S>(&mut self, relations: I) -> Result<(), FrameworkError>
+    where
+        Self: crate::eloquent::EagerLoadDispatch,
+        I: IntoIterator<Item = S> + Send,
+        S: Into<String> + Send,
+    {
+        crate::eloquent::collection::load_missing_relations::<Self, I, S>(
+            std::slice::from_mut(self),
+            relations,
+        )
+        .await
+    }
+
         // even though the vec is empty.
         let copy = self.replicate_with(Vec::<String>::new());
         let shared = std::sync::Arc::new(tokio::sync::Mutex::new(copy));
