@@ -400,6 +400,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `is_closed()` returns `true` and `closed()` completes, so a task that keeps
   a sender learns when to stop. The receiving half has to be read, because the
   answer to the heartbeat's ping arrives there.
+- **An upload policy says which rule it breaks: `UploadPolicy::validate()` and
+  `UploadPolicyError`.** A Live upload field whose policy the engine refused
+  failed the registration of its component with one closed error,
+  `invalid_component_upload_metadata`, whichever of the rules was broken: a
+  limit that was not set or was zero, a media type or an extension that was
+  not in canonical form, a media type declared twice, a dimension of zero, a
+  finalize action that was missing or was no name. `UploadPolicy::validate()`
+  returns the rule as an `UploadPolicyError`, and the registration logs it as
+  an error before it fails. The error of the registration is what it was, so
+  nothing of a component reaches a browser through it.
 
 ### Changed
 

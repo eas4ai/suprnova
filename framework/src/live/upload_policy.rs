@@ -63,6 +63,78 @@ struct Dimensions {
     maximum_pixels: u64,
 }
 
+/// Which rule an [`UploadPolicy`] breaks.
+///
+/// The engine refuses a policy with one closed error for every rule, which
+/// is the right answer for a browser and tells the developer who declared
+/// the field nothing. This is the answer for the developer:
+/// [`UploadPolicy::validate`] returns it, and the registration of a
+/// component logs it before it fails.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum UploadPolicyError {
+    /// `maximum_files` was not given, or is `0`.
+    MaximumFiles,
+    /// `maximum_file_bytes` was not given, or is `0`.
+    MaximumFileBytes,
+    /// A media type of `accept_application` is not in its canonical form,
+    /// or its extensions are not: a media type has the form
+    /// `type/subtype`, of lower case letters, digits and `+ . -`, and is
+    /// at most 127 bytes, and it has between 1 and 16 extensions of lower
+    /// case letters and digits, each at most 32 bytes.
+    AcceptedType {
+        /// The media type as it was declared.
+        media_type: String,
+    },
+    /// More than 16 accepted types, or one media type declared twice.
+    AcceptedTypes,
+    /// A limit of `dimensions` is `0`.
+    Dimensions,
+    /// `finalize_action` was not given.
+    MissingFinalizeAction,
+    /// The name of `finalize_action` is no name of an action.
+    FinalizeAction {
+        /// The name as it was declared.
+        name: String,
+    },
+}
+
+impl fmt::Display for UploadPolicyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MaximumFiles => {
+                formatter.write_str("upload policy: maximum_files is not set, or is 0")
+            }
+            Self::MaximumFileBytes => {
+                formatter.write_str("upload policy: maximum_file_bytes is not set, or is 0")
+            }
+            Self::AcceptedType { media_type } => write!(
+                formatter,
+                "upload policy: the accepted type `{media_type}` is not in canonical form: \
+                 a media type has the form type/subtype, of lower case letters, digits and \
+                 + . -, and is at most 127 bytes, and has between 1 and 16 extensions of \
+                 lower case letters and digits, each at most 32 bytes"
+            ),
+            Self::AcceptedTypes => formatter.write_str(
+                "upload policy: more than 16 accepted types, or one media type declared twice",
+            ),
+            Self::Dimensions => formatter.write_str(
+                "upload policy: a limit of dimensions is 0; width, height and pixels are \
+                 each at least 1",
+            ),
+            Self::MissingFinalizeAction => {
+                formatter.write_str("upload policy: finalize_action is not set")
+            }
+            Self::FinalizeAction { name } => write!(
+                formatter,
+                "upload policy: the finalize_action `{name}` is no name of an action"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for UploadPolicyError {}
+
 /// Opaque validated-at-registration upload policy returned by a field helper.
 #[derive(Clone)]
 pub struct UploadPolicy {
@@ -92,12 +164,43 @@ impl UploadPolicy {
         }
     }
 
-    pub(crate) fn into_engine(self) -> Result<suprnova_live::upload::UploadFieldPolicy, ()> {
+    /// Check the policy against the rules of the engine, and say which
+    /// one it breaks.
+    ///
+    /// The registration of the component makes the same check. This is for
+    /// a test of the policy by itself, and for the developer who wants the
+    /// reason where the registration gives the closed error.
+    ///
+    /// Whether `finalize_action` names an action of the component is not
+    /// checked here: the policy does not know its component. The
+    /// registration checks it.
+    ///
+    /// # Errors
+    ///
+    /// The first rule the policy breaks. The rules of one value are
+    /// checked in the order of [`UploadPolicyError`], and the rule of the
+    /// list of the accepted types,
+    /// [`AcceptedTypes`](UploadPolicyError::AcceptedTypes), is checked last.
+    pub fn validate(&self) -> Result<(), UploadPolicyError> {
+        self.clone().into_engine().map(|_| ())
+    }
+
+    pub(crate) fn into_engine(
+        self,
+    ) -> Result<suprnova_live::upload::UploadFieldPolicy, UploadPolicyError> {
         use suprnova_live::upload::{
             AcceptedUploadType, ScanFailurePolicy, UploadDimensionLimits, UploadMediaType,
             UploadReplacementPolicy, UploadScanPolicy,
         };
 
+        let maximum_files = self
+            .maximum_files
+            .filter(|maximum| *maximum > 0)
+            .ok_or(UploadPolicyError::MaximumFiles)?;
+        let maximum_file_bytes = self
+            .maximum_file_bytes
+            .filter(|maximum| *maximum > 0)
+            .ok_or(UploadPolicyError::MaximumFileBytes)?;
         let accepted = self
             .accepted
             .into_iter()
@@ -112,8 +215,9 @@ impl UploadPolicy {
                     media_type,
                     extensions,
                 } => {
-                    let extensions = extensions.iter().map(String::as_str).collect::<Vec<_>>();
-                    AcceptedUploadType::application(&media_type, &extensions).map_err(|_| ())
+                    let names = extensions.iter().map(String::as_str).collect::<Vec<_>>();
+                    AcceptedUploadType::application(&media_type, &names)
+                        .map_err(|_| UploadPolicyError::AcceptedType { media_type })
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -125,7 +229,7 @@ impl UploadPolicy {
                     limits.maximum_height,
                     limits.maximum_pixels,
                 )
-                .map_err(|_| ())
+                .map_err(|_| UploadPolicyError::Dimensions)
             })
             .transpose()?;
         let failure = |value| match value {
@@ -146,19 +250,23 @@ impl UploadPolicy {
             UploadReplacement::RetirePrevious => UploadReplacementPolicy::RetirePrevious,
             UploadReplacement::PreservePrevious => UploadReplacementPolicy::PreservePrevious,
         };
-        let action =
-            suprnova_live::identity::ActionName::parse(self.finalize_action.as_deref().ok_or(())?)
-                .map_err(|_| ())?;
+        let name = self
+            .finalize_action
+            .ok_or(UploadPolicyError::MissingFinalizeAction)?;
+        let action = suprnova_live::identity::ActionName::parse(&name)
+            .map_err(|_| UploadPolicyError::FinalizeAction { name })?;
+        // What is left for the engine to refuse is the list of the accepted
+        // types as a whole: every rule of one value was checked above.
         suprnova_live::upload::UploadFieldPolicy::new_with_accepted_types(
-            self.maximum_files.ok_or(())?,
-            self.maximum_file_bytes.ok_or(())?,
+            maximum_files,
+            maximum_file_bytes,
             replacement,
             accepted,
             dimensions,
             scan,
             action,
         )
-        .map_err(|_| ())
+        .map_err(|_| UploadPolicyError::AcceptedTypes)
     }
 }
 

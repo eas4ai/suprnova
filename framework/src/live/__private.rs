@@ -156,9 +156,17 @@ pub mod upload {
         policy: crate::live::UploadPolicy,
     ) -> Result<suprnova_live::metadata::FieldMetadata, suprnova_live::metadata::MetadataError>
     {
-        let policy = policy
-            .into_engine()
-            .map_err(|()| suprnova_live::metadata::MetadataError::invalid_upload_metadata())?;
+        // The error of the engine is closed, so that nothing of a
+        // component reaches a browser through it. The rule the policy
+        // breaks is for the developer, and is logged here.
+        let policy = policy.into_engine().map_err(|refused| {
+            tracing::error!(
+                field = field.name().as_str(),
+                reason = %refused,
+                "the upload policy of a Live field was refused"
+            );
+            suprnova_live::metadata::MetadataError::invalid_upload_metadata()
+        })?;
         field.with_upload_policy(policy)
     }
 }
