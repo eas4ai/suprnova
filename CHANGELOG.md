@@ -497,6 +497,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   errors of the crate's own headers stay `Internal`, and a payload that is too
   large and a failure of the encryption stay `Encryption`. A `match` on
   `WebPushError` that names every variant has one more to name.
+- **A database error on the payment webhook path keeps its type:
+  `PaymentError::Database`.** The webhook route made a text of every database
+  error, `PaymentError::Internal(format!("{e}"))`, in twenty-two places, so
+  the code that decides what to do with a failed webhook could not ask whether
+  the failure was a lost connection, which the next attempt cures, or a
+  violated constraint, which none does. The new variant has the
+  `sea_orm::DbErr` as its source, reachable with `error.source()` and
+  `downcast_ref`, and `From<sea_orm::DbErr>` makes a statement end in `?`. The
+  text of the error is what it was, and the route answers 503 for every
+  database error as it did: the variant is what a later decision can be made
+  on, and none is made yet. `Debug` prints the variant with the text of the
+  database error and not with its `Debug`, which for a violated constraint
+  names the values of the key. A `match` on `PaymentError` that names every
+  variant has one more to name.
 
 ### Fixed
 
