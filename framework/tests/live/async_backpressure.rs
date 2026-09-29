@@ -120,6 +120,11 @@ async fn a_chatty_island_cannot_starve_its_sibling_on_one_transport() {
         )
         .await
         .expect("publish sibling event");
+    // The first loop stopped at the sibling, so the part of the first
+    // backlog it did not read is still queued ahead of this burst. The bound
+    // is everything queued before the sibling's event: that leftover, the
+    // 40 events just published, and two envelopes of slack.
+    let leftover = BACKLOG - orders_seen;
     let mut deliveries_before_sibling = 0;
     loop {
         let envelope = next_envelope(&mut stream).await;
@@ -130,13 +135,15 @@ async fn a_chatty_island_cannot_starve_its_sibling_on_one_transport() {
         }
         deliveries_before_sibling += 1;
         assert!(
-            deliveries_before_sibling < 80,
-            "the sibling event never surfaced behind the chatty backlog"
+            deliveries_before_sibling < leftover + 80,
+            "the sibling event never surfaced behind the chatty backlog \
+             ({deliveries_before_sibling} deliveries, {leftover} left from the first backlog)"
         );
     }
     assert!(
-        deliveries_before_sibling <= 42,
-        "fairness bounds the sibling's wait to the backlog already queued"
+        deliveries_before_sibling <= leftover + 42,
+        "fairness bounds the sibling's wait to the backlog already queued: \
+         {deliveries_before_sibling} deliveries came first, {leftover} of them left from the first backlog"
     );
 }
 
