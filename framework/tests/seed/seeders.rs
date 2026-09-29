@@ -1,3 +1,5 @@
+#![cfg(feature = "testing")]
+
 //! Seeder trait + registry integration tests.
 //!
 //! Pins the registry semantics: registration order is preserved

@@ -10,7 +10,11 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use clap::Parser;
+// `db:seed` is driven below with the seeder registry reset, which only the
+// `testing` feature has.
+#[cfg(feature = "testing")]
 use serial_test::serial;
+#[cfg(feature = "testing")]
 use suprnova::seed::{self, Seeder};
 use suprnova::{Command, FrameworkError, TypedCommand, console};
 
@@ -52,8 +56,10 @@ impl TypedCommand for Purge {
     }
 }
 
+#[cfg(feature = "testing")]
 struct HarnessSeeder;
 
+#[cfg(feature = "testing")]
 #[async_trait]
 impl Seeder for HarnessSeeder {
     fn name() -> &'static str {
@@ -206,6 +212,7 @@ async fn a_command_that_does_not_exist_fails_on_the_error_stream() {
     assert_eq!(run.output(), "");
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial]
 async fn a_builtin_command_is_read_the_same_way() {
@@ -231,6 +238,7 @@ async fn a_builtin_command_is_read_the_same_way() {
     assert_eq!(lines[2], "");
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial]
 async fn a_warning_of_a_builtin_command_is_on_the_error_stream() {

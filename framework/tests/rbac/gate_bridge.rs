@@ -1,3 +1,5 @@
+#![cfg(feature = "testing")]
+
 //! The opt-in bridge that lets a held permission answer the gate:
 //! `suprnova::rbac::register_gate_bridge`.
 //!

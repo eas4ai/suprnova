@@ -1,3 +1,5 @@
+#![cfg(feature = "testing")]
+
 //! `db:seed` builtin integration tests.
 //!
 //! Exercises the framework-provided `db:seed` command via the same

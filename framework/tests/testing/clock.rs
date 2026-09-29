@@ -1,3 +1,5 @@
+#![cfg(feature = "testing")]
+
 //! `suprnova::clock` and `TestClock`: the clock the framework reads can be
 //! moved by a test, so expiry, idle timeouts and pruning are tested without
 //! sleeping.

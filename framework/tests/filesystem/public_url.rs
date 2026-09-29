@@ -1,3 +1,5 @@
+#![cfg(all(feature = "filesystem", feature = "testing"))]
+
 //! `Storage::url`: the public URL of a file on a disk that has a public
 //! base URL, and an error for a disk that has none.
 

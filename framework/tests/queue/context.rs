@@ -289,6 +289,8 @@ async fn the_events_around_a_job_run_in_the_jobs_context() {
     );
 }
 
+// `Context::test_clear_hooks` exists only with the `testing` feature.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial]
 async fn the_hooks_run_on_a_push_and_on_the_worker() {
