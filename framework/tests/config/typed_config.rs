@@ -8,16 +8,14 @@ use serde::Deserialize;
 use serial_test::serial;
 use suprnova::Config;
 
-/// SAFETY: every caller is inside a `#[serial]` test, so no concurrent
-/// thread mutates env vars. `std::env::set_var` / `remove_var` are
-/// `unsafe` since Rust 1.74 on `getenv`-using platforms; the marker
-/// lives here.
+/// Every caller holds the shared env lock, which the one writer of the
+/// test support asks for.
 fn set_env(k: &str, v: &str) {
-    unsafe { std::env::set_var(k, v) }
+    crate::env_snapshot::set_env(k, Some(v));
 }
 fn clear_env(keys: &[&str]) {
     for k in keys {
-        unsafe { std::env::remove_var(k) }
+        crate::env_snapshot::set_env(k, None);
     }
 }
 

@@ -10,45 +10,13 @@
 //!    set in the actual process environment when `load_dotenv` ran.
 //!
 //! These tests mutate `std::env` (process-global) so we serialize them
-//! under a single `Mutex` and capture/restore the keys we touch.
+//! under the shared env lock and capture/restore the keys we touch.
 
 use std::path::Path;
-use std::sync::Mutex;
 
 use suprnova::config::{__reset_loaded_keys_for_tests, Environment, load_dotenv};
 
-/// Serialize the whole module: every test mutates `APP_ENV` etc.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-/// RAII snapshot for the env keys this suite mutates. On drop, restores
-/// the original values so a failing assertion doesn't poison the next
-/// test in the binary.
-struct EnvSnapshot {
-    keys: Vec<(&'static str, Option<String>)>,
-}
-
-impl EnvSnapshot {
-    fn capture(keys: &[&'static str]) -> Self {
-        let captured = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
-        Self { keys: captured }
-    }
-}
-
-impl Drop for EnvSnapshot {
-    fn drop(&mut self) {
-        for (k, v) in &self.keys {
-            // SAFETY: ENV_LOCK serializes these tests within the suite.
-            // Concurrent getenv races on other tests are bounded by the
-            // process-wide mutex used by every env-touching test.
-            unsafe {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
-    }
-}
+use crate::env_snapshot::{EnvSnapshot, set_env};
 
 fn write_env_file(dir: &Path, name: &str, contents: &str) {
     std::fs::write(dir.join(name), contents).expect("write env file");
@@ -63,7 +31,6 @@ fn app_env_in_base_dotenv_selects_environment_specific_file() {
     // skipped.
 
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&[
         "APP_ENV",
@@ -71,13 +38,10 @@ fn app_env_in_base_dotenv_selects_environment_specific_file() {
         "DOTENV_TEST_VAR_PROD",
         "DOTENV_TEST_VAR_LOCAL",
     ]);
-    // SAFETY: serialized via ENV_LOCK
-    unsafe {
-        std::env::remove_var("APP_ENV");
-        std::env::remove_var("DOTENV_TEST_VAR_BASE_ONLY");
-        std::env::remove_var("DOTENV_TEST_VAR_PROD");
-        std::env::remove_var("DOTENV_TEST_VAR_LOCAL");
-    }
+    set_env("APP_ENV", None);
+    set_env("DOTENV_TEST_VAR_BASE_ONLY", None);
+    set_env("DOTENV_TEST_VAR_PROD", None);
+    set_env("DOTENV_TEST_VAR_LOCAL", None);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
@@ -119,14 +83,10 @@ fn system_env_app_env_selects_environment_file() {
     // The "old" path - `APP_ENV=production` in real system env - must
     // still work after the reorder.
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV", "DOTENV_TEST_SYS_PROD"]);
-    // SAFETY: serialized via ENV_LOCK
-    unsafe {
-        std::env::remove_var("DOTENV_TEST_SYS_PROD");
-        std::env::set_var("APP_ENV", "production");
-    }
+    set_env("DOTENV_TEST_SYS_PROD", None);
+    set_env("APP_ENV", Some("production"));
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
@@ -144,13 +104,9 @@ fn no_app_env_defaults_to_local() {
     // anywhere, the loader returns Local. We preserve this so existing
     // local-dev workflows that rely on `cargo run` keep working.
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV"]);
-    // SAFETY: serialized via ENV_LOCK
-    unsafe {
-        std::env::remove_var("APP_ENV");
-    }
+    set_env("APP_ENV", None);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let env = load_dotenv(tmp.path()).expect("load_dotenv");
@@ -166,14 +122,10 @@ fn system_env_wins_over_dotenv_files() {
     // be a precedence inversion (system env is highest, files are
     // lower).
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV", "DOTENV_TEST_SYS_WINS"]);
-    // SAFETY: serialized via ENV_LOCK
-    unsafe {
-        std::env::set_var("APP_ENV", "production");
-        std::env::set_var("DOTENV_TEST_SYS_WINS", "from-system");
-    }
+    set_env("APP_ENV", Some("production"));
+    set_env("DOTENV_TEST_SYS_WINS", Some("from-system"));
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
@@ -200,14 +152,10 @@ fn env_specific_file_overrides_base_dotenv() {
     // env-specific files are more specific (higher precedence than the
     // base file).
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV", "DOTENV_TEST_OVERRIDE"]);
-    // SAFETY: serialized via ENV_LOCK
-    unsafe {
-        std::env::remove_var("APP_ENV");
-        std::env::remove_var("DOTENV_TEST_OVERRIDE");
-    }
+    set_env("APP_ENV", None);
+    set_env("DOTENV_TEST_OVERRIDE", None);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
@@ -235,13 +183,9 @@ fn malformed_dotenv_returns_error() {
     // stray non-key/value line) would leave required settings missing
     // or defaulted with no signal to the operator.
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV"]);
-    // SAFETY: serialized via ENV_LOCK
-    unsafe {
-        std::env::remove_var("APP_ENV");
-    }
+    set_env("APP_ENV", None);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
@@ -264,13 +208,9 @@ fn missing_optional_env_files_are_ok() {
     // Missing `.env.local`, `.env.<env>`, `.env.<env>.local` are the
     // expected case - the loader must NOT promote ENOENT to an error.
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV"]);
-    // SAFETY: serialized via ENV_LOCK
-    unsafe {
-        std::env::set_var("APP_ENV", "production");
-    }
+    set_env("APP_ENV", Some("production"));
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
@@ -287,14 +227,10 @@ fn repeat_load_does_not_promote_stale_keys_to_system_tier() {
     // A's file values were promoted to the "real system env" snapshot
     // on B's call, freezing the stale value in place.
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV", "DOTENV_TEST_LEAK"]);
-    // SAFETY: serialized via ENV_LOCK
-    unsafe {
-        std::env::remove_var("APP_ENV");
-        std::env::remove_var("DOTENV_TEST_LEAK");
-    }
+    set_env("APP_ENV", None);
+    set_env("DOTENV_TEST_LEAK", None);
 
     let tmp_a = tempfile::tempdir().expect("tempdir a");
     let tmp_b = tempfile::tempdir().expect("tempdir b");

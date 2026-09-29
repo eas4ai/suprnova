@@ -39,15 +39,15 @@ use suprnova::config::{AppConfig, Config, Environment};
 use suprnova::error::FrameworkError;
 use suprnova::http::HttpResponse;
 
-/// SAFETY: every caller is inside a `#[serial]` test, so no concurrent
-/// thread is reading these env vars while we mutate them.
+/// Every caller holds the shared env lock, which the one writer of the
+/// test support asks for.
 fn set_env(k: &str, v: &str) {
-    unsafe { std::env::set_var(k, v) }
+    crate::env_snapshot::set_env(k, Some(v));
 }
 
 fn clear_env(keys: &[&str]) {
     for k in keys {
-        unsafe { std::env::remove_var(k) }
+        crate::env_snapshot::set_env(k, None);
     }
 }
 
