@@ -1215,6 +1215,48 @@ impl Router {
         Ok(())
     }
 
+    /// Insert a route for `method` with a pre-boxed handler, for callers
+    /// that walk a list of methods rather than name one verb.
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate registration, any matchit insert error, or a
+    /// method the router keeps no registry for. See [`Router::insert_get`]
+    /// for rationale.
+    pub(crate) fn insert_method(
+        &mut self,
+        method: &Method,
+        path: &str,
+        handler: Arc<BoxedHandler>,
+    ) {
+        self.try_insert_method(method, path, handler)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Fallible sibling of [`Router::insert_method`]. Dispatches to the
+    /// `try_insert_*` of `method`, and refuses a method the router keeps no
+    /// registry for, so a route is never dropped without an error.
+    pub(crate) fn try_insert_method(
+        &mut self,
+        method: &Method,
+        path: &str,
+        handler: Arc<BoxedHandler>,
+    ) -> Result<(), FrameworkError> {
+        match *method {
+            Method::GET => self.try_insert_get(path, handler),
+            Method::POST => self.try_insert_post(path, handler),
+            Method::PUT => self.try_insert_put(path, handler),
+            Method::PATCH => self.try_insert_patch(path, handler),
+            Method::DELETE => self.try_insert_delete(path, handler),
+            Method::HEAD => self.try_insert_head(path, handler),
+            Method::OPTIONS => self.try_insert_options(path, handler),
+            ref other => Err(FrameworkError::internal(format!(
+                "Router::methods() got unsupported method '{other}'; only \
+                 GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS are accepted"
+            ))),
+        }
+    }
+
     /// Register a GET route.
     ///
     /// Express-style `:param` segments are converted to matchit-style
@@ -1566,21 +1608,7 @@ impl Router {
         let handler_arc = Arc::new(boxed);
         let mut registered = Vec::with_capacity(methods.len());
         for method in methods {
-            match *method {
-                Method::GET => self.try_insert_get(&converted, handler_arc.clone())?,
-                Method::POST => self.try_insert_post(&converted, handler_arc.clone())?,
-                Method::PUT => self.try_insert_put(&converted, handler_arc.clone())?,
-                Method::PATCH => self.try_insert_patch(&converted, handler_arc.clone())?,
-                Method::DELETE => self.try_insert_delete(&converted, handler_arc.clone())?,
-                Method::HEAD => self.try_insert_head(&converted, handler_arc.clone())?,
-                Method::OPTIONS => self.try_insert_options(&converted, handler_arc.clone())?,
-                ref other => {
-                    return Err(FrameworkError::internal(format!(
-                        "Router::methods() got unsupported method '{other}'; only \
-                         GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS are accepted"
-                    )));
-                }
-            }
+            self.try_insert_method(method, &converted, handler_arc.clone())?;
             registered.push(method.clone());
         }
         Ok(MultiMethodRouteBuilder {
@@ -2513,10 +2541,15 @@ impl From<RouteBuilder> for Router {
     }
 }
 
-/// The seven HTTP methods that [`Router::any`] fans out across. Kept
-/// in registration order so `methods` field of the returned builder
-/// matches the order callers see in tests / logs.
-const ANY_METHODS: &[Method] = &[
+/// The seven HTTP methods that an `any` route fans out across, in
+/// registration order so `methods` field of the returned builder
+/// matches the order callers see in tests / logs. The one list behind
+/// [`Router::any`], [`GroupRouter::any`](super::GroupRouter::any) and
+/// `any!` inside `group!`: each of them puts the handler, the middleware
+/// and the session block of an `any` route on every verb listed here, so
+/// auth, CSRF and rate limiting cannot skip a verb on one of the three
+/// registration paths only.
+pub(crate) const ANY_METHODS: &[Method] = &[
     Method::GET,
     Method::POST,
     Method::PUT,

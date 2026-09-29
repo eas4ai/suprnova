@@ -1,6 +1,7 @@
 //! Route grouping with shared prefix and middleware
 
 use super::macros::{convert_route_params, join_paths};
+use super::router::ANY_METHODS;
 use super::{BoxedHandler, RouteBuilder, Router};
 use crate::FrameworkError;
 use crate::http::{Request, Response};
@@ -355,27 +356,14 @@ impl GroupRouter {
     /// seven method-routes within the group. Group middleware applied
     /// via [`GroupBuilder::middleware`] fans across every method at
     /// finalize time, matching the fluent `Router::any` fan-out
-    /// semantics.
+    /// semantics. The verbs come from the list [`Router::any`] uses, so
+    /// the two cannot drift apart.
     pub fn any<H, Fut>(self, path: &str, handler: H) -> Self
     where
         H: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
-        let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
-        let arc = Arc::new(boxed);
-        self.push_routes_for_methods(
-            path,
-            [
-                GroupMethod::Get,
-                GroupMethod::Post,
-                GroupMethod::Put,
-                GroupMethod::Patch,
-                GroupMethod::Delete,
-                GroupMethod::Head,
-                GroupMethod::Options,
-            ],
-            arc,
-        )
+        self.methods(ANY_METHODS, path, handler)
     }
 
     /// Register one handler against an explicit list of HTTP methods -
@@ -441,8 +429,8 @@ impl GroupRouter {
         Ok(self.push_routes_for_methods(path, group_methods, arc))
     }
 
-    /// Internal helper used by [`GroupRouter::any`] and
-    /// [`GroupRouter::methods`]. Pushes one `GroupRoute` entry per
+    /// Internal helper behind [`GroupRouter::methods`], and so behind
+    /// [`GroupRouter::any`] too. Pushes one `GroupRoute` entry per
     /// requested method, all sharing the same `Arc<BoxedHandler>` so
     /// per-method dispatch stays O(1) at finalize time.
     fn push_routes_for_methods(

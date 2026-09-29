@@ -401,6 +401,42 @@ async fn any_macro_inside_group_inherits_prefix_and_middleware() {
     );
 }
 
+/// `any!()` inside `group!{}` runs the group middleware AND the route's
+/// own middleware for every one of the seven methods, one request per
+/// method through `handle_request`. Auth, CSRF and rate limiting hang on
+/// these registrations, so a verb the fan-out skipped would be a verb
+/// they never guard.
+#[tokio::test]
+#[serial]
+async fn any_macro_inside_group_runs_middleware_for_all_seven_methods() {
+    use suprnova::{any, group, routes};
+
+    routes! {
+        group!("/guarded", {
+            any!("/every", |_req| async { text("guarded-any") })
+                .middleware(StaticTracker { tag: "route-mw" }),
+        }).middleware(StaticTracker { tag: "group-mw" }),
+    }
+
+    let router = register();
+    let addr = spawn_server(router, 7).await;
+
+    for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
+        any_macro_tracker().lock().expect("tracker lock").clear();
+        let (status, _, _) = send_request(addr, method, "/guarded/every").await;
+        assert_eq!(
+            status.as_u16(),
+            200,
+            "any! inside a group must respond 200 for {method}",
+        );
+        assert_eq!(
+            *any_macro_tracker().lock().expect("tracker lock"),
+            vec!["group-mw", "route-mw"],
+            "group and route middleware must both run for {method}",
+        );
+    }
+}
+
 /// `routes!{}`-friendly middleware: captures its tag and the global
 /// `any_macro_tracker()` static, no per-instance state. The earlier
 /// `TaggingMiddleware` carries an `Arc<Mutex<...>>` field which means

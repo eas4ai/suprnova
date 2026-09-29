@@ -52,7 +52,7 @@ pub const fn validate_route_path(path: &'static str) -> &'static str {
 }
 use crate::middleware::{BoxedMiddleware, Middleware, boxed_as};
 use crate::routing::params::ParamConstraint;
-use crate::routing::router::{BoxedHandler, Router, register_route_name};
+use crate::routing::router::{ANY_METHODS, BoxedHandler, Router, register_route_name};
 use crate::session::SessionBlock;
 use crate::session::blocking::register_route_block;
 use hyper::Method;
@@ -1384,17 +1384,13 @@ impl GroupDef {
                     let full_path = convert_route_params(&raw_full);
                     let full_path: &'static str = Box::leak(full_path.into_boxed_str());
 
-                    // Fan the same Arc<BoxedHandler> across every common
-                    // HTTP method's matchit registry. Order matches
-                    // `ANY_METHODS` in router.rs so tests / logs see the
-                    // same ordering.
-                    router.insert_get(full_path, any_route.handler.clone());
-                    router.insert_post(full_path, any_route.handler.clone());
-                    router.insert_put(full_path, any_route.handler.clone());
-                    router.insert_patch(full_path, any_route.handler.clone());
-                    router.insert_delete(full_path, any_route.handler.clone());
-                    router.insert_head(full_path, any_route.handler.clone());
-                    router.insert_options(full_path, any_route.handler);
+                    // Fan the same Arc<BoxedHandler> across the matchit
+                    // registry of every method in `ANY_METHODS`, in its
+                    // order, so this path and `Router::any` register the
+                    // same verbs in the same sequence.
+                    for method in ANY_METHODS {
+                        router.insert_method(method, full_path, any_route.handler.clone());
+                    }
 
                     // Name is registered once - the path is shared
                     // across all seven verbs so reverse-lookup returns
@@ -1405,20 +1401,11 @@ impl GroupDef {
                     }
 
                     // Fan combined (inherited + group) middleware AND
-                    // route-local middleware across every (method, path)
-                    // key. Without this, auth / CSRF / rate-limit
-                    // attached to an `any!` route would silently skip
-                    // some verbs.
-                    let all_methods = [
-                        hyper::Method::GET,
-                        hyper::Method::POST,
-                        hyper::Method::PUT,
-                        hyper::Method::PATCH,
-                        hyper::Method::DELETE,
-                        hyper::Method::HEAD,
-                        hyper::Method::OPTIONS,
-                    ];
-                    for method in &all_methods {
+                    // route-local middleware across the (method, path)
+                    // key of every method the handler went to above.
+                    // Without this, auth / CSRF / rate-limit attached to
+                    // an `any!` route would silently skip some verbs.
+                    for method in ANY_METHODS {
                         for mw in &combined_middleware {
                             router.add_middleware(method.clone(), full_path, mw.clone());
                         }
@@ -1987,6 +1974,64 @@ mod tests {
             router
                 .match_route(&Method::OPTIONS, "/api/discover")
                 .is_some()
+        );
+    }
+
+    /// An `any!` route inside a group lands on each of the seven methods
+    /// with its handler, the group's middleware and the group's session
+    /// block. Auth, CSRF and rate limiting hang on these registrations, so
+    /// a verb the fan-out skipped would be a verb they never guard.
+    #[test]
+    fn group_any_route_fans_handler_middleware_and_block_across_seven_methods() {
+        use crate::middleware::Next;
+        use async_trait::async_trait;
+        use std::time::Duration;
+
+        #[derive(Clone)]
+        struct NoopMw;
+        #[async_trait]
+        impl Middleware for NoopMw {
+            async fn handle(&self, request: Request, next: Next) -> Response {
+                next(request).await
+            }
+        }
+
+        let block = SessionBlock::new(Duration::from_secs(3), Duration::from_secs(4));
+        let router = GroupDef::__new_unchecked("/any-fanout")
+            .add(super::__any_impl("/every", test_handler))
+            .middleware(NoopMw)
+            .block_session(block)
+            .register(Router::new());
+
+        for m in [
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::HEAD,
+            Method::OPTIONS,
+        ] {
+            assert!(
+                router.match_route(&m, "/any-fanout/every").is_some(),
+                "any! in a group must register the handler for {m}",
+            );
+            assert_eq!(
+                router.get_route_middleware(&m, "/any-fanout/every").len(),
+                1,
+                "any! in a group must carry the group middleware for {m}",
+            );
+            assert_eq!(
+                crate::session::blocking::route_block(&m, "/any-fanout/every"),
+                Some(block),
+                "any! in a group must carry the group session block for {m}",
+            );
+        }
+        // A HEAD request falls back to the GET route, so the loop above
+        // cannot see a HEAD registration that is missing.
+        assert!(
+            router.has_explicit_head("/any-fanout/every"),
+            "any! in a group must register a HEAD handler of its own",
         );
     }
 
