@@ -457,15 +457,30 @@ const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const workspaceRoot = path.resolve(repositoryRoot, "..", "..");
-const expectedTargetDirectory = process.env.CARGO_TARGET_DIR
-  ? path.resolve(workspaceRoot, process.env.CARGO_TARGET_DIR)
-  : path.join(workspaceRoot, "target");
-assert.equal(
-  resolveCargoTargetDirectory(repositoryRoot),
-  expectedTargetDirectory,
-  "the integrated scanner resolves the parent Cargo workspace target directory",
+// A checkout may move its target directory with build.target-dir in a
+// .cargo/config.toml. CARGO_TARGET_DIR overrides that and every other
+// setting cargo reads, so pinning it gives the one directory the scanner may
+// return, whatever this checkout configures. The inherited value comes back
+// before the parser below runs, since it builds into the real directory.
+const inheritedTargetDirectory = process.env.CARGO_TARGET_DIR;
+const pinnedTargetDirectory = path.join(
+  os.tmpdir(),
+  "suprnova-live-scanner-pinned-target",
 );
+process.env.CARGO_TARGET_DIR = pinnedTargetDirectory;
+try {
+  assert.equal(
+    resolveCargoTargetDirectory(repositoryRoot),
+    pinnedTargetDirectory,
+    "the integrated scanner resolves the target directory Cargo reports",
+  );
+} finally {
+  if (inheritedTargetDirectory === undefined) {
+    delete process.env.CARGO_TARGET_DIR;
+  } else {
+    process.env.CARGO_TARGET_DIR = inheritedTargetDirectory;
+  }
+}
 assert.notEqual(
   resolveCargoTargetDirectory(repositoryRoot),
   path.join(repositoryRoot, "target"),
