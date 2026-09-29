@@ -536,6 +536,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   and of the `retry_when` predicate, in two blocks that a change had to keep
   alike by hand. It is one function now, and the two outcomes are retried by
   one rule. What is retried and how long the request waits is what it was.
+- **The parser of `#[model]` has no `#[allow(dead_code)]` left.** Sixteen
+  suppressions on `ModelInput` and `RelationDecl` said that a later task would
+  read the field. The tasks are done and the fields are read, so the
+  suppressions hid nothing and would have hidden a field that a later change
+  leaves unread. They are removed with the comments that named the tasks.
 
 ### Fixed
 

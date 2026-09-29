@@ -23,11 +23,9 @@ use super::observers::ObserversAttr;
 /// One declared relation, e.g. `posts: HasMany<Post>` or
 /// `roles: BelongsToMany<Role, RoleUserPivot> { with_pivot = [...] }`.
 ///
-/// T1 ships the AST + parser. T2-T7 emit relation methods from the
-/// `through` and `options` fields; `#[allow(dead_code)]` keeps them
-/// quiet until those tasks wire them in.
+/// `relations.rs` emits the relation methods from the `through` and
+/// `options` fields.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct RelationDecl {
     /// The relation name as the user declared it (e.g. `"posts"`).
     /// Drives the dispatcher `match` and the inventory entry name.
@@ -197,7 +195,6 @@ pub struct ModelInput {
     pub item: ItemStruct,
     pub table: String,
     pub primary_key: String,
-    #[allow(dead_code)] // T4+ - used when typed CRUD lifecycle wires through.
     pub key_type: Type,
     pub auto_increment: bool,
     /// Phase 10C T12 - per-model default connection name. `None` means
@@ -207,32 +204,18 @@ pub struct ModelInput {
     /// `Some("__primary__")` is legal but unusual - it pins reads to
     /// the primary pool even when a `__read_replica__` is registered.
     pub connection: Option<String>,
-    // Slots filled by later tasks (Phase 10A T6/T7a/T9/T10):
-    #[allow(dead_code)]
     pub fillable: Option<Vec<String>>,
-    #[allow(dead_code)]
     pub guarded: Option<Vec<String>>,
-    #[allow(dead_code)]
     pub casts: Vec<(Ident, Type)>,
-    #[allow(dead_code)]
     pub timestamps: bool,
-    #[allow(dead_code)]
     pub created_at: String,
-    #[allow(dead_code)]
     pub updated_at: String,
-    #[allow(dead_code)]
     pub soft_deletes: bool,
-    #[allow(dead_code)]
     pub soft_deletes_column: String,
-    #[allow(dead_code)]
     pub appends: Vec<String>,
-    #[allow(dead_code)]
     pub hidden: Vec<String>,
-    #[allow(dead_code)]
     pub visible: Option<Vec<String>>,
-    #[allow(dead_code)]
     pub mutators: Vec<String>,
-    #[allow(dead_code)]
     pub touches: Vec<String>,
     /// Phase 10B T1 - parsed `relations = { ... }` body. `None` when
     /// the attribute is omitted entirely (no relations declared on
@@ -251,7 +234,6 @@ pub struct ModelInput {
     /// `MorphTypeEntry` inventory (for the runtime
     /// `type_string -> TypeId` reverse lookup). Both readers honour the
     /// fallback themselves; nothing else on `ModelInput` references this.
-    #[allow(dead_code)]
     pub morph_type: Option<String>,
     /// Phase 10C T2c - parsed `observers = [Type1, Type2, ...]` list.
     /// `None` when the attribute is omitted entirely. The list drives
