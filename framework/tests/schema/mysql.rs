@@ -118,3 +118,10 @@ async fn mysql_duplicate_added_column_is_refused() {
 async fn mysql_quoted_string_default_round_trips() {
     cases::quoted_string_default_round_trips(&connect_mysql().await).await;
 }
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_a_name_longer_than_the_limit_is_refused() {
+    cases::a_name_longer_than_the_limit_is_refused(&connect_mysql().await).await;
+}

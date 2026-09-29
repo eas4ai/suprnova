@@ -117,3 +117,10 @@ async fn postgres_duplicate_added_column_is_refused() {
 async fn postgres_quoted_string_default_round_trips() {
     cases::quoted_string_default_round_trips(&connect_postgres().await).await;
 }
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_a_name_longer_than_the_limit_is_refused() {
+    cases::a_name_longer_than_the_limit_is_refused(&connect_postgres().await).await;
+}

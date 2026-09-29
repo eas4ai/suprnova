@@ -58,8 +58,8 @@ fn check_blueprint(blueprint: &Blueprint) -> Result<(), DbErr> {
     Ok(())
 }
 
-fn check_name_length(backend: DbBackend, table: &str, name: &str, what: &str) -> Result<(), DbErr> {
-    if backend != DbBackend::Sqlite && name.len() > MAX_NAME_BYTES {
+fn check_name_length(table: &str, name: &str, what: &str) -> Result<(), DbErr> {
+    if name.len() > MAX_NAME_BYTES {
         return Err(refuse(format!(
             "schema: the {what} name `{name}` on table `{table}` is {} bytes, more than the {MAX_NAME_BYTES} bytes Postgres keeps, the limit the builder uses on every backend so a migration runs on all three; shorten the table or column names",
             name.len()
@@ -80,19 +80,14 @@ fn index_statement(table: &str, name: &str, spec: &IndexSpec) -> IndexCreateStat
     statement
 }
 
-fn check_index(
-    backend: DbBackend,
-    table: &str,
-    spec: &IndexSpec,
-    seen: &mut HashSet<String>,
-) -> Result<String, DbErr> {
+fn check_index(table: &str, spec: &IndexSpec, seen: &mut HashSet<String>) -> Result<String, DbErr> {
     if spec.columns.is_empty() || spec.columns.iter().any(String::is_empty) {
         return Err(refuse(format!(
             "schema: cannot create an index on table `{table}` without named columns"
         )));
     }
     let name = spec.name(table);
-    check_name_length(backend, table, &name, "index")?;
+    check_name_length(table, &name, "index")?;
     if !seen.insert(name.clone()) {
         return Err(refuse(format!(
             "schema: table `{table}` gets the index `{name}` twice; declare it once"
@@ -172,7 +167,7 @@ pub(crate) fn plan_create(blueprint: &Blueprint, backend: DbBackend) -> Result<V
                 create.col(column.to_column_def(backend));
             }
             Command::AddIndex(spec) => {
-                let name = check_index(backend, table, spec, &mut seen_indexes)?;
+                let name = check_index(table, spec, &mut seen_indexes)?;
                 indexes.push(index_statement(table, &name, spec));
             }
             Command::AddForeign(position) => {
@@ -183,7 +178,7 @@ pub(crate) fn plan_create(blueprint: &Blueprint, backend: DbBackend) -> Result<V
                     continue;
                 };
                 let name = foreign.name(table);
-                check_name_length(backend, table, &name, "foreign key")?;
+                check_name_length(table, &name, "foreign key")?;
                 create.foreign_key(&mut foreign_statement(table, &name, foreign, ref_table));
             }
             Command::RenameColumn { from, .. } => {
@@ -323,7 +318,7 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
                 steps.push(Step::AlterTable(alter));
             }
             Command::AddIndex(spec) => {
-                let name = check_index(backend, table, spec, &mut seen_indexes)?;
+                let name = check_index(table, spec, &mut seen_indexes)?;
                 steps.push(Step::CreateIndex(index_statement(table, &name, spec)));
             }
             Command::DropIndex(name) => {
@@ -344,7 +339,7 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
                     continue;
                 };
                 let name = foreign.name(table);
-                check_name_length(backend, table, &name, "foreign key")?;
+                check_name_length(table, &name, "foreign key")?;
                 steps.push(Step::CreateForeignKey(foreign_statement(
                     table, &name, foreign, ref_table,
                 )));

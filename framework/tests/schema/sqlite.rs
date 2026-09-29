@@ -197,3 +197,8 @@ async fn sqlite_refuses_columns_it_cannot_add_and_runs_nothing() {
         "a refused call must not add extra"
     );
 }
+
+#[tokio::test]
+async fn sqlite_a_name_longer_than_the_limit_is_refused() {
+    cases::a_name_longer_than_the_limit_is_refused(&connect_sqlite().await).await;
+}

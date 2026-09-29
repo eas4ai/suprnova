@@ -1022,3 +1022,26 @@ pub async fn migrator_runs_both_styles(conn: &DatabaseConnection) {
 
     drop_tables(conn, &["schema_test_migrations"]).await;
 }
+
+pub async fn a_name_longer_than_the_limit_is_refused(conn: &DatabaseConnection) {
+    let manager = SchemaManager::new(conn);
+    drop_tables(conn, &["schema_long_names"]).await;
+    let column = "a_column_whose_name_makes_the_index_name_too_long";
+
+    let text = migration_error(
+        Schema::create(&manager, "schema_long_names", |t| {
+            t.id();
+            t.string(column);
+            t.index(&[column]);
+        })
+        .await,
+    );
+    assert!(text.contains("63 bytes"), "{text}");
+    assert!(text.contains("schema_long_names"), "{text}");
+    assert!(
+        !Schema::has_table(&manager, "schema_long_names")
+            .await
+            .expect("has_table"),
+        "a refused description must leave no table behind, on every backend"
+    );
+}
