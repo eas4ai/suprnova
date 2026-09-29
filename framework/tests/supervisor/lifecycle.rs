@@ -5,13 +5,13 @@
 //! construct supervisors with test state.
 
 use async_trait::async_trait;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use suprnova::FrameworkError;
 use suprnova::supervisor::run_with_restart_for_testing;
 use suprnova::supervisor::run_with_restart_for_testing_with_cancel;
 use suprnova::supervisor::{RestartPolicy, Supervisor, SupervisorRegistry};
+use suprnova::{App, FrameworkError};
 use tokio_util::sync::CancellationToken;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -296,5 +296,90 @@ async fn cancel_prevents_restart_under_always_policy() {
         counter.load(Ordering::SeqCst),
         1,
         "Always supervisor should run once then stop when pre-cancelled"
+    );
+}
+
+/// Numbers every `RunScoped` value the factory builds.
+static RUN_SCOPED_BUILT: AtomicUsize = AtomicUsize::new(0);
+
+/// A scoped binding that a supervisor run resolves.
+trait RunScoped: Send + Sync {
+    fn id(&self) -> usize;
+}
+
+struct RunScopedValue {
+    id: usize,
+    dropped: Arc<AtomicUsize>,
+}
+
+impl RunScoped for RunScopedValue {
+    fn id(&self) -> usize {
+        self.id
+    }
+}
+
+impl Drop for RunScopedValue {
+    fn drop(&mut self) {
+        self.dropped.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// The value a run resolved at its start and at its end.
+type ResolvedInRun = (Option<usize>, Option<usize>);
+
+/// Records, for each run, the value it resolved at its start and at its end.
+struct ScopedRunSupervisor {
+    seen: Arc<Mutex<Vec<ResolvedInRun>>>,
+}
+
+#[async_trait]
+impl Supervisor for ScopedRunSupervisor {
+    fn name(&self) -> &'static str {
+        "scoped_run"
+    }
+
+    async fn run(&self, _cancel: CancellationToken) -> Result<(), FrameworkError> {
+        let first = App::make::<dyn RunScoped>().map(|value| value.id());
+        let second = App::make::<dyn RunScoped>().map(|value| value.id());
+        self.seen.lock().expect("unpoisoned").push((first, second));
+        Ok(())
+    }
+
+    fn restart_policy(&self) -> RestartPolicy {
+        RestartPolicy::Never
+    }
+}
+
+/// Each supervisor run has a container scope of its own: one value for the
+/// whole run, dropped when the run ends, and a new value for the next run.
+#[tokio::test]
+async fn each_run_gets_a_container_scope_of_its_own() {
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let dropped_in = dropped.clone();
+    App::bind_scoped::<dyn RunScoped, _>(move || {
+        Arc::new(RunScopedValue {
+            id: RUN_SCOPED_BUILT.fetch_add(1, Ordering::SeqCst),
+            dropped: dropped_in.clone(),
+        }) as Arc<dyn RunScoped>
+    });
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    for _ in 0..2 {
+        let sv: Arc<dyn Supervisor> = Arc::new(ScopedRunSupervisor { seen: seen.clone() });
+        // Never policy: this returns once the single run has finished.
+        run_with_restart_for_testing(sv).await;
+    }
+
+    let seen = seen.lock().expect("unpoisoned").clone();
+    assert_eq!(seen.len(), 2, "two runs");
+    for (first, second) in &seen {
+        assert!(first.is_some(), "a run resolves the scoped binding");
+        assert_eq!(first, second, "one value for the whole run");
+    }
+    assert_ne!(seen[0].0, seen[1].0, "the next run builds a new value");
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        2,
+        "each run's value is dropped when the run ends"
     );
 }

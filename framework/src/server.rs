@@ -709,6 +709,25 @@ pub async fn handle_request_with_peer(
     req: hyper::Request<hyper::body::Incoming>,
     peer_ip: Option<std::net::IpAddr>,
 ) -> hyper::Response<ServerBody> {
+    // One container scope per request, outermost: the Inertia flash bag,
+    // the SSR flag, the socket id and the auth state below, and the request
+    // id, session and context the middleware installs, all live inside it.
+    // A scoped binding resolved anywhere in the request is built once and
+    // dropped once the response is ready and every streamed body, terminable
+    // hook or after-commit callback of the request, which carry the scope,
+    // has ended.
+    let request = serve_request(router, middleware_registry, req, peer_ip);
+    crate::container::scope::run_in_new_scope(request).await
+}
+
+/// The body of [`handle_request_with_peer`], run inside the request's
+/// container scope.
+async fn serve_request(
+    router: Arc<Router>,
+    middleware_registry: Arc<MiddlewareRegistry>,
+    req: hyper::Request<hyper::body::Incoming>,
+    peer_ip: Option<std::net::IpAddr>,
+) -> hyper::Response<ServerBody> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
@@ -866,15 +885,19 @@ pub async fn handle_request_with_peer(
     // audit logging, metrics flush) runs without blocking the wire.
     // The count check elides the spawn entirely when no hooks are
     // registered, keeping the hot path zero-cost.
+    //
+    // The hooks belong to this request, so they carry its container scope:
+    // they resolve the scoped values the request resolved, and the scope
+    // ends when the last of them ends.
     if crate::middleware::terminable_count() > 0 {
         let snapshot = crate::middleware::TerminationSnapshot {
             method: terminate_method.clone(),
             path: terminate_path.clone(),
             status: response.status().as_u16(),
         };
-        tokio::spawn(async move {
+        tokio::spawn(App::in_current_scope(async move {
             crate::middleware::dispatch_termination(snapshot).await;
-        });
+        }));
     }
 
     response
@@ -1016,7 +1039,7 @@ async fn handle_request_inner(
             // request span is still live. Recording here would target the
             // wrong span: this runs after the middleware's `.instrument`
             // scope has already closed.
-            http_response.into_hyper()
+            into_hyper_in_scope(http_response)
         }
         None => {
             // Check for fallback handler
@@ -1053,7 +1076,7 @@ async fn handle_request_inner(
 
                 // 5xx -> OTel error marker is recorded in
                 // `RequestIdMiddleware` (outermost), where the span is live.
-                http_response.into_hyper()
+                into_hyper_in_scope(http_response)
             } else {
                 // No fallback handler registered. Still run the global
                 // middleware chain (RequestId + global) terminating in a
@@ -1091,10 +1114,29 @@ async fn handle_request_inner(
                 if http_response.status_code() >= 500 {
                     tracing::Span::current().record("error", true);
                 }
-                http_response.into_hyper()
+                into_hyper_in_scope(http_response)
             }
         }
     }
+}
+
+/// Convert the response of the middleware chain for hyper.
+///
+/// A streamed body (SSE, `stream_bytes`, `stream_json`) is polled after the
+/// request's future has returned, so it is wrapped to run each poll in the
+/// request's container scope, which it keeps until it ends or is dropped.
+/// A buffered body is complete already and is handed over as it is.
+fn into_hyper_in_scope(response: HttpResponse) -> hyper::Response<ServerBody> {
+    let streaming = response.is_streaming();
+    let response = response.into_hyper();
+    if !streaming {
+        return response;
+    }
+    let Some(scope) = crate::container::scope::ContainerScope::current() else {
+        return response;
+    };
+    let (parts, body) = response.into_parts();
+    hyper::Response::from_parts(parts, BoxBody::new(scope.body(body)))
 }
 
 /// Run `chain.execute(request, handler)` with panic recovery.
@@ -1629,6 +1671,13 @@ async fn handle_ws_upgrade(
     // `suprnova_req`. This matches `spawn_with_request_id`, which likewise
     // carries only the id into spawned work.
     let handler_task = crate::logging::REQUEST_ID.scope(request_id, handler_task);
+
+    // The session is a unit of work of its own, so it gets a container scope
+    // of its own, outermost. It does not share the upgrade request's scope,
+    // which ends with the 101 response, for the reason the `Context` bag
+    // stays behind: the session is not serving the originating GET. Scoped
+    // bindings the handler resolves live as long as the socket.
+    let handler_task = crate::container::scope::run_in_new_scope(handler_task);
 
     // Take the connection-cap permit (when SERVER_MAX_CONNECTIONS is set) out of
     // the connection task's task-local and move it into the WS session task, so

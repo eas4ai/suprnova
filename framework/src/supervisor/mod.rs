@@ -57,6 +57,12 @@
 //! loop treats it as an `Err` - the supervisor is restarted with exponential
 //! backoff rather than dying silently.
 //!
+//! # Scoped bindings
+//!
+//! Each run is a unit of work with a container scope of its own (see
+//! [`App::scoped`](crate::App::scoped)): scoped values live as long as the
+//! run, and a restart builds them anew.
+//!
 //! # Backoff
 //!
 //! Restarts start at 100 ms and double on each subsequent failure, capped at
@@ -415,7 +421,11 @@ async fn run_with_restart(supervisor: Arc<dyn Supervisor>, cancel: CancellationT
         let sv = Arc::clone(&supervisor);
         let cancel_for_run = cancel.clone();
         let started = Instant::now();
-        let handle = tokio::spawn(async move { sv.run(cancel_for_run).await });
+        // Each run is a unit of work with a container scope of its own: a
+        // restart starts from fresh scoped values, as it starts from a fresh
+        // task.
+        let run = async move { sv.run(cancel_for_run).await };
+        let handle = tokio::spawn(crate::container::scope::run_in_new_scope(run));
         // Must outlive the `handle.await` below - see `AbortChildOnDrop`.
         let _abort_child = AbortChildOnDrop(handle.abort_handle());
 

@@ -446,13 +446,18 @@ pub(crate) fn spawn_detached(future: impl Future<Output = ()> + Send + 'static) 
 }
 
 /// Own finalization work independently of its caller while retaining the
-/// task-local container used by database listeners and callback services.
+/// task-local container used by database listeners and callback services,
+/// and the caller's container scope.
 pub(crate) fn spawn_owned<T: Send + 'static>(
     future: impl Future<Output = T> + Send + 'static,
 ) -> JoinHandle<T> {
     let task_container = crate::container::TASK_CONTAINER
         .try_with(|c| c.clone())
         .ok();
+    // The callbacks belong to the unit of work that registered them, so they
+    // carry its container scope: they resolve the scoped values it resolved,
+    // and the scope ends when the last of the two ends.
+    let future = crate::container::App::in_current_scope(future);
     tokio::spawn(async move {
         match task_container {
             Some(container) => {

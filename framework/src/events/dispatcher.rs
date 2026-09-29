@@ -437,13 +437,16 @@ impl EventDispatcher {
                 // and silently disappearing - see drain_queued's is_panic
                 // log for the defense-in-depth case where a panic somehow
                 // escapes this boundary.
-                let attempt_result = match AssertUnwindSafe(crate::context::Context::restored(
-                    context.clone(),
-                    listener.dispatch(&event),
-                ))
-                .catch_unwind()
-                .await
-                {
+                //
+                // Each attempt also runs in a container scope of its own,
+                // outermost, as each attempt of a queued job does: the
+                // listener is a unit of work, it does not share the scoped
+                // values of the dispatcher, and a retry never sees what
+                // the failed attempt built.
+                let dispatch =
+                    crate::context::Context::restored(context.clone(), listener.dispatch(&event));
+                let dispatch = crate::container::scope::run_in_new_scope(dispatch);
+                let attempt_result = match AssertUnwindSafe(dispatch).catch_unwind().await {
                     Ok(r) => r,
                     Err(payload) => Err(FrameworkError::internal(format!(
                         "queued listener panicked: {}",

@@ -181,7 +181,12 @@ where
     if let Some((name, sub_matches)) = matches.subcommand() {
         if let Some(entry) = find(name) {
             lazy_init().await;
-            let result = (entry.handler)(sub_matches).await;
+            // One command is one unit of work: it runs in a container scope
+            // of its own, so its scoped bindings are built for it and
+            // dropped when it returns. `lazy_init` registers bindings and
+            // stays outside.
+            let command = (entry.handler)(sub_matches);
+            let result = crate::container::scope::run_in_new_scope(command).await;
             if let Err(ref e) = result
                 && !e.is_silent()
             {

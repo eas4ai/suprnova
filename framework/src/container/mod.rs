@@ -3,6 +3,10 @@
 //! This module provides Laravel-like service container capabilities:
 //! - Singletons: one stored value per type, returned on every resolution
 //! - Factories: new instance per resolution
+//! - Scoped bindings: one instance per unit of work (an HTTP request, a
+//!   WebSocket session, a queue job, a queued event listener, a workflow
+//!   run, a supervisor run, a scheduled task, a console command), dropped
+//!   when it ends - see [`App::scoped`]
 //! - Trait bindings: bind interfaces to implementations behind `Arc<dyn Trait>`
 //! - Test faking: swap implementations in tests
 //! - Service Providers: bootstrap services with register/boot lifecycle
@@ -32,7 +36,8 @@
 //!
 //! The global container guards itself behind a `std::sync::RwLock`. Every
 //! write path on [`App`] (`singleton`, `factory`, `bind`, `bind_factory`,
-//! and the test-container `instance` alias) recovers from a poisoned lock
+//! `scoped`, `bind_scoped`, and the test-container `instance` alias)
+//! recovers from a poisoned lock
 //! via `unwrap_or_else(|e| e.into_inner())` so service registration cannot
 //! be silently dropped if some unrelated subsystem panicked mid-write.
 //! Reads recover the same way, so a poisoned container still resolves
@@ -69,12 +74,16 @@
 //! ```
 
 pub mod provider;
+pub(crate) mod scope;
 pub mod testing;
 
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
+
+use scope::ScopedError;
+use tokio::task::JoinHandle;
 
 /// Global application container
 static APP_CONTAINER: OnceLock<RwLock<Container>> = OnceLock::new();
@@ -112,7 +121,8 @@ tokio::task_local! {
     pub(crate) static TASK_CONTAINER: Arc<RwLock<Container>>;
 }
 
-/// Binding types: either a singleton instance or a factory closure
+/// Binding types: a singleton instance, a factory closure, or a factory
+/// whose value lives for one container scope
 #[derive(Clone)]
 enum Binding {
     /// Shared singleton instance - same instance returned every time
@@ -120,6 +130,10 @@ enum Binding {
 
     /// Factory closure - creates new instance each time
     Factory(Arc<dyn Fn() -> Arc<dyn Any + Send + Sync> + Send + Sync>),
+
+    /// Scoped factory - runs at the first resolution inside a container
+    /// scope; the scope keeps the value and drops it when it ends
+    Scoped(Arc<dyn Fn() -> Arc<dyn Any + Send + Sync> + Send + Sync>),
 }
 
 impl Binding {
@@ -127,26 +141,47 @@ impl Binding {
     /// caller is expected to have already cloned the binding out of the
     /// container's `RwLock` (see [`Container::binding`]) so factory
     /// closures do not run while a read or write guard is held.
-    fn resolve_concrete<T: Any + Send + Sync + Clone + 'static>(&self) -> Option<T> {
-        match self {
+    ///
+    /// `Err` only for a scoped binding: no scope is active, or its factory
+    /// asked for the value it is building.
+    fn resolve_concrete<T: Any + Send + Sync + Clone + 'static>(
+        &self,
+    ) -> Result<Option<T>, ScopedError> {
+        Ok(match self {
             Binding::Singleton(arc) => arc.downcast_ref::<T>().cloned(),
             Binding::Factory(factory) => {
                 let arc = factory();
                 arc.downcast_ref::<T>().cloned()
             }
-        }
+            Binding::Scoped(factory) => {
+                let arc =
+                    scope::resolve(TypeId::of::<T>(), std::any::type_name::<T>(), &**factory)?;
+                arc.downcast_ref::<T>().cloned()
+            }
+        })
     }
 
     /// Resolve this binding to an `Arc<T>` trait object. Lock-free; see
-    /// [`Binding::resolve_concrete`] for the lock-handling contract.
-    fn resolve_make<T: ?Sized + Send + Sync + 'static>(&self) -> Option<Arc<T>> {
-        match self {
+    /// [`Binding::resolve_concrete`] for the lock-handling contract and
+    /// the scoped-binding errors.
+    fn resolve_make<T: ?Sized + Send + Sync + 'static>(
+        &self,
+    ) -> Result<Option<Arc<T>>, ScopedError> {
+        Ok(match self {
             Binding::Singleton(arc) => arc.downcast_ref::<Arc<T>>().cloned(),
             Binding::Factory(factory) => {
                 let arc = factory();
                 arc.downcast_ref::<Arc<T>>().cloned()
             }
-        }
+            Binding::Scoped(factory) => {
+                let arc = scope::resolve(
+                    TypeId::of::<Arc<T>>(),
+                    std::any::type_name::<T>(),
+                    &**factory,
+                )?;
+                arc.downcast_ref::<Arc<T>>().cloned()
+            }
+        })
     }
 }
 
@@ -299,8 +334,59 @@ impl Container {
         self.bindings.insert(type_id, Binding::Factory(wrapped));
     }
 
+    /// Register a scoped binding: `factory` runs at the first resolution
+    /// inside a container scope, and that scope keeps the value and drops
+    /// it when it ends. See [`App::scoped`] for when scopes open and how a
+    /// scoped binding resolves.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::Container;
+    /// # struct TenantDb;
+    /// # impl TenantDb { fn for_current_tenant() -> Self { TenantDb } }
+    /// # let mut container = Container::new();
+    /// container.scoped(|| Arc::new(TenantDb::for_current_tenant()));
+    /// ```
+    pub fn scoped<T, F>(&mut self, factory: F)
+    where
+        T: Any + Send + Sync + 'static,
+        F: Fn() -> T + Send + Sync + 'static,
+    {
+        let wrapped: Arc<dyn Fn() -> Arc<dyn Any + Send + Sync> + Send + Sync> =
+            Arc::new(move || Arc::new(factory()) as Arc<dyn Any + Send + Sync>);
+        self.bindings
+            .insert(TypeId::of::<T>(), Binding::Scoped(wrapped));
+    }
+
+    /// Bind a trait object to a scoped factory: one `Arc<T>` per container
+    /// scope. The trait-object form of [`Container::scoped`].
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::Container;
+    /// # trait ApiClient: Send + Sync {}
+    /// # struct TenantApiClient;
+    /// # impl TenantApiClient { fn for_current_tenant() -> Self { TenantApiClient } }
+    /// # impl ApiClient for TenantApiClient {}
+    /// # let mut container = Container::new();
+    /// container.bind_scoped::<dyn ApiClient, _>(|| {
+    ///     Arc::new(TenantApiClient::for_current_tenant()) as Arc<dyn ApiClient>
+    /// });
+    /// ```
+    pub fn bind_scoped<T: ?Sized + Send + Sync + 'static, F>(&mut self, factory: F)
+    where
+        F: Fn() -> Arc<T> + Send + Sync + 'static,
+    {
+        let type_id = TypeId::of::<Arc<T>>();
+        let wrapped: Arc<dyn Fn() -> Arc<dyn Any + Send + Sync> + Send + Sync> =
+            Arc::new(move || Arc::new(factory()) as Arc<dyn Any + Send + Sync>);
+        self.bindings.insert(type_id, Binding::Scoped(wrapped));
+    }
+
     /// Clone the binding for `type_id` out of the map. Returned `Binding`
-    /// is cheap to clone (both variants are `Arc`s) and can be resolved
+    /// is cheap to clone (every variant is an `Arc`) and can be resolved
     /// after any surrounding lock has been released - used by `App::get`
     /// and `App::make` to avoid running factory closures while a read
     /// guard on the container is still alive.
@@ -309,6 +395,9 @@ impl Container {
     }
 
     /// Resolve a concrete type (requires Clone)
+    ///
+    /// A scoped binding resolves in the current container scope; outside
+    /// any scope this logs the error and returns `None`.
     ///
     /// # Example
     /// ```rust,no_run
@@ -320,10 +409,12 @@ impl Container {
     /// # let _ = db;
     /// ```
     pub fn get<T: Any + Send + Sync + Clone + 'static>(&self) -> Option<T> {
-        self.binding(TypeId::of::<T>())?.resolve_concrete::<T>()
+        scope::or_log(self.binding(TypeId::of::<T>())?.resolve_concrete::<T>())
     }
 
     /// Resolve a trait binding - returns `Arc<T>`.
+    ///
+    /// A scoped binding resolves as in [`Container::get`].
     ///
     /// # Example
     /// ```rust,no_run
@@ -335,7 +426,7 @@ impl Container {
     /// # let _ = client;
     /// ```
     pub fn make<T: ?Sized + Send + Sync + 'static>(&self) -> Option<Arc<T>> {
-        self.binding(TypeId::of::<Arc<T>>())?.resolve_make::<T>()
+        scope::or_log(self.binding(TypeId::of::<Arc<T>>())?.resolve_make::<T>())
     }
 
     /// Check if a concrete type is registered
@@ -547,6 +638,252 @@ impl App {
         c.bind_factory(factory);
     }
 
+    /// Register a scoped binding: one value per unit of work.
+    ///
+    /// The framework opens a container scope for each unit of work it runs:
+    /// an HTTP request, a WebSocket session, an attempt of a queue job or
+    /// of a queued event listener, a workflow run (its steps share it), a
+    /// supervisor run, a scheduled task and a console command. An
+    /// after-commit callback and a terminable hook belong to the request
+    /// that registered them and share its scope. The first
+    /// `App::get::<T>()` inside a scope runs `factory`;
+    /// every later resolution in the same scope returns a clone of that
+    /// value, and the scope drops the value when it ends. Register
+    /// `Arc<...>` to share one instance by reference, or a trait object
+    /// with [`App::bind_scoped`]. This is the home of what belongs to one
+    /// request and must not reach the next one in a long-lived process:
+    /// the current tenant's database handle, an API client bound to the
+    /// caller.
+    ///
+    /// Resolving a scoped binding outside any scope is an error that names
+    /// the type ([`App::resolve`] returns it, [`App::get`] logs it and
+    /// returns `None`): the container never builds a value that would then
+    /// live for the whole process. A task spawned from a request sees the
+    /// request's scope only through [`App::spawn_scoped`] or
+    /// [`App::in_current_scope`], and code that runs outside any unit of
+    /// work opens a scope with [`App::run_scoped`]. A test override
+    /// ([`testing::TestContainer`]) wins over a scoped binding.
+    ///
+    /// One registration per type, as for every binding: a later
+    /// `singleton`, `factory` or `scoped` call for `T` replaces this one.
+    ///
+    /// `factory` runs with no container lock held, so it may resolve other
+    /// bindings, scoped ones included. Tasks that share a scope and resolve
+    /// `T` at the same moment run `factory` once: a resolver that finds the
+    /// value being built waits for it on its thread, blocking that thread,
+    /// so a factory has to be quick and must not block on I/O. A
+    /// resolution that closes a cycle of scoped factories (`T`'s factory
+    /// resolves `T`, directly or through other scoped factories, in this
+    /// task or in another task that shares the scope) is an error instead
+    /// of a wait that never ends. Recovers in place from a poisoned
+    /// container lock so the registration is never silently dropped.
+    ///
+    /// A streamed response body (`HttpResponse::sse`, `stream_bytes`,
+    /// `stream_json`) is produced after the handler returns, and still in
+    /// the request's scope: the body keeps the scope until it ends.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::App;
+    /// # struct TenantDb;
+    /// # impl TenantDb { fn for_current_tenant() -> Self { TenantDb } }
+    /// App::scoped(|| Arc::new(TenantDb::for_current_tenant()));
+    ///
+    /// // Inside a request: built once, dropped when the request ends.
+    /// let db: Arc<TenantDb> = App::get().unwrap();
+    /// # let _ = db;
+    /// ```
+    pub fn scoped<T, F>(factory: F)
+    where
+        T: Any + Send + Sync + 'static,
+        F: Fn() -> T + Send + Sync + 'static,
+    {
+        let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
+        let mut c = container.write().unwrap_or_else(|e| e.into_inner());
+        c.scoped(factory);
+    }
+
+    /// Bind a trait object to a scoped factory: one `Arc<dyn Trait>` per
+    /// unit of work, resolved with [`App::make`].
+    ///
+    /// The trait-object form of [`App::scoped`], under the same rules:
+    /// `factory` runs at the first resolution inside a container scope,
+    /// every resolution in that scope returns the same `Arc`, and the scope
+    /// drops its reference when it ends.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::App;
+    /// # trait ApiClient: Send + Sync {}
+    /// # struct TenantApiClient;
+    /// # impl TenantApiClient { fn for_current_tenant() -> Self { TenantApiClient } }
+    /// # impl ApiClient for TenantApiClient {}
+    /// App::bind_scoped::<dyn ApiClient, _>(|| {
+    ///     Arc::new(TenantApiClient::for_current_tenant()) as Arc<dyn ApiClient>
+    /// });
+    /// ```
+    pub fn bind_scoped<T: ?Sized + Send + Sync + 'static, F>(factory: F)
+    where
+        F: Fn() -> Arc<T> + Send + Sync + 'static,
+    {
+        let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
+        let mut c = container.write().unwrap_or_else(|e| e.into_inner());
+        c.bind_scoped(factory);
+    }
+
+    /// Spawn `future` onto the Tokio runtime inside the current container
+    /// scope.
+    ///
+    /// `tokio::spawn` starts a task with no task-locals, so a task spawned
+    /// from a handler cannot resolve the request's scoped bindings: it gets
+    /// the no-scope error. This helper carries the scope into the new task.
+    /// The task shares the scope's values, so a binding it resolves first
+    /// is the value the request sees too, and the scope, with its values,
+    /// ends when the last of the request and the tasks spawned into it
+    /// ends.
+    ///
+    /// Only the container scope follows the task: the request id and the
+    /// request `Context` do not. To carry the scope into another spawn
+    /// helper, such as [`crate::spawn_with_request_id`], hand it
+    /// [`App::in_current_scope`] instead. Outside a scope the future is
+    /// spawned as is, exactly like `tokio::spawn`.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use suprnova::App;
+    /// # trait AuditLog: Send + Sync { fn record(&self, event: &str); }
+    /// # fn ex() {
+    /// let handle = App::spawn_scoped(async {
+    ///     if let Some(log) = App::make::<dyn AuditLog>() {
+    ///         log.record("export finished");
+    ///     }
+    /// });
+    /// # let _ = handle;
+    /// # }
+    /// ```
+    pub fn spawn_scoped<F>(future: F) -> JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        tokio::spawn(Self::in_current_scope(future))
+    }
+
+    /// Run `future` in the caller's container scope, wherever it is later
+    /// polled.
+    ///
+    /// The scope is taken when this is called, not when the future first
+    /// runs, so the returned future can be handed to any spawn helper
+    /// (`tokio::spawn`, [`crate::spawn_with_request_id`], a task set) and
+    /// still resolve the caller's scoped values. It shares them with the
+    /// caller, and the scope ends when the last of the caller and the
+    /// futures carrying it ends. Outside a scope the returned future
+    /// behaves exactly like `future`.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use suprnova::{App, spawn_with_request_id};
+    /// # trait AuditLog: Send + Sync { fn record(&self, event: &str); }
+    /// # fn ex() {
+    /// // The request id and the container scope both follow the task.
+    /// let handle = spawn_with_request_id(App::in_current_scope(async {
+    ///     if let Some(log) = App::make::<dyn AuditLog>() {
+    ///         log.record("export finished");
+    ///     }
+    /// }));
+    /// # let _ = handle;
+    /// # }
+    /// ```
+    pub fn in_current_scope<F>(future: F) -> impl std::future::Future<Output = F::Output>
+    where
+        F: std::future::Future,
+    {
+        let current = scope::ContainerScope::current();
+        async move {
+            match current {
+                Some(current) => current.run(future).await,
+                None => future.await,
+            }
+        }
+    }
+
+    /// Run `future` in a new container scope of its own and return its
+    /// output.
+    ///
+    /// The framework opens a scope for every unit of work it runs itself.
+    /// This is the same for work it does not run: the loop of an
+    /// embedder's own worker, or a test of code that resolves a scoped
+    /// binding outside a request. The scope's values are dropped when
+    /// `future` completes, unless a future carrying the scope
+    /// ([`App::in_current_scope`], [`App::spawn_scoped`]) still runs.
+    ///
+    /// Called inside a scope, this opens a nested scope, and the values of
+    /// the outer scope are not visible inside it: a unit of work has
+    /// values of its own. The outer scope's values are visible again once
+    /// `future` completes. To stay in the caller's scope, await the future
+    /// directly.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::App;
+    /// # struct TenantDb;
+    /// # impl TenantDb { fn for_current_tenant() -> Self { TenantDb } }
+    /// # async fn ex() {
+    /// App::scoped(|| Arc::new(TenantDb::for_current_tenant()));
+    ///
+    /// let resolved = App::run_scoped(async { App::get::<Arc<TenantDb>>().is_some() }).await;
+    /// assert!(resolved);
+    /// # }
+    /// ```
+    pub async fn run_scoped<F>(future: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        scope::run_in_new_scope(future).await
+    }
+
+    /// The binding for `type_id` from the first layer that has one: the
+    /// task-local test override, the thread-local test override, then the
+    /// global container. All three layers recover in place from a poisoned
+    /// lock.
+    ///
+    /// Each layer's binding is cloned out from under its guard, so the
+    /// caller resolves it lock-free - otherwise a factory that re-enters
+    /// `App::*` (or any writer) would deadlock, and an expensive factory
+    /// would needlessly block container mutation.
+    fn active_binding(type_id: TypeId) -> Option<Binding> {
+        // Task-local first (async-safe).
+        let task_binding = TASK_CONTAINER
+            .try_with(|c| c.read().unwrap_or_else(|e| e.into_inner()).binding(type_id))
+            .ok()
+            .flatten();
+        if task_binding.is_some() {
+            return task_binding;
+        }
+
+        // Thread-local second (sync / current_thread compat). RefCell so
+        // there's no cross-thread guard, but we extract the binding before
+        // invoking it to keep the resolution shape uniform across layers.
+        let test_binding = TEST_CONTAINER.with(|c| {
+            c.borrow()
+                .as_ref()
+                .and_then(|container| container.binding(type_id))
+        });
+        if test_binding.is_some() {
+            return test_binding;
+        }
+
+        // Fall back to global container. Same extract-then-drop-lock shape.
+        let container = APP_CONTAINER.get()?;
+        container
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .binding(type_id)
+    }
+
     /// Resolve a concrete type.
     ///
     /// Lookup order:
@@ -554,7 +891,9 @@ impl App {
     ///    async-safe across multi-thread runtimes.
     /// 2. Thread-local test override ([`testing::TestContainer::fake`]) -
     ///    sync / `current_thread` tests.
-    /// 3. Global container - production lookup.
+    /// 3. Global container - production lookup. A binding registered with
+    ///    [`App::scoped`] resolves in the current container scope, so a
+    ///    test override of the same type wins over it.
     ///
     /// All three layers recover in place from a poisoned lock so a panic
     /// in one registration does not turn every later resolution into a
@@ -566,6 +905,10 @@ impl App {
     /// arbitrarily expensive work without blocking concurrent writers
     /// or deadlocking against a re-entrant write.
     ///
+    /// A scoped binding that cannot resolve (no scope is active, or its
+    /// factory asked for itself) logs the reason and returns `None`;
+    /// [`App::resolve`] returns the reason as an error instead.
+    ///
     /// # Example
     /// ```rust,no_run
     /// # use suprnova::App;
@@ -575,39 +918,8 @@ impl App {
     /// # let _ = db;
     /// ```
     pub fn get<T: Any + Send + Sync + Clone + 'static>() -> Option<T> {
-        let type_id = TypeId::of::<T>();
-
-        // Task-local first (async-safe). Clone the binding out from under
-        // the read guard so any factory closure runs lock-free - otherwise
-        // a factory that re-enters `App::*` (or any writer) would deadlock,
-        // and an expensive factory would needlessly block container mutation.
-        if let Some(binding) = TASK_CONTAINER
-            .try_with(|c| c.read().unwrap_or_else(|e| e.into_inner()).binding(type_id))
-            .ok()
-            .flatten()
-        {
-            return binding.resolve_concrete::<T>();
-        }
-
-        // Thread-local second (sync / current_thread compat). RefCell so
-        // there's no cross-thread guard, but we extract the binding before
-        // invoking it to keep the resolution shape uniform across layers.
-        let test_binding = TEST_CONTAINER.with(|c| {
-            c.borrow()
-                .as_ref()
-                .and_then(|container| container.binding(type_id))
-        });
-        if let Some(binding) = test_binding {
-            return binding.resolve_concrete::<T>();
-        }
-
-        // Fall back to global container. Same extract-then-drop-lock shape.
-        let container = APP_CONTAINER.get()?;
-        let binding = container
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .binding(type_id)?;
-        binding.resolve_concrete::<T>()
+        let binding = Self::active_binding(TypeId::of::<T>())?;
+        scope::or_log(binding.resolve_concrete::<T>())
     }
 
     /// Resolve a trait binding - returns `Arc<T>`.
@@ -617,7 +929,8 @@ impl App {
     ///    async-safe across multi-thread runtimes.
     /// 2. Thread-local test override ([`testing::TestContainer::fake`]) -
     ///    sync / `current_thread` tests.
-    /// 3. Global container - production lookup.
+    /// 3. Global container - production lookup. A binding registered with
+    ///    [`App::bind_scoped`] resolves in the current container scope.
     ///
     /// All three layers recover in place from a poisoned lock so a panic
     /// in one registration does not turn every later resolution into a
@@ -625,7 +938,8 @@ impl App {
     ///
     /// Factory closures run AFTER the container lock is released - see
     /// [`App::get`] for the full contract; the same guarantee holds for
-    /// trait factories registered via [`App::bind_factory`].
+    /// trait factories registered via [`App::bind_factory`], and a scoped
+    /// binding that cannot resolve is logged and returns `None` as there.
     ///
     /// # Example
     /// ```rust,no_run
@@ -636,42 +950,18 @@ impl App {
     /// # let _ = client;
     /// ```
     pub fn make<T: ?Sized + Send + Sync + 'static>() -> Option<Arc<T>> {
-        let type_id = TypeId::of::<Arc<T>>();
-
-        // Task-local first (async-safe). Same extract-then-drop-lock shape
-        // as `App::get` so factory closures that re-enter `App::*` cannot
-        // deadlock against a held read guard.
-        if let Some(binding) = TASK_CONTAINER
-            .try_with(|c| c.read().unwrap_or_else(|e| e.into_inner()).binding(type_id))
-            .ok()
-            .flatten()
-        {
-            return binding.resolve_make::<T>();
-        }
-
-        // Thread-local second (sync / current_thread compat).
-        let test_binding = TEST_CONTAINER.with(|c| {
-            c.borrow()
-                .as_ref()
-                .and_then(|container| container.binding(type_id))
-        });
-        if let Some(binding) = test_binding {
-            return binding.resolve_make::<T>();
-        }
-
-        // Fall back to global container.
-        let container = APP_CONTAINER.get()?;
-        let binding = container
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .binding(type_id)?;
-        binding.resolve_make::<T>()
+        let binding = Self::active_binding(TypeId::of::<Arc<T>>())?;
+        scope::or_log(binding.resolve_make::<T>())
     }
 
     /// Resolve a concrete type, returning an error if not found
     ///
     /// This allows using the `?` operator in controllers and services for
     /// automatic error propagation with proper HTTP responses.
+    ///
+    /// A scoped binding ([`App::scoped`]) is an error too when no container
+    /// scope is active or when its factory asked for itself; the error
+    /// names the type and says that the binding is scoped.
     ///
     /// # Example
     /// ```rust,no_run
@@ -686,12 +976,17 @@ impl App {
     /// ```
     pub fn resolve<T: Any + Send + Sync + Clone + 'static>()
     -> Result<T, crate::error::FrameworkError> {
-        Self::get::<T>().ok_or_else(crate::error::FrameworkError::service_not_found::<T>)
+        let resolved = match Self::active_binding(TypeId::of::<T>()) {
+            Some(binding) => binding.resolve_concrete::<T>()?,
+            None => None,
+        };
+        resolved.ok_or_else(crate::error::FrameworkError::service_not_found::<T>)
     }
 
     /// Resolve a trait binding, returning an error if not found
     ///
-    /// This allows using the `?` operator for trait object resolution.
+    /// This allows using the `?` operator for trait object resolution. A
+    /// scoped binding ([`App::bind_scoped`]) fails as in [`App::resolve`].
     ///
     /// # Example
     /// ```rust,no_run
@@ -705,7 +1000,11 @@ impl App {
     /// ```
     pub fn resolve_make<T: ?Sized + Send + Sync + 'static>()
     -> Result<Arc<T>, crate::error::FrameworkError> {
-        Self::make::<T>().ok_or_else(crate::error::FrameworkError::service_not_found::<T>)
+        let resolved = match Self::active_binding(TypeId::of::<Arc<T>>()) {
+            Some(binding) => binding.resolve_make::<T>()?,
+            None => None,
+        };
+        resolved.ok_or_else(crate::error::FrameworkError::service_not_found::<T>)
     }
 
     /// Check if a concrete type is registered.
@@ -1311,7 +1610,9 @@ mod lock_release_tests {
             .expect("factory binding must be registered");
         // Lock guard drops at end of previous statement (temporary
         // expression). The binding clone is what we hand to the factory.
-        let resolved = binding.resolve_concrete::<Probe>();
+        let resolved = binding
+            .resolve_concrete::<Probe>()
+            .expect("a factory binding resolves without a container scope");
 
         assert_eq!(resolved, Some(Probe(123)));
         assert!(
@@ -1386,7 +1687,9 @@ mod lock_release_tests {
             .unwrap_or_else(|e| e.into_inner())
             .binding(type_id)
             .expect("trait factory binding must be registered");
-        let resolved = binding.resolve_make::<dyn Greeter>();
+        let resolved = binding
+            .resolve_make::<dyn Greeter>()
+            .expect("a factory binding resolves without a container scope");
 
         assert_eq!(resolved.map(|g| g.hello()), Some("hi"));
         assert!(

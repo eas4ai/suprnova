@@ -293,7 +293,9 @@ fn redacted_for_log(env: &Envelope) -> Envelope {
 /// into retry / dead-letter).
 ///
 /// The job and its middleware run inside a [`Context`](crate::context::Context)
-/// scope restored from the envelope's snapshot.
+/// scope restored from the envelope's snapshot, and inside a container scope
+/// of their own, so the job's scoped bindings (`App::scoped`) are built for
+/// it and dropped when it ends.
 ///
 /// Exposed for test harnesses that want to settle one envelope without
 /// running the full worker loop; production code goes through
@@ -304,8 +306,13 @@ pub async fn run_through_middleware(env: Envelope) -> Result<JobOutcome, Framewo
     // caller's for the length of the job, so a job run inline sees what a
     // job on a worker sees: a copy, never the caller's live context, and no
     // query parameters, which belong to the request and do not travel.
+    //
+    // The same holds for the container scope: the job gets one of its own,
+    // so its scoped bindings are built for the job, as on a worker, and not
+    // taken from the request that dispatched it.
     let context = env.context.clone();
-    crate::context::Context::restored(context, run_pipeline(env)).await
+    let job = crate::context::Context::restored(context, run_pipeline(env));
+    crate::container::scope::run_in_new_scope(job).await
 }
 
 /// The middleware pipeline of [`run_through_middleware`], without the
@@ -362,6 +369,25 @@ async fn run_pipeline(env: Envelope) -> Result<JobOutcome, FrameworkError> {
             });
 
     chained(env).await
+}
+
+/// Run `fut` inside one attempt's container scope and, within it, the
+/// attempt's context.
+///
+/// The worker opens both once per attempt and enters them for the job and
+/// for every lifecycle event around it, so a listener of `JobProcessing`
+/// resolves the same scoped values the job resolves, and the values are
+/// dropped when the attempt settles.
+async fn in_attempt<F>(
+    scope: crate::container::scope::ContainerScope,
+    context: crate::context::ContextStore,
+    fut: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    let in_context = crate::context::Context::scope(context, fut);
+    scope.run(in_context).await
 }
 
 /// Return all registered job names. Used by admin inspectors and
@@ -777,6 +803,10 @@ async fn run_labelled_worker(
         // trace id the job reads. Laravel restores the context on
         // `JobProcessing` for the same reason.
         let job_context = crate::context::Context::hydrate(env.context.as_ref());
+        // One container scope for this attempt, entered wherever the context
+        // is: the attempt's scoped bindings are built once, shared by the job
+        // and its lifecycle events, and dropped when the attempt settles.
+        let job_scope = crate::container::scope::ContainerScope::new();
 
         // Spend the budget *before* running, not only when settling.
         //
@@ -801,7 +831,8 @@ async fn run_labelled_worker(
                 "queue job exhausted its attempts without ever settling - \
                  dead-lettering before it takes another worker down"
             );
-            crate::context::Context::scope(
+            in_attempt(
+                job_scope.clone(),
                 job_context.clone(),
                 handle_dead_letter(
                     &*driver,
@@ -826,7 +857,8 @@ async fn run_labelled_worker(
         }
 
         let identity_pre = queue_events::JobIdentity::from_env(&env, &connection);
-        let _ = crate::context::Context::scope(
+        let _ = in_attempt(
+            job_scope.clone(),
             job_context.clone(),
             EventFacade::dispatch(queue_events::JobProcessing {
                 job: identity_pre.clone(),
@@ -839,7 +871,8 @@ async fn run_labelled_worker(
         // superseded job runs no middleware at all. Same order here. This is a
         // settlement, not a failure: ack, report, move on.
         if envelope_was_superseded(&env).await {
-            let _ = crate::context::Context::scope(
+            let _ = in_attempt(
+                job_scope.clone(),
                 job_context.clone(),
                 EventFacade::dispatch(queue_events::JobDebounced {
                     job: identity_pre.clone(),
@@ -871,7 +904,8 @@ async fn run_labelled_worker(
         // through the existing retry / dead-letter path. Without the boundary,
         // a panic would unwind out of `run_worker`, kill the worker task, and
         // strand the envelope's reservation until visibility expiry.
-        let dispatch_fut = AssertUnwindSafe(crate::context::Context::scope(
+        let dispatch_fut = AssertUnwindSafe(in_attempt(
+            job_scope.clone(),
             job_context.clone(),
             run_pipeline(env_for_dispatch),
         ))
@@ -931,9 +965,9 @@ async fn run_labelled_worker(
         let sweep_unique_lock =
             env.unique_lock_owner.is_some() && job_is_unique_until_processing(&env.job_name);
 
-        // Settled inside the job's context, so the events a settlement raises
-        // carry what the job carried.
-        crate::context::Context::scope(job_context, async {
+        // Settled inside the job's context and container scope, so the events
+        // a settlement raises carry what the job carried.
+        in_attempt(job_scope, job_context, async {
             match outcome {
                 DispatchOutcome::Settled(JobOutcome::Completed) => {
                     if sweep_unique_lock {

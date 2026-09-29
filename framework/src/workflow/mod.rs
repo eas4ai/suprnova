@@ -493,7 +493,13 @@ async fn process_claimed_workflow(
     // pattern in `server::execute_chain_safely`: catch the unwind, downcast
     // the payload, fold into the existing Err arm so the row goes through
     // the same retry/fail accounting as a returned `FrameworkError`.
-    let body = AssertUnwindSafe(ctx.enter(async { (entry.run)(&claimed.input).await }));
+    //
+    // The body runs in a container scope of its own, outermost: one scope
+    // per claimed run. Its steps run inline in the body, on this task, so
+    // they share the run's scope and resolve the scoped values the body
+    // resolves. A retry is a new claim and gets a new scope.
+    let run = ctx.enter(async { (entry.run)(&claimed.input).await });
+    let body = AssertUnwindSafe(crate::container::scope::run_in_new_scope(run));
     let result = match body.catch_unwind().await {
         Ok(inner) => inner,
         Err(panic) => {
@@ -1031,6 +1037,87 @@ mod tests {
         assert_eq!(status, WorkflowStatus::Succeeded);
         assert_eq!(ALWAYS_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(FLAKY_CALLS.load(Ordering::SeqCst), 2);
+    }
+
+    /// Numbers every `RunScoped` value the factory builds.
+    static RUN_SCOPED_BUILT: AtomicUsize = AtomicUsize::new(0);
+
+    /// A scoped binding that a workflow body and its step both resolve.
+    trait RunScoped: Send + Sync {
+        fn id(&self) -> usize;
+    }
+
+    struct RunScopedValue(usize);
+
+    impl RunScoped for RunScopedValue {
+        fn id(&self) -> usize {
+            self.0
+        }
+    }
+
+    /// The id of the run's scoped value, in a type a step output carries.
+    fn run_scoped_id() -> Result<i64, FrameworkError> {
+        let value = crate::container::App::resolve_make::<dyn RunScoped>()?;
+        <i64 as TryFrom<usize>>::try_from(value.id())
+            .map_err(|error| FrameworkError::internal(error.to_string()))
+    }
+
+    #[workflow_step]
+    async fn run_scoped_step() -> Result<i64, FrameworkError> {
+        run_scoped_id()
+    }
+
+    #[workflow]
+    async fn run_scoped_workflow() -> Result<i64, FrameworkError> {
+        let in_body = run_scoped_id()?;
+        let in_step = run_scoped_step().await?;
+        if in_body == in_step {
+            Ok(in_body)
+        } else {
+            Err(FrameworkError::internal(format!(
+                "the body resolved {in_body} and its step {in_step}"
+            )))
+        }
+    }
+
+    /// A workflow run gets a container scope of its own and its steps share
+    /// it: the body and its step resolve one value, and the next run builds
+    /// a new one.
+    #[tokio::test]
+    async fn a_run_and_its_steps_share_one_scope_and_the_next_run_gets_its_own() {
+        let _db = setup_db().await;
+        crate::container::App::bind_scoped::<dyn RunScoped, _>(|| {
+            Arc::new(RunScopedValue(
+                RUN_SCOPED_BUILT.fetch_add(1, Ordering::SeqCst),
+            )) as Arc<dyn RunScoped>
+        });
+        let name = format!("{}::run_scoped_workflow", module_path!());
+        let input = serde_json::to_string(&()).unwrap();
+        let config = Arc::new(WorkflowConfig::from_env());
+
+        let mut outputs = Vec::new();
+        for _ in 0..2 {
+            let handle = store::insert_workflow(&name, &input, 1)
+                .await
+                .expect("insert workflow");
+            let claimed = store::mark_running(handle.id(), "test-worker", Duration::from_secs(30))
+                .await
+                .expect("mark running");
+            process_claimed_workflow(claimed, config.clone())
+                .await
+                .expect("process workflow");
+            assert_eq!(
+                store::get_workflow_status(handle.id()).await.unwrap(),
+                WorkflowStatus::Succeeded,
+                "the body and its step must resolve the same value"
+            );
+            let record = store::get_workflow_record(handle.id()).await.unwrap();
+            outputs.push(record.output);
+        }
+
+        assert!(outputs[0].is_some(), "the run records its output");
+        assert_ne!(outputs[0], outputs[1], "each run builds a value of its own");
+        assert_eq!(RUN_SCOPED_BUILT.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

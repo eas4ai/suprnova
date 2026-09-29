@@ -4,5 +4,6 @@
 pub mod boot_idempotent;
 pub mod dep_resolution;
 pub mod laravel_named_aliases;
+pub mod scoped_bindings;
 pub mod test_scope_async_safe;
 pub mod test_spawn_inheritance;

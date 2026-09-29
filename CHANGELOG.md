@@ -473,6 +473,27 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   that called `RenderCacheConfig::with_clock_for_test` calls `with_clock`. The
   other hooks stay for the framework's own tests, and are compiled with the
   `testing` feature only.
+- **A binding that lives for one request: `App::scoped`.** The container had
+  bindings for the process and overrides for a test, and nothing between them,
+  so a service that belongs to one request, such as the database handle of the
+  tenant or an API client bound to the request, was global and leaked between
+  requests, or was built by hand in every handler. `App::scoped::<T>(factory)`
+  and `App::bind_scoped` register a binding whose factory runs at most once in
+  a scope, at the first `App::get`, and whose value is dropped when the scope
+  ends. The framework opens a scope for each request, each WebSocket session,
+  each attempt of a queued job, each attempt of a queued listener, each run of
+  a scheduled task, a workflow or a supervisor, and each console command. An
+  after-commit callback, a hook that runs after the response and the body of a
+  streamed response share the scope of the request that registered them.
+  `App::run_scoped(future)` opens a scope of your own,
+  `App::in_current_scope(future)` carries the scope of the caller into a
+  future that you spawn, and `App::spawn_scoped` does both steps. Outside a
+  scope, `App::resolve` returns an error that names the type, and `App::get`
+  logs a warning and returns `None`: a scoped binding never builds a value
+  that lives for the process. A test override wins over a scoped binding. A
+  factory is synchronous and runs once: a second task of the scope that asks
+  for the value while it is built waits for it on its thread, and a cycle of
+  scoped factories, in one task or across tasks, is an error.
 
 ### Changed
 
