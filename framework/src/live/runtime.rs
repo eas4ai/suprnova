@@ -1637,7 +1637,16 @@ impl LiveRuntime {
             .public_mount
             .mount_component_for_document(document, key, parameters, flags, document_path, context)
             .await
-            .map_err(|_| FrameworkError::internal("Live public mount was rejected"))
+            .map_err(|error| {
+                // The framework error carries no engine detail, so the closed engine kinds are
+                // recorded here for an operator.
+                tracing::warn!(
+                    kind = ?error.kind(),
+                    cause = ?error.cause(),
+                    "Live public mount was rejected"
+                );
+                FrameworkError::internal("Live public mount was rejected")
+            })
     }
 
     pub(crate) async fn mount_private_component(
@@ -1650,7 +1659,16 @@ impl LiveRuntime {
             .private_mount
             .mount(document, request, context)
             .await
-            .map_err(|_| FrameworkError::internal("Live private mount was rejected"))
+            .map_err(|error| {
+                // The framework error carries no engine detail, so the closed engine kinds are
+                // recorded here for an operator.
+                tracing::warn!(
+                    kind = ?error.kind(),
+                    cause = ?error.cause(),
+                    "Live private mount was rejected"
+                );
+                FrameworkError::internal("Live private mount was rejected")
+            })
     }
 
     pub(crate) fn readiness(&self) -> RuntimeReadiness {

@@ -11,17 +11,20 @@ use component_support::{
     snapshot_limits, trusted_context,
 };
 use suprnova_live::canonical::CanonicalValue;
-use suprnova_live::clock::{Clock, ClockError};
-use suprnova_live::identity::{InstanceId, Revision, UnixMillis};
+use suprnova_live::clock::{Clock, ClockError, ClockErrorKind};
+use suprnova_live::identity::{InstanceId, Revision, ScopeFingerprint, UnixMillis};
 use suprnova_live::ledger::{
-    LedgerLimits, LiveInstanceLedger, MemoryInstanceLedger, MountInstanceRecord,
+    AcceptedOutcome, ClaimOutcome, ClaimRequest, ClaimToken, InstanceAuthority, LedgerError,
+    LedgerErrorKind, LedgerLimits, LiveInstanceLedger, MemoryInstanceLedger, MountInstanceRecord,
+    PromotionOutcome, PromotionRecord,
 };
 use suprnova_live::mount::{
-    DocumentMountKey, DocumentMountScope, MountErrorKind, MountFlags, MountLimits, MountProviders,
-    PrivateMountRequest, PrivateMountService,
+    DocumentMountKey, DocumentMountScope, MountErrorKind, MountFailure, MountFlags, MountLimits,
+    MountProviders, PrivateMountRequest, PrivateMountService,
 };
 use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
-use suprnova_live::view::{RenderLimits, ViewRenderer};
+use suprnova_live::snapshot::SnapshotErrorKind;
+use suprnova_live::view::{RenderLimits, ViewErrorKind, ViewRenderer};
 
 fn service(
     control: Arc<FixtureControl>,
@@ -65,6 +68,59 @@ impl Clock for ExpiringClock {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(UnixMillis::new(if call == 0 { 1_000 } else { 2_000 }))
     }
+}
+
+/// Instance ledger that refuses every operation with one closed kind.
+struct RefusingLedger {
+    kind: LedgerErrorKind,
+}
+
+impl RefusingLedger {
+    fn refusal(&self) -> LedgerError {
+        LedgerError::new(self.kind)
+    }
+}
+
+#[async_trait::async_trait]
+impl LiveInstanceLedger for RefusingLedger {
+    async fn mount_instance(
+        &self,
+        _record: MountInstanceRecord,
+    ) -> Result<InstanceAuthority, LedgerError> {
+        Err(self.refusal())
+    }
+
+    async fn promote(&self, _request: PromotionRecord) -> Result<PromotionOutcome, LedgerError> {
+        Err(self.refusal())
+    }
+
+    async fn claim(&self, _request: ClaimRequest) -> Result<ClaimOutcome, LedgerError> {
+        Err(self.refusal())
+    }
+
+    async fn current_accepted_revision(
+        &self,
+        _scope: &ScopeFingerprint,
+        _instance_id: &InstanceId,
+    ) -> Result<Option<Revision>, LedgerError> {
+        Err(self.refusal())
+    }
+
+    async fn commit(
+        &self,
+        _claim: &ClaimToken,
+        _outcome: AcceptedOutcome,
+    ) -> Result<(), LedgerError> {
+        Err(self.refusal())
+    }
+
+    async fn abandon(&self, _claim: &ClaimToken) -> Result<(), LedgerError> {
+        Err(self.refusal())
+    }
+
+    fn abandon_on_drop(&self, _claim: ClaimToken) {}
+
+    fn fence_on_drop(&self, _claim: ClaimToken) {}
 }
 
 fn memory_ledger(clock: Arc<ManualClock>, max_instances: usize) -> Arc<MemoryInstanceLedger> {
@@ -192,6 +248,7 @@ async fn expired_context_and_executable_mount_metadata_fail_before_publication()
         .await
         .expect_err("expired host authority fails");
     assert_eq!(error.kind(), MountErrorKind::ContextRejected);
+    assert_eq!(error.cause(), None);
     assert!(expired_control.values().is_empty());
 
     let executable_control = FixtureControl::new(FailurePoint::ExecutableRender);
@@ -215,6 +272,10 @@ async fn expired_context_and_executable_mount_metadata_fail_before_publication()
         .await
         .expect_err("script-bearing nested mount metadata fails");
     assert_eq!(error.kind(), MountErrorKind::RenderRejected);
+    assert_eq!(
+        error.cause(),
+        Some(MountFailure::View(ViewErrorKind::ExecutableMountMetadata))
+    );
     assert!(
         ledger
             .inspect(
@@ -284,11 +345,63 @@ async fn oversized_inert_metadata_and_ledger_capacity_fail_without_output() {
         .await
         .expect_err("ledger rejection prevents publication");
     assert_eq!(error.kind(), MountErrorKind::LedgerRejected);
+    assert_eq!(error.ledger_kind(), Some(LedgerErrorKind::CapacityExceeded));
     assert_eq!(
         capacity_control.values().last(),
         Some(&"teardown"),
         "complete lifecycle precedes the atomic ledger write"
     );
+}
+
+#[tokio::test]
+async fn ledger_refusal_keeps_the_ledger_kind_behind_the_coarse_mount_kind() {
+    let kinds = [
+        LedgerErrorKind::ProviderUnavailable,
+        LedgerErrorKind::CapacityExceeded,
+        LedgerErrorKind::ClockUnavailable,
+        LedgerErrorKind::InvalidExpiry,
+        LedgerErrorKind::InvalidConfiguration,
+    ];
+
+    for kind in kinds {
+        let control = FixtureControl::new(FailurePoint::None);
+        let service = service(
+            control.clone(),
+            Arc::new(ManualClock::new(1_000)),
+            Arc::new(RefusingLedger { kind }),
+            Arc::new(SequenceGenerator::new(0x20)),
+            limits(3, 8_192),
+        );
+        let mut document = DocumentMountScope::new();
+
+        let error = service
+            .mount(
+                &mut document,
+                request("refused", MountFlags::empty()),
+                &trusted_context(),
+            )
+            .await
+            .expect_err("a ledger refusal prevents publication");
+
+        assert_eq!(error.kind(), MountErrorKind::LedgerRejected, "{kind:?}");
+        assert_eq!(error.cause(), Some(MountFailure::Ledger(kind)), "{kind:?}");
+        assert_eq!(error.ledger_kind(), Some(kind), "{kind:?}");
+        assert_eq!(error.to_string(), "mount_ledger_rejected", "{kind:?}");
+        assert_eq!(
+            format!("{error:?}"),
+            format!("mount_ledger_rejected:{:?}", MountFailure::Ledger(kind)),
+            "{kind:?}"
+        );
+        assert_eq!(
+            control
+                .values()
+                .into_iter()
+                .filter(|phase| *phase == "mount")
+                .count(),
+            1,
+            "{kind:?}: a refusal other than a collision is never retried"
+        );
+    }
 }
 
 #[tokio::test]
@@ -329,6 +442,7 @@ async fn collision_retry_is_hard_bounded_and_never_reuses_prepared_output() {
         .expect_err("collision budget exhausts");
 
     assert_eq!(error.kind(), MountErrorKind::IdentityCollision);
+    assert_eq!(error.cause(), None);
     assert_eq!(ids.calls(), 2);
     assert_eq!(
         control
@@ -363,6 +477,10 @@ async fn snapshot_and_clock_failures_never_reach_instance_authority() {
         .await
         .expect_err("invalid dehydrated state cannot be signed");
     assert_eq!(error.kind(), MountErrorKind::SnapshotRejected);
+    assert_eq!(
+        error.cause(),
+        Some(MountFailure::Snapshot(SnapshotErrorKind::UnknownStateField))
+    );
     assert!(
         ledger
             .inspect(
@@ -393,6 +511,10 @@ async fn snapshot_and_clock_failures_never_reach_instance_authority() {
         .await
         .expect_err("clock provider failure is closed");
     assert_eq!(error.kind(), MountErrorKind::ClockUnavailable);
+    assert_eq!(
+        error.cause(),
+        Some(MountFailure::Clock(ClockErrorKind::TimestampOverflow))
+    );
     assert!(provider_control.values().is_empty());
 }
 

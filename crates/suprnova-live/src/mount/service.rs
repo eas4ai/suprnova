@@ -169,7 +169,7 @@ impl PrivateMountService {
         let now = self
             .clock
             .now()
-            .map_err(|_| MountError::new(MountErrorKind::ClockUnavailable))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::ClockUnavailable, &error))?;
         if !context.is_current(now) {
             return Err(MountError::new(MountErrorKind::ContextRejected));
         }
@@ -177,15 +177,15 @@ impl PrivateMountService {
         let descriptor = self
             .registry
             .require_contract(catalog.component(), catalog.contract_digest())
-            .map_err(|_| MountError::new(MountErrorKind::ComponentRejected))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::ComponentRejected, &error))?;
         let expected = catalog.expected_seed();
         expected
             .schemas()
             .mount()
             .validate(&request.parameters, StateExposure::PublicSeed)
-            .map_err(|_| MountError::new(MountErrorKind::ParametersRejected))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::ParametersRejected, &error))?;
         to_canonical_bytes(&request.parameters, self.snapshot_limits.input())
-            .map_err(|_| MountError::new(MountErrorKind::ParametersRejected))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::ParametersRejected, &error))?;
         if request.flags.len() > self.limits.max_flags
             || preflight_metadata_bytes(request) > self.limits.max_metadata_bytes
         {
@@ -198,10 +198,9 @@ impl PrivateMountService {
             .ok_or_else(|| MountError::new(MountErrorKind::ClockUnavailable))?;
 
         for attempt in 0..self.limits.max_identity_attempts {
-            let instance_id = self
-                .instance_ids
-                .generate()
-                .map_err(|_| MountError::new(MountErrorKind::RandomUnavailable))?;
+            let instance_id = self.instance_ids.generate().map_err(|error| {
+                MountError::caused_by(MountErrorKind::RandomUnavailable, &error)
+            })?;
             let revision = Revision::new(0);
             let render_context = RenderContext::new(context, &instance_id, revision, expires_at);
             let mount_context = MountContext::new(render_context, &request.parameters);
@@ -209,11 +208,13 @@ impl PrivateMountService {
                 .executor
                 .initial_mount(descriptor, &mount_context)
                 .await
-                .map_err(|_| MountError::new(MountErrorKind::LifecycleRejected))?;
+                .map_err(|error| {
+                    MountError::caused_by(MountErrorKind::LifecycleRejected, &error)
+                })?;
             let (render, state, memo) = lifecycle.into_parts();
             self.views
                 .validate_island_fragment(descriptor.metadata().view().clone(), &render)
-                .map_err(|_| MountError::new(MountErrorKind::RenderRejected))?;
+                .map_err(|error| MountError::caused_by(MountErrorKind::RenderRejected, &error))?;
             let extensions = request
                 .document_path
                 .as_ref()
@@ -241,7 +242,7 @@ impl PrivateMountService {
                 &self.snapshot_limits,
             )
             .and_then(|body| body.sign(&self.keys, now, &self.snapshot_limits))
-            .map_err(|_| MountError::new(MountErrorKind::SnapshotRejected))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::SnapshotRejected, &error))?;
             if signed_snapshot
                 .len()
                 .saturating_add(preflight_metadata_bytes(request))
@@ -255,7 +256,7 @@ impl PrivateMountService {
                 MountSnapshotKind::Instance,
                 Bytes::from(signed_snapshot.clone()),
             )
-            .map_err(|_| MountError::new(MountErrorKind::MetadataTooLarge))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::MetadataTooLarge, &error))?;
             let assembled = assemble_island_root(
                 render,
                 IslandRootInput {
@@ -281,16 +282,16 @@ impl PrivateMountService {
                 },
                 self.limits.max_metadata_bytes,
             )
-            .map_err(|_| MountError::new(MountErrorKind::MetadataTooLarge))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::MetadataTooLarge, &error))?;
             let validated = self
                 .views
                 .validate_island_output(descriptor.metadata().view().clone(), assembled)
-                .map_err(|_| MountError::new(MountErrorKind::RenderRejected))?;
+                .map_err(|error| MountError::caused_by(MountErrorKind::RenderRejected, &error))?;
 
             let completed_at = self
                 .clock
                 .now()
-                .map_err(|_| MountError::new(MountErrorKind::ClockUnavailable))?;
+                .map_err(|error| MountError::caused_by(MountErrorKind::ClockUnavailable, &error))?;
             if completed_at < now {
                 return Err(MountError::new(MountErrorKind::ClockUnavailable));
             }
@@ -330,7 +331,12 @@ impl PrivateMountService {
                         return Err(MountError::new(MountErrorKind::IdentityCollision));
                     }
                 }
-                Err(_) => return Err(MountError::new(MountErrorKind::LedgerRejected)),
+                Err(error) => {
+                    return Err(MountError::caused_by(
+                        MountErrorKind::LedgerRejected,
+                        &error,
+                    ));
+                }
             }
         }
         Err(MountError::new(MountErrorKind::IdentityCollision))

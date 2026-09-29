@@ -13,7 +13,7 @@ use crate::child::{
     ChildParameterLimits, EligibleChildParametersV2, PreparedChildParametersV2,
     VerifiedChildParametersV1, VerifiedChildParametersV2, authorize_child_parameters_v2,
 };
-use crate::clock::Clock;
+use crate::clock::{Clock, ClockErrorKind};
 use crate::component::{
     ActionExecutionOutput, ActionExecutionParts, ComponentExecutor, HydrationContext, MountContext,
     RenderContext,
@@ -41,7 +41,8 @@ use crate::snapshot::state::StateExposure;
 use crate::snapshot::{
     COMPOSITION_LINEAGE_EXTENSION_V1, ComponentContract, CompositionChildLineageV1,
     CompositionLineageV1, CompositionOwnerLineageV1, InstanceBodyV1, InstanceFieldsV1, SeedBodyV1,
-    SnapshotLimits, SnapshotSchemaSet, VerifiedInstanceV1, mounted_document_path,
+    SnapshotErrorKind, SnapshotLimits, SnapshotSchemaSet, VerifiedInstanceV1,
+    mounted_document_path,
 };
 use crate::state::ProposalBatch;
 use crate::validation::{BagPolicy, ErrorBag, ValidationEngine, ValidationPort};
@@ -51,8 +52,8 @@ use crate::view::{
 };
 
 use super::{
-    ExecutionPhase, ExecutionTracePort, HostError, HostErrorKind, HostTransaction, RetryLegality,
-    TransactionPort, record, run_host_future,
+    ExecutionFailure, ExecutionPhase, ExecutionTracePort, HostError, HostErrorKind,
+    HostTransaction, RetryLegality, TransactionPort, record, run_host_future,
 };
 
 /// Explicit dependencies and bounded input for one registered action execution.
@@ -425,6 +426,7 @@ pub struct RefreshRequiredExecution {
     reason: ExecutionRefreshReason,
     retry: RetryLegality,
     accepted: Option<AcceptedOutcomeMetadata>,
+    cause: Option<ExecutionFailure>,
 }
 
 impl RefreshRequiredExecution {
@@ -432,6 +434,16 @@ impl RefreshRequiredExecution {
     #[must_use]
     pub const fn reason(&self) -> ExecutionRefreshReason {
         self.reason
+    }
+
+    /// Returns the closed cause when a trusted subsystem failed the operation.
+    ///
+    /// `None` marks an ordinary refresh, such as a stale base revision or an exact duplicate,
+    /// that reports no fault. No response encodes the cause: the browser sees at most the
+    /// coarse [`reason`](Self::reason), and the host records the cause for an operator.
+    #[must_use]
+    pub const fn cause(&self) -> Option<ExecutionFailure> {
+        self.cause
     }
 
     /// Returns whether automatic replay of the action is legal.
@@ -454,6 +466,7 @@ impl fmt::Debug for RefreshRequiredExecution {
             .field("reason", &self.reason)
             .field("retry", &self.retry)
             .field("has_accepted_metadata", &self.accepted.is_some())
+            .field("cause", &self.cause)
             .finish()
     }
 }
@@ -670,6 +683,30 @@ struct SuccessorComposition {
     pending: Vec<crate::component::composition::PendingChildParameters>,
 }
 
+/// Reason the successor composition lineage could not be prepared.
+enum SuccessorCompositionError {
+    /// The operation names an owner parent revision and the signed lineage has no owner.
+    OwnerMissing,
+    /// A rendered child mount carries no transition while the signed lineage has children.
+    ChildUntracked,
+    /// A rendered child matches no signed lineage entry by key, contract, and instance.
+    ChildUnknown,
+    /// The snapshot subsystem refused an owner, child, or whole lineage.
+    Lineage(SnapshotErrorKind),
+}
+
+impl SuccessorCompositionError {
+    /// Names the reason in the closed cause the host reads from the refresh.
+    fn failure(self) -> ExecutionFailure {
+        match self {
+            Self::OwnerMissing => ExecutionFailure::CompositionOwnerMissing,
+            Self::ChildUntracked => ExecutionFailure::CompositionChildUntracked,
+            Self::ChildUnknown => ExecutionFailure::CompositionChildUnknown,
+            Self::Lineage(kind) => ExecutionFailure::CompositionLineage(kind),
+        }
+    }
+}
+
 enum RequestSnapshotAuthority {
     Instance(InstanceId),
     SeedPromotion(BrowserNonce),
@@ -766,9 +803,9 @@ impl ExecutionService {
             .await;
         let output = match output {
             Ok(output) => output,
-            Err(_) => {
+            Err(error) => {
                 self.consume_failed_claim(claimed.claim).await;
-                return refresh(ExecutionRefreshReason::ExecutionFailed);
+                return execution_failed(ExecutionFailure::Action(error.kind()));
             }
         };
         self.accept_output(
@@ -812,7 +849,7 @@ impl ExecutionService {
         let body = request.snapshot.body();
         let successor_revision = match body.revision().checked_next() {
             Ok(revision) => revision,
-            Err(_) => return refresh(ExecutionRefreshReason::ExecutionFailed),
+            Err(error) => return execution_failed(ExecutionFailure::Identity(error.kind())),
         };
         let render_context = RenderContext::new(
             request.context,
@@ -827,7 +864,7 @@ impl ExecutionService {
             .await
         {
             Ok(output) => ActionExecutionOutput::fresh_render(output),
-            Err(_) => return refresh(ExecutionRefreshReason::ExecutionFailed),
+            Err(error) => return execution_failed(ExecutionFailure::Lifecycle(error.kind())),
         };
         let claimed = match self
             .claim(
@@ -843,7 +880,7 @@ impl ExecutionService {
             Ok(claimed) if claimed.successor_revision == successor_revision => claimed,
             Ok(claimed) => {
                 self.consume_failed_claim(claimed.claim).await;
-                return refresh(ExecutionRefreshReason::ExecutionFailed);
+                return execution_failed(ExecutionFailure::LedgerSuccessorMismatch);
             }
             Err(result) => return result,
         };
@@ -932,9 +969,9 @@ impl ExecutionService {
         };
         let output = match output {
             Ok(output) => ActionExecutionOutput::fresh_render(output),
-            Err(_) => {
+            Err(error) => {
                 self.consume_failed_claim(claimed.claim).await;
-                return refresh(ExecutionRefreshReason::ExecutionFailed);
+                return execution_failed(ExecutionFailure::Lifecycle(error.kind()));
             }
         };
         self.accept_output(
@@ -1021,9 +1058,9 @@ impl ExecutionService {
             .await
         {
             Ok(output) => output,
-            Err(reason) => {
+            Err(result) => {
                 self.consume_failed_claim(claimed.claim).await;
-                return refresh(reason);
+                return result;
             }
         };
 
@@ -1071,18 +1108,18 @@ impl ExecutionService {
         refresh_before_action: RefreshBeforeAction,
         render_context: RenderContext<'_>,
         action: ActionExecutionRequest<'_>,
-    ) -> Result<(ActionExecutionOutput, Option<AcceptedOutcomeKind>), ExecutionRefreshReason> {
+    ) -> Result<(ActionExecutionOutput, Option<AcceptedOutcomeKind>), ExecutionResult> {
         let trace = action.trace;
         let mount = MountContext::new(render_context, seed.mount());
         record(trace, ExecutionPhase::PromotionMount);
         if refresh_before_action == RefreshBeforeAction::Required {
             if context.mount().protocol() < 2 {
-                return Err(ExecutionRefreshReason::ProtocolUpgradeRequired);
+                return Err(refresh(ExecutionRefreshReason::ProtocolUpgradeRequired));
             }
             let mounted = ComponentExecutor::new()
                 .initial_mount(descriptor, &mount)
                 .await
-                .map_err(|_| ExecutionRefreshReason::ExecutionFailed)?;
+                .map_err(|error| execution_failed(ExecutionFailure::Lifecycle(error.kind())))?;
             return Ok((
                 ActionExecutionOutput::fresh_render(mounted),
                 Some(AcceptedOutcomeKind::Recovery),
@@ -1092,31 +1129,29 @@ impl ExecutionService {
         let mounted = ComponentExecutor::new()
             .promotion_mount_state(descriptor, &mount)
             .await
-            .map_err(|_| ExecutionRefreshReason::ExecutionFailed)?;
+            .map_err(|error| execution_failed(ExecutionFailure::Lifecycle(error.kind())))?;
         let mut state = mounted.state;
         let mut memo = mounted.memo;
         if !overlay_verified_public(&mut state, seed.state())
             || !overlay_verified_public(&mut memo, seed.memo())
         {
-            return Err(ExecutionRefreshReason::ExecutionFailed);
+            // The overlay refuses a state or memo that is not an object: the shape fault the
+            // snapshot schema reports for the same value.
+            return Err(execution_failed(ExecutionFailure::Snapshot(
+                SnapshotErrorKind::InvalidStateShape,
+            )));
         }
         let schemas = context.mount().expected_seed().schemas();
-        if schemas
+        schemas
             .state()
             .validate(&state, StateExposure::Instanced)
-            .is_err()
-            || schemas
-                .memo()
-                .validate(&memo, StateExposure::Instanced)
-                .is_err()
-        {
-            return Err(ExecutionRefreshReason::ExecutionFailed);
-        }
+            .and_then(|()| schemas.memo().validate(&memo, StateExposure::Instanced))
+            .map_err(|error| execution_failed(ExecutionFailure::Snapshot(error.kind())))?;
         let hydration = HydrationContext::new(render_context, &state).with_memo(&memo);
         let output = ComponentExecutor::new()
             .coordinated_action(descriptor, &hydration, action)
             .await
-            .map_err(|_| ExecutionRefreshReason::ExecutionFailed)?;
+            .map_err(|error| execution_failed(ExecutionFailure::Action(error.kind())))?;
         Ok((output, None))
     }
 
@@ -1157,6 +1192,7 @@ impl ExecutionService {
                     reason: ExecutionRefreshReason::DuplicateResponseUnavailable,
                     retry: RetryLegality::Prohibited,
                     accepted: Some(metadata),
+                    cause: None,
                 }),
             )),
             Ok(ClaimOutcome::Stale { .. }) => Err(refresh(ExecutionRefreshReason::Stale)),
@@ -1164,7 +1200,10 @@ impl ExecutionService {
             Ok(ClaimOutcome::RefreshRequired(reason)) => {
                 Err(refresh(ExecutionRefreshReason::Ledger(reason)))
             }
-            Err(_) => Err(refresh(ExecutionRefreshReason::LedgerUnavailable)),
+            Err(error) => Err(refresh_failed(
+                ExecutionRefreshReason::LedgerUnavailable,
+                ExecutionFailure::Ledger(error.kind()),
+            )),
         }
     }
 
@@ -1173,7 +1212,7 @@ impl ExecutionService {
         authority: &SnapshotAuthority,
         successor_revision: Revision,
         render: Option<&IslandRender>,
-    ) -> Result<SuccessorComposition, ()> {
+    ) -> Result<SuccessorComposition, SuccessorCompositionError> {
         let mut extensions = authority.extensions.clone();
         extensions.remove(COMPOSITION_LINEAGE_EXTENSION_V1);
         let mut owner = authority
@@ -1182,7 +1221,9 @@ impl ExecutionService {
             .and_then(CompositionLineageV1::owner)
             .cloned();
         if let Some(parent_revision) = authority.owner_parent_revision {
-            let current = owner.as_ref().ok_or(())?;
+            let current = owner
+                .as_ref()
+                .ok_or(SuccessorCompositionError::OwnerMissing)?;
             owner = Some(
                 CompositionOwnerLineageV1::new(
                     current.parent_instance().clone(),
@@ -1192,7 +1233,7 @@ impl ExecutionService {
                     current.child_instance().clone(),
                     current.depth(),
                 )
-                .map_err(|_| ())?,
+                .map_err(|error| SuccessorCompositionError::Lineage(error.kind()))?,
             );
         }
         let previous = authority
@@ -1207,7 +1248,7 @@ impl ExecutionService {
             for mount in &render.children {
                 let Some(transition) = mount.transition() else {
                     if !previous.is_empty() {
-                        return Err(());
+                        return Err(SuccessorCompositionError::ChildUntracked);
                     }
                     continue;
                 };
@@ -1225,7 +1266,7 @@ impl ExecutionService {
                         entry.child_contract() == child.component_contract()
                             && entry.child_instance() == child.instance_id()
                     })
-                    .ok_or(())?;
+                    .ok_or(SuccessorCompositionError::ChildUnknown)?;
                 children.push(
                     CompositionChildLineageV1::new(
                         authority.instance_id.clone(),
@@ -1235,7 +1276,7 @@ impl ExecutionService {
                         child.instance_id().clone(),
                         prior.depth(),
                     )
-                    .map_err(|_| ())?,
+                    .map_err(|error| SuccessorCompositionError::Lineage(error.kind()))?,
                 );
             }
         } else {
@@ -1250,13 +1291,14 @@ impl ExecutionService {
                         child.child_instance().clone(),
                         child.depth(),
                     )
-                    .map_err(|_| ())
+                    .map_err(|error| SuccessorCompositionError::Lineage(error.kind()))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
         }
 
         if owner.is_some() || !children.is_empty() {
-            let lineage = CompositionLineageV1::new(owner, children).map_err(|_| ())?;
+            let lineage = CompositionLineageV1::new(owner, children)
+                .map_err(|error| SuccessorCompositionError::Lineage(error.kind()))?;
             extensions.insert(
                 COMPOSITION_LINEAGE_EXTENSION_V1.to_owned(),
                 lineage.to_canonical(),
@@ -1275,18 +1317,18 @@ impl ExecutionService {
         successor_revision: Revision,
         pending: Vec<crate::component::composition::PendingChildParameters>,
         now: UnixMillis,
-    ) -> Result<Vec<ChildParameterDelivery>, ()> {
+    ) -> Result<Vec<ChildParameterDelivery>, ExecutionFailure> {
         const MAX_CHILD_PARAMETER_LIFETIME_MS: u64 = 300_000;
         let child_limits = ChildParameterLimits::new(
             *self.snapshot_limits.input(),
             0,
             MAX_CHILD_PARAMETER_LIFETIME_MS,
         )
-        .map_err(|_| ())?;
+        .map_err(|error| ExecutionFailure::ChildParameters(error.kind()))?;
         let expires_at = UnixMillis::new(
             now.get()
                 .checked_add(MAX_CHILD_PARAMETER_LIFETIME_MS)
-                .ok_or(())?
+                .ok_or(ExecutionFailure::Clock(ClockErrorKind::TimestampOverflow))?
                 .min(authority.expires_at.get()),
         );
         pending
@@ -1295,7 +1337,7 @@ impl ExecutionService {
                 let child_instance = pending.child().instance_id().clone();
                 let parameter_hash =
                     ContentDigest::from_bytes(pending.parameter_value().as_bytes())
-                        .map_err(|_| ())?;
+                        .map_err(|error| ExecutionFailure::Identity(error.kind()))?;
                 let envelope = PreparedChildParametersV2::new(
                     authority.scope.clone(),
                     authority.instance_id.clone(),
@@ -1317,7 +1359,7 @@ impl ExecutionService {
                         &child_limits,
                     )
                 })
-                .map_err(|_| ())?;
+                .map_err(|error| ExecutionFailure::ChildParameters(error.kind()))?;
                 Ok(ChildParameterDelivery::sealed(
                     child_instance,
                     parameter_hash,
@@ -1360,16 +1402,16 @@ impl ExecutionService {
         record(trace, ExecutionPhase::Sign);
         let now = match self.clock.now() {
             Ok(now) => now,
-            Err(_) => {
+            Err(error) => {
                 rollback(&mut transaction).await;
                 self.consume_failed_claim(claim).await;
-                return refresh(ExecutionRefreshReason::ExecutionFailed);
+                return execution_failed(ExecutionFailure::Clock(error.kind()));
             }
         };
         if now >= presentation.context_expires_at {
             rollback(&mut transaction).await;
             self.consume_failed_claim(claim).await;
-            return refresh(ExecutionRefreshReason::ExecutionFailed);
+            return execution_failed(ExecutionFailure::ContextExpired);
         }
         let successor_composition = match self.prepare_successor_composition(
             &authority,
@@ -1377,10 +1419,10 @@ impl ExecutionService {
             render.as_ref(),
         ) {
             Ok(composition) => composition,
-            Err(()) => {
+            Err(error) => {
                 rollback(&mut transaction).await;
                 self.consume_failed_claim(claim).await;
-                return refresh(ExecutionRefreshReason::ExecutionFailed);
+                return execution_failed(error.failure());
             }
         };
         let signed_snapshot = InstanceBodyV1::new(
@@ -1405,18 +1447,20 @@ impl ExecutionService {
         .and_then(|body| body.sign(&self.keys, now, &self.snapshot_limits));
         let signed_snapshot = match signed_snapshot {
             Ok(snapshot) => snapshot,
-            Err(_) => {
+            Err(error) => {
                 rollback(&mut transaction).await;
                 self.consume_failed_claim(claim).await;
-                return refresh(ExecutionRefreshReason::ExecutionFailed);
+                return execution_failed(ExecutionFailure::Snapshot(error.kind()));
             }
         };
 
         record(trace, ExecutionPhase::OutcomeValidation);
-        if !self.validate_outcome(descriptor, &result, render.as_ref(), &signed_snapshot) {
+        if let Err(cause) =
+            self.validate_outcome(descriptor, &result, render.as_ref(), &signed_snapshot)
+        {
             rollback(&mut transaction).await;
             self.consume_failed_claim(claim).await;
-            return refresh(ExecutionRefreshReason::ExecutionFailed);
+            return execution_failed(cause);
         }
         let render = match render {
             Some(fragment) => {
@@ -1447,10 +1491,10 @@ impl ExecutionService {
                 });
                 match assembled {
                     Ok(render) => Some(render),
-                    Err(_) => {
+                    Err(error) => {
                         rollback(&mut transaction).await;
                         self.consume_failed_claim(claim).await;
-                        return refresh(ExecutionRefreshReason::ExecutionFailed);
+                        return execution_failed(ExecutionFailure::View(error.kind()));
                     }
                 }
             }
@@ -1466,10 +1510,10 @@ impl ExecutionService {
                 now,
             ) {
                 Ok(deliveries) => deliveries,
-                Err(()) => {
+                Err(cause) => {
                     rollback(&mut transaction).await;
                     self.consume_failed_claim(claim).await;
-                    return refresh(ExecutionRefreshReason::ExecutionFailed);
+                    return execution_failed(cause);
                 }
             }
         } else {
@@ -1480,16 +1524,16 @@ impl ExecutionService {
                 record(trace, ExecutionPhase::ResponseIntentPreparation);
                 let document_path = match mounted_document_path(&authority.extensions) {
                     Ok(path) => path,
-                    Err(_) => {
+                    Err(error) => {
                         rollback(&mut transaction).await;
                         self.consume_failed_claim(claim).await;
-                        return refresh(ExecutionRefreshReason::ExecutionFailed);
+                        return execution_failed(ExecutionFailure::Snapshot(error.kind()));
                     }
                 };
                 let Some(port) = response_intent_port else {
                     rollback(&mut transaction).await;
                     self.consume_failed_claim(claim).await;
-                    return refresh(ExecutionRefreshReason::ExecutionFailed);
+                    return execution_failed(ExecutionFailure::ResponseIntents);
                 };
                 match run_host_future(
                     || {
@@ -1506,10 +1550,10 @@ impl ExecutionService {
                 .await
                 {
                     Ok(intents) => intents,
-                    Err(_) => {
+                    Err(error) => {
                         rollback(&mut transaction).await;
                         self.consume_failed_claim(claim).await;
-                        return refresh(ExecutionRefreshReason::ExecutionFailed);
+                        return execution_failed(ExecutionFailure::Host(error.kind()));
                     }
                 }
             } else {
@@ -1518,23 +1562,23 @@ impl ExecutionService {
         if !response_intents.is_valid_for(&result, presentation.protocol_version) {
             rollback(&mut transaction).await;
             self.consume_failed_claim(claim).await;
-            return refresh(ExecutionRefreshReason::ExecutionFailed);
+            return execution_failed(ExecutionFailure::ResponseIntents);
         }
         record(trace, ExecutionPhase::ResponseSealing);
         let Some(response_sealer) = response_sealer else {
             rollback(&mut transaction).await;
             self.consume_failed_claim(claim).await;
-            return refresh(ExecutionRefreshReason::ExecutionFailed);
+            return execution_failed(ExecutionFailure::ResponseSealing);
         };
         let Some(response_binding) = response_binding else {
             rollback(&mut transaction).await;
             self.consume_failed_claim(claim).await;
-            return refresh(ExecutionRefreshReason::ExecutionFailed);
+            return execution_failed(ExecutionFailure::ResponseSealing);
         };
         if response_sealer.protocol_version() != presentation.protocol_version {
             rollback(&mut transaction).await;
             self.consume_failed_claim(claim).await;
-            return refresh(ExecutionRefreshReason::ExecutionFailed);
+            return execution_failed(ExecutionFailure::ResponseSealing);
         }
         let snapshot_authority = match &authority.request_snapshot {
             RequestSnapshotAuthority::Instance(instance_id) => {
@@ -1562,34 +1606,39 @@ impl ExecutionService {
             },
         }) {
             Ok(response) => response,
+            // Every sealing refusal carries the same payload-free kernel kind, so the variant
+            // alone names the cause.
             Err(_) => {
                 rollback(&mut transaction).await;
                 self.consume_failed_claim(claim).await;
-                return refresh(ExecutionRefreshReason::ExecutionFailed);
+                return execution_failed(ExecutionFailure::ResponseSealing);
             }
         };
         if let Some(transaction) = transaction.take() {
             record(trace, ExecutionPhase::HostCommit);
             claim.begin_finalizing();
-            if run_host_future(|| transaction.commit(), HostErrorKind::Commit)
-                .await
-                .is_err()
-            {
+            let committed = run_host_future(|| transaction.commit(), HostErrorKind::Commit).await;
+            if let Err(error) = committed {
                 self.consume_failed_claim(claim).await;
-                return refresh(ExecutionRefreshReason::HostCommitFailed);
+                return refresh_failed(
+                    ExecutionRefreshReason::HostCommitFailed,
+                    ExecutionFailure::Host(error.kind()),
+                );
             }
         }
 
         let kind = kind_override.unwrap_or_else(|| outcome_kind(&result, &validation));
         let digest = outcome_digest(successor_revision, &signed_snapshot, render.as_ref(), kind);
         record(trace, ExecutionPhase::LedgerAcceptance);
-        if self
+        let accepted = self
             .ledger
             .commit(claim.token(), AcceptedOutcome::new(kind, digest))
-            .await
-            .is_err()
-        {
-            return refresh(ExecutionRefreshReason::LedgerAcceptanceFailed);
+            .await;
+        if let Err(error) = accepted {
+            return refresh_failed(
+                ExecutionRefreshReason::LedgerAcceptanceFailed,
+                ExecutionFailure::Ledger(error.kind()),
+            );
         }
         claim.disarm();
 
@@ -1629,20 +1678,24 @@ impl ExecutionService {
         result: &ActionResult,
         render: Option<&IslandRender>,
         signed_snapshot: &[u8],
-    ) -> bool {
+    ) -> Result<(), ExecutionFailure> {
         if signed_snapshot.is_empty() {
-            return false;
+            return Err(ExecutionFailure::OutcomeShape);
         }
         let shape_matches = match result.outcome() {
             ActionOutcome::Render => render.is_some(),
             ActionOutcome::NoRender | ActionOutcome::Redirect(_) => render.is_none(),
         };
-        shape_matches
-            && render.is_none_or(|render| {
-                self.renderer
-                    .validate_island_fragment(descriptor.metadata().view().clone(), render)
-                    .is_ok()
-            })
+        if !shape_matches {
+            return Err(ExecutionFailure::OutcomeShape);
+        }
+        match render {
+            Some(render) => self
+                .renderer
+                .validate_island_fragment(descriptor.metadata().view().clone(), render)
+                .map_err(|error| ExecutionFailure::View(error.kind())),
+            None => Ok(()),
+        }
     }
 
     async fn consume_failed_claim(&self, mut claim: ClaimGuard) {
@@ -1659,11 +1712,31 @@ async fn rollback(transaction: &mut Option<Box<dyn HostTransaction>>) {
     }
 }
 
+/// Refresh that reports no fault: the ledger classified the request, or the protocol must
+/// upgrade.
 fn refresh(reason: ExecutionRefreshReason) -> ExecutionResult {
+    refresh_with_cause(reason, None)
+}
+
+/// Refresh that ends a failed operation and keeps its closed cause for the host.
+fn refresh_failed(reason: ExecutionRefreshReason, cause: ExecutionFailure) -> ExecutionResult {
+    refresh_with_cause(reason, Some(cause))
+}
+
+/// Pre-commit failure: the browser learns only `ExecutionFailed`, the host the cause.
+fn execution_failed(cause: ExecutionFailure) -> ExecutionResult {
+    refresh_failed(ExecutionRefreshReason::ExecutionFailed, cause)
+}
+
+fn refresh_with_cause(
+    reason: ExecutionRefreshReason,
+    cause: Option<ExecutionFailure>,
+) -> ExecutionResult {
     ExecutionResult::RefreshRequired(Box::new(RefreshRequiredExecution {
         reason,
         retry: RetryLegality::Prohibited,
         accepted: None,
+        cause,
     }))
 }
 

@@ -1,10 +1,12 @@
 //! Host-neutral coordination of Live actions, transactions, and accepted outcomes.
 
+mod failure;
 mod recovery;
 mod service;
 mod trace;
 mod transaction;
 
+pub use failure::ExecutionFailure;
 pub use recovery::RetryLegality;
 pub use service::{
     AcceptedExecution, AcceptedExecutionReport, AcceptedOutcomeReporter, ActionExecutionRequest,

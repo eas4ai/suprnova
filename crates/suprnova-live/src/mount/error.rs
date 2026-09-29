@@ -3,6 +3,9 @@
 use std::error::Error;
 use std::fmt;
 
+use super::failure::{MountCause, MountFailure};
+use crate::ledger::LedgerErrorKind;
+
 /// Stable category for an identity-bound initial mount failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MountErrorKind {
@@ -63,17 +66,48 @@ impl MountErrorKind {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct MountError {
     kind: MountErrorKind,
+    cause: Option<MountFailure>,
 }
 
 impl MountError {
     pub(crate) const fn new(kind: MountErrorKind) -> Self {
-        Self { kind }
+        Self { kind, cause: None }
+    }
+
+    /// Keeps the closed kind of the subsystem error behind the coarse mount kind.
+    pub(crate) fn caused_by(kind: MountErrorKind, error: &impl MountCause) -> Self {
+        Self {
+            kind,
+            cause: Some(error.mount_failure()),
+        }
     }
 
     /// Returns the closed failure category.
     #[must_use]
     pub const fn kind(self) -> MountErrorKind {
         self.kind
+    }
+
+    /// Returns the closed cause when a trusted subsystem failed the mount.
+    ///
+    /// `None` means the kind says everything: the refusal has no subsystem error behind it, such
+    /// as an authority mismatch or an identity collision. The kind stays coarse outside the host;
+    /// the cause lets an operator tell, for example, a store outage from a capacity fault.
+    #[must_use]
+    pub const fn cause(self) -> Option<MountFailure> {
+        self.cause
+    }
+
+    /// Returns the closed reason the instance ledger gave when it refused the mount.
+    ///
+    /// Shorthand for a [`MountFailure::Ledger`] cause, which only a
+    /// [`MountErrorKind::LedgerRejected`] carries.
+    #[must_use]
+    pub const fn ledger_kind(self) -> Option<LedgerErrorKind> {
+        match self.cause {
+            Some(MountFailure::Ledger(kind)) => Some(kind),
+            _ => None,
+        }
     }
 }
 
@@ -85,7 +119,11 @@ impl fmt::Display for MountError {
 
 impl fmt::Debug for MountError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, formatter)
+        formatter.write_str(self.kind.as_str())?;
+        if let Some(cause) = self.cause {
+            write!(formatter, ":{cause:?}")?;
+        }
+        Ok(())
     }
 }
 

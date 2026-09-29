@@ -410,6 +410,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   returns the rule as an `UploadPolicyError`, and the registration logs it as
   an error before it fails. The error of the registration is what it was, so
   nothing of a component reaches a browser through it.
+- **A Live operation that fails inside the engine says why.** The engine
+  answered every failure of one of its own parts with one reason for the
+  browser, `ExecutionFailed` or `LedgerUnavailable`, and threw the error away,
+  so a panic of a component, a clock that gave no time and a ledger that was
+  full read the same in every log. The browser still gets that reason and
+  nothing more. `RefreshRequiredExecution::cause()` returns an
+  `ExecutionFailure`, a closed value that names the part that failed and the
+  kind of its error: the action, the lifecycle, the ledger, the clock, the
+  snapshot, the view, the composition, a port of the host. It is `None` for a
+  refresh that is no failure, such as a stale revision. The framework writes
+  one warning for each operation that ends with a cause, with the component,
+  the reason and the cause. `MountError::cause()` returns a `MountFailure` in
+  the same way for a mount, private or public, and `MountError::ledger_kind()`
+  is the kind of the ledger when the ledger refused. Neither value holds a
+  text, an identifier of an instance or anything of a request.
 
 ### Changed
 

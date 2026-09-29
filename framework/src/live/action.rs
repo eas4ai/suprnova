@@ -388,6 +388,19 @@ impl SuprnovaEndpointKernel {
                 .await?
             }
         };
+        // The browser is only told to refresh the island, so the closed cause of a failed
+        // operation is recorded here for an operator. A refresh without a cause, such as a
+        // stale revision or a duplicate, is an ordinary outcome and is not a fault.
+        if let ExecutionResult::RefreshRequired(refresh) = &result
+            && let Some(cause) = refresh.cause()
+        {
+            tracing::warn!(
+                component = request.component().as_str(),
+                reason = ?refresh.reason(),
+                cause = ?cause,
+                "Live operation failed and the browser must refresh the island"
+            );
+        }
         dispatch_execution_result(request.request(), result)
     }
 

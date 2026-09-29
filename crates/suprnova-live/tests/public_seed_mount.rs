@@ -16,8 +16,8 @@ use suprnova_live::clock::{Clock, ClockError};
 use suprnova_live::identity::{BuildId, ComponentName, ModelField, Revision, UnixMillis, ViewName};
 use suprnova_live::metadata::{ComponentMetadata, ContractVersions, FieldMetadata};
 use suprnova_live::mount::{
-    DocumentMountKey, DocumentMountScope, MountFlags, PublicMountProviders, PublicSeedMountRequest,
-    PublicSeedMountService,
+    DocumentMountKey, DocumentMountScope, MountErrorKind, MountFailure, MountFlags,
+    PublicMountProviders, PublicSeedMountRequest, PublicSeedMountService,
 };
 use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
 use suprnova_live::snapshot::state::{
@@ -26,7 +26,9 @@ use suprnova_live::snapshot::state::{
 use suprnova_live::snapshot::{
     ComponentContract, ExpectedSeedV1, SeedBodyV1, SeedFieldsV1, verify_seed,
 };
-use suprnova_live::view::{AssetSet, IslandRender, MountSnapshotKind, RenderLimits, ViewRenderer};
+use suprnova_live::view::{
+    AssetSet, IslandRender, MountSnapshotKind, RenderLimits, ViewErrorKind, ViewRenderer,
+};
 
 #[test]
 fn public_seed_mount_uses_the_shared_root_without_instance_or_promotion_authority() {
@@ -389,4 +391,72 @@ async fn a_public_seed_mount_reads_the_clock_once_and_its_expiry_matches_the_see
         "the cache deadline must equal the seed's own expiry; a later value lets the cache \
          serve a document whose embedded seed has already expired"
     );
+}
+
+#[test]
+fn a_public_seed_mount_keeps_the_view_failure_behind_the_coarse_mount_kind() {
+    let context = trusted_context();
+    let component = ComponentContract::new(
+        metadata().identity().clone(),
+        metadata().contract_digest().clone(),
+        1,
+        1,
+        1,
+    )
+    .expect("component contract");
+    let keys = Arc::new(key_ring());
+    let limits = snapshot_limits();
+    let seed = SeedBodyV1::new(
+        SeedFieldsV1 {
+            component,
+            build_id: BuildId::parse("build-lifecycle-tests").expect("build identity"),
+            route: context.mount().route().clone(),
+            slot: context.mount().slot().clone(),
+            key_id: keys.active_key_id().clone(),
+            issued_at: UnixMillis::new(1_000),
+            max_age_ms: 500,
+            mount: CanonicalValue::Object(BTreeMap::new()),
+            state: CanonicalValue::Object(BTreeMap::new()),
+            memo: CanonicalValue::Object(BTreeMap::new()),
+            advisory_generations: vec![],
+            refresh_on_promote: false,
+            extensions: BTreeMap::new(),
+        },
+        &schema_set(),
+        &limits,
+    )
+    .expect("public seed state validates");
+    let registry = ComponentRegistryBuilder::new()
+        .register(ComponentDescriptor::new(metadata().clone()))
+        .expect("component registers")
+        .build();
+    let service = PublicSeedMountService::new(
+        PublicMountProviders::new(Arc::new(registry), Arc::new(ManualClock::new(1_000)), keys),
+        limits,
+        ViewRenderer::new(RenderLimits::standard()).expect("render limits"),
+        8_192,
+    )
+    .expect("public mount service");
+    let request = PublicSeedMountRequest::new(
+        DocumentMountKey::parse("public-executable").expect("document key"),
+        seed,
+        IslandRender {
+            body: Bytes::from_static(b"<script data-suprnova-live-root=\"forged\"></script>"),
+            assets: AssetSet::empty(),
+            children: vec![],
+        },
+        MountFlags::empty(),
+    );
+    let mut document = DocumentMountScope::new();
+
+    let error = service
+        .mount(&mut document, request, &context)
+        .expect_err("script-bearing mount metadata fails");
+
+    assert_eq!(error.kind(), MountErrorKind::RenderRejected);
+    assert_eq!(
+        error.cause(),
+        Some(MountFailure::View(ViewErrorKind::ExecutableMountMetadata))
+    );
+    assert_eq!(error.ledger_kind(), None);
 }
