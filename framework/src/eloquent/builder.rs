@@ -4202,8 +4202,9 @@ where
     /// concurrent-safe by construction.
     ///
     /// `chunk()` exists as the simple form for read-only workloads
-    /// against stable tables and for models with non-`i64` primary
-    /// keys where `chunk_by_id` cannot be used.
+    /// against stable tables, and for models whose primary key cannot
+    /// carry the keyset cursor of `chunk_by_id`: a composite key, or a
+    /// key stored as neither an integer nor a string.
     ///
     /// ## Eager loads are not supported
     ///
@@ -4269,14 +4270,40 @@ where
     /// later batch (rather than skipping or duplicating, which
     /// [`Self::chunk`]'s OFFSET form is vulnerable to).
     ///
-    /// ## Requires an `i64` primary key
+    /// ## Key types
     ///
-    /// The cursor is read off [`Model::field_value`] as an `i64` -
-    /// models with `String` / `Uuid` PKs use [`Self::chunk`] with the
-    /// OFFSET caveat (or wait for a follow-up that generalises the
-    /// cursor shape). If [`Model::field_value`] returns a non-numeric
-    /// JSON value for the PK column the loop breaks rather than
-    /// looping forever; non-`i64` callers should reach for `chunk`.
+    /// The cursor is the primary key's own value, as
+    /// [`Model::field_value`] gives it, bound in `pk > cursor` the way
+    /// [`Self::filter_op`] binds any value. A single integer key works,
+    /// and so does a single string key, including the UUID and ULID
+    /// keys of `#[model(unique_id = "...")]`: the database orders both
+    /// the same way in `ORDER BY` and in `>`.
+    ///
+    /// A key that cannot carry the cursor is refused with
+    /// `FrameworkError::internal`, which names the model and the column
+    /// and never the key's value:
+    ///
+    /// - before the first query, when the model's metadata shows a
+    ///   composite key, or a column stored as neither an integer nor a
+    ///   string (a native `Uuid`, a timestamp, a decimal, JSON);
+    /// - otherwise when a batch holds a key value the cursor cannot
+    ///   bind, such as a null or an unsigned integer above `i64::MAX`,
+    ///   before that batch reaches `f`.
+    ///
+    /// `f` is never called with a batch before its key is known to be
+    /// usable, so a key the metadata refuses costs no work at all. Walk
+    /// such a model with [`Self::chunk`], which carries the OFFSET
+    /// caveat above.
+    ///
+    /// ## Keys with no time order
+    ///
+    /// A key that grows with its row's creation time, such as an
+    /// auto-increment integer, a UUID v7 or a ULID, puts a row inserted
+    /// during the walk after the cursor, where a later batch finds it.
+    /// A random key, such as a UUID v4, does not: a row inserted during
+    /// the walk with a key below the cursor is not seen by this walk.
+    /// Every row that existed when the walk started is still seen once,
+    /// in key order.
     ///
     /// ## Eager loads
     ///
@@ -4288,6 +4315,9 @@ where
     /// - `n == 0` → `FrameworkError::param("n")` (400). A zero batch
     ///   size would issue `LIMIT 0` forever; reject up front rather
     ///   than no-op silently.
+    /// - A primary key that cannot carry the cursor →
+    ///   `FrameworkError::internal` (500), as described under "Key
+    ///   types".
     ///
     /// ## Example
     ///
@@ -4314,35 +4344,26 @@ where
             ));
         }
         let pk = M::primary_key_name();
-        let mut last_id: Option<i64> = None;
+        let kind = Self::refuse_keyset_key_by_metadata("chunk_by_id", pk)?;
+        let mut cursor: Option<Value> = None;
         loop {
             let mut q = self.clone().order_by_asc(pk).limit(n);
-            if let Some(lid) = last_id {
-                q = q.filter_op(pk, ">", lid);
+            if let Some(after) = cursor.take() {
+                q = q.filter_op(pk, ">", after);
             }
             let batch = q.get().await?;
-            if batch.is_empty() {
-                break;
-            }
-            // Read the highest PK in the batch (the rows came back
-            // `ORDER BY pk ASC`, so `.last()` holds it). If the PK
-            // can't be coerced to `i64` we bail rather than loop
-            // forever - non-`i64` PK models should use `chunk()`.
-            last_id = batch
-                .last()
-                .and_then(|m| m.field_value(pk))
-                .and_then(|v| v.as_i64());
+            // The next cursor is read, and checked, before `f` sees the
+            // batch, so a key that cannot carry it ends the walk first.
+            let next = match Self::keyset_cursor_after("chunk_by_id", pk, kind, &batch)? {
+                Some(next) => next,
+                None => break,
+            };
             let count = batch.len() as u64;
             f(batch).await?;
             if count < n {
                 break;
             }
-            if last_id.is_none() {
-                return Err(FrameworkError::internal(
-                    "Builder::chunk_by_id: primary key column did not yield an i64 value - \
-                     models with non-i64 primary keys must use chunk() instead",
-                ));
-            }
+            cursor = Some(next);
         }
         Ok(())
     }
@@ -4466,12 +4487,12 @@ where
     ///
     /// Alias: [`Self::cursor`] (Laravel name).
     ///
-    /// ## Requires an `i64` primary key
+    /// ## Key types
     ///
-    /// Same constraint as [`Self::chunk_by_id`] - the underlying
-    /// batching uses an `id > last_id` filter. Models with `String` /
-    /// `Uuid` PKs need [`Self::chunk`] until the cursor shape
-    /// generalises.
+    /// Same keys as [`Self::lazy_by_id`], which this calls: a single
+    /// integer or string primary key, UUID and ULID keys included. A
+    /// key that cannot carry the cursor surfaces as the stream's first
+    /// item, an error, before any row.
     ///
     /// ## Example
     ///
@@ -4493,7 +4514,31 @@ where
     /// where 1000 in memory at once is too much, or very narrow rows
     /// where a larger batch reduces round trips.
     ///
-    /// Same `i64`-PK constraint as [`Self::chunk_by_id`].
+    /// ## Key types
+    ///
+    /// The batches are keyset batches, `pk > cursor ORDER BY pk ASC`,
+    /// with the primary key's own value as the cursor, exactly as in
+    /// [`Self::chunk_by_id`]. A single integer key works, and so does a
+    /// single string key, including the UUID and ULID keys of
+    /// `#[model(unique_id = "...")]`.
+    ///
+    /// A key that cannot carry the cursor is refused with
+    /// `FrameworkError::internal`, which names the model and the column
+    /// and never the key's value. A composite key, or a column stored as
+    /// neither an integer nor a string, is refused before the first
+    /// query, as the stream's first item. A key value the cursor cannot
+    /// bind, such as a null or an unsigned integer above `i64::MAX`, is
+    /// refused when its batch arrives, before any row of that batch is
+    /// yielded. No row is yielded before its key is known to be usable.
+    ///
+    /// ## Keys with no time order
+    ///
+    /// With a random key, such as a UUID v4, a row inserted during the
+    /// walk with a key below the cursor is not seen by this stream. Keys
+    /// that grow with creation time (an auto-increment integer, a UUID
+    /// v7, a ULID) put such a row after the cursor, where a later batch
+    /// finds it. Every row that existed when the stream started is still
+    /// yielded once, in key order.
     pub fn lazy_by_id(self, batch_size: u64) -> crate::eloquent::LazyCollection<M> {
         let builder = self;
         let stream = async_stream::try_stream! {
@@ -4506,20 +4551,20 @@ where
                 ))?;
             }
             let pk = M::primary_key_name();
-            let mut last_id: Option<i64> = None;
+            let kind = Self::refuse_keyset_key_by_metadata("lazy_by_id", pk)?;
+            let mut cursor: Option<Value> = None;
             loop {
                 let mut q = builder.clone().order_by_asc(pk).limit(batch_size);
-                if let Some(lid) = last_id {
-                    q = q.filter_op(pk, ">", lid);
+                if let Some(after) = cursor.take() {
+                    q = q.filter_op(pk, ">", after);
                 }
                 let batch = q.get().await?;
-                if batch.is_empty() {
-                    break;
-                }
-                last_id = batch
-                    .last()
-                    .and_then(|m| m.field_value(pk))
-                    .and_then(|v| v.as_i64());
+                // The next cursor is read, and checked, before the first
+                // row of the batch is yielded.
+                let next = match Self::keyset_cursor_after("lazy_by_id", pk, kind, &batch)? {
+                    Some(next) => next,
+                    None => break,
+                };
                 let count = batch.len() as u64;
                 for row in batch.into_vec() {
                     yield row;
@@ -4527,12 +4572,7 @@ where
                 if count < batch_size {
                     break;
                 }
-                if last_id.is_none() {
-                    Err(FrameworkError::internal(
-                        "Builder::lazy_by_id: primary key column did not yield an i64 value - \
-                         models with non-i64 primary keys cannot use lazy() / cursor()",
-                    ))?;
-                }
+                cursor = Some(next);
             }
         };
         crate::eloquent::LazyCollection::boxed(stream)
@@ -4540,11 +4580,110 @@ where
 
     /// Laravel-shape alias for [`Self::lazy`].
     ///
-    /// Same shape, same semantics, same `i64`-PK constraint. Ships
-    /// alongside `lazy` so users with Laravel muscle memory don't
-    /// have to translate.
+    /// Same shape, same semantics, same key types as
+    /// [`Self::lazy_by_id`]. Ships alongside `lazy` so users with
+    /// Laravel muscle memory don't have to translate.
     pub fn cursor(self) -> crate::eloquent::LazyCollection<M> {
         self.lazy()
+    }
+
+    /// Refuses, before any query, a primary key that the model's
+    /// metadata already shows cannot carry the cursor of
+    /// [`Self::chunk_by_id`] and [`Self::lazy_by_id`].
+    ///
+    /// The cursor is bound as a JSON value: a number binds as an
+    /// integer and a string as text. A composite key has no single
+    /// value to bind. A column stored as anything else (a native UUID,
+    /// a timestamp, a decimal, JSON) does not compare with that bind in
+    /// the order `ORDER BY` returns its rows, so the walk would repeat
+    /// rows, skip them, or fail on a later batch after the caller had
+    /// already processed the first.
+    ///
+    /// Returns the kind of value the column binds, which every row's key
+    /// then has to have.
+    fn refuse_keyset_key_by_metadata(method: &str, pk: &str) -> Result<KeysetKind, FrameworkError> {
+        use sea_orm::{ColumnTrait, ColumnType, Iterable, PrimaryKeyToColumn};
+
+        let columns: Vec<_> = <<M::Entity as sea_orm::EntityTrait>::PrimaryKey as Iterable>::iter()
+            .map(PrimaryKeyToColumn::into_column)
+            .collect();
+        let [column] = columns.as_slice() else {
+            return Err(Self::keyset_refusal(
+                method,
+                pk,
+                "the key spans more than one column",
+            ));
+        };
+        match column.def().get_column_type() {
+            ColumnType::TinyInteger
+            | ColumnType::SmallInteger
+            | ColumnType::Integer
+            | ColumnType::BigInteger
+            | ColumnType::TinyUnsigned
+            | ColumnType::SmallUnsigned
+            | ColumnType::Unsigned
+            | ColumnType::BigUnsigned => Ok(KeysetKind::Integer),
+            ColumnType::Char(_) | ColumnType::String(_) | ColumnType::Text => Ok(KeysetKind::Text),
+            _ => Err(Self::keyset_refusal(
+                method,
+                pk,
+                "the column is stored as neither an integer nor a string",
+            )),
+        }
+    }
+
+    /// The cursor to carry past `batch`: the primary key of its last
+    /// row, or `None` when the batch is empty and the walk is over.
+    ///
+    /// The first row is checked as well as the last, because
+    /// `ORDER BY pk ASC` puts a null key at one end of the batch or the
+    /// other, depending on the backend. A key the cursor cannot bind is
+    /// refused here, before the batch reaches the caller.
+    fn keyset_cursor_after(
+        method: &str,
+        pk: &str,
+        kind: KeysetKind,
+        batch: &[M],
+    ) -> Result<Option<Value>, FrameworkError> {
+        let (Some(first), Some(last)) = (batch.first(), batch.last()) else {
+            return Ok(None);
+        };
+        Self::keyset_key(method, pk, kind, first)?;
+        Self::keyset_key(method, pk, kind, last).map(Some)
+    }
+
+    /// One row's primary key as a keyset cursor. A null, an array, an
+    /// object or a number outside the `i64` range has no place in the
+    /// key's order that `pk > cursor` would respect, so it is refused.
+    /// So is a value of another kind than its column: a key type that
+    /// writes an integer column as a string would bind as text, and the
+    /// database refuses to compare an integer column with text.
+    fn keyset_key(
+        method: &str,
+        pk: &str,
+        kind: KeysetKind,
+        row: &M,
+    ) -> Result<Value, FrameworkError> {
+        match row.field_value(pk) {
+            Some(key) if kind.fits(&key) => Ok(key),
+            _ => Err(Self::keyset_refusal(
+                method,
+                pk,
+                "a row's key is not of the kind of its column: an integer in the i64 range \
+                 for an integer column, a string for a text column",
+            )),
+        }
+    }
+
+    /// The error both keyset walks return for a key that cannot carry
+    /// their cursor. It names the model and the column, and never the
+    /// key's value, which can be user data.
+    fn keyset_refusal(method: &str, pk: &str, reason: &str) -> FrameworkError {
+        FrameworkError::internal(format!(
+            "Builder::{method}: the primary key `{pk}` of `{}` cannot carry a keyset cursor \
+             ({reason}); use chunk() instead",
+            std::any::type_name::<M>(),
+        ))
     }
 
     // Terminal/aggregate type bounds are `TryGetable` - that's the
@@ -5179,9 +5318,52 @@ fn current_cursor_from_request() -> Option<String> {
     crate::context::Context::query_param("cursor").filter(|s| !s.is_empty())
 }
 
+/// The kind of value that the cursor of a keyset walk binds for a key
+/// column. The cursor is bound as it is, so a key has to be of the kind
+/// of its column for the database to compare the two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeysetKind {
+    /// An integer column. The key is a number in the `i64` range.
+    Integer,
+    /// A text column. The key is a string.
+    Text,
+}
+
+impl KeysetKind {
+    /// Whether `key` binds as a value of this kind.
+    fn fits(self, key: &Value) -> bool {
+        match self {
+            Self::Integer => key.is_i64(),
+            Self::Text => key.is_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_keyset_key_has_the_kind_of_its_column() {
+        let number = serde_json::json!(42);
+        let text = serde_json::json!("42");
+        assert!(KeysetKind::Integer.fits(&number));
+        assert!(KeysetKind::Text.fits(&text));
+        // A key type that writes an integer column as a string binds as
+        // text, which the database does not compare with the column.
+        assert!(!KeysetKind::Integer.fits(&text));
+        assert!(!KeysetKind::Text.fits(&number));
+        for other in [
+            serde_json::json!(null),
+            serde_json::json!(1.5),
+            serde_json::json!(u64::MAX),
+            serde_json::json!([1]),
+            serde_json::json!({"id": 1}),
+        ] {
+            assert!(!KeysetKind::Integer.fits(&other), "{other}");
+            assert!(!KeysetKind::Text.fits(&other), "{other}");
+        }
+    }
 
     #[test]
     fn into_column_for_str() {

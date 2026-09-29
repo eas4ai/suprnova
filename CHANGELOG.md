@@ -916,6 +916,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `#[derive(FormRequest)]`, each bare or behind `suprnova::`, and the helper
   attribute. `generate-types` read `InertiaProps` and `Data` in both forms
   already, and the three detectors ask one function.
+- **`chunk_by_id` and `lazy_by_id` walk a table whose key is no `i64`.** The
+  cursor of the walk was an `i64`, so a model with a `String` key, or with
+  `unique_id = "uuid"`, `"uuid_v4"` or `"ulid"`, got the first batch and then
+  an error. The closure had run on that batch by then, and a table that fits
+  in one batch never gave the error. The cursor is the value of the key as the
+  model has it, so an integer key and a string key both walk, in the order of
+  the key. For a key with no order in time, a UUID v4, a row that is inserted
+  during the walk with a key below the cursor is not seen by that walk. A key
+  that cannot be a cursor is refused before the first query and before the
+  closure sees a row: a composite key, and a key column that is no integer and
+  no text, such as a native `uuid::Uuid`, a timestamp or a decimal. `lazy()`
+  and `cursor()` walk through `lazy_by_id`, so both hold for them. What you
+  have to change: a walk over a model with such a key returned `Ok` when the
+  table fit in one batch, and returns the error now. Use `chunk()` for it.
 
 ### Security
 
