@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 //! `#[derive(Data)]` - composite derive that produces:
 //! - `Serialize` (skipping `#[data(input_only)]` fields)
 //! - `Deserialize` (rejecting payloads containing `#[data(output_only)]`
@@ -385,36 +384,33 @@ fn classify_route_param_type(ty: &syn::Type) -> RouteParamKind {
 /// If `ty` is `Path<T>` where Path ends in `Option` or `Field`, return the
 /// first generic arg; otherwise return `ty` unchanged.
 fn unwrap_single_generic(ty: &syn::Type) -> &syn::Type {
-    if let syn::Type::Path(p) = ty {
-        if let Some(seg) = p.path.segments.last() {
-            if seg.ident == "Option" || seg.ident == "Field" {
-                if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
-                    if let Some(syn::GenericArgument::Type(inner)) = ab.args.first() {
-                        return inner;
-                    }
-                }
-            }
-        }
+    if let syn::Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+        && (seg.ident == "Option" || seg.ident == "Field")
+        && let syn::PathArguments::AngleBracketed(ab) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = ab.args.first()
+    {
+        return inner;
     }
     ty
 }
 
 fn last_ident_kind(ty: &syn::Type) -> RouteParamKind {
-    if let syn::Type::Path(p) = ty {
-        if let Some(seg) = p.path.segments.last() {
-            return match seg.ident.to_string().as_str() {
-                "i64" => RouteParamKind::I64,
-                "u64" => RouteParamKind::U64,
-                "i32" => RouteParamKind::I32,
-                "u32" => RouteParamKind::U32,
-                "i128" => RouteParamKind::I128,
-                "u128" => RouteParamKind::U128,
-                "f64" => RouteParamKind::F64,
-                "f32" => RouteParamKind::F32,
-                "bool" => RouteParamKind::Bool,
-                _ => RouteParamKind::Str,
-            };
-        }
+    if let syn::Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+    {
+        return match seg.ident.to_string().as_str() {
+            "i64" => RouteParamKind::I64,
+            "u64" => RouteParamKind::U64,
+            "i32" => RouteParamKind::I32,
+            "u32" => RouteParamKind::U32,
+            "i128" => RouteParamKind::I128,
+            "u128" => RouteParamKind::U128,
+            "f64" => RouteParamKind::F64,
+            "f32" => RouteParamKind::F32,
+            "bool" => RouteParamKind::Bool,
+            _ => RouteParamKind::Str,
+        };
     }
     RouteParamKind::Str
 }
@@ -438,10 +434,10 @@ fn route_param_parser_path(kind: RouteParamKind) -> TokenStream2 {
 
 /// Returns `true` when the outermost type is `Option<_>` or `Field<_>`.
 fn is_option_type(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(p) = ty {
-        if let Some(seg) = p.path.segments.last() {
-            return seg.ident == "Option" || seg.ident == "Field";
-        }
+    if let syn::Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+    {
+        return seg.ident == "Option" || seg.ident == "Field";
     }
     false
 }
@@ -450,10 +446,10 @@ fn is_option_type(ty: &syn::Type) -> bool {
 /// Used by `auto_lazy` logic to infer which fields should be treated
 /// as lazy props without an explicit `#[data(lazy)]` annotation.
 fn is_prop_type(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(p) = ty {
-        if let Some(seg) = p.path.segments.last() {
-            return seg.ident == "Prop";
-        }
+    if let syn::Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+    {
+        return seg.ident == "Prop";
     }
     false
 }
@@ -1159,10 +1155,10 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
 /// short forms. False positives require a user type named exactly `Option` or
 /// `Field` - an acceptable and easily documented limitation.
 fn is_option_or_field(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(p) = ty {
-        if let Some(seg) = p.path.segments.last() {
-            return seg.ident == "Option" || seg.ident == "Field";
-        }
+    if let syn::Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+    {
+        return seg.ident == "Option" || seg.ident == "Field";
     }
     false
 }
@@ -1173,10 +1169,10 @@ fn is_option_or_field(ty: &syn::Type) -> bool {
 /// "omit the key entirely" behaviour from `framework/src/data/field.rs`
 /// into the derive's custom Serialize.
 fn is_field_type(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(p) = ty {
-        if let Some(seg) = p.path.segments.last() {
-            return seg.ident == "Field";
-        }
+    if let syn::Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+    {
+        return seg.ident == "Field";
     }
     false
 }

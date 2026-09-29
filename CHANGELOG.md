@@ -545,6 +545,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   import of the framework had a blanket `#[allow(unused_imports)]`, which hid
   that `singleton` was imported and never used, and would have hidden every
   later one. The suppression and the import are removed.
+- **The `Data` derive has no module-wide
+  `#![allow(clippy::collapsible_if)]`.** The attribute turned the lint off for
+  the whole file with no reason given. It is removed, and the nested
+  conditions it hid are written as one.
 
 ### Fixed
 
