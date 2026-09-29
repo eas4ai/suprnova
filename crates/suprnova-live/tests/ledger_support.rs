@@ -13,7 +13,8 @@ use suprnova_live::identity::{
     ContentDigest, IdempotencyKey, InstanceId, Revision, ScopeFingerprint, UnixMillis,
 };
 use suprnova_live::ledger::{
-    LedgerLimits, LiveInstanceLedger, MemoryInstanceLedger, PromotionOutcome, PromotionRecord,
+    ClaimGrant, ClaimOutcome, LedgerLimits, LiveInstanceLedger, MemoryInstanceLedger,
+    PromotionOutcome, PromotionRecord,
 };
 
 pub(crate) fn bytes<const LENGTH: usize>(start: u8) -> [u8; LENGTH] {
@@ -88,4 +89,11 @@ pub(crate) async fn promote_default(
         .await
         .expect("promotion succeeds");
     assert!(matches!(outcome, PromotionOutcome::Created(_)));
+}
+
+pub(crate) fn expect_granted(outcome: ClaimOutcome) -> ClaimGrant {
+    match outcome {
+        ClaimOutcome::Granted(grant) => grant,
+        other => panic!("the claim was expected to be granted, not {other:?}"),
+    }
 }

@@ -5,7 +5,8 @@ mod ledger_support;
 use std::sync::Arc;
 
 use ledger_support::{
-    ManualClock, digest, idempotency, instance, ledger, promote_default, promotion, scope,
+    ManualClock, digest, expect_granted, idempotency, instance, ledger, promote_default, promotion,
+    scope,
 };
 use suprnova_live::identity::{Revision, UnixMillis};
 use suprnova_live::ledger::{
@@ -29,20 +30,18 @@ async fn accepted_revision_changes_only_when_a_pending_claim_commits() {
         Some(Revision::new(0))
     );
 
-    let grant = match ledger
-        .claim(ClaimRequest::new(
-            scope.clone(),
-            instance.clone(),
-            Revision::new(0),
-            idempotency(0x5f),
-            digest(0x6f),
-        ))
-        .await
-        .expect("claim succeeds")
-    {
-        ClaimOutcome::Granted(grant) => grant,
-        other => panic!("expected granted claim, got {other:?}"),
-    };
+    let grant = expect_granted(
+        ledger
+            .claim(ClaimRequest::new(
+                scope.clone(),
+                instance.clone(),
+                Revision::new(0),
+                idempotency(0x5f),
+                digest(0x6f),
+            ))
+            .await
+            .expect("claim succeeds"),
+    );
 
     assert_eq!(
         ledger
@@ -93,20 +92,18 @@ async fn accepted_revision_read_is_exact_and_terminal_or_expired_authority_is_ab
         "diagnostic presence under another scope is never an authorization fallback"
     );
 
-    let grant = match ledger
-        .claim(ClaimRequest::new(
-            parent_scope.clone(),
-            parent_instance.clone(),
-            Revision::new(0),
-            idempotency(0x51),
-            digest(0x61),
-        ))
-        .await
-        .expect("claim succeeds")
-    {
-        ClaimOutcome::Granted(grant) => grant,
-        other => panic!("expected grant, got {other:?}"),
-    };
+    let grant = expect_granted(
+        ledger
+            .claim(ClaimRequest::new(
+                parent_scope.clone(),
+                parent_instance.clone(),
+                Revision::new(0),
+                idempotency(0x51),
+                digest(0x61),
+            ))
+            .await
+            .expect("claim succeeds"),
+    );
     ledger
         .abandon(&grant.into_token())
         .await
@@ -147,10 +144,7 @@ async fn claim_advances_monotonically_and_exact_duplicates_observe_one_outcome()
         idempotency(0x60),
         digest(0x70),
     );
-    let grant = match ledger.claim(request.clone()).await.expect("claim succeeds") {
-        ClaimOutcome::Granted(grant) => grant,
-        other => panic!("expected granted claim, got {other:?}"),
-    };
+    let grant = expect_granted(ledger.claim(request.clone()).await.expect("claim succeeds"));
     assert_eq!(grant.successor_revision(), Revision::new(1));
 
     assert!(matches!(
@@ -208,14 +202,12 @@ async fn stale_bases_and_mismatched_idempotency_never_join_pending_or_accepted_w
         idempotency(0x62),
         digest(0x72),
     );
-    let grant = match ledger
-        .claim(original.clone())
-        .await
-        .expect("claim succeeds")
-    {
-        ClaimOutcome::Granted(grant) => grant,
-        other => panic!("expected grant, got {other:?}"),
-    };
+    let grant = expect_granted(
+        ledger
+            .claim(original.clone())
+            .await
+            .expect("claim succeeds"),
+    );
 
     for mismatch in [
         ClaimRequest::new(
@@ -294,10 +286,7 @@ async fn accepted_history_and_provider_inspection_are_bounded_metadata_only() {
             idempotency(0x70 + base as u8),
             digest(0x80 + base as u8),
         );
-        let grant = match ledger.claim(request).await.expect("claim succeeds") {
-            ClaimOutcome::Granted(grant) => grant,
-            other => panic!("expected grant, got {other:?}"),
-        };
+        let grant = expect_granted(ledger.claim(request).await.expect("claim succeeds"));
         ledger
             .commit(
                 &grant.into_token(),
@@ -380,18 +369,13 @@ async fn opaque_claim_tokens_are_bound_to_the_provider_that_issued_them() {
         idempotency(0x65),
         digest(0x76),
     );
-    let first_grant = match first
-        .claim(request.clone())
-        .await
-        .expect("first claim succeeds")
-    {
-        ClaimOutcome::Granted(grant) => grant,
-        other => panic!("expected first grant, got {other:?}"),
-    };
-    let _second_grant = match second.claim(request).await.expect("second claim succeeds") {
-        ClaimOutcome::Granted(grant) => grant,
-        other => panic!("expected second grant, got {other:?}"),
-    };
+    let first_grant = expect_granted(
+        first
+            .claim(request.clone())
+            .await
+            .expect("first claim succeeds"),
+    );
+    let _second_grant = expect_granted(second.claim(request).await.expect("second claim succeeds"));
 
     assert_eq!(
         second

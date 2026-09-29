@@ -4,7 +4,9 @@ mod ledger_support;
 
 use std::sync::Arc;
 
-use ledger_support::{ManualClock, digest, idempotency, instance, ledger, promote_default, scope};
+use ledger_support::{
+    ManualClock, digest, expect_granted, idempotency, instance, ledger, promote_default, scope,
+};
 use suprnova_live::identity::{Revision, UnixMillis};
 use suprnova_live::ledger::{
     ClaimOutcome, ClaimRequest, LedgerLimits, LedgerPhase, LiveInstanceLedger,
@@ -32,14 +34,12 @@ async fn abandoned_claim_consumes_authority_without_rolling_revision_back() {
     let scope = scope(0x31);
     let instance = instance(0x41);
     promote_default(&ledger, scope.clone(), instance.clone()).await;
-    let grant = match ledger
-        .claim(request(scope.clone(), instance.clone(), 0))
-        .await
-        .expect("claim succeeds")
-    {
-        ClaimOutcome::Granted(grant) => grant,
-        other => panic!("expected grant, got {other:?}"),
-    };
+    let grant = expect_granted(
+        ledger
+            .claim(request(scope.clone(), instance.clone(), 0))
+            .await
+            .expect("claim succeeds"),
+    );
 
     ledger
         .abandon(&grant.into_token())
@@ -70,25 +70,21 @@ async fn dropped_execution_claim_releases_authority_for_an_exact_retry() {
     let scope = scope(0x35);
     let instance = instance(0x45);
     promote_default(&ledger, scope.clone(), instance.clone()).await;
-    let grant = match ledger
-        .claim(request(scope.clone(), instance.clone(), 0))
-        .await
-        .expect("claim succeeds")
-    {
-        ClaimOutcome::Granted(grant) => grant,
-        other => panic!("expected grant, got {other:?}"),
-    };
+    let grant = expect_granted(
+        ledger
+            .claim(request(scope.clone(), instance.clone(), 0))
+            .await
+            .expect("claim succeeds"),
+    );
 
     ledger.abandon_on_drop(grant.into_token());
 
-    let retry = match ledger
-        .claim(request(scope.clone(), instance.clone(), 0))
-        .await
-        .expect("released claim accepts an exact retry")
-    {
-        ClaimOutcome::Granted(grant) => grant,
-        other => panic!("expected retry grant, got {other:?}"),
-    };
+    let retry = expect_granted(
+        ledger
+            .claim(request(scope.clone(), instance.clone(), 0))
+            .await
+            .expect("released claim accepts an exact retry"),
+    );
     let inspection = ledger
         .inspect(&scope, &instance)
         .expect("inspection succeeds")
@@ -109,14 +105,12 @@ async fn expired_claim_lease_becomes_terminal_and_cannot_be_reclaimed() {
     let scope = scope(0x32);
     let instance = instance(0x42);
     promote_default(&ledger, scope.clone(), instance.clone()).await;
-    let grant = match ledger
-        .claim(request(scope.clone(), instance.clone(), 0))
-        .await
-        .expect("claim succeeds")
-    {
-        ClaimOutcome::Granted(grant) => grant,
-        other => panic!("expected grant, got {other:?}"),
-    };
+    let grant = expect_granted(
+        ledger
+            .claim(request(scope.clone(), instance.clone(), 0))
+            .await
+            .expect("claim succeeds"),
+    );
 
     clock.set(1_101);
     assert!(matches!(

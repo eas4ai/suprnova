@@ -13,14 +13,14 @@ mod ledger_support;
 
 use std::sync::Arc;
 
-use ledger_support::{digest, idempotency, instance, scope};
+use ledger_support::{digest, expect_granted, idempotency, instance, scope};
 use suprnova_live::clock::Clock;
 use suprnova_live::identity::{Revision, UnixMillis};
 use suprnova_live::ledger::{
-    AcceptedOutcome, AcceptedOutcomeKind, ClaimGrant, ClaimOutcome, ClaimRequest,
-    DistributedInstanceLedger, InstanceRecordKey, InstanceRecordStore, LedgerErrorKind,
-    LiveInstanceLedger, MemoryInstanceLedger, MemoryRecordStore, MountInstanceRecord,
-    PromotionOutcome, PromotionRecord, RefreshReason,
+    AcceptedOutcome, AcceptedOutcomeKind, ClaimOutcome, ClaimRequest, DistributedInstanceLedger,
+    InstanceRecordKey, InstanceRecordStore, LedgerErrorKind, LiveInstanceLedger,
+    MemoryInstanceLedger, MemoryRecordStore, MountInstanceRecord, PromotionOutcome,
+    PromotionRecord, RefreshReason,
 };
 use suprnova_live_test_support::ControlledClock;
 use suprnova_live_test_support::ledger_conformance::{conformance_limits, run_all, run_two_node};
@@ -70,13 +70,6 @@ fn claim_request(instance_start: u8, base: u64, retry: u8) -> ClaimRequest {
         idempotency(retry),
         digest(retry.wrapping_add(0x80)),
     )
-}
-
-fn granted(outcome: ClaimOutcome) -> ClaimGrant {
-    match outcome {
-        ClaimOutcome::Granted(grant) => grant,
-        other => panic!("the claim was expected to be granted, not {other:?}"),
-    }
 }
 
 #[tokio::test]
@@ -161,7 +154,7 @@ async fn a_commit_on_one_node_is_the_accepted_revision_on_the_other() {
         .mount_instance(record.clone())
         .await
         .expect("the mount is created");
-    let grant = granted(
+    let grant = expect_granted(
         nodes
             .first
             .claim(claim_request(0x22, 0, 0x51))
@@ -207,7 +200,7 @@ async fn a_released_claim_crosses_nodes_once_the_queue_drains() {
         .mount_instance(record.clone())
         .await
         .expect("the mount is created");
-    let grant = granted(
+    let grant = expect_granted(
         nodes
             .first
             .claim(claim_request(0x23, 0, 0x52))
@@ -253,7 +246,7 @@ async fn flush_cleanup_applies_a_queued_release_without_another_operation() {
         .mount_instance(record.clone())
         .await
         .expect("the mount is created");
-    let grant = granted(
+    let grant = expect_granted(
         nodes
             .first
             .claim(claim_request(0x24, 0, 0x54))
@@ -290,7 +283,7 @@ async fn a_fenced_claim_never_restores_base_revision_authority_on_either_node() 
         .mount_instance(record.clone())
         .await
         .expect("the mount is created");
-    let grant = granted(
+    let grant = expect_granted(
         nodes
             .first
             .claim(claim_request(0x25, 0, 0x56))
@@ -394,7 +387,7 @@ async fn a_claim_token_from_one_node_is_never_accepted_by_the_other() {
         .mount_instance(mount(0x28))
         .await
         .expect("the mount is created");
-    let grant = granted(
+    let grant = expect_granted(
         nodes
             .first
             .claim(claim_request(0x28, 0, 0x59))
