@@ -94,6 +94,7 @@ pub mod render_cache;
 pub mod resources;
 pub mod routing;
 pub mod schedule;
+pub mod schema;
 pub mod seed;
 pub mod server;
 pub mod session;

@@ -587,6 +587,30 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `tokio::time::pause` moves, and the Redis driver reads the clock. What you
   have to change: code of your own that reads the time for a decision reads
   `suprnova::clock::now()` when its tests should be able to move it.
+- **`suprnova::schema::Schema` writes a migration without an identifier enum
+  or `ColumnDef` chains.** A migration can build its tables with
+  `Schema::create(manager, "posts", |t| { t.id(); t.string("title");
+  t.timestamps(); })` and `Schema::table`, `Schema::drop`,
+  `Schema::drop_if_exists`, `Schema::rename`, `Schema::has_table` and
+  `Schema::has_column`. The layer builds SeaORM's `Table::create()`,
+  `Table::alter()`, `Index` and `ForeignKey` statements and runs them on the
+  `SchemaManager` the migration is given, so every statement runs on the
+  migration's own connection and transaction, and a SeaORM migration and a
+  `Schema` migration can sit in one `Migrator`. `Blueprint` has `id()` (a
+  `BIGINT` auto-increment primary key), `foreign_id(name).constrained(table)`
+  with `on_delete` and `on_update`, eighteen column types, the modifiers
+  `nullable`, `default`, `unique` and `length`, `index` and `unique` over
+  several columns, and in `Schema::table` also `rename_column`, `drop_column`,
+  `drop_index` and `drop_foreign`. A column is `NOT NULL` unless it is
+  `nullable()`. `timestamps()` and `soft_deletes()` create the `created_at`,
+  `updated_at` and `deleted_at` columns as `VARCHAR(255)`, because
+  `#[suprnova::model]` stores a `DateTime<Utc>` field as RFC 3339 text unless
+  the field declares a cast; `timestamp_tz` with a native cast gives a native
+  column. On SQLite, adding or dropping a foreign key on an existing table is
+  an error that is returned before any statement of the call runs, and every
+  other alteration runs as its own statement. The layer is not re-exported at
+  the crate root, where `suprnova::Schema` is SeaORM's `Schema`.
+  `make:migration` generates SeaORM migrations as before.
 
 ### Changed
 
