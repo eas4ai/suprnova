@@ -511,6 +511,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   database error and not with its `Debug`, which for a violated constraint
   names the values of the key. A `match` on `PaymentError` that names every
   variant has one more to name.
+- **`suprnova::payments` names the types it exports.** The module had `pub use
+  dto::*;`, the only glob export of the framework. It exported the modules of
+  `dto` as well as the types, so every type had two public paths,
+  `payments::StartSessionRequest` and
+  `payments::session::StartSessionRequest`, and a type that was added to `dto`
+  was public in `payments` without anybody deciding so. The twenty-five types
+  are named now. The paths through the modules, `payments::session::` and its
+  seven siblings, are gone: the modules are reached as
+  `payments::dto::session`.
 
 ### Fixed
 

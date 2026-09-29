@@ -5,6 +5,7 @@ pub mod dto;
 pub mod migration;
 pub mod mock_discriminator;
 pub mod money;
+pub mod public_surface;
 pub mod registry;
 pub mod webhook_hydration;
 pub mod webhook_idempotency;
