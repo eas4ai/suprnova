@@ -1,6 +1,8 @@
 //! Positive checker contracts.
 
 mod checker_support;
+#[path = "checker_support/freshness.rs"]
+mod freshness;
 
 use serde_json::Value;
 use suprnova_live::checker::{
@@ -14,6 +16,7 @@ use suprnova_live::conformance::{
 };
 
 use checker_support::{CHILD_VIEW, MODEL_CHILD_VIEW, ROOT_VIEW, registry, root_name, view};
+use freshness::freshness_source;
 
 #[test]
 fn registered_directives_nested_ownership_and_compatible_branches_are_proved() {
@@ -345,20 +348,6 @@ fn freshness_combinations_are_isolated_per_nested_island_instance() {
         .check_component(&root_name());
 
     assert!(report.is_proved(), "{:?}", report.diagnostics());
-}
-
-fn freshness_source(combination: &Value) -> String {
-    let poll = combination["poll"].as_bool().expect("poll flag");
-    let stream = combination["stream"].as_str().expect("stream mode");
-    let stream_attribute = match stream {
-        "absent" => "",
-        "default" => r#" live:stream="orders""#,
-        "hybrid" => r#" live:stream.hybrid="orders""#,
-        "push-only" => r#" live:stream.push-only="orders""#,
-        other => panic!("unexpected stream mode {other}"),
-    };
-    let poll_attribute = if poll { " live:poll" } else { "" };
-    format!("<section{stream_attribute}{poll_attribute}></section>")
 }
 
 fn assert_proved(source: &str) {

@@ -1,6 +1,8 @@
 //! Negative checker fixtures.
 
 mod checker_support;
+#[path = "checker_support/freshness.rs"]
+mod freshness;
 
 use serde_json::Value;
 use suprnova_live::checker::{
@@ -11,6 +13,7 @@ use suprnova_live::conformance::{FixtureVersion, fixture_directory};
 use checker_support::{
     CHILD_VIEW, ROOT_VIEW, registry, registry_with_checker_contract, root_name, view,
 };
+use freshness::freshness_source;
 
 #[test]
 fn directive_metadata_and_nested_ownership_fail_closed() {
@@ -376,17 +379,7 @@ fn every_conflicting_v4_freshness_combination_is_rejected_by_the_real_checker() 
         if combination["result"] != "directive_conflict" {
             continue;
         }
-        let poll = combination["poll"].as_bool().expect("poll flag");
-        let stream = combination["stream"].as_str().expect("stream mode");
-        let stream_attribute = match stream {
-            "absent" => "",
-            "default" => r#" live:stream="orders""#,
-            "hybrid" => r#" live:stream.hybrid="orders""#,
-            "push-only" => r#" live:stream.push-only="orders""#,
-            other => panic!("unexpected stream mode {other}"),
-        };
-        let poll_attribute = if poll { " live:poll" } else { "" };
-        let source = format!("<section{stream_attribute}{poll_attribute}></section>");
+        let source = freshness_source(combination);
         let registry = registry();
         let catalog = TemplateCatalog::new(vec![
             (view(ROOT_VIEW), source.as_str()),
