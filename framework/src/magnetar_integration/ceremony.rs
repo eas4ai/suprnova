@@ -43,7 +43,7 @@ pub async fn issue<P: Serialize>(
 ) -> Result<(), FrameworkError> {
     let payload_json = serde_json::to_string(payload)
         .map_err(|e| FrameworkError::internal(format!("ceremony: serialize payload: {e}")))?;
-    let now = chrono::Utc::now();
+    let now = crate::clock::now();
     let expires_at = now + Duration::minutes(ttl_minutes);
     let conn = DB::connection()?;
     let model = entity::ActiveModel {
@@ -74,7 +74,7 @@ pub async fn consume<P: DeserializeOwned>(
     kind: &str,
 ) -> Result<Option<P>, FrameworkError> {
     let conn = DB::connection()?;
-    let now = chrono::Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
 
     // O(1) indexed lookup on the UNIQUE selector.
     let row = entity::Entity::find()
@@ -116,7 +116,7 @@ pub async fn consume<P: DeserializeOwned>(
 /// table does not accumulate dead rows.
 pub async fn prune_expired() -> Result<u64, FrameworkError> {
     let conn = DB::connection()?;
-    let now = chrono::Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
     let result = entity::Entity::delete_many()
         .filter(entity::Column::ExpiresAt.lte(now))
         .exec(conn.inner())

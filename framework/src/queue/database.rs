@@ -268,7 +268,7 @@ impl QueueDriver for DatabaseQueueDriver {
     }
 
     async fn pending_size(&self) -> Result<u64, FrameworkError> {
-        let now = Utc::now().timestamp();
+        let now = crate::clock::now().timestamp();
         let row = self
             .db
             .query_one_raw(Statement::from_sql_and_values(
@@ -295,7 +295,7 @@ impl QueueDriver for DatabaseQueueDriver {
     }
 
     async fn delayed_size(&self) -> Result<u64, FrameworkError> {
-        let now = Utc::now().timestamp();
+        let now = crate::clock::now().timestamp();
         let row = self
             .db
             .query_one_raw(Statement::from_sql_and_values(
@@ -319,7 +319,7 @@ impl QueueDriver for DatabaseQueueDriver {
     }
 
     async fn reserved_size(&self) -> Result<u64, FrameworkError> {
-        let now = Utc::now().timestamp();
+        let now = crate::clock::now().timestamp();
         let row = self
             .db
             .query_one_raw(Statement::from_sql_and_values(
@@ -359,7 +359,7 @@ impl QueueDriver for DatabaseQueueDriver {
     /// decoded and ordered by `available_at`. See
     /// the `list_jobs` helper for the poison-row contract.
     async fn pending_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
-        let now = Utc::now().timestamp();
+        let now = crate::clock::now().timestamp();
         let (queue_clause, queue_params) = self.queue_filter_clause(queue, 3)?;
         let mut params = vec![sea_orm::Value::from(now), sea_orm::Value::from(now)];
         params.extend(queue_params);
@@ -380,7 +380,7 @@ impl QueueDriver for DatabaseQueueDriver {
     /// decoded and ordered by `available_at`. See
     /// the `list_jobs` helper for the poison-row contract.
     async fn delayed_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
-        let now = Utc::now().timestamp();
+        let now = crate::clock::now().timestamp();
         let (queue_clause, queue_params) = self.queue_filter_clause(queue, 2)?;
         let mut params = vec![sea_orm::Value::from(now)];
         params.extend(queue_params);
@@ -401,7 +401,7 @@ impl QueueDriver for DatabaseQueueDriver {
         &self,
         queue: Option<&str>,
     ) -> Result<Vec<InspectedJob>, FrameworkError> {
-        let now = Utc::now().timestamp();
+        let now = crate::clock::now().timestamp();
         let (queue_clause, queue_params) = self.queue_filter_clause(queue, 2)?;
         let mut params = vec![sea_orm::Value::from(now)];
         params.extend(queue_params);
@@ -488,7 +488,7 @@ impl DatabaseQueueDriver {
         attempts: AttemptPolicy,
         op: &'static str,
     ) -> Result<(), FrameworkError> {
-        let now = Utc::now().timestamp();
+        let now = crate::clock::now().timestamp();
         let new_available = now + delay.as_secs().min(i64::MAX as u64) as i64;
 
         let txn = self
@@ -663,7 +663,7 @@ impl DatabaseQueueDriver {
         visibility_timeout: Duration,
         queues: &[String],
     ) -> Result<Option<Reservation>, FrameworkError> {
-        let claim_time = Utc::now();
+        let claim_time = crate::clock::now();
         let now = claim_time.timestamp();
         let token = Uuid::new_v4().to_string();
         let reserved_until = visibility_deadline_seconds(claim_time, visibility_timeout);

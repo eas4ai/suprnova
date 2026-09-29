@@ -1410,7 +1410,7 @@ where
         let schedule = build_schedule(schedule_fn);
         print!(
             "{}",
-            format_schedule_listing(&schedule, display_tz, chrono::Utc::now())
+            format_schedule_listing(&schedule, display_tz, crate::clock::now())
         );
     }
 
@@ -1943,7 +1943,7 @@ impl crate::events::Listener<crate::queue::events::WorkerQueuePaused> for Worker
     ) -> Result<(), crate::FrameworkError> {
         println!(
             "{}",
-            format_worker_queue_status(event.queue.as_deref(), true, chrono::Utc::now())
+            format_worker_queue_status(event.queue.as_deref(), true, crate::clock::now())
         );
         Ok(())
     }
@@ -1962,7 +1962,7 @@ impl crate::events::Listener<crate::queue::events::WorkerQueueResumed>
     ) -> Result<(), crate::FrameworkError> {
         println!(
             "{}",
-            format_worker_queue_status(event.queue.as_deref(), false, chrono::Utc::now())
+            format_worker_queue_status(event.queue.as_deref(), false, crate::clock::now())
         );
         Ok(())
     }

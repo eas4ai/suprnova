@@ -585,7 +585,7 @@ impl<L: HostLifecycleDeduplication> MagnetarLifecycleForwarder<L> {
             });
         }
 
-        let now = chrono::Utc::now();
+        let now = crate::clock::now();
         let lease_id = Uuid::new_v4().to_string();
         match self
             .deliveries
@@ -859,7 +859,7 @@ where
         lifetime: chrono::Duration,
     ) -> Result<RememberCredential> {
         self.remember
-            .issue_with_lifetime(user_id, chrono::Utc::now(), lifetime)
+            .issue_with_lifetime(user_id, crate::clock::now(), lifetime)
             .await
     }
 
@@ -875,7 +875,7 @@ where
             .sign_in_with_lifetime(
                 credential,
                 metadata,
-                chrono::Utc::now(),
+                crate::clock::now(),
                 replacement_lifetime,
             )
             .await?;
@@ -897,7 +897,7 @@ where
             .attempt_sign_in_with_lifetime(
                 credential,
                 metadata,
-                chrono::Utc::now(),
+                crate::clock::now(),
                 replacement_lifetime,
             )
             .await?

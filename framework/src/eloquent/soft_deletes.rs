@@ -2,7 +2,7 @@
 //!
 //! Models annotated `#[suprnova::model(soft_deletes)]` swap their
 //! `delete()` semantics: instead of `DELETE FROM table WHERE pk = ?`,
-//! the row's `deleted_at` column is set to `Utc::now()`. The default
+//! the row's `deleted_at` column is set to `suprnova::clock::now()`. The default
 //! query scope filters `WHERE deleted_at IS NULL` so trashed rows are
 //! invisible to ordinary `find` / `query` calls; callers opt in via
 //! [`with_trashed`] (includes both alive + trashed) or [`only_trashed`]

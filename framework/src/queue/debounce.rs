@@ -157,7 +157,7 @@ async fn max_wait_exceeded(
         return Ok(false);
     };
     let stamp_key = first_dispatched_key(key);
-    let now = chrono::Utc::now().timestamp();
+    let now = crate::clock::now().timestamp();
     let Some(first) = Cache::get::<i64>(&stamp_key).await? else {
         Cache::put(&stamp_key, &now, Some(ttl)).await?;
         return Ok(false);

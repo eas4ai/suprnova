@@ -708,7 +708,7 @@ impl SessionData {
     /// `RequirePassword`-style middleware to decide whether to force
     /// re-confirmation on sensitive routes.
     pub fn password_confirmed(&mut self) {
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::clock::now().timestamp();
         self.put("auth.password_confirmed_at", now);
     }
 

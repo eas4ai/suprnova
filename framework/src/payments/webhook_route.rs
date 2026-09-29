@@ -38,7 +38,6 @@ use crate::payments::{
     PaymentSnapshot, SubscriptionResult, SubscriptionStatus, WebhookContext, WebhookEvent,
 };
 use crate::routing::Router;
-use chrono::Utc;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
@@ -220,7 +219,7 @@ async fn handle_webhook_inner(
             provider_event_type: Set(event.provider_event_type.clone()),
             neutral_event_kind: Set(neutral_str),
             payload: Set(event.raw_payload.clone()),
-            received_at: Set(Utc::now().to_rfc3339()),
+            received_at: Set(crate::clock::now().to_rfc3339()),
             processed_at: Set(None),
             process_error: Set(None),
             ..Default::default()
@@ -597,7 +596,7 @@ where
     let mark_canceled = matches!(neutral, NeutralEventKind::SubscriptionCanceled)
         || matches!(result.status, SubscriptionStatus::Canceled);
 
-    let now = Utc::now().to_rfc3339();
+    let now = crate::clock::now().to_rfc3339();
 
     match existing {
         Some(model) => {
@@ -674,7 +673,7 @@ where
         .all(db)
         .await?;
 
-    let now = Utc::now().to_rfc3339();
+    let now = crate::clock::now().to_rfc3339();
 
     let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
     for item in &result.items {
@@ -762,7 +761,7 @@ where
         .one(db)
         .await?;
 
-    let now = Utc::now().to_rfc3339();
+    let now = crate::clock::now().to_rfc3339();
 
     match existing {
         Some(model) => {
@@ -837,7 +836,7 @@ where
 
     let mut am: transaction::ActiveModel = existing.into();
     am.status = Set(status.to_owned());
-    am.updated_at = Set(Utc::now().to_rfc3339());
+    am.updated_at = Set(crate::clock::now().to_rfc3339());
     am.update(db).await?;
     touched.push(crate::database::model::entity_table_name::<
         transaction::Entity,
@@ -885,7 +884,7 @@ where
         }
         am.provider_metadata = Set(snap.provider_metadata.clone());
     }
-    am.updated_at = Set(Utc::now().to_rfc3339());
+    am.updated_at = Set(crate::clock::now().to_rfc3339());
     am.update(db).await?;
     touched.push(crate::database::model::entity_table_name::<customer::Entity>());
     Ok(())
@@ -906,7 +905,7 @@ where
         .await?
         .ok_or_else(|| PaymentError::Internal("webhook event vanished after insert".into()))?;
     let mut am: webhook_event::ActiveModel = model.into();
-    am.processed_at = Set(Some(Utc::now().to_rfc3339()));
+    am.processed_at = Set(Some(crate::clock::now().to_rfc3339()));
     am.process_error = Set(None);
     am.update(db).await?;
     touched.push(crate::database::model::entity_table_name::<
@@ -1098,7 +1097,7 @@ mod tests {
             provider_event_type: Set("payment.succeeded".into()),
             neutral_event_kind: Set(Some("payment_succeeded".into())),
             payload: Set(serde_json::json!({})),
-            received_at: Set(Utc::now().to_rfc3339()),
+            received_at: Set(crate::clock::now().to_rfc3339()),
             processed_at: Set(None),
             process_error: Set(None),
             ..Default::default()
@@ -1120,7 +1119,7 @@ mod tests {
             .await
             .expect("TestDatabase::fresh");
         let conn = db.conn();
-        let processed_at = Utc::now().to_rfc3339();
+        let processed_at = crate::clock::now().to_rfc3339();
         let event = WebhookEvent {
             provider: "mock".into(),
             provider_event_id: "evt_processed_before_failure_record".into(),
@@ -1186,7 +1185,7 @@ mod tests {
             provider_event_type: Set("payment.succeeded".into()),
             neutral_event_kind: Set(Some("payment_succeeded".into())),
             payload: Set(serde_json::json!({})),
-            received_at: Set(Utc::now().to_rfc3339()),
+            received_at: Set(crate::clock::now().to_rfc3339()),
             processed_at: Set(None),
             process_error: Set(None),
             ..Default::default()
@@ -1258,7 +1257,7 @@ mod tests {
             provider_event_type: Set("payment.succeeded".into()),
             neutral_event_kind: Set(Some("payment_succeeded".into())),
             payload: Set(serde_json::json!({})),
-            received_at: Set(Utc::now().to_rfc3339()),
+            received_at: Set(crate::clock::now().to_rfc3339()),
             processed_at: Set(None),
             process_error: Set(Some("transient failure on first attempt".into())),
             ..Default::default()

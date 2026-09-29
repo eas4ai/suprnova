@@ -46,7 +46,7 @@ fn should_fire_locked_once(email: &str, locked_until: Option<DateTime<Utc>>) -> 
     let mut guard = locked_event_dedup()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let now = Utc::now();
+    let now = crate::clock::now();
     let fire = match guard.get(email) {
         // Previous lockout window is still in effect - additional
         // failed attempts inside it must not re-fire AccountLocked.

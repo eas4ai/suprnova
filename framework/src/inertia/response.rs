@@ -1514,7 +1514,7 @@ async fn resolve_props(
     materialized.insert(ERRORS_KEY.to_string(), seeded_errors);
 
     let mut tasks: Vec<TaskFuture> = Vec::new();
-    let now_ms = chrono::Utc::now().timestamp_millis();
+    let now_ms = crate::clock::now().timestamp_millis();
 
     for (key, prop) in props {
         // The absent sentinel (`when_loaded!` on an unloaded relation)

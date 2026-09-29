@@ -55,7 +55,6 @@ pub use sync::SyncQueueDriver;
 
 use crate::error::FrameworkError;
 use crate::lock;
-use chrono::Utc;
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
@@ -411,7 +410,7 @@ impl Queue {
 
     /// Convenience: push with a delay from `now`.
     pub async fn later<J: Job>(delay: std::time::Duration, job: J) -> Result<(), FrameworkError> {
-        let available_at = Utc::now()
+        let available_at = crate::clock::now()
             + chrono::Duration::from_std(delay)
                 .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
         Self::push_later(job, available_at).await
@@ -437,7 +436,7 @@ impl Queue {
         job: J,
         overrides: EnvelopeOverrides,
     ) -> Result<(), FrameworkError> {
-        let available_at = Utc::now()
+        let available_at = crate::clock::now()
             + chrono::Duration::from_std(delay)
                 .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
         Self::dispatch_push(job, AvailableAt::Fixed(available_at), overrides, None).await
@@ -723,7 +722,7 @@ impl Queue {
         delay: std::time::Duration,
         job: J,
     ) -> Result<bool, FrameworkError> {
-        let available_at = Utc::now()
+        let available_at = crate::clock::now()
             + chrono::Duration::from_std(delay)
                 .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
         Self::push_unique_at::<J>(job, AvailableAt::Fixed(available_at)).await
@@ -918,7 +917,7 @@ impl Queue {
     /// Suprnova has nothing to partition.
     pub async fn bulk<J: Job + Clone>(jobs: Vec<J>) -> Result<(), FrameworkError> {
         if testing::is_active() {
-            let available_at = resolve_job_delay::<J>(Utc::now())?;
+            let available_at = resolve_job_delay::<J>(crate::clock::now())?;
             for j in jobs {
                 testing::record::<J>(&j, available_at)?;
             }
@@ -944,7 +943,7 @@ impl Queue {
         jobs: Vec<J>,
         context: Option<crate::context::ContextSnapshot>,
     ) -> Result<(), FrameworkError> {
-        let available_at = resolve_job_delay::<J>(Utc::now())?;
+        let available_at = resolve_job_delay::<J>(crate::clock::now())?;
         let mut envs = Vec::with_capacity(jobs.len());
         for j in jobs {
             envs.push(envelope_for::<J>(&j, available_at, context.clone())?);
@@ -1031,7 +1030,7 @@ impl Queue {
     /// milliseconds so tightly-clustered `restart()` calls in tests are
     /// distinguishable.
     pub async fn restart() -> Result<(), FrameworkError> {
-        let now = Utc::now().timestamp_millis();
+        let now = crate::clock::now().timestamp_millis();
         crate::cache::Cache::put(RESTART_SIGNAL_KEY, &now, None).await?;
         Ok(())
     }
@@ -1187,7 +1186,7 @@ impl Queue {
         let mut env = Envelope::from_json(&record.envelope_json)
             .map_err(|e| FrameworkError::internal(format!("retry_failed: decode envelope: {e}")))?;
         env.attempts = 0;
-        env.available_at = Utc::now();
+        env.available_at = crate::clock::now();
         env.idempotency_key = None;
         env.unique_lock_owner = None;
         if testing::is_active() {
@@ -1240,7 +1239,7 @@ impl Queue {
                 continue;
             };
             env.attempts = 0;
-            env.available_at = Utc::now();
+            env.available_at = crate::clock::now();
             env.idempotency_key = None;
             env.unique_lock_owner = None;
             if faked {
@@ -1823,7 +1822,7 @@ enum AvailableAt {
 impl AvailableAt {
     fn resolve<J: Job>(&self) -> Result<chrono::DateTime<chrono::Utc>, FrameworkError> {
         match self {
-            Self::FromJobDelay => resolve_job_delay::<J>(Utc::now()),
+            Self::FromJobDelay => resolve_job_delay::<J>(crate::clock::now()),
             Self::Fixed(at) => Ok(*at),
         }
     }
@@ -1935,11 +1934,13 @@ async fn arm_debounce<J: Job>(
     };
     // `DateTime<Utc>`'s `Add<Duration>` panics near chrono's representable
     // range; house rule 2 says public-surface code returns `Result` instead.
-    let available_at = Utc::now().checked_add_signed(delay).ok_or_else(|| {
-        FrameworkError::internal(
-            "debounce window pushes availability out of the representable date range",
-        )
-    })?;
+    let available_at = crate::clock::now()
+        .checked_add_signed(delay)
+        .ok_or_else(|| {
+            FrameworkError::internal(
+                "debounce window pushes availability out of the representable date range",
+            )
+        })?;
     Ok(Some(available_at))
 }
 
@@ -2064,7 +2065,7 @@ pub(crate) fn build_envelope_on<J: Job>(
         job_name: J::job_name().to_string(),
         queue,
         payload,
-        dispatched_at: Utc::now(),
+        dispatched_at: crate::clock::now(),
         available_at,
         attempts: 0,
         max_tries: J::max_tries(),

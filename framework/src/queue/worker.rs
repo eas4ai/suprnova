@@ -38,7 +38,6 @@ use crate::queue::middleware::{JobMiddleware, Next};
 use crate::queue::outcome::JobOutcome;
 use crate::queue::retry::{delay_after_failure, next_delay};
 use crate::telemetry::Metrics;
-use chrono::Utc;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
@@ -644,7 +643,7 @@ async fn run_labelled_worker(
     cfg: WorkerConfig,
     shutdown: CancellationToken,
 ) {
-    let worker_started_at = Utc::now().timestamp_millis();
+    let worker_started_at = crate::clock::now().timestamp_millis();
     // Read once per worker lifetime, mirroring Laravel's `Worker::$pausable`
     // static: an operator's escape hatch, not something that should change
     // mid-run.
@@ -1748,7 +1747,7 @@ mod tests {
     use crate::queue::driver::{Reservation, ReservationToken};
     use crate::queue::failed::{FailedJob, FailedJobStore};
     use async_trait::async_trait;
-    use chrono::DateTime;
+    use chrono::{DateTime, Utc};
     use std::sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -2163,7 +2162,7 @@ mod tests {
             failed_jobs: 0,
             failed_job_ids: Vec::new(),
             options: BatchOptions::default(),
-            created_at: Utc::now(),
+            created_at: crate::clock::now(),
             cancelled_at: None,
             finished_at: None,
         })
@@ -2231,7 +2230,7 @@ mod tests {
             failed_jobs,
             failed_job_ids: Vec::new(),
             options: BatchOptions::default(),
-            created_at: Utc::now(),
+            created_at: crate::clock::now(),
             cancelled_at,
             finished_at: None,
         }
@@ -2245,7 +2244,7 @@ mod tests {
     /// and so leaves `failed_jobs` at zero.
     #[test]
     fn cancelled_batch_finalizes_via_catch_not_then() {
-        let cancelled = batch_with(0, Some(Utc::now()));
+        let cancelled = batch_with(0, Some(crate::clock::now()));
         assert!(
             cancelled.cancelled(),
             "fixture must actually be cancelled, else this proves nothing"
@@ -2350,8 +2349,8 @@ mod tests {
             job_name: name.into(),
             queue: None,
             payload: serde_json::json!({}),
-            dispatched_at: Utc::now(),
-            available_at: Utc::now(),
+            dispatched_at: crate::clock::now(),
+            available_at: crate::clock::now(),
             attempts,
             max_tries: 3,
             backoff: BackoffSchedule::default(),
@@ -2823,7 +2822,7 @@ mod tests {
                 finally_callbacks: vec![FINALLY.into()],
                 ..BatchOptions::default()
             },
-            created_at: Utc::now(),
+            created_at: crate::clock::now(),
             cancelled_at: None,
             finished_at: None,
         })
@@ -2896,7 +2895,7 @@ mod tests {
                 finally_callbacks: vec![FINALLY.into()],
                 ..BatchOptions::default()
             },
-            created_at: Utc::now(),
+            created_at: crate::clock::now(),
             cancelled_at: None,
             finished_at: None,
         })
@@ -3286,7 +3285,7 @@ mod tests {
                 finally_callbacks: vec![FINALLY.into()],
                 ..BatchOptions::default()
             },
-            created_at: Utc::now(),
+            created_at: crate::clock::now(),
             cancelled_at: None,
             finished_at: None,
         })

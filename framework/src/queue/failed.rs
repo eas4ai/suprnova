@@ -144,7 +144,7 @@ impl FailedJobStore for MemoryFailedJobStore {
             job_name: env.job_name.clone(),
             envelope_json,
             exception: exception.into(),
-            failed_at: Utc::now(),
+            failed_at: crate::clock::now(),
         };
         let mut g = self
             .rows
@@ -324,7 +324,7 @@ impl FailedJobStore for DatabaseFailedJobStore {
                 sea_orm::Value::from(env.job_name.clone()),
                 sea_orm::Value::from(envelope_json),
                 sea_orm::Value::from(exception.to_string()),
-                sea_orm::Value::from(Utc::now().timestamp()),
+                sea_orm::Value::from(crate::clock::now().timestamp()),
             ],
         );
         self.db
@@ -548,8 +548,8 @@ mod tests {
             job_name: name.into(),
             queue: None,
             payload: serde_json::json!({}),
-            dispatched_at: Utc::now(),
-            available_at: Utc::now(),
+            dispatched_at: crate::clock::now(),
+            available_at: crate::clock::now(),
             attempts: 0,
             max_tries: 3,
             backoff: BackoffSchedule::default(),

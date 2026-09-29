@@ -121,7 +121,7 @@ pub async fn consume(user_id: &str, code: &str) -> Result<bool, FrameworkError> 
             )
             .col_expr(
                 entity::Column::UpdatedAt,
-                sea_orm::sea_query::Expr::value(chrono::Utc::now()),
+                sea_orm::sea_query::Expr::value(crate::clock::now()),
             )
             .filter(entity::Column::UserId.eq(user_id.to_string()))
             .filter(entity::Column::RecoveryCodes.eq(encrypted.clone()))

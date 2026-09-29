@@ -33,7 +33,6 @@ use crate::payments::{
     WebhookEvent, WebhookHandler,
 };
 use async_trait::async_trait;
-use chrono::Utc;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -302,7 +301,7 @@ fn check_price_set(prices: &[String]) -> PaymentResult<()> {
 impl Subscription for MockPaymentProvider {
     async fn subscribe(&self, req: SubscribeRequest) -> PaymentResult<SubscriptionResult> {
         let id = self.next_id("sub").await;
-        let now = Utc::now();
+        let now = crate::clock::now();
         let result = SubscriptionResult {
             provider_subscription_id: id.clone(),
             provider_customer_id: req.customer_ref.clone(),
@@ -777,7 +776,7 @@ mod tests {
         let req = CreatePromotionCodeRequest {
             coupon_ref: "coupon_15".into(),
             customer_ref: "cus_mock_1".into(),
-            expires_at: Some(Utc::now() + chrono::Duration::days(7)),
+            expires_at: Some(crate::clock::now() + chrono::Duration::days(7)),
             max_redemptions: Some(1),
         };
         let minted = promotions.create_promotion_code(req.clone()).await.unwrap();

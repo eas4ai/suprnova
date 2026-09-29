@@ -40,7 +40,7 @@ impl RateLimiterDriver for RedisRateLimiter {
         config: &SlidingWindowConfig,
     ) -> Result<bool, FrameworkError> {
         let zkey = format!("{}rl:{}", self.prefix, key);
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = crate::clock::now().timestamp_millis();
         let window_ms = config.window.as_millis() as i64;
         let member = Uuid::new_v4().to_string();
 
@@ -84,7 +84,7 @@ impl RateLimiterDriver for RedisRateLimiter {
         config: &SlidingWindowConfig,
     ) -> Result<Option<Duration>, FrameworkError> {
         let zkey = format!("{}rl:{}", self.prefix, key);
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = crate::clock::now().timestamp_millis();
         let window_ms = config.window.as_millis() as i64;
 
         // Single Lua block so the evict / count / oldest-score reads

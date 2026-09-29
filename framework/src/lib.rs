@@ -48,6 +48,7 @@ pub mod boot;
 pub mod broadcasting;
 pub mod bus;
 pub mod cache;
+pub mod clock;
 pub mod config;
 pub mod console;
 pub mod container;

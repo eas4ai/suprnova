@@ -121,7 +121,7 @@ mod tests {
         assert!(!user.is_email_verified());
         assert_eq!(user.name(), None);
 
-        let now = Utc::now();
+        let now = crate::clock::now();
         user.set_email_verified_at(Some(now));
         assert!(user.is_email_verified());
         assert_eq!(user.email_verified_at(), Some(now));

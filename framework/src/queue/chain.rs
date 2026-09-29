@@ -150,7 +150,7 @@ impl ChainLink {
     }
 
     fn to_envelope_with_id(&self, id: uuid::Uuid, connection: &str) -> Envelope {
-        let now = chrono::Utc::now();
+        let now = crate::clock::now();
         // The job's own `delay()`, as a direct push applies it. A delay too
         // large for the clock saturates instead of wrapping into the past.
         let available_at = self

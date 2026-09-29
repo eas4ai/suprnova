@@ -154,8 +154,8 @@ pub async fn generate_token() -> Result<(String, String, String), FrameworkError
 /// `Auth::login_remember`).
 pub async fn issue(user_id: &str, ttl_minutes: i64) -> Result<String, FrameworkError> {
     let (selector, verifier_plaintext, verifier_hash) = generate_token().await?;
-    let expires_at = chrono::Utc::now() + Duration::minutes(ttl_minutes);
-    let now = chrono::Utc::now();
+    let expires_at = crate::clock::now() + Duration::minutes(ttl_minutes);
+    let now = crate::clock::now();
 
     let conn = DB::connection()?;
     let model = entity::ActiveModel {
@@ -206,7 +206,7 @@ pub async fn verify_and_rotate(
     };
 
     let conn = DB::connection()?;
-    let now = chrono::Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
 
     // O(1) indexed lookup: the UNIQUE constraint on `selector` means
     // this returns 0 or 1 rows.
@@ -364,7 +364,7 @@ pub async fn revoke_by_id(id: i64) -> Result<bool, FrameworkError> {
 /// the table does not accumulate dead rows.
 pub async fn prune_expired() -> Result<u64, FrameworkError> {
     let conn = DB::connection()?;
-    let now = chrono::Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
     let result = entity::Entity::delete_many()
         .filter(entity::Column::ExpiresAt.lte(now))
         .exec(conn.inner())

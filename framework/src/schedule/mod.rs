@@ -1307,6 +1307,49 @@ mod tests {
         );
     }
 
+    /// The same-minute gate reads the framework clock: with the clock
+    /// frozen the two calls are in one minute for certain, and a move of
+    /// the clock by one minute lets the task run again.
+    #[tokio::test]
+    async fn the_same_minute_gate_follows_the_test_clock() {
+        use crate::testing::{TestClock, TestContainer};
+        let _scope = TestContainer::fake();
+        let clock = TestClock::travel_to(
+            chrono::DateTime::from_timestamp(1_900_000_020, 0).expect("a time"),
+        );
+
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut schedule = Schedule::new();
+        let counter_clone = counter.clone();
+        let builder = schedule
+            .call(move || {
+                let counter = counter_clone.clone();
+                async move {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }
+            })
+            .every_minute()
+            .name("clock-gate");
+        schedule.add(builder);
+
+        schedule.run_due_tasks().await;
+        schedule.run_due_tasks().await;
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one run in one minute of the clock",
+        );
+
+        clock.advance(chrono::Duration::minutes(1));
+        schedule.run_due_tasks().await;
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the next minute of the clock runs the task again",
+        );
+    }
+
     /// `CronExpression::is_due_at` lets tests drive cron evaluation
     /// against a fixed clock - the audit's test-coverage gap "Add
     /// clock-controlled tests for once-per-minute de-duplication,

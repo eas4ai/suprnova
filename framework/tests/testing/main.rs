@@ -2,6 +2,8 @@
 //! one former top-level test file per submodule (folded 2026-09-05).
 
 pub mod assertable_inertia;
+pub mod clock;
+pub mod clock_reads;
 pub mod registry_clears;
 pub mod test_database_helpers;
 pub mod test_response;

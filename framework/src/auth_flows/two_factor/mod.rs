@@ -303,7 +303,7 @@ impl TwoFactor {
         }
         reset_2fa_failures(user.email()).await;
 
-        set_confirmed_at(user.user_id(), chrono::Utc::now()).await?;
+        set_confirmed_at(user.user_id(), crate::clock::now()).await?;
 
         // Discard dispatch errors - the confirmation has already
         // committed; a downstream listener failure must not surface
@@ -415,7 +415,7 @@ impl TwoFactor {
         let claim_to = current_timestep + TOTP_SKEW_STEPS;
         let claim = entity::Entity::update_many()
             .col_expr(entity::Column::LastUsedTimestep, Expr::value(claim_to))
-            .col_expr(entity::Column::UpdatedAt, Expr::value(chrono::Utc::now()))
+            .col_expr(entity::Column::UpdatedAt, Expr::value(crate::clock::now()))
             .filter(entity::Column::UserId.eq(user.user_id()))
             .filter(
                 Condition::any()
@@ -514,7 +514,7 @@ impl TwoFactor {
         let claim_to = current_timestep + TOTP_SKEW_STEPS;
         let claim = entity::Entity::update_many()
             .col_expr(entity::Column::LastUsedTimestep, Expr::value(claim_to))
-            .col_expr(entity::Column::UpdatedAt, Expr::value(chrono::Utc::now()))
+            .col_expr(entity::Column::UpdatedAt, Expr::value(crate::clock::now()))
             .filter(entity::Column::UserId.eq(user.user_id()))
             .filter(
                 Condition::any()
@@ -1048,7 +1048,7 @@ impl TwoFactor {
             .ok_or_else(|| FrameworkError::internal("two_factor row vanished mid-regenerate"))?;
         let mut active: entity::ActiveModel = row.into();
         active.recovery_codes = Set(Some(encrypted));
-        active.updated_at = Set(chrono::Utc::now());
+        active.updated_at = Set(crate::clock::now());
         active
             .update(conn)
             .await
@@ -1094,7 +1094,7 @@ async fn upsert_row(
 ) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
     let conn = db.inner();
-    let now = chrono::Utc::now();
+    let now = crate::clock::now();
     // SeaORM has no portable upsert across MySQL/Postgres/SQLite, so
     // we read-modify-write. Re-enrolling overwrites secret +
     // recovery_codes and clears `confirmed_at`, forcing the user
@@ -1148,7 +1148,7 @@ async fn set_confirmed_at(
         .ok_or_else(|| FrameworkError::internal("two_factor row missing"))?;
     let mut active: entity::ActiveModel = row.into();
     active.confirmed_at = Set(Some(when));
-    active.updated_at = Set(chrono::Utc::now());
+    active.updated_at = Set(crate::clock::now());
     active
         .update(conn)
         .await
@@ -1178,7 +1178,7 @@ async fn load_secret(user_id: &str) -> Result<Option<String>, FrameworkError> {
 /// validate. 30-second step matches the TOTP construction in
 /// [`check_code`] / enrollment.
 fn current_totp_timestep() -> i64 {
-    chrono::Utc::now().timestamp() / 30
+    crate::clock::now().timestamp() / 30
 }
 
 /// Best-effort record of a failed 2FA attempt against

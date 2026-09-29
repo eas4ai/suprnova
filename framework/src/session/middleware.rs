@@ -11,7 +11,6 @@ use secrecy::{ExposeSecret, SecretString};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::config::SessionConfig;
 use super::driver::DatabaseSessionDriver;
@@ -497,11 +496,10 @@ fn parse_session_cookie_payload(payload: &str) -> Option<(String, Option<u64>)> 
     Some((session_id.to_string(), Some(touched_at)))
 }
 
+/// The time of the touched-at stamp, from [`crate::clock::now`], so a test
+/// that moves the clock moves the stamp and the touch interval with it.
 fn unix_timestamp_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    u64::try_from(crate::clock::now().timestamp()).unwrap_or_default()
 }
 
 fn session_touch_is_due(last_touch: Option<u64>, now: u64, interval: std::time::Duration) -> bool {

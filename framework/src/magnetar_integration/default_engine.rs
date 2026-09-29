@@ -414,7 +414,7 @@ impl HostLifecycleDeduplication for SqlLifecycleDedup {
         let updated = lifecycle_deliveries::Entity::update_many()
             .col_expr(
                 lifecycle_deliveries::Column::DeliveredAt,
-                Expr::value(Some(chrono::Utc::now())),
+                Expr::value(Some(crate::clock::now())),
             )
             .col_expr(
                 lifecycle_deliveries::Column::LeaseId,
@@ -651,7 +651,7 @@ mod tests {
     async fn sql_lifecycle_ledger_survives_instances_and_reclaims_expired_leases() {
         let database = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
         magnetar::default_schema::migrate(&database).await.unwrap();
-        let now = chrono::Utc::now();
+        let now = crate::clock::now();
         let first = SqlLifecycleDedup::new(database.clone());
         assert_eq!(
             first

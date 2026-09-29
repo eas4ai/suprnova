@@ -62,7 +62,7 @@ pub use types::{StepStatus, WorkflowHandle, WorkflowStatus};
 use crate::config::Config;
 use crate::error::FrameworkError;
 use crate::workflow::types::ClaimedWorkflow;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::Duration as ChronoDuration;
 use futures::FutureExt;
 use rand::RngExt;
 use std::panic::AssertUnwindSafe;
@@ -526,7 +526,11 @@ async fn process_claimed_workflow(
         Err(err) => {
             if claimed.attempts < claimed.max_attempts {
                 let backoff = config.retry_backoff_secs * claimed.attempts as i64;
-                let next_run_at = Utc::now().naive_utc() + ChronoDuration::seconds(backoff);
+                // A worker claims the run when `next_run_at <= NOW()` of the
+                // database, so the retry is stamped from the wall clock: a
+                // test clock would move one side of that comparison only.
+                let wall_now = chrono::Utc::now().naive_utc();
+                let next_run_at = wall_now + ChronoDuration::seconds(backoff);
                 store::requeue(
                     claimed.id,
                     &err.to_string(),
@@ -635,7 +639,7 @@ mod tests {
         use crate::container::testing::TestContainer;
         use crate::database::DbConnection;
         use crate::database::config::DatabaseConfig;
-        use chrono::{Duration as ChronoDuration, Utc};
+        use chrono::Duration as ChronoDuration;
 
         let url = std::env::var("PG_TEST_URL").expect("set PG_TEST_URL to a disposable Postgres");
         let _guard = TestContainer::fake();
@@ -657,7 +661,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let slow_client_clock = Utc::now().naive_utc() - ChronoDuration::hours(1);
+        let slow_client_clock = crate::clock::now().naive_utc() - ChronoDuration::hours(1);
         assert!(
             store::refresh_lock_if_owned_at(
                 claim.id,
@@ -1646,7 +1650,7 @@ mod tests {
         let claimed = store::mark_running(handle.id(), "worker-a", Duration::from_secs(30))
             .await
             .expect("claim workflow");
-        let now = chrono::Utc::now()
+        let now = crate::clock::now()
             .naive_utc()
             .with_nanosecond(0)
             .expect("zero nanoseconds is valid");

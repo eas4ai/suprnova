@@ -176,7 +176,9 @@ async fn forget(store: &dyn FailedJobStore, raw: &str) -> Result<Report, Framewo
 }
 
 async fn flush(store: &dyn FailedJobStore, hours: Option<u64>) -> Result<Report, FrameworkError> {
-    let cutoff = hours.map(|h| cutoff_before(Utc::now(), h)).transpose()?;
+    let cutoff = hours
+        .map(|h| cutoff_before(crate::clock::now(), h))
+        .transpose()?;
     let deleted = store.flush(cutoff).await?;
     let line = match hours {
         Some(h) => format!("{deleted} failed job(s) older than {h} hour(s) deleted."),
@@ -457,7 +459,7 @@ mod tests {
 
     #[test]
     fn a_cutoff_past_the_calendar_is_refused() {
-        let error = cutoff_before(Utc::now(), u64::MAX).unwrap_err();
+        let error = cutoff_before(crate::clock::now(), u64::MAX).unwrap_err();
         assert!(error.to_string().contains("is out of range"));
     }
 

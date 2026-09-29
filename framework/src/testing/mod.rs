@@ -5,6 +5,7 @@
 //! - `describe!` and `test!` macros for test organization
 //! - `TestDatabase` for isolated database tests
 //! - `TestContainer` for dependency injection in tests
+//! - `TestClock` to move the time the framework reads
 //!
 //! # Example
 //!
@@ -26,6 +27,8 @@ mod expect;
 mod inertia;
 mod response;
 
+#[cfg(any(test, feature = "testing"))]
+pub use crate::clock::{TestClock, TestClockGuard, TestClockHandle};
 pub use crate::container::testing::{TestContainer, TestContainerGuard};
 pub use crate::database::testing::TestDatabase;
 pub use expect::{Expect, set_current_test_name};

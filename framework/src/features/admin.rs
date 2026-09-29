@@ -123,7 +123,7 @@ pub async fn upsert(
     // the chrono value the same way the cast pipeline does so the
     // round-trip back through the FeatureRow conversion below parses
     // cleanly.
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = crate::clock::now().to_rfc3339();
 
     let active = entity::ActiveModel {
         name: Set(name.to_string()),

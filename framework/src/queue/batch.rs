@@ -346,7 +346,7 @@ impl BatchRepository for MemoryBatchRepository {
             .lock()
             .map_err(|_| FrameworkError::internal("batch repo poisoned"))?;
         if let Some(e) = g.get_mut(id) {
-            e.batch.cancelled_at = Some(Utc::now());
+            e.batch.cancelled_at = Some(crate::clock::now());
         }
         Ok(())
     }
@@ -376,7 +376,7 @@ impl BatchRepository for MemoryBatchRepository {
         if entry.batch.finished_at.is_some() {
             return Ok(None);
         }
-        let claimed_at = Utc::now();
+        let claimed_at = crate::clock::now();
         entry.batch.finished_at = Some(claimed_at);
         Ok(Some(TerminalCallbackClaim {
             finished_at: claimed_at,
@@ -712,7 +712,7 @@ impl DatabaseBatchRepository {
                     sea_orm::Value::from(id.to_string()),
                     sea_orm::Value::from(job_id.to_string()),
                     sea_orm::Value::from(i32::from(failed)),
-                    sea_orm::Value::from(Utc::now().timestamp()),
+                    sea_orm::Value::from(crate::clock::now().timestamp()),
                 ],
             ))
             .await
@@ -755,7 +755,7 @@ impl DatabaseBatchRepository {
                     placeholder(self.backend(), 2)?
                 ),
                 vec![
-                    sea_orm::Value::from(Utc::now().timestamp()),
+                    sea_orm::Value::from(crate::clock::now().timestamp()),
                     sea_orm::Value::from(id.to_string()),
                 ],
             ))
@@ -990,7 +990,7 @@ impl BatchRepository for DatabaseBatchRepository {
         }
 
         let cancelled_at = self.locked_cancelled_at(&txn, id).await?;
-        let claimed_at_secs = Utc::now().timestamp();
+        let claimed_at_secs = crate::clock::now().timestamp();
         let claimed_at = timestamp(claimed_at_secs, "finished_at")?;
         let result = txn
             .execute_raw(sea_orm::Statement::from_sql_and_values(
@@ -1263,7 +1263,7 @@ impl PendingBatch {
             self.debounce_rejected.push(J::job_name().to_string());
             return self;
         }
-        let now = Utc::now();
+        let now = crate::clock::now();
         // The context of the code that adds the job, which is the code that
         // builds the batch: `add` is where the envelope is built.
         let context = crate::context::Context::dehydrate();
@@ -1406,7 +1406,7 @@ impl PendingBatch {
             failed_jobs: 0,
             failed_job_ids: Vec::new(),
             options: self.options.clone(),
-            created_at: Utc::now(),
+            created_at: crate::clock::now(),
             cancelled_at: None,
             finished_at: None,
         };
@@ -1519,7 +1519,7 @@ mod tests {
             failed_jobs: 0,
             failed_job_ids: Vec::new(),
             options: BatchOptions::default(),
-            created_at: Utc::now(),
+            created_at: crate::clock::now(),
             cancelled_at: None,
             finished_at: None,
         }

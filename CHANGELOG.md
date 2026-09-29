@@ -564,6 +564,29 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   it, and `preventing_lazy_loading()` reads the switch. The switch is off by
   default, and with it off every read behaves as before. Turn it on in the
   bootstrap of the application outside production.
+- **A test moves the clock the framework reads: `suprnova::clock::now()` and
+  `suprnova::testing::TestClock`.** The framework read the wall clock with
+  `chrono::Utc::now()` in about 170 places, and `tokio::time::pause` moves the
+  timers of Tokio and not those reads, so a test of a signed URL that expires,
+  a session that idles out, a scheduled task that is due, a window of a rate
+  limit or a model that becomes prunable had to sleep. Every such read goes
+  through `suprnova::clock::now()`, and so do the timestamps the `#[model]`
+  macro writes, the due check of a scheduled task without a time zone and its
+  one-run-a-minute gate, and the touched-at stamp of the session. Without the
+  `testing` feature `now()` is `Utc::now()` and nothing else. With it,
+  `TestClock::freeze()` and `TestClock::travel_to(at)` stop the clock of the
+  current thread at a time you move with `advance` and `set`, until the guard
+  is dropped, and `TestClock::scope(at, |clock| future)` holds a time across
+  `.await` and on a multi-thread runtime; `clock.run(future)` carries it into
+  a task you spawn. A clock of one test never reaches another test that runs
+  beside it. Three reads keep the wall clock, because each is compared with a
+  clock a test cannot move: the health endpoint, the retry time of a workflow
+  run (compared with `NOW()` of the database), and the window of the
+  `RateLimiter` facade (its cache key expires in real time). The in-memory
+  driver of `RateLimitMiddleware` measures with `tokio::time::Instant`, which
+  `tokio::time::pause` moves, and the Redis driver reads the clock. What you
+  have to change: code of your own that reads the time for a decision reads
+  `suprnova::clock::now()` when its tests should be able to move it.
 
 ### Changed
 

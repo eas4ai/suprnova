@@ -507,7 +507,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         quote! {
             // Always bump updated_at - covers create() and
             // update(attrs) in one place.
-            let __suprnova_now = ::suprnova::chrono::Utc::now();
+            let __suprnova_now = ::suprnova::clock::now();
             am.#updated_col_ident = ::suprnova::sea_orm::Set(
                 <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
                     &__suprnova_now,
@@ -537,7 +537,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // already populated updated_at with the in-memory value.
             // Overwrite with NOW so save() bumps the column even when
             // the caller didn't touch it.
-            let __suprnova_now = ::suprnova::chrono::Utc::now();
+            let __suprnova_now = ::suprnova::clock::now();
             am.#updated_col_ident = ::suprnova::sea_orm::Set(
                 <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
                     &__suprnova_now,
@@ -566,7 +566,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     {
                         return ::core::result::Result::Ok(());
                     }
-                    let now = ::suprnova::chrono::Utc::now();
+                    let now = ::suprnova::clock::now();
                     let mut am = <<#module_name::Entity as ::suprnova::EntityTrait>::ActiveModel
                         as ::core::default::Default>::default();
                     am.#pk_ident = ::suprnova::sea_orm::ActiveValue::Unchanged(self.#pk_ident.clone());
@@ -714,7 +714,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                         &::suprnova::eloquent::Attrs::new(),
                     )?;
 
-                    let now = ::core::option::Option::Some(::suprnova::chrono::Utc::now());
+                    let now = ::core::option::Option::Some(::suprnova::clock::now());
                     let deleted_at =
                         <#soft_delete_cast as ::suprnova::eloquent::casts::Cast>::to_storage(&now)?;
                     let table = <Self as ::suprnova::eloquent::EloquentModel>::TABLE;
@@ -994,7 +994,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 ::core::option::Option<::suprnova::eloquent::SoftDeleteStamp>,
                 ::suprnova::FrameworkError,
             > {
-                let now = ::suprnova::chrono::Utc::now();
+                let now = ::suprnova::clock::now();
                 let deleted_at = ::suprnova::sea_orm::Value::from(
                     <#soft_delete_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
                         &::core::option::Option::Some(now),

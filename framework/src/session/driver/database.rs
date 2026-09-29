@@ -60,7 +60,7 @@ impl SessionStore for DatabaseSessionDriver {
             // range; `checked_add` is belt-and-suspenders against a
             // far-future stored timestamp, which reads as still active
             // (fail closed) rather than panicking.
-            let now = chrono::Utc::now().naive_utc();
+            let now = crate::clock::now().naive_utc();
             let expiry = session
                 .last_activity
                 .checked_add_signed(chrono::Duration::seconds(self.lifetime_secs_capped()))
@@ -112,7 +112,7 @@ impl SessionStore for DatabaseSessionDriver {
         let payload = serde_json::to_string(&session.data)
             .map_err(|e| FrameworkError::internal(format!("Session serialize error: {}", e)))?;
 
-        let now = chrono::Utc::now().naive_utc();
+        let now = crate::clock::now().naive_utc();
 
         // SEC-02(c): a session that was read from an existing row under
         // `session.id` must be written back as an UPDATE-ONLY - no
@@ -214,7 +214,7 @@ impl SessionStore for DatabaseSessionDriver {
             user_id: Set(session.user_id.clone()),
             payload: Set(payload),
             csrf_token: Set(session.csrf_token.clone()),
-            last_activity: Set(chrono::Utc::now().naive_utc()),
+            last_activity: Set(crate::clock::now().naive_utc()),
         };
 
         let transaction = db.inner().begin().await.map_err(|e| {
@@ -319,7 +319,7 @@ impl SessionStore for DatabaseSessionDriver {
         // A cutoff outside the database's date range must not be bound into
         // SQL: chrono accepts negative years that MySQL cannot encode and
         // dates older than PostgreSQL's timestamp range.
-        let Some(threshold) = chrono::Utc::now()
+        let Some(threshold) = crate::clock::now()
             .naive_utc()
             .checked_sub_signed(chrono::Duration::seconds(self.lifetime_secs_capped()))
         else {

@@ -12,7 +12,6 @@ use crate::database::placeholder::placeholder_list;
 use crate::error::FrameworkError;
 use crate::notifications::{Channel, DynNotification};
 use async_trait::async_trait;
-use chrono::Utc;
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use uuid::Uuid;
 
@@ -51,7 +50,7 @@ impl Channel for DatabaseChannel {
         notification: &dyn DynNotification,
     ) -> Result<(), FrameworkError> {
         let id = Uuid::new_v4().to_string();
-        let now = Utc::now().naive_utc();
+        let now = crate::clock::now().naive_utc();
         let data_json = serde_json::to_string(&notification.data())
             .map_err(|e| FrameworkError::internal(format!("DatabaseChannel encode: {e}")))?;
 

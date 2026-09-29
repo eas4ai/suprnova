@@ -990,7 +990,7 @@ async fn attach_one<C: ConnectionTrait>(
         });
     }
     if with_timestamps {
-        let now = chrono::Utc::now();
+        let now = crate::clock::now();
         if !columns.iter().any(|c| c == "created_at") {
             columns.push("created_at".to_string());
             values.push(Some(sea_orm::Value::ChronoDateTimeUtc(Some(now))));

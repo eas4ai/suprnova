@@ -950,7 +950,7 @@ where
         if Self::TOUCHES.is_empty() || crate::eloquent::touches_disabled() {
             return Ok(());
         }
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = crate::clock::now().to_rfc3339();
 
         for relation in Self::TOUCHES {
             let Some(entry) = crate::eloquent::find_relation::<Self>(relation) else {

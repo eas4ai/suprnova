@@ -197,7 +197,7 @@ impl TaskEntry {
         match self.timezone {
             Some(tz) => self
                 .expression
-                .is_due_at(chrono::Utc::now().with_timezone(&tz)),
+                .is_due_at(crate::clock::now().with_timezone(&tz)),
             None => self.expression.is_due(),
         }
     }
@@ -399,7 +399,7 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
     // executing the same minute-level task multiple times) is closed at
     // this gate; cross-process protection is layered on by Cache::lock
     // inside the `without_overlapping` branch below.
-    let now_minute = chrono::Local::now().timestamp() / 60;
+    let now_minute = crate::clock::now().timestamp() / 60;
     let prev_minute = state
         .last_run_minute
         .fetch_max(now_minute, Ordering::SeqCst);

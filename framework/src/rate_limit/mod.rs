@@ -10,7 +10,7 @@
 //!
 //! The in-memory driver uses `tokio::time::Instant` so `start_paused`
 //! tests can use `tokio::time::advance` to drive the clock. The Redis
-//! driver uses `chrono::Utc::now().timestamp_millis()` with a Lua
+//! driver uses `suprnova::clock::now().timestamp_millis()` with a Lua
 //! script for atomic check-and-record. [`RateLimitMiddleware`] is the
 //! HTTP wrapper around the driver and is what most application code
 //! reaches for to throttle a route.

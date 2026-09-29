@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 /// One captured push: the envelope id the fake assigned, the serialized
 /// job payload, and the `available_at` the facade dispatched with.
-/// `Queue::push` records `Utc::now()`; the `*_later` variants record the
+/// `Queue::push` records `suprnova::clock::now()`; the `*_later` variants record the
 /// explicit timestamp.
 ///
 /// The id exists so a test can join a captured push to the `JobQueued`
@@ -493,7 +493,7 @@ pub fn assert_pushed_on_connection<J: Job>(connection: &str) {
 pub fn pending_jobs() -> Vec<InspectedJob> {
     let g = lock_fake();
     let store = g.as_ref().expect("Queue::fake() must be active");
-    let now = Utc::now();
+    let now = crate::clock::now();
     store
         .pushed
         .values()
@@ -510,7 +510,7 @@ pub fn pending_jobs() -> Vec<InspectedJob> {
 pub fn delayed_jobs() -> Vec<InspectedJob> {
     let g = lock_fake();
     let store = g.as_ref().expect("Queue::fake() must be active");
-    let now = Utc::now();
+    let now = crate::clock::now();
     store
         .pushed
         .values()
