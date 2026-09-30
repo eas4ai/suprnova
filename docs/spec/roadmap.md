@@ -85,7 +85,7 @@ components in waves, the advanced components last, the datatable closing.
 8. session-request-serialization - DONE 2026-09-15 (built at `36287efb`
    after the race was pinned at `1a6c1dda`; the combined check after the
    kernel change exposed a webkit race in the input OTP's mirror and a
-   PKG-007 lint on LIVE-020, fixed at `fa3e572e` and `ee60c838`; receipts
+   Cairn lint on LIVE-020, fixed at `fa3e572e` and `ee60c838`; receipts
    `04be1af0`, `e5607e60`, `5c561a51`, review `7103d526`) - session
    blocking through the cache lock driver, the session write race the
    live-native review recorded as an open finding and the developer routed
