@@ -90,6 +90,15 @@
 //! is the storage a `#[suprnova::model]` uses for a `DateTime<Utc>` field
 //! with no declared cast. Their documentation gives the reason.
 //!
+//! For native date-time columns, Laravel's names:
+//!
+//! | Method | Columns | Model cast |
+//! |---|---|---|
+//! | `timestamps_tz()` | nullable `created_at`, `updated_at`, with a time zone | `AsNativeDateTime` |
+//! | `soft_deletes_tz()` | nullable `deleted_at`, with a time zone | `AsOptionalNativeDateTime` |
+//! | `datetimes()` | nullable `created_at`, `updated_at`, without a time zone | `AsNaiveDateTime` |
+//! | `soft_deletes_datetime()` | nullable `deleted_at`, without a time zone | `AsOptionalNaiveDateTime` |
+//!
 //! # Indexes and foreign keys
 //!
 //! `t.index(&["a", "b"])` is named `{table}_{columns}_index` and

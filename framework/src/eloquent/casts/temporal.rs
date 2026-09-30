@@ -1,10 +1,29 @@
 //! Temporal casts - dates, datetimes, immutable variants, and
 //! Unix-epoch timestamps.
 //!
-//! All non-timestamp temporals store as `TEXT` so the round-trip is
-//! backend-agnostic - SQLite stores datetimes as strings natively
-//! and Postgres / MySQL accept ISO-8601 / RFC-3339 strings transparently
-//! through SeaORM's `Value::String` boundary.
+//! The default temporals store as `TEXT` so the round-trip is
+//! backend-agnostic: every backend stores and returns the RFC 3339
+//! string unchanged. That text belongs in a text column. A text
+//! parameter reaches a native date-time column only on MySQL; Postgres
+//! refuses to bind text to `timestamp` or `timestamp with time zone`.
+//!
+//! ## Native columns
+//!
+//! [`AsNativeDateTime`] and [`AsNaiveDateTime`] (and their `Optional`
+//! forms) store a `DateTime<Utc>` in a native column instead, so the
+//! database's own date functions work on it:
+//!
+//! - `AsNativeDateTime` keeps the zone: `timestamp with time zone` on
+//!   Postgres, `TIMESTAMP` or `DATETIME` on MySQL, text on SQLite. The
+//!   schema builder's `timestamp_tz`, `native_timestamps` and
+//!   `native_soft_deletes` create such columns.
+//! - `AsNaiveDateTime` stores the UTC wall clock in a column without a
+//!   zone: `timestamp` on Postgres, `DATETIME` or `TIMESTAMP` on MySQL,
+//!   text on SQLite. It is the cast for a table Laravel's `timestamps()`
+//!   created on Postgres, which the zone-aware cast cannot read.
+//!
+//! A cast names its storage type, and the database driver checks it
+//! against the column, so pick the one that matches the column.
 //!
 //! ## Immutable variants
 //!
@@ -267,6 +286,181 @@ impl IntoDynCast for AsOptionalDateTime {
     }
 }
 
+// ---- AsNativeDateTime -------------------------------------------------------
+
+/// Cast `chrono::DateTime<Utc>` ↔ a native date-time column that keeps
+/// the zone: `timestamp with time zone` on Postgres, `TIMESTAMP` or
+/// `DATETIME` on MySQL, text on SQLite.
+///
+/// A `DateTime<Utc>` field defaults to the text [`AsDateTime`], so
+/// declare this one per field:
+/// `#[model(casts = { created_at = AsNativeDateTime, updated_at = AsNativeDateTime })]`.
+/// The model's automatic timestamps, `touch`, soft deletes and the
+/// touch of an owner all store through the declared cast.
+pub struct AsNativeDateTime;
+
+impl Cast for AsNativeDateTime {
+    type Runtime = DateTime<Utc>;
+    type Storage = DateTime<Utc>;
+
+    fn to_storage(v: &DateTime<Utc>) -> Result<DateTime<Utc>, FrameworkError> {
+        Ok(*v)
+    }
+
+    fn from_storage(s: &DateTime<Utc>) -> Result<DateTime<Utc>, FrameworkError> {
+        Ok(*s)
+    }
+}
+
+impl IntoDynCast for AsNativeDateTime {
+    fn into_dyn() -> Box<dyn DynCast> {
+        Box::new(NativeDateTimeDyn("AsNativeDateTime"))
+    }
+}
+
+// ---- AsOptionalNativeDateTime -------------------------------------------------
+
+/// The nullable form of [`AsNativeDateTime`], for `deleted_at` and any
+/// other `Option<DateTime<Utc>>` field in a native column.
+pub struct AsOptionalNativeDateTime;
+
+impl Cast for AsOptionalNativeDateTime {
+    type Runtime = Option<DateTime<Utc>>;
+    type Storage = Option<DateTime<Utc>>;
+
+    fn to_storage(v: &Option<DateTime<Utc>>) -> Result<Option<DateTime<Utc>>, FrameworkError> {
+        Ok(*v)
+    }
+
+    fn from_storage(s: &Option<DateTime<Utc>>) -> Result<Option<DateTime<Utc>>, FrameworkError> {
+        Ok(*s)
+    }
+}
+
+impl IntoDynCast for AsOptionalNativeDateTime {
+    fn into_dyn() -> Box<dyn DynCast> {
+        Box::new(OptionalNativeDateTimeDyn("AsOptionalNativeDateTime"))
+    }
+}
+
+// ---- AsNaiveDateTime ----------------------------------------------------------
+
+/// Cast `chrono::DateTime<Utc>` ↔ a native date-time column without a
+/// zone, holding the UTC wall clock: `timestamp` on Postgres, `DATETIME`
+/// or `TIMESTAMP` on MySQL, text on SQLite.
+///
+/// This is the shape Laravel's `timestamps()` creates on Postgres. The
+/// Postgres driver will not read such a column as a zone-aware value,
+/// so [`AsNativeDateTime`] cannot serve it. Declare it per field, like
+/// [`AsNativeDateTime`].
+pub struct AsNaiveDateTime;
+
+impl Cast for AsNaiveDateTime {
+    type Runtime = DateTime<Utc>;
+    type Storage = NaiveDateTime;
+
+    fn to_storage(v: &DateTime<Utc>) -> Result<NaiveDateTime, FrameworkError> {
+        Ok(v.naive_utc())
+    }
+
+    fn from_storage(s: &NaiveDateTime) -> Result<DateTime<Utc>, FrameworkError> {
+        Ok(s.and_utc())
+    }
+}
+
+impl IntoDynCast for AsNaiveDateTime {
+    fn into_dyn() -> Box<dyn DynCast> {
+        Box::new(NativeDateTimeDyn("AsNaiveDateTime"))
+    }
+}
+
+// ---- AsOptionalNaiveDateTime --------------------------------------------------
+
+/// The nullable form of [`AsNaiveDateTime`].
+pub struct AsOptionalNaiveDateTime;
+
+impl Cast for AsOptionalNaiveDateTime {
+    type Runtime = Option<DateTime<Utc>>;
+    type Storage = Option<NaiveDateTime>;
+
+    fn to_storage(v: &Option<DateTime<Utc>>) -> Result<Option<NaiveDateTime>, FrameworkError> {
+        Ok(v.map(|moment| moment.naive_utc()))
+    }
+
+    fn from_storage(s: &Option<NaiveDateTime>) -> Result<Option<DateTime<Utc>>, FrameworkError> {
+        Ok(s.map(|moment| moment.and_utc()))
+    }
+}
+
+impl IntoDynCast for AsOptionalNaiveDateTime {
+    fn into_dyn() -> Box<dyn DynCast> {
+        Box::new(OptionalNativeDateTimeDyn("AsOptionalNaiveDateTime"))
+    }
+}
+
+/// Read a native column's JSON as a UTC moment. The row arrives as the
+/// driver renders it: RFC 3339 for a zone-aware column, and a bare
+/// `YYYY-MM-DD HH:MM:SS` or `YYYY-MM-DDTHH:MM:SS` for one without a zone,
+/// which the naive casts store in UTC.
+fn native_json_moment(cast: &'static str, raw: &str) -> Result<DateTime<Utc>, FrameworkError> {
+    parse_database_datetime(raw)
+        .or_else(|_| {
+            NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%.f")
+                .map(|moment| moment.and_utc())
+        })
+        .map_err(|e| FrameworkError::validation(cast, format!("{e}")))
+}
+
+/// The erased form of the native casts, named for its errors.
+struct NativeDateTimeDyn(&'static str);
+
+impl DynCast for NativeDateTimeDyn {
+    fn from_storage_json(
+        &self,
+        v: &serde_json::Value,
+    ) -> Result<serde_json::Value, FrameworkError> {
+        let raw = v.as_str().ok_or_else(|| {
+            FrameworkError::validation(
+                self.0,
+                format!("dyn from_storage: expected JSON string, got {v:?}"),
+            )
+        })?;
+        serde_json::to_value(native_json_moment(self.0, raw)?)
+            .map_err(|e| FrameworkError::internal(format!("{}: re-serialize failed: {e}", self.0)))
+    }
+
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
+        Ok(v.clone())
+    }
+}
+
+/// The erased form of the nullable native casts.
+struct OptionalNativeDateTimeDyn(&'static str);
+
+impl DynCast for OptionalNativeDateTimeDyn {
+    fn from_storage_json(
+        &self,
+        v: &serde_json::Value,
+    ) -> Result<serde_json::Value, FrameworkError> {
+        match v {
+            serde_json::Value::Null => Ok(serde_json::Value::Null),
+            serde_json::Value::String(raw) => {
+                serde_json::to_value(native_json_moment(self.0, raw)?).map_err(|e| {
+                    FrameworkError::internal(format!("{}: re-serialize failed: {e}", self.0))
+                })
+            }
+            other => Err(FrameworkError::validation(
+                self.0,
+                format!("expected null or string, got {other:?}"),
+            )),
+        }
+    }
+
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
+        Ok(v.clone())
+    }
+}
+
 // ---- AsTimestamp ----------------------------------------------------------
 
 /// Cast Unix-epoch `i64` ↔ `INTEGER`. Use when you want numeric
@@ -310,7 +504,58 @@ impl IntoDynCast for AsTimestamp {
 
 #[cfg(test)]
 mod tests {
-    use super::{AsDateTime, AsOptionalDateTime, Cast};
+    use super::{
+        AsDateTime, AsNaiveDateTime, AsNativeDateTime, AsOptionalDateTime, AsOptionalNaiveDateTime,
+        AsOptionalNativeDateTime, Cast, IntoDynCast,
+    };
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
+
+    #[test]
+    fn the_naive_casts_store_the_utc_wall_clock() {
+        let moment = Utc.with_ymd_and_hms(2031, 3, 14, 9, 30, 0).unwrap();
+        let stored = AsNaiveDateTime::to_storage(&moment).unwrap();
+        assert_eq!(stored.to_string(), "2031-03-14 09:30:00");
+        assert_eq!(AsNaiveDateTime::from_storage(&stored).unwrap(), moment);
+        assert_eq!(
+            AsOptionalNaiveDateTime::to_storage(&Some(moment)).unwrap(),
+            Some(stored)
+        );
+        assert_eq!(AsOptionalNaiveDateTime::to_storage(&None).unwrap(), None);
+        assert_eq!(AsNativeDateTime::to_storage(&moment).unwrap(), moment);
+        assert_eq!(AsOptionalNativeDateTime::from_storage(&None).unwrap(), None);
+    }
+
+    /// `with_casts` reads a row as JSON, where a zone-aware column arrives as
+    /// RFC 3339 and one without a zone as a bare date and time.
+    #[test]
+    fn the_native_dyn_casts_read_both_column_shapes_as_utc() {
+        let want = json!("2031-03-14T09:30:00Z");
+        for cast in [AsNativeDateTime::into_dyn(), AsNaiveDateTime::into_dyn()] {
+            for stored in [
+                json!("2031-03-14T09:30:00+00:00"),
+                json!("2031-03-14T11:30:00+02:00"),
+                json!("2031-03-14T09:30:00"),
+                json!("2031-03-14 09:30:00"),
+            ] {
+                assert_eq!(cast.from_storage_json(&stored).unwrap(), want, "{stored}");
+            }
+            assert!(cast.from_storage_json(&json!(1)).is_err());
+            assert!(cast.from_storage_json(&json!("soon")).is_err());
+        }
+        for cast in [
+            AsOptionalNativeDateTime::into_dyn(),
+            AsOptionalNaiveDateTime::into_dyn(),
+        ] {
+            assert_eq!(cast.from_storage_json(&json!(null)).unwrap(), json!(null));
+            assert_eq!(
+                cast.from_storage_json(&json!("2031-03-14 09:30:00"))
+                    .unwrap(),
+                want
+            );
+            assert!(cast.from_storage_json(&json!(true)).is_err());
+        }
+    }
 
     #[test]
     fn datetime_accepts_postgres_current_timestamp_text() {

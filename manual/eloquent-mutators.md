@@ -218,6 +218,53 @@ pub struct Subscription {
 }
 ```
 
+### Native date-time casts
+
+The casts above store text. These four store a `DateTime<Utc>` in a native
+date-time column, so the database's own date functions - grouping by
+month, date arithmetic, `NOW()` comparisons - work on it:
+
+| Cast | Field | Column |
+|---|---|---|
+| `AsNativeDateTime` | `DateTime<Utc>` | `timestamp with time zone` on Postgres, `TIMESTAMP` or `DATETIME` on MySQL, text on SQLite |
+| `AsOptionalNativeDateTime` | `Option<DateTime<Utc>>` | the same, nullable |
+| `AsNaiveDateTime` | `DateTime<Utc>` | a column without a zone holding the UTC wall clock: `timestamp` on Postgres, `DATETIME` or `TIMESTAMP` on MySQL, text on SQLite |
+| `AsOptionalNaiveDateTime` | `Option<DateTime<Utc>>` | the same, nullable |
+
+A `DateTime<Utc>` field defaults to `AsDateTime`, so declare these per
+field. The model's automatic timestamps, `touch()`, soft deletes and the
+touch of an owner all store through the declared cast.
+
+```rust
+#[model(
+    table = "orders",
+    casts = {
+        created_at = AsNativeDateTime,
+        updated_at = AsNativeDateTime,
+    },
+)]
+pub struct Order {
+    pub id: i64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+```
+
+Pick the cast that matches the column: the database driver checks the
+storage type against it. A table Laravel's `timestamps()` created is
+`TIMESTAMP` on MySQL, which either cast reads, and `timestamp without time
+zone` on Postgres, which only `AsNaiveDateTime` reads. The schema builder's
+`timestamps_tz()` and `datetimes()` create the two shapes (see
+[Migrations](migrations.md#timestamps-and-soft-deletes)).
+
+#### Why Suprnova diverges
+
+Laravel's `datetime` cast writes whatever column the migration made, because
+PHP binds every value as text and each database converts it. Postgres
+refuses a text parameter for a date-time column, so a Suprnova cast names
+its storage type and the default stays the text that round-trips on every
+backend.
+
 ### `AsTimestamp`
 
 Unix-epoch `i64` ↔ `INTEGER`. Use when the column is queried as a

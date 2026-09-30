@@ -45,6 +45,13 @@ async fn mysql_model_round_trip() {
 #[tokio::test]
 #[serial]
 #[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_native_timestamps_round_trip() {
+    cases::native_timestamps_round_trip(&connect_mysql().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
 async fn mysql_foreign_key_cascade() {
     cases::foreign_key_cascade(&connect_mysql().await).await;
 }

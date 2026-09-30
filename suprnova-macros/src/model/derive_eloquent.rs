@@ -548,6 +548,24 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         quote! {}
     };
 
+    // An owner's `updated_at` is written by the child's touch cascade, not
+    // by the owner's own save, so the owner tells the cascade how its cast
+    // stores the time. Without timestamps the trait default stands: the
+    // cascade skips such an owner before it would ask.
+    let updated_at_storage_impl = if timestamps_enabled {
+        quote! {
+            fn updated_at_storage(
+                now: &::suprnova::chrono::DateTime<::suprnova::chrono::Utc>,
+            ) -> ::core::result::Result<::suprnova::sea_orm::Value, ::suprnova::FrameworkError> {
+                ::core::result::Result::Ok(::suprnova::sea_orm::Value::from(
+                    <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(now)?,
+                ))
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let touchable_impl = if timestamps_enabled {
         quote! {
             #[::suprnova::__async_trait::async_trait]
@@ -1049,6 +1067,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // the pair via `touch_column`.
             const HAS_TIMESTAMPS: bool = #timestamps_enabled;
             const UPDATED_AT_COLUMN: &'static str = #updated_at_col;
+            #updated_at_storage_impl
 
             // Per-model default connection override. Lives on
             // `EloquentModel` (not the heavier `Model` trait) so

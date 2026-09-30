@@ -950,7 +950,7 @@ where
         if Self::TOUCHES.is_empty() || crate::eloquent::touches_disabled() {
             return Ok(());
         }
-        let now = crate::clock::now().to_rfc3339();
+        let now = crate::clock::now();
 
         for relation in Self::TOUCHES {
             let Some(entry) = crate::eloquent::find_relation::<Self>(relation) else {
@@ -974,9 +974,9 @@ where
                 touch_owner_row(
                     exec,
                     tx_handle,
-                    &now,
                     OwnerRow {
                         table: owner.table,
+                        updated_at: (owner.updated_at_storage)(&now)?,
                         updated_at_column: owner.updated_at_column,
                         key_column: owner.key_column,
                         soft_deletes_column: owner.soft_deletes_column,
@@ -1004,9 +1004,9 @@ where
             touch_owner_row(
                 exec,
                 tx_handle,
-                &now,
                 OwnerRow {
                     table: entry.target_table,
+                    updated_at: (entry.related_updated_at_storage)(&now)?,
                     updated_at_column: entry.related_updated_at_column,
                     key_column: entry.parent_key,
                     soft_deletes_column: entry.related_soft_deletes_column,
@@ -1803,6 +1803,8 @@ fn unregistered_touch(table: &str, relation: &str) -> FrameworkError {
 /// `MorphTo` owner from the model its child's `<name>_type` names.
 struct OwnerRow<'a> {
     table: &'a str,
+    /// The time, as the owner's `updated_at` cast stores it.
+    updated_at: sea_orm::Value,
     updated_at_column: &'a str,
     key_column: &'a str,
     soft_deletes_column: &'a str,
@@ -1821,7 +1823,6 @@ struct OwnerRow<'a> {
 async fn touch_owner_row(
     exec: &crate::database::transaction::ExecutorChoice,
     tx_handle: Option<&crate::database::transaction::TxHandle>,
-    now: &str,
     owner: OwnerRow<'_>,
 ) -> Result<(), FrameworkError> {
     let backend = exec.backend();
@@ -1847,10 +1848,7 @@ async fn touch_owner_row(
     exec.run(sea_orm::Statement::from_sql_and_values(
         backend,
         &sql,
-        vec![
-            sea_orm::Value::String(Some(now.to_string())),
-            json_value_to_sea_value(owner.key),
-        ],
+        vec![owner.updated_at, json_value_to_sea_value(owner.key)],
     ))
     .await
     .map_err(|e| FrameworkError::database(e.to_string()))?;

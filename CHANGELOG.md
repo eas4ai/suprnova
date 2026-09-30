@@ -8,6 +8,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Native date-time columns for models.** `AsNativeDateTime` and
+  `AsOptionalNativeDateTime` store a `DateTime<Utc>` in a column that keeps
+  the zone (`timestamp with time zone` on Postgres, `TIMESTAMP` or
+  `DATETIME` on MySQL); `AsNaiveDateTime` and `AsOptionalNaiveDateTime`
+  store the UTC wall clock in one without a zone, the shape Laravel's
+  `timestamps()` creates on Postgres. The schema builder gains Laravel's
+  `timestamps_tz()`, `soft_deletes_tz()`, `datetimes()` and
+  `soft_deletes_datetime()` to create them. Automatic timestamps, `touch()`,
+  soft deletes and the touch of an owner all store through the declared
+  cast. `suprnova generate-types` now emits chrono's date and time types as
+  `string` instead of `unknown`. This landed on main after the `v3.0.0` tag.
 - **Laravel's `exists`, `accepted`, `digits`, `date_format`, date
   comparison, `prohibited`, `missing` and `exclude_if` rules.** `Exists`
   checks that a value names a row, scoped with `where_eq`; `check_value`
@@ -806,6 +817,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Touching an owner writes the owner's own date-time storage.** The
+  `touches` cascade bound the time as RFC 3339 text whatever the owner's
+  `updated_at` cast stored, which Postgres refuses for a native date-time
+  column. It now stores the time through the owner's cast. This fix landed
+  on main after the `v3.0.0` tag.
+- **The temporal casts' documentation said Postgres accepts RFC 3339 text
+  for a native column.** It refuses a text parameter for `timestamp` and
+  `timestamp with time zone`; the module documentation now says so and
+  points to the native casts. This fix landed on main after the `v3.0.0`
+  tag.
 - **`Unique` and `Exists` keep database errors out of the response.** A
   database rule that could not run returned the driver's error as its
   validation message, and a validation message is rendered into the 422

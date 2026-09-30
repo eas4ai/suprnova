@@ -554,3 +554,33 @@ fn a_plain_struct_whose_fields_serde_all_skips_is_an_empty_interface() {
     let props = extract_block(&ts, "MarkerProps");
     assert!(props.contains("  marker: Marker;"), "got: {props}");
 }
+
+/// A Data Object carrying a model's dates: chrono serializes each one as
+/// ISO 8601 text, so each is a `string`, not `unknown`.
+#[test]
+fn chrono_dates_are_strings() {
+    const CHRONO_SRC: &str = r#"
+use chrono::{DateTime, NaiveDate, Utc};
+
+#[derive(suprnova::Data)]
+pub struct EventDto {
+    pub starts_at: DateTime<Utc>,
+    pub ends_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    pub day: NaiveDate,
+    pub local: chrono::NaiveDateTime,
+    pub doors: chrono::NaiveTime,
+}
+"#;
+    let ts = generate_types_string(ScanInput::Source(CHRONO_SRC));
+    let dto = extract_block(&ts, "EventDto");
+    for line in [
+        "  starts_at: string;",
+        "  ends_at: string | null;",
+        "  day: string;",
+        "  local: string;",
+        "  doors: string;",
+    ] {
+        assert!(dto.contains(line), "{line} in {dto}");
+    }
+    assert!(!ts.contains("unknown"), "got: {ts}");
+}

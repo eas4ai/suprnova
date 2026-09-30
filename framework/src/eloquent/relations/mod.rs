@@ -317,6 +317,31 @@ pub struct RelationEntry {
     /// "this owner disclaims timestamps, skip it" - not an error and
     /// not a write.
     pub related_updated_at_column: &'static str,
+    /// The owner's [`EloquentModel::updated_at_storage`]: how the parent-touch
+    /// cascade turns the time into the value the owner's `updated_at` cast
+    /// stores. A `MorphTo` entry carries [`morph_to_touch_storage`], which
+    /// the cascade never calls: it reads the storage of the model a row's
+    /// `<name>_type` names instead.
+    ///
+    /// [`EloquentModel::updated_at_storage`]: crate::eloquent::EloquentModel::updated_at_storage
+    pub related_updated_at_storage: TouchStorage,
+}
+
+/// How a model stores a moment in its `updated_at` column; see
+/// [`RelationEntry::related_updated_at_storage`].
+pub type TouchStorage =
+    fn(&chrono::DateTime<chrono::Utc>) -> Result<sea_orm::Value, crate::FrameworkError>;
+
+/// The [`RelationEntry::related_updated_at_storage`] of a `MorphTo`
+/// relation, whose owner model varies by row. The cascade uses the
+/// storage of the owner a row names, never this; it refuses rather than
+/// guess a column type.
+pub fn morph_to_touch_storage(
+    _now: &chrono::DateTime<chrono::Utc>,
+) -> Result<sea_orm::Value, crate::FrameworkError> {
+    Err(crate::FrameworkError::internal(
+        "a MorphTo relation has no single owner model; its touch storage comes from the owner the row names",
+    ))
 }
 
 inventory::collect!(RelationEntry);

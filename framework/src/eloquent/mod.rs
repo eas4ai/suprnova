@@ -33,7 +33,8 @@ pub use builder::{Builder, Direction, IntoColumn, IntoVal};
 pub use casts::{
     AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal, AsEncrypted,
     AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat, AsHashed,
-    AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsObject, AsOptionalDateTime, AsString,
+    AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsNaiveDateTime, AsNativeDateTime,
+    AsObject, AsOptionalDateTime, AsOptionalNaiveDateTime, AsOptionalNativeDateTime, AsString,
     AsTimestamp, Cast, DynCast, IntoDynCast,
 };
 pub use collection::Collection;
@@ -163,6 +164,21 @@ pub trait EloquentModel: Sized {
     /// `#[model(updated_at = "...")]`. Meaningful only when
     /// [`Self::HAS_TIMESTAMPS`] is `true`.
     const UPDATED_AT_COLUMN: &'static str = "updated_at";
+
+    /// The value this model's `updated_at` column stores for `now`,
+    /// through the column's cast. The parent-touch cascade writes an
+    /// owner's column with it, so an owner with a native date-time
+    /// column receives a native value and not the text the default
+    /// cast stores, which Postgres refuses for such a column.
+    ///
+    /// The default is that RFC 3339 text; the macro overrides it with the
+    /// declared cast of the `updated_at` field.
+    #[doc(hidden)]
+    fn updated_at_storage(
+        now: &chrono::DateTime<chrono::Utc>,
+    ) -> Result<sea_orm::Value, crate::FrameworkError> {
+        Ok(sea_orm::Value::String(Some(now.to_rfc3339())))
+    }
 
     /// The per-model default connection name. Returns `None` for
     /// models that don't declare `#[model(connection = "...")]`; the

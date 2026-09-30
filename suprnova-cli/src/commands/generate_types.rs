@@ -152,6 +152,23 @@ impl InertiaPropsVisitor {
                     return RustType::Json;
                 }
 
+                // chrono's date and time types serialize as ISO 8601 text.
+                // `DateTime` is claimed only with its zone argument or through
+                // `chrono::`, so a project type of that name still resolves
+                // as its own struct.
+                let chrono_path = type_path.path.segments.len() == 2
+                    && type_path.path.segments[0].ident == "chrono";
+                match ident.as_str() {
+                    "NaiveDate" | "NaiveDateTime" | "NaiveTime" => return RustType::String,
+                    "DateTime"
+                        if chrono_path
+                            || matches!(segment.arguments, PathArguments::AngleBracketed(_)) =>
+                    {
+                        return RustType::String;
+                    }
+                    _ => {}
+                }
+
                 match ident.as_str() {
                     "String" | "str" => RustType::String,
                     "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32"

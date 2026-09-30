@@ -31,6 +31,11 @@ async fn sqlite_model_round_trip() {
 }
 
 #[tokio::test]
+async fn sqlite_native_timestamps_round_trip() {
+    cases::native_timestamps_round_trip(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
 async fn sqlite_foreign_key_cascade() {
     cases::foreign_key_cascade(&connect_sqlite().await).await;
 }

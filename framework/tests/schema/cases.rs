@@ -2,17 +2,78 @@
 //! tables it uses before it starts (so a rerun on the same database works),
 //! and drops them again when it ends.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as TimeDelta, TimeZone, Utc};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, DbErr, Statement};
 use sea_orm_migration::prelude::*;
 use suprnova::schema::Schema;
-use suprnova::testing::TestContainer;
-use suprnova::{DbConnection, Model, attrs, model};
+use suprnova::testing::{TestClock, TestContainer};
+use suprnova::{DbConnection, Model, Touchable, attrs, model};
 
 use super::catalog;
 
 #[model(table = "schema_posts", soft_deletes, fillable = ["title"])]
 pub struct SchemaPost {
+    pub id: i64,
+    pub title: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+/// An owner whose timestamps are native columns that keep the zone.
+#[model(
+    table = "schema_native_owners",
+    fillable = ["name"],
+    casts = {
+        created_at = suprnova::AsNativeDateTime,
+        updated_at = suprnova::AsNativeDateTime,
+    },
+)]
+pub struct NativeOwner {
+    pub id: i64,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A soft-deleting child of [`NativeOwner`] that touches it, all three of
+/// its timestamps native.
+#[model(
+    table = "schema_native_posts",
+    soft_deletes,
+    fillable = ["native_owner_id", "title"],
+    touches = ["owner"],
+    relations = {
+        owner: BelongsTo<NativeOwner> { fk = "native_owner_id" },
+    },
+    casts = {
+        created_at = suprnova::AsNativeDateTime,
+        updated_at = suprnova::AsNativeDateTime,
+        deleted_at = suprnova::AsOptionalNativeDateTime,
+    },
+)]
+pub struct NativePost {
+    pub id: i64,
+    pub native_owner_id: i64,
+    pub title: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+/// Timestamps in native columns without a zone, the shape Laravel's
+/// `timestamps()` makes on Postgres.
+#[model(
+    table = "schema_naive_posts",
+    soft_deletes,
+    fillable = ["title"],
+    casts = {
+        created_at = suprnova::AsNaiveDateTime,
+        updated_at = suprnova::AsNaiveDateTime,
+        deleted_at = suprnova::AsOptionalNaiveDateTime,
+    },
+)]
+pub struct NaivePost {
     pub id: i64,
     pub title: String,
     pub created_at: DateTime<Utc>,
@@ -352,6 +413,188 @@ pub async fn model_round_trip(conn: &DatabaseConnection) {
     );
 
     drop_tables(conn, &["schema_posts"]).await;
+}
+
+// ---- native date-time columns --------------------------------------------
+
+/// The date-time family a native column reports in the catalog.
+fn native_family(backend: DbBackend, zoned: bool) -> &'static str {
+    match (backend, zoned) {
+        (DbBackend::Postgres, true) => "timestamp with time zone",
+        (DbBackend::Postgres, false) => "timestamp without time zone",
+        (DbBackend::MySql, true) => "timestamp",
+        (DbBackend::MySql, false) => "datetime",
+        // SQLite has no date-time type; the declared name gives the column
+        // text affinity.
+        _ => "text",
+    }
+}
+
+fn assert_native_columns(columns: &[catalog::CatalogColumn], names: &[&str], family: &str) {
+    for name in names {
+        let column = columns
+            .iter()
+            .find(|column| column.name == *name)
+            .unwrap_or_else(|| panic!("column {name} exists"));
+        assert_eq!(column.family, family, "column {name}");
+        assert!(column.nullable, "column {name} is nullable, as in Laravel");
+    }
+}
+
+/// `timestamps_tz()` / `soft_deletes_tz()` and `datetimes()` /
+/// `soft_deletes_datetime()` make native columns, and models cast with
+/// `AsNativeDateTime` and `AsNaiveDateTime` create, update, touch, soft
+/// delete and restore rows in them. A child's write touches its owner's
+/// native `updated_at` through the owner's cast: before that, the cascade
+/// bound RFC 3339 text, which Postgres refuses for such a column.
+///
+/// The clock stands at whole seconds, so a MySQL `timestamp` of precision
+/// 0 holds each moment exactly.
+pub async fn native_timestamps_round_trip(conn: &DatabaseConnection) {
+    let manager = SchemaManager::new(conn);
+    let backend = conn.get_database_backend();
+    drop_tables(
+        conn,
+        &[
+            "schema_native_posts",
+            "schema_native_owners",
+            "schema_naive_posts",
+        ],
+    )
+    .await;
+    Schema::create(&manager, "schema_native_owners", |t| {
+        t.id();
+        t.string("name");
+        t.timestamps_tz();
+    })
+    .await
+    .expect("create schema_native_owners");
+    Schema::create(&manager, "schema_native_posts", |t| {
+        t.id();
+        t.big_integer("native_owner_id");
+        t.string("title");
+        t.timestamps_tz();
+        t.soft_deletes_tz();
+    })
+    .await
+    .expect("create schema_native_posts");
+    Schema::create(&manager, "schema_naive_posts", |t| {
+        t.id();
+        t.string("title");
+        t.datetimes();
+        t.soft_deletes_datetime();
+    })
+    .await
+    .expect("create schema_naive_posts");
+
+    let zoned = native_family(backend, true);
+    let naive = native_family(backend, false);
+    assert_native_columns(
+        &catalog::columns(conn, "schema_native_posts").await,
+        &["created_at", "updated_at", "deleted_at"],
+        zoned,
+    );
+    assert_native_columns(
+        &catalog::columns(conn, "schema_naive_posts").await,
+        &["created_at", "updated_at", "deleted_at"],
+        naive,
+    );
+
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(conn.clone()));
+    let at =
+        |hour: i64| Utc.with_ymd_and_hms(2031, 3, 14, 0, 0, 0).unwrap() + TimeDelta::hours(hour);
+    let clock = TestClock::travel_to(at(9));
+
+    // Zone-aware columns, with an owner touched through its own cast.
+    let owner = NativeOwner::create(attrs! { name: "ada" })
+        .await
+        .expect("create owner");
+    clock.set(at(10));
+    let post = NativePost::create(attrs! { native_owner_id: owner.id, title: "first" })
+        .await
+        .expect("create post");
+    let owner = NativeOwner::find(owner.id)
+        .await
+        .expect("find owner")
+        .expect("the owner");
+    assert_eq!(owner.created_at, at(9));
+    assert_eq!(owner.updated_at, at(10), "the post touched its owner");
+
+    let read = NativePost::find(post.id)
+        .await
+        .expect("find post")
+        .expect("the post");
+    assert_eq!((read.created_at, read.updated_at), (at(10), at(10)));
+
+    clock.set(at(11));
+    read.touch().await.expect("touch");
+    let touched = NativePost::find(post.id)
+        .await
+        .expect("find after touch")
+        .expect("the post");
+    assert_eq!(touched.updated_at, at(11));
+
+    clock.set(at(12));
+    touched.delete().await.expect("soft delete");
+    let trashed = NativePost::with_trashed()
+        .filter("id", post.id)
+        .first()
+        .await
+        .expect("with_trashed")
+        .expect("the soft deleted post");
+    assert_eq!(trashed.deleted_at, Some(at(12)));
+    let owner = NativeOwner::find(owner.id)
+        .await
+        .expect("find owner")
+        .expect("the owner");
+    assert_eq!(owner.updated_at, at(12), "the delete touched the owner");
+
+    trashed.restore().await.expect("restore");
+    let restored = NativePost::find(post.id)
+        .await
+        .expect("find after restore")
+        .expect("the restored post");
+    assert!(restored.deleted_at.is_none());
+
+    // Columns without a zone hold the UTC wall clock.
+    clock.set(at(13));
+    let naive_post = NaivePost::create(attrs! { title: "naive" })
+        .await
+        .expect("create naive post");
+    let read = NaivePost::find(naive_post.id)
+        .await
+        .expect("find naive post")
+        .expect("the naive post");
+    assert_eq!((read.created_at, read.updated_at), (at(13), at(13)));
+    clock.set(at(14));
+    read.touch().await.expect("touch naive");
+    clock.set(at(15));
+    let read = NaivePost::find(naive_post.id)
+        .await
+        .expect("find naive after touch")
+        .expect("the naive post");
+    assert_eq!(read.updated_at, at(14));
+    read.delete().await.expect("soft delete naive");
+    let trashed = NaivePost::with_trashed()
+        .filter("id", naive_post.id)
+        .first()
+        .await
+        .expect("with_trashed naive")
+        .expect("the soft deleted naive post");
+    assert_eq!(trashed.deleted_at, Some(at(15)));
+    trashed.restore().await.expect("restore naive");
+
+    drop(clock);
+    drop_tables(
+        conn,
+        &[
+            "schema_native_posts",
+            "schema_native_owners",
+            "schema_naive_posts",
+        ],
+    )
+    .await;
 }
 
 // ---- foreign keys ----------------------------------------------------------

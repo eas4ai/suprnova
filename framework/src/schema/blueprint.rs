@@ -267,9 +267,10 @@ impl Blueprint {
     /// type `DateTime<Utc>` with no declared cast uses the `AsDateTime` cast,
     /// which stores RFC 3339 text, and Postgres refuses a text parameter for a
     /// `timestamp` column. A string column is the one type that round-trips
-    /// on all three backends. For a native column, declare it with
-    /// [`timestamp_tz`](Blueprint::timestamp_tz) and give the model field a
-    /// cast whose storage is a native date-time.
+    /// on all three backends. For native columns use
+    /// [`timestamps_tz`](Blueprint::timestamps_tz) with the
+    /// `AsNativeDateTime` cast, or [`datetimes`](Blueprint::datetimes)
+    /// with `AsNaiveDateTime`.
     pub fn timestamps(&mut self) {
         self.column("created_at", ColumnKind::String);
         self.column("updated_at", ColumnKind::String);
@@ -280,10 +281,48 @@ impl Blueprint {
     ///
     /// It is a `VARCHAR(255)` column on every backend, for the reason given
     /// at [`timestamps`](Blueprint::timestamps): the default model cast
-    /// stores RFC 3339 text. Use [`timestamp_tz`](Blueprint::timestamp_tz)
-    /// with a native cast on the model field for a native column.
+    /// stores RFC 3339 text. For a native column use
+    /// [`soft_deletes_tz`](Blueprint::soft_deletes_tz) or
+    /// [`soft_deletes_datetime`](Blueprint::soft_deletes_datetime).
     pub fn soft_deletes(&mut self) {
         self.column("deleted_at", ColumnKind::String).nullable();
+    }
+
+    /// Laravel's `timestampsTz`: nullable `created_at` and `updated_at`
+    /// columns that keep the zone - `timestamp with time zone` on Postgres,
+    /// `timestamp` on MySQL, text on SQLite.
+    ///
+    /// The model's fields need the native cast, because a `DateTime<Utc>`
+    /// field defaults to RFC 3339 text, which Postgres refuses for these
+    /// columns: `casts = { created_at = AsNativeDateTime, updated_at =
+    /// AsNativeDateTime }`.
+    pub fn timestamps_tz(&mut self) {
+        self.column("created_at", ColumnKind::TimestampTz)
+            .nullable();
+        self.column("updated_at", ColumnKind::TimestampTz)
+            .nullable();
+    }
+
+    /// Laravel's `datetimes`: nullable `created_at` and `updated_at`
+    /// columns without a zone - `timestamp` on Postgres, `DATETIME` on
+    /// MySQL, text on SQLite - holding the UTC wall clock through the
+    /// `AsNaiveDateTime` cast.
+    pub fn datetimes(&mut self) {
+        self.column("created_at", ColumnKind::DateTime).nullable();
+        self.column("updated_at", ColumnKind::DateTime).nullable();
+    }
+
+    /// Laravel's `softDeletesTz`: a nullable `deleted_at` that keeps the
+    /// zone, for a model field cast with `AsOptionalNativeDateTime`.
+    pub fn soft_deletes_tz(&mut self) {
+        self.column("deleted_at", ColumnKind::TimestampTz)
+            .nullable();
+    }
+
+    /// Laravel's `softDeletesDatetime`: a nullable `deleted_at` without a
+    /// zone, for a model field cast with `AsOptionalNaiveDateTime`.
+    pub fn soft_deletes_datetime(&mut self) {
+        self.column("deleted_at", ColumnKind::DateTime).nullable();
     }
 
     /// Creates an index over `columns`, named `{table}_{columns}_index`. The

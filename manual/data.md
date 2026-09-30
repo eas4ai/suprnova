@@ -350,6 +350,7 @@ SeaORM entities need a custom `IsRelationLoaded` impl that consults their loaded
 `suprnova generate-types` emits TypeScript definitions for every `#[derive(Data)]` (and legacy `#[derive(InertiaProps)]`) struct. Behavior:
 
 - `Field<T>` → `field?: T | null`
+- chrono's `DateTime`, `NaiveDate`, `NaiveDateTime` and `NaiveTime` → `string`, the ISO 8601 text they serialize as
 - `Prop` → `field?: T` (the lazy may-be-absent semantic; the `?` carries it, the type itself is plain)
 - `#[data(input_only)]` → excluded from output type
 - `#[data(output_only)]` → excluded from input type

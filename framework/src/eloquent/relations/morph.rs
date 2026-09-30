@@ -619,6 +619,8 @@ pub struct MorphOwner {
     /// The owner model's soft-delete column, `""` when it has none. A
     /// trashed owner is not touched.
     pub(crate) soft_deletes_column: &'static str,
+    /// How the owner's `updated_at` cast stores the time.
+    pub(crate) updated_at_storage: super::TouchStorage,
     /// The owner's key, the JSON value of the child's `<name>_id`
     /// column, bound as it is.
     pub(crate) key: serde_json::Value,
@@ -638,6 +640,7 @@ impl MorphOwner {
             key_column: T::PRIMARY_KEY,
             updated_at_column: super::touch_column(T::HAS_TIMESTAMPS, T::UPDATED_AT_COLUMN),
             soft_deletes_column: T::SOFT_DELETES_COLUMN,
+            updated_at_storage: T::updated_at_storage,
             key,
         }
     }

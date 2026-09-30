@@ -154,7 +154,9 @@ The builder differs from Laravel's `Blueprint` in four ways:
 - `timestamps()` and `soft_deletes()` create string columns, not native
   date-time columns. A model stores a `DateTime<Utc>` field as RFC 3339 text
   by default, and the string column is the one type that round-trips on all
-  three backends.
+  three backends. Laravel's native forms are `timestamps_tz()`,
+  `datetimes()`, `soft_deletes_tz()` and `soft_deletes_datetime()`, paired
+  with a native cast on the model.
 - There is no table rebuild on SQLite. An operation SQLite cannot run in place
   returns an error that names the operation.
 - There is no column type change. `Schema::table` adds, renames and drops
@@ -296,11 +298,50 @@ with no declared cast uses `AsDateTime`, which stores RFC 3339 text
 parameter for a `timestamp` column. A string column round-trips on all three
 backends.
 
-For a native column, declare it with `t.timestamp_tz("published_at")` and give
-the model field a cast of your own. The [`Cast`](eloquent-mutators.md) trait
-sets the storage type, so its `Storage` must be a native date-time type.
-No shipped cast has one: `AsDateTime` and the other temporal casts store text,
-and `AsTimestamp` stores an integer.
+For native date-time columns, use Laravel's helpers and give the model's
+fields the matching cast (see
+[Native date-time casts](eloquent-mutators.md#native-date-time-casts)):
+
+| Helper | Columns | Cast |
+|---|---|---|
+| `t.timestamps_tz()` | nullable `created_at`, `updated_at` with a time zone | `AsNativeDateTime` |
+| `t.soft_deletes_tz()` | nullable `deleted_at` with a time zone | `AsOptionalNativeDateTime` |
+| `t.datetimes()` | nullable `created_at`, `updated_at` without a time zone | `AsNaiveDateTime` |
+| `t.soft_deletes_datetime()` | nullable `deleted_at` without a time zone | `AsOptionalNaiveDateTime` |
+
+```rust
+Schema::create(manager, "orders", |t| {
+    t.id();
+    t.string("reference");
+    t.timestamps_tz();
+    t.soft_deletes_tz();
+})
+.await?;
+```
+
+```rust
+use suprnova::{AsNativeDateTime, AsOptionalNativeDateTime, model};
+
+#[model(
+    table = "orders",
+    soft_deletes,
+    casts = {
+        created_at = AsNativeDateTime,
+        updated_at = AsNativeDateTime,
+        deleted_at = AsOptionalNativeDateTime,
+    },
+)]
+pub struct Order {
+    pub id: i64,
+    pub reference: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+```
+
+Declare a single native column with `t.timestamp_tz("published_at")` or
+`t.date_time("published_at")` and the same casts.
 
 ### Indexes and foreign keys
 
