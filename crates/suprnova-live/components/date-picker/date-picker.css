@@ -8,7 +8,24 @@
     font-weight: var(--sn-font-weight-medium);
   }
 
+  /* The strips' disclosure is a plain toggle under the date input. The base
+     layer draws every details as a bordered surface for the collapsible,
+     which here read as a second, empty field. */
+  .sn-date-strips {
+    margin: var(--sn-space-0);
+    border: none;
+    border-radius: var(--sn-radius-none);
+    background: none;
+  }
+
+  .sn-date-strips > :not(summary) {
+    padding: var(--sn-space-0);
+  }
+
   .sn-date-summary {
+    padding: var(--sn-space-0);
+    font-size: var(--sn-font-size-sm);
+    font-weight: inherit;
     cursor: pointer;
     color: var(--sn-color-text-muted);
   }
