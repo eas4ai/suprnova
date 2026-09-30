@@ -57,6 +57,8 @@
     /* color: interaction */
     --sn-color-link: var(--sn-color-primary);
     --sn-color-link-hover: var(--sn-color-primary-hover);
+    --sn-color-accent: var(--sn-color-primary);
+    --sn-color-on-accent: var(--sn-color-primary-contrast);
     --sn-color-focus-ring: oklch(62% 0.19 262);
     --sn-color-selection: var(--sn-color-primary-soft);
     --sn-color-backdrop: oklch(20% 0.02 260 / 0.55);
