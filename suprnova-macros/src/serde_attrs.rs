@@ -95,8 +95,6 @@ impl RenameRule {
 struct PerDirection<T> {
     serialize: Option<T>,
     deserialize: Option<T>,
-    /// Written in the split form with a `deserialize = ..` half.
-    split_deserialize: bool,
 }
 
 impl<T> Default for PerDirection<T> {
@@ -104,7 +102,6 @@ impl<T> Default for PerDirection<T> {
         Self {
             serialize: None,
             deserialize: None,
-            split_deserialize: false,
         }
     }
 }
@@ -114,21 +111,24 @@ impl<T: Clone> PerDirection<T> {
         Self {
             serialize: Some(value.clone()),
             deserialize: Some(value),
-            split_deserialize: false,
         }
     }
 }
 
-/// Reads `name = "x"` or `name(serialize = "x", deserialize = "y")`.
+/// Reads `name = "x"` or `name(serialize = "x", deserialize = "y")` into
+/// `out`. A half the attribute does not name keeps what an earlier
+/// attribute gave it, as serde merges `rename(serialize = ..)` and
+/// `rename(deserialize = ..)` written in two attributes.
 fn per_direction<T: Clone>(
     meta: &ParseNestedMeta<'_>,
+    out: &mut PerDirection<T>,
     parse: impl Fn(&LitStr) -> syn::Result<T>,
-) -> syn::Result<PerDirection<T>> {
+) -> syn::Result<()> {
     if meta.input.peek(syn::Token![=]) {
         let lit: LitStr = meta.value()?.parse()?;
-        return Ok(PerDirection::both(parse(&lit)?));
+        *out = PerDirection::both(parse(&lit)?);
+        return Ok(());
     }
-    let mut out = PerDirection::default();
     meta.parse_nested_meta(|inner| {
         let lit: LitStr = inner.value()?.parse()?;
         if inner.path.is_ident("serialize") {
@@ -136,13 +136,11 @@ fn per_direction<T: Clone>(
             Ok(())
         } else if inner.path.is_ident("deserialize") {
             out.deserialize = Some(parse(&lit)?);
-            out.split_deserialize = true;
             Ok(())
         } else {
             Err(inner.error("expected `serialize` or `deserialize`"))
         }
-    })?;
-    Ok(out)
+    })
 }
 
 /// What to do with a serde attribute the derive does not read. The
@@ -189,8 +187,7 @@ fn container_with(attrs: &[Attribute], unknown: Unknown<'_>) -> syn::Result<Cont
     for attr in attrs.iter().filter(|attr| attr.path().is_ident("serde")) {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("rename_all") {
-                out.rename_all = per_direction(&meta, RenameRule::parse)?;
-                return Ok(());
+                return per_direction(&meta, &mut out.rename_all, RenameRule::parse);
             }
             match unknown {
                 Unknown::Ignore => skip_meta(&meta),
@@ -220,7 +217,7 @@ fn parse_field_serde(field: &Field, unknown: Unknown<'_>) -> syn::Result<FieldSe
     {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("rename") {
-                out.rename = per_direction(&meta, |lit| Ok(lit.value()))?;
+                per_direction(&meta, &mut out.rename, |lit| Ok(lit.value()))?;
             } else if meta.path.is_ident("skip") {
                 out.skip_serializing = true;
                 out.skip_deserializing = true;
@@ -253,11 +250,6 @@ pub(crate) struct FieldNames {
     pub(crate) deserialize: String,
     pub(crate) skip_serializing: bool,
     pub(crate) skip_deserializing: bool,
-    /// The attributes name the field for deserialization apart from
-    /// serialization: a `deserialize = ..` half of `rename` or
-    /// `rename_all`, or `skip_deserializing` without `skip_serializing`.
-    /// A derive that only serializes refuses it: it would do nothing.
-    pub(crate) deserialize_only_attribute: bool,
 }
 
 /// The names serde's own derive would give `field`: the field name without
@@ -301,9 +293,6 @@ fn names_with(
         deserialize: name(&serde.rename.deserialize, container.rename_all.deserialize),
         skip_serializing: serde.skip_serializing,
         skip_deserializing: serde.skip_deserializing,
-        deserialize_only_attribute: serde.rename.split_deserialize
-            || container.rename_all.split_deserialize
-            || (serde.skip_deserializing && !serde.skip_serializing),
     })
 }
 
@@ -356,6 +345,17 @@ mod tests {
         assert_eq!(
             (got.serialize.as_str(), got.deserialize.as_str()),
             ("display_name", "display-name")
+        );
+    }
+
+    #[test]
+    fn split_halves_in_two_attributes_merge() {
+        let got = names(
+            "struct S { #[serde(rename(serialize = \"out\"))] #[serde(rename(deserialize = \"in\"))] a: String }",
+        );
+        assert_eq!(
+            (got.serialize.as_str(), got.deserialize.as_str()),
+            ("out", "in")
         );
     }
 

@@ -53,7 +53,17 @@ fn registry() -> &'static HashMap<&'static str, &'static [InputField]> {
             // Two types with one name (two crates of the same name, or two
             // same-named types in one function body) cannot both be looked
             // up: the later entry wins, so say so.
-            if registry.insert(type_name, entry.fields).is_some() {
+            // One struct may register twice through two derives, with the same
+            // fields; only a different field list is a collision.
+            let differs = |earlier: &[InputField]| {
+                earlier.len() != entry.fields.len()
+                    || earlier.iter().zip(entry.fields).any(|(a, b)| {
+                        a.rust != b.rust || a.input != b.input
+                    })
+            };
+            if let Some(earlier) = registry.insert(type_name, entry.fields)
+                && differs(earlier)
+            {
                 tracing::warn!(
                     target: "suprnova::data",
                     type_name,

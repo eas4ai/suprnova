@@ -148,7 +148,7 @@ pub fn derive_input_names(input: proc_macro::TokenStream) -> proc_macro::TokenSt
         Ok(Some(registration)) => registration.into(),
         Ok(None) => syn::Error::new_spanned(
             &input.ident,
-            "#[derive(InputNames)] needs a struct with named fields and no generic parameters",
+            "#[derive(InputNames)] needs a struct with named fields and no generic or lifetime parameters",
         )
         .to_compile_error()
         .into(),

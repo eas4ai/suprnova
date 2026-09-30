@@ -78,16 +78,17 @@
 //! }
 //! ```
 //!
-//! and, with the same derives, an attribute that names a deserialize key on
-//! props that are never read, a route parameter on a field serde never
+//! and, with the same derives, two props under one key, an attribute
+//! `InertiaProps` does not apply, a route parameter on a field serde never
 //! reads, a rename rule serde does not know, a JSON:API member named `type`
-//! (JSON:API reserves it), and `InputNames` on a generic struct:
+//! (JSON:API reserves it), and `InputNames` on a generic or a tuple struct:
 //!
 //! ```compile_fail
 //! #[derive(suprnova::InertiaProps)]
 //! pub struct Home {
-//!     #[serde(rename(deserialize = "t"))]
 //!     pub title: String,
+//!     #[serde(rename = "title")]
+//!     pub heading: String,
 //! }
 //! ```
 //!
@@ -117,7 +118,7 @@
 //! ```
 //!
 //! ```compile_fail
-//! #[derive(suprnova::Data, suprnova::Validate)]
+//! #[derive(Debug, Clone, suprnova::Data, suprnova::Validate)]
 //! #[json_resource("tickets")]
 //! pub struct Ticket {
 //!     pub id: i64,
@@ -132,7 +133,28 @@
 //! }
 //! ```
 //!
-//! A struct that compiles, for contrast:
+//! ```compile_fail
+//! #[derive(suprnova::InputNames)]
+//! pub struct Pair(pub String, pub String);
+//! ```
+//!
+//! Structs that compile, for contrast:
+//!
+//! ```
+//! #[derive(Debug, Clone, suprnova::Data, suprnova::Validate)]
+//! #[json_resource("tickets")]
+//! pub struct Ticket {
+//!     pub id: i64,
+//!     pub kind: String,
+//! }
+//!
+//! #[derive(serde::Deserialize, suprnova::Validate, suprnova::InputNames)]
+//! #[serde(rename_all = "camelCase")]
+//! pub struct Address {
+//!     pub zip_code: String,
+//! }
+//! ```
+//!
 //!
 //! ```
 //! #[derive(suprnova::Data, suprnova::Validate)]

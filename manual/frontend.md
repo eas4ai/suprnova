@@ -89,8 +89,10 @@ pub async fn index(req: Request) -> Response {
 The props are sent under the names serde's attributes give them:
 `#[serde(rename_all = "camelCase")]` on the struct sends a `current_user`
 field as `currentUser`, and `#[serde(rename = "..")]`, `#[serde(skip)]` and
-`#[serde(skip_serializing)]` work on a field. The derive refuses any other
-serde attribute.
+`#[serde(skip_serializing)]` work on a field. Props are only serialized, so
+the derive reads the serialize side, and leaves a `deserialize` half and
+`skip_deserializing` to a `Deserialize` derive on the same struct. It
+refuses any other serde attribute, and two props under one key.
 
 A few things the macro does for you. First, it validates at compile
 time that the page component file actually exists under

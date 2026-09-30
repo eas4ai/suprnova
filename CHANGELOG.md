@@ -30,7 +30,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   there; it now takes effect, and an attribute the derive does not apply
   is a compile error. A localized validation message labels every key
   snake-cased, so a hand-written key `userID` reads "user i d", as in
-  Laravel; snake_case keys read as before.
+  Laravel; snake_case keys read as before. A `#[json_resource]` struct may
+  no longer send an attribute or relationship named `type` or `id`, which
+  JSON:API reserves: a struct with a custom `id_field` and a field named
+  `id`, or a field `r#type` (sent as `r#type` before), is now a compile
+  error that asks for a `#[serde(rename = "...")]`.
 - **The schema builder covers the rest of a Laravel migration.**
   `unsigned_id()` and `unsigned_foreign_id()` create Laravel's `BIGINT
   UNSIGNED` keys on MySQL, so a new table can point a foreign key at an

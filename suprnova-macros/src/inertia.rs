@@ -108,18 +108,9 @@ pub fn derive_inertia_props_impl(input: TokenStream) -> TokenStream {
             Ok(names) => names,
             Err(e) => return e.to_compile_error().into(),
         };
-        // Props are only ever serialized: an attribute that names the
-        // field for deserialization would do nothing, so it is refused
-        // like any other attribute the derive does not apply.
-        if names.deserialize_only_attribute {
-            return syn::Error::new_spanned(
-                field,
-                "#[derive(InertiaProps)] props are never read from input; drop the \
-                 `deserialize` half of `rename`/`rename_all`, or `skip_deserializing`",
-            )
-            .to_compile_error()
-            .into();
-        }
+        // Props are only serialized: the derive reads the serialize side of
+        // the attributes, and leaves a `deserialize` half and
+        // `skip_deserializing` to a `Deserialize` derive on the same struct.
         if names.skip_serializing {
             continue;
         }
