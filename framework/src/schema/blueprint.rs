@@ -362,10 +362,15 @@ impl Blueprint {
     /// ```
     pub fn enumeration(&mut self, name: &str, values: &[&str]) -> ColumnBuilder<'_> {
         let index = self.push_column(name, ColumnKind::Enum);
-        let repeated = values
-            .iter()
-            .enumerate()
-            .find(|(position, value)| values[..*position].contains(value));
+        // MySQL compares enumeration values without case and without
+        // trailing spaces, so `a`, `A` and `a ` are one value to it; the
+        // builder holds every backend to that, so the migration runs on all.
+        let comparable = |value: &str| value.trim_end_matches(' ').to_lowercase();
+        let repeated = values.iter().enumerate().find(|(position, value)| {
+            values[..*position]
+                .iter()
+                .any(|earlier| comparable(earlier) == comparable(value))
+        });
         if values.is_empty() {
             self.fault_on(index, "enumeration()", "give it at least one value");
         } else if let Some(value) = values.iter().find(|value| value.contains('\\')) {
@@ -374,7 +379,9 @@ impl Blueprint {
             );
             self.fault_on(index, "enumeration()", &reason);
         } else if let Some((_, value)) = repeated {
-            let reason = format!("the value `{value}` is listed twice");
+            let reason = format!(
+                "the value `{value}` is listed twice (MySQL ignores case and trailing spaces)"
+            );
             self.fault_on(index, "enumeration()", &reason);
         } else if let Some(spec) = self.columns.get_mut(index) {
             spec.allowed = values.iter().map(|value| (*value).to_owned()).collect();
@@ -533,8 +540,9 @@ impl Blueprint {
     ///
     /// In `Schema::create` the key is part of `CREATE TABLE`. In
     /// `Schema::table` it is added to the existing table on Postgres and
-    /// MySQL; SQLite cannot add a primary key to a table, and the call
-    /// fails there before any statement runs.
+    /// MySQL, which make the key's columns `NOT NULL` and fail if a row
+    /// holds `NULL` in one; SQLite cannot add a primary key to a table, and
+    /// the call fails there before any statement runs.
     pub fn primary(&mut self, columns: &[&str]) {
         self.commands.push(Command::AddPrimary(
             columns.iter().map(|column| (*column).to_owned()).collect(),

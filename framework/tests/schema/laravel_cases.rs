@@ -759,6 +759,18 @@ pub async fn laravel_misuse_is_refused(conn: &DatabaseConnection) {
             }),
         ),
         (
+            &["enumeration()", "`Draft ` is listed twice"],
+            Box::new(|t| {
+                t.enumeration("status", &["draft", "Draft "]);
+            }),
+        ),
+        (
+            &["default `paid`", "not one of its values"],
+            Box::new(|t| {
+                t.enumeration("status", &["draft"]).default("paid");
+            }),
+        ),
+        (
             &["enumeration()", "`draft` is listed twice"],
             Box::new(|t| {
                 t.enumeration("status", &["draft", "paid", "draft"]);
@@ -1015,6 +1027,23 @@ pub async fn action_shorthands(conn: &DatabaseConnection) {
         "no_action_on_update keeps a referenced key"
     );
 
+    // The catalog tells `restrict` from `no action`, which behave alike here.
+    for (child, expected) in [
+        (children[0], (None, Some("RESTRICT"))),
+        (children[1], (None, Some("NO ACTION"))),
+        (children[2], (Some("CASCADE"), None)),
+        (children[3], (Some("SET NULL"), None)),
+        (children[4], (Some("RESTRICT"), None)),
+        (children[5], (Some("NO ACTION"), None)),
+    ] {
+        let (update, delete) = foreign_key_rules(conn, child).await;
+        if let Some(rule) = expected.0 {
+            assert_eq!(update, rule, "{child} ON UPDATE");
+        }
+        if let Some(rule) = expected.1 {
+            assert_eq!(delete, rule, "{child} ON DELETE");
+        }
+    }
     assert!(
         manager
             .has_index(children[0], "schema_act_restrict_del_parent_id_index")
@@ -1031,6 +1060,40 @@ pub async fn action_shorthands(conn: &DatabaseConnection) {
     }
 
     drop_tables(conn, &all).await;
+}
+
+/// The `(ON UPDATE, ON DELETE)` rules of the one foreign key on `table`, as
+/// the catalog reports them, upper-cased.
+async fn foreign_key_rules(conn: &DatabaseConnection, table: &str) -> (String, String) {
+    let backend = conn.get_database_backend();
+    let sql = match backend {
+        DbBackend::Sqlite => {
+            format!("SELECT on_update AS u, on_delete AS d FROM pragma_foreign_key_list('{table}')")
+        }
+        DbBackend::Postgres => format!(
+            "SELECT rc.update_rule::text AS u, rc.delete_rule::text AS d \
+             FROM information_schema.referential_constraints rc \
+             JOIN information_schema.table_constraints tc \
+               ON rc.constraint_name = tc.constraint_name \
+              AND rc.constraint_schema = tc.constraint_schema \
+             WHERE tc.table_name = '{table}' AND tc.table_schema = current_schema()"
+        ),
+        _ => format!(
+            "SELECT CAST(update_rule AS CHAR) AS u, CAST(delete_rule AS CHAR) AS d \
+             FROM information_schema.referential_constraints \
+             WHERE table_name = '{table}' AND constraint_schema = DATABASE()"
+        ),
+    };
+    let row = conn
+        .query_one_raw(Statement::from_string(backend, sql))
+        .await
+        .expect("foreign key rules query")
+        .expect("the table's foreign key");
+    let rule = |column: &str| -> String {
+        let value: String = row.try_get("", column).expect("rule");
+        value.to_uppercase()
+    };
+    (rule("u"), rule("d"))
 }
 
 /// Reads one nullable integer column of every row, in `id` order.

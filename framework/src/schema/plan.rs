@@ -8,8 +8,9 @@
 use std::collections::HashSet;
 
 use sea_orm::sea_query::{
-    ForeignKey, ForeignKeyAction, ForeignKeyCreateStatement, ForeignKeyDropStatement, Index,
+    Expr, ForeignKey, ForeignKeyAction, ForeignKeyCreateStatement, ForeignKeyDropStatement, Index,
     IndexCreateStatement, IndexDropStatement, Table, TableAlterStatement, TableCreateStatement,
+    Value,
 };
 use sea_orm::{DbBackend, DbErr};
 
@@ -54,6 +55,16 @@ fn check_blueprint(blueprint: &Blueprint) -> Result<(), DbErr> {
         if column.name.is_empty() {
             return Err(refuse(format!(
                 "schema: cannot add a column with an empty name to table `{}`",
+                blueprint.table()
+            )));
+        }
+        if column.kind == ColumnKind::Enum
+            && let Some(Expr::Value(Value::String(Some(default)))) = &column.default
+            && !column.allowed.contains(default)
+        {
+            return Err(refuse(format!(
+                "schema: the default `{default}` of enumeration `{}` on table `{}` is not one of its values",
+                column.name,
                 blueprint.table()
             )));
         }
