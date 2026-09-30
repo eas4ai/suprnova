@@ -19,12 +19,7 @@ session, holds it through the handler and the session write, and releases
 it afterwards, with a bounded wait to acquire and a bounded hold, so a
 request's session write never overwrites a mutation that a request handled
 concurrently persisted after this one loaded the session.
-Falsifier: with blocking enabled, two requests carrying one session are
-handled concurrently, the first persists a flash after the second loaded
-the session, and the second's write removes the flash; or a request waits
-past the bounded acquire without a decisive outcome.
-Evidence: the defect without blocking, pinned by `framework/tests/session/blocking.rs` (`without_blocking_the_last_writer_wins_and_the_flash_is_lost`) from the backlog record the dogfood browser suite produced on 2026-09-15, retired at closure; `framework/src/session/middleware.rs` load and write paths; `framework/src/cache/mod.rs`, `Cache::lock`.
-Mechanism: `.cairn/mechanisms/session-blocking` (declared with the
-commitment `session-request-serialization`).
-Refines: none; parity with Laravel's `block()` middleware method.
+Falsifier: with blocking enabled, two requests carrying one session are handled concurrently, the first persists a flash after the second loaded the session, and the second's write removes the flash; or a request waits past the bounded acquire without a decisive outcome.
+Mechanism: `.cairn/mechanisms/session-blocking` (declared with the commitment `session-request-serialization`).
+Rationale: Evidence: the defect without blocking, pinned by `framework/tests/session/blocking.rs` (`without_blocking_the_last_writer_wins_and_the_flash_is_lost`) from the backlog record the dogfood browser suite produced on 2026-09-15, retired at closure; `framework/src/session/middleware.rs` load and write paths; `framework/src/cache/mod.rs`, `Cache::lock`. Refines: none; parity with Laravel's `block()` middleware method.
 Status: Agreed 2026-09-15
