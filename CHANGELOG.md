@@ -4,20 +4,6 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
-## 3.0.1 - 2026-09-30
-
-### Fixed
-
-- **The date picker, upload, account menu and notification bell follow the
-  theme.** Their stylesheets read `--sn-color-accent` and
-  `--sn-color-on-accent`, which the token stylesheet never defined, so the
-  selected day, the upload progress bar, the avatar and the unread count fell
-  back to inherited colors and ignored every theme. The token stylesheet now
-  defines both, from `--sn-color-primary` and `--sn-color-primary-contrast`,
-  and the Tailwind preset maps them as `accent` and `on-accent`. An
-  application that vendored these components with `live:add` needs no change:
-  the framework serves the corrected stylesheet.
-
 ## 3.0.0 - 2026-09-29
 
 ### Added
@@ -795,6 +781,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **The date picker, upload, account menu and notification bell follow the
+  theme.** Their stylesheets read `--sn-color-accent` and
+  `--sn-color-on-accent`, which the token stylesheet never defined, so the
+  selected day, the upload progress bar, the avatar and the unread count fell
+  back to inherited colors and ignored every theme. The token stylesheet now
+  defines both, from `--sn-color-primary` and `--sn-color-primary-contrast`,
+  and the Tailwind preset maps them as `accent` and `on-accent`. An
+  application that vendored these components with `live:add` needs no change:
+  the framework serves the corrected stylesheet. This fix landed on main after
+  the `v3.0.0` tag.
 - **Magnetar logs a lockout status failure before the sign-in fails closed.**
   The password plugin answered `503` when the lockout store could not report
   an identity's status and logged nothing, while the failed-attempt path
