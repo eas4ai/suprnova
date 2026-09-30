@@ -287,8 +287,15 @@ Where the databases differ, the builder does what Laravel does rather than
 refusing: `unsigned` applies on MySQL only, because Postgres and SQLite have no
 unsigned integers; `tiny_integer`, `medium_text` and `long_text` take the
 nearest type; and `enumeration` becomes a string with a `CHECK` off MySQL. An
-`enumeration` value may contain any character, a quote included; the builder
-escapes it.
+`enumeration` value may contain a quote; the builder escapes it. The migration
+fails on a value listed twice, which MySQL refuses, and on a value with a
+backslash, which MySQL and Postgres read differently depending on server
+settings.
+
+A model field has to match the column's width on Postgres, whose driver reads
+each integer type into one Rust type only: `i16` for `tiny_integer` and
+`small_integer`, `i32` for `integer`, `i64` for `big_integer`, `id()` and
+`foreign_id`. MySQL and SQLite read any signed integer column into `i64`.
 
 #### Laravel tables on MySQL
 
@@ -308,8 +315,9 @@ Schema::create(manager, "orders", |t| {
 ```
 
 A model reads an unsigned column into an unsigned field: the MySQL driver
-refuses to read `BIGINT UNSIGNED` into an `i64`. Declare the key `u64`, and
-foreign key fields `u64` to match:
+refuses to read an unsigned column into a signed type, `BIGINT UNSIGNED` into
+an `i64` included. `u64` reads any of them. Declare the key `u64`, and foreign
+key fields `u64` to match:
 
 ```rust
 #[model(table = "orders", key_type = "u64")]
@@ -334,7 +342,7 @@ Each column method returns a builder. Chain the modifiers on it.
 | `.primary()` | Makes this column the primary key. For a key over several columns, `t.primary(&[..])`. |
 | `.unsigned()` | `UNSIGNED` on MySQL, for an integer column. Ignored on Postgres and SQLite. On any other column type the migration fails. |
 | `.precision(n)` | Fractional-second digits, 0 to 6, of a `date_time`, `timestamp_tz` or `time` column. MySQL keeps whole seconds without it, Postgres microseconds; SQLite stores text and ignores it. |
-| `.use_current()` | Defaults a `date_time` or `timestamp_tz` column to the current time, `CURRENT_TIMESTAMP`. |
+| `.use_current()` | Defaults a `date_time` or `timestamp_tz` column to the current time, `CURRENT_TIMESTAMP`. Combined with `.default(..)` the migration fails. |
 | `.after(column)` | Places a column that `Schema::table` adds after `column`, on MySQL. Ignored on Postgres and SQLite; `Schema::create` refuses it, because MySQL does. |
 
 A native date-time column on MySQL keeps whole seconds unless you set a
@@ -432,7 +440,11 @@ Schema::create(manager, "comments", |t| {
   `.no_action_on_delete()` are short for `.on_delete(..)` with that action, and
   the `_on_update` forms for `.on_update(..)`.
 - `.name("orders_state_fk")` names the constraint instead of
-  `{table}_{column}_foreign`.
+  `{table}_{column}_foreign`. A name used twice in one closure, by two keys or
+  by a key and an index, fails the migration.
+- `.null_on_delete()` and `.null_on_update()` need a nullable column. On a
+  column the closure declares `NOT NULL` the migration fails before its first
+  statement, because MySQL would refuse the key only after adding the column.
 - `t.foreign("state_id")` creates a foreign key on a column declared on its own,
   or one the table already has in `Schema::table`. It takes the same
   `.references(table, column)`, `.constrained(table)`, `.name(..)` and actions,
@@ -463,7 +475,9 @@ one backend runs on all three.
 - `index`, `unique` and `drop_index(name)`
 - `foreign_id(..).constrained(..)`, `foreign(column)` and `drop_foreign(name)`
 - `drop_constrained_foreign_id(column)`, which drops the key
-  `{table}_{column}_foreign` and then the column
+  `{table}_{column}_foreign` and then the column. A key `.name(..)` named has
+  another name: drop it with `drop_foreign(name)` and the column with
+  `drop_column`.
 - `primary(&[..])`, on Postgres and MySQL
 
 ```rust
@@ -527,6 +541,13 @@ that an index, a unique constraint or a foreign key covers: record the
 - Laravel's `enum` is `enumeration`: `enum` is a Rust keyword.
 - `references(table, column)` takes both names in one call, where Laravel
   chains `->references($column)->on($table)`.
+- `.unsigned()` applies to integers only. Laravel also lets it mark a decimal
+  or floating point column; MySQL deprecated that in 8.0.17.
+- Laravel's timestamp columns default to whole seconds (`timestamp(0)`) on
+  Postgres. The builder keeps each database's own default, microseconds on
+  Postgres and whole seconds on MySQL, unless `.precision(n)` sets one.
+- `use_current()` together with `.default(..)` fails the migration. Laravel
+  lets `useCurrent` win silently.
 
 ### Both styles in one Migrator
 

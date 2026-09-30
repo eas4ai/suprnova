@@ -232,3 +232,18 @@ async fn sqlite_laravel_misuse_is_refused() {
 async fn sqlite_alter_laravel_refusals() {
     laravel_cases::sqlite_alter_laravel_refusals(&connect_sqlite().await).await;
 }
+
+#[tokio::test]
+async fn sqlite_laravel_alter_misuse_is_refused() {
+    laravel_cases::laravel_alter_misuse_is_refused(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_action_shorthands() {
+    laravel_cases::action_shorthands(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_unsigned_keys_everywhere() {
+    laravel_cases::unsigned_keys_everywhere(&connect_sqlite().await).await;
+}

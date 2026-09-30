@@ -174,3 +174,24 @@ async fn mysql_alter_laravel_additions() {
 async fn mysql_unsigned_keys_through_models() {
     laravel_cases::unsigned_keys_through_models(&connect_mysql().await).await;
 }
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_laravel_alter_misuse_is_refused() {
+    laravel_cases::laravel_alter_misuse_is_refused(&connect_mysql().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_action_shorthands() {
+    laravel_cases::action_shorthands(&connect_mysql().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_unsigned_keys_everywhere() {
+    laravel_cases::unsigned_keys_everywhere(&connect_mysql().await).await;
+}

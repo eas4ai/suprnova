@@ -140,7 +140,7 @@ pub async fn laravel_column_types(conn: &DatabaseConnection) {
         t.unsigned_big_integer("ubig_col").nullable();
         t.medium_text("medium_col").nullable();
         t.long_text("long_col").nullable();
-        t.enumeration("status", &["draft", "o'clock", "back\\slash"])
+        t.enumeration("status", &["draft", "o'clock", "semi;colon"])
             .default("draft");
         t.remember_token();
         t.date_time("stamp_col").precision(6).use_current();
@@ -225,14 +225,32 @@ pub async fn laravel_column_types(conn: &DatabaseConnection) {
         assert_eq!(datetime_precision(conn, table, "time_col").await, Some(0));
     }
 
-    for value in ["draft", "o'clock", "back\\slash"] {
+    for value in ["draft", "o'clock", "semi;colon"] {
         insert_one(conn, table, "status", value.into())
             .await
             .unwrap_or_else(|e| panic!("insert the allowed value {value:?}: {e}"));
     }
+    if backend == DbBackend::MySql {
+        // MySQL refuses an out-of-list enum value, and an out-of-range
+        // integer, only in strict mode; outside it, it stores a blank or a
+        // clamped value with a warning.
+        let mode = conn
+            .query_one_raw(Statement::from_string(
+                backend,
+                "SELECT CAST(@@SESSION.sql_mode AS CHAR) AS m".to_owned(),
+            ))
+            .await
+            .expect("sql_mode query")
+            .expect("sql_mode row");
+        let mode: String = mode.try_get("", "m").expect("sql_mode");
+        assert!(
+            mode.contains("STRICT_TRANS_TABLES") || mode.contains("STRICT_ALL_TABLES"),
+            "these assertions need a strict sql_mode, got {mode}"
+        );
+    }
     assert_eq!(
         texts(conn, table, "status").await,
-        ["draft", "o'clock", "back\\slash"],
+        ["draft", "o'clock", "semi;colon"],
         "every allowed value round-trips as it was declared"
     );
     assert!(
@@ -494,9 +512,17 @@ pub async fn alter_laravel_additions(conn: &DatabaseConnection) {
     Schema::table(&manager, "schema_badges", |t| {
         t.primary(&["code"]);
         t.timestamp_tz("issued_at").use_current();
+        t.enumeration("tier", &["gold", "silver"]).default("silver");
+        t.string("owner").nullable().index();
     })
     .await
-    .expect("add a primary key and a use_current column");
+    .expect("add a primary key, a use_current column, an enumeration and an index");
+    assert!(
+        manager
+            .has_index("schema_badges", "schema_badges_owner_index")
+            .await
+            .expect("has_index")
+    );
     assert_eq!(primary_key_columns(conn, "schema_badges").await, ["code"]);
     run(
         conn,
@@ -512,6 +538,15 @@ pub async fn alter_laravel_additions(conn: &DatabaseConnection) {
         .await
         .is_err(),
         "the added key must refuse a repeated code"
+    );
+    assert!(
+        run(
+            conn,
+            "INSERT INTO schema_badges (code, label, tier) VALUES ('b', 'y', 'bronze')"
+        )
+        .await
+        .is_err(),
+        "the added enumeration refuses a value outside its list"
     );
     let issued = conn
         .query_one_raw(Statement::from_string(
@@ -549,6 +584,20 @@ pub async fn sqlite_alter_laravel_refusals(conn: &DatabaseConnection) {
         .pop()
         .expect("columns");
     assert_eq!(last.name, "label");
+    Schema::table(&manager, "schema_lite_badges", |t| {
+        t.enumeration("tier", &["gold", "silver"]).default("silver");
+    })
+    .await
+    .expect("SQLite adds an enumeration column with its CHECK");
+    assert!(
+        run(
+            conn,
+            "INSERT INTO schema_lite_badges (id, code, tier) VALUES (1, 'a', 'bronze')"
+        )
+        .await
+        .is_err(),
+        "the added CHECK refuses a value outside the list"
+    );
 
     let refusals: Vec<(&str, Define)> = vec![
         (
@@ -695,6 +744,56 @@ pub async fn laravel_misuse_is_refused(conn: &DatabaseConnection) {
                 t.primary(&[]);
             }),
         ),
+        (
+            &["use_current()", "default(..)"],
+            Box::new(|t| {
+                t.date_time("at")
+                    .use_current()
+                    .default("2031-03-14 00:00:00");
+            }),
+        ),
+        (
+            &["enumeration()", "backslash"],
+            Box::new(|t| {
+                t.enumeration("path", &["a\\b"]);
+            }),
+        ),
+        (
+            &["enumeration()", "`draft` is listed twice"],
+            Box::new(|t| {
+                t.enumeration("status", &["draft", "paid", "draft"]);
+            }),
+        ),
+        (
+            &["after()", "empty name"],
+            Box::new(|t| {
+                t.string("name").after("");
+            }),
+        ),
+        (
+            &["length", "string columns only"],
+            Box::new(|t| {
+                t.enumeration("status", &["draft"]).length(20);
+            }),
+        ),
+        (
+            &["sets it to NULL", "NOT NULL", "nullable()"],
+            Box::new(|t| {
+                t.foreign_id("parent_id")
+                    .constrained("schema_parents")
+                    .null_on_delete();
+            }),
+        ),
+        (
+            &["twice the same name", "schema_refused_parent_id_index"],
+            Box::new(|t| {
+                t.big_integer("parent_id");
+                t.index(&["parent_id"]);
+                t.foreign("parent_id")
+                    .constrained("schema_parents")
+                    .name("schema_refused_parent_id_index");
+            }),
+        ),
     ];
     for (needles, define) in cases {
         let text = migration_error(Schema::create(&manager, table, define).await);
@@ -706,6 +805,311 @@ pub async fn laravel_misuse_is_refused(conn: &DatabaseConnection) {
             "a refused create must not create the table: {text}"
         );
     }
+}
+
+/// Misuse in `Schema::table` is refused before the first statement. It
+/// fails when `id()` and `primary` in one call reach the database, or a
+/// `null_on_delete` on a NOT NULL column is only refused by MySQL after the
+/// column was added.
+pub async fn laravel_alter_misuse_is_refused(conn: &DatabaseConnection) {
+    let backend = conn.get_database_backend();
+    let manager = SchemaManager::new(conn);
+    let table = "schema_alter_refused";
+    drop_tables(conn, &[table]).await;
+    Schema::create(&manager, table, |t| {
+        t.string("code").length(8);
+    })
+    .await
+    .expect("create schema_alter_refused");
+    let cases: Vec<(&[&str], Define)> = vec![
+        (
+            if backend == DbBackend::Sqlite {
+                &["primary key column", "SQLite"]
+            } else {
+                &["second primary key"]
+            },
+            Box::new(|t| {
+                t.string("first").nullable();
+                t.id();
+                t.primary(&["code"]);
+            }),
+        ),
+        (
+            if backend == DbBackend::Sqlite {
+                &["foreign key", "SQLite"]
+            } else {
+                &["sets it to NULL", "NOT NULL"]
+            },
+            Box::new(|t| {
+                t.string("first").nullable();
+                t.foreign_id("parent_id")
+                    .default(1)
+                    .constrained("schema_parents")
+                    .null_on_update();
+            }),
+        ),
+    ];
+    for (needles, define) in cases {
+        let text = migration_error(Schema::table(&manager, table, define).await);
+        for needle in needles {
+            assert!(text.contains(needle), "{needle:?} missing from: {text}");
+        }
+        assert!(
+            !Schema::has_column(&manager, table, "first")
+                .await
+                .expect("has_column"),
+            "the refused call must run nothing: {text}"
+        );
+    }
+    drop_tables(conn, &[table]).await;
+}
+
+// ---- referential actions -------------------------------------------------------
+
+/// Every action shorthand sets the action it names, the `.index()` modifier
+/// creates `{table}_{column}_index`, and `ForeignIdBuilder::name` names the
+/// key. Each child row points at its own parent row, so one action's effect
+/// cannot hide another's. It fails when a shorthand sets the wrong action
+/// (a restrict that cascades, a cascade that restricts), `.index()` creates
+/// nothing, or the key keeps its default name.
+pub async fn action_shorthands(conn: &DatabaseConnection) {
+    let backend = conn.get_database_backend();
+    let manager = SchemaManager::new(conn);
+    let children = [
+        "schema_act_restrict_del",
+        "schema_act_noaction_del",
+        "schema_act_cascade_upd",
+        "schema_act_null_upd",
+        "schema_act_restrict_upd",
+        "schema_act_noaction_upd",
+    ];
+    let mut all: Vec<&str> = children.to_vec();
+    all.push("schema_act_parents");
+    drop_tables(conn, &all).await;
+    Schema::create(&manager, "schema_act_parents", |t| {
+        t.id();
+    })
+    .await
+    .expect("create schema_act_parents");
+    type Child = Box<dyn FnOnce(&mut suprnova::schema::Blueprint) + Send>;
+    let definitions: Vec<(&str, Child)> = vec![
+        (
+            children[0],
+            Box::new(|t| {
+                t.id();
+                t.foreign_id("parent_id")
+                    .constrained("schema_act_parents")
+                    .restrict_on_delete()
+                    .index();
+            }),
+        ),
+        (
+            children[1],
+            Box::new(|t| {
+                t.id();
+                t.foreign_id("parent_id")
+                    .constrained("schema_act_parents")
+                    .no_action_on_delete()
+                    .name("schema_act_named_fk");
+            }),
+        ),
+        (
+            children[2],
+            Box::new(|t| {
+                t.id();
+                t.foreign_id("parent_id")
+                    .constrained("schema_act_parents")
+                    .cascade_on_update();
+            }),
+        ),
+        (
+            children[3],
+            Box::new(|t| {
+                t.id();
+                t.foreign_id("parent_id")
+                    .nullable()
+                    .constrained("schema_act_parents")
+                    .null_on_update();
+            }),
+        ),
+        (
+            children[4],
+            Box::new(|t| {
+                t.id();
+                t.foreign_id("parent_id")
+                    .constrained("schema_act_parents")
+                    .restrict_on_update();
+            }),
+        ),
+        (
+            children[5],
+            Box::new(|t| {
+                t.id();
+                t.foreign_id("parent_id")
+                    .constrained("schema_act_parents")
+                    .no_action_on_update();
+            }),
+        ),
+    ];
+    for (name, define) in definitions {
+        Schema::create(&manager, name, define)
+            .await
+            .unwrap_or_else(|e| panic!("create {name}: {e}"));
+    }
+    run(
+        conn,
+        "INSERT INTO schema_act_parents (id) VALUES (1), (2), (3), (4), (5), (6)",
+    )
+    .await
+    .expect("insert parents");
+    for (position, child) in children.iter().enumerate() {
+        run(
+            conn,
+            &format!(
+                "INSERT INTO {child} (id, parent_id) VALUES (1, {})",
+                position + 1
+            ),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("insert into {child}: {e}"));
+    }
+
+    assert!(
+        run(conn, "DELETE FROM schema_act_parents WHERE id = 1")
+            .await
+            .is_err(),
+        "restrict_on_delete keeps a referenced parent"
+    );
+    assert!(
+        run(conn, "DELETE FROM schema_act_parents WHERE id = 2")
+            .await
+            .is_err(),
+        "no_action_on_delete keeps a referenced parent"
+    );
+    run(conn, "UPDATE schema_act_parents SET id = 33 WHERE id = 3")
+        .await
+        .expect("cascade_on_update lets the key change");
+    assert_eq!(
+        integers(conn, children[2], "parent_id").await,
+        [Some(33)],
+        "cascade_on_update copies the new key"
+    );
+    run(conn, "UPDATE schema_act_parents SET id = 44 WHERE id = 4")
+        .await
+        .expect("null_on_update lets the key change");
+    assert_eq!(
+        integers(conn, children[3], "parent_id").await,
+        [None],
+        "null_on_update clears the reference"
+    );
+    assert!(
+        run(conn, "UPDATE schema_act_parents SET id = 55 WHERE id = 5")
+            .await
+            .is_err(),
+        "restrict_on_update keeps a referenced key"
+    );
+    assert!(
+        run(conn, "UPDATE schema_act_parents SET id = 66 WHERE id = 6")
+            .await
+            .is_err(),
+        "no_action_on_update keeps a referenced key"
+    );
+
+    assert!(
+        manager
+            .has_index(children[0], "schema_act_restrict_del_parent_id_index")
+            .await
+            .expect("has_index"),
+        ".index() creates {{table}}_{{column}}_index"
+    );
+    if backend != DbBackend::Sqlite {
+        Schema::table(&manager, children[1], |t| {
+            t.drop_foreign("schema_act_named_fk");
+        })
+        .await
+        .expect("the foreign_id key carries the name .name() gave");
+    }
+
+    drop_tables(conn, &all).await;
+}
+
+/// Reads one nullable integer column of every row, in `id` order.
+async fn integers(conn: &DatabaseConnection, table: &str, column: &str) -> Vec<Option<i64>> {
+    let rows = conn
+        .query_all_raw(Statement::from_string(
+            conn.get_database_backend(),
+            format!("SELECT {column} AS v FROM {table} ORDER BY id"),
+        ))
+        .await
+        .expect("select integers");
+    rows.iter()
+        .map(|row| row.try_get("", "v").expect("integer value"))
+        .collect()
+}
+
+// ---- unsigned keys on every backend --------------------------------------------
+
+/// `unsigned_id` and `unsigned_foreign_id` make a working key on every
+/// backend: `BIGINT UNSIGNED` on MySQL, the signed `BIGINT` Laravel falls
+/// back to on Postgres, `integer` on SQLite. It fails when the unsigned type
+/// leaks off MySQL (sea-query would widen it on Postgres) or the key does
+/// not hold.
+pub async fn unsigned_keys_everywhere(conn: &DatabaseConnection) {
+    let backend = conn.get_database_backend();
+    let manager = SchemaManager::new(conn);
+    drop_tables(conn, &["schema_uk_children", "schema_uk_parents"]).await;
+    Schema::create(&manager, "schema_uk_parents", |t| {
+        t.unsigned_id();
+    })
+    .await
+    .expect("create schema_uk_parents");
+    Schema::create(&manager, "schema_uk_children", |t| {
+        t.unsigned_id();
+        t.unsigned_foreign_id("parent_id")
+            .constrained("schema_uk_parents")
+            .cascade_on_delete();
+    })
+    .await
+    .expect("create schema_uk_children");
+    for (table, name) in [
+        ("schema_uk_parents", "id"),
+        ("schema_uk_children", "id"),
+        ("schema_uk_children", "parent_id"),
+    ] {
+        let columns = catalog::columns(conn, table).await;
+        let column = columns
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("{table}.{name}"));
+        let declared = column.declared.to_lowercase();
+        match backend {
+            DbBackend::MySql => {
+                assert!(declared.starts_with("bigint"), "{table}.{name}: {declared}");
+                assert!(declared.contains("unsigned"), "{table}.{name}: {declared}");
+            }
+            DbBackend::Postgres => assert_eq!(column.family, "bigint", "{table}.{name}"),
+            _ => assert_eq!(column.family, "integer", "{table}.{name}"),
+        }
+    }
+    run(conn, "INSERT INTO schema_uk_parents (id) VALUES (1)")
+        .await
+        .expect("insert parent");
+    run(
+        conn,
+        "INSERT INTO schema_uk_children (id, parent_id) VALUES (1, 1)",
+    )
+    .await
+    .expect("insert child");
+    assert!(
+        run(
+            conn,
+            "INSERT INTO schema_uk_children (id, parent_id) VALUES (2, 99)"
+        )
+        .await
+        .is_err(),
+        "the key must refuse an orphan row"
+    );
+    drop_tables(conn, &["schema_uk_children", "schema_uk_parents"]).await;
 }
 
 // ---- unsigned keys through models ----------------------------------------------

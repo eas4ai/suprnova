@@ -8,8 +8,8 @@
 use std::collections::HashSet;
 
 use sea_orm::sea_query::{
-    ForeignKey, ForeignKeyCreateStatement, ForeignKeyDropStatement, Index, IndexCreateStatement,
-    IndexDropStatement, Table, TableAlterStatement, TableCreateStatement,
+    ForeignKey, ForeignKeyAction, ForeignKeyCreateStatement, ForeignKeyDropStatement, Index,
+    IndexCreateStatement, IndexDropStatement, Table, TableAlterStatement, TableCreateStatement,
 };
 use sea_orm::{DbBackend, DbErr};
 
@@ -57,6 +57,36 @@ fn check_blueprint(blueprint: &Blueprint) -> Result<(), DbErr> {
                 blueprint.table()
             )));
         }
+        if column.use_current && column.default.is_some() {
+            return Err(refuse(format!(
+                "schema: column `{}` of table `{}` has both use_current() and default(..); keep one",
+                column.name,
+                blueprint.table()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a foreign key whose action sets its column to `NULL` when the
+/// closure declares that column `NOT NULL`. MySQL would refuse the key only
+/// after the column was added, and MySQL cannot roll the column back.
+fn check_null_action(blueprint: &Blueprint, foreign: &ForeignSpec) -> Result<(), DbErr> {
+    let sets_null =
+        |action: Option<ForeignKeyAction>| matches!(action, Some(ForeignKeyAction::SetNull));
+    if !sets_null(foreign.on_delete) && !sets_null(foreign.on_update) {
+        return Ok(());
+    }
+    let declared_not_null = blueprint
+        .columns()
+        .iter()
+        .any(|column| column.name == foreign.column && !column.nullable);
+    if declared_not_null {
+        return Err(refuse(format!(
+            "schema: the foreign key on column `{}` of table `{}` sets it to NULL (null_on_delete or null_on_update), but the column is NOT NULL; call .nullable()",
+            foreign.column,
+            blueprint.table()
+        )));
     }
     Ok(())
 }
@@ -93,7 +123,7 @@ fn check_index(table: &str, spec: &IndexSpec, seen: &mut HashSet<String>) -> Res
     check_name_length(table, &name, "index")?;
     if !seen.insert(name.clone()) {
         return Err(refuse(format!(
-            "schema: table `{table}` gets the index `{name}` twice; declare it once"
+            "schema: table `{table}` names two indexes or keys `{name}`, twice the same name; declare the index once, or give a key its own name with .name(..)"
         )));
     }
     Ok(name)
@@ -160,7 +190,7 @@ fn check_foreign_name(
     check_name_length(table, &name, "foreign key")?;
     if !seen.insert(name.clone()) {
         return Err(refuse(format!(
-            "schema: table `{table}` gets the foreign key `{name}` twice; give each key its own name"
+            "schema: table `{table}` names two indexes or keys `{name}`, twice the same name; give each key its own name with .name(..)"
         )));
     }
     Ok(name)
@@ -206,8 +236,9 @@ pub(crate) fn plan_create(blueprint: &Blueprint, backend: DbBackend) -> Result<V
     let mut indexes = Vec::new();
     let mut seen_columns = HashSet::new();
     let mut nullable_columns = HashSet::new();
-    let mut seen_indexes = HashSet::new();
-    let mut seen_foreigns = HashSet::new();
+    // Index and foreign key names share one set: MySQL names the index
+    // behind a foreign key after the key, so the two cannot collide.
+    let mut seen_names = HashSet::new();
     let mut explicit_foreign_columns = Vec::new();
     let mut ids = 0_usize;
     let mut primary: Option<&[String]> = None;
@@ -246,7 +277,7 @@ pub(crate) fn plan_create(blueprint: &Blueprint, backend: DbBackend) -> Result<V
                 create.col(column.to_column_def(backend));
             }
             Command::AddIndex(spec) => {
-                let name = check_index(table, spec, &mut seen_indexes)?;
+                let name = check_index(table, spec, &mut seen_names)?;
                 indexes.push(index_statement(table, &name, spec));
             }
             Command::AddForeign(position) => {
@@ -256,7 +287,8 @@ pub(crate) fn plan_create(blueprint: &Blueprint, backend: DbBackend) -> Result<V
                 let Some(ref_table) = referenced_table(table, foreign)? else {
                     continue;
                 };
-                let name = check_foreign_name(table, foreign, &mut seen_foreigns)?;
+                check_null_action(blueprint, foreign)?;
+                let name = check_foreign_name(table, foreign, &mut seen_names)?;
                 if foreign.explicit {
                     explicit_foreign_columns.push((name.clone(), foreign.column.clone()));
                 }
@@ -379,8 +411,7 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
         refuse_sqlite_foreign_keys(blueprint)?;
     }
     let mut steps = Vec::new();
-    let mut seen_indexes = HashSet::new();
-    let mut seen_foreigns = HashSet::new();
+    let mut seen_names = HashSet::new();
     let mut added_columns = HashSet::new();
     let mut nullable_added = HashSet::new();
     let mut primaries = 0_usize;
@@ -395,6 +426,12 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
                         "schema: the call adds the column `{}` to table `{table}` twice; add it once",
                         column.name
                     )));
+                }
+                if column.kind == ColumnKind::Id {
+                    primaries += 1;
+                    if primaries > 1 {
+                        return Err(second_primary_key(table));
+                    }
                 }
                 if sqlite && column.kind == ColumnKind::Id {
                     return Err(refuse(format!(
@@ -446,7 +483,7 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
                 steps.push(Step::AlterTable(alter));
             }
             Command::AddIndex(spec) => {
-                let name = check_index(table, spec, &mut seen_indexes)?;
+                let name = check_index(table, spec, &mut seen_names)?;
                 steps.push(Step::CreateIndex(index_statement(table, &name, spec)));
             }
             Command::DropIndex(name) => {
@@ -466,7 +503,8 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
                 let Some(ref_table) = referenced_table(table, foreign)? else {
                     continue;
                 };
-                let name = check_foreign_name(table, foreign, &mut seen_foreigns)?;
+                check_null_action(blueprint, foreign)?;
+                let name = check_foreign_name(table, foreign, &mut seen_names)?;
                 steps.push(Step::CreateForeignKey(foreign_statement(
                     table, &name, foreign, ref_table,
                 )));

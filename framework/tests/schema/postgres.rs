@@ -199,3 +199,24 @@ async fn postgres_laravel_misuse_is_refused() {
 async fn postgres_alter_laravel_additions() {
     laravel_cases::alter_laravel_additions(&connect_postgres().await).await;
 }
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_laravel_alter_misuse_is_refused() {
+    laravel_cases::laravel_alter_misuse_is_refused(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_action_shorthands() {
+    laravel_cases::action_shorthands(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_unsigned_keys_everywhere() {
+    laravel_cases::unsigned_keys_everywhere(&connect_postgres().await).await;
+}

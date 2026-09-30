@@ -349,8 +349,10 @@ impl Blueprint {
 
     /// Adds a column that accepts only `values`, Laravel's `enum`: `ENUM`
     /// on MySQL, and on Postgres and SQLite a string column with a `CHECK`
-    /// that the value is one of them. A value may contain any character;
-    /// the builder quotes it. An empty list makes the migration fail.
+    /// that the value is one of them. The builder quotes each value, so it
+    /// may contain a quote. The migration fails on an empty list, a value
+    /// listed twice (MySQL refuses it), and a value with a backslash, whose
+    /// meaning depends on the server's settings.
     ///
     /// ```no_run
     /// # use suprnova::schema::Blueprint;
@@ -360,8 +362,20 @@ impl Blueprint {
     /// ```
     pub fn enumeration(&mut self, name: &str, values: &[&str]) -> ColumnBuilder<'_> {
         let index = self.push_column(name, ColumnKind::Enum);
+        let repeated = values
+            .iter()
+            .enumerate()
+            .find(|(position, value)| values[..*position].contains(value));
         if values.is_empty() {
             self.fault_on(index, "enumeration()", "give it at least one value");
+        } else if let Some(value) = values.iter().find(|value| value.contains('\\')) {
+            let reason = format!(
+                "the value `{value}` holds a backslash, which MySQL and Postgres read differently depending on server settings"
+            );
+            self.fault_on(index, "enumeration()", &reason);
+        } else if let Some((_, value)) = repeated {
+            let reason = format!("the value `{value}` is listed twice");
+            self.fault_on(index, "enumeration()", &reason);
         } else if let Some(spec) = self.columns.get_mut(index) {
             spec.allowed = values.iter().map(|value| (*value).to_owned()).collect();
         }
@@ -585,8 +599,11 @@ impl Blueprint {
     }
 
     /// Drops the foreign key `{table}_{column}_foreign`, then the column,
-    /// Laravel's `dropConstrainedForeignId`. Only `Schema::table` accepts
-    /// it, and SQLite refuses it, as it refuses `drop_foreign`.
+    /// Laravel's `dropConstrainedForeignId`. A key that `.name(..)` named
+    /// has another name: drop it with [`drop_foreign`](Blueprint::drop_foreign)
+    /// and the column with [`drop_column`](Blueprint::drop_column). Only
+    /// `Schema::table` accepts it, and SQLite refuses it, as it refuses
+    /// `drop_foreign`.
     pub fn drop_constrained_foreign_id(&mut self, column: &str) {
         let name = ForeignSpec::new(column).name(&self.table);
         self.commands.push(Command::DropForeign(name));

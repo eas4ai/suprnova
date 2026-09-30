@@ -2,7 +2,7 @@
 //! builder its column methods return.
 
 use sea_orm::DbBackend;
-use sea_orm::sea_query::{Alias, ColumnDef, Expr};
+use sea_orm::sea_query::{Alias, ColumnDef, Expr, IntoIden, Keyword};
 
 use super::blueprint::Blueprint;
 use super::{quote_ident, sea_ident};
@@ -90,15 +90,13 @@ pub(crate) struct ColumnSpec {
     pub(crate) allowed: Vec<String>,
 }
 
-/// `value` as a SQL string literal. A quote doubles on every backend; on
-/// MySQL a backslash doubles too, because MySQL reads it as an escape
-/// unless `NO_BACKSLASH_ESCAPES` is set.
-fn string_literal(backend: DbBackend, value: &str) -> String {
-    let mut literal = value.replace('\'', "''");
-    if backend == DbBackend::MySql {
-        literal = literal.replace('\\', "\\\\");
-    }
-    format!("'{literal}'")
+/// `value` as a SQL string literal, a quote doubled. It holds no
+/// backslash: [`Blueprint::enumeration`] refuses one, because MySQL reads a
+/// backslash as an escape unless `NO_BACKSLASH_ESCAPES` is set and Postgres
+/// does when `standard_conforming_strings` is off, so no one spelling means
+/// the same value on every server.
+fn string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 impl ColumnSpec {
@@ -216,7 +214,7 @@ impl ColumnSpec {
                 let values = self
                     .allowed
                     .iter()
-                    .map(|value| string_literal(backend, value))
+                    .map(|value| string_literal(value))
                     .collect::<Vec<_>>()
                     .join(", ");
                 match backend {
@@ -295,10 +293,14 @@ impl ColumnSpec {
             def.null();
         }
         if self.use_current {
-            // MySQL wants the default's precision to match the column's.
+            // MySQL wants the default's precision to match the column's. A
+            // keyword renders bare, as Laravel writes it; an expression
+            // default would be wrapped in parentheses, which MySQL refuses
+            // before 8.0.13.
             match self.precision.filter(|_| mysql) {
                 Some(precision) => {
-                    def.default(Expr::cust(format!("CURRENT_TIMESTAMP({precision})")));
+                    let keyword = Alias::new(format!("CURRENT_TIMESTAMP({precision})")).into_iden();
+                    def.default(Expr::from(Keyword::Custom(keyword)));
                 }
                 None => {
                     def.default(Expr::current_timestamp());
@@ -404,9 +406,10 @@ impl<'a> ColumnBuilder<'a> {
     }
 
     /// Defaults the column to the current time, Laravel's `useCurrent()`,
-    /// for a `date_time` or `timestamp_tz` column. SQLite refuses it on a
-    /// column added to an existing table, and `Schema::table` refuses it
-    /// there before any statement runs.
+    /// for a `date_time` or `timestamp_tz` column. Combined with
+    /// `.default(..)` the migration fails, since only one default can
+    /// apply. SQLite refuses it on a column added to an existing table, and
+    /// `Schema::table` refuses it there before any statement runs.
     pub fn use_current(self) -> Self {
         self.blueprint.set_use_current(self.column);
         self
