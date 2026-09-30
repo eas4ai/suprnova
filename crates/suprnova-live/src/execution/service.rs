@@ -269,6 +269,91 @@ impl<'a> PromotedActionRequest<'a> {
     }
 }
 
+/// Promoted public-seed authority and a first model synchronization that
+/// invokes no action. The browser runtime sends an immediate `live:model` edit
+/// on a public seed this way, so it promotes like a first action does.
+pub struct PromotedModelSyncRequest<'a> {
+    descriptor: &'a ComponentDescriptor,
+    context: &'a TrustedLiveRequestContext,
+    browser: BrowserRenderContext,
+    promoted: PromotedInstance,
+    identity: PromotedRequestIdentity,
+    proposals: &'a ProposalBatch,
+    trace: &'a dyn ExecutionTracePort,
+    response_sealer: Option<AcceptedResponseSealer>,
+    response_binding: Option<AcceptedResponseRequestBinding>,
+}
+
+impl<'a> PromotedModelSyncRequest<'a> {
+    /// Binds an internal promotion capability to one prepared proposal batch.
+    #[must_use]
+    pub fn new(
+        descriptor: &'a ComponentDescriptor,
+        context: &'a TrustedLiveRequestContext,
+        browser: BrowserRenderContext,
+        promoted: PromotedInstance,
+        identity: PromotedRequestIdentity,
+        proposals: &'a ProposalBatch,
+        trace: &'a dyn ExecutionTracePort,
+    ) -> Self {
+        Self {
+            descriptor,
+            context,
+            browser,
+            promoted,
+            identity,
+            proposals,
+            trace,
+            response_sealer: None,
+            response_binding: None,
+        }
+    }
+
+    /// Supplies request-bound accepted-response sealing before durability.
+    #[must_use]
+    pub fn with_response_sealer(
+        mut self,
+        response_sealer: AcceptedResponseSealer,
+        response_binding: AcceptedResponseRequestBinding,
+    ) -> Self {
+        self.response_sealer = Some(response_sealer);
+        self.response_binding = Some(response_binding);
+        self
+    }
+}
+
+/// The first operation a promoted public seed runs.
+enum PromotedOperation<'a> {
+    Action(Box<ActionExecutionRequest<'a>>),
+    SyncModels {
+        proposals: &'a ProposalBatch,
+        trace: &'a dyn ExecutionTracePort,
+    },
+}
+
+impl<'a> PromotedOperation<'a> {
+    fn trace(&self) -> &'a dyn ExecutionTracePort {
+        match self {
+            Self::Action(action) => action.trace,
+            Self::SyncModels { trace, .. } => *trace,
+        }
+    }
+}
+
+/// One promoted request from either public entry point, with the
+/// request-bound response ports its operation carries.
+struct PromotedExecution<'a> {
+    descriptor: &'a ComponentDescriptor,
+    context: &'a TrustedLiveRequestContext,
+    browser: BrowserRenderContext,
+    promoted: PromotedInstance,
+    identity: PromotedRequestIdentity,
+    operation: PromotedOperation<'a>,
+    response_intents: Option<&'a dyn ResponseIntentPreparationPort>,
+    response_sealer: Option<AcceptedResponseSealer>,
+    response_binding: Option<AcceptedResponseRequestBinding>,
+}
+
 /// The identity a promoted request carries: the browser nonce the public seed
 /// was promoted under, and the retry identity (idempotency key and content
 /// digest) the ledger arbitrates the action on.
@@ -1019,10 +1104,52 @@ impl ExecutionService {
         &self,
         mut request: PromotedActionRequest<'_>,
     ) -> ExecutionResult {
-        let trace = request.action.trace;
         let response_intents = request.action.response_intents;
         let response_sealer = request.action.response_sealer.take();
         let response_binding = request.action.response_binding;
+        self.execute_promoted_operation(PromotedExecution {
+            descriptor: request.descriptor,
+            context: request.context,
+            browser: request.browser,
+            promoted: request.promoted,
+            identity: request.identity,
+            operation: PromotedOperation::Action(Box::new(request.action)),
+            response_intents,
+            response_sealer,
+            response_binding,
+        })
+        .await
+    }
+
+    /// Executes a first model synchronization on a public seed: the seed
+    /// promotes for the request's scope, the proposals apply as they would on
+    /// an instance, and no action runs. Nothing is published on failure.
+    pub async fn execute_promoted_model_sync(
+        &self,
+        request: PromotedModelSyncRequest<'_>,
+    ) -> ExecutionResult {
+        self.execute_promoted_operation(PromotedExecution {
+            descriptor: request.descriptor,
+            context: request.context,
+            browser: request.browser,
+            promoted: request.promoted,
+            identity: request.identity,
+            operation: PromotedOperation::SyncModels {
+                proposals: request.proposals,
+                trace: request.trace,
+            },
+            response_intents: None,
+            response_sealer: request.response_sealer,
+            response_binding: request.response_binding,
+        })
+        .await
+    }
+
+    async fn execute_promoted_operation(&self, request: PromotedExecution<'_>) -> ExecutionResult {
+        let trace = request.operation.trace();
+        let response_intents = request.response_intents;
+        let response_sealer = request.response_sealer;
+        let response_binding = request.response_binding;
         let (authority, verified_seed, refresh_before_action) = request.promoted.into_parts();
         let seed = verified_seed.body();
         let claimed = match self
@@ -1053,7 +1180,7 @@ impl ExecutionService {
                 seed,
                 refresh_before_action,
                 render_context,
-                request.action,
+                request.operation,
             )
             .await
         {
@@ -1107,9 +1234,9 @@ impl ExecutionService {
         seed: &SeedBodyV1,
         refresh_before_action: RefreshBeforeAction,
         render_context: RenderContext<'_>,
-        action: ActionExecutionRequest<'_>,
+        operation: PromotedOperation<'_>,
     ) -> Result<(ActionExecutionOutput, Option<AcceptedOutcomeKind>), ExecutionResult> {
-        let trace = action.trace;
+        let trace = operation.trace();
         let mount = MountContext::new(render_context, seed.mount());
         record(trace, ExecutionPhase::PromotionMount);
         if refresh_before_action == RefreshBeforeAction::Required {
@@ -1148,10 +1275,22 @@ impl ExecutionService {
             .and_then(|()| schemas.memo().validate(&memo, StateExposure::Instanced))
             .map_err(|error| execution_failed(ExecutionFailure::Snapshot(error.kind())))?;
         let hydration = HydrationContext::new(render_context, &state).with_memo(&memo);
-        let output = ComponentExecutor::new()
-            .coordinated_action(descriptor, &hydration, action)
-            .await
-            .map_err(|error| execution_failed(ExecutionFailure::Action(error.kind())))?;
+        let output = match operation {
+            PromotedOperation::Action(action) => ComponentExecutor::new()
+                .coordinated_action(descriptor, &hydration, *action)
+                .await
+                .map_err(|error| execution_failed(ExecutionFailure::Action(error.kind())))?,
+            PromotedOperation::SyncModels { proposals, trace } => {
+                ActionExecutionOutput::fresh_render(
+                    ComponentExecutor::new()
+                        .synchronize(descriptor, &hydration, proposals, trace)
+                        .await
+                        .map_err(|error| {
+                            execution_failed(ExecutionFailure::Lifecycle(error.kind()))
+                        })?,
+                )
+            }
+        };
         Ok((output, None))
     }
 

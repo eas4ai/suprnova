@@ -173,3 +173,122 @@ async fn live_031_an_undecodable_proposal_is_a_field_error_and_the_action_does_n
         "the instanced save did not run: {answer}"
     );
 }
+
+/// The browser runtime sends an immediate `live:model` edit on a public seed
+/// as a model sync with no action. That first request promotes the seed for
+/// the visitor, applies the proposal, and answers the promoted instance; a
+/// save on that instance then runs with the synchronized value.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_model_sync_promotes_a_public_seed() {
+    let _container = TestContainer::fake();
+    form_fixture();
+    let router = Arc::new(build_form_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+    let middleware = production_middleware();
+
+    let (status, headers, body) =
+        dispatch(router.clone(), middleware.clone(), get(FORM_DOCUMENT_PATH)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let cookie = session_cookie(&headers);
+    let seed = decoded_snapshot(&body);
+
+    let (status, _, body) = dispatch(
+        router.clone(),
+        middleware.clone(),
+        form_action_request(
+            ActionRequest {
+                snapshot: seed,
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "SEhISEhISEhISEhISEhISA",
+            },
+            json!({"seats": 4}),
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let answer: Value = serde_json::from_slice(&body).expect("sync JSON");
+    assert_eq!(answer["outcome"], "accepted", "{answer}");
+    let html = answer["render"]["html"].as_str().expect("render html");
+    assert!(
+        html.contains("value=\"4\""),
+        "the proposal was applied: {answer}"
+    );
+    assert!(
+        html.contains("<p id=\"saves\">0</p>"),
+        "no action ran: {answer}"
+    );
+    assert!(
+        !answer["snapshot"]["body"]["revision"].is_null(),
+        "the answer carries the promoted instance: {answer}"
+    );
+
+    let (status, _, body) = dispatch(
+        router.clone(),
+        middleware.clone(),
+        form_action_request(
+            ActionRequest {
+                snapshot: answer["snapshot"].clone(),
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "SUlJSUlJSUlJSUlJSUlJSQ",
+            },
+            json!({}),
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let answer: Value = serde_json::from_slice(&body).expect("save JSON");
+    let html = answer["render"]["html"].as_str().expect("render html");
+    assert!(html.contains("<p id=\"saves\">1</p>"), "{answer}");
+    assert!(
+        html.contains("value=\"4\""),
+        "the instance kept the synchronized seats: {answer}"
+    );
+}
+
+/// A first model sync whose proposal its field cannot decode promotes the
+/// seed and answers the field error, as the same sync does on an instance.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_undecodable_first_model_sync_answers_the_field_error() {
+    let _container = TestContainer::fake();
+    form_fixture();
+    let router = Arc::new(build_form_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+    let middleware = production_middleware();
+
+    let (status, headers, body) =
+        dispatch(router.clone(), middleware.clone(), get(FORM_DOCUMENT_PATH)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let cookie = session_cookie(&headers);
+    let seed = decoded_snapshot(&body);
+
+    let (status, _, body) = dispatch(
+        router,
+        middleware,
+        form_action_request(
+            ActionRequest {
+                snapshot: seed,
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "SkpKSkpKSkpKSkpKSkpKSg",
+            },
+            json!({"seats": null}),
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let answer: Value = serde_json::from_slice(&body).expect("sync JSON");
+    assert!(
+        answer["validation"].get("seats").is_some(),
+        "the first model sync carries the field error: {answer}"
+    );
+}

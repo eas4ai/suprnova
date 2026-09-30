@@ -250,7 +250,8 @@ async fn render(request: Request, mount: &LiveMount<Counter>) -> Response {
 ```
 
 - `LiveMount::public_seed` declares an island any visitor may render; its
-  state is a reusable seed promoted to an instance on the first action.
+  state is a reusable seed promoted to an instance on its first request, an
+  action or a model update.
 - `LiveMount::identity_bound` declares an island that belongs to the current
   session and principal; the document route must authenticate.
 - Mount every island before `bootstrap`, and call `bootstrap` once. The
@@ -287,7 +288,7 @@ global_middleware!(CsrfMiddleware::new());
 Anonymous visitors render public seeds, and they can act on them when the
 guard uses `AuthMiddleware::optional()`: a signed-in principal is recorded, an
 anonymous visitor continues, and the mount kind decides. A public seed then
-promotes for the visitor's own session on the first action, while an
+promotes for the visitor's own session on its first request, while an
 identity-bound island still refuses a request without principal evidence.
 With `AuthMiddleware::new()` the guard answers `401` for every anonymous
 request before any engine work. Identity-bound islands require a session and

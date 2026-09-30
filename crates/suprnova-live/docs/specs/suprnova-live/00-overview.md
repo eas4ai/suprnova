@@ -1,7 +1,7 @@
 # Suprnova Live -- System Overview
 
 Status: Normative design specification
-Last revised: 2026-09-14
+Last revised: 2026-09-30
 
 ## Purpose
 
@@ -389,7 +389,7 @@ implementation and verification rules.
 - Stateful Live component semantics over stateless requests: mounting, typed
   component state, explicitly exposed model binding, registered server
   actions, validation, errors, events, effects, and lifecycle handling.
-- Versioned public seed and instanced signed snapshots, first-action promotion,
+- Versioned public seed and instanced signed snapshots, first-request promotion,
   atomic authority creation for identity-bound initial mounts, an expiring
   tier-provided instance ledger, one committed outcome per base revision,
   idempotency, expiration, and recovery behavior.

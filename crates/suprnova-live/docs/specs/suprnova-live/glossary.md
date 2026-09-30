@@ -151,8 +151,9 @@ _Avoid_: encrypted state, server session, authorization proof, trusted client pa
 A reusable signed snapshot form embedded only in cache-safe public island HTML.
 It binds public component/build, route, slot, parameters, state, issue age, and
 advisory generation memo but contains no principal-bound data, instance ID, or
-revision; the first action promotes it into a freshly mounted scoped instance and
-may overlay only its verified public fields.
+revision; its first request, an action or a model synchronization, promotes it
+into a freshly mounted scoped instance and may overlay only its verified public
+fields.
 _Avoid_: anonymous instance, authorization token, cached private snapshot, permanent mount
 
 **Instanced snapshot**:
@@ -804,7 +805,7 @@ _Avoid_: raw palette value, Tailwind utility class, component-specific hard-code
   the browser, while component state crosses requests in a public seed or
   instanced signed snapshot.
 - An identity-bound initial mount creates ledger authority before its output can
-  be published. A public seed snapshot instead promotes on first action; the
+  be published. A public seed snapshot instead promotes on its first request; the
   Live instance ledger then arbitrates either instance's revisions and accepted
   outcomes.
 - A Live action changes server-authoritative state and returns new island HTML;
@@ -882,7 +883,7 @@ methodology's own history:
   action authority; resolved: public-seed generations are advisory by default,
   because every action must reload/reauthorize current authoritative data.
   Components may opt into protocol-v2 `refresh_on_promote`, which accepts fresh
-  render and does not execute the original first-action intent.
+  render and does not apply the original first request's proposals or action.
 - **Complete** -- the methodology term means nothing agreed remains, while a
   **Complete representation** is a directly sendable cache-entry type; the
   compound cache term must never be used to claim project completion.

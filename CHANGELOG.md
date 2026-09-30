@@ -791,6 +791,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   application that vendored these components with `live:add` needs no change:
   the framework serves the corrected stylesheet. This fix landed on main after
   the `v3.0.0` tag.
+- **A first `live:model` edit on a public seed promotes it.** The browser
+  runtime sends an immediate `live:model` edit on a public-seed island as a
+  model synchronization with no action, and the action endpoint promoted a seed
+  only for an action, so the first keystroke in such an island answered `500`.
+  The endpoint now promotes the seed on that request, applies the proposals as
+  it does on an instance, and runs no action. This fix landed on main after the
+  `v3.0.0` tag.
 - **Magnetar logs a lockout status failure before the sign-in fails closed.**
   The password plugin answered `503` when the lockout store could not report
   an identity's status and logged nothing, while the failed-attempt path

@@ -1,7 +1,7 @@
 # Suprnova Live -- 09 Runtime Bootstrap and Directives
 
 Status: Normative design specification
-Last revised: 2026-09-15
+Last revised: 2026-09-30
 
 ## Scope
 
@@ -66,10 +66,11 @@ Acceptance criteria:
   before connection.
 - For a seed-backed island, the runtime creates a cryptographically random
   at-least-128-bit proposed nonce locally and includes it only when the first
-  action requests atomic promotion; the nonce grants no authority.
-- Multiple local interactions may occur before promotion, and one first action
-  promotes and enters the ordinary island scheduler without an eager connect
-  round trip.
+  request, an action or a model synchronization, requests atomic promotion; the
+  nonce grants no authority.
+- Local interactions that send nothing may occur before promotion, and the
+  first request, an action or an immediate model synchronization, promotes and
+  enters the ordinary island scheduler without an eager connect round trip.
 - A server-declared lazy-completion trigger queues one protocol-v2
   `lazy_complete` operation through the owning island scheduler when its checked
   activation policy is satisfied. Discovery, reinsertion, or a surrounding
@@ -225,6 +226,9 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-09-30 -- An immediate `live:model` edit on a seed-backed island is its
+  first request and promotes the seed; the server now accepts that model
+  synchronization as it accepts a first action.
 - 2026-09-15 -- `live:key` is part of the directive set the runtime reads,
   not only the checker's: it names an element's stable morph identity (spec
   12, LIVE-024). `data-suprnova-live-key` remains the engine's spelling on

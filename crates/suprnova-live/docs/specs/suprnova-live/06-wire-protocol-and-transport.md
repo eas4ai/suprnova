@@ -1,7 +1,7 @@
 # Suprnova Live -- 06 Wire Protocol and Transport
 
 Status: Normative design specification
-Last revised: 2026-09-16
+Last revised: 2026-09-30
 
 ## Scope
 
@@ -43,8 +43,9 @@ UX flow:
 ### Update request envelope
 
 An update request shall identify its island and component contract and carry
-either a current instanced snapshot or, for the first action on a public cached
-island, a seed snapshot plus a proposed instance nonce. It shall also carry the
+either a current instanced snapshot or, for the first request on a public cached
+island (an action or a model synchronization), a seed snapshot plus a proposed
+instance nonce. It shall also carry the
 applicable base revision, correlation and idempotency data, allowed model
 proposals, and one or more declared operations. Browser data shall remain
 structurally separate from server-trusted memo.
@@ -72,7 +73,7 @@ Acceptance criteria:
 
 UX flow:
 1. Runtime schedules compatible work -> it creates one bounded request envelope
-   with the current instanced snapshot or eligible first-action seed operation.
+   with the current instanced snapshot or an eligible first seed operation.
 2. Work cannot be safely batched -> requests remain separately ordered rather
    than changing semantics to reduce traffic.
 
@@ -272,6 +273,10 @@ blob store merely to replay bytes.
 
 ## Decisions and revisions
 
+- 2026-09-30 -- The first request on a public seed may be a model
+  synchronization with no action, and it promotes the seed as a first action
+  does. The browser runtime already sent an immediate `live:model` edit on a
+  seed this way, and the endpoint answered it with an internal error.
 - 2026-09-16 -- The browser validators admit the message counts the
   framework configures in `ProtocolLimits`: 128 model proposals, operations,
   action arguments, validation entries, events, effects, and extensions
