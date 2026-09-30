@@ -203,6 +203,16 @@ Index `1` is the second element - the first element passed and is absent
 from the bag. Bind the key straight through on the client:
 `form.errors['items.1.name']`.
 
+### Renamed fields
+
+The error keys are the names the client sent. When serde renames a field
+(`#[serde(rename_all = "camelCase")]` on the struct, or `rename` on a
+field), a failure on `unit_price` is reported as `unitPrice`, at every
+level of a nested path: `lineItems.1.unitPrice`. The same names drive
+`Precognition-Validate-Only`, and the message reads the name snake-cased,
+"unit price", as Laravel's does. Errors a hook returns are keyed the same
+way, whether it names the field by its Rust name or its input name.
+
 ## Complete example
 
 A user registration endpoint, end to end.

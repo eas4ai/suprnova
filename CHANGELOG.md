@@ -8,6 +8,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`InertiaProps` and `Data` follow serde's field names.** Both derives
+  honor `#[serde(rename_all = "...")]` on the struct, and `rename`, `skip`,
+  `skip_serializing` and `skip_deserializing` on a field, including the
+  split `serialize = .., deserialize = ..` forms; any other serde attribute
+  is a compile error. The names reach everything the client sees: Inertia
+  props and partial reloads, the `?include=` allowlist, JSON:API members,
+  request input, route-parameter injection, and `suprnova generate-types`.
+  Validation errors of a `Data`, `#[derive(FormRequest)]` or `#[request]`
+  struct are keyed by the input names at every nested level, so
+  `Precognition-Validate-Only` matches what the client sent, and a message
+  labels `unitPrice` as "unit price", as Laravel does. A raw identifier
+  such as `r#type` is sent and read as `type`. This landed on main after
+  the `v3.0.0` tag (#124).
 - **The schema builder covers the rest of a Laravel migration.**
   `unsigned_id()` and `unsigned_foreign_id()` create Laravel's `BIGINT
   UNSIGNED` keys on MySQL, so a new table can point a foreign key at an
@@ -837,6 +850,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **A `Data` object with a route-parameter field answers 422 for a body
+  that does not fit.** Its extractor answered 400 where the default
+  extractor answers 422 for the same malformed or unknown-key body. This
+  fix landed on main after the `v3.0.0` tag.
+- **A `Data` field may be named `key` or `map`.** The generated
+  `Deserialize` named its locals after the fields, so such a field
+  shadowed the visitor's own variables and the struct failed to compile.
+  This fix landed on main after the `v3.0.0` tag.
 - **`has`, `where_has` and `where_relation` work through a `BelongsTo`
   relation.** The existence query compared the related table's key with
   the foreign key as if the relation were a `HasMany`, so every existence

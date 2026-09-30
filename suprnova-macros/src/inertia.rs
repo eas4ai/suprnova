@@ -97,12 +97,23 @@ pub fn derive_inertia_props_impl(input: TokenStream) -> TokenStream {
         }
     };
 
-    let field_count = fields.len();
-    let field_names: Vec<_> = fields.iter().map(|f| &f.ident).collect();
-    let field_name_strings: Vec<_> = fields
-        .iter()
-        .map(|f| f.ident.as_ref().unwrap().to_string())
-        .collect();
+    let container = match crate::serde_attrs::parse_container(&input.attrs, "InertiaProps") {
+        Ok(container) => container,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let mut field_names = Vec::new();
+    let mut field_name_strings = Vec::new();
+    for field in fields {
+        let names = match crate::serde_attrs::field_names(field, &container, "InertiaProps") {
+            Ok(names) => names,
+            Err(e) => return e.to_compile_error().into(),
+        };
+        if !names.skip_serializing {
+            field_names.push(&field.ident);
+            field_name_strings.push(names.serialize);
+        }
+    }
+    let field_count = field_names.len();
 
     let expanded = quote! {
         impl #impl_generics ::suprnova::serde::Serialize for #name #ty_generics #where_clause {

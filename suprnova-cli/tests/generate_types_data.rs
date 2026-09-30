@@ -500,38 +500,71 @@ fn every_rename_all_rule_names_the_keys_serde_sends() {
     assert_interface_matches_serde(&ts, "SerializeOnly", &SerializeOnly::default());
 }
 
-/// `InertiaProps` and `Data` write their own `Serialize` and never read
-/// `#[serde(...)]`, so the keys of a derived struct stay the Rust names, the
-/// `r#` of a raw identifier included. Were the generator to apply serde's
-/// attributes here, the interface would name keys the server never sends.
+/// `InertiaProps` honors serde's renames and skips in the `Serialize` it
+/// writes, and drops a raw identifier's `r#`, as serde does, so a derived
+/// struct's interface declares exactly the keys the derive sends. Checked
+/// against the derive's own output.
 #[test]
-fn a_derived_struct_keeps_the_names_its_derive_sends() {
-    const DERIVED_SRC: &str = r#"
-#[derive(serde::Deserialize, suprnova::InertiaProps)]
-#[serde(rename_all = "camelCase")]
-pub struct ProfileProps {
-    pub display_name: String,
-    #[serde(skip)]
-    pub revision_id: i64,
-    pub r#type: String,
+fn an_inertia_props_struct_declares_the_keys_its_derive_sends() {
+    scanned! {
+        root: "";
+        #[derive(suprnova::InertiaProps)]
+        #[serde(rename_all = "camelCase")]
+        pub struct ProfileProps {
+            pub display_name: String,
+            #[serde(skip)]
+            pub revision_id: i64,
+            #[serde(rename = "kind")]
+            pub r#type: String,
+            pub r#match: String,
+        }
+    }
+    let ts = generate_types_string(ScanInput::Source(SCANNED_SRC));
+    let props = ProfileProps {
+        display_name: "Ada".into(),
+        revision_id: 1,
+        r#type: "admin".into(),
+        r#match: "exact".into(),
+    };
+    assert_interface_matches_serde(&ts, "ProfileProps", &props);
+    let declared = declared_keys(&ts, "ProfileProps");
+    assert_eq!(
+        declared.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["displayName", "kind", "match"]
+    );
+    assert_eq!(props.revision_id, 1);
 }
 
+/// A `Data` struct is read as well as written, so its `Input` interface
+/// declares the keys its derive reads: the deserialize names, without the
+/// fields serde skips when deserializing. The derive's keys are pinned
+/// against serde's own derive in `suprnova-macros/tests/serde_names.rs`.
+#[test]
+fn a_data_struct_declares_the_keys_it_writes_and_reads() {
+    const DATA_SRC: &str = r#"
 #[derive(suprnova::Data)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "kebab-case"))]
 pub struct ProfileDto {
     pub display_name: String,
     #[serde(rename = "id")]
     pub profile_id: i64,
+    #[serde(skip_deserializing)]
+    pub computed: String,
+    #[serde(skip_serializing)]
+    pub secret: String,
 }
 "#;
-    let ts = generate_types_string(ScanInput::Source(DERIVED_SRC));
-    let props = extract_block(&ts, "ProfileProps");
-    assert!(props.contains("  display_name: string;"), "got: {props}");
-    assert!(props.contains("  revision_id: number;"), "got: {props}");
-    assert!(props.contains("  \"r#type\": string;"), "got: {props}");
-    let dto = extract_block(&ts, "ProfileDto");
-    assert!(dto.contains("  display_name: string;"), "got: {dto}");
-    assert!(dto.contains("  profile_id: number;"), "got: {dto}");
+    let ts = generate_types_string(ScanInput::Source(DATA_SRC));
+    let output = declared_keys(&ts, "ProfileDto");
+    assert_eq!(
+        output.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["computed", "displayName", "id"]
+    );
+    let input = declared_keys(&ts, "ProfileDtoInput");
+    assert_eq!(
+        input.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["display-name", "id", "secret"]
+    );
 }
 
 #[test]

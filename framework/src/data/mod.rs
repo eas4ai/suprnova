@@ -47,10 +47,52 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! # Field names
+//!
+//! The derive writes its own `Serialize` and `Deserialize`, and honors serde's
+//! naming attributes in them: `rename_all` on the struct, and `rename`, `skip`,
+//! `skip_serializing` and `skip_deserializing` on a field. Validation errors
+//! are keyed by the names the input uses, nested ones included. The derive
+//! refuses a serde attribute it does not apply, rather than leave it silently
+//! unapplied:
+//!
+//! ```compile_fail
+//! #[derive(suprnova::Data, suprnova::Validate)]
+//! #[serde(deny_unknown_fields)]
+//! pub struct Signup {
+//!     pub email: String,
+//! }
+//! ```
+//!
+//! and two fields under one key:
+//!
+//! ```compile_fail
+//! #[derive(suprnova::Data, suprnova::Validate)]
+//! pub struct Signup {
+//!     pub email: String,
+//!     #[serde(rename = "email")]
+//!     pub email_address: String,
+//! }
+//! ```
+//!
+//! A struct that compiles, for contrast:
+//!
+//! ```
+//! #[derive(suprnova::Data, suprnova::Validate)]
+//! #[serde(rename_all = "camelCase")]
+//! pub struct Signup {
+//!     pub email_address: String, // read and written as `emailAddress`
+//!     #[serde(skip_serializing)]
+//!     pub password: String,
+//! }
+//! ```
 
 mod error;
 mod field;
 mod include_set;
+#[doc(hidden)]
+pub mod input_names;
 mod middleware;
 pub mod registry;
 pub mod route_params;

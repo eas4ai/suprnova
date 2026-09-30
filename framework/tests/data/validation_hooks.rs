@@ -127,7 +127,7 @@ async fn install_teams_db() {
 /// How a request asks for Precognition: not at all, for every field, or
 /// for the fields a `Precognition-Validate-Only` header names.
 #[derive(Clone, Copy)]
-enum Precognition {
+pub(super) enum Precognition {
     Off,
     All,
     Only(&'static str),
@@ -136,7 +136,7 @@ enum Precognition {
 /// Send one JSON request and return what `T::extract` made of it. The
 /// server task hands the result back over a channel, so nothing waits on
 /// a timer.
-async fn extract<T>(
+pub(super) async fn extract<T>(
     route_params: &[(&str, &str)],
     body: serde_json::Value,
     precognition: Precognition,
@@ -199,7 +199,7 @@ where
     received.await.expect("the server extracted the request")
 }
 
-fn failed_keys(result: Result<impl std::fmt::Debug, FrameworkError>) -> Vec<String> {
+pub(super) fn failed_keys(result: Result<impl std::fmt::Debug, FrameworkError>) -> Vec<String> {
     let errs = match result {
         Err(FrameworkError::Validation(errs)) => errs,
         other => panic!("expected a validation failure, got {other:?}"),

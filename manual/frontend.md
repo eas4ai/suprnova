@@ -86,6 +86,12 @@ pub async fn index(req: Request) -> Response {
 }
 ```
 
+The props are sent under the names serde's attributes give them:
+`#[serde(rename_all = "camelCase")]` on the struct sends a `current_user`
+field as `currentUser`, and `#[serde(rename = "..")]`, `#[serde(skip)]` and
+`#[serde(skip_serializing)]` work on a field. The derive refuses any other
+serde attribute.
+
 A few things the macro does for you. First, it validates at compile
 time that the page component file actually exists under
 `frontend/src/pages/Home.{svelte,tsx,jsx,vue}` - typos surface as a

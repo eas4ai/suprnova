@@ -292,9 +292,38 @@ impl ValidationErrors {
     /// was empty: the request was correctly rejected, but nothing on the
     /// page could say why.
     pub fn from_validator(errors: validator::ValidationErrors) -> Self {
+        Self::from_validator_keyed(errors, |key| key.to_owned())
+    }
+
+    /// [`Self::from_validator`], with each key (a dotted path in Rust field
+    /// names) passed through `key` before its message is built, so the
+    /// message names the field as the client knows it. The `FormRequest`
+    /// extractor passes the request type's input names.
+    #[doc(hidden)]
+    pub fn from_validator_keyed(
+        errors: validator::ValidationErrors,
+        key: fn(&str) -> String,
+    ) -> Self {
         let mut result = Self::new();
-        result.absorb_validator_errors(&errors, "");
+        result.absorb_validator_errors(&errors, "", key);
         result
+    }
+
+    /// Every key passed through `key`, the messages of keys that meet
+    /// merged. The `FormRequest` extractor renames a validation hook's
+    /// errors with it, the way [`Self::from_validator_keyed`] names the
+    /// derived rules' errors.
+    #[doc(hidden)]
+    pub fn rename_keys(self, key: fn(&str) -> String) -> Self {
+        let mut renamed = Self::new();
+        for (field, messages) in self.errors {
+            renamed
+                .errors
+                .entry(key(&field))
+                .or_default()
+                .extend(messages);
+        }
+        renamed
     }
 
     /// Walk a `validator::ValidationErrors` tree and flatten every leaf
@@ -311,7 +340,12 @@ impl ValidationErrors {
     /// Keys follow Laravel's nested-attribute notation, so the same
     /// `errors["items.1.name"]` lookup works in a Blade app, an Inertia
     /// page, and a JSON API client.
-    fn absorb_validator_errors(&mut self, errors: &validator::ValidationErrors, prefix: &str) {
+    fn absorb_validator_errors(
+        &mut self,
+        errors: &validator::ValidationErrors,
+        prefix: &str,
+        rename: fn(&str) -> String,
+    ) {
         let qualify = |field: &str| -> String {
             if prefix.is_empty() {
                 field.to_string()
@@ -323,19 +357,19 @@ impl ValidationErrors {
         for (field, kind) in errors.errors() {
             match kind {
                 validator::ValidationErrorsKind::Field(field_errors) => {
-                    let key = qualify(field);
+                    let key = rename(&qualify(field));
                     for error in field_errors {
                         let message = validator_error_message(&key, error);
                         self.add(key.clone(), message);
                     }
                 }
                 validator::ValidationErrorsKind::Struct(inner) => {
-                    self.absorb_validator_errors(inner, &qualify(field));
+                    self.absorb_validator_errors(inner, &qualify(field), rename);
                 }
                 validator::ValidationErrorsKind::List(items) => {
                     let base = qualify(field);
                     for (index, inner) in items {
-                        self.absorb_validator_errors(inner, &format!("{base}.{index}"));
+                        self.absorb_validator_errors(inner, &format!("{base}.{index}"), rename);
                     }
                 }
             }
@@ -360,7 +394,9 @@ impl ValidationErrors {
 
             // The human label for the field: the `field-<name>` catalog
             // message when the app defines one (Laravel's custom
-            // attribute names), else the raw name with `_` as spaces.
+            // attribute names), else Laravel's displayable attribute: the
+            // name snake-cased (`unitPrice` reads `unit price`, as a
+            // renamed input key reads in Laravel) with `_` as spaces.
             fn display_field(field: &str) -> String {
                 let key = format!("field-{field}");
                 if Lang::has(&key)
@@ -368,7 +404,7 @@ impl ValidationErrors {
                 {
                     return label;
                 }
-                field.replace('_', " ")
+                snake_case(field).replace('_', " ")
             }
 
             if m.is_keyed() && Lang::has(&m.key) {
@@ -467,6 +503,25 @@ fn field_covers(wanted: &str, key: &str) -> bool {
 /// `field` is the **fully-qualified** key (`items.1.name`, not `name`) so
 /// the generic fallback names the actual path - two nested `name` fields
 /// otherwise render byte-identical messages.
+/// Laravel's `Str::snake`: an `_` before every uppercase letter that
+/// follows another character, then lower case. A snake_case name is
+/// unchanged.
+#[cfg(feature = "localization")]
+fn snake_case(name: &str) -> String {
+    let mut snake = String::with_capacity(name.len() + 4);
+    for (position, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() {
+            if position > 0 {
+                snake.push('_');
+            }
+            snake.extend(ch.to_lowercase());
+        } else {
+            snake.push(ch);
+        }
+    }
+    snake
+}
+
 fn validator_error_message(field: &str, error: &validator::ValidationError) -> ValidationMessage {
     // An explicit `#[validate(..., message = "…")]` is the author's final
     // word. Laravel resolves a custom message ahead of the lang file, and

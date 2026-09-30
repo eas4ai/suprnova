@@ -64,6 +64,43 @@ Add `#[derive(Validate)]` separately so `#[validate(...)]` attributes stay visib
 
 The earlier `#[data(custom_authorize)]` flag - which suppressed the whole `FormRequest` impl and forced you to reimplement body parsing, validation, and Precognition by hand - is gone. The macro emits a migration error if you try to use it. Use `#[data(authorize = "fn")]` instead.
 
+## Field names and serde attributes
+
+A Data Object writes its own `Serialize` and `Deserialize`, and it honors serde's naming attributes in them:
+
+| Attribute | Effect |
+|---|---|
+| `#[serde(rename_all = "camelCase")]` on the struct | Every field's key follows the rule. Serde's rules are all accepted: `lowercase`, `UPPERCASE`, `PascalCase`, `camelCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`, `SCREAMING-KEBAB-CASE` |
+| `#[serde(rename = "id")]` on a field | The field's key, winning over `rename_all` |
+| `rename(serialize = "..", deserialize = "..")`, `rename_all(serialize = "..", deserialize = "..")` | A different name in the output than in the input |
+| `#[serde(skip)]` | The field is neither sent nor read; it takes its `Default` |
+| `#[serde(skip_serializing)]` / `#[serde(skip_deserializing)]` | Left out of the output, or out of the input |
+
+```rust
+#[derive(Data, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct OrderDto {
+    #[validate(email)]
+    pub customer_email: String,        // `customerEmail`
+    #[validate(nested)]
+    pub line_items: Vec<LineDto>,      // `lineItems`
+    #[serde(rename = "ref")]
+    pub reference: String,             // `ref`
+}
+```
+
+The name is used everywhere the field meets the client:
+
+- **Output** (the serialize name): the JSON body, Inertia props and partial reloads, the `?include=` allowlist of a lazy prop, and JSON:API attribute, relationship and include names.
+- **Input** (the deserialize name): the request body, and so the strict unknown-field check, a required field's "missing field" error, and the key a [route parameter](#route-parameter-field-injection) is injected under. The route parameter itself keeps its own name, the Rust field name unless `from_route_param("..")` names one.
+- **Validation errors** are keyed by the input name, nested ones included (`lineItems.1.unitPrice`), so the error bag, the page and `Precognition-Validate-Only` all use the names the client sent. The message label is the name snake-cased, as Laravel's is: `unitPrice` reads "unit price". A `validate!` row or a hook may name the field by its Rust name; the error is keyed by the input name either way.
+
+A raw identifier loses its `r#`, as it does with serde: `pub r#type: String` is sent as `type`.
+
+Any other serde attribute on a Data Object fails to compile with an error that lists the supported ones: the derive would otherwise leave it silently unapplied. Two fields under the same key fail to compile too.
+
+A `#[derive(FormRequest)]` or `#[request]` struct is deserialized by serde's own derive, which reads all of serde's attributes. Its validation errors are keyed by the input names in the same way.
+
 ## Validation rules and database checks
 
 `#[validate(...)]` attributes cover the per-field checks. Everything else
@@ -130,7 +167,7 @@ match dto.bio {
 }
 ```
 
-`Field::Absent` (default) round-trips to omitted-from-JSON when paired with `#[serde(default, skip_serializing_if = "Field::is_absent")]` at the call site. Without `skip_serializing_if`, `Absent` serializes to JSON `null`.
+`Field::Absent` (default) is left out of a Data Object's output: the derive omits the key itself. In a plain struct that derives serde's `Serialize`, pair the field with `#[serde(default, skip_serializing_if = "Field::is_absent")]` for the same result; without `skip_serializing_if`, serde writes `Absent` as JSON `null`.
 
 For three-way DB upserts: `dto.bio.into_option_or_null() -> Option<Option<T>>` maps `Absent → None`, `Null → Some(None)`, `Value(v) → Some(Some(v))`. Use this when "don't touch" and "set to NULL" need to be distinct downstream.
 
@@ -355,9 +392,9 @@ SeaORM entities need a custom `IsRelationLoaded` impl that consults their loaded
 - `#[data(input_only)]` → excluded from output type
 - `#[data(output_only)]` → excluded from input type
 - Generic struct → TypeScript generic interface (`export interface Paginated<T>`)
-- When ANY field has `input_only` / `output_only` / `lazy`, two interfaces are emitted: `<Name>` (output) and `<Name>Input` (input)
+- When ANY field has `input_only` / `output_only` / `lazy`, or the input and the output name a field differently or skip it in one direction only, two interfaces are emitted: `<Name>` (output) and `<Name>Input` (input)
 - A plain struct a prop reaches, one that derives serde's `Serialize`, follows serde's attributes: `#[serde(skip)]` and `skip_serializing` leave the field out, `skip_serializing_if` makes it optional (`field?: T`), and `rename` and `rename_all` (or their `serialize = ...` forms) name the key. Other serde attributes, such as `flatten` and `transparent`, are not read. A key that is not an identifier, such as `display-name`, is quoted
-- `#[derive(Data)]` and `#[derive(InertiaProps)]` structs write their own `Serialize`, which names every key after its Rust field, so `#[serde(...)]` attributes do not change their keys. Use `#[data(input_only)]` or `#[data(output_only)]` to leave a field out of one side
+- `#[derive(Data)]` and `#[derive(InertiaProps)]` structs follow the serde attributes they honor (see [Field names and serde attributes](#field-names-and-serde-attributes)): `<Name>` declares the serialize names, `<Name>Input` the deserialize names
 
 Generated types never leak Rust-only types (`Prop<...>` won't appear in the output `.d.ts`).
 

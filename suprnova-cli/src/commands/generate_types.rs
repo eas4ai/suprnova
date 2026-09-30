@@ -7,7 +7,7 @@ use syn::ext::IdentExt;
 use syn::punctuated::Punctuated;
 use syn::visit::Visit;
 use syn::{
-    Attribute, Expr, ExprLit, Fields, GenericArgument, ItemStruct, Lit, Meta, MetaList,
+    Attribute, Expr, ExprLit, Fields, GenericArgument, ItemStruct, Lit, Meta,
     MetaNameValue, PathArguments, Token, Type,
 };
 use walkdir::WalkDir;
@@ -38,9 +38,18 @@ pub struct DataFieldFlags {
 
 #[derive(Debug, Clone)]
 pub struct StructField {
-    /// The key the field is sent under: the Rust name for a derived struct,
-    /// the name serde's attributes give it for a plain one.
+    /// The key the field is sent under: the name serde's attributes give it
+    /// for serialization. The derives honor the same attributes.
     pub name: String,
+    /// The key the field is read from in request input: serde's name for
+    /// deserialization. Equal to `name` except on a `Data` struct that
+    /// renames the two directions apart.
+    pub input_name: String,
+    /// The field is sent: serde does not skip it when serializing.
+    pub in_output: bool,
+    /// The field is read from input: a `Data` struct's serde does not skip
+    /// it when deserializing. Equal to `in_output` for every other struct.
+    pub in_input: bool,
     pub ty: RustType,
     pub data_flags: DataFieldFlags,
     /// `#[serde(skip_serializing_if = "...")]`: serde may leave the key out,
@@ -273,8 +282,10 @@ fn parse_data_flags(attrs: &[Attribute]) -> DataFieldFlags {
 /// What serde's attributes on one field say about its key on the wire.
 #[derive(Debug, Default)]
 struct SerdeField {
-    skip: bool,
+    skip_serializing: bool,
+    skip_deserializing: bool,
     rename: Option<String>,
+    rename_input: Option<String>,
     may_be_absent: bool,
 }
 
@@ -364,64 +375,71 @@ fn string_literal(expr: &Expr) -> Option<String> {
     }
 }
 
-/// The value serde uses for serialization in `rename = "x"`, or in the
+/// The value serde uses in one direction from `rename = "x"`, or from the
 /// direction-specific `rename(serialize = "x", deserialize = "y")`, and the
-/// same two forms of `rename_all`. The key is what the server sends, so the
-/// `deserialize` half never applies.
-fn serialize_value(meta: &Meta) -> Option<String> {
+/// same two forms of `rename_all`. `direction` is `serialize` or
+/// `deserialize`.
+fn direction_value(meta: &Meta, direction: &str) -> Option<String> {
     match meta {
         Meta::NameValue(pair) => string_literal(&pair.value),
-        Meta::List(list) => serialize_half(list),
+        Meta::List(list) => list
+            .parse_args_with(Punctuated::<MetaNameValue, Token![,]>::parse_terminated)
+            .ok()?
+            .into_iter()
+            .find(|pair| pair.path.is_ident(direction))
+            .and_then(|pair| string_literal(&pair.value)),
         Meta::Path(_) => None,
     }
-}
-
-fn serialize_half(list: &MetaList) -> Option<String> {
-    list.parse_args_with(Punctuated::<MetaNameValue, Token![,]>::parse_terminated)
-        .ok()?
-        .into_iter()
-        .find(|pair| pair.path.is_ident("serialize"))
-        .and_then(|pair| string_literal(&pair.value))
 }
 
 fn parse_serde_field(attrs: &[Attribute]) -> SerdeField {
     let mut field = SerdeField::default();
     for meta in serde_args(attrs) {
         let path = meta.path();
-        if path.is_ident("skip") || path.is_ident("skip_serializing") {
-            field.skip = true;
+        if path.is_ident("skip") {
+            field.skip_serializing = true;
+            field.skip_deserializing = true;
+        } else if path.is_ident("skip_serializing") {
+            field.skip_serializing = true;
+        } else if path.is_ident("skip_deserializing") {
+            field.skip_deserializing = true;
         } else if path.is_ident("skip_serializing_if") {
             field.may_be_absent = true;
-        } else if path.is_ident("rename")
-            && let Some(name) = serialize_value(&meta)
-        {
-            field.rename = Some(name);
+        } else if path.is_ident("rename") {
+            if let Some(name) = direction_value(&meta, "serialize") {
+                field.rename = Some(name);
+            }
+            if let Some(name) = direction_value(&meta, "deserialize") {
+                field.rename_input = Some(name);
+            }
         }
     }
     field
 }
 
-fn parse_serde_rename_all(attrs: &[Attribute]) -> Option<RenameRule> {
-    serde_args(attrs)
-        .filter(|meta| meta.path().is_ident("rename_all"))
-        .filter_map(|meta| serialize_value(&meta))
-        .find_map(|rule| RenameRule::parse(&rule))
+/// The struct's `rename_all` rule for serialization and for
+/// deserialization.
+fn parse_serde_rename_all(attrs: &[Attribute]) -> (Option<RenameRule>, Option<RenameRule>) {
+    let rule = |direction: &str| {
+        serde_args(attrs)
+            .filter(|meta| meta.path().is_ident("rename_all"))
+            .filter_map(|meta| direction_value(&meta, direction))
+            .find_map(|rule| RenameRule::parse(&rule))
+    };
+    (rule("serialize"), rule("deserialize"))
 }
 
 impl<'ast> Visit<'ast> for InertiaPropsVisitor {
     fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
-        let derived =
-            self.has_inertia_props_derive(&node.attrs) || self.has_data_derive(&node.attrs);
+        let data = self.has_data_derive(&node.attrs);
+        let derived = self.has_inertia_props_derive(&node.attrs) || data;
 
-        // `InertiaProps` and `Data` write their own `Serialize`, which sends
-        // every field under its Rust name and never reads `#[serde(...)]`.
-        // Every other struct here is one a prop reaches, serialized by serde's
-        // own derive, so there serde's attributes decide the keys.
-        let rename_all = if derived {
-            None
-        } else {
-            parse_serde_rename_all(&node.attrs)
-        };
+        // serde's attributes decide the keys of every struct here: a plain
+        // one a prop reaches is serialized by serde's own derive, and
+        // `InertiaProps` and `Data` honor the same attributes in the impls
+        // they write. Only a `Data` struct is read from input, so only it can
+        // name the two directions apart.
+        let (rename_all, rename_all_input) = parse_serde_rename_all(&node.attrs);
 
         let (named_fields, fields): (bool, Vec<StructField>) = match &node.fields {
             Fields::Named(named) => (
@@ -431,27 +449,37 @@ impl<'ast> Visit<'ast> for InertiaPropsVisitor {
                     .iter()
                     .filter_map(|f| {
                         let ident = f.ident.as_ref()?;
-                        let (name, may_be_absent) = if derived {
-                            (ident.to_string(), false)
-                        } else {
-                            let serde = parse_serde_field(&f.attrs);
-                            if serde.skip {
-                                return None;
-                            }
-                            let name = serde.rename.unwrap_or_else(|| {
-                                let name = ident.unraw().to_string();
-                                match rename_all {
-                                    Some(rule) => rule.apply(&name),
-                                    None => name,
-                                }
-                            });
-                            (name, serde.may_be_absent)
+                        let serde = parse_serde_field(&f.attrs);
+                        let base = ident.unraw().to_string();
+                        let apply = |rule: Option<RenameRule>| match rule {
+                            Some(rule) => rule.apply(&base),
+                            None => base.clone(),
                         };
+                        let name = serde.rename.clone().unwrap_or_else(|| apply(rename_all));
+                        let in_output = !serde.skip_serializing;
+                        let (input_name, in_input) = if data {
+                            (
+                                serde
+                                    .rename_input
+                                    .clone()
+                                    .unwrap_or_else(|| apply(rename_all_input)),
+                                !serde.skip_deserializing,
+                            )
+                        } else {
+                            (name.clone(), in_output)
+                        };
+                        if !in_output && !in_input {
+                            return None;
+                        }
                         Some(StructField {
                             name,
+                            input_name,
+                            in_output,
+                            in_input,
                             ty: Self::parse_type(&f.ty),
                             data_flags: parse_data_flags(&f.attrs),
-                            may_be_absent,
+                            // The derives refuse `skip_serializing_if`.
+                            may_be_absent: !derived && serde.may_be_absent,
                         })
                     })
                     .collect(),
@@ -1045,10 +1073,16 @@ fn warn_unresolved_refs(structs: &[InertiaPropsStruct]) {
 /// `input_only`, `output_only`, or `lazy` flag - i.e. whenever the input and
 /// output shapes differ.
 fn emit_ts_for_struct(s: &InertiaPropsStruct, known: &HashSet<String>) -> String {
-    let has_flags = s
-        .fields
-        .iter()
-        .any(|f| f.data_flags.input_only || f.data_flags.output_only || f.data_flags.lazy);
+    // An `Input` interface is emitted when what the frontend sends differs
+    // from what it receives: a data flag, a key renamed per direction, or a
+    // field serde skips in one direction only.
+    let has_flags = s.fields.iter().any(|f| {
+        f.data_flags.input_only
+            || f.data_flags.output_only
+            || f.data_flags.lazy
+            || f.name != f.input_name
+            || f.in_output != f.in_input
+    });
 
     // Build generic type parameter suffix, e.g. "<T>" or "<A, B>" or "".
     let generics = if s.type_params.is_empty() {
@@ -1061,7 +1095,11 @@ fn emit_ts_for_struct(s: &InertiaPropsStruct, known: &HashSet<String>) -> String
 
     // Output interface - what the frontend RECEIVES
     out.push_str(&format!("export interface {}{} {{\n", s.name, generics));
-    for f in s.fields.iter().filter(|f| !f.data_flags.input_only) {
+    for f in s
+        .fields
+        .iter()
+        .filter(|f| !f.data_flags.input_only && f.in_output)
+    {
         let marker = if f.may_be_absent {
             "?"
         } else {
@@ -1086,11 +1124,11 @@ fn emit_ts_for_struct(s: &InertiaPropsStruct, known: &HashSet<String>) -> String
         for f in s
             .fields
             .iter()
-            .filter(|f| !f.data_flags.output_only && !f.data_flags.lazy)
+            .filter(|f| !f.data_flags.output_only && !f.data_flags.lazy && f.in_input)
         {
             out.push_str(&format!(
                 "  {}{}: {};\n",
-                ts_property_key(&f.name),
+                ts_property_key(&f.input_name),
                 optional_marker(&f.ty),
                 rust_type_to_ts(&f.ty, known, &s.type_params)
             ));
