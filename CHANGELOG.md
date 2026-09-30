@@ -8,6 +8,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **The schema builder covers the rest of a Laravel migration.**
+  `unsigned_id()` and `unsigned_foreign_id()` create Laravel's `BIGINT
+  UNSIGNED` keys on MySQL, so a new table can point a foreign key at an
+  existing Laravel table, and a model reads them with `key_type = "u64"`.
+  New columns: `tiny_integer`, the `unsigned_` integers, `medium_text`,
+  `long_text`, `enumeration` (Laravel's `enum`) and `remember_token`. New
+  modifiers: `.unsigned()`, `.index()`, `.primary()`, `.precision(n)`,
+  `.use_current()` and `.after(column)`. `t.primary(&[..])` makes a
+  composite primary key, `t.foreign(column)` a foreign key on a column
+  declared on its own, `.name(..)` names a key, and
+  `drop_constrained_foreign_id` drops a key with its column. The actions have
+  Laravel's shorthands, `cascade_on_delete()` and the rest. Where the
+  databases differ the builder does what Laravel does: `unsigned` and
+  `after` apply on MySQL only, and an enumeration is a string with a `CHECK`
+  off MySQL. This landed on main after the `v3.0.0` tag (#122).
 - **Native date-time columns for models.** `AsNativeDateTime` and
   `AsOptionalNativeDateTime` store a `DateTime<Utc>` in a column that keeps
   the zone (`timestamp with time zone` on Postgres, `TIMESTAMP` or

@@ -251,14 +251,21 @@ affinity is what the database reports.
 | Method | SQLite | Postgres | MySQL |
 |--------|--------|----------|-------|
 | `id()` | `integer`, auto-increment, primary key | `bigserial`, primary key | `bigint`, auto-increment, primary key |
+| `unsigned_id()` | as `id()` | as `id()` | `bigint unsigned`, auto-increment, primary key |
 | `foreign_id(name)` | `integer` | `bigint` | `bigint` |
+| `unsigned_foreign_id(name)` | `integer` | `bigint` | `bigint unsigned` |
 | `big_integer(name)` | `integer` | `bigint` | `bigint` |
 | `integer(name)` | `integer` | `integer` | `int` |
 | `small_integer(name)` | `integer` | `smallint` | `smallint` |
+| `tiny_integer(name)` | `integer` | `smallint` | `tinyint` |
+| `unsigned_big_integer(name)`, `unsigned_integer(name)`, `unsigned_small_integer(name)`, `unsigned_tiny_integer(name)` | the signed type | the signed type | the type, `unsigned` |
 | `boolean(name)` | `boolean` | `boolean` | `tinyint(1)` |
 | `string(name)` | `varchar(255)` | `varchar(255)` | `varchar(255)` |
 | `char(name, length)` | `char(length)` | `char(length)` | `char(length)` |
-| `text(name)` | `text` | `text` | `text` |
+| `text(name)` | `text` | `text` | `text` (64 KB) |
+| `medium_text(name)` | `text` | `text` | `mediumtext` (16 MB) |
+| `long_text(name)` | `text` | `text` | `longtext` (4 GB) |
+| `enumeration(name, &[values])` | `varchar` with `CHECK (name IN (..))` | `varchar(255)` with `CHECK (name IN (..))` | `enum(..)` |
 | `float(name)` | `float` | `real` | `float` |
 | `double(name)` | `double` | `double precision` | `double` |
 | `decimal(name, precision, scale)` | `decimal(precision, scale)` | `numeric(precision, scale)` | `decimal(precision, scale)` |
@@ -270,10 +277,48 @@ affinity is what the database reports.
 | `uuid(name)` | `char(36)` | `uuid` | `char(36)` |
 | `ulid(name)` | `char(26)` | `char(26)` | `char(26)` |
 | `binary(name)` | `blob` | `bytea` | `blob` |
+| `remember_token()` | nullable `varchar(100)` named `remember_token` | the same | the same |
 
 `id()` is a `BIGINT` on Postgres and MySQL, and `foreign_id` has the same type.
 The types match because MySQL refuses a foreign key between columns of
 different types. A table has one `id()`.
+
+Where the databases differ, the builder does what Laravel does rather than
+refusing: `unsigned` applies on MySQL only, because Postgres and SQLite have no
+unsigned integers; `tiny_integer`, `medium_text` and `long_text` take the
+nearest type; and `enumeration` becomes a string with a `CHECK` off MySQL. An
+`enumeration` value may contain any character, a quote included; the builder
+escapes it.
+
+#### Laravel tables on MySQL
+
+Laravel's `id()` and `foreignId()` are `BIGINT UNSIGNED` on MySQL, and MySQL
+refuses a foreign key whose type differs from the referenced column's, sign
+included. A new table that points at a Laravel `users` table uses
+`unsigned_foreign_id`:
+
+```rust
+Schema::create(manager, "orders", |t| {
+    t.unsigned_id();
+    t.unsigned_foreign_id("user_id").constrained("users").cascade_on_delete();
+    t.enumeration("status", &["draft", "paid"]).default("draft");
+    t.timestamps_tz();
+})
+.await?;
+```
+
+A model reads an unsigned column into an unsigned field: the MySQL driver
+refuses to read `BIGINT UNSIGNED` into an `i64`. Declare the key `u64`, and
+foreign key fields `u64` to match:
+
+```rust
+#[model(table = "orders", key_type = "u64")]
+pub struct Order {
+    pub id: u64,
+    pub user_id: u64,
+    pub status: String,
+}
+```
 
 ### Modifiers
 
@@ -285,6 +330,18 @@ Each column method returns a builder. Chain the modifiers on it.
 | `.default(value)` | Sets the value the database stores when an insert leaves the column out. It takes a plain Rust value (`7`, `"draft"`, `false`) or a SeaQuery `Expr` such as `Expr::current_timestamp()`. |
 | `.unique()` | Adds a unique index over this column alone, named `{table}_{column}_unique`. |
 | `.length(n)` | Sets the length of a `string` column. On any other column type the migration fails with an error that names the column. Use `char(name, length)` for a fixed length. |
+| `.index()` | Adds an index over this column alone, named `{table}_{column}_index`. |
+| `.primary()` | Makes this column the primary key. For a key over several columns, `t.primary(&[..])`. |
+| `.unsigned()` | `UNSIGNED` on MySQL, for an integer column. Ignored on Postgres and SQLite. On any other column type the migration fails. |
+| `.precision(n)` | Fractional-second digits, 0 to 6, of a `date_time`, `timestamp_tz` or `time` column. MySQL keeps whole seconds without it, Postgres microseconds; SQLite stores text and ignores it. |
+| `.use_current()` | Defaults a `date_time` or `timestamp_tz` column to the current time, `CURRENT_TIMESTAMP`. |
+| `.after(column)` | Places a column that `Schema::table` adds after `column`, on MySQL. Ignored on Postgres and SQLite; `Schema::create` refuses it, because MySQL does. |
+
+A native date-time column on MySQL keeps whole seconds unless you set a
+precision, and drops the fraction a model writes: MySQL rounds it, MariaDB
+truncates it. Declare
+`t.timestamp_tz("paid_at").precision(6)` to keep microseconds. MySQL's
+`TIMESTAMP` also ends in 2038; `date_time` does not.
 
 ### Timestamps and soft deletes
 
@@ -371,6 +428,27 @@ Schema::create(manager, "comments", |t| {
   database default (`NO ACTION`) applies when you do not call them.
 - A `foreign_id` with no `constrained` or `references` call is a plain `BIGINT`
   column.
+- `.cascade_on_delete()`, `.restrict_on_delete()`, `.null_on_delete()` and
+  `.no_action_on_delete()` are short for `.on_delete(..)` with that action, and
+  the `_on_update` forms for `.on_update(..)`.
+- `.name("orders_state_fk")` names the constraint instead of
+  `{table}_{column}_foreign`.
+- `t.foreign("state_id")` creates a foreign key on a column declared on its own,
+  or one the table already has in `Schema::table`. It takes the same
+  `.references(table, column)`, `.constrained(table)`, `.name(..)` and actions,
+  and without a referenced table the migration fails.
+- `t.primary(&["post_id", "tag_id"])` makes a composite primary key, as a pivot
+  table needs. A table has one primary key: `id()` and `primary` together fail,
+  and so does a nullable column in the key.
+
+```rust
+Schema::create(manager, "post_tag", |t| {
+    t.foreign_id("post_id").constrained("posts").cascade_on_delete();
+    t.foreign_id("tag_id").constrained("tags").cascade_on_delete();
+    t.primary(&["post_id", "tag_id"]);
+})
+.await
+```
 
 The builder refuses a name longer than 63 bytes for an index or a foreign key,
 on every backend. It is the limit Postgres keeps, so a migration that runs on
@@ -383,7 +461,10 @@ one backend runs on all three.
 - new columns of any type, with the same modifiers
 - `rename_column(from, to)` and `drop_column(name)`
 - `index`, `unique` and `drop_index(name)`
-- `foreign_id(..).constrained(..)` and `drop_foreign(name)`
+- `foreign_id(..).constrained(..)`, `foreign(column)` and `drop_foreign(name)`
+- `drop_constrained_foreign_id(column)`, which drops the key
+  `{table}_{column}_foreign` and then the column
+- `primary(&[..])`, on Postgres and MySQL
 
 ```rust
 Schema::table(manager, "posts", |t| {
@@ -415,9 +496,10 @@ SQLite cannot run some alterations in place, and the builder does not rebuild
 the table. `Schema::table` on SQLite returns an error, before it runs any
 statement of the call, for:
 
-- Adding or dropping a foreign key.
-- Adding a primary key column.
+- Adding or dropping a foreign key, `drop_constrained_foreign_id` included.
+- Adding a primary key column, or a primary key.
 - Adding a `NOT NULL` column with no default.
+- Adding a column with `.use_current()`.
 
 The errors read:
 
@@ -430,9 +512,21 @@ schema: cannot add the NOT NULL column `{column}` to the existing table `{table}
 Dropping a foreign key reads `cannot drop the foreign key` in the first text.
 
 SQLite also refuses `CURRENT_TIMESTAMP` as the default of a column added to an
-existing table, so use a constant default there. It refuses to drop a column
+existing table, so use a constant default there; the builder refuses
+`.use_current()` up front, and cannot see a `CURRENT_TIMESTAMP` passed through
+`.default(..)`. It refuses to drop a column
 that an index, a unique constraint or a foreign key covers: record the
 `drop_index` earlier in the same closure.
+
+### Why Suprnova diverges
+
+- `id()` is a signed `BIGINT` on MySQL, where Laravel's is unsigned, because a
+  model's key is an `i64` by default and the MySQL driver will not read an
+  unsigned column into it. `unsigned_id()` and `unsigned_foreign_id()` create
+  Laravel's types.
+- Laravel's `enum` is `enumeration`: `enum` is a Rust keyword.
+- `references(table, column)` takes both names in one call, where Laravel
+  chains `->references($column)->on($table)`.
 
 ### Both styles in one Migrator
 

@@ -101,7 +101,7 @@ pub struct NaivePost {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
-async fn drop_tables(conn: &DatabaseConnection, tables: &[&str]) {
+pub(super) async fn drop_tables(conn: &DatabaseConnection, tables: &[&str]) {
     let manager = SchemaManager::new(conn);
     for table in tables {
         Schema::drop_if_exists(&manager, table)
@@ -110,11 +110,11 @@ async fn drop_tables(conn: &DatabaseConnection, tables: &[&str]) {
     }
 }
 
-async fn run(conn: &DatabaseConnection, sql: &str) -> Result<(), DbErr> {
+pub(super) async fn run(conn: &DatabaseConnection, sql: &str) -> Result<(), DbErr> {
     conn.execute_unprepared(sql).await.map(|_| ())
 }
 
-async fn count(conn: &DatabaseConnection, table: &str) -> i64 {
+pub(super) async fn count(conn: &DatabaseConnection, table: &str) -> i64 {
     let row = conn
         .query_one_raw(Statement::from_string(
             conn.get_database_backend(),
@@ -127,7 +127,7 @@ async fn count(conn: &DatabaseConnection, table: &str) -> i64 {
 }
 
 /// The text of the `DbErr::Migration` a call must return.
-fn migration_error(result: Result<(), DbErr>) -> String {
+pub(super) fn migration_error(result: Result<(), DbErr>) -> String {
     match result {
         Err(DbErr::Migration(text)) => text,
         other => panic!("expected DbErr::Migration, got {other:?}"),

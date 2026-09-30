@@ -12,7 +12,7 @@ use std::time::Duration;
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use serial_test::serial;
 
-use super::cases;
+use super::{cases, laravel_cases};
 
 async fn connect_mysql() -> DatabaseConnection {
     let url = std::env::var("MYSQL_TEST_URL")
@@ -131,4 +131,46 @@ async fn mysql_quoted_string_default_round_trips() {
 #[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
 async fn mysql_a_name_longer_than_the_limit_is_refused() {
     cases::a_name_longer_than_the_limit_is_refused(&connect_mysql().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_laravel_column_types() {
+    laravel_cases::laravel_column_types(&connect_mysql().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_primary_keys() {
+    laravel_cases::primary_keys(&connect_mysql().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_foreign_on_a_declared_column() {
+    laravel_cases::foreign_on_a_declared_column(&connect_mysql().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_laravel_misuse_is_refused() {
+    laravel_cases::laravel_misuse_is_refused(&connect_mysql().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_alter_laravel_additions() {
+    laravel_cases::alter_laravel_additions(&connect_mysql().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_unsigned_keys_through_models() {
+    laravel_cases::unsigned_keys_through_models(&connect_mysql().await).await;
 }

@@ -70,12 +70,19 @@
 //! | Method | Column |
 //! |---|---|
 //! | `id()` | `id`, `BIGINT`, auto-increment, primary key |
+//! | `unsigned_id()` | `id()`, `UNSIGNED` on MySQL: Laravel's `id()` |
 //! | `foreign_id(name)` | `BIGINT`, the type of `id()` |
+//! | `unsigned_foreign_id(name)` | the type of `unsigned_id()`: Laravel's `foreignId` |
 //! | `big_integer(name)`, `integer(name)`, `small_integer(name)` | 64-, 32- and 16-bit integers |
+//! | `tiny_integer(name)` | `TINYINT` on MySQL, `smallint` on Postgres, `integer` on SQLite |
+//! | `unsigned_big_integer(name)` and the other `unsigned_` forms | the integer, `UNSIGNED` on MySQL |
 //! | `boolean(name)` | boolean |
 //! | `string(name)` | `VARCHAR(255)`; `.length(n)` sets the length |
 //! | `char(name, length)` | fixed length |
-//! | `text(name)` | unbounded text |
+//! | `text(name)` | unbounded text (64 KB on MySQL) |
+//! | `medium_text(name)`, `long_text(name)` | `MEDIUMTEXT` and `LONGTEXT` on MySQL, `text` elsewhere |
+//! | `enumeration(name, &[values])` | `ENUM` on MySQL, a string with a `CHECK` elsewhere |
+//! | `remember_token()` | nullable `VARCHAR(100)` `remember_token` |
 //! | `float(name)`, `double(name)` | 32- and 64-bit floating point |
 //! | `decimal(name, precision, scale)` | exact decimal |
 //! | `date(name)`, `time(name)` | date, time of day |
@@ -85,6 +92,15 @@
 //! | `uuid(name)` | `uuid` on Postgres, `CHAR(36)` on MySQL and SQLite |
 //! | `ulid(name)` | `CHAR(26)` |
 //! | `binary(name)` | `bytea` on Postgres, `BLOB` elsewhere |
+//!
+//! Where the databases differ the builder does what Laravel does instead of
+//! refusing: `unsigned` and `.after(column)` apply on MySQL only, and the
+//! types above take the nearest type elsewhere.
+//!
+//! The modifiers are `.nullable()`, `.default(value)`, `.unique()`,
+//! `.index()`, `.primary()`, `.length(n)`, `.unsigned()`, `.precision(n)`,
+//! `.use_current()` and `.after(column)`; a modifier on a column type it
+//! does not apply to makes the migration fail.
 //!
 //! `timestamps()` and `soft_deletes()` create string columns, because that
 //! is the storage a `#[suprnova::model]` uses for a `DateTime<Utc>` field
@@ -103,22 +119,30 @@
 //!
 //! `t.index(&["a", "b"])` is named `{table}_{columns}_index` and
 //! `t.unique(&["a"])` is named `{table}_{columns}_unique`, with the columns
-//! joined by `_`. A foreign key is named `{table}_{column}_foreign`. Indexes
-//! are separate `CREATE INDEX` statements that run after the table.
+//! joined by `_`. A foreign key is named `{table}_{column}_foreign` unless
+//! `.name(..)` names it. Indexes are separate `CREATE INDEX` statements that
+//! run after the table.
+//!
+//! `t.foreign(column)` declares a key on a column declared on its own, and
+//! `t.primary(&[..])` a primary key over one or more columns. The actions
+//! have Laravel's shorthands: `.cascade_on_delete()`, `.null_on_delete()`,
+//! `.restrict_on_delete()` and the rest.
 //!
 //! # Altering a table
 //!
 //! [`Schema::table`] accepts new columns of any type, `rename_column`,
 //! `drop_column`, `index`, `unique`, `drop_index`, `foreign_id(..)
-//! .constrained(..)` and `drop_foreign`. It runs the operations in the order
+//! .constrained(..)`, `foreign`, `drop_foreign`,
+//! `drop_constrained_foreign_id` and, on Postgres and MySQL, `primary`. It runs the operations in the order
 //! the closure recorded them, each as its own statement. Changing the type
 //! of an existing column is not supported.
 //!
 //! SQLite cannot add or drop a foreign key on an existing table. On SQLite
 //! `Schema::table` returns an error for either operation before it runs any
 //! statement of the call; create the key with the table, or write the step
-//! with SeaORM. It also refuses to add a primary key column, and a `NOT
-//! NULL` column with no default, because SQLite does. A column added to an
+//! with SeaORM. It also refuses to add a primary key or a primary key
+//! column, a `NOT NULL` column with no default, and a column with
+//! `.use_current()`, because SQLite does. A column added to an
 //! existing table on SQLite needs a constant default; SQLite refuses
 //! `CURRENT_TIMESTAMP` there.
 //!
@@ -139,13 +163,13 @@ mod column;
 mod foreign;
 mod plan;
 
-use sea_orm::DbErr;
 use sea_orm::sea_query::{Alias, Table};
+use sea_orm::{ConnectionTrait, DbBackend, DbErr};
 use sea_orm_migration::SchemaManager;
 
 pub use blueprint::Blueprint;
 pub use column::ColumnBuilder;
-pub use foreign::ForeignIdBuilder;
+pub use foreign::{ForeignBuilder, ForeignIdBuilder};
 
 use plan::{Step, plan_alter, plan_create};
 
@@ -153,6 +177,19 @@ use plan::{Step, plan_alter, plan_create};
 /// string, which is what a table or column named at run time needs.
 fn sea_ident(name: &str) -> Alias {
     Alias::new(name)
+}
+
+/// `name` quoted as an identifier for `backend`, for the few statements
+/// the builder writes itself: backticks on MySQL, double quotes elsewhere,
+/// with the quote character doubled inside the name.
+fn quote_ident(backend: DbBackend, name: &str) -> String {
+    let quote = if backend == DbBackend::MySql {
+        '`'
+    } else {
+        '"'
+    };
+    let doubled = name.replace(quote, &format!("{quote}{quote}"));
+    format!("{quote}{doubled}{quote}")
 }
 
 /// Runs the statements of a plan in order and stops at the first error.
@@ -165,6 +202,9 @@ async fn run(manager: &SchemaManager<'_>, steps: Vec<Step>) -> Result<(), DbErr>
             Step::DropIndex(statement) => manager.drop_index(statement).await?,
             Step::CreateForeignKey(statement) => manager.create_foreign_key(statement).await?,
             Step::DropForeignKey(statement) => manager.drop_foreign_key(statement).await?,
+            Step::Raw(sql) => {
+                manager.get_connection().execute_unprepared(&sql).await?;
+            }
         }
     }
     Ok(())

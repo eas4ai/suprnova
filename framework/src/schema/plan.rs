@@ -16,7 +16,7 @@ use sea_orm::{DbBackend, DbErr};
 use super::blueprint::{Blueprint, Command, IndexSpec};
 use super::column::ColumnKind;
 use super::foreign::ForeignSpec;
-use super::sea_ident;
+use super::{quote_ident, sea_ident};
 
 /// Longest identifier Postgres keeps: 63 bytes. The builder applies it on
 /// every backend so a migration that runs on one runs on all three. The plan
@@ -32,6 +32,9 @@ pub(crate) enum Step {
     DropIndex(IndexDropStatement),
     CreateForeignKey(ForeignKeyCreateStatement),
     DropForeignKey(ForeignKeyDropStatement),
+    /// A statement sea-query cannot build: adding a primary key to an
+    /// existing table. Its identifiers are quoted by [`quote_ident`].
+    Raw(String),
 }
 
 fn refuse(message: String) -> DbErr {
@@ -105,6 +108,10 @@ fn referenced_table<'a>(table: &str, foreign: &'a ForeignSpec) -> Result<Option<
             foreign.column
         ))),
         Some(ref_table) => Ok(Some(ref_table.as_str())),
+        None if foreign.explicit => Err(refuse(format!(
+            "schema: foreign(`{}`) on table `{table}` names no referenced table; call references(table, column) or constrained(table)",
+            foreign.column
+        ))),
         None if foreign.on_delete.is_some() || foreign.on_update.is_some() => Err(refuse(format!(
             "schema: column `{}` of table `{table}` has on_delete or on_update but no referenced table; call constrained(table) or references(table, column) first",
             foreign.column
@@ -133,6 +140,62 @@ fn foreign_statement(
     statement
 }
 
+fn check_foreign_name(
+    table: &str,
+    foreign: &ForeignSpec,
+    seen: &mut HashSet<String>,
+) -> Result<String, DbErr> {
+    if foreign.column.is_empty() {
+        return Err(refuse(format!(
+            "schema: cannot create a foreign key on table `{table}` over a column with an empty name"
+        )));
+    }
+    let name = foreign.name(table);
+    if name.is_empty() {
+        return Err(refuse(format!(
+            "schema: the foreign key on column `{}` of table `{table}` has an empty name",
+            foreign.column
+        )));
+    }
+    check_name_length(table, &name, "foreign key")?;
+    if !seen.insert(name.clone()) {
+        return Err(refuse(format!(
+            "schema: table `{table}` gets the foreign key `{name}` twice; give each key its own name"
+        )));
+    }
+    Ok(name)
+}
+
+fn check_primary_columns(table: &str, columns: &[String]) -> Result<(), DbErr> {
+    if columns.is_empty() || columns.iter().any(String::is_empty) {
+        return Err(refuse(format!(
+            "schema: cannot make a primary key on table `{table}` without named columns"
+        )));
+    }
+    Ok(())
+}
+
+fn second_primary_key(table: &str) -> DbErr {
+    refuse(format!(
+        "schema: table `{table}` declares a second primary key (id(), primary() or .primary()); a table has one"
+    ))
+}
+
+/// `ALTER TABLE .. ADD PRIMARY KEY (..)`, which sea-query has no statement
+/// for. The key is unnamed, as Laravel's is: Postgres names it
+/// `{table}_pkey`, MySQL `PRIMARY`.
+fn add_primary_sql(backend: DbBackend, table: &str, columns: &[String]) -> String {
+    let columns = columns
+        .iter()
+        .map(|column| quote_ident(backend, column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "ALTER TABLE {} ADD PRIMARY KEY ({columns})",
+        quote_ident(backend, table)
+    )
+}
+
 /// Plans `Schema::create`: the table with its columns and inline foreign
 /// keys first, then one statement per index.
 pub(crate) fn plan_create(blueprint: &Blueprint, backend: DbBackend) -> Result<Vec<Step>, DbErr> {
@@ -142,8 +205,12 @@ pub(crate) fn plan_create(blueprint: &Blueprint, backend: DbBackend) -> Result<V
     create.table(sea_ident(table));
     let mut indexes = Vec::new();
     let mut seen_columns = HashSet::new();
+    let mut nullable_columns = HashSet::new();
     let mut seen_indexes = HashSet::new();
+    let mut seen_foreigns = HashSet::new();
+    let mut explicit_foreign_columns = Vec::new();
     let mut ids = 0_usize;
+    let mut primary: Option<&[String]> = None;
     for command in blueprint.commands() {
         match command {
             Command::AddColumn(position) => {
@@ -163,6 +230,18 @@ pub(crate) fn plan_create(blueprint: &Blueprint, backend: DbBackend) -> Result<V
                             "schema: table `{table}` declares id() twice; a table has one primary key"
                         )));
                     }
+                    if primary.is_some() {
+                        return Err(second_primary_key(table));
+                    }
+                }
+                if let Some(after) = &column.after {
+                    return Err(refuse(format!(
+                        "schema: after(`{after}`) on column `{}` of table `{table}` positions a column added to an existing table; MySQL refuses it in CREATE TABLE, so declare the columns in order instead",
+                        column.name
+                    )));
+                }
+                if column.nullable {
+                    nullable_columns.insert(column.name.clone());
                 }
                 create.col(column.to_column_def(backend));
             }
@@ -177,9 +256,18 @@ pub(crate) fn plan_create(blueprint: &Blueprint, backend: DbBackend) -> Result<V
                 let Some(ref_table) = referenced_table(table, foreign)? else {
                     continue;
                 };
-                let name = foreign.name(table);
-                check_name_length(table, &name, "foreign key")?;
+                let name = check_foreign_name(table, foreign, &mut seen_foreigns)?;
+                if foreign.explicit {
+                    explicit_foreign_columns.push((name.clone(), foreign.column.clone()));
+                }
                 create.foreign_key(&mut foreign_statement(table, &name, foreign, ref_table));
+            }
+            Command::AddPrimary(columns) => {
+                check_primary_columns(table, columns)?;
+                if primary.is_some() || ids > 0 {
+                    return Err(second_primary_key(table));
+                }
+                primary = Some(columns.as_slice());
             }
             Command::RenameColumn { from, .. } => {
                 return Err(only_in_table(table, "rename_column", from));
@@ -206,9 +294,37 @@ pub(crate) fn plan_create(blueprint: &Blueprint, backend: DbBackend) -> Result<V
             }
         }
     }
+    for (name, column) in &explicit_foreign_columns {
+        if !seen_columns.contains(column) {
+            return Err(refuse(format!(
+                "schema: the foreign key `{name}` on table `{table}` names the column `{column}`, which the table does not declare; check the spelling or declare the column"
+            )));
+        }
+    }
+    if let Some(columns) = primary {
+        let mut key = Index::create();
+        for column in columns {
+            if !seen_columns.contains(column) {
+                return Err(refuse(format!(
+                    "schema: the primary key of table `{table}` names the column `{column}`, which the table does not declare; check the spelling or declare the column"
+                )));
+            }
+            if nullable_columns.contains(column) {
+                return Err(nullable_primary(table, column));
+            }
+            key.col(sea_ident(column));
+        }
+        create.primary_key(&mut key);
+    }
     let mut steps = vec![Step::CreateTable(create)];
     steps.extend(indexes.into_iter().map(Step::CreateIndex));
     Ok(steps)
+}
+
+fn nullable_primary(table: &str, column: &str) -> DbErr {
+    refuse(format!(
+        "schema: column `{column}` of table `{table}` is nullable and cannot be part of the primary key; drop .nullable()"
+    ))
 }
 
 fn only_in_table(table: &str, operation: &str, target: &str) -> DbErr {
@@ -264,7 +380,10 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
     }
     let mut steps = Vec::new();
     let mut seen_indexes = HashSet::new();
+    let mut seen_foreigns = HashSet::new();
     let mut added_columns = HashSet::new();
+    let mut nullable_added = HashSet::new();
+    let mut primaries = 0_usize;
     for command in blueprint.commands() {
         match command {
             Command::AddColumn(position) => {
@@ -282,6 +401,15 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
                         "schema: cannot add the primary key column `{}` to the existing table `{table}`: SQLite cannot add a PRIMARY KEY column; create the table with id() instead",
                         column.name
                     )));
+                }
+                if sqlite && column.use_current {
+                    return Err(refuse(format!(
+                        "schema: cannot add the column `{}` with use_current() to the existing table `{table}`: SQLite refuses CURRENT_TIMESTAMP as the default of an added column; give it a constant default, or create it with the table",
+                        column.name
+                    )));
+                }
+                if column.nullable {
+                    nullable_added.insert(column.name.clone());
                 }
                 if sqlite && !column.nullable && column.default.is_none() {
                     return Err(refuse(format!(
@@ -338,11 +466,26 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
                 let Some(ref_table) = referenced_table(table, foreign)? else {
                     continue;
                 };
-                let name = foreign.name(table);
-                check_name_length(table, &name, "foreign key")?;
+                let name = check_foreign_name(table, foreign, &mut seen_foreigns)?;
                 steps.push(Step::CreateForeignKey(foreign_statement(
                     table, &name, foreign, ref_table,
                 )));
+            }
+            Command::AddPrimary(columns) => {
+                check_primary_columns(table, columns)?;
+                if sqlite {
+                    return Err(refuse(format!(
+                        "schema: cannot add a primary key to the existing table `{table}`: SQLite cannot; declare it in Schema::create"
+                    )));
+                }
+                primaries += 1;
+                if primaries > 1 {
+                    return Err(second_primary_key(table));
+                }
+                if let Some(column) = columns.iter().find(|c| nullable_added.contains(*c)) {
+                    return Err(nullable_primary(table, column));
+                }
+                steps.push(Step::Raw(add_primary_sql(backend, table, columns)));
             }
             Command::DropForeign(name) => {
                 let mut statement = ForeignKey::drop();

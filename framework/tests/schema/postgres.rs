@@ -14,7 +14,7 @@ use sea_orm::{
 };
 use serial_test::serial;
 
-use super::cases;
+use super::{cases, laravel_cases};
 
 async fn connect_postgres() -> DatabaseConnection {
     let url = std::env::var("PG_TEST_URL").expect("set PG_TEST_URL to a disposable Postgres");
@@ -163,4 +163,39 @@ async fn postgres_refuses_text_for_a_native_date_time_column() {
     conn.execute_unprepared("DROP TABLE schema_text_into_native")
         .await
         .expect("drop schema_text_into_native");
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_laravel_column_types() {
+    laravel_cases::laravel_column_types(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_primary_keys() {
+    laravel_cases::primary_keys(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_foreign_on_a_declared_column() {
+    laravel_cases::foreign_on_a_declared_column(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_laravel_misuse_is_refused() {
+    laravel_cases::laravel_misuse_is_refused(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_alter_laravel_additions() {
+    laravel_cases::alter_laravel_additions(&connect_postgres().await).await;
 }

@@ -5,7 +5,7 @@ use sea_orm::{Database, DatabaseConnection, DbErr};
 use sea_orm_migration::SchemaManager;
 use suprnova::schema::Schema;
 
-use super::cases;
+use super::{cases, laravel_cases};
 
 async fn connect_sqlite() -> DatabaseConnection {
     Database::connect("sqlite::memory:?mode=rwc")
@@ -206,4 +206,29 @@ async fn sqlite_refuses_columns_it_cannot_add_and_runs_nothing() {
 #[tokio::test]
 async fn sqlite_a_name_longer_than_the_limit_is_refused() {
     cases::a_name_longer_than_the_limit_is_refused(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_laravel_column_types() {
+    laravel_cases::laravel_column_types(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_primary_keys() {
+    laravel_cases::primary_keys(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_foreign_on_a_declared_column() {
+    laravel_cases::foreign_on_a_declared_column(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_laravel_misuse_is_refused() {
+    laravel_cases::laravel_misuse_is_refused(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_alter_laravel_refusals() {
+    laravel_cases::sqlite_alter_laravel_refusals(&connect_sqlite().await).await;
 }

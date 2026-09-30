@@ -2,8 +2,10 @@
 
 use sea_orm::sea_query::Expr;
 
-use super::column::{ColumnBuilder, ColumnKind, ColumnSpec};
-use super::foreign::{ForeignIdBuilder, ForeignSpec};
+use super::column::{
+    ColumnBuilder, ColumnKind, ColumnSpec, MAX_TIME_PRECISION, REMEMBER_TOKEN_LENGTH,
+};
+use super::foreign::{ForeignBuilder, ForeignIdBuilder, ForeignSpec};
 
 /// An index the closure asked for, before it has a name.
 #[derive(Debug, Clone)]
@@ -32,6 +34,7 @@ pub(crate) enum Command {
     DropIndex(String),
     AddForeign(usize),
     DropForeign(String),
+    AddPrimary(Vec<String>),
 }
 
 /// Records what a migration wants done to one table.
@@ -129,12 +132,90 @@ impl Blueprint {
     }
 
     pub(crate) fn add_column_unique(&mut self, column: usize) {
+        self.add_column_index_of(column, true);
+    }
+
+    pub(crate) fn add_column_index(&mut self, column: usize) {
+        self.add_column_index_of(column, false);
+    }
+
+    fn add_column_index_of(&mut self, column: usize, unique: bool) {
         if let Some(spec) = self.columns.get(column) {
             let index = IndexSpec {
                 columns: vec![spec.name.clone()],
-                unique: true,
+                unique,
             };
             self.commands.push(Command::AddIndex(index));
+        }
+    }
+
+    pub(crate) fn add_column_primary(&mut self, column: usize) {
+        if let Some(spec) = self.columns.get(column) {
+            self.commands
+                .push(Command::AddPrimary(vec![spec.name.clone()]));
+        }
+    }
+
+    /// Records a misuse of a modifier on `column`, which the plan returns.
+    fn fault_on(&mut self, column: usize, modifier: &str, reason: &str) {
+        let name = self
+            .columns
+            .get(column)
+            .map(|spec| spec.name.clone())
+            .unwrap_or_default();
+        let fault = format!(
+            "schema: cannot apply {modifier} to column `{name}` of table `{}`: {reason}",
+            self.table
+        );
+        self.faults.push(fault);
+    }
+
+    pub(crate) fn set_unsigned(&mut self, column: usize) {
+        match self.columns.get_mut(column) {
+            Some(spec) if spec.kind.is_integer() => spec.unsigned = true,
+            Some(_) => self.fault_on(column, "unsigned()", "it applies to integer columns only"),
+            None => {}
+        }
+    }
+
+    pub(crate) fn set_precision(&mut self, column: usize, digits: u32) {
+        match self.columns.get_mut(column) {
+            Some(spec) if spec.kind.is_temporal() && digits <= MAX_TIME_PRECISION => {
+                spec.precision = Some(digits);
+            }
+            Some(spec) if spec.kind.is_temporal() => self.fault_on(
+                column,
+                "precision()",
+                "the precision is the number of fractional-second digits, from 0 to 6",
+            ),
+            Some(_) => self.fault_on(
+                column,
+                "precision()",
+                "it applies to date_time, timestamp_tz and time columns only",
+            ),
+            None => {}
+        }
+    }
+
+    pub(crate) fn set_use_current(&mut self, column: usize) {
+        match self.columns.get_mut(column) {
+            Some(spec) if matches!(spec.kind, ColumnKind::DateTime | ColumnKind::TimestampTz) => {
+                spec.use_current = true;
+            }
+            Some(_) => self.fault_on(
+                column,
+                "use_current()",
+                "it applies to date_time and timestamp_tz columns only",
+            ),
+            None => {}
+        }
+    }
+
+    pub(crate) fn set_after(&mut self, column: usize, after: &str) {
+        if after.is_empty() {
+            self.fault_on(column, "after()", "the column to follow has an empty name");
+        } else if let Some(spec) = self.columns.get_mut(column) {
+            spec.after = Some(after.to_owned());
         }
     }
 
@@ -155,15 +236,39 @@ impl Blueprint {
         self.column("id", ColumnKind::Id)
     }
 
+    /// Adds `id` as Laravel's `id()` creates it: `BIGINT UNSIGNED`,
+    /// auto-increment, primary key on MySQL. Postgres and SQLite have no
+    /// unsigned integers, so there it is [`id`](Blueprint::id). A model reads
+    /// the MySQL column into a `u64` key: `key_type = "u64"`.
+    pub fn unsigned_id(&mut self) -> ColumnBuilder<'_> {
+        self.column("id", ColumnKind::Id).unsigned()
+    }
+
     /// Adds a `BIGINT` column meant to hold a foreign key. It has the type of
     /// [`id`](Blueprint::id). Call `.constrained(table)` on the result to
     /// create the key.
     pub fn foreign_id(&mut self, name: &str) -> ForeignIdBuilder<'_> {
         let column = self.push_column(name, ColumnKind::ForeignId);
+        self.push_foreign_id(name, column)
+    }
+
+    fn push_foreign_id(&mut self, name: &str, column: usize) -> ForeignIdBuilder<'_> {
         self.foreigns.push(ForeignSpec::new(name));
         let foreign = self.foreigns.len() - 1;
         self.commands.push(Command::AddForeign(foreign));
         ForeignIdBuilder::new(self, column, foreign)
+    }
+
+    /// Adds a `BIGINT` column for a foreign key to an [`unsigned_id`]
+    /// column: `BIGINT UNSIGNED` on MySQL, where a foreign key's type must
+    /// match the referenced column's sign, and `BIGINT` elsewhere. It is
+    /// Laravel's `foreignId`.
+    ///
+    /// [`unsigned_id`]: Blueprint::unsigned_id
+    pub fn unsigned_foreign_id(&mut self, name: &str) -> ForeignIdBuilder<'_> {
+        let column = self.push_column(name, ColumnKind::ForeignId);
+        self.set_unsigned(column);
+        self.push_foreign_id(name, column)
     }
 
     /// Adds a 64-bit integer column.
@@ -181,6 +286,33 @@ impl Blueprint {
         self.column(name, ColumnKind::SmallInteger)
     }
 
+    /// Adds an 8-bit integer column: `TINYINT` on MySQL, `smallint` on
+    /// Postgres and `integer` on SQLite, the types Laravel's `tinyInteger`
+    /// creates.
+    pub fn tiny_integer(&mut self, name: &str) -> ColumnBuilder<'_> {
+        self.column(name, ColumnKind::TinyInteger)
+    }
+
+    /// Adds `big_integer(name).unsigned()`: `BIGINT UNSIGNED` on MySQL.
+    pub fn unsigned_big_integer(&mut self, name: &str) -> ColumnBuilder<'_> {
+        self.big_integer(name).unsigned()
+    }
+
+    /// Adds `integer(name).unsigned()`: `INT UNSIGNED` on MySQL.
+    pub fn unsigned_integer(&mut self, name: &str) -> ColumnBuilder<'_> {
+        self.integer(name).unsigned()
+    }
+
+    /// Adds `small_integer(name).unsigned()`: `SMALLINT UNSIGNED` on MySQL.
+    pub fn unsigned_small_integer(&mut self, name: &str) -> ColumnBuilder<'_> {
+        self.small_integer(name).unsigned()
+    }
+
+    /// Adds `tiny_integer(name).unsigned()`: `TINYINT UNSIGNED` on MySQL.
+    pub fn unsigned_tiny_integer(&mut self, name: &str) -> ColumnBuilder<'_> {
+        self.tiny_integer(name).unsigned()
+    }
+
     /// Adds a boolean column.
     pub fn boolean(&mut self, name: &str) -> ColumnBuilder<'_> {
         self.column(name, ColumnKind::Boolean)
@@ -196,9 +328,44 @@ impl Blueprint {
         self.column(name, ColumnKind::Char(length))
     }
 
-    /// Adds an unbounded text column.
+    /// Adds an unbounded text column. On MySQL `TEXT` holds 64 KB; use
+    /// [`medium_text`](Blueprint::medium_text) or
+    /// [`long_text`](Blueprint::long_text) for more.
     pub fn text(&mut self, name: &str) -> ColumnBuilder<'_> {
         self.column(name, ColumnKind::Text)
+    }
+
+    /// Adds a text column that holds 16 MB on MySQL (`MEDIUMTEXT`). It is
+    /// `text` on Postgres and SQLite, which have no smaller limit.
+    pub fn medium_text(&mut self, name: &str) -> ColumnBuilder<'_> {
+        self.column(name, ColumnKind::MediumText)
+    }
+
+    /// Adds a text column that holds 4 GB on MySQL (`LONGTEXT`). It is
+    /// `text` on Postgres and SQLite.
+    pub fn long_text(&mut self, name: &str) -> ColumnBuilder<'_> {
+        self.column(name, ColumnKind::LongText)
+    }
+
+    /// Adds a column that accepts only `values`, Laravel's `enum`: `ENUM`
+    /// on MySQL, and on Postgres and SQLite a string column with a `CHECK`
+    /// that the value is one of them. A value may contain any character;
+    /// the builder quotes it. An empty list makes the migration fail.
+    ///
+    /// ```no_run
+    /// # use suprnova::schema::Blueprint;
+    /// # fn define(t: &mut Blueprint) {
+    /// t.enumeration("status", &["draft", "published"]).default("draft");
+    /// # }
+    /// ```
+    pub fn enumeration(&mut self, name: &str, values: &[&str]) -> ColumnBuilder<'_> {
+        let index = self.push_column(name, ColumnKind::Enum);
+        if values.is_empty() {
+            self.fault_on(index, "enumeration()", "give it at least one value");
+        } else if let Some(spec) = self.columns.get_mut(index) {
+            spec.allowed = values.iter().map(|value| (*value).to_owned()).collect();
+        }
+        ColumnBuilder::new(self, index)
     }
 
     /// Adds a 32-bit floating point column.
@@ -288,6 +455,14 @@ impl Blueprint {
         self.column("deleted_at", ColumnKind::String).nullable();
     }
 
+    /// Adds a nullable `remember_token`, `VARCHAR(100)`, the column Laravel's
+    /// `rememberToken()` creates for "remember me" sign-ins.
+    pub fn remember_token(&mut self) {
+        self.column("remember_token", ColumnKind::String)
+            .length(REMEMBER_TOKEN_LENGTH)
+            .nullable();
+    }
+
     /// Laravel's `timestampsTz`: nullable `created_at` and `updated_at`
     /// columns that keep the zone - `timestamp with time zone` on Postgres,
     /// `timestamp` on MySQL, text on SQLite.
@@ -337,6 +512,43 @@ impl Blueprint {
         self.push_index(columns, true);
     }
 
+    /// Makes `columns` the table's primary key, Laravel's `primary`: a
+    /// composite key for a pivot table, or a key on a column other than
+    /// `id`. A table has one primary key, so combined with `id()` or another
+    /// `primary` the migration fails, and so does a nullable column in it.
+    ///
+    /// In `Schema::create` the key is part of `CREATE TABLE`. In
+    /// `Schema::table` it is added to the existing table on Postgres and
+    /// MySQL; SQLite cannot add a primary key to a table, and the call
+    /// fails there before any statement runs.
+    pub fn primary(&mut self, columns: &[&str]) {
+        self.commands.push(Command::AddPrimary(
+            columns.iter().map(|column| (*column).to_owned()).collect(),
+        ));
+    }
+
+    /// Creates a foreign key on `column`, a column the table already has or
+    /// that this closure declares, Laravel's `foreign`. Name the referenced
+    /// table and column with `.references(table, column)`, or
+    /// `.constrained(table)` for its `id`; without either the migration
+    /// fails.
+    ///
+    /// ```no_run
+    /// # use suprnova::schema::Blueprint;
+    /// # fn define(t: &mut Blueprint) {
+    /// t.foreign("state_id")
+    ///     .references("states", "id")
+    ///     .name("orders_state_fk")
+    ///     .cascade_on_delete();
+    /// # }
+    /// ```
+    pub fn foreign(&mut self, column: &str) -> ForeignBuilder<'_> {
+        self.foreigns.push(ForeignSpec::explicit(column));
+        let foreign = self.foreigns.len() - 1;
+        self.commands.push(Command::AddForeign(foreign));
+        ForeignBuilder::new(self, foreign)
+    }
+
     fn push_index(&mut self, columns: &[&str], unique: bool) {
         let spec = IndexSpec {
             columns: columns.iter().map(|c| (*c).to_owned()).collect(),
@@ -370,5 +582,14 @@ impl Blueprint {
     /// and SQLite refuses it.
     pub fn drop_foreign(&mut self, name: &str) {
         self.commands.push(Command::DropForeign(name.to_owned()));
+    }
+
+    /// Drops the foreign key `{table}_{column}_foreign`, then the column,
+    /// Laravel's `dropConstrainedForeignId`. Only `Schema::table` accepts
+    /// it, and SQLite refuses it, as it refuses `drop_foreign`.
+    pub fn drop_constrained_foreign_id(&mut self, column: &str) {
+        let name = ForeignSpec::new(column).name(&self.table);
+        self.commands.push(Command::DropForeign(name));
+        self.commands.push(Command::DropColumn(column.to_owned()));
     }
 }
