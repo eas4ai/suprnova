@@ -24,7 +24,7 @@ use suprnova_live::component::{
 };
 use suprnova_live::execution::{
     ActionExecutionRequest, ExecutionPhase, ExecutionResult, ExecutionService, ExecutionTracePort,
-    PromotedActionRequest, PromotedRequestIdentity, RetryLegality,
+    PromotedActionRequest, PromotedModelSyncRequest, PromotedRequestIdentity, RetryLegality,
 };
 use suprnova_live::identity::{
     ActionName, BrowserNonce, BuildId, IslandSlot, Revision, UnixMillis,
@@ -786,6 +786,245 @@ async fn refresh_on_promote_publishes_fresh_mount_and_discards_original_operatio
     assert_eq!(control.hydrations.load(Ordering::SeqCst), 0);
     assert_eq!(control.binds.load(Ordering::SeqCst), 0);
     assert_eq!(control.actions.load(Ordering::SeqCst), 0);
+}
+
+/// The first model synchronization on a seed: the runtime sends an immediate
+/// `live:model` edit this way. It mounts, overlays the seed's public state,
+/// binds the proposals, and publishes an instance without running an action.
+#[tokio::test]
+async fn first_promoted_model_sync_mounts_overlays_then_binds_without_an_action() {
+    let harness = harness(promotion_limits(), 64);
+    let context = trusted_context_for_route(0xa3, 1);
+    let seed = signed_seed_with_refresh(&harness.keys, "cached", false);
+    let browser_nonce = nonce(0x23);
+    let promoted = harness
+        .service
+        .promote(&seed, browser_nonce.clone(), &context.for_promotion())
+        .await
+        .expect("seed promotes");
+    let control = SearchControl::new(false);
+    let descriptor = search_descriptor(control.clone());
+    let service = ExecutionService::new(
+        harness.ledger.clone(),
+        harness.clock.clone(),
+        harness.keys.clone(),
+        harness.snapshot_limits.clone(),
+        ViewRenderer::new(RenderLimits::standard()).expect("renderer"),
+    );
+    let proposals = proposal_batch(7);
+    let (response_sealer, response_binding) = admitted_seed_response_sealing(
+        descriptor.clone(),
+        trusted_context_for_route(0xa3, 1),
+        &seed,
+        browser_nonce.clone(),
+        0x45,
+    )
+    .await
+    .into_parts();
+    let trace = Trace::default();
+
+    let result = service
+        .execute_promoted_model_sync(
+            PromotedModelSyncRequest::new(
+                &descriptor,
+                &context,
+                browser_context(),
+                promoted,
+                PromotedRequestIdentity::new(
+                    browser_nonce,
+                    promotion_support::idempotency(0x43),
+                    promotion_support::digest(0x53),
+                ),
+                &proposals,
+                &trace,
+            )
+            .with_response_sealer(response_sealer, response_binding),
+        )
+        .await;
+    let ExecutionResult::Accepted(accepted) = result else {
+        panic!(
+            "first model sync must be accepted; trace={:?}",
+            trace.0.lock().expect("trace lock")
+        );
+    };
+    assert!(!accepted.action_executed());
+    let successor_html =
+        std::str::from_utf8(&accepted.render().expect("promoted successor render").body)
+            .expect("successor HTML");
+    assert!(successor_html.contains("data-suprnova-live-snapshot-kind=\"instance\""));
+    assert!(successor_html.contains("<p>7</p>"), "{successor_html}");
+    let verified = verify_instance(
+        accepted.signed_snapshot(),
+        &expected_instance(&context),
+        &harness.keys,
+        UnixMillis::new(1_000),
+        &harness.snapshot_limits,
+    )
+    .expect("first publishable instance verifies");
+    assert_eq!(
+        verified
+            .hydrate_state::<SearchState>(promotion_support::promotion_schema_set().state())
+            .expect("complete state"),
+        SearchState {
+            query: "cached".to_owned(),
+            selected: "1".to_owned(),
+            server: "authoritative".to_owned(),
+            count: 7,
+        }
+    );
+    assert_eq!(control.mounts.load(Ordering::SeqCst), 1);
+    assert_eq!(control.hydrations.load(Ordering::SeqCst), 1);
+    assert_eq!(control.binds.load(Ordering::SeqCst), 1);
+    assert_eq!(control.actions.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn promotion_mount_failure_on_a_model_sync_consumes_authority_without_a_snapshot() {
+    let harness = harness(promotion_limits(), 64);
+    let context = trusted_context_for_route(0xa4, 1);
+    let seed = signed_seed_with_refresh(&harness.keys, "cached", false);
+    let browser_nonce = nonce(0x24);
+    let promoted = harness
+        .service
+        .promote(&seed, browser_nonce.clone(), &context.for_promotion())
+        .await
+        .expect("seed promotes");
+    let instance_id = promoted.instance_id().clone();
+    let control = SearchControl::new(true);
+    let descriptor = search_descriptor(control.clone());
+    let service = ExecutionService::new(
+        harness.ledger.clone(),
+        harness.clock.clone(),
+        harness.keys.clone(),
+        harness.snapshot_limits.clone(),
+        ViewRenderer::new(RenderLimits::standard()).expect("renderer"),
+    );
+    let proposals = proposal_batch(7);
+    let (response_sealer, response_binding) = admitted_seed_response_sealing(
+        descriptor.clone(),
+        trusted_context_for_route(0xa4, 1),
+        &seed,
+        browser_nonce.clone(),
+        0x45,
+    )
+    .await
+    .into_parts();
+    let trace = Trace::default();
+
+    let result = service
+        .execute_promoted_model_sync(
+            PromotedModelSyncRequest::new(
+                &descriptor,
+                &context,
+                browser_context(),
+                promoted,
+                PromotedRequestIdentity::new(
+                    browser_nonce,
+                    promotion_support::idempotency(0x44),
+                    promotion_support::digest(0x54),
+                ),
+                &proposals,
+                &trace,
+            )
+            .with_response_sealer(response_sealer, response_binding),
+        )
+        .await;
+    let ExecutionResult::RefreshRequired(refresh) = result else {
+        panic!("mount failure must refresh");
+    };
+    assert_eq!(
+        refresh.reason(),
+        suprnova_live::execution::ExecutionRefreshReason::ExecutionFailed
+    );
+    assert_eq!(refresh.retry_legality(), RetryLegality::Prohibited);
+    assert_eq!(control.binds.load(Ordering::SeqCst), 0);
+    let inspection = harness
+        .ledger
+        .inspect(context.scope(), &instance_id)
+        .expect("ledger inspection")
+        .expect("promoted instance remains inspectable");
+    assert_eq!(inspection.phase(), LedgerPhase::Consumed);
+    assert_eq!(inspection.accepted_outcome_count(), 0);
+}
+
+/// `refresh_on_promote` discards a first model synchronization's proposals
+/// exactly as it discards a first action.
+#[tokio::test]
+async fn refresh_on_promote_discards_a_first_model_sync() {
+    let harness = harness(promotion_limits(), 64);
+    let context = trusted_context_for_route(0xa5, 1);
+    let seed = signed_seed_with_refresh(&harness.keys, "cached", true);
+    let browser_nonce = nonce(0x25);
+    let promoted = harness
+        .service
+        .promote(&seed, browser_nonce.clone(), &context.for_promotion())
+        .await
+        .expect("seed promotes");
+    let control = SearchControl::new(false);
+    let descriptor = search_descriptor(control.clone());
+    let service = ExecutionService::new(
+        harness.ledger.clone(),
+        harness.clock.clone(),
+        harness.keys.clone(),
+        harness.snapshot_limits.clone(),
+        ViewRenderer::new(RenderLimits::standard()).expect("renderer"),
+    );
+    let proposals = proposal_batch(99);
+    let (response_sealer, response_binding) = admitted_seed_response_sealing(
+        descriptor.clone(),
+        trusted_context_for_route(0xa5, 1),
+        &seed,
+        browser_nonce.clone(),
+        0x45,
+    )
+    .await
+    .into_parts();
+    let trace = Trace::default();
+
+    let result = service
+        .execute_promoted_model_sync(
+            PromotedModelSyncRequest::new(
+                &descriptor,
+                &context,
+                browser_context(),
+                promoted,
+                PromotedRequestIdentity::new(
+                    browser_nonce,
+                    promotion_support::idempotency(0x46),
+                    promotion_support::digest(0x56),
+                ),
+                &proposals,
+                &trace,
+            )
+            .with_response_sealer(response_sealer, response_binding),
+        )
+        .await;
+    let ExecutionResult::Accepted(accepted) = result else {
+        panic!(
+            "fresh recovery must be accepted; trace={:?}",
+            trace.0.lock().expect("trace lock")
+        );
+    };
+    assert!(!accepted.action_executed());
+    let verified = verify_instance(
+        accepted.signed_snapshot(),
+        &expected_instance(&context),
+        &harness.keys,
+        UnixMillis::new(1_000),
+        &harness.snapshot_limits,
+    )
+    .expect("fresh instance verifies");
+    assert_eq!(
+        verified
+            .hydrate_state::<SearchState>(promotion_support::promotion_schema_set().state())
+            .expect("complete state")
+            .count,
+        1,
+        "the proposed 99 was discarded"
+    );
+    assert_eq!(control.mounts.load(Ordering::SeqCst), 1);
+    assert_eq!(control.hydrations.load(Ordering::SeqCst), 0);
+    assert_eq!(control.binds.load(Ordering::SeqCst), 0);
 }
 
 fn encode_search_state(state: &SearchState) -> CanonicalValue {

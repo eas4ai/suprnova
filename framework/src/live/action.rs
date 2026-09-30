@@ -577,7 +577,9 @@ impl SuprnovaEndpointKernel {
                 proposals,
             } => (name, arguments, synchronized, proposals),
             // The browser runtime sends an immediate `live:model` edit on a
-            // public seed as a model sync, so it promotes the seed too.
+            // public seed as a model sync, so it promotes the seed too. It needs
+            // no upload finalization: `prepare_proposals` refuses an upload
+            // handle unless the request names the field's finalize action.
             RequestedOperation::ModelSync {
                 synchronized,
                 proposals,

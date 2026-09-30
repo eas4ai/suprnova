@@ -78,6 +78,9 @@ Acceptance criteria:
   identity-bound work.
 - Seed promotion requires the same current CSRF, origin, session, tenant, and
   middleware checks as any ordinary Live request.
+- A first model synchronization promotes a seed without naming an action, so
+  it needs no action authorization; its proposals reach only model fields, as on
+  an instance.
 - Cookie-authorized WebSocket upgrades reject missing, null, or unapproved
   `Origin` before accepting the connection. Explicit cross-origin streaming
   requires a configured non-wildcard allowlist and a separate transport
