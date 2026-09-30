@@ -330,18 +330,18 @@ async fn a_replayed_first_model_sync_does_not_mint_a_second_instance() {
     assert!(instance.is_string(), "{first}");
 
     let (status, _, body) = dispatch(router, middleware, sync()).await;
-    assert!(
-        !status.is_server_error(),
-        "a replay is not an internal error: {status} {}",
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "{}",
         String::from_utf8_lossy(&body)
     );
-    if let Ok(replay) = serde_json::from_slice::<Value>(&body) {
-        let replayed = &replay["snapshot"]["body"]["instance_id"];
-        assert!(
-            replayed.is_null() || *replayed == instance,
-            "the replay minted another instance: {replay}"
-        );
-    }
+    let replay: Value = serde_json::from_slice(&body).expect("replay JSON");
+    assert_eq!(replay["outcome"], "refresh_required", "{replay}");
+    assert!(
+        replay["snapshot"].is_null(),
+        "the replay carries no second instance: {replay}"
+    );
 }
 
 /// A first model sync can only propose model fields: a proposal for the
