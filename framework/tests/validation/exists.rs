@@ -134,6 +134,23 @@ async fn a_database_failure_does_not_reach_the_message() {
     );
 }
 
+/// When the database fails, `check_each` stops: the field has failed, and
+/// asking about every other value would repeat the failure once each.
+#[tokio::test]
+async fn check_each_stops_at_the_first_database_failure() {
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(tags_db().await);
+
+    let mut errs = ValidationErrors::new();
+    Exists::new("no_such_table", "id")
+        .check_each(&[1i64, 2, 1], &mut errs, "tag_ids")
+        .await;
+    assert_eq!(sorted_keys(&errs), ["tag_ids.0", "tag_ids.2"]);
+    for messages in errs.errors.values() {
+        assert!(messages.iter().all(|msg| msg.key == "validation-unchecked"));
+    }
+}
+
 #[tokio::test]
 async fn a_repeated_element_is_reported_under_every_index() {
     let _guard = TestContainer::fake();

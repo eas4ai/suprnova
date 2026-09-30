@@ -25,7 +25,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   binds a typed id, which Postgres needs for an integer column, and
   `check_each` checks every element of an array, one query per distinct
   value, with each failure under `field.<index>`. `Accepted`, `Digits`,
-  `DateFormat` (chrono's format syntax, as strict as Laravel's),
+  `DateFormat` (chrono's format syntax, checked by a round trip like
+  Laravel's),
   `After::new`, `AfterOrEqual::new`, `Before::new` and `BeforeOrEqual::new`
   (against a fixed date, `Now`, `Today`, `Tomorrow`, `Yesterday` or another
   field, with `.format(..)` for a field that is not ISO 8601), `Prohibited`,

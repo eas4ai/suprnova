@@ -1931,9 +1931,13 @@ pub mod rules {
     /// formats.
     ///
     /// The formats are chrono's `strftime` syntax (`%Y-%m-%d`), not PHP's
-    /// (`Y-m-d`). The check is as strict as Laravel's, which formats the
-    /// parsed date back and compares it with the input: `2026-9-30` does
-    /// not match `%Y-%m-%d`, and neither does the impossible `2026-02-31`.
+    /// (`Y-m-d`). Like Laravel's, the check formats the parsed date back
+    /// and compares it with the input: `2026-9-30` does not match
+    /// `%Y-%m-%d`, and neither does the impossible `2026-02-31`. chrono's
+    /// parser differs from PHP's at the edges: `%Y` takes a signed or
+    /// five-digit year, `%S` takes the leap second `60`, and the round trip
+    /// refuses an unpadded `5` for `%H`, which PHP's loose comparison lets
+    /// through.
     /// A partial format (`%Y-%m`, `%H:%M`) works; the parts it leaves out
     /// are taken from 1970-01-01 at midnight, as PHP's are, so `02-29` does
     /// not match `%m-%d` in either framework. A format chrono cannot
@@ -2864,10 +2868,22 @@ pub mod async_rules {
                 }
             }
             for (value, indexes) in distinct {
-                if let Some(msg) = self.failure(value).await {
-                    for index in indexes {
-                        errs.add(format!("{field}.{index}"), msg.clone());
+                let msg = match self.finds(value).await {
+                    Ok(true) => continue,
+                    Ok(false) => self.not_found(),
+                    // The database is not answering: the field has failed,
+                    // and asking it about the rest would only repeat the
+                    // failure, and the log line, once per value.
+                    Err(cause) => {
+                        let msg = unchecked("exists", self.table, self.column, &cause);
+                        for index in indexes {
+                            errs.add(format!("{field}.{index}"), msg.clone());
+                        }
+                        return;
                     }
+                };
+                for index in indexes {
+                    errs.add(format!("{field}.{index}"), msg.clone());
                 }
             }
         }
@@ -2876,14 +2892,16 @@ pub mod async_rules {
         async fn failure(&self, value: Value) -> Option<ValidationMessage> {
             match self.finds(value).await {
                 Ok(true) => None,
-                Ok(false) => Some(
-                    ValidationMessage::keyed("validation-exists")
-                        .arg("column", self.column)
-                        .arg("table", self.table)
-                        .fallback(format!("selected {} is invalid", self.column)),
-                ),
+                Ok(false) => Some(self.not_found()),
                 Err(cause) => Some(unchecked("exists", self.table, self.column, &cause)),
             }
+        }
+
+        fn not_found(&self) -> ValidationMessage {
+            ValidationMessage::keyed("validation-exists")
+                .arg("column", self.column)
+                .arg("table", self.table)
+                .fallback(format!("selected {} is invalid", self.column))
         }
 
         /// Whether a matching row exists.

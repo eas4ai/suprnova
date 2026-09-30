@@ -354,8 +354,8 @@ Digits(4).passes("0042")?; // Ok(())
 
 `DateFormat` is Laravel's `date_format`. It takes a list of formats in
 chrono's `strftime` syntax and passes a value that matches one of them.
-The check is as strict as Laravel's: the parsed date is formatted back and
-compared with the input, so `2026-9-30` does not match `%Y-%m-%d` and
+Like Laravel's, the check formats the parsed date back and compares it with
+the input, so `2026-9-30` does not match `%Y-%m-%d` and
 `2026-02-31` matches nothing. A partial format such as `%Y-%m` or `%H:%M`
 works too; the parts it leaves out come from 1970-01-01 at midnight, as in
 PHP, so `02-29` does not match `%m-%d`.

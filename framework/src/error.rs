@@ -521,6 +521,25 @@ mod validation_tests {
     use super::*;
 
     #[test]
+    fn a_field_covers_itself_its_nested_keys_and_its_wildcards() {
+        assert!(field_covers("tag_ids", "tag_ids"));
+        assert!(field_covers("tag_ids", "tag_ids.3"));
+        assert!(field_covers("address.city", "address.city.0"));
+        assert!(field_covers("tag_ids.*", "tag_ids.3"));
+        assert!(field_covers("items.*.name", "items.2.name"));
+        assert!(field_covers("*", "anything"));
+    }
+
+    #[test]
+    fn a_field_does_not_cover_a_longer_name_or_its_own_parent() {
+        assert!(!field_covers("tag", "tags"));
+        assert!(!field_covers("tag", "tag_ids.1"));
+        assert!(!field_covers("tag_ids.*", "tag_ids"));
+        assert!(!field_covers("items.*.name", "items.2.title"));
+        assert!(!field_covers("", "tag_ids"));
+    }
+
+    #[test]
     fn retain_fields_keeps_only_listed() {
         let mut errs = ValidationErrors::new();
         errs.add("email", "invalid");
