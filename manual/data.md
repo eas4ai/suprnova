@@ -58,9 +58,63 @@ Add `#[derive(Validate)]` separately so `#[validate(...)]` attributes stay visib
 |---|---|
 | `#[data(auto_lazy)]` | Every `Prop`-typed field is implicitly `#[data(lazy)]` |
 | `#[data(authorize = "path::to::fn")]` | Route the generated `FormRequest::authorize` to a free function with signature `fn(req: &Request) -> bool`. The body parser, validator, Precognition support, and route-param injection still come from the derive |
+| `#[data(after_validation = "path::to::fn")]` | Route the generated `FormRequest::after_validation` to `fn(dto: &Self) -> Result<(), ValidationErrors>`, where `validate!` rules run. See [Validation rules and database checks](#validation-rules-and-database-checks) |
+| `#[data(after_validation_async = "path::to::fn")]` | Route `FormRequest::after_validation_async` to `async fn(dto: &Self) -> Result<(), ValidationErrors>`, where `Exists`, `Unique` and other async rules run |
 | `#[data(allow_unknown_fields)]` | Accept payload keys that don't match any struct field. The default is **strict**: an unrecognised key fails the deserialize with `serde::de::Error::unknown_field(..)` and surfaces as a 422 through `FormRequest`. Opt into permissive only for response DTOs that read forward-compatible third-party payloads |
 
 The earlier `#[data(custom_authorize)]` flag - which suppressed the whole `FormRequest` impl and forced you to reimplement body parsing, validation, and Precognition by hand - is gone. The macro emits a migration error if you try to use it. Use `#[data(authorize = "fn")]` instead.
+
+## Validation rules and database checks
+
+`#[validate(...)]` attributes cover the per-field checks. Everything else
+in [Validation](validation.md) - `validate!` rows, cross-field rules like
+`After::new(DateBound::Field(..))` or `ExcludeIf`, and database rules like
+`Exists` - runs in the `FormRequest` hooks. The derive writes a Data
+Object's `FormRequest` impl, so you name the functions it calls:
+
+```rust
+use suprnova::rules::{Accepted, After, DateBound, DateFormat};
+use suprnova::{Data, Exists, FormContext, ValidationErrors, validate};
+use validator::Validate;
+
+#[derive(Data, Validate)]
+#[data(after_validation = "booking_rules", after_validation_async = "booking_rows")]
+pub struct BookingDto {
+    pub room_id: i64,
+    pub starts_on: String,
+    pub ends_on: String,
+    pub terms: bool,
+}
+
+fn booking_rules(dto: &BookingDto) -> Result<(), ValidationErrors> {
+    let ctx: FormContext = [("starts_on".to_string(), dto.starts_on.clone())].into();
+    validate! { dto =>
+        starts_on => DateFormat(&["%Y-%m-%d"]);
+        ends_on => DateFormat(&["%Y-%m-%d"]), After::new(DateBound::Field("starts_on")) => with ctx;
+        terms => Accepted;
+    }
+}
+
+async fn booking_rows(dto: &BookingDto) -> Result<(), ValidationErrors> {
+    let mut errs = ValidationErrors::new();
+    Exists::new("rooms", "id")
+        .check_value(dto.room_id, &mut errs, "room_id")
+        .await;
+    errs.into_result()
+}
+```
+
+The stages run in order and stop at the first that fails: the
+`#[validate(...)]` attributes, then `after_validation`, then
+`after_validation_async`. A malformed date therefore never reaches the
+database. Precognition runs the same stages and reports the fields the
+client asked about - asking about an array keeps the errors of its elements
+(`tag_ids` keeps `tag_ids.3`). A Data Object with a `from_route_param` field
+runs both hooks too.
+
+A generic struct, or one with reference or lazy fields, gets no
+`FormRequest` impl, so it would never run a hook; the derive refuses both
+attributes on it.
 
 ## `Field<T>` - Absent / Null / Value
 

@@ -143,6 +143,17 @@ struct StructOptions {
     /// impl (body parsing, validation, Precognition, route-param
     /// injection, `after_validation`) is always emitted.
     authorize_fn: Option<syn::ExprPath>,
+    /// `#[data(after_validation = "path::to::fn")]`: the generated
+    /// `FormRequest::after_validation` calls this `fn(&Self) ->
+    /// Result<(), ValidationErrors>`. The derive owns the `FormRequest`
+    /// impl, so without it a Data Object has no place for `validate!`
+    /// rules or any other cross-field check.
+    after_validation_fn: Option<syn::ExprPath>,
+    /// `#[data(after_validation_async = "path::to::fn")]`: the same for
+    /// `FormRequest::after_validation_async`, an `async fn(&Self) ->
+    /// Result<(), ValidationErrors>`, where `Unique`, `Exists` and other
+    /// database rules run.
+    after_validation_async_fn: Option<syn::ExprPath>,
     /// `#[data(allow_unknown_fields)]` - when set, the generated
     /// `Deserialize` visitor silently drops payload keys that don't
     /// match any struct field (the serde-default permissive behaviour).
@@ -190,6 +201,12 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                     let lit: syn::LitStr = meta.value()?.parse()?;
                     let path: syn::ExprPath = lit.parse()?;
                     opts.authorize_fn = Some(path);
+                } else if meta.path.is_ident("after_validation") {
+                    let lit: syn::LitStr = meta.value()?.parse()?;
+                    opts.after_validation_fn = Some(lit.parse()?);
+                } else if meta.path.is_ident("after_validation_async") {
+                    let lit: syn::LitStr = meta.value()?.parse()?;
+                    opts.after_validation_async_fn = Some(lit.parse()?);
                 } else if meta.path.is_ident("allow_unknown_fields") {
                     opts.allow_unknown_fields = true;
                 } else if meta.path.is_ident("max_body_bytes") {
@@ -228,7 +245,7 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                     ));
                 } else {
                     return Err(meta.error(
-                        "unknown struct-level #[data(...)] flag - expected auto_lazy, authorize, allow_unknown_fields, or max_body_bytes",
+                        "unknown struct-level #[data(...)] flag - expected auto_lazy, authorize, after_validation, after_validation_async, allow_unknown_fields, or max_body_bytes",
                     ));
                 }
                 Ok(())
@@ -530,6 +547,31 @@ fn build_form_request(ctx: &DataCodegen<'_>, struct_opts: &StructOptions) -> Tok
     // lifecycle (with route-param) arms emit it; the inlined arm calls
     // `Self::max_body_bytes()` directly, so the override propagates
     // automatically once present on the impl.
+    // `#[data(after_validation = "fn")]` / `#[data(after_validation_async =
+    // "fn")]` - both arms below emit these, and both run them through the
+    // trait: the default `extract` calls the trait methods, and the
+    // inlined arm calls them fully qualified so an inherent method of the
+    // same name on the struct can never stand in for the hook.
+    let after_validation_override: TokenStream2 = match &struct_opts.after_validation_fn {
+        Some(path) => quote! {
+            fn after_validation(&self) -> ::core::result::Result<(), ::suprnova::ValidationErrors> {
+                #path(self)
+            }
+        },
+        None => quote! {},
+    };
+    let after_validation_async_override: TokenStream2 = match &struct_opts.after_validation_async_fn
+    {
+        Some(path) => quote! {
+            async fn after_validation_async(
+                &self,
+            ) -> ::core::result::Result<(), ::suprnova::ValidationErrors> {
+                #path(self).await
+            }
+        },
+        None => quote! {},
+    };
+
     let max_body_bytes_override: TokenStream2 = match struct_opts.max_body_bytes {
         Some(n) => {
             let lit = syn::LitInt::new(&n.to_string(), proc_macro2::Span::call_site());
@@ -544,12 +586,15 @@ fn build_form_request(ctx: &DataCodegen<'_>, struct_opts: &StructOptions) -> Tok
     // (delegates to the trait's default `extract` which reads the body normally).
     if route_param_injections.is_empty() {
         return quote! {
+            #[::suprnova::__async_trait::async_trait]
             impl #impl_generics ::suprnova::http::FormRequest for #struct_name #ty_generics #where_clause {
                 fn authorize(req: &::suprnova::Request) -> bool {
                     #authorize_body
                 }
 
                 #max_body_bytes_override
+                #after_validation_override
+                #after_validation_async_override
             }
         };
     }
@@ -574,6 +619,8 @@ fn build_form_request(ctx: &DataCodegen<'_>, struct_opts: &StructOptions) -> Tok
             }
 
             #max_body_bytes_override
+            #after_validation_override
+            #after_validation_async_override
 
             async fn extract(req: ::suprnova::Request) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
                 if !Self::authorize(&req) {
@@ -657,53 +704,42 @@ fn build_form_request(ctx: &DataCodegen<'_>, struct_opts: &StructOptions) -> Tok
                     ::suprnova::serde_json::Value::Object(map),
                 ).map_err(|e| ::suprnova::FrameworkError::bad_request(e.to_string()))?;
 
-                // --- Validate + Precognition + after_validation (mirrors default) ---
+                // --- Validate + Precognition + both cross-field hooks (mirrors default) ---
+                //
+                // The stages run in the default `extract`'s order and bail at
+                // the first failure: the derived `validate()`, the sync hook,
+                // then the async hook, so a malformed value never reaches a
+                // database rule.
                 use ::validator::Validate;
                 let validation_result = dto.validate();
 
                 if is_precognition {
-                    return match validation_result {
+                    let bag = match validation_result {
+                        ::core::result::Result::Err(errors) => {
+                            ::suprnova::ValidationErrors::from_validator(errors)
+                        }
                         ::core::result::Result::Ok(()) => {
-                            match dto.after_validation() {
-                                ::core::result::Result::Ok(()) => ::core::result::Result::Err(
-                                    ::suprnova::FrameworkError::PrecognitionSuccess,
-                                ),
-                                ::core::result::Result::Err(errs) => {
-                                    let filtered = if validate_only.is_empty() {
-                                        errs
-                                    } else {
-                                        errs.retain_fields(&validate_only)
-                                    };
-                                    if filtered.is_empty() {
-                                        ::core::result::Result::Err(
-                                            ::suprnova::FrameworkError::PrecognitionSuccess,
-                                        )
-                                    } else {
-                                        ::core::result::Result::Err(
-                                            ::suprnova::FrameworkError::PrecognitionFailure(filtered),
-                                        )
+                            match <Self as ::suprnova::http::FormRequest>::after_validation(&dto) {
+                                ::core::result::Result::Err(errs) => errs,
+                                ::core::result::Result::Ok(()) => {
+                                    match <Self as ::suprnova::http::FormRequest>::after_validation_async(&dto).await {
+                                        ::core::result::Result::Err(errs) => errs,
+                                        ::core::result::Result::Ok(()) => ::suprnova::ValidationErrors::new(),
                                     }
                                 }
                             }
                         }
-                        ::core::result::Result::Err(errors) => {
-                            let errs = ::suprnova::ValidationErrors::from_validator(errors);
-                            let filtered = if validate_only.is_empty() {
-                                errs
-                            } else {
-                                errs.retain_fields(&validate_only)
-                            };
-                            if filtered.is_empty() {
-                                ::core::result::Result::Err(
-                                    ::suprnova::FrameworkError::PrecognitionSuccess,
-                                )
-                            } else {
-                                ::core::result::Result::Err(
-                                    ::suprnova::FrameworkError::PrecognitionFailure(filtered),
-                                )
-                            }
-                        }
                     };
+                    let filtered = if validate_only.is_empty() {
+                        bag
+                    } else {
+                        bag.retain_fields(&validate_only)
+                    };
+                    return ::core::result::Result::Err(if filtered.is_empty() {
+                        ::suprnova::FrameworkError::PrecognitionSuccess
+                    } else {
+                        ::suprnova::FrameworkError::PrecognitionFailure(filtered)
+                    });
                 }
 
                 if let ::core::result::Result::Err(errors) = validation_result {
@@ -712,7 +748,15 @@ fn build_form_request(ctx: &DataCodegen<'_>, struct_opts: &StructOptions) -> Tok
                     ));
                 }
 
-                if let ::core::result::Result::Err(errs) = dto.after_validation() {
+                if let ::core::result::Result::Err(errs) =
+                    <Self as ::suprnova::http::FormRequest>::after_validation(&dto)
+                {
+                    return ::core::result::Result::Err(::suprnova::FrameworkError::Validation(errs));
+                }
+
+                if let ::core::result::Result::Err(errs) =
+                    <Self as ::suprnova::http::FormRequest>::after_validation_async(&dto).await
+                {
                     return ::core::result::Result::Err(::suprnova::FrameworkError::Validation(errs));
                 }
 
@@ -1113,7 +1157,24 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
     // Users who need FormRequest on a generic struct must write the impl manually
     // with the appropriate where bounds (e.g., `where T: Send + Validate + ...`).
     let is_generic = !input.generics.params.is_empty();
-    let form_request_impl = if is_generic || has_reference_fields || has_lazy_fields {
+    let emits_form_request = !(is_generic || has_reference_fields || has_lazy_fields);
+    // A validation hook on a struct that gets no `FormRequest` impl would
+    // never run: refuse it rather than let the author believe it guards
+    // anything.
+    if !emits_form_request
+        && (struct_opts.after_validation_fn.is_some()
+            || struct_opts.after_validation_async_fn.is_some())
+    {
+        return syn::Error::new_spanned(
+            struct_name,
+            "#[data(after_validation)] and #[data(after_validation_async)] need the generated \
+             FormRequest impl, which a generic struct, a struct with reference fields, or a \
+             struct with lazy fields does not get; write the FormRequest impl by hand instead",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let form_request_impl = if !emits_form_request {
         proc_macro2::TokenStream::new()
     } else {
         build_form_request(&ctx, &struct_opts)

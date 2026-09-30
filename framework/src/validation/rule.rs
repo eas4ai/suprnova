@@ -211,14 +211,26 @@ pub trait ContextualRule {
     ) {
         self.check(value, errs, field, ctx);
     }
+
+    /// Whether this rule removes its field from validation, Laravel's
+    /// `exclude_if` family. [`validate!`] runs a row's rules in order and
+    /// asks each contextual rule this before running it; once one answers
+    /// `true`, the rest of the row does not run, and errors from rules
+    /// before it stand, as in Laravel. Only [`rules::ExcludeIf`] and
+    /// [`rules::ExcludeUnless`] ever answer `true`.
+    ///
+    /// [`validate!`]: crate::validate
+    fn excludes(&self, _ctx: &FormContext) -> bool {
+        false
+    }
 }
 
 /// Built-in synchronous rules - both pure ([`Rule`]) and contextual
 /// ([`ContextualRule`]).
 pub mod rules {
-    use super::{AsyncRule, ContextualRule, FormContext, Rule, ValueRule};
+    use super::{AsyncRule, ContextualRule, FormContext, Rule, RuleCheck, ValueRule};
     use crate::config::env::env;
-    use crate::error::FrameworkError;
+    use crate::error::{FrameworkError, ValidationErrors};
     use crate::http_client::Http;
     use crate::validation::message::ValidationMessage;
     use serde_json::Value;
@@ -1832,6 +1844,630 @@ pub mod rules {
             }
         }
     }
+
+    /// The strings Laravel's `accepted` takes: a checked box arrives as
+    /// `on`, a toggle as `true` or `1`, a typed answer as `yes`.
+    const ACCEPTED: [&str; 4] = ["yes", "on", "1", "true"];
+
+    fn not_accepted() -> ValidationMessage {
+        ValidationMessage::keyed("validation-accepted").fallback("must be accepted")
+    }
+
+    /// Laravel `accepted` - the value is `yes`, `on`, `1` or `true`: a
+    /// terms-of-service box that must be ticked.
+    ///
+    /// It checks a `bool` field as well (`true` passes), because a Data
+    /// Object carries such a toggle typed, an `Option<bool>` on a `=>` row
+    /// (an absent toggle fails), and a JSON value (`true`, `1`, or one of
+    /// the four strings). Like Laravel's, the rule fails an empty value, so
+    /// a `?=>` row fails an absent `Option<String>` field too.
+    pub struct Accepted;
+    impl Rule for Accepted {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            if ACCEPTED.contains(&value) {
+                Ok(())
+            } else {
+                Err(not_accepted())
+            }
+        }
+    }
+    impl ValueRule for Accepted {
+        fn passes(&self, value: &Value) -> Result<(), ValidationMessage> {
+            let accepted = match value {
+                Value::Bool(accepted) => *accepted,
+                Value::Number(number) => number.as_u64() == Some(1),
+                Value::String(text) => ACCEPTED.contains(&text.as_str()),
+                _ => false,
+            };
+            if accepted {
+                Ok(())
+            } else {
+                Err(not_accepted())
+            }
+        }
+    }
+    // A rule with more than one field shape makes `validate!`'s dispatch
+    // ambiguous for a `String` field, so the `String` shape is spelled out
+    // beside the `bool` one.
+    impl RuleCheck<String> for Accepted {
+        fn __check(&self, value: &String, errs: &mut ValidationErrors, field: &str) {
+            Rule::check(self, value, errs, field);
+        }
+    }
+    impl RuleCheck<bool> for Accepted {
+        fn __check(&self, value: &bool, errs: &mut ValidationErrors, field: &str) {
+            if !*value {
+                errs.add(field.to_string(), not_accepted());
+            }
+        }
+    }
+    // An absent `Option<bool>` toggle is not accepted: a `=>` row sees the
+    // `None` and fails it, which no other row shape can do for a `bool`.
+    impl RuleCheck<Option<bool>> for Accepted {
+        fn __check(&self, value: &Option<bool>, errs: &mut ValidationErrors, field: &str) {
+            if *value != Some(true) {
+                errs.add(field.to_string(), not_accepted());
+            }
+        }
+    }
+
+    /// Laravel `digits:n` - the value is exactly `n` ASCII digits. It stays
+    /// a string rule: a PIN or a card number keeps its leading zeros only
+    /// as text.
+    pub struct Digits(pub usize);
+    impl Rule for Digits {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            if value.len() == self.0 && value.bytes().all(|byte| byte.is_ascii_digit()) {
+                Ok(())
+            } else {
+                Err(ValidationMessage::keyed("validation-digits")
+                    .arg("digits", self.0)
+                    .fallback(format!("must be {} digits", self.0)))
+            }
+        }
+    }
+
+    /// Laravel `date_format:format,...` - the value matches one of the
+    /// formats.
+    ///
+    /// The formats are chrono's `strftime` syntax (`%Y-%m-%d`), not PHP's
+    /// (`Y-m-d`). The check is as strict as Laravel's, which formats the
+    /// parsed date back and compares it with the input: `2026-9-30` does
+    /// not match `%Y-%m-%d`, and neither does the impossible `2026-02-31`.
+    /// A partial format (`%Y-%m`, `%H:%M`) works; the parts it leaves out
+    /// are taken from 1970-01-01 at midnight, as PHP's are, so `02-29` does
+    /// not match `%m-%d` in either framework. A format chrono cannot
+    /// read fails every value with an unkeyed message naming it, because
+    /// that is a bug in the rule, not in the input.
+    pub struct DateFormat(pub &'static [&'static str]);
+    impl Rule for DateFormat {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            for format in self.0 {
+                match matches_date_format(value, format) {
+                    Some(true) => return Ok(()),
+                    Some(false) => {}
+                    None => {
+                        return Err(format!(
+                            "date_format: `{format}` is not a format chrono can read"
+                        )
+                        .into());
+                    }
+                }
+            }
+            let formats = self.0.join(", ");
+            Err(ValidationMessage::keyed("validation-date-format")
+                .arg("format", formats.clone())
+                .fallback(format!("must match the format {formats}")))
+        }
+    }
+
+    /// Whether `value` is exactly `format`, or `None` when chrono cannot
+    /// read the format.
+    fn matches_date_format(value: &str, format: &str) -> Option<bool> {
+        let items = strftime_items(format)?;
+        Some(
+            resolve_in_format(value, &items)
+                .and_then(|moment| moment.format_with(&items))
+                .is_some_and(|back| back == value),
+        )
+    }
+
+    /// The items of a chrono format, or `None` when chrono cannot read it.
+    fn strftime_items(format: &str) -> Option<Vec<chrono::format::Item<'_>>> {
+        use chrono::format::{Item, StrftimeItems};
+
+        let items: Vec<Item<'_>> = StrftimeItems::new(format).collect();
+        (!items.iter().any(|item| matches!(item, Item::Error))).then_some(items)
+    }
+
+    /// A moment read with a format, with the offset the value carried or
+    /// without one.
+    enum Resolved {
+        Zoned(chrono::DateTime<chrono::FixedOffset>),
+        Naive(chrono::NaiveDateTime),
+    }
+
+    impl Resolved {
+        fn utc(&self) -> chrono::NaiveDateTime {
+            match self {
+                Self::Zoned(moment) => moment.naive_utc(),
+                Self::Naive(moment) => *moment,
+            }
+        }
+
+        fn format_with(&self, items: &[chrono::format::Item<'_>]) -> Option<String> {
+            use std::fmt::Write;
+
+            let mut back = String::new();
+            match self {
+                Self::Zoned(moment) => {
+                    write!(back, "{}", moment.format_with_items(items.iter())).ok()?;
+                }
+                Self::Naive(moment) => {
+                    write!(back, "{}", moment.format_with_items(items.iter())).ok()?;
+                }
+            }
+            Some(back)
+        }
+    }
+
+    /// Read `value` with `items` and resolve it to a moment. The fields a
+    /// partial format never sets take the values PHP's `!` resets them to,
+    /// which Laravel's `date_format` uses: the Unix epoch, 1970-01-01 at
+    /// midnight. So `02-29` in `%m-%d` names no real day, as in Laravel.
+    /// `None` when the value does not match, or names no real moment
+    /// (`2026-02-31`).
+    fn resolve_in_format(value: &str, items: &[chrono::format::Item<'_>]) -> Option<Resolved> {
+        use chrono::format::{Parsed, parse};
+
+        let mut parsed = Parsed::new();
+        parse(&mut parsed, value, items.iter()).ok()?;
+        let dated = parsed.ordinal().is_some()
+            || parsed.isoweek().is_some()
+            || parsed.week_from_sun().is_some()
+            || parsed.week_from_mon().is_some()
+            || parsed.timestamp().is_some();
+        if !dated {
+            if parsed.year().is_none()
+                && parsed.year_div_100().is_none()
+                && parsed.year_mod_100().is_none()
+                && parsed.isoyear().is_none()
+            {
+                parsed.set_year(1970).ok()?;
+            }
+            if parsed.month().is_none() {
+                parsed.set_month(1).ok()?;
+            }
+            if parsed.day().is_none() {
+                parsed.set_day(1).ok()?;
+            }
+        }
+        if parsed.timestamp().is_none() {
+            match (parsed.hour_div_12(), parsed.hour_mod_12()) {
+                (None, None) => parsed.set_hour(0).ok()?,
+                (None, Some(_)) => parsed.set_ampm(false).ok()?,
+                _ => {}
+            }
+            if parsed.minute().is_none() {
+                parsed.set_minute(0).ok()?;
+            }
+        }
+        if parsed.offset().is_some() {
+            parsed.to_datetime().ok().map(Resolved::Zoned)
+        } else {
+            parsed
+                .to_naive_datetime_with_offset(0)
+                .ok()
+                .map(Resolved::Naive)
+        }
+    }
+
+    /// The other side of a date comparison ([`After`], [`AfterOrEqual`],
+    /// [`Before`], [`BeforeOrEqual`]).
+    ///
+    /// The relative bounds read the framework clock in UTC, so a test can
+    /// move them with `TestClock`. Suprnova has no application time zone,
+    /// so "today" starts at midnight UTC.
+    pub enum DateBound<'a> {
+        /// A fixed day, compared as its midnight.
+        Date(chrono::NaiveDate),
+        /// A fixed moment.
+        DateTime(chrono::DateTime<chrono::Utc>),
+        /// The current moment.
+        Now,
+        /// Midnight at the start of today.
+        Today,
+        /// Midnight at the start of tomorrow.
+        Tomorrow,
+        /// Midnight at the start of yesterday.
+        Yesterday,
+        /// A sibling field, read from the rule's [`FormContext`] the way
+        /// the value is read. A sibling the form did not send, or sent
+        /// blank, passes the rule, as Laravel's does.
+        Field(&'a str),
+    }
+
+    /// Read a date or a date-time the way the comparison rules accept it
+    /// without a format: RFC 3339 (converted to UTC), `YYYY-MM-DD
+    /// HH:MM[:SS[.fff]]` with a space or a `T` (a `datetime-local`
+    /// input), or a bare `YYYY-MM-DD`, which stands for its midnight. A
+    /// value without an offset is taken as UTC.
+    fn parse_moment(raw: &str) -> Option<chrono::NaiveDateTime> {
+        use chrono::{DateTime, NaiveDate, NaiveDateTime};
+
+        let raw = raw.trim();
+        if let Ok(moment) = DateTime::parse_from_rfc3339(raw) {
+            return Some(moment.naive_utc());
+        }
+        const LOCAL: [&str; 4] = [
+            "%Y-%m-%dT%H:%M:%S%.f",
+            "%Y-%m-%d %H:%M:%S%.f",
+            "%Y-%m-%dT%H:%M",
+            "%Y-%m-%d %H:%M",
+        ];
+        for format in LOCAL {
+            if let Ok(moment) = NaiveDateTime::parse_from_str(raw, format) {
+                return Some(moment);
+            }
+        }
+        NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+            .ok()
+            .map(|day| day.and_time(chrono::NaiveTime::MIN))
+    }
+
+    /// How a bound is named in a failure message. A sibling is named by
+    /// its field, never its value, for the reason [`operand_label`] gives.
+    fn bound_label(bound: &DateBound<'_>) -> String {
+        match bound {
+            DateBound::Date(day) => day.format("%Y-%m-%d").to_string(),
+            DateBound::DateTime(moment) => {
+                moment.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            }
+            DateBound::Now => "now".to_string(),
+            DateBound::Today => "today".to_string(),
+            DateBound::Tomorrow => "tomorrow".to_string(),
+            DateBound::Yesterday => "yesterday".to_string(),
+            DateBound::Field(other) => (*other).to_string(),
+        }
+    }
+
+    /// What a date comparison found.
+    enum Comparison {
+        /// The value's place against the bound.
+        Ordered(std::cmp::Ordering),
+        /// The bound is a sibling the form did not send: the rule passes.
+        NoBound,
+        /// The value, or a sibling bound, is not a date: the rule fails.
+        NotADate,
+        /// The rule's own format is not one chrono can read.
+        BadFormat(&'static str),
+    }
+
+    /// The part the four comparison rules share: the bound, and the format
+    /// the value (and a sibling bound) is read with.
+    struct DateComparison<'a> {
+        bound: DateBound<'a>,
+        format: Option<&'static str>,
+    }
+
+    impl DateComparison<'_> {
+        /// Order the value against the bound. Both sides are cut to the
+        /// second, because Laravel compares Unix timestamps.
+        fn compare(&self, value: &str, ctx: &FormContext) -> Comparison {
+            use chrono::SubsecRound;
+
+            let items = match self.format {
+                Some(format) => match strftime_items(format) {
+                    Some(items) => Some(items),
+                    None => return Comparison::BadFormat(format),
+                },
+                None => None,
+            };
+            let read = |raw: &str| match &items {
+                Some(items) => resolve_in_format(raw, items).map(|moment| moment.utc()),
+                None => parse_moment(raw),
+            };
+            let today = || crate::clock::now().date_naive();
+            let midnight = |day: chrono::NaiveDate| day.and_time(chrono::NaiveTime::MIN);
+            let bound = match &self.bound {
+                DateBound::Date(day) => Some(midnight(*day)),
+                DateBound::DateTime(moment) => Some(moment.naive_utc()),
+                DateBound::Now => Some(crate::clock::now().naive_utc()),
+                DateBound::Today => Some(midnight(today())),
+                DateBound::Tomorrow => today().succ_opt().map(midnight),
+                DateBound::Yesterday => today().pred_opt().map(midnight),
+                DateBound::Field(other) => match ctx.get(*other) {
+                    Some(raw) if !is_blank(raw) => read(raw),
+                    _ => return Comparison::NoBound,
+                },
+            };
+            match (read(value), bound) {
+                (Some(value), Some(bound)) => {
+                    Comparison::Ordered(value.trunc_subsecs(0).cmp(&bound.trunc_subsecs(0)))
+                }
+                _ => Comparison::NotADate,
+            }
+        }
+
+        /// The failure for `value`, or `None` when it passes.
+        fn failure(
+            &self,
+            value: &str,
+            ctx: &FormContext,
+            passes: fn(std::cmp::Ordering) -> bool,
+            key: &'static str,
+            relation: &str,
+        ) -> Option<ValidationMessage> {
+            match self.compare(value, ctx) {
+                Comparison::Ordered(order) if passes(order) => None,
+                Comparison::NoBound => None,
+                Comparison::BadFormat(format) => Some(
+                    format!("date comparison: `{format}` is not a format chrono can read").into(),
+                ),
+                Comparison::Ordered(_) | Comparison::NotADate => {
+                    let date = bound_label(&self.bound);
+                    Some(
+                        ValidationMessage::keyed(key)
+                            .arg("date", date.clone())
+                            .fallback(format!("must be a date {relation} {date}")),
+                    )
+                }
+            }
+        }
+    }
+
+    /// Laravel `after:date` - the value is a date later than the bound.
+    ///
+    /// The value is read as ISO 8601 unless [`format`](Self::format) names
+    /// the field's format, which reads a sibling bound the same way - the
+    /// pairing Laravel makes with `date_format:...|after:...`. A value, or a
+    /// sibling, that is not a date fails the field; a sibling the form did
+    /// not send passes it.
+    pub struct After<'a>(DateComparison<'a>);
+    impl<'a> After<'a> {
+        /// Compare against `bound`, reading the value as ISO 8601.
+        pub fn new(bound: DateBound<'a>) -> Self {
+            Self(DateComparison {
+                bound,
+                format: None,
+            })
+        }
+
+        /// Read the value, and a sibling bound, with this chrono format.
+        pub fn format(self, format: &'static str) -> Self {
+            Self(DateComparison {
+                format: Some(format),
+                ..self.0
+            })
+        }
+    }
+    impl ContextualRule for After<'_> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
+            self.0
+                .failure(
+                    value,
+                    ctx,
+                    std::cmp::Ordering::is_gt,
+                    "validation-after",
+                    "after",
+                )
+                .map_or(Ok(()), Err)
+        }
+    }
+
+    /// Laravel `after_or_equal:date` - the value is the bound or later.
+    /// See [`After`].
+    pub struct AfterOrEqual<'a>(DateComparison<'a>);
+    impl<'a> AfterOrEqual<'a> {
+        /// Compare against `bound`, reading the value as ISO 8601.
+        pub fn new(bound: DateBound<'a>) -> Self {
+            Self(DateComparison {
+                bound,
+                format: None,
+            })
+        }
+
+        /// Read the value, and a sibling bound, with this chrono format.
+        pub fn format(self, format: &'static str) -> Self {
+            Self(DateComparison {
+                format: Some(format),
+                ..self.0
+            })
+        }
+    }
+    impl ContextualRule for AfterOrEqual<'_> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
+            self.0
+                .failure(
+                    value,
+                    ctx,
+                    std::cmp::Ordering::is_ge,
+                    "validation-after-or-equal",
+                    "after or equal to",
+                )
+                .map_or(Ok(()), Err)
+        }
+    }
+
+    /// Laravel `before:date` - the value is a date earlier than the bound.
+    /// See [`After`].
+    pub struct Before<'a>(DateComparison<'a>);
+    impl<'a> Before<'a> {
+        /// Compare against `bound`, reading the value as ISO 8601.
+        pub fn new(bound: DateBound<'a>) -> Self {
+            Self(DateComparison {
+                bound,
+                format: None,
+            })
+        }
+
+        /// Read the value, and a sibling bound, with this chrono format.
+        pub fn format(self, format: &'static str) -> Self {
+            Self(DateComparison {
+                format: Some(format),
+                ..self.0
+            })
+        }
+    }
+    impl ContextualRule for Before<'_> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
+            self.0
+                .failure(
+                    value,
+                    ctx,
+                    std::cmp::Ordering::is_lt,
+                    "validation-before",
+                    "before",
+                )
+                .map_or(Ok(()), Err)
+        }
+    }
+
+    /// Laravel `before_or_equal:date` - the value is the bound or earlier.
+    /// See [`After`].
+    pub struct BeforeOrEqual<'a>(DateComparison<'a>);
+    impl<'a> BeforeOrEqual<'a> {
+        /// Compare against `bound`, reading the value as ISO 8601.
+        pub fn new(bound: DateBound<'a>) -> Self {
+            Self(DateComparison {
+                bound,
+                format: None,
+            })
+        }
+
+        /// Read the value, and a sibling bound, with this chrono format.
+        pub fn format(self, format: &'static str) -> Self {
+            Self(DateComparison {
+                format: Some(format),
+                ..self.0
+            })
+        }
+    }
+    impl ContextualRule for BeforeOrEqual<'_> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
+            self.0
+                .failure(
+                    value,
+                    ctx,
+                    std::cmp::Ordering::is_le,
+                    "validation-before-or-equal",
+                    "before or equal to",
+                )
+                .map_or(Ok(()), Err)
+        }
+    }
+
+    /// Laravel `prohibited` - the field is empty: blank text, or a JSON
+    /// `null`, blank string, empty array or empty object. On an `Option`
+    /// field an absent value passes by the row: `?:` skips it.
+    pub struct Prohibited;
+    fn prohibited() -> ValidationMessage {
+        ValidationMessage::keyed("validation-prohibited").fallback("is prohibited")
+    }
+    impl Rule for Prohibited {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            if is_blank(value) {
+                Ok(())
+            } else {
+                Err(prohibited())
+            }
+        }
+    }
+    impl ValueRule for Prohibited {
+        fn passes(&self, value: &Value) -> Result<(), ValidationMessage> {
+            let empty = match value {
+                Value::Null => true,
+                Value::String(text) => is_blank(text),
+                Value::Array(items) => items.is_empty(),
+                Value::Object(members) => members.is_empty(),
+                Value::Bool(_) | Value::Number(_) => false,
+            };
+            if empty { Ok(()) } else { Err(prohibited()) }
+        }
+    }
+    // See `Accepted`: two field shapes need the `String` one spelled out.
+    impl RuleCheck<String> for Prohibited {
+        fn __check(&self, value: &String, errs: &mut ValidationErrors, field: &str) {
+            Rule::check(self, value, errs, field);
+        }
+    }
+
+    /// Laravel `missing` - the field is not in the request at all.
+    ///
+    /// A typed request has every field it declares, so "not sent" is an
+    /// `Option` field that is `None`. Put `Missing` on a `?:` row: the row
+    /// skips an absent field, and the rule fails every value that arrived,
+    /// even an empty one, as Laravel's does. On a `=>` or `?=>` row it
+    /// fails every request. A key the struct does not declare at all is
+    /// already refused by a Data Object's strict unknown-field check.
+    pub struct Missing;
+    fn not_missing() -> ValidationMessage {
+        ValidationMessage::keyed("validation-missing").fallback("must be missing")
+    }
+    impl Rule for Missing {
+        fn passes(&self, _value: &str) -> Result<(), ValidationMessage> {
+            Err(not_missing())
+        }
+    }
+    impl ValueRule for Missing {
+        fn passes(&self, _value: &Value) -> Result<(), ValidationMessage> {
+            Err(not_missing())
+        }
+    }
+    // See `Accepted`: two field shapes need the `String` one spelled out.
+    impl RuleCheck<String> for Missing {
+        fn __check(&self, value: &String, errs: &mut ValidationErrors, field: &str) {
+            Rule::check(self, value, errs, field);
+        }
+    }
+
+    /// Laravel `exclude_if:other,value` - when the sibling `other` equals
+    /// `value`, the rules after it on the same [`validate!`] row do not
+    /// run. Put it first, as Laravel's documentation does, to skip them
+    /// all.
+    ///
+    /// Laravel also drops an excluded field from `validated()`. A typed
+    /// request has no such bag: the struct still holds whatever arrived,
+    /// so a handler that must ignore an excluded field asks the rule with
+    /// [`ContextualRule::excludes`].
+    ///
+    /// [`validate!`]: crate::validate
+    pub struct ExcludeIf {
+        /// Name of the sibling field to read.
+        pub other: &'static str,
+        /// When `ctx[other]` equals this string, the field is excluded.
+        pub value: &'static str,
+    }
+    impl ContextualRule for ExcludeIf {
+        fn passes(&self, _value: &str, _ctx: &FormContext) -> Result<(), ValidationMessage> {
+            Ok(())
+        }
+
+        fn excludes(&self, ctx: &FormContext) -> bool {
+            ctx.get(self.other).is_some_and(|other| other == self.value)
+        }
+    }
+
+    /// Laravel `exclude_unless:other,value` - the rules after it on the
+    /// row run only when the sibling `other` equals `value`; a sibling the
+    /// form never sent excludes the field, as Laravel's null does. See
+    /// [`ExcludeIf`] for where to put it and what exclusion does to the
+    /// struct.
+    pub struct ExcludeUnless {
+        /// Name of the sibling field to read.
+        pub other: &'static str,
+        /// Unless `ctx[other]` equals this string, the field is excluded.
+        pub value: &'static str,
+    }
+    impl ContextualRule for ExcludeUnless {
+        fn passes(&self, _value: &str, _ctx: &FormContext) -> Result<(), ValidationMessage> {
+            Ok(())
+        }
+
+        fn excludes(&self, ctx: &FormContext) -> bool {
+            ctx.get(self.other).is_none_or(|other| other != self.value)
+        }
+    }
 }
 
 /// Bridges [`Rule`] and [`ValueRule`] for [`validate!`]'s required- and
@@ -1840,7 +2476,10 @@ pub mod rules {
 /// field list mixes `Min(8)` and `ArrayKeys(&[...])` with no new syntax.
 /// `Field` is `str` for [`Rule`], `serde_json::Value` for [`ValueRule`];
 /// the two blanket impls target different `Field`s, so they can't
-/// conflict even for a hypothetical rule implementing both (none does).
+/// conflict for a rule implementing both. Such a rule ([`rules::Accepted`],
+/// [`rules::Prohibited`], [`rules::Missing`]) leaves the `Field` of a
+/// `&String` argument ambiguous, so it adds a `RuleCheck<String>` impl of
+/// its own.
 /// Not meant to be called directly - [`validate!`] reaches it through
 /// `$crate`-qualified paths that need no trait imports at the call site.
 ///
@@ -1875,9 +2514,10 @@ pub trait AsyncRule: Send + Sync {
     /// it fails.
     ///
     /// The returned [`ValidationMessage`] follows the same keyed
-    /// contract as [`Rule::passes`]. Infrastructure failures (a dead
-    /// connection, a malformed identifier) surface as keyless messages:
-    /// they are operator-facing, not user-facing text.
+    /// contract as [`Rule::passes`]. A validation message is rendered into
+    /// the response body, so an infrastructure failure (a dead connection,
+    /// a malformed identifier) must not carry its cause there: the built-in
+    /// database rules log the cause and return `validation-unchecked`.
     async fn passes(&self, value: &str) -> Result<(), ValidationMessage>;
 
     /// Async analogue of [`Rule::check`]: run the rule and push any
@@ -1913,6 +2553,24 @@ pub trait AsyncRule: Send + Sync {
 /// Built-in asynchronous rules.
 pub mod async_rules {
     use super::AsyncRule;
+    use crate::ValidationErrors;
+
+    /// The message for a database check that could not run, with the
+    /// cause logged for the operator. The cause - a driver error, an
+    /// identifier the allowlist refused - names tables, columns and types,
+    /// and a validation message is rendered into the response body, so the
+    /// client gets only this.
+    fn unchecked(rule: &'static str, table: &str, column: &str, cause: &str) -> ValidationMessage {
+        tracing::error!(
+            target: "suprnova::validation",
+            rule,
+            table,
+            column,
+            cause,
+            "a database validation rule could not run"
+        );
+        ValidationMessage::keyed("validation-unchecked").fallback("could not be checked")
+    }
     use crate::database::placeholder::placeholder;
     use crate::database::validate_identifier;
     use crate::validation::message::ValidationMessage;
@@ -2028,6 +2686,20 @@ pub mod async_rules {
     #[async_trait::async_trait]
     impl AsyncRule for Unique {
         async fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            match self.count(value).await {
+                Ok(0) => Ok(()),
+                Ok(_) => Err(ValidationMessage::keyed("validation-unique")
+                    .arg("column", self.column)
+                    .arg("table", self.table)
+                    .fallback(format!("{} already exists for {}", self.column, self.table))),
+                Err(cause) => Err(unchecked("unique", self.table, self.column, &cause)),
+            }
+        }
+    }
+
+    impl Unique {
+        /// How many rows hold `value`, or the cause the query could not run.
+        async fn count(&self, value: &str) -> Result<i64, String> {
             // Identifiers can't be placeholder-bound; validate each one
             // through the shared allowlist before interpolation.
             let table = validate_identifier(self.table).map_err(|e| e.to_string())?;
@@ -2089,23 +2761,179 @@ pub mod async_rules {
                 .map_err(|e| format!("unique query: {e}"))?
                 .ok_or_else(|| "unique query returned no rows".to_string())?;
 
-            let count: i64 = row
-                .try_get::<i64>("", "c")
-                .map_err(|e| format!("unique decode: {e}"))?;
+            row.try_get::<i64>("", "c")
+                .map_err(|e| format!("unique decode: {e}"))
+        }
+    }
 
-            if count == 0 {
+    /// Laravel `exists:table,column` - the value names a row: a
+    /// `SELECT 1 ... LIMIT 1` against the configured connection must find
+    /// one.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{AsyncRule, Exists, ValidationErrors};
+    /// # async fn ex(team_id: i64, tag_ids: &[i64], country: &str) {
+    /// let mut errs = ValidationErrors::new();
+    /// // A text column: the `AsyncRule` path binds the value as text.
+    /// Exists::new("countries", "code").check_async(country, &mut errs, "country").await;
+    /// // Typed values bind as themselves, which Postgres needs for an
+    /// // integer column; `where_eq` scopes the lookup like `Unique`'s.
+    /// Exists::new("teams", "id").check_value(team_id, &mut errs, "team_id").await;
+    /// // One check per element, each error under `tag_ids.<index>`:
+    /// // Laravel's `'tag_ids.*' => 'exists:tags,id'`.
+    /// Exists::new("tags", "id")
+    ///     .where_eq("team_id", team_id)
+    ///     .check_each(tag_ids, &mut errs, "tag_ids")
+    ///     .await;
+    /// # }
+    /// ```
+    ///
+    /// Postgres does not compare a text parameter with an integer column,
+    /// so an id checked through the `&str` [`AsyncRule`] path fails there
+    /// with a database error; check a typed value with
+    /// [`check_value`](Self::check_value) instead. Identifiers are
+    /// validated as [`Unique`] validates them, and every value is bound.
+    /// Like [`Unique`] it reads before the write, so a row deleted in
+    /// between still passes; a foreign key is the guarantee.
+    pub struct Exists {
+        table: &'static str,
+        column: &'static str,
+        wheres: Vec<(&'static str, Value)>,
+    }
+
+    impl Exists {
+        /// Start an existence rule for `column` in `table`.
+        pub fn new(table: &'static str, column: &'static str) -> Self {
+            Self {
+                table,
+                column,
+                wheres: Vec::new(),
+            }
+        }
+
+        /// Only rows where `column = value` count. Multiple calls AND
+        /// together - Laravel's `Rule::exists(...)->where(col, val)`.
+        pub fn where_eq(mut self, column: &'static str, value: impl Into<Value>) -> Self {
+            self.wheres.push((column, value.into()));
+            self
+        }
+
+        /// Check a typed value, bound as itself rather than as text, and
+        /// push any failure onto `errs` under `field`.
+        pub async fn check_value(
+            &self,
+            value: impl Into<Value> + Send,
+            errs: &mut ValidationErrors,
+            field: &str,
+        ) {
+            if let Some(msg) = self.failure(value.into()).await {
+                errs.add(field.to_string(), msg);
+            }
+        }
+
+        /// Check every element, each failure under `<field>.<index>` as
+        /// Laravel's `field.*` reports it.
+        ///
+        /// One query runs per distinct value - a value repeated across
+        /// the array is looked up once and reported under every index
+        /// that holds it. Laravel's `field.*` also queries per element, so
+        /// bound the array's length with a synchronous rule (the
+        /// `#[validate(length(max = ..))]` attribute on the field): that
+        /// stage runs first, and a request over the bound never reaches the
+        /// database.
+        pub async fn check_each<T>(&self, values: &[T], errs: &mut ValidationErrors, field: &str)
+        where
+            T: Clone + Into<Value> + Sync,
+        {
+            // Distinct values in first-appearance order, each with the
+            // indexes that hold it. The key is the bound value's debug
+            // form, which tells an integer `1` from a string `"1"`.
+            let mut distinct: Vec<(Value, Vec<usize>)> = Vec::new();
+            let mut position: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for (index, value) in values.iter().enumerate() {
+                let value: Value = value.clone().into();
+                match position.entry(format!("{value:?}")) {
+                    std::collections::hash_map::Entry::Occupied(slot) => {
+                        distinct[*slot.get()].1.push(index);
+                    }
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(distinct.len());
+                        distinct.push((value, vec![index]));
+                    }
+                }
+            }
+            for (value, indexes) in distinct {
+                if let Some(msg) = self.failure(value).await {
+                    for index in indexes {
+                        errs.add(format!("{field}.{index}"), msg.clone());
+                    }
+                }
+            }
+        }
+
+        /// The message a value fails with, or `None` when a row matches.
+        async fn failure(&self, value: Value) -> Option<ValidationMessage> {
+            match self.finds(value).await {
+                Ok(true) => None,
+                Ok(false) => Some(
+                    ValidationMessage::keyed("validation-exists")
+                        .arg("column", self.column)
+                        .arg("table", self.table)
+                        .fallback(format!("selected {} is invalid", self.column)),
+                ),
+                Err(cause) => Some(unchecked("exists", self.table, self.column, &cause)),
+            }
+        }
+
+        /// Whether a matching row exists.
+        async fn finds(&self, value: Value) -> Result<bool, String> {
+            let table = validate_identifier(self.table).map_err(|e| e.to_string())?;
+            let column = validate_identifier(self.column).map_err(|e| e.to_string())?;
+
+            let conn = DB::connection().map_err(|e| format!("db: {e}"))?;
+            let backend = conn.inner().get_database_backend();
+
+            let mut clauses = Vec::with_capacity(1 + self.wheres.len());
+            let mut values = Vec::with_capacity(1 + self.wheres.len());
+            let mut bind = |column: &str, value: Value| -> Result<(), String> {
+                values.push(value);
+                let rendered = placeholder(backend, values.len()).map_err(|e| e.to_string())?;
+                clauses.push(format!("{column} = {rendered}"));
                 Ok(())
-            } else {
-                Err(ValidationMessage::keyed("validation-unique")
-                    .arg("column", self.column)
-                    .arg("table", self.table)
-                    .fallback(format!("{} already exists for {}", self.column, self.table)))
+            };
+            bind(column, value)?;
+            for (scope_column, scope_value) in &self.wheres {
+                let scope_column = validate_identifier(scope_column).map_err(|e| e.to_string())?;
+                bind(scope_column, scope_value.clone())?;
+            }
+
+            let sql = format!(
+                "SELECT 1 AS found FROM {table} WHERE {} LIMIT 1",
+                clauses.join(" AND ")
+            );
+            let stmt = Statement::from_sql_and_values(backend, &sql, values);
+            let row = conn
+                .inner()
+                .query_one_raw(stmt)
+                .await
+                .map_err(|e| format!("exists query: {e}"))?;
+            Ok(row.is_some())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncRule for Exists {
+        async fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            match self.failure(Value::from(value.to_string())).await {
+                None => Ok(()),
+                Some(msg) => Err(msg),
             }
         }
     }
 }
 
-pub use async_rules::Unique;
+pub use async_rules::{Exists, Unique};
 
 /// Run a chain of validation rules over fields of `$self`, accumulating
 /// errors into a single [`ValidationErrors`](crate::ValidationErrors).
@@ -2216,6 +3044,14 @@ pub use async_rules::Unique;
 /// treated as the empty string), so `RequiredIf` can fail. It uses
 /// `Option::as_deref`, so the field must be `Option<String>`-shaped.
 ///
+/// # Excluded fields
+///
+/// A row's rules run in order, each rule expression evaluated once. When
+/// an [`ExcludeIf`](crate::ExcludeIf) or
+/// [`ExcludeUnless`](crate::ExcludeUnless) on the row holds, the rules
+/// after it do not run - Laravel's `exclude_if`, which is order-dependent
+/// too. Put the exclusion first to skip the whole row.
+///
 /// # Async rules
 ///
 /// The macro is sync-only. Call
@@ -2248,9 +3084,7 @@ macro_rules! __validate_rows {
     // Optional-shape row: `field?: Rule1, Rule2 => with ctx, ... ;`
     ($errs:ident, $self:ident, $field:ident ?: $($rule:expr $(=> with $ctx:ident)?),+ ; $($rest:tt)*) => {
         if let ::core::option::Option::Some(ref __val) = $self.$field {
-            $(
-                $crate::__validate_one_optional!($errs, $field, __val, $rule $(=> with $ctx)?);
-            )+
+            $crate::__validate_seq!($errs, $field, __val; $($rule $(=> with $ctx)?),+);
         }
         $crate::__validate_rows!($errs, $self, $($rest)*);
     };
@@ -2266,68 +3100,47 @@ macro_rules! __validate_rows {
     ($errs:ident, $self:ident, $field:ident ?=> $($rule:expr $(=> with $ctx:ident)?),+ ; $($rest:tt)*) => {
         {
             let __val: &str = $self.$field.as_deref().unwrap_or("");
-            $(
-                $crate::__validate_one_optional!($errs, $field, __val, $rule $(=> with $ctx)?);
-            )+
+            $crate::__validate_seq!($errs, $field, __val; $($rule $(=> with $ctx)?),+);
         }
         $crate::__validate_rows!($errs, $self, $($rest)*);
     };
     // Required-shape row: `field => Rule1, Rule2 => with ctx, ... ;`
     ($errs:ident, $self:ident, $field:ident => $($rule:expr $(=> with $ctx:ident)?),+ ; $($rest:tt)*) => {
-        $(
-            $crate::__validate_one!($errs, $self, $field, $rule $(=> with $ctx)?);
-        )+
+        $crate::__validate_seq!($errs, $field, &$self.$field; $($rule $(=> with $ctx)?),+);
         $crate::__validate_rows!($errs, $self, $($rest)*);
     };
     // Terminal: input exhausted (with or without a trailing `;`).
     ($errs:ident, $self:ident, $(;)?) => {};
 }
 
-/// Internal dispatch macro used by [`validate!`] for required-shape
-/// rows. Not part of the public API.
+/// Internal row walker used by [`validate!`]: runs one row's rules in
+/// order against `$value`, evaluating each rule expression once. A
+/// contextual rule is asked [`ContextualRule::excludes`] before it runs,
+/// and an exclusion ends the row. Not part of the public API.
 #[macro_export]
 #[doc(hidden)]
-macro_rules! __validate_one {
-    ($errs:ident, $self:ident, $field:ident, $rule:expr => with $ctx:ident) => {
-        $crate::validation::rule::ContextualRule::check_named(
-            &$rule,
-            &$self.$field,
-            &mut $errs,
-            ::core::stringify!($field),
-            &$ctx,
-        );
-    };
-    ($errs:ident, $self:ident, $field:ident, $rule:expr) => {
+macro_rules! __validate_seq {
+    ($errs:ident, $field:ident, $value:expr; ) => {};
+    ($errs:ident, $field:ident, $value:expr; $rule:expr => with $ctx:ident $(, $($rest:tt)*)?) => {{
+        let __rule = &$rule;
+        if !$crate::validation::rule::ContextualRule::excludes(__rule, &$ctx) {
+            $crate::validation::rule::ContextualRule::check_named(
+                __rule,
+                $value,
+                &mut $errs,
+                ::core::stringify!($field),
+                &$ctx,
+            );
+            $crate::__validate_seq!($errs, $field, $value; $($($rest)*)?);
+        }
+    }};
+    ($errs:ident, $field:ident, $value:expr; $rule:expr $(, $($rest:tt)*)?) => {{
         $crate::validation::rule::RuleCheck::__check(
             &$rule,
-            &$self.$field,
+            $value,
             &mut $errs,
             ::core::stringify!($field),
         );
-    };
-}
-
-/// Internal dispatch macro used by [`validate!`] for optional-shape
-/// rows. Runs against the borrowed inner value of an `Option`. Not
-/// part of the public API.
-#[macro_export]
-#[doc(hidden)]
-macro_rules! __validate_one_optional {
-    ($errs:ident, $field:ident, $val:ident, $rule:expr => with $ctx:ident) => {
-        $crate::validation::rule::ContextualRule::check_named(
-            &$rule,
-            $val,
-            &mut $errs,
-            ::core::stringify!($field),
-            &$ctx,
-        );
-    };
-    ($errs:ident, $field:ident, $val:ident, $rule:expr) => {
-        $crate::validation::rule::RuleCheck::__check(
-            &$rule,
-            $val,
-            &mut $errs,
-            ::core::stringify!($field),
-        );
-    };
+        $crate::__validate_seq!($errs, $field, $value; $($($rest)*)?);
+    }};
 }

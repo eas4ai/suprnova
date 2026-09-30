@@ -8,6 +8,31 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Laravel's `exists`, `accepted`, `digits`, `date_format`, date
+  comparison, `prohibited`, `missing` and `exclude_if` rules.** `Exists`
+  checks that a value names a row, scoped with `where_eq`; `check_value`
+  binds a typed id, which Postgres needs for an integer column, and
+  `check_each` checks every element of an array, one query per distinct
+  value, with each failure under `field.<index>`. `Accepted`, `Digits`,
+  `DateFormat` (chrono's format syntax, as strict as Laravel's),
+  `After::new`, `AfterOrEqual::new`, `Before::new` and `BeforeOrEqual::new`
+  (against a fixed date, `Now`, `Today`, `Tomorrow`, `Yesterday` or another
+  field, with `.format(..)` for a field that is not ISO 8601), `Prohibited`,
+  `Missing`, `ExcludeIf` and `ExcludeUnless` join the built-in rules.
+  `validate!` now runs a row's rules in order, each expression evaluated
+  once, and stops at an exclusion, as Laravel does. This landed on main
+  after the `v3.0.0` tag.
+- **A Data Object runs `validate!` and database rules.** The derive writes
+  a Data Object's `FormRequest` impl, so it had no place for cross-field
+  rules or for `Unique` and `Exists`. `#[data(after_validation = "fn")]`
+  and `#[data(after_validation_async = "fn")]` name the functions that
+  impl calls, and the impl a `from_route_param` field selects now runs the
+  async stage too. That impl now calls the hooks through the trait, so an
+  inherent `after_validation` method on such a Data Object, which it used
+  to call by accident, no longer runs: name it with the attribute. The
+  derive refuses both attributes on a struct that gets no `FormRequest`
+  impl. This landed on main after the `v3.0.0` tag.
+
 - **`FrameworkError::Timeout` tells a passed deadline from a failure.**
   `WorkflowHandle::wait_with_timeout` documented a timeout error that did not
   exist and returned `FrameworkError::Internal`, so a caller could not tell a
@@ -781,6 +806,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **`Unique` and `Exists` keep database errors out of the response.** A
+  database rule that could not run returned the driver's error as its
+  validation message, and a validation message is rendered into the 422
+  body, so a client could read table names, column types and SQL. The rule
+  now logs the cause under the `suprnova::validation` target and fails the
+  field with `validation-unchecked`. This fix landed on main after the
+  `v3.0.0` tag.
+- **Precognition keeps the errors of an array's elements.** A
+  `Precognition-Validate-Only` header naming `tag_ids` dropped the errors
+  reported under `tag_ids.0`, `tag_ids.1` and so on, so a form validating
+  the field saw success for an invalid array. A field now keeps the errors
+  nested under it, and `tag_ids.*` matches the elements as Laravel's rule
+  key does. This fix landed on main after the `v3.0.0` tag.
 - **The date picker, upload, account menu and notification bell follow the
   theme.** Their stylesheets read `--sn-color-accent` and
   `--sn-color-on-accent`, which the token stylesheet never defined, so the

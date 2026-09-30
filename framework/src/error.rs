@@ -424,8 +424,10 @@ impl ValidationErrors {
         })
     }
 
-    /// Return a new `ValidationErrors` containing only the entries whose
-    /// field name appears in `keep`. Used by Precognition's
+    /// Return a new `ValidationErrors` containing only the entries for the
+    /// fields in `keep`: the same key, a key nested under one (`tag_ids`
+    /// keeps `tag_ids.3`), or a key a `*` segment matches (`tag_ids.*`
+    /// keeps `tag_ids.3`). Used by Precognition's
     /// `Precognition-Validate-Only` header - the server runs full
     /// validation but reports errors only for the fields the client
     /// asked about.
@@ -433,10 +435,30 @@ impl ValidationErrors {
         let kept = self
             .errors
             .iter()
-            .filter(|(k, _)| keep.iter().any(|w| w == *k))
+            .filter(|(k, _)| keep.iter().any(|w| field_covers(w, k)))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         Self { errors: kept }
+    }
+}
+
+/// Whether the field a Precognition client asked about, `wanted`, covers
+/// the error key `key`: the same key, a key nested under it (`tag_ids`
+/// covers `tag_ids.3` and `address.city` covers `address.city.0`), or a key
+/// its `*` segments match (`tag_ids.*` covers `tag_ids.3`, Laravel's rule
+/// key for the elements). An array rule reports each element under its
+/// own index, so without this, asking about the array would drop exactly
+/// the errors it has.
+fn field_covers(wanted: &str, key: &str) -> bool {
+    let mut wanted = wanted.split('.');
+    let mut key = key.split('.');
+    loop {
+        match (wanted.next(), key.next()) {
+            (None, _) => return true,
+            (Some(_), None) => return false,
+            (Some(want), Some(have)) if want == "*" || want == have => {}
+            (Some(_), Some(_)) => return false,
+        }
     }
 }
 

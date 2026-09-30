@@ -433,12 +433,14 @@ pub use telemetry::{
 pub use timeout::TimeoutMiddleware;
 pub use validation::message::{TranslateArgs, ValidationMessage};
 pub use validation::rule::{
-    AsyncRule, ContextualRule, FormContext, Rule, Unique, ValueRule, async_rules, rules,
+    AsyncRule, ContextualRule, Exists, FormContext, Rule, Unique, ValueRule, async_rules, rules,
     rules::{
-        Alpha, AlphaDash, AlphaNum, ArrayKeys, Between, Boolean, CompareWith, Confirmed, Contains,
-        Different, Distinct, DoesntContain, Email, Gt, Gte, HibpVerifier, HttpUrl, In, InArray,
-        Integer, Lt, Lte, Max, Min, NotIn, Numeric, Password, Required, RequiredIf, RequiredUnless,
-        RequiredWith, RequiredWithAll, Same, UncompromisedVerifier, Url, UrlProtocols, Uuid,
+        Accepted, After, AfterOrEqual, Alpha, AlphaDash, AlphaNum, ArrayKeys, Before,
+        BeforeOrEqual, Between, Boolean, CompareWith, Confirmed, Contains, DateBound, DateFormat,
+        Different, Digits, Distinct, DoesntContain, Email, ExcludeIf, ExcludeUnless, Gt, Gte,
+        HibpVerifier, HttpUrl, In, InArray, Integer, Lt, Lte, Max, Min, Missing, NotIn, Numeric,
+        Password, Prohibited, Required, RequiredIf, RequiredUnless, RequiredWith, RequiredWithAll,
+        Same, UncompromisedVerifier, Url, UrlProtocols, Uuid,
     },
 };
 // The media subsystem's flat names. `Image` is the image-manipulation
