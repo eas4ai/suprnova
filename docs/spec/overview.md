@@ -91,31 +91,37 @@ rather than duplicates.
 
 | Domain | Prefix | File | State |
 |---|---|---|---|
-| RenderCache (document cache: policy, keys, storage, coherence) | CACHE | `render-cache.md` | Agreed 2026-09-13; ten requirements from the audit of that day, each refining Live specs 15-18; reference: `crates/suprnova-live/docs/specs/suprnova-live/15-...` to `18-...` and `manual/render-cache.md` |
-| Live (engine, facade, browser runtime, tooling) | LIVE | `live.md` | Observed; reference: `crates/suprnova-live/docs/specs/suprnova-live/` (26 numbered specs, glossary, conventions, iteration contracts 001-006) and `manual/live.md` |
-| Component library - foundations (inherited by every commitment) | UI | `component-library-foundations.md` | Draft; refines Live spec 20 |
-| Component library - form and input | FORM | `component-library-forms.md` | Draft; refines Live spec 21; the first commitment with foundations |
-| Component library - navigation | NAV | `component-library-navigation.md` | Draft; refines Live spec 22 |
-| Component library - overlay and disclosure | OVL | `component-library-overlays.md` | Draft; refines Live spec 23 |
-| Component library - feedback and status | FDB | `component-library-feedback.md` | Draft; refines Live spec 24 |
-| Component library - data display and layout | DATA | `component-library-data-display.md` | Draft; refines Live spec 25 |
-| Application boot, config, container, console | - | none yet | `manual/lifecycle.md`, `manual/configuration.md`, `manual/container.md`, `manual/artisan.md` |
-| Sessions (concurrent requests on one session) | SESS | `sessions.md` | Draft; SESS-001 Agreed 2026-09-15 on escalation `form-008` |
-| HTTP: routing, middleware, requests, responses, CSRF, CORS | - | none yet | `manual/routing.md`, `manual/middleware.md`, `manual/requests.md`, `manual/responses.md`, `manual/session.md` |
-| Views and Inertia frontends | - | none yet | `manual/views.md`, `manual/inertia.md`, `manual/frontend.md` |
-| Authentication, authorization, Magnetar | - | none yet | `manual/authentication.md`, `manual/authorization.md`, `manual/magnetar.md` |
-| Eloquent ORM, migrations, seeding | - | none yet | `manual/eloquent.md`, `manual/migrations.md`, `manual/seeding.md` |
-| Validation and localization | - | none yet | `manual/validation.md`, `manual/localization.md` |
-| Cache, RenderCache | - | none yet | `manual/cache.md`, `manual/render-cache.md` |
-| Queue, bus, events, schedule, workflow, supervisor | - | none yet | `manual/queues.md`, `manual/events.md`, `manual/scheduling.md` |
-| Mail, notifications, broadcasting, web push | - | none yet | `manual/mail.md`, `manual/notifications.md`, `manual/broadcasting.md` |
-| Filesystem, media, uploads | - | none yet | `manual/filesystem.md`, `manual/media.md` |
-| Payments | - | none yet | `manual/payments.md` |
-| Vector stores | - | none yet | `manual/vector.md` |
-| CLI and scaffolding | - | none yet | `manual/installation.md`, `manual/artisan.md` |
-| Testing surfaces | - | none yet | `manual/testing.md`, `manual/http-tests.md`, `manual/database-testing.md`, `manual/mocking.md` |
-| Release and distribution | - | none yet | `README.md` (Distribution model), `CHANGELOG.md` |
+| RenderCache (document cache: policy, keys, storage, coherence) | CACHE | render-cache.md | Agreed 2026-09-13; ten requirements from the audit of that day, each refining Live specs 15-18; reference: `crates/suprnova-live/docs/specs/suprnova-live/15-...` to `18-...` and `manual/render-cache.md` |
+| Live (engine, facade, browser runtime, tooling) | LIVE | live.md | Observed; reference: `crates/suprnova-live/docs/specs/suprnova-live/` (26 numbered specs, glossary, conventions, iteration contracts 001-006) and `manual/live.md` |
+| Component library - foundations (inherited by every commitment) | UI | component-library-foundations.md | Draft; refines Live spec 20 |
+| Component library - form and input | FORM | component-library-forms.md | Draft; refines Live spec 21; the first commitment with foundations |
+| Component library - navigation | NAV | component-library-navigation.md | Draft; refines Live spec 22 |
+| Component library - overlay and disclosure | OVL | component-library-overlays.md | Draft; refines Live spec 23 |
+| Component library - feedback and status | FDB | component-library-feedback.md | Draft; refines Live spec 24 |
+| Component library - data display and layout | DATA | component-library-data-display.md | Draft; refines Live spec 25 |
+| Sessions (concurrent requests on one session) | SESS | sessions.md | Draft; SESS-001 Agreed 2026-09-15 on escalation `form-008` |
 | The manual checked against the code, and remediating what the check finds | MAN | manual-check.md | Agreed 2026-09-27 (delegated by the developer); tooling in `feature-map/`, commands in `feature-map/README.md` |
+
+Domains with no spec file yet, and the manual chapters that are their
+published reference:
+
+| Domain | Reference |
+|---|---|
+| Application boot, config, container, console | `manual/lifecycle.md`, `manual/configuration.md`, `manual/container.md`, `manual/artisan.md` |
+| HTTP: routing, middleware, requests, responses, CSRF, CORS | `manual/routing.md`, `manual/middleware.md`, `manual/requests.md`, `manual/responses.md`, `manual/session.md` |
+| Views and Inertia frontends | `manual/views.md`, `manual/inertia.md`, `manual/frontend.md` |
+| Authentication, authorization, Magnetar | `manual/authentication.md`, `manual/authorization.md`, `manual/magnetar.md` |
+| Eloquent ORM, migrations, seeding | `manual/eloquent.md`, `manual/migrations.md`, `manual/seeding.md` |
+| Validation and localization | `manual/validation.md`, `manual/localization.md` |
+| Cache, RenderCache | `manual/cache.md`, `manual/render-cache.md` |
+| Queue, bus, events, schedule, workflow, supervisor | `manual/queues.md`, `manual/events.md`, `manual/scheduling.md` |
+| Mail, notifications, broadcasting, web push | `manual/mail.md`, `manual/notifications.md`, `manual/broadcasting.md` |
+| Filesystem, media, uploads | `manual/filesystem.md`, `manual/media.md` |
+| Payments | `manual/payments.md` |
+| Vector stores | `manual/vector.md` |
+| CLI and scaffolding | `manual/installation.md`, `manual/artisan.md` |
+| Testing surfaces | `manual/testing.md`, `manual/http-tests.md`, `manual/database-testing.md`, `manual/mocking.md` |
+| Release and distribution | `README.md` (Distribution model), `CHANGELOG.md` |
 
 Manual chapter names above are the published reference for each domain;
 where a chapter is named differently in `manual/documentation.md`, that
