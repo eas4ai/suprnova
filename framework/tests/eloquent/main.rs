@@ -28,6 +28,7 @@ pub mod has;
 pub mod laravel_parity;
 pub mod lazy_loading;
 pub mod locking;
+pub mod macro_hygiene;
 pub mod macro_smoke_relations;
 pub mod mass_write_mysql;
 pub mod mass_write_postgres;

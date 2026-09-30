@@ -2113,7 +2113,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                         ::core::option::Option<::suprnova::eloquent::relations::morph::MorphOwner>,
                         ::suprnova::FrameworkError,
                     > {
-                        if morph_id.is_null() {
+                        if ::suprnova::serde_json::Value::is_null(morph_id) {
                             return ::core::result::Result::Ok(::core::option::Option::None);
                         }
                         match Self::__target_of(morph_type) {
@@ -2157,7 +2157,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                         self,
                     ) -> ::core::result::Result<#enum_ident, ::suprnova::FrameworkError> {
                         self.lazy_load.check()?;
-                        if self.morph_id.is_null() {
+                        if ::suprnova::serde_json::Value::is_null(&self.morph_id) {
                             return ::core::result::Result::Ok(#enum_ident::Unknown(
                                 self.morph_type,
                                 self.morph_id,
@@ -3600,7 +3600,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                                 ::std::collections::HashSet::new();
                             for (link, target) in __sn_links.iter().zip(__sn_targets.iter()) {
                                 if *target == ::core::option::Option::Some(#index)
-                                    && !link.morph_id.is_null()
+                                    && !::suprnova::serde_json::Value::is_null(&link.morph_id)
                                     && __sn_seen.insert(link.morph_id.to_string())
                                 {
                                     __sn_ids.push(link.morph_id.clone());
@@ -3961,7 +3961,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         // backends, but the saturating cast guards
                         // against pathological drivers without
                         // panicking the dispatcher.
-                        counts.insert(key, n.max(0) as u64);
+                        counts.insert(key, ::core::cmp::Ord::max(n, 0) as u64);
                     }
 
                     for p in parents.iter_mut() {
@@ -4081,7 +4081,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
                         let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
-                        counts.insert(key, n.max(0) as u64);
+                        counts.insert(key, ::core::cmp::Ord::max(n, 0) as u64);
                     }
 
                     for p in parents.iter_mut() {
@@ -4229,7 +4229,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
                         let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
-                        counts.insert(key, n.max(0) as u64);
+                        counts.insert(key, ::core::cmp::Ord::max(n, 0) as u64);
                     }
 
                     for p in parents.iter_mut() {
@@ -4363,7 +4363,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
                         let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
-                        counts.insert(key, n.max(0) as u64);
+                        counts.insert(key, ::core::cmp::Ord::max(n, 0) as u64);
                     }
 
                     for p in parents.iter_mut() {
@@ -4500,7 +4500,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
                         let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
-                        counts.insert(key, n.max(0) as u64);
+                        counts.insert(key, ::core::cmp::Ord::max(n, 0) as u64);
                     }
 
                     for p in parents.iter_mut() {
@@ -4643,7 +4643,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
                         let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
-                        counts.insert(key, n.max(0) as u64);
+                        counts.insert(key, ::core::cmp::Ord::max(n, 0) as u64);
                     }
 
                     for p in parents.iter_mut() {

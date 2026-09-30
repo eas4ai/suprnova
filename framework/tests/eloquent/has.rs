@@ -408,3 +408,76 @@ async fn model_keys_on_a_has_query_returns_only_matching_ids() {
 
     assert_eq!(ids, vec![alice.id]);
 }
+
+// ---- existence through a BelongsTo relation -----------------------------
+//
+// Regression - the existence engine rendered every non-pivot relation as
+// "target.fk = parent.pk", the has-many shape. A BelongsTo relation keeps
+// its foreign key on the parent, so `has("author")` compared the author
+// table with a column only the book has, and every existence query through
+// a BelongsTo relation failed. Laravel's `whereHas('author', ...)` on a
+// belongs-to is one of the most common forms.
+
+#[model(table = "hex_authors")]
+pub struct HexAuthor {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "hex_books", relations = {
+    author: BelongsTo<HexAuthor> { fk = "hex_author_id" },
+})]
+pub struct HexBook {
+    pub id: i64,
+    pub hex_author_id: i64,
+    pub title: String,
+}
+
+/// Ada wrote two books, Grace one; book 4 names author 99, who does not
+/// exist.
+async fn authors_and_books() -> TestDatabase {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for sql in [
+        "CREATE TABLE hex_authors (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE hex_books (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         hex_author_id INTEGER NOT NULL, title TEXT NOT NULL)",
+        "INSERT INTO hex_authors (id, name) VALUES (1, 'Ada'), (2, 'Grace')",
+        "INSERT INTO hex_books (id, hex_author_id, title) VALUES \
+         (1, 1, 'Notes'), (2, 1, 'Sketch'), (3, 2, 'Compiler'), (4, 99, 'Orphan')",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+    db
+}
+
+fn titles(books: &[HexBook]) -> Vec<&str> {
+    let mut titles: Vec<&str> = books.iter().map(|book| book.title.as_str()).collect();
+    titles.sort_unstable();
+    titles
+}
+
+#[tokio::test]
+async fn has_and_doesnt_have_through_belongs_to() {
+    let _db = authors_and_books().await;
+    let with_author = HexBook::query().has("author").get().await.unwrap();
+    assert_eq!(titles(&with_author), ["Compiler", "Notes", "Sketch"]);
+    let orphans = HexBook::query().doesnt_have("author").get().await.unwrap();
+    assert_eq!(titles(&orphans), ["Orphan"]);
+}
+
+#[tokio::test]
+async fn where_has_and_where_relation_through_belongs_to() {
+    let _db = authors_and_books().await;
+    let by_ada = HexBook::query()
+        .where_has::<HexAuthor, _>("author", |q| q.filter("name", "Ada"))
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(titles(&by_ada), ["Notes", "Sketch"]);
+    let by_grace = HexBook::query()
+        .where_relation("author", "name", "Grace")
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(titles(&by_grace), ["Compiler"]);
+}

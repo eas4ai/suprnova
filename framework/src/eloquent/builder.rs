@@ -257,6 +257,11 @@ pub(crate) struct ExistsSpec {
     /// How a value compared with a column of the related model is bound
     /// (the relation entry's `related_bind_column`).
     pub binder: ColumnBinder,
+    /// The relation is a BelongsTo: the foreign key sits on the parent
+    /// and `parent_key` names the related table's key, the reverse of a
+    /// has-one or has-many. The two fill the same slots, so only the
+    /// relation's kind tells them apart.
+    pub belongs_to: bool,
 }
 
 /// Which rows an existence clause keeps. Stands in for a bare `bool` so
@@ -2066,15 +2071,29 @@ fn write_value_expression(
     }
 
     *position += 1;
-    values.push(bind_value(binder, column, value));
+    values.push(bind_value(backend, binder, column, value));
     placeholder(backend, *position)
 }
 
 /// Render a date-extraction function for the backend.
 /// Bind `value`, compared with `column`, through the model's binder, or
 /// as it is when the column's cast has no native form.
-fn bind_value(binder: ColumnBinder, column: &str, value: &Value) -> SeaValue {
-    binder(column, value).unwrap_or_else(|| json_value_to_sea_value(value))
+///
+/// On MySQL and MariaDB a zone-aware moment binds as its UTC wall clock.
+/// MariaDB 12.3 matches a `TIMESTAMP` column against an `IN` list of
+/// zone-aware parameters wrongly - `IN (10:00, 16:00)` found one of the
+/// two rows, and the result changed with the list's order - while it
+/// matches the same moments sent without a zone. The connection's session
+/// zone is UTC (sqlx sets `+00:00`), so the wall clock names the same
+/// moment.
+fn bind_value(backend: DbBackend, binder: ColumnBinder, column: &str, value: &Value) -> SeaValue {
+    match binder(column, value) {
+        Some(SeaValue::ChronoDateTimeUtc(Some(moment))) if backend == DbBackend::MySql => {
+            SeaValue::from(moment.naive_utc())
+        }
+        Some(bound) => bound,
+        None => json_value_to_sea_value(value),
+    }
 }
 
 /// Bind the value of a date-part comparison (`where_date` and its
@@ -2093,7 +2112,7 @@ fn date_part_value(backend: DbBackend, part: DatePart, value: &Value) -> SeaValu
                 }
             }
             DatePart::Time => {
-                let time = chrono::NaiveTime::parse_from_str(text, "%H:%M:%S")
+                let time = chrono::NaiveTime::parse_from_str(text, "%H:%M:%S%.f")
                     .or_else(|_| chrono::NaiveTime::parse_from_str(text, "%H:%M"));
                 if let Ok(time) = time {
                     return SeaValue::from(time);
@@ -2222,9 +2241,20 @@ fn render_exists(
             ));
         }
         join_clause
+    } else if !spec.target_table.is_empty() && spec.belongs_to {
+        // Belongs-to path. The parent row carries `foreign_key`; the
+        // related row's `parent_key` (its owner key) must match it.
+        where_parts.push(format!(
+            "{target}.{owner_key} = {parent}.{fk}",
+            target = spec.target_table,
+            owner_key = spec.parent_key,
+            parent = spec.parent_table,
+            fk = spec.foreign_key,
+        ));
+        spec.target_table.clone()
     } else if !spec.target_table.is_empty() {
-        // Has / belongs-to path. The correlation column on the target
-        // side is `foreign_key`; on the parent side it's `parent_key`.
+        // Has path. The correlation column on the target side is
+        // `foreign_key`; on the parent side it's `parent_key`.
         where_parts.push(format!(
             "{target}.{fk} = {parent}.{pk}",
             target = spec.target_table,
@@ -2297,7 +2327,7 @@ fn render_exists(
             .unwrap_or_else(|| "=".to_string());
         *n += 1;
         let ph = placeholder(backend, *n)?;
-        values.push(bind_value(spec.binder, col, val));
+        values.push(bind_value(backend, spec.binder, col, val));
         // Qualify with the target table when present so the col reads
         // unambiguously in the subquery's WHERE - Laravel's
         // whereRelation always renders the qualified form.
@@ -2385,13 +2415,13 @@ pub(crate) fn render_subquery_term(
         WhereTerm::Eq(col, v) => {
             *n += 1;
             let ph = placeholder(backend, *n)?;
-            values.push(bind_value(binder, col, v));
+            values.push(bind_value(backend, binder, col, v));
             format!("{} = {ph}", q(col))
         }
         WhereTerm::Op(col, op, v) => {
             *n += 1;
             let ph = placeholder(backend, *n)?;
-            values.push(bind_value(binder, col, v));
+            values.push(bind_value(backend, binder, col, v));
             format!("{} {op} {ph}", q(col))
         }
         WhereTerm::In(col, vs) => {
@@ -2400,7 +2430,7 @@ pub(crate) fn render_subquery_term(
                 .map(|v| {
                     *n += 1;
                     let ph = placeholder(backend, *n)?;
-                    values.push(bind_value(binder, col, v));
+                    values.push(bind_value(backend, binder, col, v));
                     Ok(ph)
                 })
                 .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -2416,7 +2446,7 @@ pub(crate) fn render_subquery_term(
                 .map(|v| {
                     *n += 1;
                     let ph = placeholder(backend, *n)?;
-                    values.push(bind_value(binder, col, v));
+                    values.push(bind_value(backend, binder, col, v));
                     Ok(ph)
                 })
                 .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -2429,19 +2459,19 @@ pub(crate) fn render_subquery_term(
         WhereTerm::Between(col, a, b) => {
             *n += 1;
             let pa = placeholder(backend, *n)?;
-            values.push(bind_value(binder, col, a));
+            values.push(bind_value(backend, binder, col, a));
             *n += 1;
             let pb = placeholder(backend, *n)?;
-            values.push(bind_value(binder, col, b));
+            values.push(bind_value(backend, binder, col, b));
             format!("{} BETWEEN {pa} AND {pb}", q(col))
         }
         WhereTerm::NotBetween(col, a, b) => {
             *n += 1;
             let pa = placeholder(backend, *n)?;
-            values.push(bind_value(binder, col, a));
+            values.push(bind_value(backend, binder, col, a));
             *n += 1;
             let pb = placeholder(backend, *n)?;
-            values.push(bind_value(binder, col, b));
+            values.push(bind_value(backend, binder, col, b));
             format!("{} NOT BETWEEN {pa} AND {pb}", q(col))
         }
         WhereTerm::Null(col) => format!("{} IS NULL", q(col)),
@@ -2592,13 +2622,13 @@ impl<M> Builder<M> {
             WhereTerm::Eq(col, v) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
-                values.push(bind_value(binder, col, v));
+                values.push(bind_value(backend, binder, col, v));
                 format!("{col} = {ph}")
             }
             WhereTerm::Op(col, op, v) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
-                values.push(bind_value(binder, col, v));
+                values.push(bind_value(backend, binder, col, v));
                 format!("{col} {op} {ph}")
             }
             WhereTerm::In(col, vs) => {
@@ -2607,7 +2637,7 @@ impl<M> Builder<M> {
                     .map(|v| {
                         *n += 1;
                         let ph = placeholder(backend, *n)?;
-                        values.push(bind_value(binder, col, v));
+                        values.push(bind_value(backend, binder, col, v));
                         Ok(ph)
                     })
                     .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -2623,7 +2653,7 @@ impl<M> Builder<M> {
                     .map(|v| {
                         *n += 1;
                         let ph = placeholder(backend, *n)?;
-                        values.push(bind_value(binder, col, v));
+                        values.push(bind_value(backend, binder, col, v));
                         Ok(ph)
                     })
                     .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -2636,19 +2666,19 @@ impl<M> Builder<M> {
             WhereTerm::Between(col, a, b) => {
                 *n += 1;
                 let pa = placeholder(backend, *n)?;
-                values.push(bind_value(binder, col, a));
+                values.push(bind_value(backend, binder, col, a));
                 *n += 1;
                 let pb = placeholder(backend, *n)?;
-                values.push(bind_value(binder, col, b));
+                values.push(bind_value(backend, binder, col, b));
                 format!("{col} BETWEEN {pa} AND {pb}")
             }
             WhereTerm::NotBetween(col, a, b) => {
                 *n += 1;
                 let pa = placeholder(backend, *n)?;
-                values.push(bind_value(binder, col, a));
+                values.push(bind_value(backend, binder, col, a));
                 *n += 1;
                 let pb = placeholder(backend, *n)?;
-                values.push(bind_value(binder, col, b));
+                values.push(bind_value(backend, binder, col, b));
                 format!("{col} NOT BETWEEN {pa} AND {pb}")
             }
             WhereTerm::Null(col) => format!("{col} IS NULL"),
@@ -2750,7 +2780,7 @@ impl<M> Builder<M> {
                     for (idx, v) in vs.iter().enumerate() {
                         *n += 1;
                         let ph = placeholder(backend, *n)?;
-                        values.push(json_value_to_sea_value(v));
+                        values.push(bind_value(backend, self.binder, col, v));
                         cases.push_str(&format!(" WHEN {col} = {ph} THEN {idx}"));
                     }
                     format!("CASE{cases} ELSE {} END", vs.len())
@@ -3098,6 +3128,7 @@ where
                 relation_op,
                 relation_value,
                 binder: e.related_bind_column,
+                belongs_to: e.kind == crate::eloquent::relations::RelationKind::BelongsTo,
             },
             None => ExistsSpec {
                 parent_table: M::TABLE.to_string(),
@@ -3119,6 +3150,7 @@ where
                 relation_op,
                 relation_value,
                 binder: no_column_binder,
+                belongs_to: false,
             },
         }
     }
@@ -5502,6 +5534,28 @@ mod tests {
             values,
             [SeaValue::String(Some("x".to_owned()))],
             "a column the binder declines binds as it is"
+        );
+    }
+
+    #[test]
+    fn a_zone_aware_moment_binds_as_the_utc_wall_clock_on_mysql() {
+        fn zoned(_column: &str, value: &Value) -> Option<SeaValue> {
+            let text = value.as_str()?;
+            let moment = chrono::DateTime::parse_from_rfc3339(text).ok()?;
+            Some(SeaValue::from(moment.with_timezone(&chrono::Utc)))
+        }
+        let moment = chrono::DateTime::parse_from_rfc3339("2031-03-14T16:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let value = serde_json::json!("2031-03-14T16:00:00Z");
+        assert_eq!(
+            bind_value(DbBackend::MySql, zoned, "created_at", &value),
+            SeaValue::from(moment.naive_utc())
+        );
+        assert_eq!(
+            bind_value(DbBackend::Postgres, zoned, "created_at", &value),
+            SeaValue::from(moment),
+            "Postgres keeps the zone-aware parameter a timestamptz needs"
         );
     }
 

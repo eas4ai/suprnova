@@ -264,9 +264,11 @@ them NULL. Declare such fields `Option<DateTime<Utc>>` with
 
 Queries bind through the cast too, so `filter_op("created_at", ">", "2031-03-14T12:00:00Z")`,
 `where_between`, `where_date` and `update_all` send a native parameter for a
-native column; Postgres refuses to compare one with text. A model-less
-`DB::table` query knows no casts and binds text, so on Postgres compare a
-native column there with a typed value in raw SQL.
+native column; Postgres refuses to compare one with text. A bare date such
+as `"2031-03-14"` compares as midnight UTC. Two queries still bind text: a
+model-less `DB::table` query, which knows no casts, and a `where_has`
+through a `MorphTo` relation, whose related model varies by row. On
+Postgres, compare a native column there in raw SQL with a typed value.
 
 #### Why Suprnova diverges
 

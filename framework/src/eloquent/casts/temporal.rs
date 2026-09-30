@@ -3,8 +3,8 @@
 //!
 //! The default temporals store as `TEXT` so the round-trip is
 //! backend-agnostic: every backend stores and returns the RFC 3339
-//! string unchanged. That text belongs in a text column. A text
-//! parameter reaches a native date-time column only on MySQL; Postgres
+//! string unchanged. That text belongs in a text column: a default cast
+//! on a native date-time column works only on MySQL, because Postgres
 //! refuses to bind text to `timestamp` or `timestamp with time zone`.
 //!
 //! ## Native columns
@@ -322,16 +322,27 @@ impl Cast for AsNativeDateTime {
     }
 }
 
+/// The moment a query compares a native column with: a full date-time,
+/// or a bare date (`2031-03-14`) read as midnight UTC, the way Postgres
+/// reads a date compared with a timestamp.
+fn bind_moment(value: &serde_json::Value) -> Option<DateTime<Utc>> {
+    let text = value.as_str()?;
+    native_json_moment("bind", text).ok().or_else(|| {
+        chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+            .ok()
+            .and_then(|day| day.and_hms_opt(0, 0, 0))
+            .map(|midnight| midnight.and_utc())
+    })
+}
+
 /// A JSON string naming a moment, as a zone-aware native parameter.
 fn native_bind(value: &serde_json::Value) -> Option<sea_orm::Value> {
-    let moment = native_json_moment("bind", value.as_str()?).ok()?;
-    Some(sea_orm::Value::from(moment))
+    bind_moment(value).map(sea_orm::Value::from)
 }
 
 /// A JSON string naming a moment, as a native parameter without a zone.
 fn naive_bind(value: &serde_json::Value) -> Option<sea_orm::Value> {
-    let moment = native_json_moment("bind", value.as_str()?).ok()?;
-    Some(sea_orm::Value::from(moment.naive_utc()))
+    bind_moment(value).map(|moment| sea_orm::Value::from(moment.naive_utc()))
 }
 
 impl IntoDynCast for AsNativeDateTime {

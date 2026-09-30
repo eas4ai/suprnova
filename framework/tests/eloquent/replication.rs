@@ -309,3 +309,77 @@ async fn replicate_preserves_eager_loaded_relations() {
         "clearing the replica's cache must not affect the source"
     );
 }
+
+// ---- Persisting a replica stamps its timestamps ---------------------------
+//
+// Regression - `replicate` resets `created_at` and `updated_at` so the
+// insert fills them, as Laravel's does, but `persist` wrote them as built:
+// 1970-01-01 for a `DateTime<Utc>` field, NULL for an optional one.
+
+#[suprnova::model(table = "t13_stamped")]
+pub struct T13Stamped {
+    pub id: i64,
+    pub title: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[suprnova::model(table = "t13_optional_stamped", casts = {
+    created_at = suprnova::AsOptionalDateTime,
+    updated_at = suprnova::AsOptionalDateTime,
+})]
+pub struct T13OptionalStamped {
+    pub id: i64,
+    pub title: String,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[tokio::test]
+async fn persisting_a_replica_stamps_its_timestamps() {
+    use chrono::TimeZone;
+    use suprnova::Persistable;
+    use suprnova::testing::TestClock;
+
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for table in ["t13_stamped", "t13_optional_stamped"] {
+        db.execute_unprepared(&format!(
+            "CREATE TABLE {table} (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+             title TEXT NOT NULL, created_at TEXT NULL, updated_at TEXT NULL)"
+        ))
+        .await
+        .unwrap();
+    }
+    let at = |day: u32| chrono::Utc.with_ymd_and_hms(2031, 3, day, 9, 0, 0).unwrap();
+    let clock = TestClock::travel_to(at(14));
+    let source = T13Stamped::create(attrs! { title: "source" })
+        .await
+        .unwrap();
+    let optional_source = T13OptionalStamped::create(attrs! { title: "source" })
+        .await
+        .unwrap();
+
+    clock.set(at(15));
+    let copy = source.replicate().await.unwrap().persist().await.unwrap();
+    assert_eq!((copy.created_at, copy.updated_at), (at(15), at(15)));
+    let optional_copy = optional_source
+        .replicate()
+        .await
+        .unwrap()
+        .persist()
+        .await
+        .unwrap();
+    assert_eq!(
+        (optional_copy.created_at, optional_copy.updated_at),
+        (Some(at(15)), Some(at(15)))
+    );
+
+    // A value the builder set stays: a factory may backdate its rows.
+    let mut backdated = source.replicate().await.unwrap();
+    backdated.created_at = at(1);
+    let backdated = backdated.persist().await.unwrap();
+    assert_eq!(
+        (backdated.created_at, backdated.updated_at),
+        (at(1), at(15))
+    );
+}

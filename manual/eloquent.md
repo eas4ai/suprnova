@@ -433,8 +433,10 @@ values and the exclusive lock in one statement. Unlike `refresh`,
 under a lock - scoping it the way an ordinary read is scoped would
 hand admin tooling and cross-tenant callers a false not-found for a
 row they already hold a reference to. `replicate` builds an
-in-memory clone with the PK reset (`Default::default()` for the key
-type). Caller saves explicitly.
+in-memory clone with the PK and the timestamps reset
+(`Default::default()` for each type). Insert it with
+`replica.persist().await?` (the `Persistable` trait), which stamps
+`created_at` and `updated_at` the way `create` does.
 
 `refresh` and `refresh_for_update` both return an error when the row no
 longer exists, rather than leaving the model holding stale values.

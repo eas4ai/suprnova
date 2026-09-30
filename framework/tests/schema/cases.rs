@@ -2,7 +2,7 @@
 //! tables it uses before it starts (so a rerun on the same database works),
 //! and drops them again when it ends.
 
-use chrono::{DateTime, Duration as TimeDelta, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Duration as TimeDelta, NaiveDate, NaiveTime, TimeZone, Utc};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, DbErr, Statement};
 use sea_orm_migration::prelude::*;
 use suprnova::schema::Schema;
@@ -24,6 +24,9 @@ pub struct SchemaPost {
 #[model(
     table = "schema_native_owners",
     fillable = ["name"],
+    relations = {
+        posts: HasMany<NativePost>,
+    },
     casts = {
         created_at = suprnova::AsNativeDateTime,
         updated_at = suprnova::AsNativeDateTime,
@@ -609,6 +612,51 @@ pub async fn native_timestamps_round_trip(conn: &DatabaseConnection) {
             .expect("where_date on a native column"),
         2
     );
+    assert_eq!(
+        NativePost::query()
+            .filter_in("created_at", [noon, "2031-03-14T16:00:00Z"])
+            .count()
+            .await
+            .expect("filter_in on a native column"),
+        1
+    );
+    assert_eq!(
+        NativePost::query()
+            .filter_op("created_at", ">=", "2031-03-14")
+            .count()
+            .await
+            .expect("a bare date compares as midnight UTC"),
+        2
+    );
+    assert_eq!(
+        NativePost::query()
+            .where_time(
+                "created_at",
+                NaiveTime::from_hms_milli_opt(16, 0, 0, 500).unwrap()
+            )
+            .count()
+            .await
+            .expect("where_time with a fraction on a native column"),
+        0
+    );
+    // Across a relation, in both directions: the subquery binds through
+    // the related model's cast.
+    assert_eq!(
+        NativeOwner::query()
+            .where_has::<NativePost, _>("posts", |q| q.filter_op("created_at", ">", noon))
+            .count()
+            .await
+            .expect("where_has on the posts' native column"),
+        1
+    );
+    assert_eq!(
+        NativePost::query()
+            .where_relation_op("owner", "created_at", "<", "2031-03-14T09:30:00Z")
+            .count()
+            .await
+            .expect("where_relation on the owner's native column"),
+        2
+    );
     NativePost::query()
         .filter("id", later.id)
         .update_all(attrs! { updated_at: "2031-03-20T00:00:00Z" })
@@ -650,6 +698,17 @@ pub async fn native_timestamps_round_trip(conn: &DatabaseConnection) {
         .expect("the soft deleted naive post");
     assert_eq!(trashed.deleted_at, Some(at(15)));
     trashed.restore().await.expect("restore naive");
+    assert_eq!(
+        NaivePost::query()
+            .where_between(
+                "updated_at",
+                "2031-03-14T13:30:00Z"..="2031-03-14T14:30:00Z"
+            )
+            .count()
+            .await
+            .expect("where_between on a column without a zone"),
+        1
+    );
 
     // A row another application wrote with NULL timestamps reads as None,
     // and the model's own write fills them.
@@ -685,6 +744,25 @@ pub async fn native_timestamps_round_trip(conn: &DatabaseConnection) {
     assert_eq!(
         (created.created_at, created.updated_at),
         (Some(at(17)), Some(at(17)))
+    );
+    clock.set(at(18));
+    let updated = touched
+        .update(attrs! { title: "imported, edited" })
+        .await
+        .expect("update an optional-timestamp row");
+    assert_eq!(updated.updated_at, Some(at(18)));
+    clock.set(at(19));
+    let mut handle = updated.clone();
+    handle.title = "imported, saved".into();
+    handle.save().await.expect("save an optional-timestamp row");
+    let saved = NullableStampPost::find(imported.id)
+        .await
+        .expect("find after save")
+        .expect("the saved row");
+    assert_eq!(
+        (saved.created_at, saved.updated_at),
+        (None, Some(at(19))),
+        "a save stamps updated_at and leaves a NULL created_at alone"
     );
 
     drop(clock);

@@ -20,7 +20,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   cast, and query comparisons (`filter`, `where_between`, `where_date`,
   `update_all`, `where_has`) bind through it, so Postgres gets a native
   parameter. A model may declare `created_at` and `updated_at` as
-  `Option<DateTime<Utc>>` for a table another application leaves NULL. `suprnova generate-types` now emits chrono's date and time types as
+  `Option<DateTime<Utc>>` for a table another application leaves NULL.
+  `suprnova generate-types` now emits chrono's date and time types as
   `string` instead of `unknown`. This landed on main after the `v3.0.0` tag.
 - **Laravel's `exists`, `accepted`, `digits`, `date_format`, date
   comparison, `prohibited`, `missing` and `exclude_if` rules.** `Exists`
@@ -821,6 +822,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **`has`, `where_has` and `where_relation` work through a `BelongsTo`
+  relation.** The existence query compared the related table's key with
+  the foreign key as if the relation were a `HasMany`, so every existence
+  query through a `BelongsTo` failed with an unknown column. It now joins
+  the related row's owner key to the parent's foreign key. This fix landed
+  on main after the `v3.0.0` tag.
+- **A model declared beside `use sea_orm_migration::prelude::*` compiles.**
+  That prelude brings `ExprTrait` into scope, whose `max` and `is_null`
+  took over calls the `#[model]` macro emitted for relation counts and
+  `MorphTo` relations. The macro now names those methods by path. This fix
+  landed on main after the `v3.0.0` tag.
+- **Persisting a replica stamps its timestamps.** `replicate` resets
+  `created_at` and `updated_at` for the insert to fill, but `persist`
+  wrote them as built: 1970-01-01, or NULL for an optional field. It now
+  stamps a timestamp its builder left unset, as `create` does, and keeps
+  one the builder set, so a factory can still backdate a row. This fix
+  landed on main after the `v3.0.0` tag.
 - **Touching an owner writes the owner's own date-time storage.** The
   `touches` cascade bound the time as RFC 3339 text whatever the owner's
   `updated_at` cast stored, which Postgres refuses for a native date-time

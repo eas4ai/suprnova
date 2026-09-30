@@ -547,6 +547,41 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         quote! {}
     };
 
+    // An insert stamps the timestamps its builder left at their default,
+    // as Laravel's insert stamps those the caller did not set: a
+    // replica's (which `replicate` resets) and a factory row's that its
+    // definition does not name. A value the builder set, a backdated
+    // factory row's, stays.
+    let persist_stamp = if timestamps_enabled {
+        let created_value = if created_optional {
+            quote! { ::core::option::Option::Some(__suprnova_now) }
+        } else {
+            quote! { __suprnova_now }
+        };
+        let updated_value = if updated_optional {
+            quote! { ::core::option::Option::Some(__suprnova_now) }
+        } else {
+            quote! { __suprnova_now }
+        };
+        quote! {
+            fn __suprnova_is_default<T>(value: &T) -> bool
+            where
+                T: ::core::default::Default + ::core::cmp::PartialEq,
+            {
+                *value == T::default()
+            }
+            let __suprnova_now = ::suprnova::clock::now();
+            if __suprnova_is_default(&self.#created_col_ident) {
+                self.#created_col_ident = #created_value;
+            }
+            if __suprnova_is_default(&self.#updated_col_ident) {
+                self.#updated_col_ident = #updated_value;
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let timestamp_inject_save = if timestamps_enabled {
         quote! {
             // save() rebuilds the AM from `self`; the arms have
@@ -606,7 +641,15 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 column: &str,
                 value: &::suprnova::serde_json::Value,
             ) -> ::core::option::Option<::suprnova::sea_orm::Value> {
-                let column = column.rsplit('.').next().unwrap_or(column);
+                let column = match column.rsplit_once('.') {
+                    ::core::option::Option::Some((prefix, name))
+                        if prefix == <Self as ::suprnova::eloquent::EloquentModel>::TABLE =>
+                    {
+                        name
+                    }
+                    ::core::option::Option::Some(_) => return ::core::option::Option::None,
+                    ::core::option::Option::None => column,
+                };
                 match column {
                     #(#cast_arms)*
                     _ => ::core::option::Option::None,
@@ -1312,7 +1355,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         // canonicalised runtime values flow out.
         #[::suprnova::__async_trait::async_trait]
         impl ::suprnova::Persistable for #struct_ident {
-            async fn persist(self) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
+            async fn persist(mut self) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
+                #persist_stamp
                 // The same insert `Model::create` runs: `Creating` and
                 // `Saving` before it, `Created` and `Saved` after it, the
                 // write-side connection routing, the render cache's

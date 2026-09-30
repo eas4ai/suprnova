@@ -165,6 +165,18 @@ pub trait EloquentModel: Sized {
     /// [`Self::HAS_TIMESTAMPS`] is `true`.
     const UPDATED_AT_COLUMN: &'static str = "updated_at";
 
+    /// The parameter a query binds when it compares `column` with `value`,
+    /// through the column's cast ([`casts::Cast::bind_json`]). `None` binds
+    /// the value as it is. A column may carry this model's table
+    /// (`posts.created_at`); one qualified with another table answers
+    /// `None`, since this model's casts say nothing about that table. The
+    /// macro overrides this for a model with cast fields; the query
+    /// builder asks it for every comparison.
+    #[doc(hidden)]
+    fn bind_column(_column: &str, _value: &serde_json::Value) -> Option<sea_orm::Value> {
+        None
+    }
+
     /// The value this model's `updated_at` column stores for `now`,
     /// through the column's cast. The parent-touch cascade writes an
     /// owner's column with it, so an owner with a native date-time
@@ -173,16 +185,6 @@ pub trait EloquentModel: Sized {
     ///
     /// The default is that RFC 3339 text; the macro overrides it with the
     /// declared cast of the `updated_at` field.
-    /// The parameter a query binds when it compares `column` with `value`,
-    /// through the column's cast ([`casts::Cast::bind_json`]). `None` binds
-    /// the value as it is. A column name may carry its table
-    /// (`posts.created_at`). The macro overrides this for a model with cast
-    /// fields; the query builder asks it for every comparison.
-    #[doc(hidden)]
-    fn bind_column(_column: &str, _value: &serde_json::Value) -> Option<sea_orm::Value> {
-        None
-    }
-
     #[doc(hidden)]
     fn updated_at_storage(
         now: &chrono::DateTime<chrono::Utc>,

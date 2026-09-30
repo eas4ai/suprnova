@@ -1,8 +1,9 @@
 //! Auto-managed timestamps + `touch()`.
 //!
 //! When a `#[suprnova::model]` struct carries both `created_at` and
-//! `updated_at` fields (typed `chrono::DateTime<chrono::Utc>`), the
-//! macro:
+//! `updated_at` fields (typed `chrono::DateTime<chrono::Utc>`, or
+//! `Option<chrono::DateTime<chrono::Utc>>` for columns another
+//! application may leave NULL), the macro:
 //!
 //! - sets BOTH to `suprnova::clock::now()` on `create()`
 //! - bumps `updated_at` on every `save()` and `update(attrs)`
