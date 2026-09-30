@@ -47,10 +47,21 @@ inventory::collect!(InputNames);
 fn registry() -> &'static HashMap<&'static str, &'static [InputField]> {
     static REGISTRY: OnceLock<HashMap<&'static str, &'static [InputField]>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        inventory::iter::<InputNames>
-            .into_iter()
-            .map(|entry| ((entry.type_name)(), entry.fields))
-            .collect()
+        let mut registry = HashMap::new();
+        for entry in inventory::iter::<InputNames> {
+            let type_name = (entry.type_name)();
+            // Two types with one name (two crates of the same name, or two
+            // same-named types in one function body) cannot both be looked
+            // up: the later entry wins, so say so.
+            if registry.insert(type_name, entry.fields).is_some() {
+                tracing::warn!(
+                    target: "suprnova::data",
+                    type_name,
+                    "two types register input names under one type name; validation errors of one of them may be keyed by the other's names"
+                );
+            }
+        }
+        registry
     })
 }
 

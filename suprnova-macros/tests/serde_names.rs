@@ -223,3 +223,26 @@ fn inertia_props_skip_and_unraw_like_serde() {
     );
     let _ = (&props.internal, &props.hidden);
 }
+
+#[derive(Data, validator::Validate, Debug)]
+#[data(allow_unknown_fields)]
+struct LenientData {
+    name: String,
+    #[serde(skip_deserializing)]
+    computed: String,
+    #[data(output_only)]
+    handle: String,
+}
+
+#[test]
+fn a_lenient_struct_still_never_sets_a_skipped_or_output_only_field() {
+    let data: LenientData =
+        serde_json::from_value(json!({"name": "Ada", "computed": "x", "extra": 1}))
+            .expect("unknown keys and a skipped field's key are dropped");
+    assert_eq!((data.name.as_str(), data.computed.as_str()), ("Ada", ""));
+    let error = serde_json::from_value::<LenientData>(json!({"name": "Ada", "handle": "@ada"}))
+        .expect_err("an output_only key is still refused")
+        .to_string();
+    assert!(error.contains("output_only"), "{error}");
+    assert_eq!(data.handle, "");
+}

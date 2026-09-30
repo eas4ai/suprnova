@@ -7,8 +7,8 @@ use syn::ext::IdentExt;
 use syn::punctuated::Punctuated;
 use syn::visit::Visit;
 use syn::{
-    Attribute, Expr, ExprLit, Fields, GenericArgument, ItemStruct, Lit, Meta,
-    MetaNameValue, PathArguments, Token, Type,
+    Attribute, Expr, ExprLit, Fields, GenericArgument, ItemStruct, Lit, Meta, MetaNameValue,
+    PathArguments, Token, Type,
 };
 use walkdir::WalkDir;
 

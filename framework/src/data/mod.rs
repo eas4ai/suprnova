@@ -53,7 +53,9 @@
 //! The derive writes its own `Serialize` and `Deserialize`, and honors serde's
 //! naming attributes in them: `rename_all` on the struct, and `rename`, `skip`,
 //! `skip_serializing` and `skip_deserializing` on a field. Validation errors
-//! are keyed by the names the input uses, nested ones included. The derive
+//! are keyed by the names the input uses, a nested type's included when it
+//! registers its names (a plain nested struct does with
+//! `#[derive(suprnova::InputNames)]`). The derive
 //! refuses a serde attribute it does not apply, rather than leave it silently
 //! unapplied:
 //!
@@ -73,6 +75,60 @@
 //!     pub email: String,
 //!     #[serde(rename = "email")]
 //!     pub email_address: String,
+//! }
+//! ```
+//!
+//! and, with the same derives, an attribute that names a deserialize key on
+//! props that are never read, a route parameter on a field serde never
+//! reads, a rename rule serde does not know, a JSON:API member named `type`
+//! (JSON:API reserves it), and `InputNames` on a generic struct:
+//!
+//! ```compile_fail
+//! #[derive(suprnova::InertiaProps)]
+//! pub struct Home {
+//!     #[serde(rename(deserialize = "t"))]
+//!     pub title: String,
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! #[derive(suprnova::InertiaProps)]
+//! #[serde(deny_unknown_fields)]
+//! pub struct Home {
+//!     pub title: String,
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! #[derive(suprnova::Data, suprnova::Validate)]
+//! pub struct Move {
+//!     #[data(from_route_param("post"))]
+//!     #[serde(skip_deserializing)]
+//!     pub post_id: i64,
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! #[derive(suprnova::Data, suprnova::Validate)]
+//! #[serde(rename_all = "camel")]
+//! pub struct Signup {
+//!     pub email_address: String,
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! #[derive(suprnova::Data, suprnova::Validate)]
+//! #[json_resource("tickets")]
+//! pub struct Ticket {
+//!     pub id: i64,
+//!     pub r#type: String,
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! #[derive(suprnova::InputNames)]
+//! pub struct Page<T> {
+//!     pub items: Vec<T>,
 //! }
 //! ```
 //!

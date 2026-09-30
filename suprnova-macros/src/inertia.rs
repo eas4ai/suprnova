@@ -102,16 +102,40 @@ pub fn derive_inertia_props_impl(input: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
     let mut field_names = Vec::new();
-    let mut field_name_strings = Vec::new();
+    let mut field_name_strings: Vec<String> = Vec::new();
     for field in fields {
         let names = match crate::serde_attrs::field_names(field, &container, "InertiaProps") {
             Ok(names) => names,
             Err(e) => return e.to_compile_error().into(),
         };
-        if !names.skip_serializing {
-            field_names.push(&field.ident);
-            field_name_strings.push(names.serialize);
+        // Props are only ever serialized: an attribute that names the
+        // field for deserialization would do nothing, so it is refused
+        // like any other attribute the derive does not apply.
+        if names.deserialize_only_attribute {
+            return syn::Error::new_spanned(
+                field,
+                "#[derive(InertiaProps)] props are never read from input; drop the \
+                 `deserialize` half of `rename`/`rename_all`, or `skip_deserializing`",
+            )
+            .to_compile_error()
+            .into();
         }
+        if names.skip_serializing {
+            continue;
+        }
+        if field_name_strings.contains(&names.serialize) {
+            return syn::Error::new_spanned(
+                field,
+                format!(
+                    "two props are sent under the key `{}`; give each its own name",
+                    names.serialize
+                ),
+            )
+            .to_compile_error()
+            .into();
+        }
+        field_names.push(&field.ident);
+        field_name_strings.push(names.serialize);
     }
     let field_count = field_names.len();
 

@@ -95,6 +95,8 @@ impl RenameRule {
 struct PerDirection<T> {
     serialize: Option<T>,
     deserialize: Option<T>,
+    /// Written in the split form with a `deserialize = ..` half.
+    split_deserialize: bool,
 }
 
 impl<T> Default for PerDirection<T> {
@@ -102,6 +104,7 @@ impl<T> Default for PerDirection<T> {
         Self {
             serialize: None,
             deserialize: None,
+            split_deserialize: false,
         }
     }
 }
@@ -111,6 +114,7 @@ impl<T: Clone> PerDirection<T> {
         Self {
             serialize: Some(value.clone()),
             deserialize: Some(value),
+            split_deserialize: false,
         }
     }
 }
@@ -132,6 +136,7 @@ fn per_direction<T: Clone>(
             Ok(())
         } else if inner.path.is_ident("deserialize") {
             out.deserialize = Some(parse(&lit)?);
+            out.split_deserialize = true;
             Ok(())
         } else {
             Err(inner.error("expected `serialize` or `deserialize`"))
@@ -248,6 +253,11 @@ pub(crate) struct FieldNames {
     pub(crate) deserialize: String,
     pub(crate) skip_serializing: bool,
     pub(crate) skip_deserializing: bool,
+    /// The attributes name the field for deserialization apart from
+    /// serialization: a `deserialize = ..` half of `rename` or
+    /// `rename_all`, or `skip_deserializing` without `skip_serializing`.
+    /// A derive that only serializes refuses it: it would do nothing.
+    pub(crate) deserialize_only_attribute: bool,
 }
 
 /// The names serde's own derive would give `field`: the field name without
@@ -291,6 +301,9 @@ fn names_with(
         deserialize: name(&serde.rename.deserialize, container.rename_all.deserialize),
         skip_serializing: serde.skip_serializing,
         skip_deserializing: serde.skip_deserializing,
+        deserialize_only_attribute: serde.rename.split_deserialize
+            || container.rename_all.split_deserialize
+            || (serde.skip_deserializing && !serde.skip_serializing),
     })
 }
 

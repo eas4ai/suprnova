@@ -654,6 +654,7 @@ pub use suprnova_macros::Command;
 pub use suprnova_macros::Data;
 pub use suprnova_macros::FormRequest as FormRequestDerive;
 pub use suprnova_macros::InertiaProps;
+pub use suprnova_macros::InputNames;
 pub use suprnova_macros::LiveComponent;
 pub use suprnova_macros::accessor;
 pub use suprnova_macros::command;

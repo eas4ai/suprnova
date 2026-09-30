@@ -57,36 +57,9 @@ fn parse_form_request_attrs(attrs: &[syn::Attribute]) -> Result<FormRequestAttrs
 /// The registration of the struct's input names, so the `FormRequest`
 /// extractor keys validation errors by the names serde reads (see
 /// `suprnova::data::input_names`). Nothing for a generic struct or one
-/// without named fields. Serde's own derive handles the struct, so its
-/// attributes are read leniently: only the renames and skips matter here.
+/// without named fields.
 fn input_names_registration(input: &DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
-    let syn::Data::Struct(data) = &input.data else {
-        return Ok(quote!());
-    };
-    let syn::Fields::Named(named) = &data.fields else {
-        return Ok(quote!());
-    };
-    if !input.generics.params.is_empty() {
-        return Ok(quote!());
-    }
-    let container = crate::serde_attrs::parse_container_lenient(&input.attrs)?;
-    let mut fields = Vec::new();
-    for field in &named.named {
-        let names = crate::serde_attrs::field_names_lenient(field, &container)?;
-        if names.skip_deserializing {
-            continue;
-        }
-        fields.push(crate::input_names::InputFieldSpec {
-            rust: field
-                .ident
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-            input: names.deserialize,
-            ty: &field.ty,
-        });
-    }
-    Ok(crate::input_names::registration(&input.ident, &fields))
+    Ok(crate::input_names::lenient_registration(input)?.unwrap_or_default())
 }
 
 /// Emit the body of the generated `impl FormRequest` block, including any

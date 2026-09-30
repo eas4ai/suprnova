@@ -19,8 +19,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   struct are keyed by the input names at every nested level, so
   `Precognition-Validate-Only` matches what the client sent, and a message
   labels `unitPrice` as "unit price", as Laravel does. A raw identifier
-  such as `r#type` is sent and read as `type`. This landed on main after
-  the `v3.0.0` tag (#124).
+  such as `r#type` is sent and read as `type`. A plain nested
+  `#[derive(Deserialize, Validate)]` struct registers its names with the
+  new `#[derive(suprnova::InputNames)]`. This landed on main after the
+  `v3.0.0` tag (#124).
+
+  Two consequences for existing code. A `#[serde(...)]` attribute on an
+  `InertiaProps` or `Data` struct used to compile only next to another
+  derive that registers `serde` (such as `schemars`), and did nothing
+  there; it now takes effect, and an attribute the derive does not apply
+  is a compile error. A localized validation message labels every key
+  snake-cased, so a hand-written key `userID` reads "user i d", as in
+  Laravel; snake_case keys read as before.
 - **The schema builder covers the rest of a Laravel migration.**
   `unsigned_id()` and `unsigned_foreign_id()` create Laravel's `BIGINT
   UNSIGNED` keys on MySQL, so a new table can point a foreign key at an

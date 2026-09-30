@@ -137,6 +137,28 @@ pub fn derive_inertia_props(input: TokenStream) -> TokenStream {
     inertia::derive_inertia_props_impl(input)
 }
 
+/// Registers a struct's input names - the keys serde reads each field
+/// from - so the validation errors of a request object that nests it are
+/// keyed by those names too.
+///
+/// `#[derive(Data)]`, `#[derive(FormRequest)]` and `#[request]` register
+/// their own struct. A plain `#[derive(Deserialize, Validate)]` struct nested
+/// in one of them derives this to have its renamed fields reported by their
+/// input names at the nested level too.
+///
+/// ```rust,ignore
+/// #[derive(Deserialize, Validate, suprnova::InputNames)]
+/// #[serde(rename_all = "camelCase")]
+/// struct Address {
+///     #[validate(length(min = 5))]
+///     zip_code: String, // an error on it is keyed `address.zipCode`
+/// }
+/// ```
+#[proc_macro_derive(InputNames, attributes(serde))]
+pub fn derive_input_names(input: TokenStream) -> TokenStream {
+    input_names::derive_input_names(input)
+}
+
 /// Create an Inertia response with compile-time component validation.
 ///
 /// # Signature

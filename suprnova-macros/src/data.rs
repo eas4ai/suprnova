@@ -1647,6 +1647,25 @@ fn build_into_json_resource(ctx: &DataCodegen<'_>, opts: &JsonResourceOptions) -
         })
         .collect();
 
+    // JSON:API reserves `type` and `id` for the resource object itself: an
+    // attribute or relationship by either name would make an invalid
+    // document.
+    if let Some((ident, name)) = attr_fields
+        .iter()
+        .map(|(ident, name, _)| (*ident, name))
+        .chain(rel_fields.iter().map(|(ident, name)| (*ident, name)))
+        .find(|(_, name)| *name == "type" || *name == "id")
+    {
+        return syn::Error::new_spanned(
+            ident,
+            format!(
+                "#[json_resource] cannot send a member named `{name}`: JSON:API reserves `type` and \
+                 `id` for the resource object; rename the field with #[serde(rename = \"...\")]"
+            ),
+        )
+        .to_compile_error();
+    }
+
     let struct_name_str = struct_name.to_string();
     let attrs_entries = attr_fields.iter().map(|(ident, name, is_field)| {
         // Panic message names the struct + field so operators can pinpoint

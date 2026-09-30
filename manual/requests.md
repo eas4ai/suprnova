@@ -207,11 +207,30 @@ from the bag. Bind the key straight through on the client:
 
 The error keys are the names the client sent. When serde renames a field
 (`#[serde(rename_all = "camelCase")]` on the struct, or `rename` on a
-field), a failure on `unit_price` is reported as `unitPrice`, at every
-level of a nested path: `lineItems.1.unitPrice`. The same names drive
-`Precognition-Validate-Only`, and the message reads the name snake-cased,
-"unit price", as Laravel's does. Errors a hook returns are keyed the same
-way, whether it names the field by its Rust name or its input name.
+field), a failure on `unit_price` is reported as `unitPrice`. The same names
+drive `Precognition-Validate-Only`, where a Rust name matches nothing, and a
+localized message reads the name snake-cased, "unit price", as Laravel's
+does. A hook names fields by their Rust names, as `validate!` does, and its
+errors are keyed by the input names too.
+
+A nested object is renamed at its own level when its type registers its
+names. A form request does. A plain struct nested in one derives
+`suprnova::InputNames` for it:
+
+```rust
+#[derive(Deserialize, Validate, suprnova::InputNames)]
+#[serde(rename_all = "camelCase")]
+pub struct LineItem {
+    #[validate(range(min = 1))]
+    pub unit_price: i64,
+}
+```
+
+An error on the second item's price is then keyed `lineItems.1.unitPrice`.
+Without the derive the nested part keeps the Rust name,
+`lineItems.1.unit_price`. A generic nested type, and a field serde
+`flatten`s, keep Rust names too, as do the serde attributes the derives do
+not read (`from`, `try_from`, `transparent`).
 
 ## Complete example
 

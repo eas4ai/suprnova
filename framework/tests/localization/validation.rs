@@ -451,7 +451,10 @@ async fn a_renamed_input_key_reads_snake_cased_in_the_message() {
     bind_translator(tmp.path());
 
     let mut errs = ValidationErrors::new();
-    errs.add("lineItems.1.unitPrice", rules::Min(3).passes("ab").unwrap_err());
+    errs.add(
+        "lineItems.1.unitPrice",
+        rules::Min(3).passes("ab").unwrap_err(),
+    );
     errs.add("customer_email", rules::Min(3).passes("ab").unwrap_err());
 
     scope_locale(Locale::parse("en").unwrap(), async move {

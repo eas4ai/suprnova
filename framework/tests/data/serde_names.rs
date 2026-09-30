@@ -63,6 +63,35 @@ struct InviteRequest {
     invitee_email: String,
 }
 
+/// A plain nested struct that registers its names with `InputNames`, and
+/// one that does not.
+#[derive(
+    Debug, serde::Serialize, serde::Deserialize, validator::Validate, suprnova::InputNames,
+)]
+#[serde(rename_all = "camelCase")]
+struct Address {
+    #[validate(length(min = 5))]
+    zip_code: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, validator::Validate)]
+#[serde(rename_all = "camelCase")]
+struct Contact {
+    #[validate(email)]
+    email_address: String,
+}
+
+#[derive(Debug, suprnova::Data, validator::Validate)]
+#[serde(rename_all = "camelCase")]
+struct ShipmentData {
+    #[validate(nested)]
+    shipping_address: Address,
+    #[validate(nested)]
+    contact_person: Contact,
+    #[validate(length(min = 3))]
+    r#type: String,
+}
+
 fn order(changes: serde_json::Value) -> serde_json::Value {
     let mut body = serde_json::json!({
         "customerEmail": "ada@example.test",
@@ -171,6 +200,44 @@ async fn the_route_parameter_path_uses_the_input_names_too() {
 }
 
 #[tokio::test]
+async fn the_route_parameter_wins_over_the_body_under_its_input_name() {
+    let dto = extract::<RepriceData>(
+        &[("order", "9")],
+        serde_json::json!({"orderId": 99, "unitPrice": 3}),
+        Precognition::Off,
+    )
+    .await
+    .expect("the path value is injected over the body's");
+    assert_eq!(dto.order_id, 9);
+}
+
+#[tokio::test]
+async fn a_nested_plain_struct_is_renamed_when_it_registers_its_names() {
+    let keys = failed_keys(
+        extract::<ShipmentData>(
+            &[],
+            serde_json::json!({
+                "shippingAddress": {"zipCode": "12"},
+                "contactPerson": {"emailAddress": "nope"},
+                "type": "x",
+            }),
+            Precognition::Off,
+        )
+        .await,
+    );
+    // `Address` derives `InputNames`; `Contact` does not, so its part of
+    // the key keeps the Rust name. A raw identifier's key loses its `r#`.
+    assert_eq!(
+        keys,
+        [
+            "contactPerson.email_address",
+            "shippingAddress.zipCode",
+            "type"
+        ]
+    );
+}
+
+#[tokio::test]
 async fn a_body_that_does_not_fit_answers_422_on_both_paths() {
     let unknown = serde_json::json!({"unit_price": 3});
     assert_eq!(
@@ -254,10 +321,47 @@ async fn a_renamed_lazy_prop_is_included_by_its_sent_name() {
         })
     };
     let resolved = REQUEST_INCLUDE_SET
+        .scope(
+            include("song_list"),
+            prop.clone().resolve_with_owner(owner, field),
+        )
+        .await
+        .expect("a name that is not the prop's is simply not an include of it");
+    assert_eq!(resolved, None, "the Rust name does not include the prop");
+    let resolved = REQUEST_INCLUDE_SET
         .scope(include("songList"), prop.resolve_with_owner(owner, field))
         .await
         .expect("an allowed include");
     assert_eq!(resolved, Some(serde_json::json!(["So What"])));
+}
+
+#[derive(suprnova::Data)]
+struct DraftPage {
+    title: String,
+    #[data(lazy)]
+    #[serde(skip_serializing)]
+    audit_log: suprnova::inertia::Prop,
+}
+
+/// A lazy field serde skips is neither a prop nor includable.
+#[test]
+fn a_skipped_lazy_prop_is_not_sent_or_allow_listed() {
+    use suprnova::data::registry;
+    use suprnova::inertia::{Prop, PropEntry};
+
+    let page = DraftPage {
+        title: "Draft".into(),
+        audit_log: Prop::lazy(|| async { serde_json::json!([]) }),
+    };
+    // The field exists on the struct, but the derive sends nothing of it.
+    let _field = &page.audit_log;
+    let entries = page.__into_inertia_props();
+    let keys: Vec<&str> = entries.iter().map(|(key, _)| key.as_str()).collect();
+    assert_eq!(keys, ["title"]);
+    let owner = concat!(module_path!(), "::", "DraftPage");
+    assert!(!registry::is_allowed(owner, "audit_log"));
+    assert!(!registry::is_allowed(owner, "auditLog"));
+    assert!(matches!(entries[0].1, PropEntry::Eager(_)));
 }
 
 #[derive(Debug, Clone, suprnova::Data, suprnova::Validate)]

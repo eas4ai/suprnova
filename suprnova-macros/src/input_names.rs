@@ -4,7 +4,7 @@
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{GenericArgument, Ident, PathArguments, Type};
+use syn::{DeriveInput, GenericArgument, Ident, PathArguments, Type};
 
 /// One field: its Rust name (what validation reports), the key the input
 /// carries it under, and its type.
@@ -103,5 +103,55 @@ pub(crate) fn registration(struct_name: &Ident, fields: &[InputFieldSpec<'_>]) -
                 }
             }
         };
+    }
+}
+
+/// The registration of a struct serde's own derive handles, reading only
+/// the renames and skips of its serde attributes. `None` for a generic
+/// struct or one without named fields.
+pub(crate) fn lenient_registration(input: &DeriveInput) -> syn::Result<Option<TokenStream>> {
+    let syn::Data::Struct(data) = &input.data else {
+        return Ok(None);
+    };
+    let syn::Fields::Named(named) = &data.fields else {
+        return Ok(None);
+    };
+    if !input.generics.params.is_empty() {
+        return Ok(None);
+    }
+    let container = crate::serde_attrs::parse_container_lenient(&input.attrs)?;
+    let mut fields = Vec::new();
+    for field in &named.named {
+        let names = crate::serde_attrs::field_names_lenient(field, &container)?;
+        if names.skip_deserializing {
+            continue;
+        }
+        fields.push(InputFieldSpec {
+            rust: field
+                .ident
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            input: names.deserialize,
+            ty: &field.ty,
+        });
+    }
+    Ok(Some(registration(&input.ident, &fields)))
+}
+
+/// `#[derive(InputNames)]`: the registration alone, for a plain
+/// `#[derive(Deserialize, Validate)]` struct a request object nests, so
+/// its validation errors are keyed by the names serde reads too.
+pub fn derive_input_names(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = syn::parse_macro_input!(input as DeriveInput);
+    match lenient_registration(&input) {
+        Ok(Some(registration)) => registration.into(),
+        Ok(None) => syn::Error::new_spanned(
+            &input.ident,
+            "#[derive(InputNames)] needs a struct with named fields and no generic parameters",
+        )
+        .to_compile_error()
+        .into(),
+        Err(e) => e.to_compile_error().into(),
     }
 }

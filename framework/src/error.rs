@@ -498,11 +498,6 @@ fn field_covers(wanted: &str, key: &str) -> bool {
     }
 }
 
-/// Translate one `validator::ValidationError` into a [`ValidationMessage`].
-///
-/// `field` is the **fully-qualified** key (`items.1.name`, not `name`) so
-/// the generic fallback names the actual path - two nested `name` fields
-/// otherwise render byte-identical messages.
 /// Laravel's `Str::snake`: an `_` before every uppercase letter that
 /// follows another character, then lower case. A snake_case name is
 /// unchanged.
@@ -522,6 +517,11 @@ fn snake_case(name: &str) -> String {
     snake
 }
 
+/// Translate one `validator::ValidationError` into a [`ValidationMessage`].
+///
+/// `field` is the **fully-qualified** key (`items.1.name`, not `name`) so
+/// the generic fallback names the actual path - two nested `name` fields
+/// otherwise render byte-identical messages.
 fn validator_error_message(field: &str, error: &validator::ValidationError) -> ValidationMessage {
     // An explicit `#[validate(..., message = "…")]` is the author's final
     // word. Laravel resolves a custom message ahead of the lang file, and
