@@ -805,6 +805,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   month and day strips keep their borders. Run `suprnova live:add date-picker`
   to take the fix into an application that vendored the component. This fix
   landed on main after the `v3.0.0` tag.
+- **`suprnova generate-types` names and omits plain-struct keys the way serde
+  does.** A struct a prop reaches that derives serde's `Serialize` sends the
+  keys its `#[serde(...)]` attributes give it, but the generator declared every
+  field under its Rust name. It now leaves out `skip` and `skip_serializing`
+  fields, declares `skip_serializing_if` fields optional, names keys by
+  `rename` and `rename_all` (and their `serialize = ...` forms), and drops the
+  `r#` of a raw identifier. Other serde attributes, such as `flatten` and
+  `transparent`, are still not read. A key that is not an identifier is now
+  quoted, which also makes a raw identifier on a derived struct valid
+  TypeScript (`"r#type"`, the key its derive sends). `#[derive(Data)]` and
+  `#[derive(InertiaProps)]` structs keep their Rust names: their own
+  `Serialize` never reads `#[serde(...)]`. This fix landed on main after the
+  `v3.0.0` tag.
 - **Magnetar logs a lockout status failure before the sign-in fails closed.**
   The password plugin answered `503` when the lockout store could not report
   an identity's status and logged nothing, while the failed-attempt path

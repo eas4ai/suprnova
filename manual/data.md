@@ -301,6 +301,8 @@ SeaORM entities need a custom `IsRelationLoaded` impl that consults their loaded
 - `#[data(output_only)]` → excluded from input type
 - Generic struct → TypeScript generic interface (`export interface Paginated<T>`)
 - When ANY field has `input_only` / `output_only` / `lazy`, two interfaces are emitted: `<Name>` (output) and `<Name>Input` (input)
+- A plain struct a prop reaches, one that derives serde's `Serialize`, follows serde's attributes: `#[serde(skip)]` and `skip_serializing` leave the field out, `skip_serializing_if` makes it optional (`field?: T`), and `rename` and `rename_all` (or their `serialize = ...` forms) name the key. Other serde attributes, such as `flatten` and `transparent`, are not read. A key that is not an identifier, such as `display-name`, is quoted
+- `#[derive(Data)]` and `#[derive(InertiaProps)]` structs write their own `Serialize`, which names every key after its Rust field, so `#[serde(...)]` attributes do not change their keys. Use `#[data(input_only)]` or `#[data(output_only)]` to leave a field out of one side
 
 Generated types never leak Rust-only types (`Prop<...>` won't appear in the output `.d.ts`).
 
