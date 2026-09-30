@@ -228,7 +228,7 @@ month, date arithmetic, `NOW()` comparisons - work on it:
 |---|---|---|
 | `AsNativeDateTime` | `DateTime<Utc>` | `timestamp with time zone` on Postgres, `TIMESTAMP` or `DATETIME` on MySQL, text on SQLite |
 | `AsOptionalNativeDateTime` | `Option<DateTime<Utc>>` | the same, nullable |
-| `AsNaiveDateTime` | `DateTime<Utc>` | a column without a zone holding the UTC wall clock: `timestamp` on Postgres, `DATETIME` or `TIMESTAMP` on MySQL, text on SQLite |
+| `AsNaiveDateTime` | `DateTime<Utc>` | a column without a zone holding the UTC wall clock: `timestamp` on Postgres, `DATETIME` on MySQL, text on SQLite |
 | `AsOptionalNaiveDateTime` | `Option<DateTime<Utc>>` | the same, nullable |
 
 A `DateTime<Utc>` field defaults to `AsDateTime`, so declare these per
@@ -252,10 +252,21 @@ pub struct Order {
 
 Pick the cast that matches the column: the database driver checks the
 storage type against it. A table Laravel's `timestamps()` created is
-`TIMESTAMP` on MySQL, which either cast reads, and `timestamp without time
-zone` on Postgres, which only `AsNaiveDateTime` reads. The schema builder's
-`timestamps_tz()` and `datetimes()` create the two shapes (see
-[Migrations](migrations.md#timestamps-and-soft-deletes)).
+`TIMESTAMP` on MySQL, which only `AsNativeDateTime` reads, and `timestamp
+without time zone` on Postgres, which only `AsNaiveDateTime` reads. The
+schema builder's `timestamps_tz()` and `datetimes()` create the two shapes
+(see [Migrations](migrations.md#timestamps-and-soft-deletes)).
+
+Laravel's timestamp columns are nullable, and another application can leave
+them NULL. Declare such fields `Option<DateTime<Utc>>` with
+`AsOptionalNativeDateTime` or `AsOptionalNaiveDateTime`: a NULL reads as
+`None`, and the model's own writes still stamp them.
+
+Queries bind through the cast too, so `filter_op("created_at", ">", "2031-03-14T12:00:00Z")`,
+`where_between`, `where_date` and `update_all` send a native parameter for a
+native column; Postgres refuses to compare one with text. A model-less
+`DB::table` query knows no casts and binds text, so on Postgres compare a
+native column there with a typed value in raw SQL.
 
 #### Why Suprnova diverges
 

@@ -457,6 +457,22 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         .cast_for_field(&input.updated_at)
         .cloned()
         .unwrap_or_else(|| syn::parse_quote!(::suprnova::AsDateTime));
+    // A timestamp field declared `Option<DateTime<Utc>>` stores "now" as
+    // `Some(now)` through its optional cast; `stamp` writes the value each
+    // timestamp write hands the cast.
+    let created_optional = input.is_optional_datetime(&input.created_at);
+    let updated_optional = input.is_optional_datetime(&input.updated_at);
+    let stamp = |now: TokenStream, optional: bool| {
+        if optional {
+            quote! { &::core::option::Option::Some(#now) }
+        } else {
+            quote! { &#now }
+        }
+    };
+    let updated_now = stamp(quote! { __suprnova_now }, updated_optional);
+    let created_now = stamp(quote! { __suprnova_now }, created_optional);
+    let updated_touch_now = stamp(quote! { now }, updated_optional);
+    let updated_storage_now = stamp(quote! { *now }, updated_optional);
 
     // ---- unique_id PK generation (HasUuids / HasUlids analogue) -------
     //
@@ -510,7 +526,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             let __suprnova_now = ::suprnova::clock::now();
             am.#updated_col_ident = ::suprnova::sea_orm::Set(
                 <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
-                    &__suprnova_now,
+                    #updated_now,
                 )?,
             );
             // Set created_at only on first save (NotSet); update()
@@ -522,7 +538,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             ) {
                 am.#created_col_ident = ::suprnova::sea_orm::Set(
                     <#created_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
-                        &__suprnova_now,
+                        #created_now,
                     )?,
                 );
             }
@@ -540,7 +556,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             let __suprnova_now = ::suprnova::clock::now();
             am.#updated_col_ident = ::suprnova::sea_orm::Set(
                 <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
-                    &__suprnova_now,
+                    #updated_now,
                 )?,
             );
         }
@@ -558,12 +574,45 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 now: &::suprnova::chrono::DateTime<::suprnova::chrono::Utc>,
             ) -> ::core::result::Result<::suprnova::sea_orm::Value, ::suprnova::FrameworkError> {
                 ::core::result::Result::Ok(::suprnova::sea_orm::Value::from(
-                    <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(now)?,
+                    <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
+                        #updated_storage_now,
+                    )?,
                 ))
             }
         }
     } else {
         quote! {}
+    };
+
+    // Comparisons in a query bind through the column's cast, so a native
+    // date-time column is compared with a native parameter. Casts that
+    // store text or numbers answer `None` and the value binds as it is.
+    let cast_arms: Vec<TokenStream> = input
+        .casts
+        .iter()
+        .filter(|(ident, _)| ident != &input.primary_key)
+        .map(|(ident, ty)| {
+            let name = ident.to_string();
+            quote! {
+                #name => <#ty as ::suprnova::eloquent::casts::Cast>::bind_json(value),
+            }
+        })
+        .collect();
+    let bind_column_impl = if cast_arms.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            fn bind_column(
+                column: &str,
+                value: &::suprnova::serde_json::Value,
+            ) -> ::core::option::Option<::suprnova::sea_orm::Value> {
+                let column = column.rsplit('.').next().unwrap_or(column);
+                match column {
+                    #(#cast_arms)*
+                    _ => ::core::option::Option::None,
+                }
+            }
+        }
     };
 
     let touchable_impl = if timestamps_enabled {
@@ -590,7 +639,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     am.#pk_ident = ::suprnova::sea_orm::ActiveValue::Unchanged(self.#pk_ident.clone());
                     am.#updated_col_ident = ::suprnova::sea_orm::Set(
                         <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
-                            &now,
+                            #updated_touch_now,
                         )?,
                     );
                     // Route through `resolve_write` so the timestamp
@@ -1001,7 +1050,9 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         let updated_at_stamp = if timestamps_enabled {
             quote! {
                 ::core::option::Option::Some(::suprnova::sea_orm::Value::from(
-                    <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(&now)?,
+                    <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
+                        #updated_touch_now,
+                    )?,
                 ))
             }
         } else {
@@ -1068,6 +1119,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             const HAS_TIMESTAMPS: bool = #timestamps_enabled;
             const UPDATED_AT_COLUMN: &'static str = #updated_at_col;
             #updated_at_storage_impl
+            #bind_column_impl
 
             // Per-model default connection override. Lives on
             // `EloquentModel` (not the heavier `Model` trait) so

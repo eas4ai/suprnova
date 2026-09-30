@@ -325,6 +325,23 @@ pub struct RelationEntry {
     ///
     /// [`EloquentModel::updated_at_storage`]: crate::eloquent::EloquentModel::updated_at_storage
     pub related_updated_at_storage: TouchStorage,
+    /// The related model's [`EloquentModel::bind_column`]: how a
+    /// `where_has` subquery binds a value compared with one of the related
+    /// model's columns. A `MorphTo` entry carries [`no_column_binder`],
+    /// which binds values as they are.
+    ///
+    /// [`EloquentModel::bind_column`]: crate::eloquent::EloquentModel::bind_column
+    pub related_bind_column: ColumnBinder,
+}
+
+/// How a model binds a value compared with one of its columns; see
+/// [`RelationEntry::related_bind_column`].
+pub type ColumnBinder = fn(&str, &serde_json::Value) -> Option<sea_orm::Value>;
+
+/// The binder of a relation whose model varies by row: it binds every
+/// value as it is.
+pub fn no_column_binder(_column: &str, _value: &serde_json::Value) -> Option<sea_orm::Value> {
+    None
 }
 
 /// How a model stores a moment in its `updated_at` column; see

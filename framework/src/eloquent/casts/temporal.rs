@@ -15,15 +15,21 @@
 //!
 //! - `AsNativeDateTime` keeps the zone: `timestamp with time zone` on
 //!   Postgres, `TIMESTAMP` or `DATETIME` on MySQL, text on SQLite. The
-//!   schema builder's `timestamp_tz`, `native_timestamps` and
-//!   `native_soft_deletes` create such columns.
+//!   schema builder's `timestamp_tz`, `timestamps_tz` and
+//!   `soft_deletes_tz` create such columns. It is also the cast for a
+//!   table Laravel's `timestamps()` created on MySQL, whose `TIMESTAMP`
+//!   columns only a zone-aware value reads.
 //! - `AsNaiveDateTime` stores the UTC wall clock in a column without a
-//!   zone: `timestamp` on Postgres, `DATETIME` or `TIMESTAMP` on MySQL,
-//!   text on SQLite. It is the cast for a table Laravel's `timestamps()`
-//!   created on Postgres, which the zone-aware cast cannot read.
+//!   zone: `timestamp` on Postgres, `DATETIME` on MySQL, text on SQLite.
+//!   It is the cast for a table Laravel's `timestamps()` created on
+//!   Postgres, which the zone-aware cast cannot read.
 //!
 //! A cast names its storage type, and the database driver checks it
-//! against the column, so pick the one that matches the column.
+//! against the column, so pick the one that matches the column. Queries
+//! bind through the cast as well: a `filter`, `where_between` or
+//! `update_all` on a native column sends a native parameter, which
+//! Postgres needs. A model-less `DB::table` query knows no casts and
+//! binds text.
 //!
 //! ## Immutable variants
 //!
@@ -310,6 +316,22 @@ impl Cast for AsNativeDateTime {
     fn from_storage(s: &DateTime<Utc>) -> Result<DateTime<Utc>, FrameworkError> {
         Ok(*s)
     }
+
+    fn bind_json(value: &serde_json::Value) -> Option<sea_orm::Value> {
+        native_bind(value)
+    }
+}
+
+/// A JSON string naming a moment, as a zone-aware native parameter.
+fn native_bind(value: &serde_json::Value) -> Option<sea_orm::Value> {
+    let moment = native_json_moment("bind", value.as_str()?).ok()?;
+    Some(sea_orm::Value::from(moment))
+}
+
+/// A JSON string naming a moment, as a native parameter without a zone.
+fn naive_bind(value: &serde_json::Value) -> Option<sea_orm::Value> {
+    let moment = native_json_moment("bind", value.as_str()?).ok()?;
+    Some(sea_orm::Value::from(moment.naive_utc()))
 }
 
 impl IntoDynCast for AsNativeDateTime {
@@ -335,6 +357,10 @@ impl Cast for AsOptionalNativeDateTime {
     fn from_storage(s: &Option<DateTime<Utc>>) -> Result<Option<DateTime<Utc>>, FrameworkError> {
         Ok(*s)
     }
+
+    fn bind_json(value: &serde_json::Value) -> Option<sea_orm::Value> {
+        native_bind(value)
+    }
 }
 
 impl IntoDynCast for AsOptionalNativeDateTime {
@@ -347,7 +373,9 @@ impl IntoDynCast for AsOptionalNativeDateTime {
 
 /// Cast `chrono::DateTime<Utc>` ↔ a native date-time column without a
 /// zone, holding the UTC wall clock: `timestamp` on Postgres, `DATETIME`
-/// or `TIMESTAMP` on MySQL, text on SQLite.
+/// on MySQL, text on SQLite. A MySQL `TIMESTAMP` column needs
+/// [`AsNativeDateTime`]: the MySQL driver reads it only as a zone-aware
+/// value.
 ///
 /// This is the shape Laravel's `timestamps()` creates on Postgres. The
 /// Postgres driver will not read such a column as a zone-aware value,
@@ -365,6 +393,10 @@ impl Cast for AsNaiveDateTime {
 
     fn from_storage(s: &NaiveDateTime) -> Result<DateTime<Utc>, FrameworkError> {
         Ok(s.and_utc())
+    }
+
+    fn bind_json(value: &serde_json::Value) -> Option<sea_orm::Value> {
+        naive_bind(value)
     }
 }
 
@@ -389,6 +421,10 @@ impl Cast for AsOptionalNaiveDateTime {
 
     fn from_storage(s: &Option<NaiveDateTime>) -> Result<Option<DateTime<Utc>>, FrameworkError> {
         Ok(s.map(|moment| moment.and_utc()))
+    }
+
+    fn bind_json(value: &serde_json::Value) -> Option<sea_orm::Value> {
+        naive_bind(value)
     }
 }
 

@@ -64,6 +64,7 @@ use crate::eloquent::EloquentModel;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::collection::Collection;
 use crate::eloquent::model::{Model, json_value_to_sea_value};
+use crate::eloquent::relations::{ColumnBinder, no_column_binder};
 use crate::error::FrameworkError;
 
 const AGGREGATE_RESULT_ALIAS: &str = "__suprnova_aggregate";
@@ -253,6 +254,9 @@ pub(crate) struct ExistsSpec {
     pub relation_column: Option<String>,
     pub relation_op: Option<String>,
     pub relation_value: Option<Value>,
+    /// How a value compared with a column of the related model is bound
+    /// (the relation entry's `related_bind_column`).
+    pub binder: ColumnBinder,
 }
 
 /// Which rows an existence clause keeps. Stands in for a bare `bool` so
@@ -492,6 +496,11 @@ pub struct Builder<M> {
     /// Bypassed by an active transaction (closure form CURRENT_TX or
     /// explicit `with_tx`) - transactions take precedence absolutely.
     pub(crate) connection_override: Option<String>,
+    /// How a value compared with one of `M`'s columns is bound: the model's
+    /// [`EloquentModel::bind_column`], set by [`Self::__scoped`], so a
+    /// native date-time column is compared with a native parameter. A
+    /// builder made with [`Self::new`] binds values as they are.
+    pub(crate) binder: ColumnBinder,
     _phantom: PhantomData<M>,
 }
 
@@ -549,6 +558,7 @@ impl<M> Clone for Builder<M> {
             // clones (chunk / lazy / clone-to-modify patterns) so the
             // routing stays consistent across the cloned query family.
             connection_override: self.connection_override.clone(),
+            binder: self.binder,
             _phantom: PhantomData,
         }
     }
@@ -983,6 +993,7 @@ impl<M> Builder<M> {
             lock_mode: LockMode::None,
             tx_override: None,
             connection_override: None,
+            binder: no_column_binder,
             _phantom: PhantomData,
         }
     }
@@ -2044,20 +2055,60 @@ fn placeholder(backend: DbBackend, n: usize) -> Result<String, FrameworkError> {
 /// column provide the type while every non-null value remains parameterized.
 fn write_value_expression(
     backend: DbBackend,
+    column: &str,
     value: &Value,
     values: &mut Vec<SeaValue>,
     position: &mut usize,
+    binder: ColumnBinder,
 ) -> Result<String, FrameworkError> {
     if value.is_null() {
         return Ok("NULL".to_owned());
     }
 
     *position += 1;
-    values.push(json_value_to_sea_value(value));
+    values.push(bind_value(binder, column, value));
     placeholder(backend, *position)
 }
 
 /// Render a date-extraction function for the backend.
+/// Bind `value`, compared with `column`, through the model's binder, or
+/// as it is when the column's cast has no native form.
+fn bind_value(binder: ColumnBinder, column: &str, value: &Value) -> SeaValue {
+    binder(column, value).unwrap_or_else(|| json_value_to_sea_value(value))
+}
+
+/// Bind the value of a date-part comparison (`where_date` and its
+/// siblings). On Postgres the left side is a `date`, a `time` or a number,
+/// and Postgres refuses to compare those with a text parameter, so a date
+/// or a time string binds as its own type there. Elsewhere, and for any
+/// value that does not parse, it binds as it is.
+fn date_part_value(backend: DbBackend, part: DatePart, value: &Value) -> SeaValue {
+    if backend == DbBackend::Postgres
+        && let Some(text) = value.as_str()
+    {
+        match part {
+            DatePart::Date => {
+                if let Ok(day) = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+                    return SeaValue::from(day);
+                }
+            }
+            DatePart::Time => {
+                let time = chrono::NaiveTime::parse_from_str(text, "%H:%M:%S")
+                    .or_else(|_| chrono::NaiveTime::parse_from_str(text, "%H:%M"));
+                if let Ok(time) = time {
+                    return SeaValue::from(time);
+                }
+            }
+            DatePart::Day | DatePart::Month | DatePart::Year => {
+                if let Ok(number) = text.parse::<i64>() {
+                    return SeaValue::from(number);
+                }
+            }
+        }
+    }
+    json_value_to_sea_value(value)
+}
+
 fn render_date_part(
     backend: DbBackend,
     part: DatePart,
@@ -2233,7 +2284,7 @@ fn render_exists(
         Some(spec.target_table.as_str())
     };
     for t in &spec.inner_terms {
-        let part = render_subquery_term(backend, inner_qualifier, t, values, n)?;
+        let part = render_subquery_term(backend, inner_qualifier, t, values, n, spec.binder)?;
         where_parts.push(part);
     }
 
@@ -2246,7 +2297,7 @@ fn render_exists(
             .unwrap_or_else(|| "=".to_string());
         *n += 1;
         let ph = placeholder(backend, *n)?;
-        values.push(json_value_to_sea_value(val));
+        values.push(bind_value(spec.binder, col, val));
         // Qualify with the target table when present so the col reads
         // unambiguously in the subquery's WHERE - Laravel's
         // whereRelation always renders the qualified form.
@@ -2317,6 +2368,7 @@ pub(crate) fn render_subquery_term(
     term: &WhereTerm,
     values: &mut Vec<SeaValue>,
     n: &mut usize,
+    binder: ColumnBinder,
 ) -> Result<String, FrameworkError> {
     // Prefix a bare column with the subquery's target table when one is
     // present, so it reads unambiguously across the JOIN. A column the
@@ -2333,13 +2385,13 @@ pub(crate) fn render_subquery_term(
         WhereTerm::Eq(col, v) => {
             *n += 1;
             let ph = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(v));
+            values.push(bind_value(binder, col, v));
             format!("{} = {ph}", q(col))
         }
         WhereTerm::Op(col, op, v) => {
             *n += 1;
             let ph = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(v));
+            values.push(bind_value(binder, col, v));
             format!("{} {op} {ph}", q(col))
         }
         WhereTerm::In(col, vs) => {
@@ -2348,7 +2400,7 @@ pub(crate) fn render_subquery_term(
                 .map(|v| {
                     *n += 1;
                     let ph = placeholder(backend, *n)?;
-                    values.push(json_value_to_sea_value(v));
+                    values.push(bind_value(binder, col, v));
                     Ok(ph)
                 })
                 .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -2364,7 +2416,7 @@ pub(crate) fn render_subquery_term(
                 .map(|v| {
                     *n += 1;
                     let ph = placeholder(backend, *n)?;
-                    values.push(json_value_to_sea_value(v));
+                    values.push(bind_value(binder, col, v));
                     Ok(ph)
                 })
                 .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -2377,19 +2429,19 @@ pub(crate) fn render_subquery_term(
         WhereTerm::Between(col, a, b) => {
             *n += 1;
             let pa = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(a));
+            values.push(bind_value(binder, col, a));
             *n += 1;
             let pb = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(b));
+            values.push(bind_value(binder, col, b));
             format!("{} BETWEEN {pa} AND {pb}", q(col))
         }
         WhereTerm::NotBetween(col, a, b) => {
             *n += 1;
             let pa = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(a));
+            values.push(bind_value(binder, col, a));
             *n += 1;
             let pb = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(b));
+            values.push(bind_value(binder, col, b));
             format!("{} NOT BETWEEN {pa} AND {pb}", q(col))
         }
         WhereTerm::Null(col) => format!("{} IS NULL", q(col)),
@@ -2431,25 +2483,25 @@ pub(crate) fn render_subquery_term(
         WhereTerm::DatePart(part, col, v) => {
             *n += 1;
             let ph = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(v));
+            values.push(date_part_value(backend, *part, v));
             let lhs = render_date_part(backend, *part, &q(col))?;
             format!("{lhs} = {ph}")
         }
         WhereTerm::Not(inner) => {
-            let inner_sql = render_subquery_term(backend, qualifier, inner, values, n)?;
+            let inner_sql = render_subquery_term(backend, qualifier, inner, values, n, binder)?;
             format!("NOT ({inner_sql})")
         }
         WhereTerm::Or(terms) => {
             let parts: Vec<String> = terms
                 .iter()
-                .map(|t| render_subquery_term(backend, qualifier, t, values, n))
+                .map(|t| render_subquery_term(backend, qualifier, t, values, n, binder))
                 .collect::<Result<Vec<_>, _>>()?;
             format!("({})", parts.join(" OR "))
         }
         WhereTerm::Group(terms) => {
             let parts: Vec<String> = terms
                 .iter()
-                .map(|t| render_subquery_term(backend, qualifier, t, values, n))
+                .map(|t| render_subquery_term(backend, qualifier, t, values, n, binder))
                 .collect::<Result<Vec<_>, _>>()?;
             if parts.is_empty() {
                 // An empty group has no way to reach here through the
@@ -2534,18 +2586,19 @@ impl<M> Builder<M> {
         term: &WhereTerm,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
+        binder: ColumnBinder,
     ) -> Result<String, FrameworkError> {
         Ok(match term {
             WhereTerm::Eq(col, v) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(v));
+                values.push(bind_value(binder, col, v));
                 format!("{col} = {ph}")
             }
             WhereTerm::Op(col, op, v) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(v));
+                values.push(bind_value(binder, col, v));
                 format!("{col} {op} {ph}")
             }
             WhereTerm::In(col, vs) => {
@@ -2554,7 +2607,7 @@ impl<M> Builder<M> {
                     .map(|v| {
                         *n += 1;
                         let ph = placeholder(backend, *n)?;
-                        values.push(json_value_to_sea_value(v));
+                        values.push(bind_value(binder, col, v));
                         Ok(ph)
                     })
                     .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -2570,7 +2623,7 @@ impl<M> Builder<M> {
                     .map(|v| {
                         *n += 1;
                         let ph = placeholder(backend, *n)?;
-                        values.push(json_value_to_sea_value(v));
+                        values.push(bind_value(binder, col, v));
                         Ok(ph)
                     })
                     .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -2583,19 +2636,19 @@ impl<M> Builder<M> {
             WhereTerm::Between(col, a, b) => {
                 *n += 1;
                 let pa = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(a));
+                values.push(bind_value(binder, col, a));
                 *n += 1;
                 let pb = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(b));
+                values.push(bind_value(binder, col, b));
                 format!("{col} BETWEEN {pa} AND {pb}")
             }
             WhereTerm::NotBetween(col, a, b) => {
                 *n += 1;
                 let pa = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(a));
+                values.push(bind_value(binder, col, a));
                 *n += 1;
                 let pb = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(b));
+                values.push(bind_value(binder, col, b));
                 format!("{col} NOT BETWEEN {pa} AND {pb}")
             }
             WhereTerm::Null(col) => format!("{col} IS NULL"),
@@ -2637,25 +2690,25 @@ impl<M> Builder<M> {
             WhereTerm::DatePart(part, col, v) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(v));
+                values.push(date_part_value(backend, *part, v));
                 let lhs = render_date_part(backend, *part, col)?;
                 format!("{lhs} = {ph}")
             }
             WhereTerm::Not(inner) => {
-                let inner_sql = Self::render_where_term(backend, inner, values, n)?;
+                let inner_sql = Self::render_where_term(backend, inner, values, n, binder)?;
                 format!("NOT ({inner_sql})")
             }
             WhereTerm::Or(terms) => {
                 let parts: Vec<String> = terms
                     .iter()
-                    .map(|t| Self::render_where_term(backend, t, values, n))
+                    .map(|t| Self::render_where_term(backend, t, values, n, binder))
                     .collect::<Result<Vec<_>, _>>()?;
                 format!("({})", parts.join(" OR "))
             }
             WhereTerm::Group(terms) => {
                 let parts: Vec<String> = terms
                     .iter()
-                    .map(|t| Self::render_where_term(backend, t, values, n))
+                    .map(|t| Self::render_where_term(backend, t, values, n, binder))
                     .collect::<Result<Vec<_>, _>>()?;
                 if parts.is_empty() {
                     // See the matching arm in `render_subquery_term`:
@@ -2720,7 +2773,7 @@ impl<M> Builder<M> {
         let parts: Vec<String> = self
             .having_terms
             .iter()
-            .map(|t| Self::render_where_term(backend, t, values, n))
+            .map(|t| Self::render_where_term(backend, t, values, n, self.binder))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(format!(" HAVING {}", parts.join(" AND ")))
     }
@@ -2864,7 +2917,7 @@ impl<M> Builder<M> {
             let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, values, n))
+                .map(|t| Self::render_where_term(backend, t, values, n, self.binder))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
@@ -2917,7 +2970,7 @@ impl<M> Builder<M> {
             let parts: Vec<String> = self
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, values, n))
+                .map(|t| Self::render_where_term(backend, t, values, n, self.binder))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
@@ -2986,6 +3039,7 @@ where
     pub fn __scoped() -> Self {
         let mut builder = Self::new();
         builder.scope_resolver = Some(crate::eloquent::scopes::resolve_scopes::<M>);
+        builder.binder = <M as EloquentModel>::bind_column;
         builder
     }
 
@@ -3043,6 +3097,7 @@ where
                 relation_column,
                 relation_op,
                 relation_value,
+                binder: e.related_bind_column,
             },
             None => ExistsSpec {
                 parent_table: M::TABLE.to_string(),
@@ -3063,6 +3118,7 @@ where
                 relation_column,
                 relation_op,
                 relation_value,
+                binder: no_column_binder,
             },
         }
     }
@@ -3619,7 +3675,7 @@ where
             let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
+                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n, self.binder))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
@@ -4975,7 +5031,8 @@ where
         let set_parts: Vec<String> = attrs
             .iter()
             .map(|(col, v)| {
-                let expression = write_value_expression(backend, v, &mut values, &mut n)?;
+                let expression =
+                    write_value_expression(backend, col, v, &mut values, &mut n, M::bind_column)?;
                 Ok(format!("{col} = {expression}"))
             })
             .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -4986,7 +5043,7 @@ where
             let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
+                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n, this.binder))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
@@ -5054,7 +5111,7 @@ where
             let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
+                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n, this.binder))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
@@ -5153,7 +5210,7 @@ where
             let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
+                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n, this.binder))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
@@ -5267,7 +5324,7 @@ where
                     .iter()
                     .map(|c| {
                         let v = attrs.get(c).cloned().unwrap_or(Value::Null);
-                        write_value_expression(backend, &v, &mut values, &mut n)
+                        write_value_expression(backend, c, &v, &mut values, &mut n, M::bind_column)
                     })
                     .collect::<Result<Vec<_>, FrameworkError>>()?;
                 Ok(format!("({})", phs.join(", ")))
@@ -5404,6 +5461,81 @@ mod tests {
         assert_eq!(Direction::Desc.sql(), "DESC");
     }
 
+    /// A binder that answers for `created_at` only, standing in for a model
+    /// whose `created_at` has a native cast.
+    fn created_at_binder(column: &str, _value: &Value) -> Option<SeaValue> {
+        (column.rsplit('.').next() == Some("created_at")).then(|| SeaValue::BigInt(Some(7)))
+    }
+
+    #[test]
+    fn a_column_comparison_binds_through_the_model_binder() {
+        let term = WhereTerm::Op(
+            "created_at".to_owned(),
+            ">".to_owned(),
+            serde_json::json!("2031-03-14T12:00:00Z"),
+        );
+        let mut values = Vec::new();
+        let mut position = 0;
+        render_subquery_term(
+            DbBackend::Postgres,
+            Some("posts"),
+            &term,
+            &mut values,
+            &mut position,
+            created_at_binder,
+        )
+        .unwrap();
+        assert_eq!(values, [SeaValue::BigInt(Some(7))]);
+
+        let other = WhereTerm::Eq("title".to_owned(), serde_json::json!("x"));
+        let mut values = Vec::new();
+        render_subquery_term(
+            DbBackend::Postgres,
+            None,
+            &other,
+            &mut values,
+            &mut position,
+            created_at_binder,
+        )
+        .unwrap();
+        assert_eq!(
+            values,
+            [SeaValue::String(Some("x".to_owned()))],
+            "a column the binder declines binds as it is"
+        );
+    }
+
+    #[test]
+    fn a_date_part_binds_as_its_own_type_on_postgres() {
+        let day = chrono::NaiveDate::from_ymd_opt(2031, 3, 14).unwrap();
+        assert_eq!(
+            date_part_value(
+                DbBackend::Postgres,
+                DatePart::Date,
+                &serde_json::json!("2031-03-14")
+            ),
+            SeaValue::from(day)
+        );
+        let nine = chrono::NaiveTime::from_hms_opt(9, 30, 0).unwrap();
+        assert_eq!(
+            date_part_value(
+                DbBackend::Postgres,
+                DatePart::Time,
+                &serde_json::json!("09:30")
+            ),
+            SeaValue::from(nine)
+        );
+        assert_eq!(
+            date_part_value(
+                DbBackend::Sqlite,
+                DatePart::Date,
+                &serde_json::json!("2031-03-14")
+            ),
+            SeaValue::String(Some("2031-03-14".to_owned())),
+            "SQLite compares text with text, unchanged"
+        );
+    }
+
     #[test]
     fn postgres_relationship_subquery_rebases_portable_raw_placeholders() {
         let term = WhereTerm::Raw(
@@ -5419,6 +5551,7 @@ mod tests {
             &term,
             &mut values,
             &mut position,
+            no_column_binder,
         )
         .unwrap();
 
@@ -5476,23 +5609,29 @@ mod tests {
 
         let first = write_value_expression(
             DbBackend::Postgres,
+            "status",
             &serde_json::json!(7),
             &mut values,
             &mut position,
+            no_column_binder,
         )
         .unwrap();
         let null = write_value_expression(
             DbBackend::Postgres,
+            "status",
             &Value::Null,
             &mut values,
             &mut position,
+            no_column_binder,
         )
         .unwrap();
         let second = write_value_expression(
             DbBackend::Postgres,
+            "status",
             &serde_json::json!("ready"),
             &mut values,
             &mut position,
+            no_column_binder,
         )
         .unwrap();
 

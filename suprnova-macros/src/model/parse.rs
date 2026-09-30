@@ -560,6 +560,21 @@ impl ModelInput {
         &self.item
     }
 
+    /// Whether the field `name` is declared `Option<DateTime<Utc>>`. A
+    /// timestamp column another application writes can hold NULL - Laravel
+    /// makes `created_at` and `updated_at` nullable - so a model may declare
+    /// them optional, and every write of "now" then stores `Some(now)`
+    /// through the field's cast.
+    pub fn is_optional_datetime(&self, name: &str) -> bool {
+        match &self.item.fields {
+            syn::Fields::Named(named) => named.named.iter().any(|field| {
+                field.ident.as_ref().is_some_and(|ident| ident == name)
+                    && classify_datetime(&field.ty) == DateTimeShape::OptionalDateTime
+            }),
+            _ => false,
+        }
+    }
+
     /// Look up the cast type declared or auto-injected for a field.
     pub fn cast_for_field(&self, name: &str) -> Option<&Type> {
         self.casts

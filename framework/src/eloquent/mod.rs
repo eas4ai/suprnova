@@ -173,6 +173,16 @@ pub trait EloquentModel: Sized {
     ///
     /// The default is that RFC 3339 text; the macro overrides it with the
     /// declared cast of the `updated_at` field.
+    /// The parameter a query binds when it compares `column` with `value`,
+    /// through the column's cast ([`casts::Cast::bind_json`]). `None` binds
+    /// the value as it is. A column name may carry its table
+    /// (`posts.created_at`). The macro overrides this for a model with cast
+    /// fields; the query builder asks it for every comparison.
+    #[doc(hidden)]
+    fn bind_column(_column: &str, _value: &serde_json::Value) -> Option<sea_orm::Value> {
+        None
+    }
+
     #[doc(hidden)]
     fn updated_at_storage(
         now: &chrono::DateTime<chrono::Utc>,

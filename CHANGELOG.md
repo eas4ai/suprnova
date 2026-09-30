@@ -17,7 +17,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `timestamps_tz()`, `soft_deletes_tz()`, `datetimes()` and
   `soft_deletes_datetime()` to create them. Automatic timestamps, `touch()`,
   soft deletes and the touch of an owner all store through the declared
-  cast. `suprnova generate-types` now emits chrono's date and time types as
+  cast, and query comparisons (`filter`, `where_between`, `where_date`,
+  `update_all`, `where_has`) bind through it, so Postgres gets a native
+  parameter. A model may declare `created_at` and `updated_at` as
+  `Option<DateTime<Utc>>` for a table another application leaves NULL. `suprnova generate-types` now emits chrono's date and time types as
   `string` instead of `unknown`. This landed on main after the `v3.0.0` tag.
 - **Laravel's `exists`, `accepted`, `digits`, `date_format`, date
   comparison, `prohibited`, `missing` and `exclude_if` rules.** `Exists`

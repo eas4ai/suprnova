@@ -123,7 +123,14 @@ impl PivotFilters {
         self.validate()?;
         let mut out = String::new();
         for term in &self.terms {
-            let sql = render_subquery_term(backend, None, term, values, next_placeholder)?;
+            let sql = render_subquery_term(
+                backend,
+                None,
+                term,
+                values,
+                next_placeholder,
+                crate::eloquent::relations::no_column_binder,
+            )?;
             out.push_str(" AND (");
             out.push_str(&sql);
             out.push(')');

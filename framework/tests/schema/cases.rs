@@ -2,7 +2,7 @@
 //! tables it uses before it starts (so a rerun on the same database works),
 //! and drops them again when it ends.
 
-use chrono::{DateTime, Duration as TimeDelta, TimeZone, Utc};
+use chrono::{DateTime, Duration as TimeDelta, NaiveDate, TimeZone, Utc};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, DbErr, Statement};
 use sea_orm_migration::prelude::*;
 use suprnova::schema::Schema;
@@ -59,6 +59,23 @@ pub struct NativePost {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
+}
+
+/// Timestamps another application may leave NULL - Laravel's
+/// `timestamps()` columns are nullable - declared optional on the model.
+#[model(
+    table = "schema_nullable_stamps",
+    fillable = ["title"],
+    casts = {
+        created_at = suprnova::AsOptionalNativeDateTime,
+        updated_at = suprnova::AsOptionalNativeDateTime,
+    },
+)]
+pub struct NullableStampPost {
+    pub id: i64,
+    pub title: String,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// Timestamps in native columns without a zone, the shape Laravel's
@@ -459,6 +476,7 @@ pub async fn native_timestamps_round_trip(conn: &DatabaseConnection) {
             "schema_native_posts",
             "schema_native_owners",
             "schema_naive_posts",
+            "schema_nullable_stamps",
         ],
     )
     .await;
@@ -557,6 +575,54 @@ pub async fn native_timestamps_round_trip(conn: &DatabaseConnection) {
         .expect("the restored post");
     assert!(restored.deleted_at.is_none());
 
+    // A query compares a native column with a native parameter: a string
+    // bound as text is what Postgres refuses.
+    clock.set(at(16));
+    let later = NativePost::create(attrs! { native_owner_id: owner.id, title: "later" })
+        .await
+        .expect("create a later post");
+    let noon = "2031-03-14T12:00:00Z";
+    assert_eq!(
+        NativePost::query()
+            .filter_op("created_at", ">", noon)
+            .count()
+            .await
+            .expect("filter_op on a native column"),
+        1
+    );
+    assert_eq!(
+        NativePost::query()
+            .where_between(
+                "created_at",
+                "2031-03-14T09:00:00Z"..="2031-03-14T11:00:00Z"
+            )
+            .count()
+            .await
+            .expect("where_between on a native column"),
+        1
+    );
+    assert_eq!(
+        NativePost::query()
+            .where_date("created_at", NaiveDate::from_ymd_opt(2031, 3, 14).unwrap())
+            .count()
+            .await
+            .expect("where_date on a native column"),
+        2
+    );
+    NativePost::query()
+        .filter("id", later.id)
+        .update_all(attrs! { updated_at: "2031-03-20T00:00:00Z" })
+        .await
+        .expect("update_all into a native column");
+    let moved = NativePost::find(later.id)
+        .await
+        .expect("find the updated post")
+        .expect("the updated post");
+    assert_eq!(
+        moved.updated_at,
+        Utc.with_ymd_and_hms(2031, 3, 20, 0, 0, 0).unwrap()
+    );
+
     // Columns without a zone hold the UTC wall clock.
     clock.set(at(13));
     let naive_post = NaivePost::create(attrs! { title: "naive" })
@@ -585,6 +651,42 @@ pub async fn native_timestamps_round_trip(conn: &DatabaseConnection) {
     assert_eq!(trashed.deleted_at, Some(at(15)));
     trashed.restore().await.expect("restore naive");
 
+    // A row another application wrote with NULL timestamps reads as None,
+    // and the model's own write fills them.
+    Schema::create(&manager, "schema_nullable_stamps", |t| {
+        t.id();
+        t.string("title");
+        t.timestamps_tz();
+    })
+    .await
+    .expect("create schema_nullable_stamps");
+    run(
+        conn,
+        "INSERT INTO schema_nullable_stamps (title) VALUES ('imported')",
+    )
+    .await
+    .expect("insert a row without timestamps");
+    let imported = NullableStampPost::query()
+        .first()
+        .await
+        .expect("read the imported row")
+        .expect("the imported row");
+    assert_eq!((imported.created_at, imported.updated_at), (None, None));
+    clock.set(at(17));
+    imported.touch().await.expect("touch the imported row");
+    let touched = NullableStampPost::find(imported.id)
+        .await
+        .expect("find after touch")
+        .expect("the touched row");
+    assert_eq!(touched.updated_at, Some(at(17)));
+    let created = NullableStampPost::create(attrs! { title: "fresh" })
+        .await
+        .expect("create with optional timestamps");
+    assert_eq!(
+        (created.created_at, created.updated_at),
+        (Some(at(17)), Some(at(17)))
+    );
+
     drop(clock);
     drop_tables(
         conn,
@@ -592,6 +694,7 @@ pub async fn native_timestamps_round_trip(conn: &DatabaseConnection) {
             "schema_native_posts",
             "schema_native_owners",
             "schema_naive_posts",
+            "schema_nullable_stamps",
         ],
     )
     .await;

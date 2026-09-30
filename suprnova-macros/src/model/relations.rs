@@ -749,6 +749,14 @@ fn emit_relation_inventory(
     // How the owner's `updated_at` cast stores the time, so the touch
     // cascade binds what the owner's column takes. A `MorphTo` owner
     // varies by row and brings its own.
+    let related_bind_column_expr: TokenStream = match rel.kind {
+        RelationKindAttr::MorphTo => {
+            quote! { ::suprnova::eloquent::relations::no_column_binder }
+        }
+        _ => quote! {
+            <#target_ty as ::suprnova::eloquent::EloquentModel>::bind_column
+        },
+    };
     let related_updated_at_storage_expr: TokenStream = match rel.kind {
         RelationKindAttr::MorphTo => {
             quote! { ::suprnova::eloquent::relations::morph_to_touch_storage }
@@ -851,6 +859,7 @@ fn emit_relation_inventory(
                 related_soft_deletes_column_expr: &related_soft_deletes_column_expr,
                 related_updated_at_column_expr: &related_updated_at_column_expr,
                 related_updated_at_storage_expr: &related_updated_at_storage_expr,
+                related_bind_column_expr: &related_bind_column_expr,
             });
         }
         RelationKindAttr::MorphToMany | RelationKindAttr::MorphedByMany => {
@@ -909,6 +918,7 @@ fn emit_relation_inventory(
                 related_soft_deletes_column_expr: &related_soft_deletes_column_expr,
                 related_updated_at_column_expr: &related_updated_at_column_expr,
                 related_updated_at_storage_expr: &related_updated_at_storage_expr,
+                related_bind_column_expr: &related_bind_column_expr,
             });
         }
         _ => (String::new(), String::new(), String::new()),
@@ -946,6 +956,7 @@ fn emit_relation_inventory(
         related_soft_deletes_column_expr: &related_soft_deletes_column_expr,
         related_updated_at_column_expr: &related_updated_at_column_expr,
         related_updated_at_storage_expr: &related_updated_at_storage_expr,
+        related_bind_column_expr: &related_bind_column_expr,
     })
 }
 
@@ -971,6 +982,7 @@ struct InventoryFields<'a> {
     related_soft_deletes_column_expr: &'a TokenStream,
     related_updated_at_column_expr: &'a TokenStream,
     related_updated_at_storage_expr: &'a TokenStream,
+    related_bind_column_expr: &'a TokenStream,
 }
 
 /// Single emission point for the inventory token. Keeps the kind-arms
@@ -996,6 +1008,7 @@ fn emit_inventory_token(fields: &InventoryFields<'_>) -> TokenStream {
         related_soft_deletes_column_expr,
         related_updated_at_column_expr,
         related_updated_at_storage_expr,
+        related_bind_column_expr,
     } = fields;
     quote! {
         ::suprnova::inventory::submit! {
@@ -1018,6 +1031,7 @@ fn emit_inventory_token(fields: &InventoryFields<'_>) -> TokenStream {
                 related_soft_deletes_column: #related_soft_deletes_column_expr,
                 related_updated_at_column: #related_updated_at_column_expr,
                 related_updated_at_storage: #related_updated_at_storage_expr,
+                related_bind_column: #related_bind_column_expr,
             }
         }
     }

@@ -44,6 +44,16 @@ pub trait Cast: Send + Sync {
     fn to_storage(value: &Self::Runtime) -> Result<Self::Storage, FrameworkError>;
     /// Hydrate a column's storage value back into the in-memory type.
     fn from_storage(stored: &Self::Storage) -> Result<Self::Runtime, FrameworkError>;
+
+    /// The parameter a query binds when it compares this column with a
+    /// JSON value - a `filter`, `where_between` or mass update. `None`,
+    /// the default, binds the value as it is, which suits a column that
+    /// stores text or a number. A cast whose storage is a native type
+    /// overrides it: Postgres refuses to compare a native date-time column
+    /// with a text parameter.
+    fn bind_json(_value: &serde_json::Value) -> Option<sea_orm::Value> {
+        None
+    }
 }
 
 /// Type-erased cast for `Builder::with_casts(...)` runtime override.
