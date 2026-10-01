@@ -127,7 +127,7 @@ async fn response_from_a_local_disk_is_inline_with_an_optional_name() {
     assert_eq!(header(&headers, "content-type"), "application/pdf");
     assert_eq!(
         header(&headers, "content-disposition"),
-        "inline; filename=\"Informe P_rez.pdf\"; filename*=UTF-8''Informe%20P%C3%A9rez.pdf"
+        "inline; filename=\"Informe Perez.pdf\"; filename*=UTF-8''Informe%20P%C3%A9rez.pdf"
     );
     assert_eq!(&body[..], b"%PDF-1.7 q3");
 

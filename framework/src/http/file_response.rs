@@ -74,8 +74,14 @@ impl ContentDisposition {
     /// The `Content-Disposition` value for `filename`, per RFC 6266.
     ///
     /// The `filename` parameter is an ASCII fallback for clients that read
-    /// nothing else: every character outside printable ASCII and every `%`
-    /// becomes `_`, and `"` and `\` are escaped inside the quoted string.
+    /// nothing else, built the way Laravel builds its fallback with
+    /// `Str::ascii`: each character outside ASCII is spelled in ASCII
+    /// (`é` as `e`, `ß` as `ss`), and one whose spelling would put a
+    /// character unsafe in a filename into the name (`·` as `*`, `½` as
+    /// `1/2`) is dropped. A character with no spelling at all becomes `_`,
+    /// so the fallback never shrinks to nothing. `%` and `/` become `_`,
+    /// and `"` and `\` are escaped inside the quoted string.
+    ///
     /// When that fallback cannot carry the name exactly, a
     /// `filename*=UTF-8''...` parameter follows with the name
     /// percent-encoded (RFC 8187), which every current browser prefers.
@@ -90,7 +96,7 @@ impl ContentDisposition {
     ///
     /// assert_eq!(
     ///     ContentDisposition::Attachment.header_value("Joan Pérez.pdf"),
-    ///     "attachment; filename=\"Joan P_rez.pdf\"; filename*=UTF-8''Joan%20P%C3%A9rez.pdf"
+    ///     "attachment; filename=\"Joan Perez.pdf\"; filename*=UTF-8''Joan%20P%C3%A9rez.pdf"
     /// );
     /// assert_eq!(
     ///     ContentDisposition::Inline.header_value("report.pdf"),
@@ -124,16 +130,17 @@ impl ContentDisposition {
                     value.push('\\');
                     value.push(c);
                 }
-                '%' => {
+                '%' | '/' => {
                     // RFC 6266 appendix D: some clients percent-decode the
-                    // fallback, so `%` is kept out of it.
+                    // fallback, so `%` is kept out of it; `/` would make the
+                    // name a path.
                     exact = false;
                     value.push('_');
                 }
                 ' '..='~' => value.push(c),
                 _ => {
                     exact = false;
-                    value.push('_');
+                    push_spelling(&mut value, c);
                 }
             }
         }
@@ -144,6 +151,34 @@ impl ContentDisposition {
         }
         value
     }
+}
+
+/// Append the ASCII spelling of the non-ASCII `c` to the `filename`
+/// fallback.
+///
+/// Laravel's `Str::ascii` spells what it can and drops the rest; `deunicode`
+/// spells far more (it has an answer for `·`, `½` and most symbols), so a
+/// spelling is kept only when every character of it is safe in a filename.
+/// A character `deunicode` cannot spell at all becomes `_` instead of
+/// vanishing, so a name made only of such characters still has a fallback.
+fn push_spelling(fallback: &mut String, c: char) {
+    match deunicode::deunicode_char(c) {
+        None => fallback.push('_'),
+        Some(spelling) if spelling.chars().all(safe_in_fallback) => fallback.push_str(spelling),
+        Some(_) => {}
+    }
+}
+
+/// Whether a character of a transliteration may stand in the fallback as
+/// it is: printable ASCII that is neither a path separator, `%`, a
+/// character Windows refuses in a filename, nor one the quoted string would
+/// have to escape.
+fn safe_in_fallback(c: char) -> bool {
+    matches!(c, ' '..='~')
+        && !matches!(
+            c,
+            '"' | '\\' | '/' | '%' | '*' | '?' | ':' | '<' | '>' | '|'
+        )
 }
 
 impl HttpResponse {

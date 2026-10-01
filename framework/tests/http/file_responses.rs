@@ -191,13 +191,13 @@ fn a_non_ascii_name_gets_an_ascii_fallback_and_a_percent_encoded_filename_star()
     let value = ContentDisposition::Attachment.header_value(CATALAN_NAME);
     assert_eq!(
         value,
-        "attachment; filename=\"Certificat_Joan P_rez.pdf\"; \
+        "attachment; filename=\"CertificatJoan Perez.pdf\"; \
          filename*=UTF-8''Certificat%C2%B7Joan%20P%C3%A9rez.pdf"
     );
     assert_disposition(
         &value,
         "attachment",
-        "Certificat_Joan P_rez.pdf",
+        "CertificatJoan Perez.pdf",
         Some(CATALAN_NAME),
     );
 }
@@ -261,7 +261,7 @@ fn control_characters_never_reach_the_header() {
         !value.contains("%0D") && !value.contains("%C2%85"),
         "{value:?}"
     );
-    assert_disposition(&value, "inline", "caf___.txt", Some("caf\u{e9}__.txt"));
+    assert_disposition(&value, "inline", "cafe__.txt", Some("caf\u{e9}__.txt"));
 }
 
 #[test]
@@ -272,6 +272,43 @@ fn a_percent_sign_is_kept_out_of_the_fallback() {
         "attachment",
         "100_25 done.csv",
         Some("100%25 done.csv"),
+    );
+}
+
+#[test]
+fn the_fallback_transliterates_like_laravel_str_ascii() {
+    // Laravel's fallback for this name, `str_replace('%', '',
+    // Str::ascii($name))`, is `AEro strasse .pdf`: letters are spelled out
+    // and `½`, which has no spelling in a filename, is dropped.
+    let name = "\u{c6}r\u{f8} stra\u{df}e \u{bd}.pdf";
+    let value = ContentDisposition::Attachment.header_value(name);
+    assert_disposition(&value, "attachment", "AEro strasse .pdf", Some(name));
+
+    // A combining accent has no spelling of its own and leaves nothing.
+    let value = ContentDisposition::Inline.header_value("e\u{301}te\u{301}.txt");
+    assert_disposition(&value, "inline", "ete.txt", Some("e\u{301}te\u{301}.txt"));
+}
+
+#[test]
+fn a_name_with_only_unmappable_characters_falls_back_to_underscores() {
+    // Private-use and noncharacter code points have no transliteration.
+    let name = "\u{e000}\u{f8ff}\u{10fffd}";
+    let value = ContentDisposition::Attachment.header_value(name);
+    assert_eq!(
+        value,
+        "attachment; filename=\"___\"; filename*=UTF-8''%EE%80%80%EF%A3%BF%F4%8F%BF%BD"
+    );
+    assert_disposition(&value, "attachment", "___", Some(name));
+}
+
+#[test]
+fn a_slash_never_reaches_the_fallback() {
+    let value = ContentDisposition::Attachment.header_value("2026/09 report.pdf");
+    assert_disposition(
+        &value,
+        "attachment",
+        "2026_09 report.pdf",
+        Some("2026/09 report.pdf"),
     );
 }
 
@@ -333,7 +370,7 @@ async fn file_takes_an_optional_inline_name() {
     assert_disposition(
         header(&headers, "content-disposition"),
         "inline",
-        "Logo P_rez.png",
+        "Logo Perez.png",
         Some("Logo P\u{e9}rez.png"),
     );
     assert_eq!(&body[..], b"\x89PNG\r\n\x1a\nfake");
@@ -494,7 +531,7 @@ async fn download_writes_the_caller_name_per_rfc_6266() {
     assert_eq!(header(&headers, "content-type"), "application/pdf");
     assert_eq!(
         header(&headers, "content-disposition"),
-        "attachment; filename=\"Certificat_Joan P_rez.pdf\"; \
+        "attachment; filename=\"CertificatJoan Perez.pdf\"; \
          filename*=UTF-8''Certificat%C2%B7Joan%20P%C3%A9rez.pdf"
     );
     assert_eq!(&body[..], b"%PDF-1.7 certificate");
@@ -575,7 +612,7 @@ async fn download_bytes_encodes_a_non_ascii_name() {
     assert_disposition(
         header(&headers, "content-disposition"),
         "attachment",
-        "Certificat_Joan P_rez.pdf",
+        "CertificatJoan Perez.pdf",
         Some(CATALAN_NAME),
     );
 }

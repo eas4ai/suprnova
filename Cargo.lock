@@ -7485,6 +7485,7 @@ dependencies = [
  "comrak",
  "crypto_secretbox",
  "dashmap 6.2.1",
+ "deunicode",
  "digest 0.11.3",
  "dotenvy",
  "envy",

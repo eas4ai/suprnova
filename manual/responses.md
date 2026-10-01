@@ -199,14 +199,17 @@ use suprnova::ContentDisposition;
 
 assert_eq!(
     ContentDisposition::Attachment.header_value("Certificat·Joan Pérez.pdf"),
-    "attachment; filename=\"Certificat_Joan P_rez.pdf\"; \
+    "attachment; filename=\"CertificatJoan Perez.pdf\"; \
      filename*=UTF-8''Certificat%C2%B7Joan%20P%C3%A9rez.pdf"
 );
 ```
 
-- The `filename` parameter is an ASCII fallback. Each character outside
-  printable ASCII becomes `_`, and so does `%`. A `"` or `\` is escaped
-  inside the quotes.
+- The `filename` parameter is an ASCII fallback, transliterated the way
+  Laravel's `Str::ascii` builds its fallback: `é` becomes `e` and `ß`
+  becomes `ss`. A character whose spelling would put an unsafe character
+  into a filename, such as `·` or `½`, is dropped. A character with no
+  spelling at all becomes `_`, so the fallback is never empty. `%` and `/`
+  become `_`, and a `"` or `\` is escaped inside the quotes.
 - When the fallback can't carry the name exactly, a
   `filename*=UTF-8''...` parameter follows with the name percent-encoded.
   Current browsers use it, so the user sees `Certificat·Joan Pérez.pdf`.
