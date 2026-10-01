@@ -144,12 +144,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   the named ones, which reach the real queue. `Queue::push_raw` pushes an
   envelope's JSON form, and under the fake `raw_pushes` and `pushed_raw`
   read those pushes back. `assert_pushed_without_chain` fails for a job
-  pushed with a chain. This landed on main after the `v3.0.0` tag.
+  pushed with a chain. A chain whose first job `except` names runs on the
+  real queue, and each later link is recorded unless `except` names it
+  too. This landed on main after the `v3.0.0` tag.
 
 - **Declarative authorization on handlers.** `#[authorize("update-post",
   post)]` on a `#[handler]` checks the gate against the model the route
   binds to `post`, and `#[authorize("create-post", Post)]` checks it
-  against the type. The check runs after route model binding and before
+  against the type, for the user of the guard the route authenticated
+  with. The check runs after route model binding and before
   the request body is read, so a forgotten `Gate::authorize` call can no
   longer leave a route open. Policies, async gates and the RBAC gate bridge
   all answer it. A guest gets 401, a denial 403, and `deny_as_not_found()`
@@ -161,7 +164,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   (`was_changed`, `was_changed_any`, `get_changes`), and `get_original` and
   `get_raw_original` return the loaded values while its `updated` and
   `saved` observers run, as Laravel's do; once the save returns, the
-  original is the saved row. `sync_without_detaching` attaches pivot rows
+  original is the saved row. An encrypted column counts as changed only
+  when its decrypted value changed. `sync_without_detaching` attaches pivot rows
   without touching the existing ones. `DB::after_commit` runs a callback
   after the ambient `DB::transaction` commits, and never on rollback; a
   transaction started with `DB::begin_transaction` takes its own
@@ -942,6 +946,25 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **The sync queue driver runs a whole chain.** `SyncQueueDriver` ran a
+  chain's first job and dropped every later link. It now runs the chain
+  inline, link by link, as Laravel's sync queue does; a link that fails
+  returns its error and the rest of the chain does not run. This fix
+  landed on main after the `v3.0.0` tag.
+- **`authorize_resource` checks the user of the route's guard.** On a route
+  whose `AuthMiddleware` names a guard other than the default,
+  `authorize_resource` checked the default guard's user instead of the one
+  the route authenticated, so that user was refused. It now checks the
+  route guard's user, as Laravel's `can` middleware does. This fix landed
+  on main after the `v3.0.0` tag (#127).
+- **A cached page that reads through a raw fragment is never served
+  stale.** A `select_raw`, `where_raw`, `filter_raw` or `order_by_raw` on a
+  model query can read a table the query doesn't name, but the render
+  cache stored the page anyway, so a write to that table left it stale. A
+  query carrying a raw fragment now keeps the page out of the cache, as raw
+  `DB::select` does; the page is still served. A `select_raw` that is a
+  bare number, such as `select_raw("1")`, doesn't count. This fix landed
+  on main after the `v3.0.0` tag.
 - **A destructured route parameter binds.** A handler parameter written
   `RouteParam(user): RouteParam<User>`, as the `RouteParam` docs show, looked
   up a route parameter named `param` and answered 400 to every request. It

@@ -453,7 +453,9 @@ The rules follow Laravel's `save`:
 - `save`, `update`, `save_with_tx`, and `update_with_tx` record a save. A
   model you `create` reports no changes, and a model you load reports none
   until you save it. The original is the row as the model last read or
-  saved it, whatever you change in memory. A clone keeps the record;
+  saved it, whatever you change in memory. To answer this, every model a
+  query loads keeps a copy of its stored row beside its fields, so a large
+  result takes more memory than the fields alone. A clone keeps the record;
   `replicate` builds a new model without one.
 - A model you build in memory and save without reading it first has no
   loaded values to compare with: every column counts as changed, and
