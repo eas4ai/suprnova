@@ -1,0 +1,53 @@
+.sn-tooltip {
+  position: relative;
+  display: inline-block;
+}
+
+.sn-tooltip-bubble {
+  position: absolute;
+  inset-block-start: 100%;
+  inset-inline-start: 50%;
+  z-index: 1;
+  max-inline-size: 20rem;
+  padding: var(--sn-space-1) var(--sn-space-2);
+  translate: -50% var(--sn-space-1);
+  border-radius: var(--sn-radius-sm);
+  background: var(--sn-color-text);
+  color: var(--sn-color-text-inverse);
+  font-size: var(--sn-font-size-sm);
+  line-height: var(--sn-font-leading-tight);
+  white-space: nowrap;
+  visibility: hidden;
+  opacity: 0;
+  transition-property: opacity, visibility;
+  transition-duration: var(--sn-motion-duration-fast);
+  transition-timing-function: var(--sn-motion-easing-standard);
+}
+
+/* The bubble takes the pointer, and this bridge spans the gap between the
+   trigger and the bubble, so moving the pointer from the trigger onto the
+   bubble never leaves the wrapper's :hover (OVL-007). A hidden bubble takes
+   no pointer events, bridge included. */
+.sn-tooltip-bubble::before {
+  position: absolute;
+  inset-block-end: 100%;
+  inset-inline: 0;
+  block-size: var(--sn-space-1);
+  content: "";
+}
+
+.sn-tooltip:hover > .sn-tooltip-bubble,
+.sn-tooltip:has(:focus-visible) > .sn-tooltip-bubble {
+  visibility: visible;
+  opacity: 1;
+}
+
+/* A bubble the user dismissed with Escape stays hidden while the pointer
+   rests where it was shown, and sn-tooltip drops the mark when the pointer
+   or focus leaves, so the next hover or focus shows it again (OVL-008). This
+   rule follows the showing rules deliberately: they carry the same
+   specificity, and the later rule wins. */
+.sn-tooltip[data-sn-dismissed] > .sn-tooltip-bubble {
+  visibility: hidden;
+  opacity: 0;
+}

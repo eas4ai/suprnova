@@ -1,0 +1,12 @@
+{#
+  suprnova.stat-card - one labeled statistic (DATA-002).
+  The value is a data element; the trend names its direction in text
+  before the delta, so the direction never rests on color or an arrow.
+#}
+{% macro stat_card(id, label, value, unit="", trend="flat", delta="", timeframe="") %}
+<article class="sn-stat" id="{{ id }}" aria-labelledby="{{ id }}-label">
+<p class="sn-stat-label" id="{{ id }}-label">{{ label }}</p>
+<p class="sn-stat-value"><data value="{{ value }}">{{ value }}</data>{% if unit != "" %} <span class="sn-stat-unit">{{ unit }}</span>{% endif %}</p>
+{% if delta != "" %}<p class="sn-stat-trend" data-sn-trend="{{ trend }}"><span class="sn-stat-direction">{% if trend == "up" %}Up{% elif trend == "down" %}Down{% else %}Flat{% endif %}</span> {{ delta }}{% if timeframe != "" %} <span class="sn-stat-timeframe">{{ timeframe }}</span>{% endif %}</p>{% endif %}
+</article>
+{% endmacro %}

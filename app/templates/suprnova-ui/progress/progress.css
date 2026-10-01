@@ -1,0 +1,46 @@
+.sn-progress {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--sn-space-1) var(--sn-space-3);
+  align-items: center;
+  margin-block-end: var(--sn-density-stack);
+}
+
+.sn-progress-label {
+  font-size: var(--sn-font-size-sm);
+  font-weight: var(--sn-font-weight-medium);
+}
+
+.sn-progress-readout {
+  grid-column: 2;
+  grid-row: 1;
+  font-size: var(--sn-font-size-sm);
+  color: var(--sn-color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.sn-progress-bar {
+  grid-column: 1 / -1;
+  inline-size: 100%;
+  block-size: var(--sn-space-2);
+  border: 0;
+  border-radius: var(--sn-radius-full);
+  background: var(--sn-color-surface-sunken);
+  accent-color: var(--sn-color-primary);
+  overflow: hidden;
+}
+
+.sn-progress-bar::-webkit-progress-bar {
+  background: var(--sn-color-surface-sunken);
+  border-radius: var(--sn-radius-full);
+}
+
+.sn-progress-bar::-webkit-progress-value {
+  background: var(--sn-color-primary);
+  border-radius: var(--sn-radius-full);
+}
+
+.sn-progress-bar::-moz-progress-bar {
+  background: var(--sn-color-primary);
+  border-radius: var(--sn-radius-full);
+}

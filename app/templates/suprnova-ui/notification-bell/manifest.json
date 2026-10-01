@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.notification-bell",
+  "version": 1,
+  "root": "suprnova-ui/notification-bell",
+  "files": [
+    "notification-bell.html",
+    "notification-bell.css"
+  ],
+  "elements": []
+}
