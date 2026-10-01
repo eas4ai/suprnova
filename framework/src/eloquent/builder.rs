@@ -3254,13 +3254,65 @@ fn warn_sqlite_lock_once() {
     });
 }
 
+/// The model's table in a query that joins another table: its name as the
+/// builder holds it, and the quoted form the query's FROM writes.
+///
+/// A joined query quotes the identifiers of its joins and the `table.*` it
+/// selects by default, so it quotes the model's table in its FROM too. The
+/// NULL tests the builder writes on that table, the soft-delete filter and
+/// `only_trashed`'s, then name it in the same quoted form. Otherwise, on
+/// Postgres, a mixed-case name would resolve to a different table in one
+/// place than in another.
+#[derive(Clone, Copy)]
+struct JoinedTable<'a> {
+    name: &'a str,
+    quoted: &'a str,
+}
+
+/// `column` as the query writes it: a column of the model's table in a
+/// joined query names the table in its quoted form; any other column is
+/// written as given.
+fn joined_column(joined: Option<JoinedTable<'_>>, column: &str) -> String {
+    match joined.and_then(|table| {
+        let rest = column.strip_prefix(table.name)?.strip_prefix('.')?;
+        Some((table.quoted, rest))
+    }) {
+        Some((quoted, rest)) => format!("{quoted}.{rest}"),
+        None => column.to_owned(),
+    }
+}
+
 impl<M> Builder<M> {
+    /// The model's `table` as this query's FROM writes it: quoted when the
+    /// query joins another table (see [`JoinedTable`]), and as written
+    /// otherwise, as it always has been.
+    fn from_table(&self, backend: DbBackend, table: &str) -> String {
+        if self.joins.is_empty() {
+            table.to_owned()
+        } else {
+            quote_identifier(backend, table)
+        }
+    }
+
+    /// The model's table as [`JoinedTable`] when this query joins another,
+    /// `from` being what [`Self::from_table`] wrote for it.
+    fn joined_table<'a>(&self, table: &'a str, from: &'a str) -> Option<JoinedTable<'a>> {
+        (!self.joins.is_empty()).then_some(JoinedTable {
+            name: table,
+            quoted: from,
+        })
+    }
+
+    /// Render one WHERE or HAVING term. `joined` is the model's table when
+    /// the query joins another, so a NULL test on it names the table the
+    /// way the FROM does; `None` for a query without a join.
     fn render_where_term(
         backend: DbBackend,
         term: &WhereTerm,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
         binder: ColumnBinder,
+        joined: Option<JoinedTable<'_>>,
     ) -> Result<String, FrameworkError> {
         Ok(match term {
             WhereTerm::Eq(col, v) => {
@@ -3325,8 +3377,8 @@ impl<M> Builder<M> {
                 values.push(bind_value(backend, binder, col, b));
                 format!("{col} NOT BETWEEN {pa} AND {pb}")
             }
-            WhereTerm::Null(col) => format!("{col} IS NULL"),
-            WhereTerm::NotNull(col) => format!("{col} IS NOT NULL"),
+            WhereTerm::Null(col) => format!("{} IS NULL", joined_column(joined, col)),
+            WhereTerm::NotNull(col) => format!("{} IS NOT NULL", joined_column(joined, col)),
             WhereTerm::Like(col, pat) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
@@ -3369,20 +3421,20 @@ impl<M> Builder<M> {
                 format!("{lhs} = {ph}")
             }
             WhereTerm::Not(inner) => {
-                let inner_sql = Self::render_where_term(backend, inner, values, n, binder)?;
+                let inner_sql = Self::render_where_term(backend, inner, values, n, binder, joined)?;
                 format!("NOT ({inner_sql})")
             }
             WhereTerm::Or(terms) => {
                 let parts: Vec<String> = terms
                     .iter()
-                    .map(|t| Self::render_where_term(backend, t, values, n, binder))
+                    .map(|t| Self::render_where_term(backend, t, values, n, binder, joined))
                     .collect::<Result<Vec<_>, _>>()?;
                 format!("({})", parts.join(" OR "))
             }
             WhereTerm::Group(terms) => {
                 let parts: Vec<String> = terms
                     .iter()
-                    .map(|t| Self::render_where_term(backend, t, values, n, binder))
+                    .map(|t| Self::render_where_term(backend, t, values, n, binder, joined))
                     .collect::<Result<Vec<_>, _>>()?;
                 if parts.is_empty() {
                     // See the matching arm in `render_subquery_term`:
@@ -3462,6 +3514,7 @@ impl<M> Builder<M> {
         backend: DbBackend,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
+        joined: Option<JoinedTable<'_>>,
     ) -> Result<String, FrameworkError> {
         if self.having_terms.is_empty() {
             return Ok(String::new());
@@ -3469,7 +3522,7 @@ impl<M> Builder<M> {
         let parts: Vec<String> = self
             .having_terms
             .iter()
-            .map(|t| Self::render_where_term(backend, t, values, n, self.binder))
+            .map(|t| Self::render_where_term(backend, t, values, n, self.binder, joined))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(format!(" HAVING {}", parts.join(" AND ")))
     }
@@ -3569,8 +3622,7 @@ impl<M> Builder<M> {
             // COUNT counts distinct grouped/unioned rows.
             sql.push_str("SELECT COUNT(*) AS count FROM (");
             sql.push_str("SELECT 1 AS __paginate_marker FROM ");
-            sql.push_str(table);
-            this.render_count_body(backend, &mut sql, &mut values, &mut n)?;
+            this.render_count_body(backend, table, &mut sql, &mut values, &mut n)?;
 
             // Union arms - recurse with the same placeholder counter
             // so Postgres `$N` stays monotonic. Each arm projects the
@@ -3579,28 +3631,27 @@ impl<M> Builder<M> {
                 let connector = if *all { " UNION ALL " } else { " UNION " };
                 sql.push_str(connector);
                 sql.push_str("SELECT 1 AS __paginate_marker FROM ");
-                sql.push_str(table);
-                other.render_count_body(backend, &mut sql, &mut values, &mut n)?;
+                other.render_count_body(backend, table, &mut sql, &mut values, &mut n)?;
             }
 
             sql.push_str(") AS __suprnova_paginate_subquery");
         } else {
             sql.push_str("SELECT COUNT(*) AS count FROM ");
-            sql.push_str(table);
-            this.render_count_body(backend, &mut sql, &mut values, &mut n)?;
+            this.render_count_body(backend, table, &mut sql, &mut values, &mut n)?;
         }
 
         Ok((sql, values))
     }
 
-    /// Append the WHERE / GROUP BY / HAVING clauses (without the
-    /// leading SELECT or FROM) onto `sql`. Used by
+    /// Append the table, joins and WHERE / GROUP BY / HAVING clauses
+    /// (without the leading `SELECT ... FROM`) onto `sql`. Used by
     /// [`Self::render_count_select_for`] for both the flat and
     /// subquery-wrapped shapes - DRY-ing the clause emission across
     /// the two render paths.
     fn render_count_body(
         &self,
         backend: DbBackend,
+        table: &str,
         sql: &mut String,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
@@ -3608,13 +3659,16 @@ impl<M> Builder<M> {
         // A union arm arrives here directly, so it resolves its own scopes.
         let this = self.effective();
         let this = &*this;
+        let from = this.from_table(backend, table);
+        let joined = this.joined_table(table, &from);
+        sql.push_str(&from);
         sql.push_str(&this.render_joins(backend, values, n)?);
         if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
             let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, values, n, self.binder))
+                .map(|t| Self::render_where_term(backend, t, values, n, self.binder, joined))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
@@ -3624,7 +3678,7 @@ impl<M> Builder<M> {
             sql.push_str(&this.group_by.join(", "));
         }
 
-        sql.push_str(&this.render_having(backend, values, n)?);
+        sql.push_str(&this.render_having(backend, values, n, joined)?);
         Ok(())
     }
 
@@ -3646,6 +3700,8 @@ impl<M> Builder<M> {
         // A union arm arrives here directly, so it resolves its own scopes.
         let this = self.effective();
         let this = &*this;
+        let from = this.from_table(backend, table);
+        let joined = this.joined_table(table, &from);
         let mut sql = String::new();
 
         sql.push_str("SELECT ");
@@ -3656,17 +3712,17 @@ impl<M> Builder<M> {
             sql.push_str(raw);
         } else if let Some(cols) = &this.select_cols {
             sql.push_str(&cols.join(", "));
-        } else if column_expr == "*" && !this.joins.is_empty() {
+        } else if column_expr == "*" && joined.is_some() {
             // A joined table may carry columns of the same name, `id`
             // first among them. Selecting the model's own table keeps a
             // joined row's values out of the model.
-            sql.push_str(&quote_identifier(backend, table));
+            sql.push_str(&from);
             sql.push_str(".*");
         } else {
             sql.push_str(column_expr);
         }
         sql.push_str(" FROM ");
-        sql.push_str(table);
+        sql.push_str(&from);
         sql.push_str(&this.render_joins(backend, values, n)?);
 
         // `this`, not `self`: a union arm arrives here with its scope
@@ -3677,7 +3733,7 @@ impl<M> Builder<M> {
             let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, values, n, this.binder))
+                .map(|t| Self::render_where_term(backend, t, values, n, this.binder, joined))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
@@ -3687,7 +3743,7 @@ impl<M> Builder<M> {
             sql.push_str(&this.group_by.join(", "));
         }
 
-        sql.push_str(&this.render_having(backend, values, n)?);
+        sql.push_str(&this.render_having(backend, values, n, joined)?);
         sql.push_str(&this.render_orders(backend, values, n)?);
 
         if let Some(l) = this.limit {
@@ -4402,7 +4458,9 @@ where
             let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n, self.binder))
+                .map(|t| {
+                    Self::render_where_term(backend, t, &mut values, &mut n, self.binder, None)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
@@ -5771,7 +5829,9 @@ where
             let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n, this.binder))
+                .map(|t| {
+                    Self::render_where_term(backend, t, &mut values, &mut n, this.binder, None)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
@@ -5840,7 +5900,9 @@ where
             let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n, this.binder))
+                .map(|t| {
+                    Self::render_where_term(backend, t, &mut values, &mut n, this.binder, None)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
@@ -5940,7 +6002,9 @@ where
             let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n, this.binder))
+                .map(|t| {
+                    Self::render_where_term(backend, t, &mut values, &mut n, this.binder, None)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }

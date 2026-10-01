@@ -36,6 +36,16 @@ pub struct JmPost {
     pub deleted_at: Option<String>,
 }
 
+/// A model whose table name has capitals. Postgres folds an unquoted name
+/// to lower case, so a joined query has to quote this name the same way
+/// everywhere it writes it, or one reference names a different table.
+#[model(table = "JmAuthors", soft_deletes)]
+pub struct JmAuthor {
+    pub id: i64,
+    pub name: String,
+    pub deleted_at: Option<String>,
+}
+
 /// User ids are 1 to 3 and post ids start at 101, so a post that carries
 /// a user's id is easy to spot. Grace and post 105 are trashed.
 async fn seed(fx: &Fixture) {
@@ -378,6 +388,32 @@ async fn only_trashed_names_the_models_table_when_the_query_joins() {
         everything.iter().map(|p| p.id).collect::<Vec<_>>(),
         vec![101, 102, 103, 104, 105]
     );
+}
+
+/// The joined query quotes the model's table in its default select, so it
+/// has to quote it in the FROM and in the soft-delete filter too.
+#[tokio::test]
+async fn a_joined_model_query_quotes_every_reference_to_its_mixed_case_table() {
+    let joined = || JmAuthor::query().join("jm_posts", "jm_posts.author_id", "=", "JmAuthors.id");
+    for backend in [DatabaseBackend::Sqlite, DatabaseBackend::Postgres] {
+        for (shape, query) in [
+            ("default", joined()),
+            ("only_trashed", joined().only_trashed()),
+        ] {
+            let (sql, _) = query
+                .try_to_sql_with_bindings_for(backend)
+                .expect("the query renders");
+            assert!(
+                sql.contains(r#"FROM "JmAuthors""#),
+                "{shape} on {backend:?}: the FROM is not quoted: {sql}"
+            );
+            assert_eq!(
+                sql.matches("JmAuthors").count(),
+                sql.matches(r#""JmAuthors""#).count(),
+                "{shape} on {backend:?}: a reference to the table is not quoted: {sql}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
