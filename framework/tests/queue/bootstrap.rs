@@ -186,9 +186,23 @@ async fn production_refuses_an_unknown_queue_driver() {
 /// Found in the container harness: the dogfood app had the table, ran the
 /// migration, and still recorded `failed_jobs = 0` when a poison job was
 /// finally dead-lettered.
+///
+/// Runs alone in a child process (see `own_process`). The test leaves the
+/// process-wide `DB` connection (an in-memory SQLite database with no
+/// `failed_jobs` table) and the database failed-jobs store it binds in
+/// place for the life of the process, so a later test in this binary that
+/// dead-letters a job would write into a table that does not exist.
+#[test]
+fn the_database_driver_binds_a_failed_jobs_store() {
+    crate::own_process::run_alone("bootstrap::the_database_driver_binds_a_failed_jobs_store_child");
+}
+
 #[tokio::test]
 #[serial]
-async fn the_database_driver_binds_a_failed_jobs_store() {
+async fn the_database_driver_binds_a_failed_jobs_store_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     let _env = crate::env_lock::lock_env_async().await;
     // The binding is what is under test, not the schema - `bootstrap_from_env`
     // only needs a live connection to hand the two stores.
