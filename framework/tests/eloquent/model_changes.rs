@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 use suprnova::database::{DatabaseConfig, DbConnection};
 use suprnova::eloquent::observers::Observer;
 use suprnova::testing::{TestClock, TestContainer, TestContainerGuard, TestDatabase};
-use suprnova::{AsBool, Attrs, DB, FrameworkError, Model, attrs, model};
+use suprnova::{AsBool, AsEncrypted, Attrs, DB, FrameworkError, Model, attrs, model};
 
 // ---- Models -------------------------------------------------------------
 
@@ -75,6 +75,21 @@ pub struct ChangePost {
     pub body: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// A model with an encrypted column. `AsEncrypted` writes a new ciphertext
+/// on every save, so the stored value of `secret` differs after any save;
+/// only a change to the secret itself is a change.
+#[model(
+    table = "par_secret_users",
+    timestamps = false,
+    fillable = ["secret", "is_admin"],
+    casts = { secret = AsEncrypted, is_admin = AsBool }
+)]
+pub struct SecretUser {
+    pub id: i64,
+    pub secret: String,
+    pub is_admin: bool,
 }
 
 /// The observer scenario's model for the live-engine variants. Separate
@@ -489,6 +504,46 @@ async fn a_save_with_timestamps_also_reports_updated_at() {
     assert_eq!(keys, vec!["title".to_string(), "updated_at".to_string()]);
     assert!(post.was_changed("updated_at"));
     assert!(!post.was_changed("created_at"));
+}
+
+#[tokio::test]
+async fn an_encrypted_column_is_changed_only_when_its_value_changes() {
+    suprnova::testing::install_test_encryption_key();
+    let db = sqlite().await;
+    db.execute_unprepared(
+        "CREATE TABLE par_secret_users (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            secret TEXT NOT NULL, \
+            is_admin INTEGER NOT NULL)",
+    )
+    .await
+    .unwrap();
+    let created = SecretUser::create(attrs! { secret: "first secret", is_admin: false })
+        .await
+        .unwrap();
+    let mut user = SecretUser::find_or_fail(created.id).await.unwrap();
+
+    user.is_admin = true;
+    user.save().await.unwrap();
+    assert!(
+        !user.was_changed("secret"),
+        "the save stored a new ciphertext of the same secret: {:?}",
+        sorted_changes(&user.get_changes())
+    );
+    assert_eq!(
+        sorted_changes(&user.get_changes()),
+        vec![("is_admin".to_string(), json!(1))]
+    );
+
+    user.secret = "second secret".into();
+    user.save().await.unwrap();
+    assert!(user.was_changed("secret"), "a new secret is a change");
+    assert!(!user.was_changed("is_admin"));
+    let keys: Vec<String> = sorted_changes(&user.get_changes())
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    assert_eq!(keys, vec!["secret".to_string()]);
 }
 
 #[tokio::test]
