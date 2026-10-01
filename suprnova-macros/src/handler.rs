@@ -574,15 +574,60 @@ mod tests {
     }
 
     #[test]
-    fn authorize_param_bound_by_a_pattern_is_not_a_parameter_name() {
-        // `RouteParam(post)` binds `post` inside a pattern; the attribute
-        // names a parameter, so it must be written `post: RouteParam<Post>`.
+    fn authorize_names_the_binding_inside_a_route_param_pattern() {
+        // `RouteParam(post)` binds `post` to the model inside the wrapper,
+        // so the check runs against `post` itself, with no `Deref`.
         let out = expansion(quote! {
             #[authorize("update", post)]
             pub async fn update(RouteParam(post): RouteParam<Post>) -> Response { todo!() }
         });
-        assert!(out.contains("compile_error"), "got:\n{out}");
-        assert!(out.contains("no parameter named `post`"), "got:\n{out}");
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            out.contains("__authorize_handler (\"update\" , & post)"),
+            "got:\n{out}"
+        );
+        assert!(!out.contains("Deref"), "got:\n{out}");
+    }
+
+    #[test]
+    fn destructured_route_param_is_looked_up_by_its_binding() {
+        // The route parameter is named after the pattern's binding, as for
+        // a plain identifier: `RouteParam(user)` reads `{user}`.
+        for param in [
+            quote! { RouteParam(user): RouteParam<User> },
+            quote! { RouteParam(mut user): RouteParam<User> },
+            quote! { suprnova::RouteParam(user): suprnova::RouteParam<User> },
+            quote! { user: RouteParam<User> },
+        ] {
+            let out = expansion(quote! {
+                pub async fn show(#param) -> Response { todo!() }
+            });
+            assert!(!out.contains("compile_error"), "got:\n{out}");
+            assert!(
+                out.contains("get (\"user\")"),
+                "`{param}` must read the route parameter `user`; got:\n{out}"
+            );
+            assert!(!out.contains("\"param\""), "got:\n{out}");
+        }
+    }
+
+    #[test]
+    fn route_bound_pattern_without_one_binding_is_a_compile_error() {
+        // No single binding to name the route parameter after: reject it
+        // rather than read a parameter the route does not have.
+        for param in [
+            quote! { user::Model { id, name, .. }: user::Model },
+            quote! { RouteParam(User { id, .. }): RouteParam<User> },
+        ] {
+            let out = expansion(quote! {
+                pub async fn show(#param) -> Response { todo!() }
+            });
+            assert!(
+                out.contains("compile_error"),
+                "`{param}` must be rejected; got:\n{out}"
+            );
+            assert!(out.contains("route parameter"), "got:\n{out}");
+        }
     }
 
     #[test]

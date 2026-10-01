@@ -216,6 +216,14 @@ pub async fn archive(post: RouteParam<HaPost>) -> Response {
     text(format!("archived {}", post.id))
 }
 
+// The pattern form: `post` is the model inside the wrapper, and the route
+// parameter is named after it.
+#[handler]
+#[authorize("view-ha-post", post)]
+pub async fn show_destructured(RouteParam(post): RouteParam<HaPost>) -> Response {
+    text(format!("destructured {}", post.id))
+}
+
 fn build_router() -> Router {
     Router::new()
         .get("/posts/{post}", show)
@@ -224,6 +232,7 @@ fn build_router() -> Router {
         .delete("/posts/{post}", destroy)
         .post("/posts/{post}/publish", publish)
         .post("/posts/{post}/archive", archive)
+        .get("/destructured/{post}", show_destructured)
         .into()
 }
 
@@ -507,4 +516,21 @@ async fn every_attribute_applies_in_order() {
     // And a guest stops at the first.
     let (status, body) = send(addr, "POST", "/posts/1/publish", None, None).await;
     assert_eq!(status, 401, "body: {body}");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_destructured_route_param_is_checked_as_the_bound_model() {
+    let (_db, addr) = boot().await;
+
+    assert_eq!(
+        send(addr, "GET", "/destructured/2", Some(AUTHOR), None).await,
+        (200, "destructured 2".to_string())
+    );
+    let (status, body) = send(addr, "GET", "/destructured/2", Some(STRANGER), None).await;
+    assert_eq!(status, 404, "deny as not found: {body}");
+    let (status, body) = send(addr, "GET", "/destructured/1", None, None).await;
+    assert_eq!(status, 401, "guest: {body}");
+    let (status, body) = send(addr, "GET", "/destructured/999", Some(AUTHOR), None).await;
+    assert_eq!(status, 404, "missing model: {body}");
 }
