@@ -213,10 +213,31 @@ let dispatcher = NotificationDispatcher::new()
 
 The second argument is the recipient's polymorphic type tag (what you
 store in `notifiable_type` so you can query inbox rows back later). The
-recipient's `route_for("database")` becomes the `notifiable_id`. The
-migration ships with the framework
-(`framework/migrations/20260516_create_notifications_table.sql`); run
-`suprnova migrate` and the table appears.
+recipient's `route_for("database")` becomes the `notifiable_id`.
+
+The framework ships the table as a migration,
+`suprnova::notifications::migrations::CreateNotificationsTable`. Register
+it in your app's `Migrator`:
+
+```rust
+use sea_orm_migration::{MigrationTrait, MigratorTrait};
+use suprnova::notifications::migrations::CreateNotificationsTable;
+
+pub struct Migrator;
+
+impl MigratorTrait for Migrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![
+            // ... your app's migrations ...
+            Box::new(CreateNotificationsTable),
+        ]
+    }
+}
+```
+
+Then run `suprnova migrate` and the table appears. Until the `Migrator`
+lists the migration, the channel's first insert fails on the missing
+table.
 
 #### Reading the inbox
 

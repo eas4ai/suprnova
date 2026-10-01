@@ -864,6 +864,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **The notifications table ships as a migration.** The manual said
+  `suprnova migrate` creates it, but the schema was a SQL file only the
+  framework's own tests loaded, so the database channel failed on its
+  first write in a fresh app. Register
+  `suprnova::notifications::migrations::CreateNotificationsTable` in your
+  `Migrator`: it creates the same table and indexes, and running it over a
+  table you created by hand from the old SQL file is safe on every engine.
+  The SQL file is gone. This fix landed on main after the `v3.0.0` tag
+  (#134).
 - **Nullable JSON columns have casts.** `AsJson`, `AsArray`, `AsObject`,
   `AsCollection` and `AsArrayObject` store a non-null string, so
   `AsJson<Option<T>>` wrote the text `null` instead of SQL `NULL`, and a

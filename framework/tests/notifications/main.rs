@@ -10,6 +10,8 @@ pub mod dispatch;
 pub mod lifecycle;
 pub mod mail;
 pub mod mail_derive;
+pub mod migration;
+pub mod migration_mysql;
 pub mod notify_fake;
 pub mod queue;
 pub mod telemetry;
