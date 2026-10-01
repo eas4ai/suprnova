@@ -321,7 +321,9 @@ The second argument is either a parameter or a type:
 - A single name that starts with a lowercase letter, such as `post`, is a
   parameter of the handler. The check runs against the value the route
   binds to it. For a `RouteParam<Post>` parameter, that is the `Post`
-  inside. A name the handler does not take is a compile error.
+  inside. The name can also be the binding of a pattern, as in
+  `RouteParam(post): RouteParam<Post>`. A name the handler does not take
+  is a compile error.
 - Anything else, such as `Post` or `post::Model`, is a type. The gate is
   keyed by type, so the check runs against `Post::default()`, the same
   stand-in [`authorize_resource`](#gating-resource-routes) uses. Every

@@ -443,8 +443,9 @@ pub fn handler(attr: TokenStream, input: TokenStream) -> TokenStream {
 /// starts with a lowercase letter or `_`, as Rust names values; anything
 /// else (`Post`, `post::Model`, `crate::models::Post`) is a type.
 ///
-/// - A parameter must be one the handler takes, named by an identifier
-///   pattern (`post: RouteParam<Post>`), or the handler does not compile.
+/// - A parameter must be the binding of one the handler takes, written
+///   `post: RouteParam<Post>` or `RouteParam(post): RouteParam<Post>`, or
+///   the handler does not compile.
 ///   It must come from the route: a `RouteParam<M>` (checked as the `M`
 ///   inside), a `...::Model`, or a path value such as `i64`. A form request
 ///   or `Request` reads the body, which the check runs before, so naming one

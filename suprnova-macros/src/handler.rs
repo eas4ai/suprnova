@@ -37,7 +37,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{FnArg, Ident, ItemFn, Pat, PatType, Type};
+use syn::{FnArg, Ident, ItemFn, Pat, PatIdent, PatType, Type};
 
 use crate::authorize::{AuthorizeSpec, Target, is_authorize_attr, parse_spec};
 
@@ -208,7 +208,24 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
     for (pat_type, kind) in &classifications {
         let param_pat = &pat_type.pat;
         let param_type = &pat_type.ty;
-        let param_name = extract_param_name(param_pat);
+        // Only route-bound extractions read a route parameter by name.
+        let param_name = if reads_body(kind) {
+            String::new()
+        } else {
+            match extract_param_name(param_pat) {
+                Some(name) => name,
+                None => {
+                    return syn::Error::new_spanned(
+                        param_pat,
+                        "#[handler] reads a route parameter named after the \
+                         parameter's binding, and this pattern has no single \
+                         binding to name it by: write `user: T`, or \
+                         `RouteParam(user): RouteParam<T>`",
+                    )
+                    .to_compile_error();
+                }
+            }
+        };
         let extraction = generate_extraction(param_pat, param_type, &param_name, kind);
         if !checks.is_empty() && reads_body(kind) {
             body_extractions.push(extraction);
@@ -236,9 +253,9 @@ fn reads_body(kind: &ParamKind) -> bool {
 
 /// Emit one gate check per `#[authorize]`, in the order written.
 ///
-/// A parameter target must be a parameter of the handler, bound by an
-/// identifier pattern, that the route supplies; anything else is a
-/// compile error spanned on the name in the attribute.
+/// A parameter target must be the binding of a handler parameter the route
+/// supplies, written `post: T` or `RouteParam(post): RouteParam<T>`;
+/// anything else is a compile error spanned on the name in the attribute.
 fn authorize_checks(
     specs: &[AuthorizeSpec],
     classifications: &[(&PatType, ParamKind)],
@@ -256,16 +273,18 @@ fn authorize_checks(
                 }
                 Target::Param(name) => name,
             };
-            let found = classifications.iter().find(
-                |(pat_type, _)| matches!(&*pat_type.pat, Pat::Ident(pat) if pat.ident == *name),
-            );
-            let Some((pat_type, kind)) = found else {
+            let found = classifications.iter().find_map(|(pat_type, kind)| {
+                let binding = route_binding(&pat_type.pat)?;
+                (binding.ident == *name).then_some((pat_type, kind, binding))
+            });
+            let Some((pat_type, kind, binding)) = found else {
                 return Err(syn::Error::new_spanned(
                     name,
                     format!(
                         "#[authorize] names `{name}`, but `{fn_name}` takes no parameter \
                          named `{name}`; name a parameter the route binds, written \
-                         as `{name}: RouteParam<Model>`"
+                         as `{name}: RouteParam<Model>` or \
+                         `RouteParam({name}): RouteParam<Model>`"
                     ),
                 ));
             };
@@ -279,12 +298,20 @@ fn authorize_checks(
                     ),
                 ));
             }
-            // A `RouteParam<M>` is checked as the `M` inside it, the type
-            // its policy is registered for.
-            let resource = if is_route_param(&pat_type.ty) {
-                quote! { ::core::ops::Deref::deref(&#name) }
+            // A `ref` binding already holds a reference.
+            let value = if binding.by_ref.is_some() {
+                quote! { #name }
             } else {
                 quote! { &#name }
+            };
+            // A `RouteParam<M>` is checked as the `M` inside it, the type
+            // its policy is registered for. A binding of the whole wrapper
+            // derefs to it; `RouteParam(post)` already binds the `M`.
+            let whole = matches!(&*pat_type.pat, Pat::Ident(_));
+            let resource = if whole && is_route_param(&pat_type.ty) {
+                quote! { ::core::ops::Deref::deref(#value) }
+            } else {
+                value
             };
             Ok(quote! {
                 ::suprnova::authorization::__authorize_handler(#ability, #resource).await?;
@@ -293,12 +320,28 @@ fn authorize_checks(
         .collect()
 }
 
-/// Extract the parameter name as a string from the pattern
-fn extract_param_name(pat: &Pat) -> String {
+/// The route parameter a route-bound parameter reads: the name of its
+/// binding (see [`route_binding`]), or `_` for a wildcard. `None` when the
+/// pattern has no single binding to name it by.
+fn extract_param_name(pat: &Pat) -> Option<String> {
     match pat {
-        Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
-        Pat::Wild(_) => "_".to_string(),
-        _ => "param".to_string(),
+        Pat::Wild(_) => Some("_".to_string()),
+        _ => route_binding(pat).map(|binding| binding.ident.to_string()),
+    }
+}
+
+/// The one binding of a parameter pattern: the identifier of `user: T`, or
+/// of the single field in a tuple-struct pattern such as
+/// `RouteParam(user): RouteParam<T>`, which binds the model inside the
+/// wrapper. `None` for any other pattern.
+fn route_binding(pat: &Pat) -> Option<&PatIdent> {
+    match pat {
+        Pat::Ident(binding) => Some(binding),
+        Pat::TupleStruct(tuple) if tuple.elems.len() == 1 => match tuple.elems.first() {
+            Some(Pat::Ident(binding)) => Some(binding),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
