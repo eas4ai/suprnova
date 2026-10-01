@@ -2,7 +2,8 @@
 //!
 //! Mirrors Laravel's `SyncQueue`. The envelope runs inline through the
 //! worker's middleware pipeline (`run_through_middleware`) before `push`
-//! returns; there is no background worker, no retry, and no delayed-job
+//! returns, and so does every later link of a chain, until one does not
+//! complete. There is no background worker, no retry, and no delayed-job
 //! support - `push` for an
 //! envelope with `available_at` in the future runs immediately anyway, just
 //! like Laravel's sync driver (a "fake" queue for development).
@@ -16,7 +17,8 @@ use crate::error::FrameworkError;
 use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
 use crate::queue::envelope::Envelope;
 use crate::queue::inspect::InspectedJob;
-use crate::queue::worker::run_through_middleware;
+use crate::queue::outcome::JobOutcome;
+use crate::queue::worker::{chain_successor, run_through_middleware};
 use async_trait::async_trait;
 use std::time::Duration;
 
@@ -46,7 +48,29 @@ impl QueueDriver for SyncQueueDriver {
         // worker would. Errors propagate to the caller of `Queue::push`;
         // there is no retry or loop-lifecycle event path because there is no
         // background worker (the loop owns reservation/retry/event state).
-        run_through_middleware(env).await.map(|_outcome| ())
+        //
+        // A chain continues inline, link by link, as Laravel's sync queue
+        // dispatches the next job of a chain from the one that just ran. As
+        // on a worker, only a completed link starts the next one: an error
+        // returns here with the rest of the chain unrun, and a link that
+        // middleware released, failed or deleted ends the chain. The queue
+        // fake decides for each later link, as it does on a worker.
+        let mut current = Some(env);
+        while let Some(env) = current.take() {
+            let outcome = run_through_middleware(env.clone()).await?;
+            if !matches!(outcome, JobOutcome::Completed) {
+                break;
+            }
+            let Some(next) = chain_successor(&env, &crate::queue::Queue::connection_name()) else {
+                break;
+            };
+            if crate::queue::testing::fakes(&next.job_name) {
+                crate::queue::testing::record_envelope(&next);
+                break;
+            }
+            current = Some(next);
+        }
+        Ok(())
     }
 
     async fn pop(&self, _vt: Duration) -> Result<Option<Reservation>, FrameworkError> {

@@ -1623,6 +1623,10 @@ The first envelope is pushed at dispatch; the rest travel on its
 worker pops the next entry and dispatches it. A failure breaks the
 chain - subsequent links are never enqueued.
 
+The [`sync` driver](#drivers) has no worker, so it runs the whole chain
+inline inside `dispatch()`, link by link. A link whose handler fails returns
+its error from `dispatch()`, and the links after it do not run.
+
 Each link applies its job's own `Job::delay()`, as a direct push does. A
 delay of 30 seconds on the head makes the head available 30 seconds after
 `dispatch()`. A delay on any later link makes that link available that long
