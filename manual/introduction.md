@@ -110,7 +110,7 @@ A non-exhaustive map. The full list is in [`documentation.md`](documentation.md)
 | **Frontend** | Inertia v3 bridge, Svelte 5 / React 19 / Vue 3.5 starter templates, typed `#[derive(InertiaProps)]`, partial reloads, automatic TypeScript type generation |
 | **Background** | Queue with memory/sync/redis/database/null drivers, batches, chains, job middleware, failed-job store, `#[command]`/`#[derive(Command)]` console binary, `Task` trait scheduler, `#[workflow]` long-running stateful work, `Supervisor` trait with panic-catch auto-restart, command bus, event dispatcher |
 | **Realtime** | `ws!()` macro for typed WebSocket handlers, broadcasting channels (public, private, presence), sea-streamer fanout, server-sent events, web push (VAPID) |
-| **Cache & Storage** | Memory, Redis, Database cache drivers; atomic operations; tagged cache; cache locks; filesystem with fs/memory/s3/azblob/gcs drivers; path-traversal protection; vector storage with multiple backends |
+| **Cache & Storage** | Memory and Redis cache drivers; atomic operations; tagged cache; cache locks; filesystem with fs/memory/s3/azblob/gcs drivers; path-traversal protection; vector storage with multiple backends |
 | **Mail & Notify** | `Mailable` trait, SMTP/SES/Mailgun/Postmark/SendGrid/Resend drivers, RFC 5322 file previews, in-memory/log transports, and `Notifiable` with mail/database/broadcast/webpush channels |
 | **Validation & Data** | `#[derive(Validate)]`, form requests, async validation, `#[derive(Data)]` for partial-reload include sets, `#[json_resource]` on `Data` for JSON:API |
 | **Payments** | Generic provider surface (gateway/MoR/redirect-flow), reference adapters for Stripe and Paddle, mirror tables with webhook idempotency, Inertia checkout components |
