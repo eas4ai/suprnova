@@ -823,6 +823,50 @@ the job's own `Job::after_commit()` or the switch. Queue connections here do
 not carry their own dispatch policy, so the switch applies to every
 connection.
 
+### Raw pushes
+
+`Queue::push_raw(payload, queue)` pushes a payload that is already an
+envelope, in the JSON form `Envelope::to_json` writes, onto the default
+connection. It is Laravel's `Queue::pushRaw`: use it for a payload you did
+not build from a typed job, such as one another service produced or one
+replayed from an export.
+
+```rust
+use suprnova::{FrameworkError, Queue};
+
+async fn replay(lines: Vec<String>) -> Result<(), FrameworkError> {
+    for line in lines {
+        // Each line is an envelope a producer wrote with `Envelope::to_json`.
+        Queue::push_raw(&line, Some("replays")).await?;
+    }
+    Ok(())
+}
+```
+
+A worker runs a raw-pushed envelope like any other, with the handler
+registered for its `job_name`, so that job type has to be registered in the
+process that drains the queue. The envelope goes on the queue as it is, apart
+from its queue: `Some(queue)` replaces the envelope's own queue and is
+redirected by [`Queue::forward`](#forwarding-a-whole-queue) like a per-push
+override, and `None` keeps the queue the envelope carries.
+
+A raw push skips everything a typed push resolves from the job type:
+`Queue::route`, `Job::after_commit`, and the `JobQueueing` / `JobQueued`
+events, which Laravel's `pushRaw` does not fire either. To push to another
+connection, go through its driver: `Queue::connection("reports")?.push(envelope)`
+with the decoded `Envelope`. Under `Queue::fake()` the payload is recorded,
+see [Testing](#raw-pushes-under-the-fake).
+
+#### Why Suprnova diverges
+
+Laravel stores a raw payload as whatever string it is given, and nothing
+checks it until a worker tries to run it. Here the payload has to decode as an
+`Envelope` this build can read, and `push_raw` returns an error when it does
+not, under `Queue::fake()` too: every driver stores envelopes, so a payload
+that is not one could never reach a worker. Laravel's sync driver also drops a
+raw push without running it; `SyncQueueDriver` runs it, as it runs every
+other envelope.
+
 ## Job configuration
 
 Override `Job`'s associated functions to tune behavior per impl:
@@ -1898,7 +1942,8 @@ production.
 Every path that would write to the driver records in the fake instead:
 `Queue::batch()...dispatch()`, `Queue::chain()...dispatch()`,
 `Queue::retry_failed` and `Queue::retry_all_failed`. None of them needs a
-driver under the fake, and none writes to one that is installed.
+driver under the fake, and none writes to one that is installed, unless
+[`except`](#letting-some-jobs-through) names the job.
 
 - A batch records as a `FakedBatch` with its `id`, `name` and `jobs`. The
   repository still stores the batch, so the id you receive names a batch.
@@ -1935,6 +1980,83 @@ let report: Option<GenerateReport> = chained()[0].link::<GenerateReport>(0);
 matches a chain made of exactly those jobs. `assert_nothing_batched` and
 `assert_nothing_chained` assert the opposite. See
 [Mocking](mocking.md#queue---queuefake) for the whole table.
+
+`assert_pushed_without_chain::<J>()` asserts the reverse of a chain: at least
+one push of `J` carried no chain. A job pushed on its own passes, and so does
+a batch member or a chain of one job. The head of a longer chain carries the
+rest of the chain, so it does not:
+
+```rust
+use suprnova::queue::testing::assert_pushed_without_chain;
+
+let _guard = suprnova::Queue::fake();
+send_receipt(order_id).await?;
+
+// The receipt went out on its own, not as the first step of a chain.
+assert_pushed_without_chain::<SendReceipt>();
+```
+
+### Letting some jobs through
+
+`Queue::fake_except(&[...])` fakes every job except the ones named, which
+reach the real queue as they would without the fake. Each name is a
+`Job::job_name()`. `Queue::fake().except(&[...])` is the same call on the
+guard, and calling `except` again adds to the names already excepted:
+
+```rust
+use std::sync::Arc;
+use suprnova::Queue;
+use suprnova::queue::SyncQueueDriver;
+use suprnova::queue::testing::assert_pushed;
+
+Queue::set_driver(Arc::new(SyncQueueDriver::new()));
+let _guard = Queue::fake_except(&["ProvisionAccount"]);
+
+activate_account(42).await?;
+
+// ProvisionAccount ran on the sync driver; the welcome email was recorded.
+assert_pushed::<SendWelcomeEmail>(|j| j.user_id == 42);
+```
+
+An excepted job takes the real path from end to end: it resolves its
+connection, reaches the driver, emits `JobQueueing` and `JobQueued`, and fails
+where a real push fails. A batch is still recorded with all of its jobs, and
+only its excepted jobs reach the real queue. A chain follows its first job,
+because the worker that runs that job dispatches the rest. A raw push is
+always recorded, whatever `except` names, because a raw payload is not a job
+type.
+
+### Raw pushes under the fake
+
+Under the fake, [`Queue::push_raw`](#raw-pushes) records its payload and writes
+no driver. Read the records back with `raw_pushes()`, every `RawPush` in push
+order, or `pushed_raw(...)`, the ones a predicate accepts:
+
+```rust
+use suprnova::queue::testing::{pushed_raw, raw_pushes};
+
+let _guard = suprnova::Queue::fake();
+replay(lines).await?;
+
+assert_eq!(raw_pushes().len(), 3);
+let invoices = pushed_raw(|raw| raw.envelope().is_ok_and(|env| env.job_name == "SendInvoice"));
+assert_eq!(invoices[0].queue.as_deref(), Some("replays"));
+```
+
+A `RawPush` holds the `payload` and the `queue` exactly as they were passed,
+and `envelope()` decodes the payload. Raw pushes are kept apart from typed
+pushes, as in Laravel: `pushed` and `assert_pushed` do not see them.
+
+### Why Suprnova diverges
+
+Laravel's `except` and `assertPushedWithoutChain` take class names. Rust has
+no class name to pass at run time, so `except` takes `Job::job_name()`s, as
+`assert_chained` and `EventFacade::fake_except` do, and
+`assert_pushed_without_chain` takes the job type. It takes no callback; to
+narrow to some pushes of `J`, read them with `pushed::<J>()`. Laravel's
+`QueueFake` does not record batches at all, so it has no rule for a batch
+that mixes excepted and faked jobs; here the batch is recorded and each job
+goes where `except` sends it.
 
 ## Idempotency is the contract between the worker and you
 
