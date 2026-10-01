@@ -78,6 +78,10 @@ fn row_state(
 /// caller keeps, after the `Saved` event and the owner touches, as
 /// Laravel's `finishSave` ends with `syncOriginal`.
 ///
+/// `decoded_equal` is the model's [`Model::__decoded_values_equal`], which
+/// compares a column whose cast stores a new value on every write by its
+/// decoded value.
+///
 /// The only failure is a stored row that will not serialize to JSON, which
 /// a `#[suprnova::model]` row cannot produce; it is still reported rather
 /// than recorded wrong.
@@ -85,10 +89,11 @@ fn record_save_on(
     saved: Option<&crate::eloquent::relations::EagerLoadCache>,
     current: Option<&crate::eloquent::relations::EagerLoadCache>,
     adopt: bool,
+    decoded_equal: crate::eloquent::changes::DecodedEqual,
 ) -> Result<(), FrameworkError> {
     let saved = row_state(saved);
     let current = row_state(current);
-    crate::eloquent::changes::record_save(saved, current)?;
+    crate::eloquent::changes::record_save(saved, current, decoded_equal)?;
     if adopt && let (Some(saved), Some(current)) = (saved, current) {
         saved.adopt(current);
     }
@@ -291,6 +296,30 @@ where
     ) -> Option<Result<Self, FrameworkError>> {
         let _ = row;
         None
+    }
+
+    /// Whether `column` holds the same value in `before` and `after`, two
+    /// of this model's stored rows whose stored values of `column` differ.
+    ///
+    /// A save tells what it changed by comparing stored rows, and asks this
+    /// for each column whose stored value differs. A column whose cast
+    /// stores a new value on every write (see
+    /// [`Cast::DETERMINISTIC_STORAGE`](crate::eloquent::casts::Cast::DETERMINISTIC_STORAGE)),
+    /// such as an encrypted one, then counts as changed only when its
+    /// decoded value did. The macro overrides this for a model with casts,
+    /// decoding through them; the default answers `false`, so differing
+    /// stored values are a change.
+    ///
+    /// **Not part of the public API.** It is `pub` because the macro emits
+    /// the override.
+    #[doc(hidden)]
+    fn __decoded_values_equal(
+        column: &str,
+        before: &(dyn std::any::Any + Send + Sync),
+        after: &(dyn std::any::Any + Send + Sync),
+    ) -> Result<bool, FrameworkError> {
+        let _ = (column, before, after);
+        Ok(false)
     }
 
     /// Mark every row of one query's result when the query returned more
@@ -586,9 +615,12 @@ where
             })
             .await?;
 
+        // Nothing was loaded before the insert: no original until it returns.
+        crate::eloquent::changes::begin_insert(row_state(row.__eager_cache()));
         Self::__dispatch_created(&row).await?;
         Self::__dispatch_saved(&row).await?;
         row.__touch_planned(&touch_plan).await?;
+        crate::eloquent::changes::finish_save(row_state(row.__eager_cache()));
         Ok(row)
     }
 
@@ -660,9 +692,12 @@ where
             })
             .await?;
 
+        // Nothing was loaded before the insert: no original until it returns.
+        crate::eloquent::changes::begin_insert(row_state(row.__eager_cache()));
         Self::__dispatch_created(&row).await?;
         Self::__dispatch_saved(&row).await?;
         row.__touch_planned(&touch_plan).await?;
+        crate::eloquent::changes::finish_save(row_state(row.__eager_cache()));
         Ok(row)
     }
 
@@ -722,7 +757,12 @@ where
             })
             .await?;
 
-        record_save_on(self.__eager_cache(), current.__eager_cache(), true)?;
+        record_save_on(
+            self.__eager_cache(),
+            current.__eager_cache(),
+            true,
+            Self::__decoded_values_equal,
+        )?;
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned(&touch_plan).await?;
@@ -770,7 +810,12 @@ where
             })
             .await?;
 
-        record_save_on(previous.__eager_cache(), current.__eager_cache(), false)?;
+        record_save_on(
+            previous.__eager_cache(),
+            current.__eager_cache(),
+            false,
+            Self::__decoded_values_equal,
+        )?;
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned(&touch_plan).await?;
@@ -784,7 +829,10 @@ where
     /// A column counts as changed when the value the database stores
     /// after the save differs from the value the instance held before it.
     /// Writing the same value back is no change; a column a `Saving`
-    /// listener or the timestamps rewrote is one. A save that changed
+    /// listener or the timestamps rewrote is one. A column whose cast
+    /// stores a new value on every write, such as an encrypted one, is
+    /// compared by its decoded value, so it counts as changed only when
+    /// that value changed. A save that changed
     /// nothing leaves the previous save's record in place, as Laravel's
     /// does. `false` before any save that changed something, after an
     /// insert, and for an attribute the model does not have.
@@ -841,7 +889,9 @@ where
     /// the save returns, it is the saved row, as Laravel's `finishSave`
     /// syncs it. `Ok(None)` when the instance was never read from the
     /// database, such as a model built with `Default` and not saved yet,
-    /// and for an attribute the model does not have.
+    /// inside the `created` and `saved` observers of an insert, which had
+    /// nothing loaded before it, and for an attribute the model does not
+    /// have.
     ///
     /// # Errors
     ///
@@ -867,7 +917,8 @@ where
     /// The same value as [`Self::get_original`] in the form the column
     /// holds it, so an `AsBool` column reads `0` or `1` and an encrypted
     /// column reads its ciphertext. `None` when the instance was never read
-    /// from the database and for an attribute the model does not have.
+    /// from the database, inside the `created` and `saved` observers of an
+    /// insert, and for an attribute the model does not have.
     fn get_raw_original(&self, attribute: &str) -> Option<serde_json::Value> {
         crate::eloquent::changes::raw_original(row_state(self.__eager_cache()), attribute)
     }
@@ -1260,7 +1311,12 @@ where
         let current = Self::try_from_storage(updated)?;
         crate::render_cache::orm::after_model_write_with_tx(tx, &current).await?;
 
-        record_save_on(self.__eager_cache(), current.__eager_cache(), true)?;
+        record_save_on(
+            self.__eager_cache(),
+            current.__eager_cache(),
+            true,
+            Self::__decoded_values_equal,
+        )?;
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned_with_tx(tx, &touch_plan).await?;
@@ -1296,7 +1352,12 @@ where
         let current = Self::try_from_storage(updated)?;
         crate::render_cache::orm::after_model_write_with_tx(tx, &current).await?;
 
-        record_save_on(previous.__eager_cache(), current.__eager_cache(), false)?;
+        record_save_on(
+            previous.__eager_cache(),
+            current.__eager_cache(),
+            false,
+            Self::__decoded_values_equal,
+        )?;
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned_with_tx(tx, &touch_plan).await?;
@@ -1356,9 +1417,12 @@ where
         let row = Self::try_from_storage(inserted)?;
         crate::render_cache::orm::after_model_write_with_tx(tx, &row).await?;
 
+        // Nothing was loaded before the insert: no original until it returns.
+        crate::eloquent::changes::begin_insert(row_state(row.__eager_cache()));
         Self::__dispatch_created(&row).await?;
         Self::__dispatch_saved(&row).await?;
         row.__touch_planned_with_tx(tx, &touch_plan).await?;
+        crate::eloquent::changes::finish_save(row_state(row.__eager_cache()));
         Ok(row)
     }
 

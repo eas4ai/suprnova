@@ -441,7 +441,9 @@ The rules follow Laravel's `save`:
   save differs from the value the model held before it. Writing the same
   value back is not a change. A column that a `Saving` listener or the
   timestamps rewrote is one, so a model with timestamps also reports
-  `updated_at`.
+  `updated_at`. An encrypted column stores a new ciphertext on every save,
+  so it is compared by its decrypted value instead: it counts as changed
+  only when that value changed.
 - `get_changes` and `get_raw_original` return stored values, before casts,
   as Laravel does. `get_original` reads the value through the model's casts
   and returns an error only when the stored value no longer decodes.
