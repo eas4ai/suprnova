@@ -24,6 +24,8 @@ use suprnova::session::{DatabaseSessionDriver, SessionData, SessionStore};
 use suprnova::testing::{TestContainer, TestContainerGuard, TestDatabase};
 use suprnova::{FrameworkError, SessionMigrationError};
 
+use crate::env_snapshot::{EnvSnapshot, set_env};
+
 /// Migrator containing just the sessions table - matches the schema
 /// the example app installs in production via
 /// `app/src/migrations/m20251208_220000_create_sessions_table.rs`.
@@ -189,6 +191,39 @@ async fn a_stored_payload_that_does_not_parse_reads_as_empty_and_is_logged() {
     assert!(
         !logs_contain("damaged-sess"),
         "the session id is a bearer credential and stays out of the log"
+    );
+}
+
+/// A stored payload that is valid JSON but not a map makes serde_json
+/// quote the value in its error. The log must not carry that text: the
+/// payload is session data.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_payload_of_the_wrong_shape_is_logged_without_its_content() {
+    let db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
+    let session = SessionData::new("wrong-shape-sess".into(), "csrf".into());
+    driver.write(&session).await.unwrap();
+    db.execute_unprepared(
+        "UPDATE sessions SET payload = '\"secret-session-value\"' WHERE id = 'wrong-shape-sess'",
+    )
+    .await
+    .unwrap();
+
+    let read = driver
+        .read("wrong-shape-sess")
+        .await
+        .expect("a payload of the wrong shape is not a store failure")
+        .expect("the row is still a session");
+
+    assert!(read.data.is_empty());
+    assert!(
+        logs_contain("stored session payload failed to parse; treating the session as empty"),
+        "the reason the visitor lost their session is in the log"
+    );
+    assert!(
+        !logs_contain("secret-session-value"),
+        "the payload's content stays out of the log"
     );
 }
 
@@ -447,6 +482,8 @@ async fn destroy_for_user_returns_zero_when_no_matching_rows() {
 
 #[tokio::test]
 async fn module_helper_destroy_all_for_user_delegates_to_driver() {
+    // The fallback driver reads SESSION_TABLE, which the test below sets.
+    let _env = crate::env_lock::lock_env_async().await;
     let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
     let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
 
@@ -459,6 +496,72 @@ async fn module_helper_destroy_all_for_user_delegates_to_driver() {
         .unwrap();
     assert_eq!(deleted, 1);
     assert!(driver.read("helper-sess").await.unwrap().is_none());
+}
+
+/// #132: with no store registered and no middleware built, revocation
+/// falls back to a driver over the table `SESSION_TABLE` names - the
+/// table `SessionMiddleware::new` would have used.
+#[tokio::test]
+async fn module_helper_falls_back_to_the_table_session_table_names() {
+    let _env = crate::env_lock::lock_env_async().await;
+    let _restore = EnvSnapshot::capture(&["SESSION_TABLE"]);
+    set_env("SESSION_TABLE", Some("app_sessions"));
+    let _db = TestDatabase::fresh::<crate::custom_table::AppSessionsMigrator>()
+        .await
+        .unwrap();
+    let driver = DatabaseSessionDriver::with_table(Duration::from_secs(3600), "app_sessions")
+        .expect("app_sessions is a valid table name");
+
+    for (id, user) in [
+        ("fallback-sess-1", "fallback-uid"),
+        ("fallback-sess-2", "fallback-uid"),
+        ("other-sess", "other-uid"),
+    ] {
+        let mut session = SessionData::new(id.into(), "csrf".into());
+        session.user_id = Some(user.into());
+        driver.write(&session).await.unwrap();
+    }
+
+    let deleted = suprnova::session::destroy_all_for_user("fallback-uid")
+        .await
+        .expect("the fallback driver reaches app_sessions");
+
+    assert_eq!(deleted, 2);
+    assert!(driver.read("fallback-sess-1").await.unwrap().is_none());
+    assert!(driver.read("fallback-sess-2").await.unwrap().is_none());
+    assert!(
+        driver.read("other-sess").await.unwrap().is_some(),
+        "another user's session survives"
+    );
+}
+
+/// A write that finds its row gone logs that it skipped, and leaves the
+/// session id out of the log: the id is a bearer credential.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_skipped_write_is_logged_without_the_session_id() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
+    let session = SessionData::new("skipped-write-bearer".into(), "csrf".into());
+    driver.write(&session).await.unwrap();
+    let mut reloaded = driver
+        .read("skipped-write-bearer")
+        .await
+        .unwrap()
+        .expect("row must exist");
+
+    driver.destroy("skipped-write-bearer").await.unwrap();
+    reloaded.put("touched", "yes");
+    driver.write(&reloaded).await.unwrap();
+
+    assert!(
+        logs_contain("session write skipped"),
+        "the skipped write is still logged"
+    );
+    assert!(
+        !logs_contain("skipped-write-bearer"),
+        "the session id is a bearer credential and stays out of the log"
+    );
 }
 
 // ── SEC-02(c): a write for a session read as existing must not

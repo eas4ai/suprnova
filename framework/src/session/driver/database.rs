@@ -2,9 +2,10 @@
 
 use async_trait::async_trait;
 use chrono::Datelike;
-use sea_orm::entity::prelude::*;
-use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{QueryFilter, QuerySelect, Set, TransactionTrait};
+use sea_orm::sea_query::{
+    Alias, DeleteStatement, Expr, ExprTrait, InsertStatement, OnConflict, Query,
+};
+use sea_orm::{ConnectionTrait, DbErr, DeriveIden, FromQueryResult, TransactionTrait};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -14,22 +15,128 @@ use crate::session::store::{
     SessionData, SessionMigrationError, SessionStore, guard_principal_ids_in,
 };
 
+/// The table [`DatabaseSessionDriver::new`] reads and writes.
+const DEFAULT_SESSION_TABLE: &str = "sessions";
+
+/// Longest accepted table name, in bytes. Postgres truncates an
+/// identifier past 63 bytes, so a longer name would silently name a
+/// different table there than on the other backends.
+const MAX_SESSION_TABLE_LEN: usize = 63;
+
+/// The naming rule [`valid_session_table`] enforces, worded for the
+/// errors that [`DatabaseSessionDriver::with_table`] and `Config::init`
+/// return, so both name the same rule.
+pub(crate) const SESSION_TABLE_RULE: &str = "use 1 to 63 ASCII letters, digits or underscores, \
+     starting with a letter or underscore";
+
+/// Whether `name` may name the session table: ASCII, a letter or `_`
+/// first, then letters, digits or `_`, 1 to 63 bytes.
+///
+/// Every statement quotes the name, so this rule is not what keeps SQL
+/// out. It makes a typo fail when the driver is built, or at boot for
+/// `SESSION_TABLE`, instead of on the first request, and it keeps the
+/// name portable to every backend the driver supports.
+pub(crate) fn valid_session_table(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let Some(first) = bytes.first() else {
+        return false;
+    };
+    bytes.len() <= MAX_SESSION_TABLE_LEN
+        && (first.is_ascii_alphabetic() || *first == b'_')
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}
+
 /// Database session driver using SeaORM
 ///
-/// Stores sessions in a `sessions` table with the following schema:
+/// Stores sessions in the `sessions` table, or in the table given to
+/// [`Self::with_table`] (Laravel's `session.table`), with the following
+/// schema:
 /// - id: VARCHAR (primary key) - session ID
 /// - user_id: VARCHAR (nullable) - authenticated user ID (string, supports both numeric and opaque IDs)
 /// - payload: TEXT - JSON serialized session data
 /// - csrf_token: VARCHAR - CSRF protection token
 /// - last_activity: TIMESTAMP - last access time
+///
+/// The queries are sea-query statements over the table name held at run
+/// time. A SeaORM entity fixes its table at compile time, which is why
+/// the [`sessions`] entity cannot serve a configured name.
 pub struct DatabaseSessionDriver {
     lifetime: Duration,
+    table: String,
+}
+
+/// Column names shared by every session table. Unqualified, so a
+/// statement names only the table it targets.
+#[derive(DeriveIden)]
+enum SessionColumn {
+    Id,
+    UserId,
+    Payload,
+    CsrfToken,
+    LastActivity,
+}
+
+/// One stored session row, decoded by column name.
+#[derive(FromQueryResult)]
+struct SessionRow {
+    id: String,
+    user_id: Option<String>,
+    payload: String,
+    csrf_token: String,
+    last_activity: chrono::NaiveDateTime,
+}
+
+fn database_error(error: DbErr) -> FrameworkError {
+    FrameworkError::database(error.to_string())
 }
 
 impl DatabaseSessionDriver {
-    /// Create a new database session driver
+    /// Create a new database session driver over the `sessions` table.
     pub fn new(lifetime: Duration) -> Self {
-        Self { lifetime }
+        Self::with_configured_table(lifetime, DEFAULT_SESSION_TABLE)
+    }
+
+    /// Create a database session driver over `table` instead of
+    /// `sessions`. The app's migration has to create that table with the
+    /// same columns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] naming `table` when it is not 1 to 63
+    /// ASCII letters, digits or underscores starting with a letter or
+    /// underscore.
+    pub fn with_table(
+        lifetime: Duration,
+        table: impl Into<String>,
+    ) -> Result<Self, FrameworkError> {
+        let table = table.into();
+        if !valid_session_table(&table) {
+            return Err(FrameworkError::internal(format!(
+                "session table name {table:?} is not valid: {SESSION_TABLE_RULE}"
+            )));
+        }
+        Ok(Self::with_configured_table(lifetime, table))
+    }
+
+    /// Create a driver over `table` without checking the name.
+    ///
+    /// For callers that cannot return an error, such as the infallible
+    /// [`SessionMiddleware::new`](crate::session::SessionMiddleware::new).
+    /// `Config::init` already rejects a bad `SESSION_TABLE` at boot, and
+    /// every statement quotes the name, so a bad name cannot inject SQL:
+    /// it fails as a missing table on the first query.
+    pub(crate) fn with_configured_table(lifetime: Duration, table: impl Into<String>) -> Self {
+        Self {
+            lifetime,
+            table: table.into(),
+        }
+    }
+
+    /// The configured table as a quoted identifier.
+    fn table(&self) -> Alias {
+        Alias::new(self.table.as_str())
     }
 
     /// Session lifetime in whole seconds, capped at
@@ -38,9 +145,48 @@ impl DatabaseSessionDriver {
     /// cannot overflow. Env parsing clamps to the same bound, but a
     /// programmatically built config can carry any [`Duration`].
     fn lifetime_secs_capped(&self) -> i64 {
-        i64::try_from(self.lifetime.as_secs())
-            .unwrap_or(i64::MAX)
-            .min(crate::session::MAX_SESSION_LIFETIME_SECS as i64)
+        let secs = i64::try_from(self.lifetime.as_secs()).unwrap_or(i64::MAX);
+        // `Ord::min` by path: sea-query's `ExprTrait`, imported for the
+        // statements below, is implemented for every value and has a
+        // `min` of its own.
+        Ord::min(secs, crate::session::MAX_SESSION_LIFETIME_SECS as i64)
+    }
+
+    /// `INSERT` of one full session row, shared by the upsert in `write`
+    /// and the plain insert in `migrate_two_factor_session`.
+    fn insert_row(
+        &self,
+        session: &SessionData,
+        payload: String,
+        last_activity: chrono::NaiveDateTime,
+    ) -> Result<InsertStatement, FrameworkError> {
+        let mut insert = Query::insert();
+        insert
+            .into_table(self.table())
+            .columns([
+                SessionColumn::Id,
+                SessionColumn::UserId,
+                SessionColumn::Payload,
+                SessionColumn::CsrfToken,
+                SessionColumn::LastActivity,
+            ])
+            .values([
+                Expr::value(session.id.clone()),
+                Expr::value(session.user_id.clone()),
+                Expr::value(payload),
+                Expr::value(session.csrf_token.clone()),
+                Expr::value(last_activity),
+            ])
+            .map_err(|e| FrameworkError::internal(format!("session insert statement: {e}")))?;
+        Ok(insert)
+    }
+
+    /// `DELETE` of the row whose id is `id`.
+    fn delete_by_id(&self, id: &str) -> DeleteStatement {
+        Query::delete()
+            .from_table(self.table())
+            .and_where(Expr::col(SessionColumn::Id).eq(id))
+            .to_owned()
     }
 }
 
@@ -49,10 +195,26 @@ impl SessionStore for DatabaseSessionDriver {
     async fn read(&self, id: &str) -> Result<Option<SessionData>, FrameworkError> {
         let db = DB::connection()?;
 
-        let result = sessions::Entity::find_by_id(id)
-            .one(db.inner())
+        let select = Query::select()
+            .columns([
+                SessionColumn::Id,
+                SessionColumn::UserId,
+                SessionColumn::Payload,
+                SessionColumn::CsrfToken,
+                SessionColumn::LastActivity,
+            ])
+            .from(self.table())
+            .and_where(Expr::col(SessionColumn::Id).eq(id))
+            .limit(1)
+            .to_owned();
+        let result = db
+            .inner()
+            .query_one(&select)
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+            .map_err(database_error)?
+            .map(|row| SessionRow::from_query_result(&row, ""))
+            .transpose()
+            .map_err(database_error)?;
 
         if let Some(session) = result {
             // Check if expired. The lifetime is capped so the `i64`
@@ -81,11 +243,15 @@ impl SessionStore for DatabaseSessionDriver {
 
             // Parse the payload. A payload that does not parse reads as an
             // empty session, which signs the visitor out; the log says why,
-            // without the session id, which is a bearer credential.
+            // without the session id, which is a bearer credential. It
+            // also leaves out serde_json's message, which quotes the value
+            // when the payload is a JSON string instead of a map.
             let data: HashMap<String, serde_json::Value> = serde_json::from_str(&session.payload)
                 .unwrap_or_else(|error| {
                     tracing::warn!(
-                        error = %error,
+                        category = ?error.classify(),
+                        line = error.line(),
+                        column = error.column(),
                         "stored session payload failed to parse; treating the session as empty"
                     );
                     HashMap::default()
@@ -129,29 +295,29 @@ impl SessionStore for DatabaseSessionDriver {
         // regenerate, `invalidate_session`) still fall through to the
         // upsert arm and create their new row exactly as before.
         if session.loaded_from_store {
-            let result = sessions::Entity::update_many()
-                .col_expr(
-                    sessions::Column::UserId,
-                    Expr::value(session.user_id.clone()),
-                )
-                .col_expr(sessions::Column::Payload, Expr::value(payload))
-                .col_expr(
-                    sessions::Column::CsrfToken,
-                    Expr::value(session.csrf_token.clone()),
-                )
-                .col_expr(sessions::Column::LastActivity, Expr::value(now))
-                .filter(sessions::Column::Id.eq(&session.id))
-                .exec(db.inner())
-                .await
-                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            let update = Query::update()
+                .table(self.table())
+                .values([
+                    (SessionColumn::UserId, Expr::value(session.user_id.clone())),
+                    (SessionColumn::Payload, Expr::value(payload)),
+                    (
+                        SessionColumn::CsrfToken,
+                        Expr::value(session.csrf_token.clone()),
+                    ),
+                    (SessionColumn::LastActivity, Expr::value(now)),
+                ])
+                .and_where(Expr::col(SessionColumn::Id).eq(session.id.as_str()))
+                .to_owned();
+            let result = db.inner().execute(&update).await.map_err(database_error)?;
 
-            if result.rows_affected == 0 {
+            if result.rows_affected() == 0 {
                 // The row is gone - most likely a concurrent
                 // revocation. Declining to resurrect it is the correct
                 // outcome, not a failure: the next read of this
-                // session id will correctly find nothing.
+                // session id will correctly find nothing. The log leaves
+                // the id out: it is a bearer credential.
                 tracing::debug!(
-                    session_id = %session.id,
+                    authenticated = session.user_id.is_some(),
                     "session write skipped: row no longer exists (revoked or expired concurrently)"
                 );
             }
@@ -169,31 +335,22 @@ impl SessionStore for DatabaseSessionDriver {
         // other would fail the UNIQUE constraint, and the SessionMiddleware
         // fail-closed branch would 500 the loser. ON CONFLICT collapses
         // both branches into a single round-trip + skips the pre-read
-        // on the happy path. SeaORM 1.x routes the OnConflict::column
-        // setup to Postgres `ON CONFLICT DO UPDATE`, MySQL `ON
-        // DUPLICATE KEY UPDATE`, and SQLite `ON CONFLICT DO UPDATE`.
-        let model = sessions::ActiveModel {
-            id: Set(session.id.clone()),
-            user_id: Set(session.user_id.clone()),
-            payload: Set(payload),
-            csrf_token: Set(session.csrf_token.clone()),
-            last_activity: Set(now),
-        };
+        // on the happy path. sea-query renders the OnConflict clause as
+        // Postgres `ON CONFLICT DO UPDATE`, MySQL `ON DUPLICATE KEY
+        // UPDATE`, and SQLite `ON CONFLICT DO UPDATE`.
+        let mut upsert = self.insert_row(session, payload, now)?;
+        upsert.on_conflict(
+            OnConflict::column(SessionColumn::Id)
+                .update_columns([
+                    SessionColumn::UserId,
+                    SessionColumn::Payload,
+                    SessionColumn::CsrfToken,
+                    SessionColumn::LastActivity,
+                ])
+                .to_owned(),
+        );
 
-        sessions::Entity::insert(model)
-            .on_conflict(
-                OnConflict::column(sessions::Column::Id)
-                    .update_columns([
-                        sessions::Column::UserId,
-                        sessions::Column::Payload,
-                        sessions::Column::CsrfToken,
-                        sessions::Column::LastActivity,
-                    ])
-                    .to_owned(),
-            )
-            .exec(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        db.inner().execute(&upsert).await.map_err(database_error)?;
 
         Ok(())
     }
@@ -209,32 +366,26 @@ impl SessionStore for DatabaseSessionDriver {
                 "Session serialize error: {e}"
             )))
         })?;
-        let model = sessions::ActiveModel {
-            id: Set(session.id.clone()),
-            user_id: Set(session.user_id.clone()),
-            payload: Set(payload),
-            csrf_token: Set(session.csrf_token.clone()),
-            last_activity: Set(crate::clock::now().naive_utc()),
-        };
+        let insert = self
+            .insert_row(session, payload, crate::clock::now().naive_utc())
+            .map_err(SessionMigrationError::RolledBack)?;
+        let delete_old = self.delete_by_id(old_id);
 
         let transaction = db.inner().begin().await.map_err(|e| {
             SessionMigrationError::RolledBack(FrameworkError::database(e.to_string()))
         })?;
         let migration = async {
-            let deleted = sessions::Entity::delete_by_id(old_id)
-                .exec(&transaction)
+            let deleted = transaction
+                .execute(&delete_old)
                 .await
-                .map_err(|e| FrameworkError::database(e.to_string()))?;
-            if deleted.rows_affected != 1 {
+                .map_err(database_error)?;
+            if deleted.rows_affected() != 1 {
                 return Err(FrameworkError::internal(
                     "atomic 2FA session migration requires an existing old session",
                 ));
             }
 
-            sessions::Entity::insert(model)
-                .exec(&transaction)
-                .await
-                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            transaction.execute(&insert).await.map_err(database_error)?;
             Ok(())
         }
         .await;
@@ -264,10 +415,10 @@ impl SessionStore for DatabaseSessionDriver {
     async fn destroy(&self, id: &str) -> Result<(), FrameworkError> {
         let db = DB::connection()?;
 
-        sessions::Entity::delete_by_id(id)
-            .exec(db.inner())
+        db.inner()
+            .execute(&self.delete_by_id(id))
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+            .map_err(database_error)?;
 
         Ok(())
     }
@@ -276,12 +427,16 @@ impl SessionStore for DatabaseSessionDriver {
         let db = DB::connection()?;
 
         // Indexed path: sessions whose default-guard principal is `user_id`.
-        let mut deleted = sessions::Entity::delete_many()
-            .filter(sessions::Column::UserId.eq(user_id))
-            .exec(db.inner())
+        let by_user_column = Query::delete()
+            .from_table(self.table())
+            .and_where(Expr::col(SessionColumn::UserId).eq(user_id))
+            .to_owned();
+        let mut deleted = db
+            .inner()
+            .execute(&by_user_column)
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?
-            .rows_affected;
+            .map_err(database_error)?
+            .rows_affected();
 
         // Named-guard principals live only inside the payload
         // (`_auth_guards`), so the indexed column cannot see them: a
@@ -290,23 +445,30 @@ impl SessionStore for DatabaseSessionDriver {
         // rows' guard identities exactly in Rust. Revocation is rare, so
         // correctness outranks index use here; the in-Rust comparison
         // also keeps backend JSON-dialect differences out of the query.
-        let rows = sessions::Entity::find()
-            .select_only()
-            .column(sessions::Column::Id)
-            .column(sessions::Column::Payload)
-            .into_tuple::<(String, String)>()
-            .all(db.inner())
+        let surviving = Query::select()
+            .columns([SessionColumn::Id, SessionColumn::Payload])
+            .from(self.table())
+            .to_owned();
+        let rows = db
+            .inner()
+            .query_all(&surviving)
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        for (id, payload) in rows {
+            .map_err(database_error)?;
+        for row in rows {
+            let id: String = row.try_get("", "id").map_err(database_error)?;
+            let payload: String = row.try_get("", "payload").map_err(database_error)?;
             let data: HashMap<String, serde_json::Value> =
                 serde_json::from_str(&payload).unwrap_or_default();
-            if guard_principal_ids_in(&data).iter().any(|id| id == user_id) {
-                deleted += sessions::Entity::delete_by_id(id)
-                    .exec(db.inner())
+            if guard_principal_ids_in(&data)
+                .iter()
+                .any(|principal| principal == user_id)
+            {
+                deleted += db
+                    .inner()
+                    .execute(&self.delete_by_id(&id))
                     .await
-                    .map_err(|e| FrameworkError::database(e.to_string()))?
-                    .rows_affected;
+                    .map_err(database_error)?
+                    .rows_affected();
             }
         }
 
@@ -333,17 +495,22 @@ impl SessionStore for DatabaseSessionDriver {
             return Ok(0);
         }
 
-        let result = sessions::Entity::delete_many()
-            .filter(sessions::Column::LastActivity.lt(threshold))
-            .exec(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let expired = Query::delete()
+            .from_table(self.table())
+            .and_where(Expr::col(SessionColumn::LastActivity).lt(threshold))
+            .to_owned();
+        let result = db.inner().execute(&expired).await.map_err(database_error)?;
 
-        Ok(result.rows_affected)
+        Ok(result.rows_affected())
     }
 }
 
-/// Sessions table entity for SeaORM
+/// SeaORM entity for the default `sessions` table.
+///
+/// It documents the columns every session table needs and stays public
+/// so code that names it keeps compiling. [`DatabaseSessionDriver`] no
+/// longer queries through it: an entity fixes its table name at compile
+/// time, and the driver serves the table the app configures.
 pub mod sessions {
     use sea_orm::entity::prelude::*;
 

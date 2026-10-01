@@ -616,9 +616,13 @@ fn register_configured_store(store: Arc<dyn SessionStore>) {
 }
 
 impl SessionMiddleware {
-    /// Create a new session middleware with the given configuration
+    /// Create a new session middleware with the given configuration.
+    /// The database driver reads and writes `config.table_name`.
     pub fn new(config: SessionConfig) -> Self {
-        let store = Arc::new(DatabaseSessionDriver::new(config.lifetime));
+        let store = Arc::new(DatabaseSessionDriver::with_configured_table(
+            config.lifetime,
+            config.table_name.clone(),
+        ));
         register_configured_store(store.clone());
         Self { config, store }
     }

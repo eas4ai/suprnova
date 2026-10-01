@@ -864,6 +864,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **`SESSION_TABLE` names the session table.** `SessionConfig::table_name`
+  was read and then ignored: the database session driver always used
+  `sessions`. The driver now reads and writes the configured table,
+  `DatabaseSessionDriver::with_table` builds one over another table, and
+  `Config::init` refuses a name that is not 1 to 63 ASCII letters, digits
+  or underscores starting with a letter or underscore. What you have to
+  change: an app that already set `SESSION_TABLE` now stores its sessions
+  in that table, which its migration must create, and an empty
+  `SESSION_TABLE` now fails boot. The driver also stops logging a session
+  id when it skips a write, and the content of a stored payload it cannot
+  parse. This fix landed on main after the `v3.0.0` tag (#132).
 - **Re-running a framework migration no longer fails on an existing index.**
   The workflow and RenderCache migrations relied on `IF NOT EXISTS`, which
   MySQL and MariaDB drop from `CREATE INDEX`, and the payments, features and

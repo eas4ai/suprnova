@@ -6,9 +6,12 @@ pub mod config_knobs;
 pub mod cookie_name_bound_aad;
 pub mod cookie_prefix_roundtrip;
 pub mod cookie_queue;
+pub mod custom_table;
 pub mod destroy_for_user;
 #[path = "../support/env_lock.rs"]
 mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
 pub mod facade;
 pub mod gc_loop;
 pub mod id_shape_validation;
