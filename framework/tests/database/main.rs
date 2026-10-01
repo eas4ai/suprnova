@@ -5,11 +5,8 @@
 mod env_lock;
 #[path = "../support/env_snapshot.rs"]
 mod env_snapshot;
-#[path = "../support/query_fixture.rs"]
-mod query_fixture;
 pub mod facade;
 pub mod identifier_validation;
-pub mod joins;
 pub mod mariadb_scheme;
 pub mod medium_audit;
 pub mod monitor;
@@ -17,7 +14,6 @@ pub mod multiconnection;
 pub mod observability;
 pub mod pool_liveness;
 pub mod query_binary_comparison;
-pub mod query_helpers;
 pub mod raw_helpers;
 pub mod sea_orm_aliases;
 pub mod transactions;

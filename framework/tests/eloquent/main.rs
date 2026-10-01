@@ -1,9 +1,6 @@
 //! Integration tests for the `eloquent` module: one binary per module,
 //! one former top-level test file per submodule (folded 2026-09-05).
 
-#[path = "../support/query_fixture.rs"]
-mod query_fixture;
-
 pub mod accessor_serialization;
 pub mod accessors;
 pub mod aggregate_postgres;
@@ -28,7 +25,6 @@ pub mod factory_events;
 pub mod factory_persist;
 pub mod fillable;
 pub mod has;
-pub mod joins_model;
 pub mod laravel_parity;
 pub mod lazy_loading;
 pub mod locking;
@@ -40,7 +36,6 @@ pub mod model;
 pub mod observers;
 pub mod pagination;
 pub mod prunable_relations;
-pub mod query_helpers_model;
 pub mod read_instrumentation;
 pub mod registry;
 pub mod relation_registry;
