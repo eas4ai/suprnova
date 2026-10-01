@@ -358,7 +358,10 @@ async fn update_returns_a_model_that_reports_the_change() {
         sorted_changes(&updated.get_changes()),
         vec![("name".to_string(), json!("Ada Lovelace"))]
     );
-    assert_eq!(updated.get_raw_original("name"), Some(json!("Ada Lovelace")));
+    assert_eq!(
+        updated.get_raw_original("name"),
+        Some(json!("Ada Lovelace"))
+    );
     assert_eq!(
         updated.get_original("name").unwrap(),
         Some(json!("Ada Lovelace"))

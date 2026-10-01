@@ -73,7 +73,10 @@ fn row_state(
 /// record onto `saved` as well: `save` borrows the caller's model and
 /// cannot hand back `current`, so the caller's model has to carry it.
 /// `update` returns `current` and leaves `saved`, the observer's
-/// `previous`, as it was.
+/// `previous`, as it was. The save ends with
+/// [`finish_save`](crate::eloquent::changes::finish_save) on the model the
+/// caller keeps, after the `Saved` event and the owner touches, as
+/// Laravel's `finishSave` ends with `syncOriginal`.
 ///
 /// The only failure is a stored row that will not serialize to JSON, which
 /// a `#[suprnova::model]` row cannot produce; it is still reported rather
@@ -723,6 +726,7 @@ where
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned(&touch_plan).await?;
+        crate::eloquent::changes::finish_save(row_state(self.__eager_cache()));
         Ok(())
     }
 
@@ -770,22 +774,26 @@ where
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned(&touch_plan).await?;
+        crate::eloquent::changes::finish_save(row_state(current.__eager_cache()));
         Ok(current)
     }
 
-    /// Whether the last save of this instance changed `attribute`.
+    /// Whether the last save that changed something changed `attribute`.
     /// Laravel's `$model->wasChanged('attribute')`.
     ///
     /// A column counts as changed when the value the database stores
     /// after the save differs from the value the instance held before it.
     /// Writing the same value back is no change; a column a `Saving`
-    /// listener or the timestamps rewrote is one. `false` before any save
-    /// and for an attribute the model does not have.
+    /// listener or the timestamps rewrote is one. A save that changed
+    /// nothing leaves the previous save's record in place, as Laravel's
+    /// does. `false` before any save that changed something, after an
+    /// insert, and for an attribute the model does not have.
     ///
     /// [`Self::save`], [`Self::update`], [`Self::save_with_tx`] and
     /// [`Self::update_with_tx`] record the change on the model the caller
-    /// holds afterwards and on the `current` model an `updated` observer
-    /// receives, so an observer can audit a change:
+    /// holds afterwards and on the model the `updated` and `saved`
+    /// observers receive, which can still read the value from before the
+    /// save, so an observer can audit a change:
     ///
     /// ```ignore
     /// async fn updated(&self, _previous: &User, user: &User) -> Result<(), FrameworkError> {
@@ -810,32 +818,30 @@ where
         crate::eloquent::changes::was_changed_any(row_state(self.__eager_cache()), attributes)
     }
 
-    /// The attributes the last save changed, each with the value it
-    /// stored. Laravel's `$model->getChanges()`.
+    /// The attributes the last save that changed something changed, each
+    /// with the value it stored. Laravel's `$model->getChanges()`.
     ///
     /// The values are in stored form, before casts, as Laravel's are: an
-    /// `AsBool` column reads `1`, not `true`. The record covers the last
-    /// save only. A later save replaces it, a save that changed nothing
-    /// leaves it empty, and a save that failed leaves the previous one in
-    /// place. Empty before any save.
+    /// `AsBool` column reads `1`, not `true`. A later save that changes
+    /// something replaces the record; a save that changed nothing, or that
+    /// failed, leaves it in place. Empty before any save that changed
+    /// something, and after an insert.
     fn get_changes(&self) -> Attrs {
         crate::eloquent::changes::changes(row_state(self.__eager_cache()))
     }
 
-    /// The value `attribute` held before the last save, read through the
-    /// model's casts, as [`Self::field_value`] reads the current one.
-    /// Laravel's `$model->getOriginal('attribute')`.
+    /// The original value of `attribute`, read through the model's casts,
+    /// as [`Self::field_value`] reads the current one. Laravel's
+    /// `$model->getOriginal('attribute')`.
     ///
-    /// Before any save, the value the instance was loaded with: changing a
-    /// field in memory does not change it. `Ok(None)` when the instance was
-    /// never read from the database, such as a model built with
-    /// `Default`, and for an attribute the model does not have.
-    ///
-    /// Unlike Laravel, which resets the original to the new values once
-    /// the save finishes, the values from before the last save stay
-    /// readable for the life of the instance, so code after the save can
-    /// read them as well as an `updated` observer can. [`Self::refresh`]
-    /// reads the row again and starts over.
+    /// The original is the row as the instance last read or saved it:
+    /// changing a field in memory does not change it. While a save's
+    /// `updated` and `saved` observers run, it is still the row the save
+    /// started from, so an observer reads the value before the save; once
+    /// the save returns, it is the saved row, as Laravel's `finishSave`
+    /// syncs it. `Ok(None)` when the instance was never read from the
+    /// database, such as a model built with `Default` and not saved yet,
+    /// and for an attribute the model does not have.
     ///
     /// # Errors
     ///
@@ -855,8 +861,8 @@ where
         }
     }
 
-    /// The value `attribute` held before the last save, as stored: no cast
-    /// applied. Laravel's `$model->getRawOriginal('attribute')`.
+    /// The original value of `attribute`, as stored: no cast applied.
+    /// Laravel's `$model->getRawOriginal('attribute')`.
     ///
     /// The same value as [`Self::get_original`] in the form the column
     /// holds it, so an `AsBool` column reads `0` or `1` and an encrypted
@@ -1258,6 +1264,7 @@ where
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned_with_tx(tx, &touch_plan).await?;
+        crate::eloquent::changes::finish_save(row_state(self.__eager_cache()));
         Ok(())
     }
 
@@ -1293,6 +1300,7 @@ where
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned_with_tx(tx, &touch_plan).await?;
+        crate::eloquent::changes::finish_save(row_state(current.__eager_cache()));
         Ok(current)
     }
 
