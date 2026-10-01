@@ -2,7 +2,6 @@
 
 Status: Draft
 Prefix: UI
-Scope: every commitment
 
 The cross-cutting rules every component family inherits: tokens, the
 base layer, headless styling, asset delivery, light DOM, the qualified

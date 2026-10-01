@@ -167,6 +167,10 @@ components in waves, the advanced components last, the datatable closing.
    fifteen and four gate runs went red on 2026-09-17; promoted on the
    developer's ruling answering escalation `live-010` (`live.md` LIVE-038).
 
+## laravel-port-requests
+
+Requirements: PAR-001, PAR-002, PAR-003, PAR-004, PAR-005, PAR-006, PAR-007, PAR-008, PAR-009
+
 16. laravel-port-requests - the requests an application team porting a
    Laravel 13 application filed as issues #125 to #129, and the queue fake
    gaps found while recording the parity rulings: joins and the remaining
