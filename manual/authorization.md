@@ -286,8 +286,10 @@ let router: Router = Router::new()
 ```
 
 A denied ability returns `403` before the handler runs; an unauthenticated
-request fails closed. The full action → ability table lives in the
-[routing chapter](routing.md).
+request fails closed. The check runs against the user of the route's guard,
+the same user `#[authorize]` checks (see [Authorize a
+handler](#authorize-a-handler)). The full action → ability table lives in
+the [routing chapter](routing.md).
 
 ## Authorize a handler
 
@@ -344,14 +346,39 @@ The check runs at a fixed point in the request:
    validation error.
 4. The handler body runs.
 
-The check asks the async gate about the user `Auth::user()` resolves.
+The check asks the async gate about the user of the route's guard.
 Policies, async gates, async `before` hooks, and the
 [permission bridge](#answering-the-gate-with-permissions) all answer it.
+
+The route's guard is the guard that the last `AuthMiddleware` to pass the
+request on checked. For `AuthMiddleware::new().for_guard("api")`, that is
+the `api` guard, so the check runs against the user the `api` guard
+authenticated. With no `for_guard`, or with no `AuthMiddleware` at all,
+it is the default guard, and the user is the one `Auth::user()` resolves:
+
+```rust
+use suprnova::{AuthMiddleware, Router};
+
+// `update` carries `#[authorize("update-post", post)]`. The check asks the
+// `api` guard for the user, not the default guard.
+pub fn routes() -> Router {
+    Router::new()
+        .put("/api/posts/{post}", controllers::post::update)
+        .middleware(AuthMiddleware::new().for_guard("api"))
+        .into()
+}
+```
+
+When the route's guard has no user, the check answers `401`, even if
+another guard has one. A user of the default guard never stands in for the
+user of the route's guard. This also holds under
+`AuthMiddleware::optional().for_guard("api")`, which lets a guest through.
+
 When the check fails, it answers the request with one of these statuses:
 
 | Situation | Status |
 |---|---|
-| No authenticated user | `401 Unauthorized`, `{"message": "Unauthenticated."}` |
+| No user on the route's guard | `401 Unauthorized`, `{"message": "Unauthenticated."}` |
 | The gate denies | `403 Forbidden` |
 | A rich denial with a status, such as `Response::deny_as_not_found()` | That status, `404 Not Found` here |
 
@@ -368,6 +395,13 @@ A guest gets `401 Unauthorized`. Laravel's `can` middleware passes a guest
 to the gate, which answers `403 Forbidden` unless a policy method accepts a
 missing user. Suprnova answers the way `AuthMiddleware` does for a guest,
 so a client can tell "log in" from "not allowed".
+
+In Laravel, `auth:api` makes `api` the default guard for the rest of the
+request, so `Auth::user()` and the `can` middleware both read the `api`
+user. In Suprnova, `AuthMiddleware::for_guard("api")` doesn't change the
+default guard: `Auth::user()` still reads the default guard, and only the
+`#[authorize]` check follows the route's guard. To read the same user in
+the handler body, call `Auth::guard("api")?.user()`.
 
 Laravel tells a model class from a route parameter by the backslash in
 `Post::class`. Rust has no class strings, so Suprnova uses Rust's naming

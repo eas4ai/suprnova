@@ -81,6 +81,11 @@ struct AuthRequestState {
     /// complete guard name. A `None` entry is a resolver that ran and found
     /// nobody, so the middleware does not run it again.
     request_guard_users: HashMap<String, Option<Arc<dyn Authenticatable>>>,
+    /// The guard the last `AuthMiddleware` that passed this request on
+    /// checked, by name; `None` for the default guard. `#[authorize]` asks
+    /// this guard for the user, as Laravel's `can` middleware asks the guard
+    /// that `auth:<guard>` selected.
+    route_guard: Option<String>,
 }
 
 tokio::task_local! {
@@ -301,14 +306,38 @@ pub(crate) fn request_guard_user(guard_name: &str) -> Option<Arc<dyn Authenticat
 /// Clear every authentication identity and provenance slot in this request.
 ///
 /// The `via_request` bindings are forgotten but stay resolved, for the reason
-/// `forget_request_guard_users` gives.
+/// `forget_request_guard_users` gives. The route's guard stays: a logout ends
+/// the identity, not the guard the route checks, so a later `#[authorize]`
+/// finds no user on that guard instead of asking the default guard.
 pub(crate) fn clear_all_authentication() {
     let _ = AUTH_STATE.try_with(|state| {
         let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
         let resolved = std::mem::take(&mut state.request_guard_users);
+        let route_guard = state.route_guard.take();
         *state = AuthRequestState::default();
         state.request_guard_users = resolved.into_keys().map(|name| (name, None)).collect();
+        state.route_guard = route_guard;
     });
+}
+
+/// Record the guard an `AuthMiddleware` checked before it passed the request
+/// on: `Some(name)` for `for_guard(name)`, `None` for the default guard. The
+/// last middleware to pass the request on decides.
+///
+/// No-op outside a request scope, matching the other setters.
+pub(crate) fn set_route_guard(guard_name: Option<String>) {
+    let _ = AUTH_STATE.try_with(|state| {
+        state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .route_guard = guard_name;
+    });
+}
+
+/// The guard the route's `AuthMiddleware` checked, by name, or `None` for the
+/// default guard (also outside a request scope).
+pub(crate) fn route_guard() -> Option<String> {
+    read_state(|state| state.route_guard.clone()).flatten()
 }
 
 /// Whether one named session guard already resolved a user instance.

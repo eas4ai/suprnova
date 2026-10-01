@@ -8,7 +8,8 @@
 //! through the async gate (so `#[policy]` methods, async gates and async
 //! before-hooks all answer), and it answers 401 for a guest, 403 for a
 //! denial, and 404 for a policy that denies as not found or a bound model
-//! that does not exist.
+//! that does not exist. On a route behind `AuthMiddleware::for_guard`, the
+//! check asks that guard for the user, never the default guard.
 
 use std::any::Any;
 use std::convert::Infallible;
@@ -25,11 +26,12 @@ use serial_test::serial;
 
 use suprnova::authorization::init_policies;
 use suprnova::http::text;
-use suprnova::testing::TestDatabase;
+use suprnova::testing::{TestContainer, TestDatabase};
 use suprnova::{
-    Auth, Authenticatable, Gate, GateResponse, Middleware, MiddlewareRegistry, Model, Next,
-    Request, Response, RouteParam, Router, attrs, authorize, handle_request, handler, model,
-    policy, request,
+    Auth, AuthConfig, AuthManager, AuthMiddleware, Authenticatable, FrameworkError, Gate,
+    GateResponse, GuardConfig, Middleware, MiddlewareRegistry, Model, Next, Request, Response,
+    RouteParam, Router, UserProvider, attrs, authorize, handle_request, handler, model, policy,
+    request,
 };
 
 // ── Users ────────────────────────────────────────────────────────────────────
@@ -76,27 +78,66 @@ const STRANGER: &str = "stranger";
 /// A user of a type no gate knows.
 const ROBOT: &str = "robot";
 
-/// Logs the request in as the user the `X-Test-User` header names, or leaves
-/// it a guest.
+/// The user one of the names above stands for.
+fn user_named(name: &str) -> Option<Arc<dyn Authenticatable>> {
+    match name {
+        AUTHOR => Some(Arc::new(HaUser {
+            id: 1,
+            can_create: true,
+        })),
+        STRANGER => Some(Arc::new(HaUser {
+            id: 2,
+            can_create: false,
+        })),
+        ROBOT => Some(Arc::new(HaRobot)),
+        _ => None,
+    }
+}
+
+/// Logs the request in on the default guard as the user the `X-Test-User`
+/// header names, or leaves it a guest.
 struct LoginAs;
 
 #[async_trait::async_trait]
 impl Middleware for LoginAs {
     async fn handle(&self, request: Request, next: Next) -> Response {
-        match request.header("X-Test-User") {
-            Some(AUTHOR) => Auth::set_user(Arc::new(HaUser {
-                id: 1,
-                can_create: true,
-            })),
-            Some(STRANGER) => Auth::set_user(Arc::new(HaUser {
-                id: 2,
-                can_create: false,
-            })),
-            Some(ROBOT) => Auth::set_user(Arc::new(HaRobot)),
-            _ => {}
+        if let Some(user) = request.header("X-Test-User").and_then(user_named) {
+            Auth::set_user(user);
         }
         next(request).await
     }
+}
+
+/// A guard other than the default. Its resolver finds the user the
+/// `X-Partner` header names.
+const PARTNER: &str = "partner";
+
+/// The provider the guards are declared with. The guards under test never
+/// ask it for a user.
+struct NoUsers;
+
+#[async_trait::async_trait]
+impl UserProvider for NoUsers {
+    async fn retrieve_by_id(
+        &self,
+        _id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        Ok(None)
+    }
+}
+
+/// Installs a container-scoped manager: the default `web` session guard,
+/// which `LoginAs` signs in, and the `partner` request guard.
+fn install_partner_guard() {
+    let driver = AuthManager::via_request_driver(PARTNER);
+    let config = AuthConfig::new("web").guard(PARTNER, GuardConfig::custom(driver, "users"));
+    TestContainer::singleton(AuthManager::new(config));
+    Auth::register_provider("users", Arc::new(NoUsers)).unwrap();
+    Auth::via_request(PARTNER, |request| {
+        let user = request.header("X-Partner").and_then(user_named);
+        Box::pin(async move { Ok(user) })
+    })
+    .unwrap();
 }
 
 // ── Model, policy, gates ─────────────────────────────────────────────────────
@@ -260,20 +301,27 @@ async fn boot() -> (TestDatabase, SocketAddr) {
         .await
         .unwrap();
 
+    let addr = serve(MiddlewareRegistry::new().append(LoginAs)).await;
+    (db, addr)
+}
+
+/// Serves the router through `registry`. Inside a `TestContainer::scope`,
+/// the server sees that scope's container.
+async fn serve(registry: MiddlewareRegistry) -> SocketAddr {
     let router = Arc::new(build_router());
-    let registry = Arc::new(MiddlewareRegistry::new().append(LoginAs));
+    let registry = Arc::new(registry);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral listener");
     let addr = listener.local_addr().expect("local_addr");
-    tokio::spawn(async move {
+    TestContainer::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
             let router = router.clone();
             let registry = registry.clone();
-            tokio::spawn(async move {
+            TestContainer::spawn(async move {
                 let svc = service_fn(move |req: hyper::Request<Incoming>| {
                     let router = router.clone();
                     let registry = registry.clone();
@@ -285,7 +333,7 @@ async fn boot() -> (TestDatabase, SocketAddr) {
             });
         }
     });
-    (db, addr)
+    addr
 }
 
 /// Sends one request as `user` (`None` for a guest) with an optional JSON
@@ -295,6 +343,19 @@ async fn send(
     method: &str,
     path: &str,
     user: Option<&str>,
+    json: Option<&str>,
+) -> (u16, String) {
+    let headers: Vec<(&str, &str)> = user.map(|user| ("X-Test-User", user)).into_iter().collect();
+    send_with(addr, method, path, &headers, json).await
+}
+
+/// Sends one request with `headers` and an optional JSON body, and returns
+/// the status and body.
+async fn send_with(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
     json: Option<&str>,
 ) -> (u16, String) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -315,8 +376,8 @@ async fn send(
     if json.is_some() {
         builder = builder.header("Content-Type", "application/json");
     }
-    if let Some(user) = user {
-        builder = builder.header("X-Test-User", user);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
     }
     let req = builder.body(Full::new(Bytes::from(body))).unwrap();
 
@@ -533,4 +594,96 @@ async fn a_destructured_route_param_is_checked_as_the_bound_model() {
     assert_eq!(status, 401, "guest: {body}");
     let (status, body) = send(addr, "GET", "/destructured/999", Some(AUTHOR), None).await;
     assert_eq!(status, 404, "missing model: {body}");
+}
+
+// ── The guard of the route ───────────────────────────────────────────────────
+
+/// Serves the router behind `LoginAs`, then `auth`, with the `partner` guard
+/// installed. Call it inside a `TestContainer::scope`.
+async fn boot_guarded(auth: AuthMiddleware) -> SocketAddr {
+    register_gates();
+    install_partner_guard();
+    serve(MiddlewareRegistry::new().append(LoginAs).append(auth)).await
+}
+
+/// A `POST /posts` (the type form, `create-ha-post`) with the default-guard
+/// user `web` and the partner-guard user `partner`, each `None` for nobody.
+async fn store_as(addr: SocketAddr, web: Option<&str>, partner: Option<&str>) -> (u16, String) {
+    let mut headers = Vec::new();
+    if let Some(web) = web {
+        headers.push(("X-Test-User", web));
+    }
+    if let Some(partner) = partner {
+        headers.push(("X-Partner", partner));
+    }
+    send_with(addr, "POST", "/posts", &headers, Some(r#"{"title":"new"}"#)).await
+}
+
+#[tokio::test]
+#[serial]
+async fn the_policy_decides_for_the_user_of_the_route_guard() {
+    TestContainer::scope(async {
+        let addr = boot_guarded(AuthMiddleware::new().for_guard(PARTNER)).await;
+
+        assert_eq!(
+            store_as(addr, None, Some(AUTHOR)).await,
+            (200, "stored new".to_string())
+        );
+        let (status, body) = store_as(addr, None, Some(STRANGER)).await;
+        assert_eq!(status, 403, "body: {body}");
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn the_route_guard_user_is_checked_not_the_default_guard_user() {
+    TestContainer::scope(async {
+        let addr = boot_guarded(AuthMiddleware::new().for_guard(PARTNER)).await;
+
+        // The default guard's user may create posts; the route's may not.
+        let (status, body) = store_as(addr, Some(AUTHOR), Some(STRANGER)).await;
+        assert_eq!(status, 403, "body: {body}");
+        // And the other way round.
+        assert_eq!(
+            store_as(addr, Some(STRANGER), Some(AUTHOR)).await,
+            (200, "stored new".to_string())
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn a_user_only_on_the_default_guard_gets_401_on_a_route_guard() {
+    TestContainer::scope(async {
+        // The middleware answers first when it requires the guard.
+        let addr = boot_guarded(AuthMiddleware::new().for_guard(PARTNER)).await;
+        let (status, body) = store_as(addr, Some(AUTHOR), None).await;
+        assert_eq!(status, 401, "required guard: {body}");
+
+        // An optional check lets the request through, and the check finds no
+        // user on the route's guard. The default guard's user never stands in.
+        let addr = boot_guarded(AuthMiddleware::optional().for_guard(PARTNER)).await;
+        let (status, body) = store_as(addr, Some(AUTHOR), None).await;
+        assert_eq!(status, 401, "optional guard: {body}");
+        assert!(body.contains("Unauthenticated."), "body: {body}");
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn without_a_route_guard_the_default_guard_user_is_checked() {
+    TestContainer::scope(async {
+        let addr = boot_guarded(AuthMiddleware::new()).await;
+
+        assert_eq!(
+            store_as(addr, Some(AUTHOR), Some(STRANGER)).await,
+            (200, "stored new".to_string())
+        );
+        let (status, body) = store_as(addr, Some(STRANGER), Some(AUTHOR)).await;
+        assert_eq!(status, 403, "body: {body}");
+    })
+    .await;
 }
