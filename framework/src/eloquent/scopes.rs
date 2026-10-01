@@ -231,7 +231,7 @@ where
         let column = if builder.joins.is_empty() {
             M::SOFT_DELETES_COLUMN.to_string()
         } else {
-            format!("{}.{}", M::TABLE, M::SOFT_DELETES_COLUMN)
+            crate::eloquent::soft_deletes::qualified_column(M::TABLE, M::SOFT_DELETES_COLUMN)
         };
         builder = builder.filter_null(column);
     }

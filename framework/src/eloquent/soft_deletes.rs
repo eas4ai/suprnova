@@ -27,6 +27,18 @@ use serde::Serialize;
 
 use crate::eloquent::builder::{Builder, WhereTerm};
 
+/// `table.column`, the form that stays unambiguous when the query joins
+/// another table with a column of the same name. A schema-qualified table
+/// (`public.users`) keeps the bare column: a three-part name is not an
+/// identifier the builder accepts.
+pub(crate) fn qualified_column(table: &str, column: &str) -> String {
+    if table.contains('.') {
+        column.to_owned()
+    } else {
+        format!("{table}.{column}")
+    }
+}
+
 /// Marker trait emitted by `#[suprnova::model(soft_deletes)]`. Exposes
 /// the tombstone column name + a `is_trashed()` accessor. The
 /// inherent overrides (`delete` / `force_delete` / `restore`) live on
@@ -108,15 +120,19 @@ where
     }
 
     /// Restrict the query to *only* trashed rows: lifts the soft-delete
-    /// filter and appends `deleted_at IS NOT NULL`. Every registered
-    /// global scope still applies. Idempotent.
+    /// filter and appends `<table>.deleted_at IS NOT NULL`. Every
+    /// registered global scope still applies. Idempotent.
+    ///
+    /// The column names the model's table, as Laravel's
+    /// `getQualifiedDeletedAtColumn` does: a join added before or after
+    /// this call may bring in another table with its own `deleted_at`.
     pub fn only_trashed(mut self) -> Self {
-        let col = M::deleted_at_column();
+        let col = qualified_column(M::TABLE, M::deleted_at_column());
         // Avoid double-stamping NotNull on repeated calls.
         if !self
             .where_terms
             .iter()
-            .any(|t| matches!(t, WhereTerm::NotNull(c) if c == col))
+            .any(|t| matches!(t, WhereTerm::NotNull(c) if *c == col))
         {
             self = self.filter_not_null(col);
         }

@@ -339,6 +339,47 @@ async fn a_model_join_value_is_bound_never_written_into_the_sql() {
     join_values_are_bound(&fx).await;
 }
 
+/// Both tables soft-delete, so `only_trashed`'s `deleted_at IS NOT NULL`
+/// must name the model's table or the database rejects the column as
+/// ambiguous - whichever side of the join the call is written on.
+#[tokio::test]
+async fn only_trashed_names_the_models_table_when_the_query_joins() {
+    let _fx = seeded_sqlite().await;
+    let trashed_after_join = JmPost::query()
+        .join("jm_users", "jm_users.id", "=", "jm_posts.author_id")
+        .only_trashed()
+        .get()
+        .await
+        .expect("only_trashed after a join runs");
+    assert_eq!(
+        trashed_after_join.iter().map(|p| p.id).collect::<Vec<_>>(),
+        vec![105]
+    );
+
+    let trashed_before_join = JmPost::query()
+        .only_trashed()
+        .join("jm_users", "jm_users.id", "=", "jm_posts.author_id")
+        .get()
+        .await
+        .expect("only_trashed before a join runs");
+    assert_eq!(
+        trashed_before_join.iter().map(|p| p.id).collect::<Vec<_>>(),
+        vec![105]
+    );
+
+    let everything = JmPost::query()
+        .join("jm_users", "jm_users.id", "=", "jm_posts.author_id")
+        .with_trashed()
+        .order_by_asc("jm_posts.id")
+        .get()
+        .await
+        .expect("with_trashed with a join runs");
+    assert_eq!(
+        everything.iter().map(|p| p.id).collect::<Vec<_>>(),
+        vec![101, 102, 103, 104, 105]
+    );
+}
+
 #[tokio::test]
 async fn mass_writes_refuse_a_join() {
     let _fx = seeded_sqlite().await;
