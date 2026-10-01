@@ -9,3 +9,4 @@ pub mod hub;
 pub mod middleware;
 pub mod presence;
 pub mod protocol;
+pub mod pusher;

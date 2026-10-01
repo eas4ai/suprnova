@@ -256,7 +256,8 @@ pub use ::opendal;
 pub use ::tokio;
 pub use broadcasting::{
     BroadcastEnvelope, BroadcastHub, BroadcastListener, Broadcastable, BroadcastingWsHandler,
-    InMemoryBroadcastHub,
+    ChannelVisibility, InMemoryBroadcastHub, PusherAuth, PusherBroadcastHub, PusherConfig,
+    PusherScheme, pusher_channel_auth, pusher_user_auth,
 };
 pub use bus::{Bus, Dispatched};
 pub use console::{CommandEntry, CommandHandler, TypedCommand, dispatch_argv, two_column_detail};
