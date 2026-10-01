@@ -575,7 +575,7 @@ async fn malformed_large_timeout_and_redirect_responses_are_bounded_without_retr
             ..Reply::json(json!({}))
         },
         Reply {
-            delay: Duration::from_secs(1),
+            delay: Duration::from_secs(2),
             ..Reply::json(invoice())
         },
         Reply {
@@ -586,7 +586,9 @@ async fn malformed_large_timeout_and_redirect_responses_are_bounded_without_retr
     ] {
         let server = Server::new(vec![reply]).await;
         let mut p = server.provider();
-        p.client = build_client(Duration::from_millis(100)).unwrap();
+        // Wide enough for the server task to read the request on a loaded
+        // machine, and well short of the delayed reply.
+        p.client = build_client(Duration::from_millis(500)).unwrap();
         assert!(matches!(
             p.create_invoice(request()).await,
             Err(InvoiceCreationError::Unknown(_))
