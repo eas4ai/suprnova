@@ -1,12 +1,14 @@
-//! PAR-004: a model reports what its last save changed.
+//! PAR-004: a model reports what its last save changed, as Laravel's does.
 //!
-//! After a successful save a model answers `was_changed` /
-//! `was_changed_any` / `get_changes` for that save, and keeps each
-//! attribute's value as it was loaded before the save readable through
-//! `get_original` (cast) and `get_raw_original` (stored). The same holds
-//! for the `current` model an `updated` observer receives. Laravel's
-//! `HasAttributes::wasChanged`, `getChanges`, `getOriginal` and
-//! `getRawOriginal`.
+//! After a save that changes something, `was_changed` / `was_changed_any` /
+//! `get_changes` describe that save, and keep describing it until a later
+//! save changes something. While the save's `updated` and `saved` observers
+//! run, `get_original` (cast) and `get_raw_original` (stored) return the
+//! values loaded before the save; once the save returns they return the
+//! saved values. An insert reports no changes. Laravel's
+//! `HasAttributes::wasChanged`, `getChanges`, `getOriginal`,
+//! `getRawOriginal`, `syncChanges` and `syncOriginal`, as `Model::save`,
+//! `performUpdate` and `finishSave` call them.
 //!
 //! `is_admin` carries the `AsBool` cast, so its stored value (`0` / `1`)
 //! differs from its cast value (`false` / `true`): that is what tells
@@ -90,12 +92,13 @@ pub struct LiveChangeUser {
     pub is_admin: bool,
 }
 
-// ---- What an `updated` observer saw -------------------------------------
+// ---- What an observer saw -----------------------------------------------
 
-/// Everything the observer reads off `current`, captured so the test can
-/// assert on it after the save returns.
+/// Everything an observer reads off the model it receives, captured so the
+/// test can assert on it after the save returns.
 #[derive(Debug, Clone)]
 struct Seen {
+    event: &'static str,
     email: String,
     is_admin_changed: bool,
     name_changed: bool,
@@ -116,7 +119,7 @@ fn sorted_changes(changes: &Attrs) -> Vec<(String, Value)> {
     pairs
 }
 
-fn see<M>(email: &str, current: &M) -> Result<Seen, FrameworkError>
+fn see<M>(event: &'static str, email: &str, current: &M) -> Result<Seen, FrameworkError>
 where
     M: Model + From<<M::Entity as sea_orm::EntityTrait>::Model>,
     <M::Entity as sea_orm::EntityTrait>::Model: From<M>
@@ -129,6 +132,7 @@ where
         Send + Into<sea_orm::Value>,
 {
     Ok(Seen {
+        event,
         email: email.to_string(),
         is_admin_changed: current.was_changed("is_admin"),
         name_changed: current.was_changed("name"),
@@ -143,11 +147,11 @@ where
 
 static SEEN: Mutex<Vec<Seen>> = Mutex::new(Vec::new());
 
-fn seen_for(email: &str) -> Vec<Seen> {
+fn seen_for(event: &str, email: &str) -> Vec<Seen> {
     SEEN.lock()
         .unwrap()
         .iter()
-        .filter(|s| s.email == email)
+        .filter(|s| s.event == event && s.email == email)
         .cloned()
         .collect()
 }
@@ -162,7 +166,13 @@ impl Observer<ChangeUser> for AuditObserver {
         _previous: &ChangeUser,
         current: &ChangeUser,
     ) -> Result<(), FrameworkError> {
-        let seen = see(&current.email, current)?;
+        let seen = see("updated", &current.email, current)?;
+        SEEN.lock().unwrap().push(seen);
+        Ok(())
+    }
+
+    async fn saved(&self, model: &ChangeUser) -> Result<(), FrameworkError> {
+        let seen = see("saved", &model.email, model)?;
         SEEN.lock().unwrap().push(seen);
         Ok(())
     }
@@ -178,14 +188,14 @@ impl Observer<LiveChangeUser> for LiveAuditObserver {
         _previous: &LiveChangeUser,
         current: &LiveChangeUser,
     ) -> Result<(), FrameworkError> {
-        let seen = see(&current.email, current)?;
+        let seen = see("updated", &current.email, current)?;
         SEEN.lock().unwrap().push(seen);
         Ok(())
     }
 }
 
-/// The record a save that flipped `is_admin` from `false` to `true`, and
-/// nothing else, must leave.
+/// What an observer of a save that flipped `is_admin` from `false` to
+/// `true`, and nothing else, must see.
 fn assert_saw_only_the_flip(seen: &Seen) {
     assert!(seen.is_admin_changed, "was_changed(is_admin): {seen:?}");
     assert!(!seen.name_changed, "was_changed(name): {seen:?}");
@@ -210,6 +220,19 @@ fn assert_saw_only_the_flip(seen: &Seen) {
         Some(json!(false)),
         "get_original is the loaded value through the cast"
     );
+}
+
+/// The observer records of one save: every `updated` record, and the last
+/// `saved` record (the first one belongs to the row's insert).
+fn assert_observers_saw_only_the_flip(email: &str) {
+    let updated = seen_for("updated", email);
+    assert!(!updated.is_empty(), "the updated observer ran");
+    for record in &updated {
+        assert_saw_only_the_flip(record);
+    }
+    let saved = seen_for("saved", email);
+    let last_saved = saved.last().expect("the saved observer ran");
+    assert_saw_only_the_flip(last_saved);
 }
 
 // ---- Fixtures -----------------------------------------------------------
@@ -247,10 +270,10 @@ async fn plain(name: &str, email: &str) -> PlainUser {
     PlainUser::find_or_fail(created.id).await.unwrap()
 }
 
-// ---- Inside an `updated` observer ---------------------------------------
+// ---- Inside the `updated` and `saved` observers -------------------------
 
 #[tokio::test]
-async fn updated_observer_sees_what_save_changed_and_the_loaded_value() {
+async fn observers_see_what_save_changed_and_the_loaded_value() {
     let _db = sqlite().await;
     ChangeUser::observe(AuditObserver).await;
     let created = ChangeUser::create(attrs! {
@@ -265,15 +288,11 @@ async fn updated_observer_sees_what_save_changed_and_the_loaded_value() {
     user.is_admin = true;
     user.save().await.unwrap();
 
-    let seen = seen_for("observer-save@example.com");
-    assert!(!seen.is_empty(), "the updated observer ran");
-    for record in &seen {
-        assert_saw_only_the_flip(record);
-    }
+    assert_observers_saw_only_the_flip("observer-save@example.com");
 }
 
 #[tokio::test]
-async fn updated_observer_sees_what_update_changed() {
+async fn observers_see_what_update_changed() {
     let _db = sqlite().await;
     ChangeUser::observe(AuditObserver).await;
     let created = ChangeUser::create(attrs! {
@@ -287,11 +306,7 @@ async fn updated_observer_sees_what_update_changed() {
     let user = ChangeUser::find_or_fail(created.id).await.unwrap();
     user.update(attrs! { is_admin: true }).await.unwrap();
 
-    let seen = seen_for("observer-update@example.com");
-    assert!(!seen.is_empty(), "the updated observer ran");
-    for record in &seen {
-        assert_saw_only_the_flip(record);
-    }
+    assert_observers_saw_only_the_flip("observer-update@example.com");
 }
 
 // ---- On the caller's model ----------------------------------------------
@@ -313,8 +328,21 @@ async fn save_leaves_the_change_record_on_the_saved_model() {
         sorted_changes(&user.get_changes()),
         vec![("is_admin".to_string(), json!(1))]
     );
-    assert_eq!(user.get_raw_original("is_admin"), Some(json!(0)));
-    assert_eq!(user.get_original("is_admin").unwrap(), Some(json!(false)));
+}
+
+#[tokio::test]
+async fn after_the_save_returns_the_original_is_the_saved_value() {
+    let _db = sqlite().await;
+    let mut user = plain("Ada", "synced@example.com").await;
+    user.is_admin = true;
+    user.save().await.unwrap();
+
+    assert_eq!(
+        user.get_original("is_admin").unwrap(),
+        Some(json!(true)),
+        "once the save returns, the original is what it saved"
+    );
+    assert_eq!(user.get_raw_original("is_admin"), Some(json!(1)));
     assert_eq!(user.get_original("name").unwrap(), Some(json!("Ada")));
 }
 
@@ -330,8 +358,11 @@ async fn update_returns_a_model_that_reports_the_change() {
         sorted_changes(&updated.get_changes()),
         vec![("name".to_string(), json!("Ada Lovelace"))]
     );
-    assert_eq!(updated.get_raw_original("name"), Some(json!("Ada")));
-    assert_eq!(updated.get_original("name").unwrap(), Some(json!("Ada")));
+    assert_eq!(updated.get_raw_original("name"), Some(json!("Ada Lovelace")));
+    assert_eq!(
+        updated.get_original("name").unwrap(),
+        Some(json!("Ada Lovelace"))
+    );
 }
 
 #[tokio::test]
@@ -356,18 +387,16 @@ async fn a_later_save_replaces_the_record_of_the_earlier_one() {
     );
     assert_eq!(
         user.get_original("email").unwrap(),
-        Some(json!("first@example.com")),
-        "the value before the second save"
+        Some(json!("second@example.com"))
     );
     assert_eq!(
         user.get_original("name").unwrap(),
-        Some(json!("Ada Lovelace")),
-        "before the second save, `name` already held what the first save wrote"
+        Some(json!("Ada Lovelace"))
     );
 }
 
 #[tokio::test]
-async fn a_save_that_changes_nothing_reports_no_change() {
+async fn a_save_that_changes_nothing_keeps_the_previous_changes() {
     let _db = sqlite().await;
     let mut user = plain("Ada", "noop@example.com").await;
     user.name = "Ada Lovelace".into();
@@ -376,9 +405,18 @@ async fn a_save_that_changes_nothing_reports_no_change() {
 
     user.save().await.unwrap();
 
-    assert!(!user.was_changed_any(&[]));
-    assert!(!user.was_changed("name"));
-    assert!(user.get_changes().is_empty());
+    assert!(
+        user.was_changed("name"),
+        "a save with nothing dirty leaves the previous save's changes in place"
+    );
+    assert_eq!(
+        sorted_changes(&user.get_changes()),
+        vec![("name".to_string(), json!("Ada Lovelace"))]
+    );
+    assert_eq!(
+        user.get_original("name").unwrap(),
+        Some(json!("Ada Lovelace"))
+    );
 }
 
 #[tokio::test]
@@ -410,6 +448,7 @@ async fn a_created_model_reports_no_change() {
     .unwrap();
 
     assert!(!user.was_changed_any(&[]));
+    assert!(!user.was_changed("is_admin"));
     assert!(user.get_changes().is_empty());
     assert_eq!(user.get_raw_original("is_admin"), Some(json!(1)));
     assert_eq!(user.get_original("is_admin").unwrap(), Some(json!(true)));
@@ -462,13 +501,18 @@ async fn a_model_not_read_from_the_database_reports_every_column_as_changed() {
         is_admin: true,
         ..Default::default()
     };
+    assert_eq!(user.get_raw_original("is_admin"), None);
+
     user.save().await.unwrap();
 
     for column in ["name", "email", "is_admin"] {
         assert!(user.was_changed(column), "{column} counts as changed");
     }
-    assert_eq!(user.get_raw_original("is_admin"), None);
-    assert_eq!(user.get_original("is_admin").unwrap(), None);
+    assert_eq!(
+        user.get_raw_original("is_admin"),
+        Some(json!(1)),
+        "after the save the original is the saved row"
+    );
 }
 
 #[tokio::test]
@@ -490,12 +534,15 @@ async fn save_with_tx_and_update_with_tx_record_the_change() {
         sorted_changes(&first.get_changes()),
         vec![("is_admin".to_string(), json!(1))]
     );
-    assert_eq!(first.get_raw_original("is_admin"), Some(json!(0)));
+    assert_eq!(first.get_raw_original("is_admin"), Some(json!(1)));
     assert_eq!(
         sorted_changes(&second.get_changes()),
         vec![("name".to_string(), json!("Grace Hopper"))]
     );
-    assert_eq!(second.get_original("name").unwrap(), Some(json!("Grace")));
+    assert_eq!(
+        second.get_original("name").unwrap(),
+        Some(json!("Grace Hopper"))
+    );
 }
 
 #[tokio::test]
@@ -529,7 +576,7 @@ async fn a_clone_keeps_the_record_and_a_replica_does_not() {
 
     let copy = user.clone();
     assert!(copy.was_changed("is_admin"));
-    assert_eq!(copy.get_raw_original("is_admin"), Some(json!(0)));
+    assert_eq!(copy.get_raw_original("is_admin"), Some(json!(1)));
 
     let replica = user.replicate().await.unwrap();
     assert!(!replica.was_changed_any(&[]));
@@ -584,7 +631,7 @@ async fn live_save_reports_its_changes(env: &str) {
     user.is_admin = true;
     user.save().await.unwrap();
 
-    let seen = seen_for(&email);
+    let seen = seen_for("updated", &email);
     assert!(!seen.is_empty(), "the updated observer ran");
     for record in &seen {
         assert_saw_only_the_flip(record);
@@ -593,14 +640,21 @@ async fn live_save_reports_its_changes(env: &str) {
         sorted_changes(&user.get_changes()),
         vec![("is_admin".to_string(), json!(1))]
     );
+    assert_eq!(user.get_raw_original("is_admin"), Some(json!(1)));
+
+    // Nothing dirty: the flip stays the last change.
+    user.save().await.unwrap();
+    assert!(user.was_changed("is_admin"));
 
     let user = user.update(attrs! { name: "Ada Lovelace" }).await.unwrap();
     assert_eq!(
         sorted_changes(&user.get_changes()),
         vec![("name".to_string(), json!("Ada Lovelace"))]
     );
-    assert_eq!(user.get_raw_original("is_admin"), Some(json!(1)));
-    assert_eq!(user.get_original("name").unwrap(), Some(json!("Ada")));
+    assert_eq!(
+        user.get_original("name").unwrap(),
+        Some(json!("Ada Lovelace"))
+    );
 
     drop(guard);
     database.inner().clone().close().await.unwrap();
