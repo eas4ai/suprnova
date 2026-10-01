@@ -67,6 +67,7 @@
 //! semantics. Use [`Transaction::savepoint`] for nested behaviour.
 
 use crate::database::DB;
+use crate::database::clauses::quote_identifier;
 use crate::database::identifier::canonical_savepoint_name;
 use crate::error::FrameworkError;
 use rand::RngExt;
@@ -1069,7 +1070,8 @@ impl Transaction {
     /// that splices untrusted input gets a
     /// [`FrameworkError::bad_request`] instead of an injected
     /// statement. [`Self::rollback_to`] applies the same guard.
-    /// Names are case-insensitive. PostgreSQL also aliases names that share
+    /// The name is then quoted, so a reserved word such as `inner` is a
+    /// valid name on every backend. Names are case-insensitive. PostgreSQL also aliases names that share
     /// their first 63 ASCII bytes; SQLite and MySQL retain all 64 bytes.
     ///
     /// Inside [`DB::transaction`] the call also marks the after-commit
@@ -1079,7 +1081,7 @@ impl Transaction {
     /// back, which is how every backend resolves it.
     pub async fn savepoint(&self, name: &str) -> Result<(), FrameworkError> {
         let validated = canonical_savepoint_name(name, self.backend())?;
-        let sql = format!("SAVEPOINT {validated}");
+        let sql = format!("SAVEPOINT {}", quote_identifier(self.backend(), &validated));
         self.inner
             .execute_unprepared(&sql)
             .await
@@ -1124,7 +1126,10 @@ impl Transaction {
     /// goes to the cache store, and neither shipped store is database-backed.
     pub async fn rollback_to(&self, name: &str) -> Result<(), FrameworkError> {
         let validated = canonical_savepoint_name(name, self.backend())?;
-        let sql = format!("ROLLBACK TO SAVEPOINT {validated}");
+        let sql = format!(
+            "ROLLBACK TO SAVEPOINT {}",
+            quote_identifier(self.backend(), &validated)
+        );
         self.inner
             .execute_unprepared(&sql)
             .await

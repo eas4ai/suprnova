@@ -946,6 +946,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **A savepoint can be named with a reserved word.** `tx.savepoint("inner")`
+  failed with a syntax error on PostgreSQL and MySQL, because the validated
+  name went into the statement unquoted. Savepoint names are now quoted for
+  the backend; they stay case-insensitive. This fix landed on main after the
+  `v3.0.0` tag.
 - **The sync queue driver runs a whole chain.** `SyncQueueDriver` ran a
   chain's first job and dropped every later link. It now runs the chain
   inline, link by link, as Laravel's sync queue does; a link that fails
