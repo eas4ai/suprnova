@@ -165,6 +165,7 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | crossbeam-queue | 0.3.12 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | crossbeam-utils | 0.8.21 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | crunchy | 0.2.4 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | crypto_secretbox | 0.1.1 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | crypto-bigint | 0.5.5 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | crypto-common | 0.1.7 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | crypto-common | 0.2.2 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -497,6 +498,7 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | plist | 1.10.0 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | pluralizer | 0.5.0 | Workspace resolved | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | png | 0.18.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | poly1305 | 0.8.0 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | polyval | 0.6.2 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | portable-atomic-util | 0.2.7 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | portable-atomic | 1.13.1 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
@@ -584,6 +586,7 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | rusty-fork | 0.3.1 | Workspace resolved | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | ryu-js | 1.0.3 | Workspace resolved | Apache-2.0 OR BSL-1.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | ryu | 1.0.23 | Workspace resolved | Apache-2.0 OR BSL-1.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | salsa20 | 0.10.2 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | same-file | 1.0.6 | Workspace resolved | Unlicense/MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | schannel | 0.1.29 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | scopeguard | 1.2.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
