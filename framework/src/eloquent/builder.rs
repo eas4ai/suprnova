@@ -2802,13 +2802,21 @@ fn render_date_part(
 /// The renderer threads `values` + `n` through the placeholder
 /// counter - Postgres `$N` numbers stay monotonic across the parent's
 /// WHERE clause and the subquery body, the same way UNION arms do.
+///
+/// `joined` is the outer query's own table when that query joins another
+/// (see [`JoinedTable`]): the correlation back to the parent then names
+/// the parent table quoted, as the outer FROM does.
 fn render_exists(
     backend: DbBackend,
     spec: &ExistsSpec,
     values: &mut Vec<SeaValue>,
     n: &mut usize,
+    joined: Option<JoinedTable<'_>>,
 ) -> Result<String, FrameworkError> {
     let mut where_parts: Vec<String> = Vec::new();
+    let parent = joined
+        .filter(|table| table.name == spec.parent_table)
+        .map_or(spec.parent_table.as_str(), |table| table.quoted);
 
     // Three shapes - pivot, belongs-to, has - selected by which slots
     // the spec carries. The renderer is intentionally explicit rather
@@ -2836,7 +2844,7 @@ fn render_exists(
             "{pivot}.{ppk} = {parent}.{pk}",
             pivot = spec.pivot_table,
             ppk = spec.pivot_parent_key,
-            parent = spec.parent_table,
+            parent = parent,
             pk = spec.parent_key,
         ));
         if !spec.morph_type_column.is_empty() && !spec.morph_type_value.is_empty() {
@@ -2857,7 +2865,7 @@ fn render_exists(
             "{target}.{owner_key} = {parent}.{fk}",
             target = spec.target_table,
             owner_key = spec.parent_key,
-            parent = spec.parent_table,
+            parent = parent,
             fk = spec.foreign_key,
         ));
         spec.target_table.clone()
@@ -2868,7 +2876,7 @@ fn render_exists(
             "{target}.{fk} = {parent}.{pk}",
             target = spec.target_table,
             fk = spec.foreign_key,
-            parent = spec.parent_table,
+            parent = parent,
             pk = spec.parent_key,
         ));
         if !spec.morph_type_column.is_empty() && !spec.morph_type_value.is_empty() {
@@ -3153,7 +3161,7 @@ pub(crate) fn render_subquery_term(
                 format!("({})", parts.join(" AND "))
             }
         }
-        WhereTerm::Exists(spec) => render_exists(backend, spec, values, n)?,
+        WhereTerm::Exists(spec) => render_exists(backend, spec, values, n, None)?,
         WhereTerm::InQuery(col, query, negated) => {
             render_in_query(backend, &q(col), query, *negated, values, n)?
         }
@@ -3259,8 +3267,9 @@ fn warn_sqlite_lock_once() {
 ///
 /// A joined query quotes the identifiers of its joins and the `table.*` it
 /// selects by default, so it quotes the model's table in its FROM too. The
-/// NULL tests the builder writes on that table, the soft-delete filter and
-/// `only_trashed`'s, then name it in the same quoted form. Otherwise, on
+/// references the builder writes to that table, the soft-delete filter and
+/// `only_trashed`'s, a `where_has` correlation and the key `model_keys`
+/// selects, then name it in the same quoted form. Otherwise, on
 /// Postgres, a mixed-case name would resolve to a different table in one
 /// place than in another.
 #[derive(Clone, Copy)]
@@ -3445,7 +3454,7 @@ impl<M> Builder<M> {
                     format!("({})", parts.join(" AND "))
                 }
             }
-            WhereTerm::Exists(spec) => render_exists(backend, spec, values, n)?,
+            WhereTerm::Exists(spec) => render_exists(backend, spec, values, n, joined)?,
             WhereTerm::InQuery(col, query, negated) => {
                 render_in_query(backend, col, query, *negated, values, n)?
             }
@@ -5703,10 +5712,16 @@ where
         let mut s = self;
         s.select_cols = None;
         s.select_raw = None;
+        // A joined query writes its table quoted in the FROM, so the key
+        // names the table the same way.
+        let key = {
+            let this = s.effective();
+            let from = this.own_table(backend, M::TABLE);
+            joined_column(this.joined_table(M::TABLE, &from), &qualified)
+        };
         // Alias back to the bare column name so the result column is
         // named identically on SQLite, MySQL and Postgres.
-        let (sql, vals) =
-            s.render_select_for(backend, M::TABLE, &format!("{qualified} AS {pk}"))?;
+        let (sql, vals) = s.render_select_for(backend, M::TABLE, &format!("{key} AS {pk}"))?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let rows = exec
             .query_all(stmt)
