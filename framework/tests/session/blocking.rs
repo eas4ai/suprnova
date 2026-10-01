@@ -167,9 +167,15 @@ async fn post_request(cookie: Option<(&str, &str)>) -> suprnova::Request {
 }
 
 /// One stored session and the cookie value that names it.
+///
+/// Every call names a new session. The lock a blocking request takes is
+/// keyed by the session id in the process-wide cache, and the tests of
+/// this binary run side by side in one process under plain `cargo test`:
+/// with one id for all of them, a test would find the lock another test
+/// holds.
 fn stored_session(config: &SessionConfig) -> (String, SessionData, String) {
     use suprnova::http::cookie::Cookie;
-    let session_id = "a".repeat(40);
+    let session_id = suprnova::session::generate_session_id();
     let session = SessionData::new(session_id.clone(), "b".repeat(40));
     let cookie = Cookie::encrypted(&config.cookie_name, &session_id).unwrap();
     (session_id, session, cookie.value().to_owned())

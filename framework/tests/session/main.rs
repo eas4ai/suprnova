@@ -16,6 +16,7 @@ pub mod facade;
 pub mod gc_loop;
 pub mod id_shape_validation;
 pub mod lazy_persistence;
+mod own_process;
 pub mod persistence_fail_closed;
 pub mod previous_url_open_redirect;
 pub mod store_container_binding;

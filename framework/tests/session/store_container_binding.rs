@@ -6,14 +6,15 @@
 //! instead of silently constructing an unrelated fresh
 //! `DatabaseSessionDriver` that revokes nothing on a custom-store app.
 //!
-//! Kept in its own test binary (its own OS process): the registration
-//! writes to the process-global container via `App::bind_if_absent`
-//! (see `session::middleware::register_configured_store`), and this is
-//! the one test in the whole suite that deliberately exercises that
-//! real global write end-to-end. Sharing a process with any other test
-//! that also constructs a `SessionMiddleware` would race for that
-//! global slot - every other session test that cares about a specific
-//! store instead overrides hermetically via `TestContainer`.
+//! The body runs in a child process of this binary, as its only test
+//! (see `own_process`): the registration writes to the process-global
+//! container via `App::bind_if_absent` (see
+//! `session::middleware::register_configured_store`), and this is the
+//! one test in the whole suite that deliberately exercises that real
+//! global write end-to-end. Sharing a process with any other test that
+//! also constructs a `SessionMiddleware` would race for that global
+//! slot - every other session test that cares about a specific store
+//! instead overrides hermetically via `TestContainer`.
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -55,8 +56,18 @@ impl SessionStore for RecordingStore {
     }
 }
 
+#[test]
+fn session_middleware_registers_its_store_for_revocation_resolution() {
+    crate::own_process::run_alone(
+        "store_container_binding::session_middleware_registers_its_store_for_revocation_resolution_child",
+    );
+}
+
 #[tokio::test]
-async fn session_middleware_registers_its_store_for_revocation_resolution() {
+async fn session_middleware_registers_its_store_for_revocation_resolution_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     let recording = Arc::new(RecordingStore {
         revoked_user_id: std::sync::Mutex::new(None),
         revoke_calls: AtomicU64::new(0),
