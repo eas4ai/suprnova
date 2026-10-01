@@ -467,4 +467,48 @@ mod tests {
             "block must end in resolve(...).map_err(...) shape; got: {rendered}"
         );
     }
+
+    /// The page file and the manifest the lookup came from are read by the
+    /// macro, not by rustc, so cargo does not know about them. Naming them
+    /// in `include_bytes!` puts them in the crate's dep-info, which re-runs
+    /// the check when either changes.
+    #[test]
+    fn tracked_inputs_become_include_bytes_items() {
+        let parsed: InertiaResponseInput = parse_quote! {
+            &req, "Home", { "title": "Welcome" }
+        };
+        let expansion = render_inertia_response_expansion(&parsed);
+        let rendered = track_inputs(
+            expansion.clone(),
+            &[
+                PathBuf::from("/srv/app/Cargo.toml"),
+                PathBuf::from("/srv/app/frontend/src/pages/Home.svelte"),
+            ],
+        )
+        .to_string();
+        assert!(
+            rendered.contains("include_bytes ! (\"/srv/app/Cargo.toml\")"),
+            "the manifest must be tracked; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("include_bytes ! (\"/srv/app/frontend/src/pages/Home.svelte\")"),
+            "the page must be tracked; got: {rendered}"
+        );
+        assert!(
+            rendered.contains(&expansion.to_string()),
+            "the expansion must follow the tracking items; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn no_tracked_inputs_leave_the_expansion_unchanged() {
+        let parsed: InertiaResponseInput = parse_quote! {
+            &req, "Home", { "title": "Welcome" }
+        };
+        let expansion = render_inertia_response_expansion(&parsed);
+        assert_eq!(
+            track_inputs(expansion.clone(), &[]).to_string(),
+            expansion.to_string()
+        );
+    }
 }
