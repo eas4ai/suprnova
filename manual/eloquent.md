@@ -603,22 +603,12 @@ so rustdoc search finds either.
 | `->orWhereKey(id)` | `.or_filter_key(id)` | `.or_where_key(id)` | PK filter as a disjunct |
 | `->orWhereKeyNot(id)` | `.or_filter_key_not(id)` | `.or_where_key_not(id)` | Negated PK filter as a disjunct |
 | `->whereNot(col, val)` | `.filter_not(col, val)` | `.where_not(col, val)` | |
-| `->whereIn(col, vals)` | `.filter_in(col, vals)` | `.where_in(col, vals)` | A list or a `DB::table` subquery |
-| `->whereNotIn(col, vals)` | `.filter_not_in(col, vals)` | `.where_not_in(col, vals)` | A list or a subquery |
-| `->orWhereIn(col, vals)` | `.or_filter_in(col, vals)` | `.or_where_in(col, vals)` | A list or a subquery |
-| `->orWhereNotIn(col, vals)` | `.or_filter_not_in(col, vals)` | `.or_where_not_in(col, vals)` | A list or a subquery |
-| `->whereAny(cols, op, v)` | `.filter_any(cols, op, v)` | `.where_any(cols, op, v)` | `(c1 op v OR c2 op v ...)` |
-| `->orWhereAny(cols, op, v)` | `.or_filter_any(cols, op, v)` | `.or_where_any(cols, op, v)` | |
-| `->whereAll(cols, op, v)` | `.filter_all(cols, op, v)` | `.where_all(cols, op, v)` | `(c1 op v AND c2 op v ...)` |
-| `->orWhereAll(cols, op, v)` | `.or_filter_all(cols, op, v)` | `.or_where_all(cols, op, v)` | |
-| `->whereNone(cols, op, v)` | `.filter_none(cols, op, v)` | `.where_none(cols, op, v)` | `NOT (c1 op v OR c2 op v ...)` |
-| `->orWhereNone(cols, op, v)` | `.or_filter_none(cols, op, v)` | `.or_where_none(cols, op, v)` | |
+| `->whereIn(col, vals)` | `.filter_in(col, vals)` | `.where_in(col, vals)` | |
+| `->whereNotIn(col, vals)` | `.filter_not_in(col, vals)` | `.where_not_in(col, vals)` | |
 | `->whereBetween(col, [a, b])` | `.filter_between(col, a..=b)` | `.where_between(col, a..=b)` | Rust range |
 | `->whereNotBetween(col, [a, b])` | `.filter_not_between(col, a..=b)` | `.where_not_between(col, a..=b)` | |
 | `->whereNull(col)` | `.filter_null(col)` | `.where_null(col)` | |
 | `->whereNotNull(col)` | `.filter_not_null(col)` | `.where_not_null(col)` | |
-| `->orWhereNull(col)` | `.or_filter_null(col)` | `.or_where_null(col)` | |
-| `->orWhereNotNull(col)` | `.or_filter_not_null(col)` | `.or_where_not_null(col)` | |
 | `->whereDate(col, '2026-05-19')` | `.filter_date(col, NaiveDate)` | `.where_date(col, NaiveDate)` | |
 | `->whereMonth(col, 5)` | `.filter_month(col, 5)` | `.where_month(col, 5)` | |
 | `->whereDay(col, 19)` | `.filter_day(col, 19)` | `.where_day(col, 19)` | |
@@ -633,56 +623,11 @@ so rustdoc search finds either.
 | `->whereJsonContains(col, v)` | `.filter_json_contains(col, v)` | `.where_json_contains(col, v)` | Backend-dispatched |
 | `->whereJsonLength(col, op, n)` | `.filter_json_length(col, op, n)` | `.where_json_length(col, op, n)` | |
 | `->whereColumn(a, b)` | `.filter_column(a, b)` | `.where_column(a, b)` | Column-to-column compare |
-| `->whereExists(query)` | `.filter_exists(query)` | `.where_exists(query)` | A `DB::table` subquery |
-| `->whereNotExists(query)` | `.filter_not_exists(query)` | `.where_not_exists(query)` | |
+| `->whereExists(closure)` | `.filter_exists(builder)` | `.where_exists(builder)` | Subquery |
 | `->whereHas(rel, closure)` | `.filter_has(rel, fn)` | `.where_has(rel, fn)` | Relation predicate (10B) |
 | `->whereDoesntHave(rel)` | `.filter_doesnt_have(rel)` | `.where_doesnt_have(rel)` | (10B) |
 | `->whereRelation(rel, col, op, v)` | `.filter_relation(...)` | `.where_relation(...)` | (10B) |
 | `->whereRaw(sql, bindings)` | `.filter_raw(sql, bindings)` | `.where_raw(sql, bindings)` | |
-| `->orWhereRaw(sql, bindings)` | `.or_filter_raw(sql, bindings)` | `.or_where_raw(sql, bindings)` | |
-
-Every `or_*` method folds its condition into the one before it, so an
-`OR` widens that one condition and never the whole `WHERE` clause. The
-grouped helpers keep their comparisons in parentheses: this query never
-returns a user whose `active` is false, and the model's soft-delete
-filter still applies:
-
-```rust
-// WHERE deleted_at IS NULL AND active = ? AND (is_admin = ? OR is_staff = ?)
-let staff = User::query()
-    .filter("active", true)
-    .where_any(["is_admin", "is_staff"], "=", true)
-    .get()
-    .await?;
-```
-
-An empty column list adds no condition. `where_in` and its siblings
-take another `DB::table` builder as a subquery, and so do
-`where_exists` and `where_not_exists`, whose subquery can refer to the
-model's table through `where_column`:
-
-```rust
-use suprnova::DB;
-
-let booked = Room::query()
-    .where_in("id", DB::table("slots").select(["room_id"]).filter("day", "mon"))
-    .get()
-    .await?;
-
-let authors = User::query()
-    .where_exists(
-        DB::table("posts")
-            .select_raw("1")
-            .where_column("posts.author_id", "users.id"),
-    )
-    .get()
-    .await?;
-```
-
-A subquery's values are bound parameters in their place in the
-statement. For a declared relation, `has` and `where_has` build the
-`EXISTS` subquery for you. The full subquery and `OR` rules are in
-[Query Builder](queries.md#subqueries).
 
 The `binary` family compares raw bytes instead of matching under the
 column's collation. MySQL and MariaDB emit `col = binary ?`; Postgres
@@ -732,18 +677,6 @@ let users = User::query().in_random_order().get().await?;
 
 `Direction::Asc` / `Direction::Desc` is the Suprnova enum
 re-exported from SeaORM.
-
-`reorder()` drops every ordering set so far, and `reorder_by(col, dir)`
-drops them and orders by `col` instead. Orderings a global scope adds
-when the query runs stay, as in Laravel:
-
-```php
-$users = User::latest()->reorder('name')->get();
-```
-
-```rust
-let users = User::latest().reorder_by("name", Direction::Asc).get().await?;
-```
 
 #### Ordering by an explicit sequence
 
@@ -879,45 +812,6 @@ matched?" question costs one column instead of a full row per match.
 The qualification is what lets it survive a query that joins another
 table carrying its own `id`. Any `select(...)` already on the builder is
 discarded - the caller asked for keys.
-
-### Joins
-
-`join`, `left_join`, `right_join`, and `cross_join` work as they do on
-the `DB::table` builder, along with the closure forms (`join_with`,
-`left_join_with`, `right_join_with`) and the subquery joins (`join_sub`,
-`left_join_sub`, `join_sub_with`, `left_join_sub_with`). See
-[Query Builder - Joins](queries.md#joins) for the conditions a join
-takes.
-
-```php
-$posts = Post::join('users', 'users.id', '=', 'posts.author_id')
-    ->where('users.active', true)
-    ->get();
-```
-
-```rust
-let posts = Post::query()
-    .join("users", "users.id", "=", "posts.author_id")
-    .filter("users.active", true)
-    .get()
-    .await?;
-```
-
-Without a `select`, a model query with a join selects only the model's
-own columns (`"posts".*`), so the joined table's `id`, `name`, or
-`created_at` never lands in the model. Call `select` to choose the
-columns yourself; `select(["posts.*"])` is the default spelled out.
-Qualify a column that both tables carry, such as `users.active` above.
-On a model that soft-deletes, the soft-delete filter names the model's
-table once the query joins another, so a joined table with its own
-`deleted_at` doesn't make the column ambiguous. The joined table's own
-soft-delete filter isn't applied, as in Laravel.
-
-`count` and `paginate` count the joined rows. `update_all`,
-`delete_all`, `force_delete_all`, and `increment_each` return an error
-on a query with a join, because the statement they render would ignore
-it. Narrow the rows with `where_in` or `where_exists` on a subquery
-instead.
 
 ### Unions
 
@@ -4109,10 +4003,15 @@ Use these escape hatches sparingly - the typed builder catches more
 errors at compile time and reads cleaner in business logic. But when
 you need them, they're here.
 
-A computed column such as `SELECT COUNT(*) AS n FROM t` comes back in
-raw `DB::select` rows on every backend. SQLite declares no type for it,
-so Suprnova reads the value by its runtime type; see
-[Computed columns on SQLite](queries.md#computed-columns-on-sqlite).
+**Aggregate-column gotcha.** Untyped aggregates like
+`SELECT COUNT(*) AS n FROM t` work through the builder's `.count()`
+helper but may be silently dropped from raw `DB::select` rows on
+SQLite - the underlying `JsonValue::from_query_result` walks sqlx's
+per-column type info, and a bare aggregate carries none. If you need
+the raw select path with aggregates, give the expression a typed
+context: either use a `CAST(... AS BIGINT)` wrapper or read the
+column with a typed `DB::table(...).count()` / `.max(...)` helper
+that uses `query_one` + `try_get` under the hood.
 
 ## Relation-existence + cheap shortcuts
 
