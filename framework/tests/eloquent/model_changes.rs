@@ -543,7 +543,9 @@ async fn a_save_with_timestamps_also_reports_updated_at() {
 
 #[tokio::test]
 async fn an_encrypted_column_is_changed_only_when_its_value_changes() {
-    suprnova::testing::install_test_encryption_key();
+    // The binary's one key ring; a key of this test's own would seal the
+    // ring before the rotation tests install theirs (see `key_ring`).
+    crate::key_ring::rotation_keys();
     let db = sqlite().await;
     db.execute_unprepared(
         "CREATE TABLE par_secret_users (\
