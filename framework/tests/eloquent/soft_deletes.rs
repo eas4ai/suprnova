@@ -130,6 +130,50 @@ async fn only_trashed_sees_only_dead() {
     assert_eq!(dead[0].name, "Alice");
 }
 
+/// A union arm is scoped like the query it joins: its soft-delete filter
+/// renders with its own terms, so a trashed row never comes back through
+/// the second `SELECT`, and an arm with no terms of its own still renders
+/// a valid `WHERE`.
+#[tokio::test]
+async fn a_union_arm_keeps_its_soft_delete_filter() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate_users(&db).await;
+    let alice = T10User::create(attrs! { name: "Alice", email: "a@x.com" })
+        .await
+        .unwrap();
+    T10User::create(attrs! { name: "Bob", email: "b@x.com" })
+        .await
+        .unwrap();
+    let carol = T10User::create(attrs! { name: "Carol", email: "c@x.com" })
+        .await
+        .unwrap();
+    carol.delete().await.unwrap();
+
+    let mut names: Vec<String> = T10User::query()
+        .filter("name", "Alice")
+        .union(T10User::query().filter_op("id", ">", alice.id))
+        .get()
+        .await
+        .expect("a union of two scoped queries runs")
+        .into_iter()
+        .map(|user| user.name)
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["Alice", "Bob"], "Carol is trashed");
+
+    let mut unfiltered_arm: Vec<String> = T10User::query()
+        .filter("name", "Alice")
+        .union(T10User::query())
+        .get()
+        .await
+        .expect("an arm with only its scope's terms runs")
+        .into_iter()
+        .map(|user| user.name)
+        .collect();
+    unfiltered_arm.sort();
+    assert_eq!(unfiltered_arm, vec!["Alice", "Bob"]);
+}
+
 #[tokio::test]
 async fn all_hides_trashed_rows() {
     // The macro emits an inherent `all()` for soft-deletes models

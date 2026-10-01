@@ -3662,12 +3662,15 @@ impl<M> Builder<M> {
         sql.push_str(table);
         sql.push_str(&this.render_joins(backend, values, n)?);
 
+        // `this`, not `self`: a union arm arrives here with its scope
+        // resolver still set, and its soft-delete filter and global scopes
+        // exist only on the resolved copy.
         if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
-            let parts: Vec<String> = self
+            let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, values, n, self.binder))
+                .map(|t| Self::render_where_term(backend, t, values, n, this.binder))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
