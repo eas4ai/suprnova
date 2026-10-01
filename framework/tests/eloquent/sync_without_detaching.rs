@@ -381,6 +381,23 @@ async fn connect_live(env: &str) -> (TestContainerGuard, DbConnection) {
     (guard, database)
 }
 
+/// Every pivot row of `user` read through `DB::table`, ordered by role id.
+/// The live tables keep native timestamp columns, which `SwdRoleUser`'s
+/// default text storage for `DateTime<Utc>` cannot read; `DB::table`
+/// decodes each column by its database type.
+async fn live_pivot_rows(user: &SwdUser) -> Vec<Value> {
+    DB::table("swd_role_user")
+        .filter("swd_user_id", user.id)
+        .order_by_asc("swd_role_id")
+        .get()
+        .await
+        .unwrap()
+        .into_vec()
+        .into_iter()
+        .map(|row| Value::Object(row.0))
+        .collect()
+}
+
 async fn live_sync_without_detaching(env: &str) {
     use sea_orm::ConnectionTrait;
 
@@ -409,7 +426,7 @@ async fn live_sync_without_detaching(env: &str) {
 
     let clock = TestClock::freeze();
     let (user, [r1, r2, r3]) = user_holding_two_roles().await;
-    let before = pivot_rows(&user).await;
+    let before = live_pivot_rows(&user).await;
     clock.advance(Duration::seconds(60));
 
     user.roles()
@@ -418,7 +435,7 @@ async fn live_sync_without_detaching(env: &str) {
         .unwrap();
 
     assert_eq!(held_role_ids(&user).await, vec![r1.id, r2.id, r3.id]);
-    let after = pivot_rows(&user).await;
+    let after = live_pivot_rows(&user).await;
     assert_eq!(after.len(), 3);
     assert_eq!(&after[..2], &before[..]);
 
