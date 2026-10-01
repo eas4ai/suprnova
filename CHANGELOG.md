@@ -8,6 +8,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **A Pusher-protocol broadcast driver.** `PusherBroadcastHub` publishes
+  broadcasts through the REST API that Pusher Channels, Soketi and Laravel
+  Reverb share, and still delivers them to in-process subscribers, so a
+  `ws!` broadcasting route keeps working. `PusherConfig::from_env()` reads
+  Laravel's `PUSHER_*` variables, and `from_env_prefix("REVERB")` reads
+  Reverb's. `pusher_channel_auth` and `pusher_user_auth` answer Laravel
+  Echo's authorization requests for private, presence and end-to-end
+  encrypted channels. The new `Channel::visibility` picks each channel's
+  Pusher name and defaults to private, so a channel that restricts
+  `authorize` can never leak through a public Pusher channel. A name that
+  would read as another channel's Pusher name, and an encrypted presence
+  channel, are refused rather than published, and an invalid configuration
+  fails when the hub is built. Publishing to an encrypted channel without a
+  master key is an error, never a plaintext send. This landed on main after
+  the `v3.0.0` tag (#130).
 - **`InertiaProps` and `Data` follow serde's field names.** Both derives
   honor `#[serde(rename_all = "...")]` on the struct, and `rename`, `skip`,
   `skip_serializing` and `skip_deserializing` on a field, including the

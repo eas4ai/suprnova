@@ -219,6 +219,7 @@ oxideav-png = { version = "=0.1.8", optional = true }
 oxideav-webp = { version = "=0.2.3", optional = true }
 oxideav-gif = { version = "=0.0.11", optional = true }
 oxideav-bmp = { version = "=0.1.6", optional = true }
+crypto_secretbox = "0.1.1"
 
 [features]
 default = [
