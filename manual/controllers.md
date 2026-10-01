@@ -71,7 +71,8 @@ extractor. Four categories:
 
 The macro runs the extractions in declaration order, so the body of
 your function sees fully-typed values. If any extraction fails, the
-error short-circuits via `?` and the handler body never runs.
+error short-circuits via `?` and the handler body never runs. A handler
+with `#[authorize]` changes the order; see [Authorization](#authorization).
 
 ### Path parameters
 
@@ -169,6 +170,32 @@ pub async fn show(req: Request) -> Response {
 ```
 
 You can mix and match: `pub async fn nested(category_id: i64, product: product::Model, req: Request)` is a valid signature. The macro extracts each argument by its own rule.
+
+### Authorization
+
+`#[authorize]` declares the gate check a handler needs. The check runs
+after the route parameters are bound and before the request body is read,
+so a denied request never reaches validation or the handler body:
+
+```rust
+use suprnova::{authorize, handler, json_response, Response, RouteParam};
+use crate::models::Post;
+use crate::requests::UpdatePostRequest;
+
+// Route: put!("/posts/{post}", controllers::post::update)
+#[handler]
+#[authorize("update-post", post)]
+pub async fn update(post: RouteParam<Post>, form: UpdatePostRequest) -> Response {
+    json_response!({ "updated": post.id, "title": form.title })
+}
+```
+
+A guest gets 401, a denial 403, and a policy that denies as not found 404.
+On a handler with `#[authorize]`, the macro extracts the route-bound
+parameters first, then runs the checks, then extracts the form request or
+`Request`, whatever order the signature lists them in. For the type form,
+several attributes on one handler, and the full rules, see
+[Authorize a handler](authorization.md#authorize-a-handler).
 
 ## The `Response` contract
 
