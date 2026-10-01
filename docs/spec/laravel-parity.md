@@ -5,8 +5,10 @@ Prefix: PAR
 
 Suprnova tracks Laravel 13.34.0 and Inertia 3.7.1. The parity map,
 `feature-map/laravel/parity.jsonl`, holds one row per Laravel item with the
-developer's ruling on it: build, not built by design, or does not apply.
-The developer ruled on the whole map on 2026-09-30 and 2026-10-01. This
+classification of it: build, not built by design, or does not apply. The
+developer ruled on part of the map: the recommendations accepted on
+2026-09-30, and the open questions of the third review on 2026-10-01. A row
+says "Developer ruling <date>" only where the developer ruled on it. This
 file turns the rows ruled "build" into requirements, one commitment at a
 time; the map stays the complete list. A requirement here names the
 capability and the Laravel behavior it matches; the map rows it covers say
@@ -19,8 +21,9 @@ tests against Postgres, MariaDB and MySQL as well as SQLite.
 ## Requests from an application port
 
 An application team porting a Laravel 13 application filed issues #125 to
-#129 for the gaps it met in application code. The developer approved them
-with the rest of the map on 2026-10-01.
+#129 for the gaps it met in application code. The developer asked for
+them to be done on 2026-10-01. The queue fake gaps (PAR-009) are among the
+recommendations the developer accepted on 2026-09-30.
 
 [PAR-001] The `DB::table` builder and the model query builder MUST offer
 joins: `join`, `left_join`, `right_join` and `cross_join` against a table

@@ -179,8 +179,9 @@ Requirements: PAR-001, PAR-002, PAR-003, PAR-004, PAR-005, PAR-006, PAR-007, PAR
    `sync_without_detaching`, `DB::after_commit`, a configurable Inertia
    page lookup, and the queue fake's `except`, raw pushes and
    `assert_pushed_without_chain` (`laravel-parity.md` PAR-001 to PAR-009).
-   The developer approved every ruling in the parity map on 2026-10-01;
-   this is the first commitment cut from it.
+   The developer asked for issues #125 to #129 to be done on 2026-10-01;
+   the queue fake gaps are among the recommendations the developer accepted
+   on 2026-09-30. This is the first commitment cut from the parity map.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
