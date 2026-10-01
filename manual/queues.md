@@ -808,13 +808,14 @@ after-commit partition is all or nothing for the call. Laravel partitions a
 heterogeneous array into deferred and immediate halves; there is nothing here
 to partition.
 
-Deferral is tied to the closure form. A push inside a manual
-[`DB::begin_transaction`](database.md#manual-form) happens **immediately**,
-because manual mode installs no ambient transaction and therefore has no
-commit to hang a callback on. Deferring there would queue a callback that
-nothing ever runs, and a dispatch that silently disappears is worse than one
-that happens too early. Reach for `DB::transaction` when a dispatch has to
-wait for the commit.
+Ambient deferral follows the closure form. A push inside a manual
+[`DB::begin_transaction`](database.md#manual-form) that doesn't name the
+handle happens **immediately**, because manual mode installs no ambient
+transaction: code that doesn't name the handle runs outside it. To wait for
+that transaction, push with `Queue::push_after_commit_with_tx(&tx, job)`,
+which defers to `tx.commit()` and is discarded by a rollback or by dropping
+the handle uncommitted. See
+[After-commit callbacks](database.md#after-commit-callbacks).
 
 Laravel also reads a connection-level `after_commit` config key as the last
 fallback in its precedence chain. Suprnova reads one process-wide switch,

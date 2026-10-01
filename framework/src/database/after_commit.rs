@@ -5,6 +5,9 @@
 //! nothing to partition per connection: the registry is two `Vec`s hanging off
 //! the current transaction's `TxState`, drained exactly once by
 //! [`DB::transaction`](crate::DB::transaction)'s commit or rollback path.
+//! Two callers register into it: the queue's deferred push, and application
+//! code through [`DB::after_commit`](crate::DB::after_commit) and
+//! [`Transaction::after_commit`](crate::Transaction::after_commit).
 //!
 //! Nesting does reach this module in one shape. Laravel's
 //! `DatabaseTransactionsManager::rollback($connection, $level)` discards every
@@ -18,10 +21,15 @@
 //! everything registered inside it.
 //!
 //! Manual transactions ([`DB::begin_transaction`](crate::DB::begin_transaction))
-//! deliberately do not participate. They install no `CURRENT_TX`, so there is no
-//! drain point, and a callback registered against them would never run - a
-//! deferred dispatch that silently disappears is worse than one that happens
-//! too early, so a push from inside a manual transaction happens immediately.
+//! carry a registry of their own on the handle, drained by
+//! [`Transaction::commit`](crate::Transaction::commit) and
+//! [`Transaction::rollback`](crate::Transaction::rollback). They install no
+//! `CURRENT_TX`, so ambient code never finds that registry: a push or a
+//! [`DB::after_commit`](crate::DB::after_commit) that does not name the handle
+//! runs immediately, outside the manual transaction, as the writes of such
+//! code do. Work that has to wait for a manual transaction registers on the
+//! handle with [`Transaction::after_commit`](crate::Transaction::after_commit)
+//! or [`Queue::push_after_commit_with_tx`](crate::Queue::push_after_commit_with_tx).
 
 use crate::error::FrameworkError;
 use futures::future::BoxFuture;
@@ -63,6 +71,65 @@ pub(crate) async fn register_callback(cb: AfterCommitCallback) -> Result<(), Fra
     }
 }
 
+impl crate::database::DB {
+    /// Run `callback` once the open [`DB::transaction`](crate::DB::transaction)
+    /// commits, or at once when no transaction is open. Laravel's
+    /// `DB::afterCommit($callback)`.
+    ///
+    /// Use it for work that must wait until the rows it describes are
+    /// durable: a webhook, a cache write, a message to another service.
+    /// Inside the closure of `DB::transaction` the callback is queued and
+    /// runs after the commit, outside the transaction, in the order the
+    /// callbacks were registered. It never runs when the transaction rolls
+    /// back. A [`Transaction::rollback_to`](crate::Transaction::rollback_to)
+    /// discards the callbacks registered since its savepoint, as Laravel
+    /// discards those of a nested transaction that rolls back; callbacks
+    /// registered before the savepoint, after the rollback, or inside a
+    /// savepoint that is kept still run at the commit. Suprnova refuses a
+    /// nested `DB::transaction`, so the transaction a callback waits for is
+    /// always the outermost one.
+    ///
+    /// The callback is an async closure returning `Result`, the shape the
+    /// after-commit queue that [`Job::after_commit`](crate::queue::Job::after_commit)
+    /// uses already runs, so it can await database, cache or HTTP work.
+    /// With no transaction open it runs before this call returns and its
+    /// error is this call's error. Queued, its error comes back from
+    /// `DB::transaction` after the commit, with the message
+    /// `after-commit callback failed (the transaction itself committed)`;
+    /// the remaining callbacks still run and the commit stands.
+    ///
+    /// A transaction started by hand with
+    /// [`DB::begin_transaction`](crate::DB::begin_transaction) is not
+    /// ambient: code that does not name its handle runs outside it, and that
+    /// code's writes do not join it either. So this call beside a manual
+    /// transaction runs the callback at once. To wait for that transaction,
+    /// register on its handle with
+    /// [`Transaction::after_commit`](crate::Transaction::after_commit), or push
+    /// a job with
+    /// [`Queue::push_after_commit_with_tx`](crate::Queue::push_after_commit_with_tx).
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// DB::transaction(|_tx| {
+    ///     Box::pin(async move {
+    ///         let order = Order::create(attrs! { total: 30 }).await?;
+    ///         let id = order.id;
+    ///         DB::after_commit(move || async move { notify_warehouse(id).await }).await?;
+    ///         Ok::<(), FrameworkError>(())
+    ///     })
+    /// })
+    /// .await?;
+    /// ```
+    pub async fn after_commit<F, Fut>(callback: F) -> Result<(), FrameworkError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), FrameworkError>> + Send + 'static,
+    {
+        register_callback(Box::new(move || Box::pin(callback()))).await
+    }
+}
+
 /// Register `cb` to run after the current transaction rolls back.
 ///
 /// With no open transaction this drops `cb` and reports success: Laravel's
@@ -98,24 +165,34 @@ fn queue_on_current_transaction(
 ) -> Option<AfterCommitCallback> {
     let mut slot = Some(cb);
     let _ = super::transaction::CURRENT_TX.try_with(|t| {
-        if let Some(state) = t.as_ref() {
-            let vec = match registry {
-                Registry::AfterCommit => &state.after_commit,
-                Registry::Rollback => &state.on_rollback,
-            };
-            // Recover in place on a poisoned lock. The critical section is a
-            // single `Vec::push` with no user code in it, so poisoning is
-            // unreachable in practice; if it ever happened, the registry is
-            // still structurally intact and dropping the callback (or running
-            // it early, inside the very transaction it is meant to outlive)
-            // would both be worse than using it.
-            let mut guard = vec.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(cb) = slot.take() {
-                guard.push(cb);
-            }
+        if let Some(state) = t.as_ref()
+            && let Some(cb) = slot.take()
+        {
+            push_to(state, cb, registry);
         }
     });
     slot
+}
+
+/// Push `cb` onto the after-commit registry of `state`, the registry a
+/// [`Transaction`](crate::Transaction) handle carries. The handle-bound
+/// registration path: it needs no ambient transaction.
+pub(crate) fn queue_on(state: &super::transaction::TxState, cb: AfterCommitCallback) {
+    push_to(state, cb, Registry::AfterCommit);
+}
+
+/// Push `cb` onto `registry` of `state`.
+fn push_to(state: &super::transaction::TxState, cb: AfterCommitCallback, registry: Registry) {
+    let vec = match registry {
+        Registry::AfterCommit => &state.after_commit,
+        Registry::Rollback => &state.on_rollback,
+    };
+    // Recover in place on a poisoned lock. The critical section is a single
+    // `Vec::push` with no user code in it, so poisoning is unreachable in
+    // practice; if it ever happened, the registry is still structurally intact
+    // and dropping the callback (or running it early, inside the very
+    // transaction it is meant to outlive) would both be worse than using it.
+    vec.lock().unwrap_or_else(|e| e.into_inner()).push(cb);
 }
 
 /// Where both callback registries stood when a `SAVEPOINT` was issued.

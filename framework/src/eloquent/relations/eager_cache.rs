@@ -29,10 +29,25 @@
 //! `#[serde(skip)]`, so the mark is never serialised, and `Debug` shows
 //! the relations only. A clone keeps the mark; a replica, which is a new
 //! model built in the process, does not.
+//!
+//! ## The row it was read from
+//!
+//! The cache also keeps the row the model was hydrated from, and after a
+//! save the record of what that save changed: the state behind
+//! [`Model::was_changed`](crate::eloquent::Model::was_changed) and
+//! [`Model::get_original`](crate::eloquent::Model::get_original). It lives
+//! here because this is the per-instance state the macro already injects,
+//! so keeping it adds no field to user structs. A clone keeps it; a
+//! replica, which nothing has read or saved yet, does not. `Debug` leaves
+//! it out.
 
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
+
+use serde::Serialize;
+
+use crate::eloquent::changes::RowState;
 
 /// Eager-load cache. One per model instance.
 ///
@@ -47,6 +62,8 @@ pub struct EagerLoadCache {
     /// Whether the model came out of a query that returned more than
     /// one row. Set once, by the read path that hydrated the model.
     from_multi_row_query: bool,
+    /// The row the model was read from and the record of its last save.
+    row: RowState,
 }
 
 /// Internal storage variant. One per relation kind plus a generic
@@ -73,7 +90,30 @@ impl EagerLoadCache {
         Self {
             rows: HashMap::new(),
             from_multi_row_query: false,
+            row: RowState::default(),
         }
+    }
+
+    /// An empty cache for a model hydrated from `row`, which it keeps as
+    /// the row the model was loaded with.
+    ///
+    /// **Not part of the public API.** It is `pub` because the
+    /// `#[suprnova::model]` macro's hydration emits the call.
+    #[doc(hidden)]
+    pub fn __with_loaded_row<R>(row: R) -> Self
+    where
+        R: Serialize + Send + Sync + 'static,
+    {
+        Self {
+            rows: HashMap::new(),
+            from_multi_row_query: false,
+            row: RowState::loaded(row),
+        }
+    }
+
+    /// The row the model was read from and the record of its last save.
+    pub(crate) fn row_state(&self) -> &RowState {
+        &self.row
     }
 
     /// Whether this cache has a value for the given relation name.
@@ -110,7 +150,8 @@ impl EagerLoadCache {
 
     /// A copy of the loaded relations for a replica of the model. The
     /// replica is a new model built in the process, so it does not carry
-    /// the mark of the query its source came from.
+    /// the mark of the query its source came from, nor the row its source
+    /// was read from.
     ///
     /// **Not part of the public API.** It is `pub` because the
     /// `replicate_with` the macro emits calls it.
@@ -119,6 +160,7 @@ impl EagerLoadCache {
         Self {
             rows: self.clone_rows(),
             from_multi_row_query: false,
+            row: RowState::default(),
         }
     }
 
@@ -303,6 +345,7 @@ impl Clone for EagerLoadCache {
         Self {
             rows: self.clone_rows(),
             from_multi_row_query: self.from_multi_row_query,
+            row: self.row.clone(),
         }
     }
 }

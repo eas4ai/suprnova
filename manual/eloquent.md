@@ -379,6 +379,93 @@ user.update(attrs! { name: "Alice B" }).await?;
 `update(attrs)` is the same flow but applies a partial attribute
 map first (running the Fillable filter and any declared mutators).
 
+### Changes after a save
+
+After a save, a model reports which attributes that save changed. While
+the save's `updated` and `saved` observers run, the original values are
+still the ones loaded before the save; once the save returns, they are the
+saved ones:
+
+```php
+// Laravel
+$user->is_admin = true;
+$user->save();
+
+$user->wasChanged('is_admin');        // true
+$user->wasChanged(['name', 'email']); // false
+$user->getChanges();                  // ['is_admin' => 1]
+$user->getOriginal('is_admin');       // true
+```
+
+```rust
+// Suprnova
+use suprnova::Model;
+
+user.is_admin = true;
+user.save().await?;
+
+user.was_changed("is_admin");             // true
+user.was_changed_any(&["name", "email"]); // false
+user.was_changed_any(&[]);                // true: the save changed something
+user.get_changes();                       // Attrs { "is_admin": 1 }
+user.get_original("is_admin")?;           // Some(true): the saved value
+user.get_raw_original("is_admin");        // Some(1), as stored
+```
+
+An observer reads the value from before the save, which is how an audit
+trail records both sides of a change:
+
+```rust
+use async_trait::async_trait;
+use suprnova::eloquent::observers::Observer;
+use suprnova::{FrameworkError, Model};
+
+pub struct AdminAudit;
+
+#[suprnova::observer(User)]
+#[async_trait]
+impl Observer<User> for AdminAudit {
+    async fn updated(&self, _previous: &User, user: &User) -> Result<(), FrameworkError> {
+        if user.was_changed("is_admin") {
+            let before = user.get_raw_original("is_admin"); // Some(0)
+            tracing::info!(user_id = user.id, ?before, after = user.is_admin, "admin flag changed");
+        }
+        Ok(())
+    }
+}
+```
+
+The rules follow Laravel's `save`:
+
+- A column counts as changed when the value the database stores after the
+  save differs from the value the model held before it. Writing the same
+  value back is not a change. A column that a `Saving` listener or the
+  timestamps rewrote is one, so a model with timestamps also reports
+  `updated_at`.
+- `get_changes` and `get_raw_original` return stored values, before casts,
+  as Laravel does. `get_original` reads the value through the model's casts
+  and returns an error only when the stored value no longer decodes.
+- The record describes the last save that changed something. A later save
+  that changes something replaces it. A save that changes nothing, or a
+  save that fails, leaves it in place.
+- `save`, `update`, `save_with_tx`, and `update_with_tx` record a save. A
+  model you `create` reports no changes, and a model you load reports none
+  until you save it. The original is the row as the model last read or
+  saved it, whatever you change in memory. A clone keeps the record;
+  `replicate` builds a new model without one.
+- A model you build in memory and save without reading it first has no
+  loaded values to compare with: every column counts as changed, and
+  `get_original` returns `None` until that save returns.
+
+### Why Suprnova diverges
+
+Laravel skips the `UPDATE` and the `updating` and `updated` events when no
+attribute is dirty. Suprnova always writes the row and fires the events; a
+save that changes nothing still leaves the previous record in place, as in
+Laravel. `refresh` replaces the model with a fresh read, so it also clears
+the record, where Laravel's `refresh` keeps `getChanges`. `getPrevious` has
+no counterpart.
+
 ### Increment / decrement
 
 ```php
@@ -1644,6 +1731,7 @@ let admin = Role::create(attrs! { name: "admin" }).await?;
 u.roles().attach(admin.id).await?;
 u.roles().attach_with(admin.id, attrs! { assigned_at: chrono::Utc::now() }).await?;
 u.roles().sync([role_a.id, role_b.id, role_c.id]).await?;
+u.roles().sync_without_detaching([role_d.id]).await?;
 u.roles().detach(admin.id).await?;
 
 // Read pivot data through the per-row downcast accessor:
@@ -1662,6 +1750,9 @@ for r in &roles {
 - `.detach(id)` - DELETE the pivot row(s) linking parent → id.
 - `.sync([ids...])` - diff-and-apply: attach what's new, detach what's
   missing, leave the intersection alone. Wrapped in a transaction.
+- `.sync_without_detaching([ids...])` - attach what's new and leave every
+  existing pivot row untouched, extra columns and timestamps included.
+  Wrapped in a transaction. Laravel's `syncWithoutDetaching`.
 
 `.get()` returns `Vec<R>` with the pivot stamped on each row's
 internal `__pivot` field. The `.pivot::<P>()` accessor downcasts the
@@ -1871,8 +1962,8 @@ let post  = Post::find(1).await?.unwrap();
 let video = Video::find(1).await?.unwrap();
 let tag   = Tag::create(attrs! { name: "rust" }).await?;
 
-// `attach` / `attach_with` / `detach` / `sync` work the same way as
-// BelongsToMany. The `<name>_type` column lands automatically from
+// `attach` / `attach_with` / `detach` / `sync` / `sync_without_detaching`
+// work the same way as BelongsToMany. The `<name>_type` column lands automatically from
 // the calling parent's `morph_type`.
 post.tags().attach(tag.id).await?;
 video.tags().attach(tag.id).await?;          // independent attachment

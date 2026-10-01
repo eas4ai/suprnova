@@ -1033,8 +1033,8 @@ async fn a_manual_transaction_never_defers() {
     assert_eq!(
         driver.count(),
         1,
-        "DB::begin_transaction installs no CURRENT_TX, so there is no drain point \
-         and the push must not be deferred into a registry nothing drains"
+        "DB::begin_transaction installs no CURRENT_TX, so a push that does not \
+         name the handle runs outside it and goes out at once"
     );
     tx.commit().await.expect("commit");
 }
@@ -1667,8 +1667,8 @@ async fn a_manual_transaction_savepoint_leaves_the_enclosing_registry_alone() {
     // from the ambient `CURRENT_TX` instead of from the handle and the mark
     // lands at length 0, the push takes the list to 1, and `rollback_to`
     // truncates it back to 0 - the enclosing transaction's job silently never
-    // dispatches. With the registry on the handle the manual transaction has
-    // none, marks nothing, unwinds nothing, and the push survives.
+    // dispatches. With the registry on the handle the manual transaction
+    // marks and unwinds only its own, and the push survives.
     TestContainer::scope(async move {
         TestContainer::singleton(conn);
         DB::transaction(|_tx| {
