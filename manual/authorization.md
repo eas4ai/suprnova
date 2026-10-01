@@ -286,8 +286,10 @@ let router: Router = Router::new()
 ```
 
 A denied ability returns `403` before the handler runs; an unauthenticated
-request fails closed. The full action → ability table lives in the
-[routing chapter](routing.md).
+request fails closed. The check runs against the user of the route's guard,
+the same user `#[authorize]` checks (see [Authorize a
+handler](#authorize-a-handler)). The full action → ability table lives in
+the [routing chapter](routing.md).
 
 ## Authorize a handler
 

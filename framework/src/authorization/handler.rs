@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use super::Gate;
 use crate::FrameworkError;
-use crate::auth::{Auth, request_state};
+use crate::auth::Auth;
 
 /// Authorize `ability` on `resource` for the request's user, or answer the
 /// error the handler returns instead of running.
@@ -46,11 +46,7 @@ pub async fn __authorize_handler<R>(ability: &str, resource: &R) -> Result<(), F
 where
     R: Sync + 'static,
 {
-    let user = match request_state::route_guard() {
-        Some(guard) => Auth::guard(&guard)?.user().await?,
-        None => Auth::user().await?,
-    };
-    let Some(user) = user else {
+    let Some(user) = Auth::route_user().await? else {
         return Err(FrameworkError::domain("Unauthenticated.", 401));
     };
     let user: Arc<dyn Any + Send + Sync> = user.into_arc_any();
