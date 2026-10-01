@@ -2022,10 +2022,12 @@ assert_pushed::<SendWelcomeEmail>(|j| j.user_id == 42);
 An excepted job takes the real path from end to end: it resolves its
 connection, reaches the driver, emits `JobQueueing` and `JobQueued`, and fails
 where a real push fails. A batch is still recorded with all of its jobs, and
-only its excepted jobs reach the real queue. A chain follows its first job,
-because the worker that runs that job dispatches the rest. A raw push is
-always recorded, whatever `except` names, because a raw payload is not a job
-type.
+only its excepted jobs reach the real queue. A chain whose first job is
+excepted reaches the real queue, and the worker that runs that job dispatches
+each later link through the fake, as Laravel does: a link `except` names
+reaches the real queue, and any other link is recorded and does not run. A
+raw push is always recorded, whatever `except` names, because a raw payload is
+not a job type.
 
 ### Raw pushes under the fake
 

@@ -1181,7 +1181,14 @@ async fn handle_completed(
     // and would silently land the next link on the wrong queue. A chain runs
     // on one connection for this reason, and `PendingChain::dispatch` refuses
     // one that would not.
+    //
+    // Under the queue fake the next link is a push like any other: the fake
+    // records it unless `except` names it, as Laravel dispatches the next job
+    // of a chain through the faked queue. Without this, a chain whose head
+    // the fake excepts would send every later link to the real queue,
+    // whatever `except` says about it.
     let mut follow_ups: Vec<Envelope> = Vec::new();
+    let mut faked_successor: Option<Envelope> = None;
     if !env.chain_remaining.is_empty() {
         let mut tail = env.chain_remaining.clone();
         let next: ChainLink = tail.remove(0);
@@ -1197,7 +1204,11 @@ async fn handle_completed(
         // that just ran: this runs outside that job's scope, and what one
         // link adds to its own copy is not the next link's to inherit.
         next_env.context = env.context.clone();
-        follow_ups.push(next_env);
+        if crate::queue::testing::fakes(&next_env.job_name) {
+            faked_successor = Some(next_env);
+        } else {
+            follow_ups.push(next_env);
+        }
     }
 
     // 2. Persist batch accounting before settlement. A rejected or uncertain
@@ -1231,9 +1242,13 @@ async fn handle_completed(
     }
 
     // 3. Enqueue the successor and drop the reservation - in one transaction
-    // where the driver can, push-then-ack where it cannot.
+    // where the driver can, push-then-ack where it cannot. A successor the
+    // fake records is recorded only where a real one would be enqueued.
     match driver.settle(token, &follow_ups).await {
         Ok(Settled::Atomically) => {
+            if let Some(next) = &faked_successor {
+                crate::queue::testing::record_envelope(next);
+            }
             tracing::debug!(job = %env.job_name, id = %env.id, "queue job ok");
         }
         Ok(Settled::Stale) => {
@@ -1248,6 +1263,9 @@ async fn handle_completed(
             );
         }
         Ok(Settled::Unsupported) => {
+            if let Some(next) = &faked_successor {
+                crate::queue::testing::record_envelope(next);
+            }
             fallback_settle(driver, token, env, follow_ups).await;
         }
         Err(e) => {
