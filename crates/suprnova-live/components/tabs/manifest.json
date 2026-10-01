@@ -1,0 +1,13 @@
+{
+  "name": "suprnova.tabs",
+  "version": 1,
+  "root": "suprnova-ui/tabs",
+  "files": [
+    "tabs.html",
+    "tabs.css",
+    "tabs.js"
+  ],
+  "elements": [
+    "sn-tabs"
+  ]
+}

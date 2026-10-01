@@ -1,0 +1,12 @@
+<section>
+  <button live:unknown="save">Unknown</button>
+  <button live:click.prevent.prevent="save">Repeated</button>
+  <input live:model.debounce.999ms="query">
+  <div live:key="{{ unstable }}"></div>
+  <div {{ attributes }}>Dynamic attributes</div>
+  <div live:teleport="//evil.example"></div>
+  <div live:preserve live:replace></div>
+  <div live:poll="1000" live:stream="profile-saved"></div>
+  <a href="https://evil.example" live:navigate>Unsafe</a>
+  <a href="/unsafe\target" live:prefetch>Unsafe backslash</a>
+</section>

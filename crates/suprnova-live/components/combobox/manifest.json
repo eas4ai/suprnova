@@ -1,0 +1,13 @@
+{
+  "name": "suprnova.combobox",
+  "version": 1,
+  "root": "suprnova-ui/combobox",
+  "files": [
+    "combobox.html",
+    "combobox.css",
+    "combobox.js"
+  ],
+  "elements": [
+    "sn-combobox"
+  ]
+}

@@ -1,0 +1,13 @@
+#![no_main]
+
+mod support;
+
+use libfuzzer_sys::fuzz_target;
+use suprnova_live::protocol::parse_versioned_update_request;
+
+fuzz_target!(|data: &[u8]| {
+    let Some(limits) = support::protocol_limits() else {
+        return;
+    };
+    let _ = parse_versioned_update_request(data, &limits);
+});

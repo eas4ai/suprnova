@@ -1,0 +1,82 @@
+.sn-alert {
+  display: flex;
+  gap: var(--sn-space-3);
+  align-items: flex-start;
+  padding: var(--sn-space-3) var(--sn-space-4);
+  border: var(--sn-state-border-width) solid var(--sn-color-border);
+  border-inline-start-width: var(--sn-space-1);
+  border-radius: var(--sn-radius-md);
+  background: var(--sn-color-surface);
+  color: var(--sn-color-text);
+  margin-block-end: var(--sn-density-stack);
+}
+
+.sn-alert-icon {
+  flex: none;
+  inline-size: var(--sn-space-6);
+  block-size: var(--sn-space-6);
+  border-radius: var(--sn-radius-full);
+  background: var(--sn-color-border-strong);
+  color: var(--sn-color-text-inverse);
+  font-size: var(--sn-font-size-sm);
+  font-weight: var(--sn-font-weight-bold);
+  line-height: var(--sn-space-6);
+  text-align: center;
+}
+
+.sn-alert-label {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.sn-alert-body > :last-child {
+  margin-block-end: 0;
+}
+
+.sn-alert-title {
+  margin: 0 0 var(--sn-space-1);
+  font-weight: var(--sn-font-weight-semibold);
+}
+
+.sn-alert[data-sn-variant="info"] {
+  border-color: var(--sn-color-info);
+  background: var(--sn-color-info-soft);
+}
+
+.sn-alert[data-sn-variant="info"] > .sn-alert-icon {
+  background: var(--sn-color-info);
+}
+
+.sn-alert[data-sn-variant="success"] {
+  border-color: var(--sn-color-success);
+  background: var(--sn-color-success-soft);
+}
+
+.sn-alert[data-sn-variant="success"] > .sn-alert-icon {
+  background: var(--sn-color-success);
+}
+
+.sn-alert[data-sn-variant="warning"] {
+  border-color: var(--sn-color-warning);
+  background: var(--sn-color-warning-soft);
+}
+
+.sn-alert[data-sn-variant="warning"] > .sn-alert-icon {
+  background: var(--sn-color-warning);
+}
+
+.sn-alert[data-sn-variant="error"] {
+  border-color: var(--sn-color-danger);
+  background: var(--sn-color-danger-soft);
+}
+
+.sn-alert[data-sn-variant="error"] > .sn-alert-icon {
+  background: var(--sn-color-danger);
+}
