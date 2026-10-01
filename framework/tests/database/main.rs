@@ -12,6 +12,8 @@ pub mod medium_audit;
 pub mod monitor;
 pub mod multiconnection;
 pub mod observability;
+#[path = "../support/own_process.rs"]
+mod own_process;
 pub mod pool_liveness;
 pub mod query_binary_comparison;
 pub mod raw_helpers;
