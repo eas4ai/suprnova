@@ -335,3 +335,50 @@ async fn db_affecting_statement_returns_rows_affected() {
     .unwrap();
     assert_eq!(deleted, 1);
 }
+
+/// SQLite declares no type for a computed column - an aggregate, a
+/// `COALESCE`, any `select_raw` expression - so the row decoder has to
+/// read each value by its runtime type: integer, real, text or null. Raw
+/// `DB::select` shares the decoder and returns the same row.
+#[tokio::test]
+async fn computed_columns_come_back_with_their_values() {
+    let _db = setup_audit_table().await;
+    for (event, actor_id) in [("a", 1), ("b", 1), ("c", 2)] {
+        DB::table("audit_log")
+            .insert(suprnova::attrs! { event: event, actor_id: actor_id })
+            .await
+            .unwrap();
+    }
+
+    let built = DB::table("audit_log")
+        .select(["actor_id"])
+        .select_raw("COUNT(*) AS n")
+        .select_raw("AVG(actor_id) * 1.5 AS weighted")
+        .select_raw("MAX(NULL) AS missing")
+        .select_raw("'actor-' || actor_id AS label")
+        .group_by("actor_id")
+        .order_by_asc("actor_id")
+        .get()
+        .await
+        .unwrap()
+        .into_vec();
+    let raw = DB::select(
+        "SELECT actor_id, COUNT(*) AS n, AVG(actor_id) * 1.5 AS weighted, MAX(NULL) AS missing, \
+         'actor-' || actor_id AS label FROM audit_log GROUP BY actor_id ORDER BY actor_id ASC",
+        Vec::<sea_orm::Value>::new(),
+    )
+    .await
+    .unwrap();
+
+    let expected = vec![
+        json!({"actor_id": 1, "n": 2, "weighted": 1.5, "missing": null, "label": "actor-1"}),
+        json!({"actor_id": 2, "n": 1, "weighted": 3.0, "missing": null, "label": "actor-2"}),
+    ];
+    let as_json = |rows: Vec<DynamicRow>| -> Vec<serde_json::Value> {
+        rows.into_iter()
+            .map(|row| serde_json::Value::Object(row.into_map()))
+            .collect()
+    };
+    assert_eq!(as_json(built), expected, "the DB::table builder");
+    assert_eq!(as_json(raw), expected, "raw DB::select");
+}

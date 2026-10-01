@@ -113,7 +113,7 @@ async fn chained_left_joins_with_alias(_fx: &Fixture) {
 }
 
 /// Issue #125, shape 2: a left join against a grouped subquery.
-async fn left_join_against_a_grouped_subquery(fx: &Fixture) {
+async fn left_join_against_a_grouped_subquery(_fx: &Fixture) {
     let totals = DB::table("pj_orders")
         .select(["status_id"])
         .select_raw("COUNT(*) AS total")
@@ -148,13 +148,13 @@ async fn left_join_against_a_grouped_subquery(fx: &Fixture) {
         column(&built, "name"),
         vec![json!("open"), json!("paid"), json!("void")]
     );
-    // SQLite reports no column type for an aggregate, and the row
-    // materialiser drops such a column for raw SQL and the builder alike
-    // (see "Aggregate-column gotcha" in manual/queries.md). The totals are
-    // checked through `count()` below, which reads them typed.
-    if fx.backend != DatabaseBackend::Sqlite {
-        assert_eq!(column(&built, "total"), vec![json!(2), json!(1), json!(0)]);
-    }
+    // SQLite declares no type for a computed column; the row still
+    // carries its value, for the builder and for raw SQL alike.
+    assert_eq!(column(&built, "total"), vec![json!(2), json!(1), json!(0)]);
+    assert_eq!(
+        column(&expected, "total"),
+        vec![json!(2), json!(1), json!(0)]
+    );
     for (status, total) in [("open", 2), ("paid", 1)] {
         let matching = DB::table("pj_statuses")
             .left_join_sub(

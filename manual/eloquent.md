@@ -4109,15 +4109,10 @@ Use these escape hatches sparingly - the typed builder catches more
 errors at compile time and reads cleaner in business logic. But when
 you need them, they're here.
 
-**Aggregate-column gotcha.** Untyped aggregates like
-`SELECT COUNT(*) AS n FROM t` work through the builder's `.count()`
-helper but may be silently dropped from raw `DB::select` rows on
-SQLite - the underlying `JsonValue::from_query_result` walks sqlx's
-per-column type info, and a bare aggregate carries none. If you need
-the raw select path with aggregates, give the expression a typed
-context: either use a `CAST(... AS BIGINT)` wrapper or read the
-column with a typed `DB::table(...).count()` / `.max(...)` helper
-that uses `query_one` + `try_get` under the hood.
+A computed column such as `SELECT COUNT(*) AS n FROM t` comes back in
+raw `DB::select` rows on every backend. SQLite declares no type for it,
+so Suprnova reads the value by its runtime type; see
+[Computed columns on SQLite](queries.md#computed-columns-on-sqlite).
 
 ## Relation-existence + cheap shortcuts
 

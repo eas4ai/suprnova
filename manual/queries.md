@@ -291,9 +291,7 @@ let rows = DB::table("statuses")
 
 The subquery's values bind ahead of the values of the conditions and
 `WHERE` clauses after it, so the order you call the methods in doesn't
-matter. On SQLite, read an aggregate column like `total` through
-`count()` or a typed path; see
-[Aggregate-column gotcha](#aggregate-column-gotcha).
+matter.
 
 `get` and `count` record a read of every table the query touches,
 including joined tables and the tables a subquery reads, so a cached
@@ -590,21 +588,22 @@ let n: u64 = DB::affecting_statement(
 ).await?;
 ```
 
-### Aggregate-column gotcha
+### Computed columns on SQLite
 
-Untyped aggregates like `SELECT COUNT(*) AS n FROM t` work through the
-builder's `.count()` helper but may come back silently dropped from
-raw `DB::select` rows on SQLite. The underlying row materialiser walks
-sqlx's per-column type info, and a bare aggregate carries none. If you
-need raw `DB::select` with aggregates on SQLite, either wrap the
-expression in `CAST(… AS BIGINT)` to give it a type tag, or use
-`DB::scalar::<i64>` which goes through `query_one` + `try_get` and
-doesn't depend on the per-column type detection.
+SQLite declares no type for a computed column: `COUNT(*) AS n`,
+`COALESCE(t.total, 0) AS total`, or any other `select_raw` expression.
+Rows from `DB::table` and `DB::select` still carry the column. Suprnova
+reads each such value by its runtime type, so an integer comes back as a
+JSON integer, a real as a JSON number, text as a string, and `NULL` as
+`null`:
 
-The same applies to an aggregate column a `DB::table` builder selects
-with `select_raw`, including one read through a joined subquery. To
-filter on such a column, `filter("order_totals.total", 2)` works on
-every backend, and `count()` reads its result typed.
+```rust
+let rows = DB::select(
+    "SELECT actor_id, COUNT(*) AS n FROM audit_log GROUP BY actor_id",
+    vec![],
+).await?;
+let n: i64 = rows[0].get_int("n")?;
+```
 
 ## Bridge to typed Eloquent
 

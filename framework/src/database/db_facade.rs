@@ -60,13 +60,55 @@ use sea_orm::{DbBackend, JsonValue, Statement, Value as SeaValue};
 /// `query_one` so QueryExecuted observation works. Returns `None`
 /// when the row doesn't parse as an object - matching the prior
 /// `filter_map` behaviour on `JsonValue`.
-fn query_result_to_dynamic_row(qr: &sea_orm::QueryResult) -> Option<DynamicRow> {
+///
+/// SeaORM's decoder picks each column's Rust type from the type the
+/// driver reports for the column. SQLite reports none for a computed
+/// column - an aggregate, `COALESCE(...)`, any `select_raw` expression -
+/// and SeaORM then drops the column whenever its value is not text. On
+/// SQLite every column the decoder dropped is read again by the value's
+/// own runtime type, so the row carries it.
+fn query_result_to_dynamic_row(
+    backend: DbBackend,
+    qr: &sea_orm::QueryResult,
+) -> Option<DynamicRow> {
     use sea_orm::FromQueryResult;
     let v = JsonValue::from_query_result(qr, "").ok()?;
-    match v {
-        serde_json::Value::Object(map) => Some(DynamicRow::from_map(map)),
-        _ => None,
+    let serde_json::Value::Object(mut map) = v else {
+        return None;
+    };
+    if backend == DbBackend::Sqlite {
+        for column in qr.column_names() {
+            if !map.contains_key(&column)
+                && let Some(value) = sqlite_value_by_runtime_type(qr, &column)
+            {
+                map.insert(column, value);
+            }
+        }
     }
+    Some(DynamicRow::from_map(map))
+}
+
+/// Read `column` as an integer, a real, text or a blob, whichever the
+/// SQLite value is; a `NULL` reads as JSON `null`. The driver checks each
+/// attempt against the value's runtime type, so only the matching one
+/// succeeds. `None` when none does.
+fn sqlite_value_by_runtime_type(
+    qr: &sea_orm::QueryResult,
+    column: &str,
+) -> Option<serde_json::Value> {
+    if let Ok(value) = qr.try_get::<Option<i64>>("", column) {
+        return Some(serde_json::json!(value));
+    }
+    if let Ok(value) = qr.try_get::<Option<f64>>("", column) {
+        return Some(serde_json::json!(value));
+    }
+    if let Ok(value) = qr.try_get::<Option<String>>("", column) {
+        return Some(serde_json::json!(value));
+    }
+    if let Ok(value) = qr.try_get::<Option<Vec<u8>>>("", column) {
+        return Some(serde_json::json!(value));
+    }
+    None
 }
 
 /// True when `sql`, ignoring leading whitespace, starts with `SELECT`
@@ -923,7 +965,7 @@ impl DbTableBuilder {
 
         let dyn_rows: Vec<DynamicRow> = rows
             .iter()
-            .filter_map(query_result_to_dynamic_row)
+            .filter_map(|qr| query_result_to_dynamic_row(backend, qr))
             .collect();
 
         Ok(Collection::from_vec(dyn_rows))
@@ -1442,7 +1484,7 @@ impl DB {
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(rows
             .into_iter()
-            .filter_map(|qr| query_result_to_dynamic_row(&qr))
+            .filter_map(|qr| query_result_to_dynamic_row(backend, &qr))
             .collect())
     }
 
@@ -1464,7 +1506,9 @@ impl DB {
             .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(row.as_ref().and_then(query_result_to_dynamic_row))
+        Ok(row
+            .as_ref()
+            .and_then(|qr| query_result_to_dynamic_row(backend, qr)))
     }
 
     /// [`DB::select_one`] for a statement whose tables the caller knows:
@@ -1494,7 +1538,9 @@ impl DB {
             .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(row.as_ref().and_then(query_result_to_dynamic_row))
+        Ok(row
+            .as_ref()
+            .and_then(|qr| query_result_to_dynamic_row(backend, qr)))
     }
 
     /// Run a raw SELECT, return the FIRST column of the FIRST row.
@@ -1780,7 +1826,7 @@ impl DB {
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(rows
             .into_iter()
-            .filter_map(|qr| query_result_to_dynamic_row(&qr))
+            .filter_map(|qr| query_result_to_dynamic_row(backend, &qr))
             .collect())
     }
 
