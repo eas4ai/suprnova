@@ -700,6 +700,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn erased_user_keys_by_the_concrete_type_behind_it() {
+        // `#[authorize]` hands the gate the user as the type-erased value the
+        // guard resolved. It must key the lookup by the type behind the
+        // erasure, never by `dyn Any` itself, or no gate would ever match.
+        let erased: Arc<dyn Any + Send + Sync> = Arc::new(U);
+        let user: &(dyn Any + Send + Sync) = &*erased;
+        assert_eq!(user.gate_type_id(), TypeId::of::<U>());
+        assert!(user.as_gate_any().downcast_ref::<U>().is_some());
+
+        // A concrete user keys by its own type, as it always has.
+        assert_eq!(U.gate_type_id(), TypeId::of::<U>());
+    }
+
+    #[tokio::test]
+    async fn erased_user_reaches_the_gates_and_async_hooks_of_its_type() {
+        let registry = GateRegistry::new();
+        registry.register::<U, R>("erased-allowed", |_u, _r| true);
+        registry.register::<U, R>("erased-hooked", |_u, _r| true);
+        // An async before-hook only the async path awaits; it overrules the
+        // allowing gate above for one ability.
+        registry.register_before_async::<U, _, _>(|_u, action| {
+            let deny = action == "erased-hooked";
+            async move { deny.then_some(false) }
+        });
+
+        let erased: Arc<dyn Any + Send + Sync> = Arc::new(U);
+        let user: &(dyn Any + Send + Sync) = &*erased;
+        let decide = |action: &'static str| registry.raw_async::<dyn Any + Send + Sync, R>(action, user, &R);
+
+        assert!(decide("erased-allowed").await.is_some_and(|r| r.allowed()));
+        assert!(decide("erased-hooked").await.is_some_and(|r| r.denied()));
+        assert!(decide("erased-undefined").await.is_none());
+
+        // A user of another type finds none of `U`'s gates.
+        let other: Arc<dyn Any + Send + Sync> = Arc::new(R);
+        assert!(
+            registry
+                .raw_async::<dyn Any + Send + Sync, R>("erased-allowed", &*other, &R)
+                .await
+                .is_none()
+        );
+    }
+
     #[tracing_test::traced_test]
     #[test]
     fn sync_overwriting_async_warns_with_kind_transition() {
