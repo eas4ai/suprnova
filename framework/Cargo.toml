@@ -179,6 +179,9 @@ qdrant-client = "1.18.0"
 sqlx = { version = "0.9", optional = true, default-features = false, features = ["runtime-tokio", "tls-rustls", "json"] }
 iso_currency = { version = "0.5.3", features = ["with-serde"] }
 percent-encoding = "2.3.2"
+# Transliterates the ASCII `filename` fallback of `Content-Disposition`, the
+# way Laravel's `Str::ascii` does. Already in the build through `fake`.
+deunicode = "1.6.2"
 httpdate = "1.0.3"
 argon2 = "0.5.3"
 md-5 = "0.11.0"

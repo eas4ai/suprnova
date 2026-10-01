@@ -124,6 +124,127 @@ response to hyper:
 Both filters are silent in the success path - you only see them in
 logs when something tried to slip through.
 
+## File responses
+
+Three constructors send a file. `file` and `download` read from the
+filesystem, so they're `async` and return
+`Result<HttpResponse, FrameworkError>`. A handler converts the error with
+`.map_err(HttpResponse::from)`. `download_bytes` can't fail and returns an
+`HttpResponse`.
+
+| Constructor | Laravel | `Content-Disposition` |
+|---|---|---|
+| `HttpResponse::file(path, name).await` | `response()->file($path)` | `inline` |
+| `HttpResponse::download(path, name).await` | `response()->download($path, $name)` | `attachment` |
+| `HttpResponse::download_bytes(bytes, name, content_type)` | `response()->streamDownload(...)` | `attachment` |
+
+```rust
+use suprnova::{HttpResponse, Request, Response};
+
+// Show a PDF in the browser under a friendlier name.
+pub async fn certificate(_req: Request) -> Response {
+    HttpResponse::file("storage/certificates/7f3e.pdf", Some("certificate.pdf"))
+        .await
+        .map_err(HttpResponse::from)
+}
+
+// Save a stored upload under the name the user gave it.
+pub async fn attachment(_req: Request) -> Response {
+    HttpResponse::download("storage/attachments/7f3e", Some("Informe Pérez.pdf"))
+        .await
+        .map_err(HttpResponse::from)
+}
+
+// Send a file you built in memory.
+pub async fn export(_req: Request) -> Response {
+    let csv = "id,name\n1,Joan\n".to_string();
+    Ok(HttpResponse::download_bytes(
+        csv,
+        "users-2026-09-30.csv",
+        "text/csv; charset=utf-8",
+    ))
+}
+```
+
+`file` and `download` behave the same way except for the disposition:
+
+- The `Content-Type` comes from the file extension: `.pdf` is
+  `application/pdf`, `.png` is `image/png`, and `.xlsx` is the
+  spreadsheet type. An extension the table doesn't know gives
+  `application/octet-stream`. The content is never inspected, so a file
+  with an unknown extension is never served as HTML or SVG, whatever it
+  holds.
+- When `name` is `None`, the filename is the file's own name.
+- A file of 1 MiB or less is read whole. A larger file is streamed in
+  64 KiB chunks, so a large download doesn't sit in memory. Both carry a
+  `Content-Length`.
+- A missing path, or a path that is a directory, returns a `404` error
+  whose message doesn't name the path. Any other read failure returns a
+  `500` error with the generic server-error body; the path goes to the
+  log.
+
+`file` and `download` open the path you pass as-is. Don't build that path
+from request input. To serve a file that a request names, use
+`Storage::response` or `Storage::download` on a disk, which apply the
+disk's path guard. For more information, see
+[Serve a file from a disk](filesystem.md#serve-a-file-from-a-disk).
+
+### Filenames and `Content-Disposition`
+
+Every file response writes its header with
+`ContentDisposition::header_value`, which follows RFC 6266:
+
+```rust
+use suprnova::ContentDisposition;
+
+assert_eq!(
+    ContentDisposition::Attachment.header_value("Certificat·Joan Pérez.pdf"),
+    "attachment; filename=\"CertificatJoan Perez.pdf\"; \
+     filename*=UTF-8''Certificat%C2%B7Joan%20P%C3%A9rez.pdf"
+);
+```
+
+- The `filename` parameter is an ASCII fallback, transliterated the way
+  Laravel's `Str::ascii` builds its fallback: `é` becomes `e` and `ß`
+  becomes `ss`. A character whose spelling would put an unsafe character
+  into a filename, such as `·` or `½`, is dropped. A character with no
+  spelling at all becomes `_`, so the fallback is never empty. `%` and `/`
+  become `_`, and a `"` or `\` is escaped inside the quotes.
+- When the fallback can't carry the name exactly, a
+  `filename*=UTF-8''...` parameter follows with the name percent-encoded.
+  Current browsers use it, so the user sees `Certificat·Joan Pérez.pdf`.
+- Control characters, including CR, LF, and NUL, become `_` before
+  anything else. A filename can't end the header, start a new header, or
+  add a parameter, so the original name of an upload is safe to pass.
+
+To send a download from a stream, set the header yourself:
+
+```rust
+use suprnova::{ContentDisposition, HttpResponse};
+
+let response = HttpResponse::stream_bytes(rows)
+    .header("Content-Type", "text/csv; charset=utf-8")
+    .header(
+        "Content-Disposition",
+        ContentDisposition::Attachment.header_value("report.csv"),
+    );
+```
+
+### Why Suprnova diverges
+
+- Laravel's `response()->file()` sends no `Content-Disposition`. Suprnova
+  sends `inline` with the filename, so a user who saves the file gets a
+  sensible name.
+- Laravel guesses the content type from the file content. Suprnova uses the
+  extension only, because a sniffed type lets an upload be served as
+  something the browser runs.
+- In Laravel a missing file throws, which becomes a `500` error. Suprnova
+  returns a `404` error that the handler can pass on.
+- Symfony's `BinaryFileResponse` answers `Range` requests and adds
+  `Last-Modified` and `Cache-Control: public`. Suprnova's file responses send
+  the whole file and add no caching headers. Add them with `.header(...)`
+  when a file is safe to cache.
+
 ## Response macros
 
 Two `Response`-shaped macros exist for the common cases:
@@ -495,6 +616,11 @@ use the [Error Model](error-model.md) surface (`AppError`,
 | Raw bytes + content-type | `HttpResponse::bytes_body(b, "image/png")` |
 | Server-Sent Events | `HttpResponse::sse(stream)` - see [SSE](sse.md) |
 | Chunked stream | `HttpResponse::stream_bytes(stream)` |
+| Show a file inline | `HttpResponse::file(path, name).await` |
+| Download a file | `HttpResponse::download(path, name).await` |
+| Download generated bytes | `HttpResponse::download_bytes(bytes, name, content_type)` |
+| Serve a file from a disk | `Storage::response(disk, path, name).await` / `Storage::download(disk, path, name).await` |
+| `Content-Disposition` value | `ContentDisposition::Attachment.header_value(name)` |
 | Set status | `.status(code)` |
 | Add header | `.header(k, v)` / `.with_headers([...])` |
 | Remove header | `.without_header(name)` |
@@ -536,6 +662,8 @@ use the [Error Model](error-model.md) surface (`AppError`,
   `AppError`, and custom domain errors
 - [Server-Sent Events](sse.md) - building and consuming `sse(...)`
   responses
+- [Filesystem & Storage](filesystem.md) - disks, and serving a file from
+  one with `Storage::response` and `Storage::download`
 - [URLs](urls.md) - signed URLs, named-route resolution, the
   surface behind `Redirect::signed_route`
 - [Session](session.md) - flash data, intended URLs, the bag

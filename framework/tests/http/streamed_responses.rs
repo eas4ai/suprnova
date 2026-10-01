@@ -38,6 +38,7 @@
 //! active reader by the time the write runs. None of those can block, so
 //! wrapping them would only add noise.
 
+use crate::common::incoming_get_request;
 use bytes::Bytes;
 use futures::stream;
 use http_body_util::{BodyExt, Empty};
@@ -48,15 +49,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use suprnova::sse::{EndSignal, StreamedEvent};
 use suprnova::{
     CorsConfig, CorsMiddleware, HttpResponse, MiddlewareRegistry, Router, handle_request,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 /// How long any single bounded wait in this file is allowed to take.
 /// Generous for a loopback / in-memory-pipe round trip; short enough
@@ -116,61 +117,6 @@ async fn fetch(addr: SocketAddr) -> hyper::Response<Bytes> {
         .expect("collecting the response body timed out")
         .unwrap();
     hyper::Response::from_parts(parts, collected.to_bytes())
-}
-
-/// Build a genuine `hyper::Request<hyper::body::Incoming>` for a `GET`
-/// on `path` carrying `headers`, by parsing real HTTP/1.1 bytes through
-/// an in-memory `tokio::io::duplex` pipe rather than binding a TCP
-/// port. `hyper::body::Incoming` is privately constructed in hyper
-/// 1.x, so this is the only way to obtain a genuine one without a live
-/// connection - same idiom as
-/// `framework/tests/common.rs::request_from_http_bytes` (see that
-/// file's doc comment for the full rationale).
-async fn incoming_get_request(
-    path: &str,
-    headers: &[(&str, &str)],
-) -> hyper::Request<hyper::body::Incoming> {
-    let mut http_bytes = Vec::new();
-    http_bytes.extend_from_slice(format!("GET {path} HTTP/1.1\r\n").as_bytes());
-    http_bytes.extend_from_slice(b"Host: localhost\r\n");
-    for (name, value) in headers {
-        http_bytes.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
-    }
-    http_bytes.extend_from_slice(b"\r\n");
-
-    let (req_tx, req_rx) = oneshot::channel::<hyper::Request<hyper::body::Incoming>>();
-    let req_tx = Mutex::new(Some(req_tx));
-
-    let (client_io, server_io) = tokio::io::duplex(http_bytes.len() + 64 * 1024);
-
-    tokio::spawn(async move {
-        let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-            if let Ok(mut guard) = req_tx.lock()
-                && let Some(tx) = guard.take()
-            {
-                let _ = tx.send(req);
-            }
-            // Never resolve - the caller only wants the parsed
-            // `Incoming` request, not a response over this connection.
-            // Returning `Ok` here would stop hyper from pumping any
-            // remaining body bytes (see `common.rs` for the same note).
-            async {
-                std::future::pending::<()>().await;
-                Ok::<_, Infallible>(hyper::Response::new(Empty::<Bytes>::new()))
-            }
-        });
-        let _ = http1::Builder::new()
-            .serve_connection(TokioIo::new(server_io), svc)
-            .await;
-    });
-
-    let mut client = client_io;
-    client.write_all(&http_bytes).await.unwrap();
-
-    tokio::time::timeout(WAIT, req_rx)
-        .await
-        .expect("timed out building the incoming request")
-        .expect("server should have received the request")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
