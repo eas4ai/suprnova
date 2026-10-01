@@ -1,6 +1,0 @@
-.sn-switch {
-  display: flex;
-  align-items: center;
-  gap: var(--sn-space-2);
-  font-weight: var(--sn-font-weight-normal);
-}
