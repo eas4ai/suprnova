@@ -266,10 +266,16 @@ it ran, in terms you will recognize:
   entirely - it cannot decline what it cannot see, so declaring the
   matching variance is on you.
 - **You ran raw SQL through `DB::select`, `DB::select_one`, `DB::scalar`, or
-  `DB::select_on`.** The framework cannot name the tables a raw statement
-  read, so the render is never stored; it is still served. Reads through
-  `DB::table(..)` know their table and are cached normally, and so is
-  `Auth::user()`, which resolves through that path.
+  `DB::select_on`, or a query that carries a raw fragment.** The framework
+  cannot name the tables a raw statement or fragment read, so the render is
+  never stored; it is still served. A raw fragment is a `select_raw`, an
+  `order_by_raw`, or a raw `WHERE` clause (`where_raw`, `or_where_raw`,
+  `filter_raw`, `or_filter_raw`) on `DB::table(..)` or a model query,
+  subqueries included; a `select_raw`
+  that is a bare number, such as `select_raw("1")`, reads nothing and
+  doesn't count. Other reads through `DB::table(..)` know their tables and
+  are cached normally, and so is `Auth::user()`, which resolves through
+  that path.
   The framework's own RBAC role and permission checks name the five tables
   they read - `roles`, `permissions`, `role_permissions`, `model_roles`, and
   `model_permissions` - so a cached route that evaluates one is observed

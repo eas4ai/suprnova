@@ -2674,6 +2674,76 @@ async fn a_raw_sql_read_is_never_stored() {
     }
 }
 
+/// A cache-miss render runs its handler inside the render cache's own
+/// transaction, so a `DB::after_commit` callback the handler registers runs
+/// after that transaction commits. When the callback fails, the render has
+/// still succeeded and its writes are durable: the response is the render,
+/// not a 500, and a debug build does not panic on the way.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_failing_after_commit_callback_still_serves_the_committed_render() {
+    let harness = boot_with_render_cache().await;
+
+    let served = dispatch_get(&harness, "/after-commit-fails", &[]).await;
+
+    assert!(
+        render_cache_middleware_support::after_commit_callback_ran(),
+        "precondition: the deferred callback ran after the render committed"
+    );
+    assert_eq!(
+        served.status,
+        StatusCode::OK,
+        "a callback failing after the commit must not turn the render into an error"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.body),
+        "after-commit render 1"
+    );
+}
+
+/// A builder query that carries a raw fragment can read tables the builder
+/// does not name: here a `where_raw` subquery on `posts` inside a query on
+/// `users`. Recording only `users` would store the page on an incomplete
+/// dependency set and serve it stale after a write to `posts`. One key per
+/// builder: `DB::table` and the model builder.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_raw_fragment_read_of_another_table_is_never_served_stale() {
+    let harness = boot_with_render_cache().await;
+    create_user(&harness, "alice").await;
+    create_user(&harness, "bob").await;
+
+    let mut posts = 0;
+    let mut stale = Vec::new();
+    for kind in ["table", "model"] {
+        let path = format!("/raw-fragment-read/{kind}");
+        let before = dispatch_get(&harness, &path, &[]).await;
+        assert_eq!(
+            before.status,
+            StatusCode::OK,
+            "{kind}: the read itself works"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&before.body),
+            format!("{kind} counts {posts} users"),
+            "{kind}: precondition"
+        );
+
+        advance_posts(&harness).await;
+        posts += 1;
+
+        let after = dispatch_get(&harness, &path, &[]).await;
+        let body = String::from_utf8_lossy(&after.body).into_owned();
+        if body != format!("{kind} counts {posts} users") {
+            stale.push(format!("{kind}: {body:?}"));
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "a write to posts, which only the raw fragment reads, left these pages stale: {stale:?}"
+    );
+}
+
 /// Final review, F2: `Auth::user()` resolves through `DatabaseUserProvider`,
 /// which reads the `users` table through `DB::table(..).first()`; with the
 /// builder facade observed, a `PrivateCached` render that shows the

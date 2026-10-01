@@ -931,6 +931,18 @@ async fn boot(
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("raw read policy");
+    // A public route whose only read names `users` while a raw `WHERE`
+    // fragment reads `posts`.
+    let raw_fragment_read_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("raw fragment read policy");
+    // A public route whose handler defers a failing `DB::after_commit`
+    // callback to the render transaction.
+    let after_commit_fails_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("after commit fails policy");
     // Final review, F2: a private route whose body shows `Auth::user()`,
     // resolved through `DatabaseUserProvider` (see `ProviderLoginHeader`).
     let shows_auth_user_policy = RenderCachePolicy::builder(RepresentationClass::PrivateCached)
@@ -1216,6 +1228,12 @@ async fn boot(
     let router: Router = router.get("/builder-read", builder_read_handler).into();
     let router: Router = router.get("/raw-read/{kind}", raw_read_handler).into();
     let router: Router = router
+        .get("/raw-fragment-read/{kind}", raw_fragment_read_handler)
+        .into();
+    let router: Router = router
+        .get("/after-commit-fails", after_commit_fails_handler)
+        .into();
+    let router: Router = router
         .get("/shows-auth-user", shows_auth_user_handler)
         .into();
     let router: Router = router
@@ -1433,6 +1451,16 @@ async fn boot(
         .expect("attach builder read policy")
         .try_render_cache("/raw-read/{kind}", GroupPolicy::from(raw_read_policy))
         .expect("attach raw read policy")
+        .try_render_cache(
+            "/raw-fragment-read/{kind}",
+            GroupPolicy::from(raw_fragment_read_policy),
+        )
+        .expect("attach raw fragment read policy")
+        .try_render_cache(
+            "/after-commit-fails",
+            GroupPolicy::from(after_commit_fails_policy),
+        )
+        .expect("attach after commit fails policy")
         .try_render_cache(
             "/shows-auth-user",
             GroupPolicy::from(shows_auth_user_policy),
@@ -2232,6 +2260,54 @@ async fn raw_read_handler(request: Request) -> Response {
     Ok(HttpResponse::html(format!(
         "raw {kind} sees {count} posts (render {n})"
     )))
+}
+
+/// Counts the `users` rows whose `id` is at most the number of `posts`
+/// rows, through a builder that names only `users`: the `posts` read sits
+/// in a `where_raw` subquery the builder cannot see. `{kind}` picks the
+/// builder: `table` (`DB::table`) or `model` (`User::query()`). The body
+/// carries the count so a stale serve is visible.
+async fn raw_fragment_read_handler(request: Request) -> Response {
+    counting_route::on_render_start().await;
+    let kind = request.param("kind").unwrap_or("table").to_owned();
+    let fragment = "id <= (SELECT COUNT(*) FROM posts)";
+    let count = match kind.as_str() {
+        "table" => {
+            DB::table("users")
+                .where_raw(fragment, vec![])
+                .count()
+                .await? as i64
+        }
+        "model" => User::query().where_raw(fragment, vec![]).count().await?,
+        other => {
+            return Ok(HttpResponse::text(format!("unknown builder kind {other}")).status(404));
+        }
+    };
+    Ok(HttpResponse::html(format!("{kind} counts {count} users")))
+}
+
+/// Set by the callback [`after_commit_fails_handler`] registers, so a test
+/// can tell a callback that ran and failed from one that never ran.
+static AFTER_COMMIT_CALLBACK_RAN: AtomicBool = AtomicBool::new(false);
+
+/// Whether the failing callback `/after-commit-fails` registers has run.
+pub fn after_commit_callback_ran() -> bool {
+    AFTER_COMMIT_CALLBACK_RAN.load(Ordering::SeqCst)
+}
+
+/// Registers a `DB::after_commit` callback that fails. The application
+/// opened no transaction, so the callback waits for the render cache's own
+/// render transaction and fails after it commits.
+async fn after_commit_fails_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    AFTER_COMMIT_CALLBACK_RAN.store(false, Ordering::SeqCst);
+    DB::after_commit(|| async {
+        AFTER_COMMIT_CALLBACK_RAN.store(true, Ordering::SeqCst);
+        Err(FrameworkError::internal("the webhook refused the call"))
+    })
+    .await?;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("after-commit render {n}")))
 }
 
 /// Final review, F2: shows the signed-in user's own row, resolved through
