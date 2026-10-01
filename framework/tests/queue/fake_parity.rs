@@ -435,6 +435,7 @@ async fn a_raw_push_is_recorded_and_read_back() {
 }
 
 #[tokio::test]
+#[serial]
 async fn pushed_raw_returns_the_raw_pushes_a_predicate_accepts() {
     let _guard = Queue::fake();
     Queue::push_raw(&raw_payload(Greet { name: "Ada".into() }), Some("imports"))
@@ -464,6 +465,7 @@ async fn pushed_raw_returns_the_raw_pushes_a_predicate_accepts() {
 }
 
 #[tokio::test]
+#[serial]
 async fn raw_pushes_is_empty_when_nothing_was_pushed_raw() {
     let _guard = Queue::fake();
     Queue::push(Greet { name: "Ada".into() }).await.unwrap();
@@ -557,6 +559,7 @@ async fn a_raw_push_runs_like_any_envelope() {
 }
 
 #[tokio::test]
+#[serial]
 async fn a_raw_push_that_is_not_an_envelope_is_refused() {
     let _guard = Queue::fake();
 
@@ -583,6 +586,7 @@ async fn a_raw_push_that_is_not_an_envelope_is_refused() {
 // ---- assert_pushed_without_chain -----------------------------------------
 
 #[tokio::test]
+#[serial]
 async fn assert_pushed_without_chain_passes_for_a_job_pushed_alone() {
     let _guard = Queue::fake();
     Queue::push(Greet { name: "Ada".into() }).await.unwrap();
@@ -590,6 +594,7 @@ async fn assert_pushed_without_chain_passes_for_a_job_pushed_alone() {
 }
 
 #[tokio::test]
+#[serial]
 async fn assert_pushed_without_chain_passes_for_a_chain_of_one_job() {
     let _guard = Queue::fake();
     Queue::chain()
@@ -602,6 +607,7 @@ async fn assert_pushed_without_chain_passes_for_a_chain_of_one_job() {
 }
 
 #[tokio::test]
+#[serial]
 async fn assert_pushed_without_chain_passes_when_one_push_has_no_chain() {
     let _guard = Queue::fake();
     Queue::chain()
@@ -619,6 +625,7 @@ async fn assert_pushed_without_chain_passes_when_one_push_has_no_chain() {
 }
 
 #[tokio::test]
+#[serial]
 #[should_panic(expected = "without a chain")]
 async fn assert_pushed_without_chain_fails_for_a_job_pushed_with_a_chain() {
     let _guard = Queue::fake();
@@ -636,6 +643,7 @@ async fn assert_pushed_without_chain_fails_for_a_job_pushed_with_a_chain() {
 }
 
 #[tokio::test]
+#[serial]
 #[should_panic(expected = "expected at least one pushed Greet")]
 async fn assert_pushed_without_chain_fails_when_the_job_was_not_pushed() {
     let _guard = Queue::fake();

@@ -4,6 +4,7 @@
 //! delay deadline.
 
 use serde::{Deserialize, Serialize};
+use serial_test::serial;
 use std::sync::Arc;
 use std::time::Duration;
 use suprnova::queue::driver::QueueDriver;
@@ -26,6 +27,7 @@ impl Job for ScheduledNote {
 }
 
 #[tokio::test(start_paused = true)]
+#[serial]
 async fn queue_later_dispatches_via_driver_and_honors_delay() {
     let driver = Arc::new(MemoryQueueDriver::new());
     Queue::set_driver(driver.clone());

@@ -30,6 +30,7 @@ impl Job for Greet {
 }
 
 #[tokio::test]
+#[serial]
 async fn queue_fake_captures_pushed_jobs_without_running_them() {
     let _guard = install_fake();
     Queue::push(Greet {
@@ -43,6 +44,7 @@ async fn queue_fake_captures_pushed_jobs_without_running_them() {
 }
 
 #[tokio::test]
+#[serial]
 async fn queue_fake_is_installed_from_the_facade() {
     let _guard = Queue::fake();
     Queue::push(Greet {
@@ -54,6 +56,7 @@ async fn queue_fake_is_installed_from_the_facade() {
 }
 
 #[tokio::test]
+#[serial]
 async fn queue_fake_isolates_per_test() {
     let _guard = install_fake();
     Queue::push(Greet {
@@ -65,6 +68,7 @@ async fn queue_fake_isolates_per_test() {
 }
 
 #[tokio::test]
+#[serial]
 async fn queue_fake_records_available_at_for_delayed_pushes() {
     let _guard = install_fake();
     let now = Utc::now();
@@ -116,6 +120,7 @@ async fn queue_fake_records_available_at_for_delayed_pushes() {
 // ---- the fake stamps an envelope id (Laravel 13.25 #60966) ---------------
 
 #[tokio::test]
+#[serial]
 async fn queue_fake_stamps_a_distinct_id_on_every_push() {
     let _guard = install_fake();
     Queue::push(Greet { name: "one".into() }).await.unwrap();
@@ -133,6 +138,7 @@ async fn queue_fake_stamps_a_distinct_id_on_every_push() {
 }
 
 #[tokio::test]
+#[serial]
 async fn queue_fake_id_matches_the_job_queued_event_id() {
     // The point of the id: a test can join what the fake captured to
     // what a listener saw. Under the fake there is no driver, so the
@@ -158,6 +164,7 @@ async fn queue_fake_id_matches_the_job_queued_event_id() {
 }
 
 #[tokio::test]
+#[serial]
 async fn queue_fake_delayed_push_also_carries_an_id() {
     let _guard = install_fake();
     let when = Utc::now() + ChronoDuration::hours(2);
@@ -196,6 +203,7 @@ impl Job for Digest {
 }
 
 #[tokio::test]
+#[serial]
 async fn queue_fake_push_honors_job_declared_delay() {
     let _guard = install_fake();
     let before = Utc::now();
@@ -218,6 +226,7 @@ async fn queue_fake_push_honors_job_declared_delay() {
 }
 
 #[tokio::test]
+#[serial]
 async fn queue_fake_later_call_site_delay_outranks_job_declared_delay() {
     let _guard = install_fake();
     let before = Utc::now();
@@ -248,6 +257,7 @@ async fn queue_fake_later_call_site_delay_outranks_job_declared_delay() {
 }
 
 #[tokio::test]
+#[serial]
 async fn queue_fake_push_with_default_overrides_honors_job_declared_delay() {
     // `Queue::push_with(job, EnvelopeOverrides::default())` must land the
     // same `available_at` `Queue::push(job)` would - the doc comment on
@@ -287,6 +297,7 @@ async fn queue_fake_push_with_default_overrides_honors_job_declared_delay() {
 // `Queue::fake()` from one declaring nothing at all.
 
 #[tokio::test]
+#[serial]
 async fn queue_fake_captures_push_with_queue_override() {
     let _guard = install_fake();
     Queue::push_with(
@@ -309,6 +320,7 @@ async fn queue_fake_captures_push_with_queue_override() {
 }
 
 #[tokio::test]
+#[serial]
 async fn queue_fake_captures_push_with_connection_override() {
     let _guard = install_fake();
     Queue::push_with(
@@ -331,6 +343,7 @@ async fn queue_fake_captures_push_with_connection_override() {
 }
 
 #[tokio::test]
+#[serial]
 async fn queue_fake_push_with_default_overrides_records_no_override() {
     // A bare `push_with(job, EnvelopeOverrides::default())` must read as
     // "no override declared" under the fake, same as a plain `push`.
@@ -350,6 +363,7 @@ async fn queue_fake_push_with_default_overrides_records_no_override() {
 }
 
 #[tokio::test]
+#[serial]
 #[should_panic(expected = "EnvelopeOverrides.queue")]
 async fn assert_pushed_on_queue_panics_when_nothing_matches() {
     let _guard = install_fake();
@@ -498,6 +512,7 @@ async fn a_faked_chain_is_recorded_and_reaches_no_driver() {
 /// runs in its own process under nextest, so there is none to find, and
 /// both dispatches used to fail with "queue driver not initialized".
 #[tokio::test]
+#[serial]
 async fn a_faked_batch_and_chain_need_no_driver() {
     let _guard = Queue::fake();
 
@@ -521,6 +536,7 @@ async fn a_faked_batch_and_chain_need_no_driver() {
 }
 
 #[tokio::test]
+#[serial]
 async fn an_empty_chain_records_nothing() {
     let _guard = Queue::fake();
     Queue::chain().dispatch().await.unwrap();
@@ -529,6 +545,7 @@ async fn an_empty_chain_records_nothing() {
 }
 
 #[tokio::test]
+#[serial]
 async fn a_plain_push_is_neither_a_batch_nor_a_chain() {
     let _guard = Queue::fake();
     Queue::push(Greet { name: "Ada".into() }).await.unwrap();
@@ -583,6 +600,7 @@ async fn a_faked_retry_is_recorded_and_reaches_no_driver() {
 }
 
 #[tokio::test]
+#[serial]
 #[should_panic(expected = "expected a chain of")]
 async fn assert_chained_panics_when_the_order_differs() {
     let _guard = Queue::fake();
@@ -601,6 +619,7 @@ async fn assert_chained_panics_when_the_order_differs() {
 }
 
 #[tokio::test]
+#[serial]
 #[should_panic(expected = "expected at least one batch to match")]
 async fn assert_batched_panics_when_nothing_matches() {
     let _guard = Queue::fake();
