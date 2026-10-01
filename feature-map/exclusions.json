@@ -1,7 +1,7 @@
 {
  "build_time_env": {
   "CARGO_MANIFEST_DIR": [
-   "suprnova-macros/src/inertia.rs:255",
+   "suprnova-macros/src/inertia.rs:275",
    "suprnova-macros/src/redirect.rs:59"
   ],
   "CARGO_PKG_NAME": [
@@ -70,6 +70,6 @@
   "methods of external trait impls (Debug, Clone, Serialize, ...); the traits themselves are listed in each type's implements_external",
   "demo application code (app/), test-support crates and fixtures"
  ],
- "sibling_reexports_folded_into_aliases": 298,
- "source_rev": "d1dcccd5"
+ "sibling_reexports_folded_into_aliases": 299,
+ "source_rev": "e720588d"
 }
