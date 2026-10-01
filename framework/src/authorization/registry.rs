@@ -49,6 +49,47 @@ enum GateEntry {
     Async(AsyncGateFn),
 }
 
+/// A user the async evaluation path can key and hand to a gate.
+///
+/// Gates and hooks are registered under a concrete user type. A check that
+/// names that type keys its lookup by it, through the blanket impl. The
+/// check `#[authorize]` emits on a handler does not know the application's
+/// user type: it holds the user only as the type-erased value the guard
+/// resolved. The impl for `dyn Any + Send + Sync` keys that value by the
+/// concrete type behind the erasure, so it reaches the same gates and hooks
+/// a check naming the type would. The erased form is `Send + Sync` so that
+/// a reference to it can live across the `.await`s of the async path.
+pub(crate) trait GateUser {
+    /// The key the user's gates and hooks are registered under.
+    fn gate_type_id(&self) -> TypeId;
+    /// The user as the gate closures receive it, to downcast to their type.
+    fn as_gate_any(&self) -> &dyn Any;
+}
+
+impl<U: 'static> GateUser for U {
+    fn gate_type_id(&self) -> TypeId {
+        TypeId::of::<U>()
+    }
+
+    fn as_gate_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl GateUser for dyn Any + Send + Sync {
+    fn gate_type_id(&self) -> TypeId {
+        // Called on `&dyn Any`, `type_id` dispatches through the vtable to
+        // the value behind the erasure. It is the same call `downcast_ref`
+        // makes, so the key always agrees with the gate's downcast.
+        let erased: &dyn Any = self;
+        erased.type_id()
+    }
+
+    fn as_gate_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 // Downcast the type-erased (user, resource) pair back to the concrete
 // `(U, R)` the gate was registered with. Returns `None` when either side
 // fails to downcast.
@@ -448,7 +489,7 @@ impl GateRegistry {
 
     /// Invoke a gate asynchronously. Works for both sync- and async-registered
     /// gates. Returns `None` if the gate is not registered.
-    pub(crate) async fn invoke_async<U: 'static, R: 'static>(
+    pub(crate) async fn invoke_async<U: GateUser + ?Sized, R: 'static>(
         &self,
         action: &str,
         user: &U,
@@ -457,7 +498,7 @@ impl GateRegistry {
         type AsyncFut = Pin<Box<dyn Future<Output = Response> + Send>>;
         type EntryResult = Option<Result<Response, AsyncFut>>;
 
-        let key = (action.to_string(), TypeId::of::<U>(), TypeId::of::<R>());
+        let key = (action.to_string(), user.gate_type_id(), TypeId::of::<R>());
         // We hold the read lock only long enough to clone the result or start
         // the async dispatch - we must NOT hold it across an `.await`.
         //
@@ -466,8 +507,8 @@ impl GateRegistry {
         // none is set) - see `default_denial` above.
         let entry_result: EntryResult = match self.gates.read() {
             Ok(gates) => match gates.get(&key) {
-                Some(GateEntry::Sync(f)) => Some(Ok(f(user as &dyn Any, resource as &dyn Any))),
-                Some(GateEntry::Async(f)) => Some(Err(f(user as &dyn Any, resource as &dyn Any))),
+                Some(GateEntry::Sync(f)) => Some(Ok(f(user.as_gate_any(), resource as &dyn Any))),
+                Some(GateEntry::Async(f)) => Some(Err(f(user.as_gate_any(), resource as &dyn Any))),
                 None => None,
             },
             Err(_) => {
@@ -511,18 +552,21 @@ impl GateRegistry {
     /// Async sibling of [`raw`](Self::raw). The before hooks run in the same
     /// place and order, and here the async ones are awaited too; the gate
     /// dispatch awaits; the after hooks are synchronous.
-    pub(crate) async fn raw_async<U: 'static, R: 'static>(
+    ///
+    /// The user may be a concrete type or the type-erased value
+    /// `#[authorize]` holds; [`GateUser`] keys both by the concrete type.
+    pub(crate) async fn raw_async<U: GateUser + ?Sized, R: 'static>(
         &self,
         action: &str,
         user: &U,
         resource: &R,
     ) -> Option<Response> {
-        let tid = TypeId::of::<U>();
+        let tid = user.gate_type_id();
         let mut result = self.run_before_async(user, action).await;
         if result.is_none() {
             result = self.invoke_async::<U, R>(action, user, resource).await;
         }
-        self.run_after(tid, user as &dyn Any, action, result)
+        self.run_after(tid, user.as_gate_any(), action, result)
     }
 
     // Run before hooks; first `Some` short-circuits. An async hook is skipped:
@@ -543,12 +587,18 @@ impl GateRegistry {
     // `Some` short-circuits. Generic over the user type rather than taking
     // `&dyn Any` like `run_before`: `dyn Any` is not `Sync`, so a `&dyn Any`
     // alive across the `.await` would make every async gate check `!Send`.
-    async fn run_before_async<U: 'static>(&self, user: &U, action: &str) -> Option<Response> {
-        for hook in self.before_hooks(TypeId::of::<U>()) {
+    // The `&dyn Any` each hook receives is a temporary that ends before the
+    // `.await`.
+    async fn run_before_async<U: GateUser + ?Sized>(
+        &self,
+        user: &U,
+        action: &str,
+    ) -> Option<Response> {
+        for hook in self.before_hooks(user.gate_type_id()) {
             let decision = match hook {
-                BeforeHook::Sync(hook) => hook(user as &dyn Any, action),
+                BeforeHook::Sync(hook) => hook(user.as_gate_any(), action),
                 BeforeHook::Async(hook) => {
-                    let pending = hook(user as &dyn Any, action);
+                    let pending = hook(user.as_gate_any(), action);
                     pending.await
                 }
             };
@@ -697,6 +747,51 @@ mod tests {
         assert!(
             !decision.allowed(),
             "a downcast type mismatch must fail closed (deny), not panic"
+        );
+    }
+
+    #[test]
+    fn erased_user_keys_by_the_concrete_type_behind_it() {
+        // `#[authorize]` hands the gate the user as the type-erased value the
+        // guard resolved. It must key the lookup by the type behind the
+        // erasure, never by `dyn Any` itself, or no gate would ever match.
+        let erased: Arc<dyn Any + Send + Sync> = Arc::new(U);
+        let user: &(dyn Any + Send + Sync) = &*erased;
+        assert_eq!(user.gate_type_id(), TypeId::of::<U>());
+        assert!(user.as_gate_any().downcast_ref::<U>().is_some());
+
+        // A concrete user keys by its own type, as it always has.
+        assert_eq!(U.gate_type_id(), TypeId::of::<U>());
+    }
+
+    #[tokio::test]
+    async fn erased_user_reaches_the_gates_and_async_hooks_of_its_type() {
+        let registry = GateRegistry::new();
+        registry.register::<U, R>("erased-allowed", |_u, _r| true);
+        registry.register::<U, R>("erased-hooked", |_u, _r| true);
+        // An async before-hook only the async path awaits; it overrules the
+        // allowing gate above for one ability.
+        registry.register_before_async::<U, _, _>(|_u, action| {
+            let deny = action == "erased-hooked";
+            async move { deny.then_some(false) }
+        });
+
+        let erased: Arc<dyn Any + Send + Sync> = Arc::new(U);
+        let user: &(dyn Any + Send + Sync) = &*erased;
+        let decide =
+            |action: &'static str| registry.raw_async::<dyn Any + Send + Sync, R>(action, user, &R);
+
+        assert!(decide("erased-allowed").await.is_some_and(|r| r.allowed()));
+        assert!(decide("erased-hooked").await.is_some_and(|r| r.denied()));
+        assert!(decide("erased-undefined").await.is_none());
+
+        // A user of another type finds none of `U`'s gates.
+        let other: Arc<dyn Any + Send + Sync> = Arc::new(R);
+        assert!(
+            registry
+                .raw_async::<dyn Any + Send + Sync, R>("erased-allowed", &*other, &R)
+                .await
+                .is_none()
         );
     }
 

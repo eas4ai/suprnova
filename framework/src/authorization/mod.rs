@@ -7,12 +7,57 @@
 //!
 //! The [`Authorizable`] shim adds `user.can("update", &post)` directly on
 //! the user type for a more fluent call site.
+//!
+//! # Authorizing a handler
+//!
+//! [`#[authorize]`](crate::authorize) on a [`#[handler]`](crate::handler)
+//! declares the check instead of calling the gate in the body, where it
+//! only works if nobody forgets it. It names a parameter the route binds:
+//!
+//! ```rust,no_run
+//! use suprnova::http::text;
+//! use suprnova::{Response, RouteParam, authorize, handler};
+//!
+//! #[suprnova::model(table = "posts")]
+//! pub struct Post {
+//!     pub id: i64,
+//! }
+//!
+//! #[handler]
+//! #[authorize("update", post)]
+//! pub async fn update(post: RouteParam<Post>) -> Response {
+//!     text(format!("updated {}", post.id))
+//! }
+//! # fn main() {}
+//! ```
+//!
+//! A name the handler does not take as a parameter does not compile:
+//!
+//! ```compile_fail
+//! use suprnova::http::text;
+//! use suprnova::{Response, RouteParam, authorize, handler};
+//!
+//! #[suprnova::model(table = "posts")]
+//! pub struct Post {
+//!     pub id: i64,
+//! }
+//!
+//! #[handler]
+//! #[authorize("update", post)]
+//! pub async fn update(article: RouteParam<Post>) -> Response {
+//!     text(format!("updated {}", article.id))
+//! }
+//! # fn main() {}
+//! ```
 
 mod gate;
+mod handler;
 mod registry;
 mod response;
 
 pub use gate::Gate;
+#[doc(hidden)]
+pub use handler::{__authorize_handler, __authorize_handler_type};
 pub use response::Response;
 
 /// User-side ergonomic shim for [`Gate`]: `user.can(action, &resource)`

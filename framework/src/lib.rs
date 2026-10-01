@@ -660,6 +660,7 @@ pub use suprnova_macros::InertiaProps;
 pub use suprnova_macros::InputNames;
 pub use suprnova_macros::LiveComponent;
 pub use suprnova_macros::accessor;
+pub use suprnova_macros::authorize;
 pub use suprnova_macros::command;
 pub use suprnova_macros::domain_error;
 pub use suprnova_macros::handler;
