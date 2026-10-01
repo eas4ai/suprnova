@@ -735,7 +735,9 @@ fn docker_backend_stage_has_the_pages_the_inertia_macro_resolves() {
     // `[package.metadata.suprnova.inertia]` table.
     let pages_dir = "frontend/src/pages";
     assert!(
-        macro_src.contains(&format!(r#"const STARTER_PAGES_DIR: &str = "{pages_dir}";"#)),
+        macro_src.contains(&format!(
+            r#"const STARTER_PAGES_DIR: &str = "{pages_dir}";"#
+        )),
         "the page lookup no longer defaults to {pages_dir} the way this test \
          assumes - re-derive the expected COPY from its new default"
     );
