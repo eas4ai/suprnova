@@ -5,6 +5,8 @@
 //! nothing to partition per connection: the registry is two `Vec`s hanging off
 //! the current transaction's `TxState`, drained exactly once by
 //! [`DB::transaction`](crate::DB::transaction)'s commit or rollback path.
+//! Two callers register into it: the queue's deferred push, and application
+//! code through [`DB::after_commit`](crate::DB::after_commit).
 //!
 //! Nesting does reach this module in one shape. Laravel's
 //! `DatabaseTransactionsManager::rollback($connection, $level)` discards every
@@ -60,6 +62,59 @@ pub(crate) async fn register_callback(cb: AfterCommitCallback) -> Result<(), Fra
         None => Ok(()),
         // No open transaction - Laravel's immediate-execution rule.
         Some(cb) => cb().await,
+    }
+}
+
+impl crate::database::DB {
+    /// Run `callback` once the open [`DB::transaction`](crate::DB::transaction)
+    /// commits, or at once when no transaction is open. Laravel's
+    /// `DB::afterCommit($callback)`.
+    ///
+    /// Use it for work that must wait until the rows it describes are
+    /// durable: a webhook, a cache write, a message to another service.
+    /// Inside the closure of `DB::transaction` the callback is queued and
+    /// runs after the commit, outside the transaction, in the order the
+    /// callbacks were registered. It never runs when the transaction rolls
+    /// back. A [`Transaction::rollback_to`](crate::Transaction::rollback_to)
+    /// discards the callbacks registered since its savepoint, as Laravel
+    /// discards those of a nested transaction that rolls back; callbacks
+    /// registered before the savepoint, after the rollback, or inside a
+    /// savepoint that is kept still run at the commit. Suprnova refuses a
+    /// nested `DB::transaction`, so the transaction a callback waits for is
+    /// always the outermost one.
+    ///
+    /// The callback is an async closure returning `Result`, the shape the
+    /// after-commit queue that [`Job::after_commit`](crate::queue::Job::after_commit)
+    /// uses already runs, so it can await database, cache or HTTP work.
+    /// With no transaction open it runs before this call returns and its
+    /// error is this call's error. Queued, its error comes back from
+    /// `DB::transaction` after the commit, with the message
+    /// `after-commit callback failed (the transaction itself committed)`;
+    /// the remaining callbacks still run and the commit stands.
+    ///
+    /// A manual transaction from [`DB::begin_transaction`](crate::DB::begin_transaction)
+    /// installs no ambient transaction, so there is no commit to wait for
+    /// and the callback runs at once, as an after-commit job does there.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// DB::transaction(|_tx| {
+    ///     Box::pin(async move {
+    ///         let order = Order::create(attrs! { total: 30 }).await?;
+    ///         let id = order.id;
+    ///         DB::after_commit(move || async move { notify_warehouse(id).await }).await?;
+    ///         Ok::<(), FrameworkError>(())
+    ///     })
+    /// })
+    /// .await?;
+    /// ```
+    pub async fn after_commit<F, Fut>(callback: F) -> Result<(), FrameworkError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), FrameworkError>> + Send + 'static,
+    {
+        register_callback(Box::new(move || Box::pin(callback()))).await
     }
 }
 

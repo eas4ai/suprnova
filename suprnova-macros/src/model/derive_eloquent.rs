@@ -189,15 +189,26 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let morph_owner_method = relations::emit_morph_owner_method(input);
 
     // Every Self { ... } constructor that materialises a user struct
-    // from a fresh-row source (`From<inner::Model>`, `Default`,
-    // `try_from_storage`) must initialise the auto-injected `__eager`
+    // without a `self` in scope (`Default`, and the two hydration
+    // constructors below) must initialise the auto-injected `__eager`
     // / `__pivot` slots so the struct literal stays exhaustive.
     // `EagerLoadCache::default()` returns the empty cache;
-    // `Option::<...>::None` is the pivot default. None of those
-    // constructors have a `self` in scope, so empty defaults are the
-    // only correct shape for them.
+    // `Option::<...>::None` is the pivot default. `Default` builds a model
+    // nothing has read, so empty defaults are the correct shape for it.
     let relations_fields_init = quote! {
         __eager: ::core::default::Default::default(),
+        __pivot: ::core::default::Default::default(),
+    };
+
+    // The two hydration constructors (`From<inner::Model>` and
+    // `try_from_storage`) build a model from a row the database returned,
+    // so its cache keeps a copy of that row: the base `Model::save`
+    // compares against to tell what changed, and what
+    // `Model::get_original` reads. The copy is taken before the field
+    // arms move the row's fields out, under a name no column can collide
+    // with.
+    let loaded_relations_fields_init = quote! {
+        __eager: ::suprnova::EagerLoadCache::__with_loaded_row(__suprnova_loaded_row),
         __pivot: ::core::default::Default::default(),
     };
 
@@ -1181,9 +1192,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         // stores a different Storage type (e.g. INTEGER for bool).
         impl ::core::convert::From<#module_name::Model> for #struct_ident {
             fn from(row: #module_name::Model) -> Self {
+                let __suprnova_loaded_row = ::core::clone::Clone::clone(&row);
                 Self {
                     #( #from_storage_arms, )*
-                    #relations_fields_init
+                    #loaded_relations_fields_init
                 }
             }
         }
@@ -1236,9 +1248,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             fn try_from_storage(
                 row: <Self::Entity as ::suprnova::EntityTrait>::Model,
             ) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
+                let __suprnova_loaded_row = ::core::clone::Clone::clone(&row);
                 ::core::result::Result::Ok(Self {
                     #( #try_from_storage_arms, )*
-                    #relations_fields_init
+                    #loaded_relations_fields_init
                 })
             }
 
@@ -1272,6 +1285,30 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // row's relation cache, which only the macro can name.
             fn __mark_from_multi_row_query(&mut self) {
                 self.__eager.__mark_from_multi_row_query();
+            }
+
+            // `Model::was_changed` and its siblings are trait defaults, so
+            // they reach the row the cache keeps through this override
+            // rather than through the field, which only the macro can name.
+            fn __eager_cache(
+                &self,
+            ) -> ::core::option::Option<&::suprnova::EagerLoadCache> {
+                ::core::option::Option::Some(&self.__eager)
+            }
+
+            // `Model::get_original` reads a value through the casts, so it
+            // rebuilds the model from the kept row. The row is type-erased
+            // in the cache; only here is its type nameable.
+            fn __model_from_stored_row(
+                row: &(dyn ::std::any::Any + ::core::marker::Send + ::core::marker::Sync),
+            ) -> ::core::option::Option<
+                ::core::result::Result<Self, ::suprnova::FrameworkError>,
+            > {
+                row.downcast_ref::<#module_name::Model>().map(|row| {
+                    <Self as ::suprnova::eloquent::Model>::try_from_storage(
+                        ::core::clone::Clone::clone(row),
+                    )
+                })
             }
 
             fn active_model_from_attrs(

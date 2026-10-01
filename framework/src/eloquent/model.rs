@@ -58,6 +58,40 @@ fn table_read_then<E>(table: &str, error: E) -> E {
     error
 }
 
+/// The row state a model's relation cache keeps, when it has a cache.
+fn row_state(
+    cache: Option<&crate::eloquent::relations::EagerLoadCache>,
+) -> Option<&crate::eloquent::changes::RowState> {
+    cache.map(crate::eloquent::relations::EagerLoadCache::row_state)
+}
+
+/// Record a save on `current`, the model hydrated from the row the write
+/// returned, comparing it with `saved`, the model that was saved.
+///
+/// Runs right after the write and before the `Updated` event, so an
+/// `updated` observer reads the record off `current`. `adopt` copies the
+/// record onto `saved` as well: `save` borrows the caller's model and
+/// cannot hand back `current`, so the caller's model has to carry it.
+/// `update` returns `current` and leaves `saved`, the observer's
+/// `previous`, as it was.
+///
+/// The only failure is a stored row that will not serialize to JSON, which
+/// a `#[suprnova::model]` row cannot produce; it is still reported rather
+/// than recorded wrong.
+fn record_save_on(
+    saved: Option<&crate::eloquent::relations::EagerLoadCache>,
+    current: Option<&crate::eloquent::relations::EagerLoadCache>,
+    adopt: bool,
+) -> Result<(), FrameworkError> {
+    let saved = row_state(saved);
+    let current = row_state(current);
+    crate::eloquent::changes::record_save(saved, current)?;
+    if adopt && let (Some(saved), Some(current)) = (saved, current) {
+        saved.adopt(current);
+    }
+    Ok(())
+}
+
 /// The Eloquent CRUD lifecycle. Auto-implemented for every
 /// `#[suprnova::model]` struct.
 ///
@@ -224,6 +258,37 @@ where
     /// emits the override.
     #[doc(hidden)]
     fn __mark_from_multi_row_query(&mut self) {}
+
+    /// The relation cache the `#[suprnova::model]` macro injects as
+    /// `__eager`. Besides relations it keeps the row the instance was read
+    /// from, which [`Self::was_changed`] and its siblings read.
+    ///
+    /// The macro overrides it. The default, for a type without the cache,
+    /// keeps no row, so such a type reports no change and no original.
+    ///
+    /// **Not part of the public API.** It is `pub` because the macro emits
+    /// the override.
+    #[doc(hidden)]
+    fn __eager_cache(&self) -> Option<&crate::eloquent::relations::EagerLoadCache> {
+        None
+    }
+
+    /// Build this model back from a row the cache kept, so
+    /// [`Self::get_original`] can read a value through the model's casts.
+    /// `None` when `row` is not this model's stored row.
+    ///
+    /// The macro overrides it with a downcast to the model's own SeaORM
+    /// row, the one type the generic default cannot name.
+    ///
+    /// **Not part of the public API.** It is `pub` because the macro emits
+    /// the override.
+    #[doc(hidden)]
+    fn __model_from_stored_row(
+        row: &(dyn std::any::Any + Send + Sync),
+    ) -> Option<Result<Self, FrameworkError>> {
+        let _ = row;
+        None
+    }
 
     /// Mark every row of one query's result when the query returned more
     /// than one row. The one place that rule lives: every read path that
@@ -654,6 +719,7 @@ where
             })
             .await?;
 
+        record_save_on(self.__eager_cache(), current.__eager_cache(), true)?;
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned(&touch_plan).await?;
@@ -700,10 +766,104 @@ where
             })
             .await?;
 
+        record_save_on(previous.__eager_cache(), current.__eager_cache(), false)?;
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned(&touch_plan).await?;
         Ok(current)
+    }
+
+    /// Whether the last save of this instance changed `attribute`.
+    /// Laravel's `$model->wasChanged('attribute')`.
+    ///
+    /// A column counts as changed when the value the database stores
+    /// after the save differs from the value the instance held before it.
+    /// Writing the same value back is no change; a column a `Saving`
+    /// listener or the timestamps rewrote is one. `false` before any save
+    /// and for an attribute the model does not have.
+    ///
+    /// [`Self::save`], [`Self::update`], [`Self::save_with_tx`] and
+    /// [`Self::update_with_tx`] record the change on the model the caller
+    /// holds afterwards and on the `current` model an `updated` observer
+    /// receives, so an observer can audit a change:
+    ///
+    /// ```ignore
+    /// async fn updated(&self, _previous: &User, user: &User) -> Result<(), FrameworkError> {
+    ///     if user.was_changed("is_admin") {
+    ///         let before = user.get_raw_original("is_admin");
+    ///         tracing::info!(user_id = user.id, ?before, after = user.is_admin, "admin flag changed");
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    fn was_changed(&self, attribute: &str) -> bool {
+        crate::eloquent::changes::was_changed_any(row_state(self.__eager_cache()), &[attribute])
+    }
+
+    /// Whether the last save changed any of `attributes`. Laravel's
+    /// `$model->wasChanged([...])`.
+    ///
+    /// An empty slice asks whether the save changed anything at all, which
+    /// is Laravel's `wasChanged()` with no argument. See
+    /// [`Self::was_changed`] for what counts as a change.
+    fn was_changed_any(&self, attributes: &[&str]) -> bool {
+        crate::eloquent::changes::was_changed_any(row_state(self.__eager_cache()), attributes)
+    }
+
+    /// The attributes the last save changed, each with the value it
+    /// stored. Laravel's `$model->getChanges()`.
+    ///
+    /// The values are in stored form, before casts, as Laravel's are: an
+    /// `AsBool` column reads `1`, not `true`. The record covers the last
+    /// save only. A later save replaces it, a save that changed nothing
+    /// leaves it empty, and a save that failed leaves the previous one in
+    /// place. Empty before any save.
+    fn get_changes(&self) -> Attrs {
+        crate::eloquent::changes::changes(row_state(self.__eager_cache()))
+    }
+
+    /// The value `attribute` held before the last save, read through the
+    /// model's casts, as [`Self::field_value`] reads the current one.
+    /// Laravel's `$model->getOriginal('attribute')`.
+    ///
+    /// Before any save, the value the instance was loaded with: changing a
+    /// field in memory does not change it. `Ok(None)` when the instance was
+    /// never read from the database, such as a model built with
+    /// `Default`, and for an attribute the model does not have.
+    ///
+    /// Unlike Laravel, which resets the original to the new values once
+    /// the save finishes, the values from before the last save stay
+    /// readable for the life of the instance, so code after the save can
+    /// read them as well as an `updated` observer can. [`Self::refresh`]
+    /// reads the row again and starts over.
+    ///
+    /// # Errors
+    ///
+    /// When the kept value no longer decodes through the model's cast, for
+    /// example an encrypted column whose key has left the key ring.
+    fn get_original(&self, attribute: &str) -> Result<Option<serde_json::Value>, FrameworkError> {
+        let Some(row) = crate::eloquent::changes::original_row(row_state(self.__eager_cache()))
+        else {
+            return Ok(None);
+        };
+        match Self::__model_from_stored_row(row.as_any()) {
+            Some(original) => Ok(original?.field_value(attribute)),
+            None => Err(FrameworkError::internal(format!(
+                "get_original: the row kept for `{}` is not that model's row",
+                std::any::type_name::<Self>(),
+            ))),
+        }
+    }
+
+    /// The value `attribute` held before the last save, as stored: no cast
+    /// applied. Laravel's `$model->getRawOriginal('attribute')`.
+    ///
+    /// The same value as [`Self::get_original`] in the form the column
+    /// holds it, so an `AsBool` column reads `0` or `1` and an encrypted
+    /// column reads its ciphertext. `None` when the instance was never read
+    /// from the database and for an attribute the model does not have.
+    fn get_raw_original(&self, attribute: &str) -> Option<serde_json::Value> {
+        crate::eloquent::changes::raw_original(row_state(self.__eager_cache()), attribute)
     }
 
     /// Delete this row. The trait default performs a hard DELETE.
@@ -1094,6 +1254,7 @@ where
         let current = Self::try_from_storage(updated)?;
         crate::render_cache::orm::after_model_write_with_tx(tx, &current).await?;
 
+        record_save_on(self.__eager_cache(), current.__eager_cache(), true)?;
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned_with_tx(tx, &touch_plan).await?;
@@ -1128,6 +1289,7 @@ where
         let current = Self::try_from_storage(updated)?;
         crate::render_cache::orm::after_model_write_with_tx(tx, &current).await?;
 
+        record_save_on(previous.__eager_cache(), current.__eager_cache(), false)?;
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned_with_tx(tx, &touch_plan).await?;
