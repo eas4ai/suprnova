@@ -4,16 +4,6 @@ use quote::quote;
 use std::path::{Path, PathBuf};
 use syn::{DeriveInput, Expr, LitStr, Token, parse::Parse, parse::ParseStream, parse_macro_input};
 
-use crate::utils::levenshtein_distance;
-
-/// Page-component file extensions the macro will accept.
-///
-/// Ordered so that Svelte (Suprnova's default) wins ties first. The macro
-/// accepts whichever extension exists in `frontend/src/pages/`. This frees
-/// the framework from requiring a build-time `SUPRNOVA_FRONTEND` env var
-/// in every workspace setup.
-const PAGE_EXTENSIONS: &[&str] = &["svelte", "tsx", "jsx", "vue"];
-
 /// Props can be either a typed struct expression or JSON-like syntax.
 pub enum PropsKind {
     /// Typed struct: `HomeProps { title: "Welcome".into(), user }`
@@ -164,11 +154,39 @@ fn inertia_response_inner(input: InertiaResponseInput) -> proc_macro2::TokenStre
     let component_name = input.component.value();
     let component_lit = &input.component;
 
-    if let Err(err) = validate_component_exists(&component_name, component_lit.span()) {
-        return err.to_compile_error();
-    }
+    let tracked = match validate_component_exists(&component_name, component_lit.span()) {
+        Ok(tracked) => tracked,
+        Err(err) => return err.to_compile_error(),
+    };
 
-    render_inertia_response_expansion(&input)
+    track_inputs(render_inertia_response_expansion(&input), &tracked)
+}
+
+/// Prefix the expansion with one `include_bytes!` per file the check read.
+///
+/// Cargo re-runs a proc macro only when a file in the crate's dep-info
+/// changes, and files a macro opens on its own never reach it: without
+/// this, deleting a page or editing the lookup table in `Cargo.toml` (cargo
+/// does not fingerprint `[package.metadata]`) leaves a stale check in place
+/// until some Rust file changes. Naming the files in `include_bytes!` puts
+/// them in the dep-info. The constants are unnamed and unused, so nothing
+/// reaches the binary.
+fn track_inputs(
+    expansion: proc_macro2::TokenStream,
+    files: &[PathBuf],
+) -> proc_macro2::TokenStream {
+    let paths: Vec<LitStr> = files
+        .iter()
+        .filter_map(|file| file.to_str())
+        .map(|file| LitStr::new(file, Span::call_site()))
+        .collect();
+    if paths.is_empty() {
+        return expansion;
+    }
+    quote! {{
+        #( const _: &[u8] = ::core::include_bytes!(#paths); )*
+        #expansion
+    }}
 }
 
 /// Render the macro expansion proper - the value-expr, the match
@@ -251,126 +269,20 @@ fn render_inertia_response_expansion(input: &InertiaResponseInput) -> proc_macro
     expanded
 }
 
-fn validate_component_exists(component_name: &str, span: Span) -> Result<(), syn::Error> {
+/// Checks the component against the crate's page lookup and returns the
+/// files the check read, for [`track_inputs`].
+fn validate_component_exists(component_name: &str, span: Span) -> Result<Vec<PathBuf>, syn::Error> {
     let manifest_dir = match std::env::var("CARGO_MANIFEST_DIR") {
         Ok(dir) => dir,
         Err(_) => {
             // In environments where CARGO_MANIFEST_DIR isn't set (some IDEs,
             // rust-analyzer in odd states), skip validation gracefully.
-            return Ok(());
+            return Ok(Vec::new());
         }
     };
 
-    let project_root = PathBuf::from(&manifest_dir);
-    let pages_dir = project_root.join("frontend").join("src").join("pages");
-
-    // Try every supported extension. The macro accepts whichever exists.
-    for ext in PAGE_EXTENSIONS {
-        let candidate = pages_dir.join(format!("{}.{}", component_name, ext));
-        if candidate.exists() {
-            return Ok(());
-        }
-    }
-
-    let available = list_available_components(&project_root);
-
-    let mut error_msg = format!(
-        "Inertia component '{}' not found.\nLooked in: frontend/src/pages/\nTried extensions: {}",
-        component_name,
-        PAGE_EXTENSIONS
-            .iter()
-            .map(|e| format!(".{}", e))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-
-    if !available.is_empty() {
-        error_msg.push_str("\n\nAvailable components:");
-        for comp in &available {
-            error_msg.push_str(&format!("\n  - {}", comp));
-        }
-
-        if let Some(suggestion) = find_similar_component(component_name, &available) {
-            error_msg.push_str(&format!("\n\nDid you mean '{}'?", suggestion));
-        }
-    } else {
-        error_msg.push_str(
-            "\n\nNo components found in frontend/src/pages/.\nMake sure your frontend directory structure is set up correctly.",
-        );
-    }
-
-    Err(syn::Error::new(span, error_msg))
-}
-
-fn list_available_components(project_root: &Path) -> Vec<String> {
-    let pages_dir = project_root.join("frontend").join("src").join("pages");
-
-    let mut components = Vec::new();
-    collect_components_recursive(&pages_dir, &pages_dir, &mut components);
-    components.sort();
-    components
-}
-
-fn collect_components_recursive(base_dir: &Path, current_dir: &Path, components: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(current_dir) else {
-        return;
-    };
-
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-
-        if path.is_dir() {
-            collect_components_recursive(base_dir, &path, components);
-            continue;
-        }
-
-        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
-            continue;
-        };
-
-        if !PAGE_EXTENSIONS.contains(&ext) {
-            continue;
-        }
-
-        let Ok(relative) = path.strip_prefix(base_dir) else {
-            continue;
-        };
-
-        let Some(stem) = relative.with_extension("").to_str().map(str::to_string) else {
-            continue;
-        };
-
-        // Normalize Windows-style separators in the relative path to forward
-        // slashes so the component name matches what `inertia_response!` is
-        // called with on any platform.
-        components.push(stem.replace(std::path::MAIN_SEPARATOR, "/"));
-    }
-}
-
-fn find_similar_component(target: &str, available: &[String]) -> Option<String> {
-    let target_lower = target.to_lowercase();
-
-    for comp in available {
-        if comp.to_lowercase() == target_lower {
-            return Some(comp.clone());
-        }
-    }
-
-    let mut best_match: Option<(String, usize)> = None;
-    for comp in available {
-        let distance = levenshtein_distance(&target_lower, &comp.to_lowercase());
-        let threshold = std::cmp::max(2, target.len() / 3);
-        if distance <= threshold
-            && best_match
-                .as_ref()
-                .map(|(_, d)| distance < *d)
-                .unwrap_or(true)
-        {
-            best_match = Some((comp.clone(), distance));
-        }
-    }
-
-    best_match.map(|(name, _)| name)
+    crate::inertia_pages::check_component(Path::new(&manifest_dir), component_name)
+        .map_err(|message| syn::Error::new(span, message))
 }
 
 #[cfg(test)]
@@ -465,6 +377,50 @@ mod tests {
         assert!(
             rendered.contains("resolve") && rendered.contains("map_err"),
             "block must end in resolve(...).map_err(...) shape; got: {rendered}"
+        );
+    }
+
+    /// The page file and the manifest the lookup came from are read by the
+    /// macro, not by rustc, so cargo does not know about them. Naming them
+    /// in `include_bytes!` puts them in the crate's dep-info, which re-runs
+    /// the check when either changes.
+    #[test]
+    fn tracked_inputs_become_include_bytes_items() {
+        let parsed: InertiaResponseInput = parse_quote! {
+            &req, "Home", { "title": "Welcome" }
+        };
+        let expansion = render_inertia_response_expansion(&parsed);
+        let rendered = track_inputs(
+            expansion.clone(),
+            &[
+                PathBuf::from("/srv/app/Cargo.toml"),
+                PathBuf::from("/srv/app/frontend/src/pages/Home.svelte"),
+            ],
+        )
+        .to_string();
+        assert!(
+            rendered.contains("include_bytes ! (\"/srv/app/Cargo.toml\")"),
+            "the manifest must be tracked; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("include_bytes ! (\"/srv/app/frontend/src/pages/Home.svelte\")"),
+            "the page must be tracked; got: {rendered}"
+        );
+        assert!(
+            rendered.contains(&expansion.to_string()),
+            "the expansion must follow the tracking items; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn no_tracked_inputs_leave_the_expansion_unchanged() {
+        let parsed: InertiaResponseInput = parse_quote! {
+            &req, "Home", { "title": "Welcome" }
+        };
+        let expansion = render_inertia_response_expansion(&parsed);
+        assert_eq!(
+            track_inputs(expansion.clone(), &[]).to_string(),
+            expansion.to_string()
         );
     }
 }

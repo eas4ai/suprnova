@@ -148,8 +148,9 @@ See [Responses](responses.md).
 
 Builds an Inertia page response, validating at compile time that the
 named component file (`.svelte` / `.tsx` / `.jsx` / `.vue`) exists in
-`frontend/src/pages/`. If you misspell the component name, the build
-fails with suggestions:
+`frontend/src/pages/`, or wherever the crate's `Cargo.toml` points the
+lookup (see [Another page layout](frontend-pages.md#another-page-layout)).
+If you misspell the component name, the build fails with suggestions:
 
 ```rust
 use suprnova::{handler, inertia_response, InertiaProps, Request, Response};
