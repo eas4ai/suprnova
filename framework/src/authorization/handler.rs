@@ -16,8 +16,17 @@ use crate::auth::Auth;
 /// Authorize `ability` on `resource` for the request's user, or answer the
 /// error the handler returns instead of running.
 ///
-/// The user is the one [`Auth::user`] resolves on the default guard. The
-/// macro does not know the application's user type, so the gate is asked
+/// The user is the one the route's guard resolves. That guard is the one the
+/// last [`AuthMiddleware`](crate::AuthMiddleware) that passed the request on
+/// checked: the guard its
+/// [`for_guard`](crate::AuthMiddleware::for_guard) names, or the default
+/// guard, through [`Auth::user`], when it names none or no such middleware
+/// ran. Laravel's `can` middleware reads the user of the guard that
+/// `auth:<guard>` selected the same way. When the route's guard has no user,
+/// the answer is 401 even if another guard has one: that user is not the
+/// one the route authenticated.
+///
+/// The macro does not know the application's user type, so the gate is asked
 /// about the type-erased user and keys its lookup by the concrete type
 /// behind it: the gates, `#[policy]` methods and before-hooks registered
 /// for that type all answer, as they would for
@@ -27,17 +36,17 @@ use crate::auth::Auth;
 ///
 /// # Errors
 ///
-/// - 401 (`Unauthenticated.`) when no user is authenticated.
+/// - 401 (`Unauthenticated.`) when the route's guard has no user.
 /// - The denial as [`Gate::authorize_async`] maps it: 403 for a bare
 ///   denial, or the status a rich [`Response`](super::Response) carries,
 ///   404 for `Response::deny_as_not_found()`.
-/// - The error [`Auth::user`] returns when the user cannot be resolved.
+/// - The error the guard returns when the user cannot be resolved.
 #[doc(hidden)]
 pub async fn __authorize_handler<R>(ability: &str, resource: &R) -> Result<(), FrameworkError>
 where
     R: Sync + 'static,
 {
-    let Some(user) = Auth::user().await? else {
+    let Some(user) = Auth::route_user().await? else {
         return Err(FrameworkError::domain("Unauthenticated.", 401));
     };
     let user: Arc<dyn Any + Send + Sync> = user.into_arc_any();

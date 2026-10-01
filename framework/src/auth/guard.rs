@@ -912,6 +912,22 @@ impl Auth {
         Ok(any_arc.downcast::<T>().ok())
     }
 
+    /// The user of the route's guard: the guard the last `AuthMiddleware`
+    /// that passed the request on checked, or the default guard, through
+    /// [`user`](Self::user), when that middleware names no guard or none ran.
+    ///
+    /// Route authorization (`#[authorize]` and `authorize_resource`) checks
+    /// this user, as Laravel's `can` middleware checks the user of the guard
+    /// `auth:<guard>` selected. It never answers with another guard's user:
+    /// that user is not the one the route authenticated.
+    pub(crate) async fn route_user()
+    -> Result<Option<Arc<dyn Authenticatable>>, crate::error::FrameworkError> {
+        match request_state::route_guard() {
+            Some(guard) => Self::guard(&guard)?.user().await,
+            None => Self::user().await,
+        }
+    }
+
     // ── Named guards (AuthManager) ──────────────────────────────────────────────
 
     /// Resolve the [`AuthManager`] from the container, with a remediation
