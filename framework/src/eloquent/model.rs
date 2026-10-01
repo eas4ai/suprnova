@@ -615,9 +615,12 @@ where
             })
             .await?;
 
+        // Nothing was loaded before the insert: no original until it returns.
+        crate::eloquent::changes::begin_insert(row_state(row.__eager_cache()));
         Self::__dispatch_created(&row).await?;
         Self::__dispatch_saved(&row).await?;
         row.__touch_planned(&touch_plan).await?;
+        crate::eloquent::changes::finish_save(row_state(row.__eager_cache()));
         Ok(row)
     }
 
@@ -689,9 +692,12 @@ where
             })
             .await?;
 
+        // Nothing was loaded before the insert: no original until it returns.
+        crate::eloquent::changes::begin_insert(row_state(row.__eager_cache()));
         Self::__dispatch_created(&row).await?;
         Self::__dispatch_saved(&row).await?;
         row.__touch_planned(&touch_plan).await?;
+        crate::eloquent::changes::finish_save(row_state(row.__eager_cache()));
         Ok(row)
     }
 
@@ -883,7 +889,9 @@ where
     /// the save returns, it is the saved row, as Laravel's `finishSave`
     /// syncs it. `Ok(None)` when the instance was never read from the
     /// database, such as a model built with `Default` and not saved yet,
-    /// and for an attribute the model does not have.
+    /// inside the `created` and `saved` observers of an insert, which had
+    /// nothing loaded before it, and for an attribute the model does not
+    /// have.
     ///
     /// # Errors
     ///
@@ -909,7 +917,8 @@ where
     /// The same value as [`Self::get_original`] in the form the column
     /// holds it, so an `AsBool` column reads `0` or `1` and an encrypted
     /// column reads its ciphertext. `None` when the instance was never read
-    /// from the database and for an attribute the model does not have.
+    /// from the database, inside the `created` and `saved` observers of an
+    /// insert, and for an attribute the model does not have.
     fn get_raw_original(&self, attribute: &str) -> Option<serde_json::Value> {
         crate::eloquent::changes::raw_original(row_state(self.__eager_cache()), attribute)
     }
@@ -1408,9 +1417,12 @@ where
         let row = Self::try_from_storage(inserted)?;
         crate::render_cache::orm::after_model_write_with_tx(tx, &row).await?;
 
+        // Nothing was loaded before the insert: no original until it returns.
+        crate::eloquent::changes::begin_insert(row_state(row.__eager_cache()));
         Self::__dispatch_created(&row).await?;
         Self::__dispatch_saved(&row).await?;
         row.__touch_planned_with_tx(tx, &touch_plan).await?;
+        crate::eloquent::changes::finish_save(row_state(row.__eager_cache()));
         Ok(row)
     }
 

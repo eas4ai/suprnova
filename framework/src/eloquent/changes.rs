@@ -29,7 +29,9 @@
 //! changes stay. Until the save returns, the original stays the row the save
 //! started from, so the `updated` and `saved` observers read the values
 //! loaded before it. [`finish_save`] then does what `finishSave` does with
-//! `syncOriginal`: the original becomes the saved row.
+//! `syncOriginal`: the original becomes the saved row. An insert has
+//! nothing loaded before it, so [`begin_insert`] leaves it without an
+//! original until [`finish_save`] runs.
 //!
 //! The kept row lives in the model's
 //! [`EagerLoadCache`](crate::EagerLoadCache), the per-instance runtime state
@@ -234,6 +236,21 @@ pub(crate) fn record_save(
         changes,
     });
     Ok(())
+}
+
+/// Start an insert's record on `state`, the state of the model hydrated
+/// from the row the insert returned. Nothing was read before an insert, so
+/// until [`finish_save`] runs the model has no original: Laravel's model has
+/// none until `finishSave` runs `syncOriginal`, after the `created` and
+/// `saved` events. An insert records no changes, as Laravel's
+/// `performInsert` runs no `syncChanges`.
+pub(crate) fn begin_insert(state: Option<&RowState>) {
+    let Some(state) = state else {
+        return;
+    };
+    let mut history = state.read();
+    history.in_progress = Some(SaveInProgress { before: None });
+    state.write(history);
 }
 
 /// Whether `column`, whose stored value differs between the two rows,

@@ -5,7 +5,8 @@
 //! save changes something. While the save's `updated` and `saved` observers
 //! run, `get_original` (cast) and `get_raw_original` (stored) return the
 //! values loaded before the save; once the save returns they return the
-//! saved values. An insert reports no changes. Laravel's
+//! saved values. An insert reports no changes, and has no original until
+//! it returns. Laravel's
 //! `HasAttributes::wasChanged`, `getChanges`, `getOriginal`,
 //! `getRawOriginal`, `syncChanges` and `syncOriginal`, as `Model::save`,
 //! `performUpdate` and `finishSave` call them.
@@ -176,6 +177,12 @@ struct AuditObserver;
 
 #[async_trait]
 impl Observer<ChangeUser> for AuditObserver {
+    async fn created(&self, model: &ChangeUser) -> Result<(), FrameworkError> {
+        let seen = see("created", &model.email, model)?;
+        SEEN.lock().unwrap().push(seen);
+        Ok(())
+    }
+
     async fn updated(
         &self,
         _previous: &ChangeUser,
@@ -322,6 +329,34 @@ async fn observers_see_what_update_changed() {
     user.update(attrs! { is_admin: true }).await.unwrap();
 
     assert_observers_saw_only_the_flip("observer-update@example.com");
+}
+
+#[tokio::test]
+async fn an_insert_has_no_original_while_its_observers_run() {
+    let _db = sqlite().await;
+    ChangeUser::observe(AuditObserver).await;
+    let email = "observer-insert@example.com";
+    let created = ChangeUser::create(attrs! { name: "Ada", email: email, is_admin: true })
+        .await
+        .unwrap();
+
+    for event in ["created", "saved"] {
+        let records = seen_for(event, email);
+        assert!(!records.is_empty(), "the {event} observer ran");
+        for record in &records {
+            assert_eq!(
+                record.raw_original_is_admin, None,
+                "{event}: nothing was loaded before the insert: {record:?}"
+            );
+            assert_eq!(record.original_is_admin, None, "{event}: {record:?}");
+            assert!(!record.anything_changed, "{event}: {record:?}");
+        }
+    }
+    assert_eq!(
+        created.get_raw_original("is_admin"),
+        Some(json!(1)),
+        "once the insert returns, the original is the inserted row"
+    );
 }
 
 // ---- On the caller's model ----------------------------------------------
