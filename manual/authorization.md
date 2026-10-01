@@ -289,6 +289,93 @@ A denied ability returns `403` before the handler runs; an unauthenticated
 request fails closed. The full action → ability table lives in the
 [routing chapter](routing.md).
 
+## Authorize a handler
+
+A gate check inside the handler body works only if nobody forgets it.
+`#[authorize]` on a `#[handler]` declares the check instead, the way
+Laravel's `#[Authorize]` controller attribute does:
+
+```rust
+use suprnova::http::text;
+use suprnova::{Response, RouteParam, authorize, handler};
+use crate::models::Post;
+use crate::requests::StorePost;
+
+// Route: post!("/posts", controllers::post::store)
+#[handler]
+#[authorize("create-post", Post)]
+pub async fn store(form: StorePost) -> Response {
+    text(format!("stored {}", form.title))
+}
+
+// Route: put!("/posts/{post}", controllers::post::update)
+#[handler]
+#[authorize("update-post", post)]
+pub async fn update(post: RouteParam<Post>) -> Response {
+    text(format!("updated {}", post.id))
+}
+```
+
+The second argument is either a parameter or a type:
+
+- A single name that starts with a lowercase letter, such as `post`, is a
+  parameter of the handler. The check runs against the value the route
+  binds to it. For a `RouteParam<Post>` parameter, that is the `Post`
+  inside. The name can also be the binding of a pattern, as in
+  `RouteParam(post): RouteParam<Post>`. A name the handler does not take
+  is a compile error.
+- Anything else, such as `Post` or `post::Model`, is a type. The gate is
+  keyed by type, so the check runs against `Post::default()`, the same
+  stand-in [`authorize_resource`](#gating-resource-routes) uses. Every
+  `#[suprnova::model]` struct implements `Default`.
+
+The ability goes to the gate as written. A `#[policy(User, Post)]` method
+`update` registers the ability `update-post`, so a handler that relies on
+that policy names `"update-post"`. An ability registered with
+`Gate::define` or `Gate::define_async` is named the way it was registered.
+
+The check runs at a fixed point in the request:
+
+1. The route parameters are bound. A model that does not exist answers
+   `404 Not Found`, whatever the gate would decide.
+2. Each `#[authorize]` runs, in the order written. The first one that
+   fails ends the request.
+3. The request body is read and validated, so a denied user never sees a
+   validation error.
+4. The handler body runs.
+
+The check asks the async gate about the user `Auth::user()` resolves.
+Policies, async gates, async `before` hooks, and the
+[permission bridge](#answering-the-gate-with-permissions) all answer it.
+When the check fails, it answers the request with one of these statuses:
+
+| Situation | Status |
+|---|---|
+| No authenticated user | `401 Unauthorized`, `{"message": "Unauthenticated."}` |
+| The gate denies | `403 Forbidden` |
+| A rich denial with a status, such as `Response::deny_as_not_found()` | That status, `404 Not Found` here |
+
+`#[authorize]` may sit above or below `#[handler]`, and a handler may carry
+several. Without `#[handler]` it is a compile error. The handler must be an
+`async fn`, and the parameter it names must come from the route: a
+`RouteParam<M>`, a `...::Model`, or a path value such as `id: i64`. A form
+request or a `Request` reads the body, and the check runs before the body
+is read, so naming one is a compile error too.
+
+### Why Suprnova diverges
+
+A guest gets `401 Unauthorized`. Laravel's `can` middleware passes a guest
+to the gate, which answers `403 Forbidden` unless a policy method accepts a
+missing user. Suprnova answers the way `AuthMiddleware` does for a guest,
+so a client can tell "log in" from "not allowed".
+
+Laravel tells a model class from a route parameter by the backslash in
+`Post::class`. Rust has no class strings, so Suprnova uses Rust's naming
+conventions instead: a single lowercase name is a parameter, and anything
+else is a type. For the type form, Laravel calls a policy method that takes
+no model. Suprnova's gate always passes a resource, so the type form passes
+a default value of the type.
+
 ## Async semantics
 
 `Gate::define_async`'s closure must return an **owned** future - the

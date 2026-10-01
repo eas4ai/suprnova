@@ -10,6 +10,7 @@
 
 use proc_macro::TokenStream;
 
+mod authorize;
 mod command;
 mod console_derive;
 mod data;
@@ -431,6 +432,67 @@ pub fn domain_error(attr: TokenStream, input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn handler(attr: TokenStream, input: TokenStream) -> TokenStream {
     handler::handler_impl(attr, input)
+}
+
+/// Declare the gate check a `#[handler]` needs, like Laravel's
+/// `#[Authorize]` controller attribute.
+///
+/// A check in the handler body only works if nobody forgets it. This
+/// attribute makes `#[handler]` run the check for you, after the route
+/// parameters are bound and before the request body is read or the handler
+/// body runs.
+///
+/// # Forms
+///
+/// ```rust,ignore
+/// // Against a type: "may this user create posts at all?"
+/// #[handler]
+/// #[authorize("create-post", Post)]
+/// pub async fn store(form: StorePost) -> Response { ... }
+///
+/// // Against the model the route binds to a parameter.
+/// #[handler]
+/// #[authorize("update-post", post)]
+/// pub async fn update(post: RouteParam<Post>) -> Response { ... }
+/// ```
+///
+/// The second argument is a parameter when it is a single identifier that
+/// starts with a lowercase letter or `_`, as Rust names values; anything
+/// else (`Post`, `post::Model`, `crate::models::Post`) is a type.
+///
+/// - A parameter must be the binding of one the handler takes, written
+///   `post: RouteParam<Post>` or `RouteParam(post): RouteParam<Post>`, or
+///   the handler does not compile.
+///   It must come from the route: a `RouteParam<M>` (checked as the `M`
+///   inside), a `...::Model`, or a path value such as `i64`. A form request
+///   or `Request` reads the body, which the check runs before, so naming one
+///   does not compile either.
+/// - A type is checked as `<Type as Default>::default()`: the gate is keyed
+///   by type, so a default value stands in for it, as it does for
+///   `authorize_resource`. Every `#[suprnova::model]` struct implements
+///   `Default`.
+///
+/// The ability goes to the gate as written. A `#[policy(User, Post)]`
+/// method `update` registers `update-post`.
+///
+/// # What the check does
+///
+/// It asks the async gate about the user `Auth::user()` resolves, keyed by
+/// that user's concrete type, so `#[policy]` methods, async gates, and
+/// async before-hooks (the RBAC gate bridge among them) all answer. A guest
+/// gets 401, a denial 403, and a rich denial its own status, 404 for
+/// `Response::deny_as_not_found()`. A bound model that does not exist
+/// answers 404 before the check runs.
+///
+/// # Placement
+///
+/// The attribute may sit above or below `#[handler]`. A handler may carry
+/// several; each one runs, in the order written, and the first that fails
+/// ends the request. The handler must be an `async fn`. Without
+/// `#[handler]`, the attribute is a compile error.
+#[proc_macro_attribute]
+pub fn authorize(attr: TokenStream, input: TokenStream) -> TokenStream {
+    authorize::authorize_impl(attr, input)
 }
 
 /// Derive macro for FormRequest trait

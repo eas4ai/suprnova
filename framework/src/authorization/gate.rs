@@ -1,7 +1,8 @@
+use std::any::Any;
 use std::future::Future;
 
 use super::Response;
-use super::registry::{self, global};
+use super::registry::{self, GateUser, global};
 use crate::FrameworkError;
 
 /// Authorization gate facade.
@@ -206,6 +207,29 @@ impl Gate {
 
     /// Async sibling of [`inspect`](Self::inspect).
     pub async fn inspect_async<U: 'static, R: 'static>(
+        action: &str,
+        user: &U,
+        resource: &R,
+    ) -> Response {
+        Self::inspect_async_keyed::<U, R>(action, user, resource).await
+    }
+
+    /// [`Self::inspect_async`] for a user held only as a type-erased value,
+    /// such as the one [`Auth::user`](crate::Auth::user) resolves. The lookup
+    /// keys by the concrete type behind the erasure, so the gates and hooks
+    /// registered for that type answer. `#[authorize]` checks through this,
+    /// because the macro does not know the application's user type.
+    pub(crate) async fn inspect_erased_async<R: 'static>(
+        action: &str,
+        user: &(dyn Any + Send + Sync),
+        resource: &R,
+    ) -> Response {
+        Self::inspect_async_keyed::<dyn Any + Send + Sync, R>(action, user, resource).await
+    }
+
+    // The evaluation both async inspect forms share, so a concrete and a
+    // type-erased user go through one pipeline and one default denial.
+    async fn inspect_async_keyed<U: GateUser + ?Sized, R: 'static>(
         action: &str,
         user: &U,
         resource: &R,

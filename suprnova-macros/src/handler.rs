@@ -22,11 +22,24 @@
 //! Rejected at expansion (clear macro error):
 //! - two or more `FormRequest` params
 //! - `Request` plus any `FormRequest` param
+//!
+//! ## `#[authorize]`
+//!
+//! The macro applies every `#[authorize(...)]` on the function (parsed in
+//! `authorize.rs`). Without one, the extractions run in declaration order,
+//! as always. With one, the route-bound extractions (`Primitive`, `Model`)
+//! run first, then one gate check per attribute in the order written, then
+//! the body-consuming extraction, then the body. That is the order of
+//! Laravel's `SubstituteBindings` and `can` middleware ahead of a form
+//! request: the check sees the bound model, a missing model is a 404 before
+//! the check, and a denied request never reaches validation.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{FnArg, ItemFn, Pat, Type};
+use syn::{FnArg, Ident, ItemFn, Pat, PatIdent, PatType, Type};
+
+use crate::authorize::{AuthorizeSpec, Target, is_authorize_attr, parse_spec};
 
 /// Parameter classification for extraction strategy
 enum ParamKind {
@@ -86,17 +99,29 @@ pub fn handler_impl(_attr: TokenStream, input: TokenStream) -> TokenStream {
 /// on the rendered output - the host `proc_macro::TokenStream` cannot be
 /// constructed outside a real macro-expansion context.
 fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
-    let input_fn: ItemFn = match syn::parse2(input) {
+    let mut input_fn: ItemFn = match syn::parse2(input) {
         Ok(f) => f,
         Err(e) => return e.to_compile_error(),
     };
+
+    // `#[authorize]` attributes are applied here, so take them off the
+    // function: left on, each would expand on its own.
+    let (authorize_attrs, fn_attrs): (Vec<_>, Vec<_>) = std::mem::take(&mut input_fn.attrs)
+        .into_iter()
+        .partition(is_authorize_attr);
+    let mut specs = Vec::with_capacity(authorize_attrs.len());
+    for attr in &authorize_attrs {
+        match parse_spec(attr) {
+            Ok(spec) => specs.push(spec),
+            Err(e) => return e.to_compile_error(),
+        }
+    }
 
     let fn_vis = &input_fn.vis;
     let fn_name = &input_fn.sig.ident;
     let fn_generics = &input_fn.sig.generics;
     let fn_output = &input_fn.sig.output;
     let fn_block = &input_fn.block;
-    let fn_attrs = &input_fn.attrs;
 
     let is_async = input_fn.sig.asyncness.is_some();
     let async_token = if is_async {
@@ -105,18 +130,18 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
         quote! {}
     };
 
+    if let Some(first) = authorize_attrs.first()
+        && !is_async
+    {
+        return syn::Error::new_spanned(
+            first,
+            "#[authorize] needs an `async fn` handler: the check awaits the gate",
+        )
+        .to_compile_error();
+    }
+
     // Collect all parameters
     let params: Vec<_> = input_fn.sig.inputs.iter().collect();
-
-    // Handle no parameters case
-    if params.is_empty() {
-        return quote! {
-            #(#fn_attrs)*
-            #fn_vis #async_token fn #fn_name #fn_generics(_: ::suprnova::Request) #fn_output {
-                #fn_block
-            }
-        };
-    }
 
     // First pass: classify every param and count the body-consuming
     // extractors so we can reject `Request` + `FormRequest` /
@@ -144,6 +169,22 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
         classifications.push((pat_type, kind));
     }
 
+    let checks = match authorize_checks(&specs, &classifications, fn_name) {
+        Ok(checks) => checks,
+        Err(e) => return e.to_compile_error(),
+    };
+
+    // Handle no parameters case
+    if params.is_empty() {
+        return quote! {
+            #(#fn_attrs)*
+            #fn_vis #async_token fn #fn_name #fn_generics(_: ::suprnova::Request) #fn_output {
+                #(#checks)*
+                #fn_block
+            }
+        };
+    }
+
     if request_consumer_count > 1 {
         // Point the diagnostic at the most-recent offending parameter so
         // the user's eye lands somewhere meaningful in the signature.
@@ -160,17 +201,37 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
     }
 
     // Second pass: emit extractions now that we know the signature is legal.
+    // With checks, the body-consuming extraction waits until they pass (see
+    // the module docs); without, every extraction keeps its place.
     let mut extractions = Vec::with_capacity(classifications.len());
+    let mut body_extractions = Vec::new();
     for (pat_type, kind) in &classifications {
         let param_pat = &pat_type.pat;
         let param_type = &pat_type.ty;
-        let param_name = extract_param_name(param_pat);
-        extractions.push(generate_extraction(
-            param_pat,
-            param_type,
-            &param_name,
-            kind,
-        ));
+        // Only route-bound extractions read a route parameter by name.
+        let param_name = if reads_body(kind) {
+            String::new()
+        } else {
+            match extract_param_name(param_pat) {
+                Some(name) => name,
+                None => {
+                    return syn::Error::new_spanned(
+                        param_pat,
+                        "#[handler] reads a route parameter named after the \
+                         parameter's binding, and this pattern has no single \
+                         binding to name it by: write `user: T`, or \
+                         `RouteParam(user): RouteParam<T>`",
+                    )
+                    .to_compile_error();
+                }
+            }
+        };
+        let extraction = generate_extraction(param_pat, param_type, &param_name, kind);
+        if !checks.is_empty() && reads_body(kind) {
+            body_extractions.push(extraction);
+        } else {
+            extractions.push(extraction);
+        }
     }
 
     quote! {
@@ -178,17 +239,109 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
         #fn_vis #async_token fn #fn_name #fn_generics(__suprnova_req: ::suprnova::Request) #fn_output {
             let __suprnova_params = __suprnova_req.params().clone();
             #(#extractions)*
+            #(#checks)*
+            #(#body_extractions)*
             #fn_block
         }
     }
 }
 
-/// Extract the parameter name as a string from the pattern
-fn extract_param_name(pat: &Pat) -> String {
+/// Whether an extraction of this kind consumes the request.
+fn reads_body(kind: &ParamKind) -> bool {
+    matches!(kind, ParamKind::Request | ParamKind::FormRequest)
+}
+
+/// Emit one gate check per `#[authorize]`, in the order written.
+///
+/// A parameter target must be the binding of a handler parameter the route
+/// supplies, written `post: T` or `RouteParam(post): RouteParam<T>`;
+/// anything else is a compile error spanned on the name in the attribute.
+fn authorize_checks(
+    specs: &[AuthorizeSpec],
+    classifications: &[(&PatType, ParamKind)],
+    fn_name: &Ident,
+) -> syn::Result<Vec<TokenStream2>> {
+    specs
+        .iter()
+        .map(|spec| {
+            let ability = &spec.ability;
+            let name = match &spec.target {
+                Target::Type(ty) => {
+                    return Ok(quote! {
+                        ::suprnova::authorization::__authorize_handler_type::<#ty>(#ability).await?;
+                    });
+                }
+                Target::Param(name) => name,
+            };
+            let found = classifications.iter().find_map(|(pat_type, kind)| {
+                let binding = route_binding(&pat_type.pat)?;
+                (binding.ident == *name).then_some((pat_type, kind, binding))
+            });
+            let Some((pat_type, kind, binding)) = found else {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    format!(
+                        "#[authorize] names `{name}`, but `{fn_name}` takes no parameter \
+                         named `{name}`; name a parameter the route binds, written \
+                         as `{name}: RouteParam<Model>` or \
+                         `RouteParam({name}): RouteParam<Model>`"
+                    ),
+                ));
+            };
+            if reads_body(kind) {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    format!(
+                        "#[authorize] cannot check `{name}`: it reads the request body, \
+                         and the check runs before the body is read; name a route-bound \
+                         model (`RouteParam<M>` or `...::Model`) or a path parameter"
+                    ),
+                ));
+            }
+            // A `ref` binding already holds a reference.
+            let value = if binding.by_ref.is_some() {
+                quote! { #name }
+            } else {
+                quote! { &#name }
+            };
+            // A `RouteParam<M>` is checked as the `M` inside it, the type
+            // its policy is registered for. A binding of the whole wrapper
+            // derefs to it; `RouteParam(post)` already binds the `M`.
+            let whole = matches!(&*pat_type.pat, Pat::Ident(_));
+            let resource = if whole && is_route_param(&pat_type.ty) {
+                quote! { ::core::ops::Deref::deref(#value) }
+            } else {
+                value
+            };
+            Ok(quote! {
+                ::suprnova::authorization::__authorize_handler(#ability, #resource).await?;
+            })
+        })
+        .collect()
+}
+
+/// The route parameter a route-bound parameter reads: the name of its
+/// binding (see [`route_binding`]), or `_` for a wildcard. `None` when the
+/// pattern has no single binding to name it by.
+fn extract_param_name(pat: &Pat) -> Option<String> {
     match pat {
-        Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
-        Pat::Wild(_) => "_".to_string(),
-        _ => "param".to_string(),
+        Pat::Wild(_) => Some("_".to_string()),
+        _ => route_binding(pat).map(|binding| binding.ident.to_string()),
+    }
+}
+
+/// The one binding of a parameter pattern: the identifier of `user: T`, or
+/// of the single field in a tuple-struct pattern such as
+/// `RouteParam(user): RouteParam<T>`, which binds the model inside the
+/// wrapper. `None` for any other pattern.
+fn route_binding(pat: &Pat) -> Option<&PatIdent> {
+    match pat {
+        Pat::Ident(binding) => Some(binding),
+        Pat::TupleStruct(tuple) if tuple.elems.len() == 1 => match tuple.elems.first() {
+            Some(Pat::Ident(binding)) => Some(binding),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -231,9 +384,7 @@ fn classify_param_type(ty: &Type) -> ParamKind {
             // Routes through M::find (Eloquent's CRUD entrypoint) so
             // global scopes, soft-delete filter, and per-model
             // connection apply. See `suprnova::RouteParam` rustdoc.
-            if let Some(last_segment) = segments.last()
-                && last_segment.ident == "RouteParam"
-            {
+            if is_route_param(ty) {
                 return ParamKind::Model;
             }
 
@@ -242,6 +393,12 @@ fn classify_param_type(ty: &Type) -> ParamKind {
         }
         _ => ParamKind::FormRequest,
     }
+}
+
+/// Whether `ty` is the scoped binding wrapper `RouteParam<M>`.
+fn is_route_param(ty: &Type) -> bool {
+    matches!(ty, Type::Path(type_path)
+        if type_path.path.segments.last().is_some_and(|last| last.ident == "RouteParam"))
 }
 
 /// Check if a type name is a primitive that should use FromParam
@@ -436,5 +593,286 @@ mod tests {
             !out.contains("compile_error"),
             "Primitive + Request must compile (Primitive is non-consuming); got:\n{out}"
         );
+    }
+
+    // ── #[authorize] ─────────────────────────────────────────────────────────
+
+    /// Byte offset of `needle` in `out`, failing the test when it is absent.
+    fn position(out: &str, needle: &str) -> usize {
+        out.find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` missing from expansion:\n{out}"))
+    }
+
+    #[test]
+    fn authorize_param_missing_from_the_signature_is_a_compile_error() {
+        let out = expansion(quote! {
+            #[authorize("update", post)]
+            pub async fn update(id: i64) -> Response { todo!() }
+        });
+        assert!(out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            out.contains("`update` takes no parameter named `post`"),
+            "the message must name the handler and the missing parameter; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn authorize_names_the_binding_inside_a_route_param_pattern() {
+        // `RouteParam(post)` binds `post` to the model inside the wrapper,
+        // so the check runs against `post` itself, with no `Deref`.
+        let out = expansion(quote! {
+            #[authorize("update", post)]
+            pub async fn update(RouteParam(post): RouteParam<Post>) -> Response { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            out.contains("__authorize_handler (\"update\" , & post)"),
+            "got:\n{out}"
+        );
+        assert!(!out.contains("Deref"), "got:\n{out}");
+    }
+
+    #[test]
+    fn destructured_route_param_is_looked_up_by_its_binding() {
+        // The route parameter is named after the pattern's binding, as for
+        // a plain identifier: `RouteParam(user)` reads `{user}`.
+        for param in [
+            quote! { RouteParam(user): RouteParam<User> },
+            quote! { RouteParam(mut user): RouteParam<User> },
+            quote! { suprnova::RouteParam(user): suprnova::RouteParam<User> },
+            quote! { user: RouteParam<User> },
+        ] {
+            let out = expansion(quote! {
+                pub async fn show(#param) -> Response { todo!() }
+            });
+            assert!(!out.contains("compile_error"), "got:\n{out}");
+            assert!(
+                out.contains("get (\"user\")"),
+                "`{param}` must read the route parameter `user`; got:\n{out}"
+            );
+            assert!(!out.contains("\"param\""), "got:\n{out}");
+        }
+    }
+
+    #[test]
+    fn route_bound_pattern_without_one_binding_is_a_compile_error() {
+        // No single binding to name the route parameter after: reject it
+        // rather than read a parameter the route does not have.
+        for param in [
+            quote! { user::Model { id, name, .. }: user::Model },
+            quote! { RouteParam(User { id, .. }): RouteParam<User> },
+        ] {
+            let out = expansion(quote! {
+                pub async fn show(#param) -> Response { todo!() }
+            });
+            assert!(
+                out.contains("compile_error"),
+                "`{param}` must be rejected; got:\n{out}"
+            );
+            assert!(out.contains("route parameter"), "got:\n{out}");
+        }
+    }
+
+    #[test]
+    fn authorize_param_that_reads_the_body_is_a_compile_error() {
+        let out = expansion(quote! {
+            #[authorize("update", form)]
+            pub async fn update(form: UpdatePost) -> Response { todo!() }
+        });
+        assert!(out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            out.contains("request body"),
+            "the message must say why a body extractor cannot be named; got:\n{out}"
+        );
+
+        let out = expansion(quote! {
+            #[authorize("update", req)]
+            pub async fn update(req: Request) -> Response { todo!() }
+        });
+        assert!(out.contains("compile_error"), "got:\n{out}");
+    }
+
+    #[test]
+    fn authorize_on_a_sync_handler_is_a_compile_error() {
+        let out = expansion(quote! {
+            #[authorize("create", Post)]
+            pub fn store() -> Response { todo!() }
+        });
+        assert!(out.contains("compile_error"), "got:\n{out}");
+        assert!(out.contains("async"), "got:\n{out}");
+    }
+
+    #[test]
+    fn authorize_with_malformed_arguments_is_a_compile_error() {
+        for attr in [
+            quote! { #[authorize(post)] },
+            quote! { #[authorize("update")] },
+            quote! { #[authorize("update", post, extra)] },
+            quote! { #[authorize("", post)] },
+            quote! { #[authorize(update, post)] },
+            quote! { #[authorize] },
+        ] {
+            let out = expansion(quote! {
+                #attr
+                pub async fn update(post: RouteParam<Post>) -> Response { todo!() }
+            });
+            assert!(
+                out.contains("compile_error"),
+                "`{attr}` must be rejected; got:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn authorize_param_form_checks_after_binding_and_before_body_and_form() {
+        // The form comes first in the signature, yet it must be read after
+        // the check: a denied user never sees what the form would reject.
+        let out = expansion(quote! {
+            #[authorize("update", post)]
+            pub async fn update(form: UpdatePost, post: post::Model) -> Response {
+                let _ = "BODY_MARKER";
+                todo!()
+            }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        let binding = position(&out, "from_route_param");
+        let check = position(&out, "__authorize_handler (");
+        let form = position(&out, "from_request");
+        let body = position(&out, "BODY_MARKER");
+        assert!(
+            binding < check && check < form && form < body,
+            "order must be binding, check, form, body; got:\n{out}"
+        );
+        assert!(
+            !out.contains("# [authorize"),
+            "the attribute must not survive into the output; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn authorize_route_param_checks_the_inner_model() {
+        let out = expansion(quote! {
+            #[authorize("update", post)]
+            pub async fn update(post: RouteParam<Post>) -> Response { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            out.contains("Deref :: deref (& post)"),
+            "a RouteParam<M> must be authorized as the M inside it; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn authorize_type_form_checks_the_type() {
+        for (attr, ty) in [
+            (quote! { #[authorize("create", Post)] }, "< Post >"),
+            (
+                quote! { #[authorize("create", post::Model)] },
+                "< post :: Model >",
+            ),
+            (
+                quote! { #[authorize("create", crate::models::Post)] },
+                "< crate :: models :: Post >",
+            ),
+        ] {
+            let out = expansion(quote! {
+                #attr
+                pub async fn store(form: StorePost) -> Response {
+                    let _ = "BODY_MARKER";
+                    todo!()
+                }
+            });
+            assert!(!out.contains("compile_error"), "got:\n{out}");
+            let check = position(&out, "__authorize_handler_type");
+            assert!(out[check..].contains(ty), "`{ty}` missing; got:\n{out}");
+            assert!(
+                check < position(&out, "from_request") && check < position(&out, "BODY_MARKER"),
+                "the check must precede the form and the body; got:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn authorize_on_a_zero_parameter_handler_checks_before_the_body() {
+        let out = expansion(quote! {
+            #[authorize("create", Post)]
+            pub async fn create() -> Response {
+                let _ = "BODY_MARKER";
+                todo!()
+            }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(position(&out, "__authorize_handler_type") < position(&out, "BODY_MARKER"));
+    }
+
+    #[test]
+    fn authorize_attributes_all_apply_in_written_order() {
+        let out = expansion(quote! {
+            #[authorize("view", post)]
+            #[suprnova::authorize("publish", post)]
+            pub async fn publish(post: RouteParam<Post>) -> Response { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            position(&out, "\"view\"") < position(&out, "\"publish\""),
+            "checks must run in the order written; got:\n{out}"
+        );
+        assert!(!out.contains("authorize ("), "got:\n{out}");
+    }
+
+    // ── #[authorize] expanding on its own ────────────────────────────────────
+
+    /// What the standalone attribute expands to.
+    fn authorize_expansion(
+        attr: proc_macro2::TokenStream,
+        item: proc_macro2::TokenStream,
+    ) -> String {
+        crate::authorize::authorize_impl_inner(attr, item).to_string()
+    }
+
+    #[test]
+    fn authorize_above_handler_moves_below_it() {
+        // Written above `#[handler]`, the attribute expands first. It hands
+        // itself back below `#[handler]`, which then applies every check.
+        let out = authorize_expansion(
+            quote! { "view", post },
+            quote! {
+                #[authorize("publish", post)]
+                #[handler]
+                pub async fn publish(post: RouteParam<Post>) -> Response { todo!() }
+            },
+        );
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        let handler = position(&out, "# [handler]");
+        let view = position(&out, "\"view\"");
+        let publish = position(&out, "\"publish\"");
+        assert!(
+            handler < view && view < publish,
+            "`#[handler]` must come first, then the checks in written order; got:\n{out}"
+        );
+        assert_eq!(out.matches("handler").count(), 1, "got:\n{out}");
+    }
+
+    #[test]
+    fn authorize_without_handler_is_a_compile_error() {
+        let out = authorize_expansion(
+            quote! { "update", post },
+            quote! { pub async fn update(post: RouteParam<Post>) -> Response { todo!() } },
+        );
+        assert!(out.contains("compile_error"), "got:\n{out}");
+        assert!(out.contains("#[handler]"), "got:\n{out}");
+
+        let out = authorize_expansion(quote! { "update", Post }, quote! { pub struct Post; });
+        assert!(out.contains("compile_error"), "got:\n{out}");
+    }
+
+    #[test]
+    fn handler_without_authorize_keeps_declaration_order() {
+        // No attribute, no change: extractions stay in signature order.
+        let out = expansion(quote! {
+            pub async fn update(form: UpdatePost, post: post::Model) -> Response { todo!() }
+        });
+        assert!(position(&out, "from_request") < position(&out, "from_route_param"));
+        assert!(!out.contains("__authorize_handler"), "got:\n{out}");
     }
 }

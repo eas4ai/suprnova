@@ -146,6 +146,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   read those pushes back. `assert_pushed_without_chain` fails for a job
   pushed with a chain. This landed on main after the `v3.0.0` tag.
 
+- **Declarative authorization on handlers.** `#[authorize("update-post",
+  post)]` on a `#[handler]` checks the gate against the model the route
+  binds to `post`, and `#[authorize("create-post", Post)]` checks it
+  against the type. The check runs after route model binding and before
+  the request body is read, so a forgotten `Gate::authorize` call can no
+  longer leave a route open. Policies, async gates and the RBAC gate bridge
+  all answer it. A guest gets 401, a denial 403, and `deny_as_not_found()`
+  404. A parameter name the handler does not take fails to compile. This
+  landed on main after the `v3.0.0` tag (#127).
+
 - **`FrameworkError::Timeout` tells a passed deadline from a failure.**
   `WorkflowHandle::wait_with_timeout` documented a timeout error that did not
   exist and returned `FrameworkError::Internal`, so a caller could not tell a
@@ -919,6 +929,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **A destructured route parameter binds.** A handler parameter written
+  `RouteParam(user): RouteParam<User>`, as the `RouteParam` docs show, looked
+  up a route parameter named `param` and answered 400 to every request. It
+  now reads the parameter its binding names, and a pattern with no single
+  binding is a compile error. This fix landed on main after the `v3.0.0` tag.
 - **SQLite rows keep computed columns.** An aggregate or `select_raw`
   expression came back missing from `DB::table` and `DB::select` rows on
   SQLite, because SQLite declares no type for a computed column. Such a
