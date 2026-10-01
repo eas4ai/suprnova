@@ -60,8 +60,8 @@ use sea_orm::{DbBackend, FromQueryResult, Statement, TryGetable, Value as SeaVal
 use serde_json::Value;
 
 use crate::database::clauses::{
-    IntoWhereIn, JoinClause, JoinKind, JoinTarget, WhereIn, join_tables, quote_identifier,
-    render_join, validate_join, validate_select_column,
+    IntoWhereIn, JoinClause, JoinKind, JoinTarget, ReadSet, WhereIn, join_tables, quote_identifier,
+    raw_select_may_read, render_join, validate_join, validate_select_column,
 };
 use crate::database::{DB, DbTableBuilder};
 use crate::eloquent::EloquentModel;
@@ -925,8 +925,9 @@ pub(crate) fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError
 /// [`DbTableBuilder`] subquery's tables, and the related table (and pivot
 /// table) a relation-existence term (`has`, `where_has`, `doesnt_have`,
 /// `where_relation` and their kin) reads in its `EXISTS`, plus whatever
-/// its closure's own terms read.
-fn where_term_tables(term: &WhereTerm, out: &mut Vec<String>) {
+/// its closure's own terms read. A raw term marks the read set, since its
+/// SQL may read a table none of these name; see [`ReadSet`].
+fn where_term_tables(term: &WhereTerm, out: &mut ReadSet) {
     match term {
         WhereTerm::InQuery(_, query, _) | WhereTerm::ExistsQuery(query, _) => {
             query.collect_tables(out);
@@ -937,10 +938,11 @@ fn where_term_tables(term: &WhereTerm, out: &mut Vec<String>) {
                 where_term_tables(t, out);
             }
         }
+        WhereTerm::Raw(..) => out.raw_fragment = true,
         WhereTerm::Exists(spec) => {
             for table in [&spec.target_table, &spec.pivot_table] {
                 if !table.is_empty() {
-                    out.push(table.clone());
+                    out.tables.push(table.clone());
                 }
             }
             for t in &spec.inner_terms {
@@ -959,7 +961,6 @@ fn where_term_tables(term: &WhereTerm, out: &mut Vec<String>) {
         | WhereTerm::NotLike(..)
         | WhereTerm::Binary(..)
         | WhereTerm::Column(..)
-        | WhereTerm::Raw(..)
         | WhereTerm::JsonContains(..)
         | WhereTerm::JsonLength(..)
         | WhereTerm::DatePart(..) => {}
@@ -2302,12 +2303,22 @@ impl<M> Builder<M> {
     }
 
     /// Every table this query reads beyond the model's own: each joined
-    /// table and every table a subquery reads, union arms included.
-    pub(crate) fn collect_query_tables(&self, out: &mut Vec<String>) {
+    /// table and every table a subquery reads, union arms included, plus
+    /// whether a raw fragment (`select_raw`, `where_raw`, `or_where_raw`,
+    /// `filter_raw`, `order_by_raw`) may read more; see [`ReadSet`].
+    pub(crate) fn collect_query_tables(&self, out: &mut ReadSet) {
+        if self.select_raw.as_deref().is_some_and(raw_select_may_read)
+            || self
+                .orders
+                .iter()
+                .any(|order| matches!(order, OrderTerm::Raw(_)))
+        {
+            out.raw_fragment = true;
+        }
         for join in &self.joins {
             join_tables(join, out);
         }
-        for term in &self.where_terms {
+        for term in self.where_terms.iter().chain(&self.having_terms) {
             where_term_tables(term, out);
         }
         for (other, _is_all) in &self.unions {
@@ -3753,18 +3764,17 @@ where
     /// Record, for the render cache, every table this query reads: the
     /// model's own, each joined table and every table a subquery reads,
     /// so a write to any of them invalidates a cached page built from it.
-    /// Global scopes are folded in first, since a scope may add a
-    /// subquery too.
+    /// A raw fragment anywhere in the query marks the render unobservable
+    /// instead, so it is never stored. Global scopes are folded in first,
+    /// since a scope may add a subquery or a raw fragment too.
     fn observe_reads(&self) {
         crate::render_cache::collector::observe_table_read(M::TABLE);
         if !crate::render_cache::collector::is_active() {
             return;
         }
-        let mut tables = Vec::new();
-        self.effective().collect_query_tables(&mut tables);
-        for table in &tables {
-            crate::render_cache::collector::observe_table_read(table);
-        }
+        let mut reads = ReadSet::default();
+        self.effective().collect_query_tables(&mut reads);
+        reads.observe();
     }
 
     // ---- Has / where-has existence engine (Laravel parity) ---------------

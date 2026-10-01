@@ -278,6 +278,17 @@ impl From<FrameworkError> for TransactionFailure {
     }
 }
 
+/// A transaction whose closure ran, before the entry point decides what to
+/// return. `DB::transaction` lets a finalization failure win over the value;
+/// the render cache keeps a committed value when only an after-commit
+/// callback failed. Holding both is what lets the two differ.
+struct Settled<T> {
+    /// What the closure returned. Only an `Ok` is ever committed.
+    value: Result<T, FrameworkError>,
+    /// The commit or rollback, and the callbacks run after it.
+    finalized: Result<(), TransactionFailure>,
+}
+
 tokio::task_local! {
     /// Active transaction installed by [`DB::transaction`] /
     /// [`DB::transaction_with_attempts`] for the duration of their
@@ -1370,10 +1381,17 @@ impl DB {
     /// default `READ COMMITTED` does not give (every statement sees the
     /// latest committed data), so it asks for `REPEATABLE READ` there. See
     /// `render_cache::middleware::run_render`.
+    ///
+    /// One difference in what comes back: an after-commit callback that
+    /// fails does not discard the closure's value. The commit has landed by
+    /// then, so the value is returned with the callback's error beside it,
+    /// and the render cache can serve a render whose handler succeeded
+    /// instead of answering 500 for a callback the handler deferred with
+    /// [`DB::after_commit`].
     pub(crate) async fn transaction_with_isolation<F, T>(
         isolation_level: Option<IsolationLevel>,
         f: F,
-    ) -> Result<T, FrameworkError>
+    ) -> Result<(T, Option<FrameworkError>), FrameworkError>
     where
         F: for<'b> FnOnce(
             &'b Transaction,
@@ -1382,9 +1400,19 @@ impl DB {
         >,
         T: Send,
     {
-        Self::transaction_inner(f, isolation_level)
-            .await
-            .map_err(TransactionFailure::into_error)
+        let settled = Self::transaction_settled(isolation_level, |transaction| async move {
+            f(&transaction).await
+        })
+        .await
+        .map_err(TransactionFailure::into_error)?;
+        match settled.finalized {
+            Ok(()) => settled.value.map(|value| (value, None)),
+            // Only a closure that returned `Ok` commits, so `value` is `Ok`.
+            Err(TransactionFailure::AfterCommitCallback(error)) => {
+                settled.value.map(|value| (value, Some(error)))
+            }
+            Err(failure) => Err(failure.into_error()),
+        }
     }
 
     /// [`DB::transaction`] with the failure cause still intact.
@@ -1446,6 +1474,25 @@ impl DB {
         Fut: std::future::Future<Output = Result<T, FrameworkError>>,
         T: Send,
     {
+        let settled = Self::transaction_settled(isolation_level, make).await?;
+        settled.finalized?;
+        settled.value.map_err(TransactionFailure::from)
+    }
+
+    /// [`Self::transaction_scoped`] before it decides what to return: the
+    /// closure's value and the outcome of finalizing are kept apart, so
+    /// [`Self::transaction_with_isolation`] can keep a committed value when
+    /// only an after-commit callback failed. `Err` means the closure never
+    /// ran: the nesting refusal, no connection, or a failed `BEGIN`.
+    async fn transaction_settled<G, Fut, T>(
+        isolation_level: Option<IsolationLevel>,
+        make: G,
+    ) -> Result<Settled<T>, TransactionFailure>
+    where
+        G: FnOnce(Transaction) -> Fut,
+        Fut: std::future::Future<Output = Result<T, FrameworkError>>,
+        T: Send,
+    {
         // Reject nested calls before doing any work. Without this
         // guard, `conn.inner().begin()` below would start a brand-new
         // top-level transaction on a pooled connection that's
@@ -1500,8 +1547,11 @@ impl DB {
         // Transfer state before the next await. Dropping the caller now only
         // stops waiting: the physical outcome, listeners, and callbacks remain
         // owned by the completion task. T stays here, without a 'static bound.
-        scope_finalizer.complete(result.is_ok()).await?;
-        result.map_err(TransactionFailure::from)
+        let finalized = scope_finalizer.complete(result.is_ok()).await;
+        Ok(Settled {
+            value: result,
+            finalized,
+        })
     }
 
     /// Open a manual transaction. The caller is responsible for

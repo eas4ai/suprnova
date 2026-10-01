@@ -415,8 +415,54 @@ fn render_condition(
     })
 }
 
-/// Every table `condition` reads through a subquery.
-pub(crate) fn condition_tables(condition: &Condition, out: &mut Vec<String>) {
+/// What a query reads, as the render cache records it: every table the
+/// query names, and whether it carries a raw SQL fragment.
+///
+/// A raw fragment (`select_raw`, `where_raw`, `or_where_raw`, `order_by_raw`)
+/// is written into the statement verbatim, so it can read a table nothing
+/// else names, such as `(SELECT COUNT(*) FROM comments ...)`. The tables
+/// listed are then not all the query reads, and a page stored on them alone
+/// would be served stale after a write to the table only the fragment
+/// reads. Such a query is treated like raw SQL through `DB::select`: the
+/// render is marked unobservable and never stored. The one fragment known
+/// to read nothing is a `select_raw` that is a bare integer, the
+/// `select_raw("1")` an `EXISTS` subquery conventionally carries; see
+/// [`raw_select_may_read`].
+#[derive(Debug, Default)]
+pub(crate) struct ReadSet {
+    /// Each table the query names: its own, each joined table, and the
+    /// tables its subqueries name.
+    pub(crate) tables: Vec<String>,
+    /// Whether a raw fragment appears anywhere in the query, subqueries
+    /// included.
+    pub(crate) raw_fragment: bool,
+}
+
+impl ReadSet {
+    /// Record this read set on the active render-cache collector: each
+    /// named table, and an unobservable read when a raw fragment is present.
+    /// A no-op outside a render, like every collector hook.
+    pub(crate) fn observe(&self) {
+        if self.raw_fragment {
+            crate::render_cache::collector::observe_unobservable_read();
+        }
+        for table in &self.tables {
+            crate::render_cache::collector::observe_table_read(table);
+        }
+    }
+}
+
+/// Whether a `select_raw` expression may read a table the query does not
+/// name. A bare integer such as `1` reads nothing, and exempting it keeps
+/// the usual `EXISTS (SELECT 1 ...)` subquery cacheable; any other
+/// expression may hold a subquery, so it counts as a raw fragment.
+pub(crate) fn raw_select_may_read(raw: &str) -> bool {
+    raw.trim().parse::<i64>().is_err()
+}
+
+/// Every table `condition` reads through a subquery, and whether it holds a
+/// raw fragment.
+pub(crate) fn condition_tables(condition: &Condition, out: &mut ReadSet) {
     match condition {
         Condition::InQuery { query, .. } | Condition::Exists { query, .. } => {
             query.collect_tables(out);
@@ -427,11 +473,11 @@ pub(crate) fn condition_tables(condition: &Condition, out: &mut Vec<String>) {
             }
         }
         Condition::Not(condition) => condition_tables(condition, out),
+        Condition::Raw { .. } => out.raw_fragment = true,
         Condition::Compare { .. }
         | Condition::Columns { .. }
         | Condition::In { .. }
-        | Condition::Null { .. }
-        | Condition::Raw { .. } => {}
+        | Condition::Null { .. } => {}
     }
 }
 
@@ -795,11 +841,11 @@ pub(crate) fn render_join(
 }
 
 /// Every table the join reads: its own, or every table its subquery reads.
-pub(crate) fn join_tables(join: &JoinClause, out: &mut Vec<String>) {
+pub(crate) fn join_tables(join: &JoinClause, out: &mut ReadSet) {
     match &join.target {
         JoinTarget::Table(table) => {
             if let Some(table) = bare_table(table) {
-                out.push(table.to_owned());
+                out.tables.push(table.to_owned());
             }
         }
         JoinTarget::Query { query, .. } => query.collect_tables(out),
