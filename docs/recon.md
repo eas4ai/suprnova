@@ -164,8 +164,8 @@ Traced once the developer names the work.
 Recovered 2026-09-30 from Git history (`74b0122f^:.cairn/mechanisms/`, removed from the tree
 at `74b0122f` on 2026-09-21). Sudus reads no 1.x record; each line keeps the mechanism's
 command, inputs and the requirements it observed, so a commitment that needs one can
-`sudus declare` it again. Thread and job counts in the commands are the 1.x values; the
-current cap is 8 (see `CLAUDE.md`).
+`sudus declare` it again. Thread and job counts in the commands are the 1.x values; builds
+now cap jobs and test threads at 8.
 Eleven commands run a script under `.cairn/tools/`; those scripts went with the same commit
 and are recovered from `74b0122f^:.cairn/tools/` when their mechanism is declared again.
 
