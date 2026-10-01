@@ -141,6 +141,26 @@ impl Queue {
         testing::install_fake()
     }
 
+    /// Install the queue fake, but send the jobs named in `job_names` to the
+    /// real queue. Each entry is a `Job::job_name()`. Mirrors Laravel's
+    /// `Queue::fakeExcept($jobs)` and reads like
+    /// [`EventFacade::fake_except`](crate::events::EventFacade::fake_except).
+    ///
+    /// Use it when a test needs one job to really run, for example on the
+    /// sync driver, while asserting on the jobs that code queues around it:
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Queue;
+    /// let _guard = Queue::fake_except(&["ProvisionAccount"]);
+    /// ```
+    ///
+    /// The same as `Queue::fake().except(job_names)`; see
+    /// [`QueueFakeGuard::except`](testing::QueueFakeGuard::except) for what
+    /// an excepted job does.
+    pub fn fake_except(job_names: &[&str]) -> testing::QueueFakeGuard {
+        testing::install_fake().except(job_names)
+    }
+
     /// Route every future dispatch of `J` to a connection and/or queue.
     ///
     /// Mirrors Laravel 13's `Queue::route(...)`. Register in
@@ -479,7 +499,7 @@ impl Queue {
         if (J::debounce_for().is_some() || debounce.is_some()) && job.unique_id().is_some() {
             return Err(debounce_conflict(J::job_name()));
         }
-        if testing::is_active() {
+        if testing::fakes(J::job_name()) {
             let available_at = when.resolve::<J>()?;
             // Records `overrides` too, so a test can assert on the
             // queue/connection/etc a push_with call declared - see
@@ -740,7 +760,7 @@ impl Queue {
         if J::debounce_for().is_some() && job.unique_id().is_some() {
             return Err(debounce_conflict(J::job_name()));
         }
-        if testing::is_active() {
+        if testing::fakes(J::job_name()) {
             // In fake mode, dedupe is irrelevant - record and report fresh.
             testing::record::<J>(&job, when.resolve::<J>()?)?;
             return Ok(true);
@@ -916,7 +936,7 @@ impl Queue {
     /// for the whole batch. Laravel partitions a heterogeneous array here;
     /// Suprnova has nothing to partition.
     pub async fn bulk<J: Job + Clone>(jobs: Vec<J>) -> Result<(), FrameworkError> {
-        if testing::is_active() {
+        if testing::fakes(J::job_name()) {
             let available_at = resolve_job_delay::<J>(crate::clock::now())?;
             for j in jobs {
                 testing::record::<J>(&j, available_at)?;
@@ -950,6 +970,57 @@ impl Queue {
         }
         let drv = driver_for_job::<J>()?;
         drv.bulk_push(envs).await
+    }
+
+    /// Push a payload that is already an envelope, in its JSON wire form
+    /// ([`Envelope::to_json`]), onto the default connection. Mirrors
+    /// Laravel's `Queue::pushRaw($payload, $queue)`.
+    ///
+    /// It is for a payload the caller did not build from a typed job: one a
+    /// producer outside this process wrote, or one replayed from an export.
+    /// A worker runs it like any other envelope, with the handler registered
+    /// for its `job_name`.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{FrameworkError, Queue};
+    /// # async fn ex(payload: String) -> Result<(), FrameworkError> {
+    /// // `payload` came from another service, already in envelope form.
+    /// Queue::push_raw(&payload, Some("imports")).await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// The envelope is pushed as it is, with one exception: `queue`, when
+    /// given, replaces the envelope's own queue and is redirected by
+    /// [`Queue::forward`] the way a per-push queue override is. Without one
+    /// the envelope keeps the queue it carries. Nothing that a typed push
+    /// resolves from the job type applies: no [`Queue::route`], no
+    /// [`Job::after_commit`] deferral, and no
+    /// [`JobQueueing`](events::JobQueueing) / [`JobQueued`](events::JobQueued)
+    /// events, which Laravel's `pushRaw` does not fire either. Push to
+    /// another connection through its driver:
+    /// `Queue::connection(name)?.push(Envelope::from_json(payload)?)`.
+    ///
+    /// Under [`Queue::fake`] the payload is recorded for
+    /// [`testing::raw_pushes`] / [`testing::pushed_raw`] and no driver is
+    /// written to, whatever the fake excepts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `payload` is not an envelope this build can
+    /// read, under the fake too, because the real push would refuse it.
+    /// Otherwise the errors of a push to the default connection.
+    pub async fn push_raw(payload: &str, queue: Option<&str>) -> Result<(), FrameworkError> {
+        let mut env = Envelope::from_json(payload)
+            .map_err(|e| FrameworkError::internal(format!("Queue::push_raw: {e}")))?;
+        if testing::is_active() {
+            testing::record_raw(payload, queue);
+            return Ok(());
+        }
+        let target = connections::target(&Self::connection_name())?;
+        if let Some(queue) = queue {
+            env.queue = routing::forwarded_queue(Some(queue), &target.label);
+        }
+        target.driver.push(env).await
     }
 
     /// Begin a queued batch builder. Mirrors `Bus::batch([...])`.
@@ -1172,7 +1243,8 @@ impl Queue {
     /// the id had no record in the store.
     ///
     /// Under [`Queue::fake`] the envelope is recorded as a push and no
-    /// driver is written to. The record still leaves the store.
+    /// driver is written to, unless the fake excepts the job. The record
+    /// still leaves the store.
     pub async fn retry_failed(id: Uuid) -> Result<bool, FrameworkError> {
         let store = failed::current().ok_or_else(|| {
             FrameworkError::internal(
@@ -1189,7 +1261,7 @@ impl Queue {
         env.available_at = crate::clock::now();
         env.idempotency_key = None;
         env.unique_lock_owner = None;
-        if testing::is_active() {
+        if testing::fakes(&env.job_name) {
             // A retry is a push like any other: under the fake it is
             // recorded, and the record leaves the store the same way.
             testing::record_envelope(&env);
@@ -1209,7 +1281,8 @@ impl Queue {
     /// retried envelope is pushed AND removed from the store.
     ///
     /// Under [`Queue::fake`] each envelope is recorded as a push and no
-    /// driver is written to. The records still leave the store.
+    /// driver is written to, except for a job the fake excepts. The records
+    /// still leave the store.
     pub async fn retry_all_failed(
         before: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<u64, FrameworkError> {
@@ -1223,9 +1296,9 @@ impl Queue {
         // Under the fake each retry is recorded and there is no driver to
         // resolve. Otherwise the default driver is resolved before the loop,
         // so a process with no driver reports it even when there is nothing
-        // to retry.
-        let faked = testing::is_active();
-        if !faked {
+        // to retry. A job the fake excepts resolves its connection in the
+        // loop, as every retry does.
+        if !testing::is_active() {
             current_driver()?;
         }
         let mut count: u64 = 0;
@@ -1242,7 +1315,7 @@ impl Queue {
             env.available_at = crate::clock::now();
             env.idempotency_key = None;
             env.unique_lock_owner = None;
-            if faked {
+            if testing::fakes(&env.job_name) {
                 testing::record_envelope(&env);
             } else {
                 // Back to the connection the job failed on. A record whose
