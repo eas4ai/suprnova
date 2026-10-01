@@ -7,6 +7,8 @@
 
 use sea_orm_migration::prelude::*;
 
+use crate::database::migration_guard::create_index_if_missing;
+
 /// Migration that creates the framework-owned `workflows` table.
 pub struct Migration;
 
@@ -64,38 +66,35 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_workflows_status")
-                    .table(Workflows::Table)
-                    .col(Workflows::Status)
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "workflows",
+            Index::create()
+                .name("idx_workflows_status")
+                .col(Workflows::Status)
+                .to_owned(),
+        )
+        .await?;
 
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_workflows_next_run_at")
-                    .table(Workflows::Table)
-                    .col(Workflows::NextRunAt)
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "workflows",
+            Index::create()
+                .name("idx_workflows_next_run_at")
+                .col(Workflows::NextRunAt)
+                .to_owned(),
+        )
+        .await?;
 
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_workflows_locked_until")
-                    .table(Workflows::Table)
-                    .col(Workflows::LockedUntil)
-                    .to_owned(),
-            )
-            .await
+        create_index_if_missing(
+            manager,
+            "workflows",
+            Index::create()
+                .name("idx_workflows_locked_until")
+                .col(Workflows::LockedUntil)
+                .to_owned(),
+        )
+        .await
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {

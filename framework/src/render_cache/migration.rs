@@ -19,6 +19,8 @@
 
 use sea_orm_migration::prelude::*;
 
+use crate::database::migration_guard::create_index_if_missing;
+
 /// Creates the three `suprnova_render_` tables.
 pub struct Migration;
 
@@ -98,20 +100,21 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        // `if_not_exists()` here too: an idempotency test that re-runs the
+        // Through the index guard: an idempotency test that re-runs the
         // whole migration would otherwise fail on this index specifically,
-        // not just on the epoch seed below - found by writing that test.
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("suprnova_render_generation_log_identity")
-                    .table(GenerationLog::Table)
-                    .col(GenerationLog::Identity)
-                    .col(GenerationLog::Id)
-                    .to_owned(),
-            )
-            .await?;
+        // not just on the epoch seed below - found by writing that test. On
+        // MySQL `if_not_exists()` would not help, because sea-query drops
+        // it from `CREATE INDEX` there.
+        create_index_if_missing(
+            manager,
+            "suprnova_render_generation_log",
+            Index::create()
+                .name("suprnova_render_generation_log_identity")
+                .col(GenerationLog::Identity)
+                .col(GenerationLog::Id)
+                .to_owned(),
+        )
+        .await?;
 
         manager
             .create_table(
@@ -310,16 +313,15 @@ impl MigrationTrait for TierMigration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_suprnova_render_entries_expires")
-                    .table(RenderEntries::Table)
-                    .col(RenderEntries::ExpiresAtMs)
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "suprnova_render_entries",
+            Index::create()
+                .name("idx_suprnova_render_entries_expires")
+                .col(RenderEntries::ExpiresAtMs)
+                .to_owned(),
+        )
+        .await?;
 
         manager
             .create_table(
@@ -382,16 +384,15 @@ impl MigrationTrait for TierMigration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_suprnova_live_instances_expires")
-                    .table(LiveInstances::Table)
-                    .col(LiveInstances::ExpiresAtMs)
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "suprnova_live_instances",
+            Index::create()
+                .name("idx_suprnova_live_instances_expires")
+                .col(LiveInstances::ExpiresAtMs)
+                .to_owned(),
+        )
+        .await?;
 
         manager
             .create_table(
@@ -422,16 +423,15 @@ impl MigrationTrait for TierMigration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_suprnova_live_promotions_expires")
-                    .table(LivePromotions::Table)
-                    .col(LivePromotions::ExpiresAtMs)
-                    .to_owned(),
-            )
-            .await
+        create_index_if_missing(
+            manager,
+            "suprnova_live_promotions",
+            Index::create()
+                .name("idx_suprnova_live_promotions_expires")
+                .col(LivePromotions::ExpiresAtMs)
+                .to_owned(),
+        )
+        .await
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {

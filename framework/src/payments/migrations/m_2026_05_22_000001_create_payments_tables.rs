@@ -15,6 +15,8 @@
 
 use sea_orm_migration::prelude::*;
 
+use crate::database::migration_guard::create_index_if_missing;
+
 /// SeaORM migration that creates every `payments_*` mirror table.
 ///
 /// Apps include this in their `Migrator::migrations()` list - see the module
@@ -76,26 +78,26 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("uniq_payments_customers_provider_customer_id")
-                    .table(Alias::new("payments_customers"))
-                    .col(Alias::new("provider"))
-                    .col(Alias::new("provider_customer_id"))
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_payments_customers_user_id")
-                    .table(Alias::new("payments_customers"))
-                    .col(Alias::new("user_id"))
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "payments_customers",
+            Index::create()
+                .name("uniq_payments_customers_provider_customer_id")
+                .col(Alias::new("provider"))
+                .col(Alias::new("provider_customer_id"))
+                .unique()
+                .to_owned(),
+        )
+        .await?;
+        create_index_if_missing(
+            manager,
+            "payments_customers",
+            Index::create()
+                .name("idx_payments_customers_user_id")
+                .col(Alias::new("user_id"))
+                .to_owned(),
+        )
+        .await?;
 
         // ── payments_payment_methods ──────────────────────────────────
         manager
@@ -159,26 +161,26 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("uniq_payments_payment_methods_provider_pm_id")
-                    .table(Alias::new("payments_payment_methods"))
-                    .col(Alias::new("provider"))
-                    .col(Alias::new("provider_payment_method_id"))
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_payments_payment_methods_customer_id")
-                    .table(Alias::new("payments_payment_methods"))
-                    .col(Alias::new("provider_customer_id"))
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "payments_payment_methods",
+            Index::create()
+                .name("uniq_payments_payment_methods_provider_pm_id")
+                .col(Alias::new("provider"))
+                .col(Alias::new("provider_payment_method_id"))
+                .unique()
+                .to_owned(),
+        )
+        .await?;
+        create_index_if_missing(
+            manager,
+            "payments_payment_methods",
+            Index::create()
+                .name("idx_payments_payment_methods_customer_id")
+                .col(Alias::new("provider_customer_id"))
+                .to_owned(),
+        )
+        .await?;
 
         // ── payments_subscriptions ────────────────────────────────────
         manager
@@ -252,35 +254,35 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("uniq_payments_subscriptions_provider_sub_id")
-                    .table(Alias::new("payments_subscriptions"))
-                    .col(Alias::new("provider"))
-                    .col(Alias::new("provider_subscription_id"))
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_payments_subscriptions_customer_id")
-                    .table(Alias::new("payments_subscriptions"))
-                    .col(Alias::new("provider_customer_id"))
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_payments_subscriptions_status")
-                    .table(Alias::new("payments_subscriptions"))
-                    .col(Alias::new("status"))
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "payments_subscriptions",
+            Index::create()
+                .name("uniq_payments_subscriptions_provider_sub_id")
+                .col(Alias::new("provider"))
+                .col(Alias::new("provider_subscription_id"))
+                .unique()
+                .to_owned(),
+        )
+        .await?;
+        create_index_if_missing(
+            manager,
+            "payments_subscriptions",
+            Index::create()
+                .name("idx_payments_subscriptions_customer_id")
+                .col(Alias::new("provider_customer_id"))
+                .to_owned(),
+        )
+        .await?;
+        create_index_if_missing(
+            manager,
+            "payments_subscriptions",
+            Index::create()
+                .name("idx_payments_subscriptions_status")
+                .col(Alias::new("status"))
+                .to_owned(),
+        )
+        .await?;
 
         // ── payments_subscription_items ───────────────────────────────
         manager
@@ -353,30 +355,30 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_payments_subscription_items_sub_id")
-                    .table(Alias::new("payments_subscription_items"))
-                    .col(Alias::new("subscription_id"))
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "payments_subscription_items",
+            Index::create()
+                .name("idx_payments_subscription_items_sub_id")
+                .col(Alias::new("subscription_id"))
+                .to_owned(),
+        )
+        .await?;
         // A subscription can hold each provider line item only once;
         // this UNIQUE lets the webhook sync treat a concurrent
         // duplicate-apply as a benign already-applied row rather than
         // double-inserting it.
-        manager
-            .create_index(
-                Index::create()
-                    .name("uniq_payments_subscription_items_provider_item")
-                    .table(Alias::new("payments_subscription_items"))
-                    .col(Alias::new("subscription_id"))
-                    .col(Alias::new("provider_item_id"))
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "payments_subscription_items",
+            Index::create()
+                .name("uniq_payments_subscription_items_provider_item")
+                .col(Alias::new("subscription_id"))
+                .col(Alias::new("provider_item_id"))
+                .unique()
+                .to_owned(),
+        )
+        .await?;
 
         // ── payments_transactions ─────────────────────────────────────
         manager
@@ -455,44 +457,44 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("uniq_payments_transactions_provider_tx_id")
-                    .table(Alias::new("payments_transactions"))
-                    .col(Alias::new("provider"))
-                    .col(Alias::new("provider_transaction_id"))
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_payments_transactions_customer_id")
-                    .table(Alias::new("payments_transactions"))
-                    .col(Alias::new("provider_customer_id"))
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_payments_transactions_subscription_id")
-                    .table(Alias::new("payments_transactions"))
-                    .col(Alias::new("provider_subscription_id"))
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_payments_transactions_status")
-                    .table(Alias::new("payments_transactions"))
-                    .col(Alias::new("status"))
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "payments_transactions",
+            Index::create()
+                .name("uniq_payments_transactions_provider_tx_id")
+                .col(Alias::new("provider"))
+                .col(Alias::new("provider_transaction_id"))
+                .unique()
+                .to_owned(),
+        )
+        .await?;
+        create_index_if_missing(
+            manager,
+            "payments_transactions",
+            Index::create()
+                .name("idx_payments_transactions_customer_id")
+                .col(Alias::new("provider_customer_id"))
+                .to_owned(),
+        )
+        .await?;
+        create_index_if_missing(
+            manager,
+            "payments_transactions",
+            Index::create()
+                .name("idx_payments_transactions_subscription_id")
+                .col(Alias::new("provider_subscription_id"))
+                .to_owned(),
+        )
+        .await?;
+        create_index_if_missing(
+            manager,
+            "payments_transactions",
+            Index::create()
+                .name("idx_payments_transactions_status")
+                .col(Alias::new("status"))
+                .to_owned(),
+        )
+        .await?;
 
         // ── payments_webhook_events ───────────────────────────────────
         manager
@@ -546,26 +548,26 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("uniq_payments_webhook_events_provider_event_id")
-                    .table(Alias::new("payments_webhook_events"))
-                    .col(Alias::new("provider"))
-                    .col(Alias::new("provider_event_id"))
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_payments_webhook_events_event_type")
-                    .table(Alias::new("payments_webhook_events"))
-                    .col(Alias::new("provider_event_type"))
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "payments_webhook_events",
+            Index::create()
+                .name("uniq_payments_webhook_events_provider_event_id")
+                .col(Alias::new("provider"))
+                .col(Alias::new("provider_event_id"))
+                .unique()
+                .to_owned(),
+        )
+        .await?;
+        create_index_if_missing(
+            manager,
+            "payments_webhook_events",
+            Index::create()
+                .name("idx_payments_webhook_events_event_type")
+                .col(Alias::new("provider_event_type"))
+                .to_owned(),
+        )
+        .await?;
 
         Ok(())
     }

@@ -864,6 +864,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Re-running a framework migration no longer fails on an existing index.**
+  The workflow and RenderCache migrations relied on `IF NOT EXISTS`, which
+  MySQL and MariaDB drop from `CREATE INDEX`, and the payments, features and
+  RBAC migrations created their indexes without it, so running one over
+  tables that already existed failed with a duplicate index and blocked
+  every migration after it. Each framework migration now creates an index
+  only when it is missing, with the same columns and uniqueness as before.
+  This fix landed on main after the `v3.0.0` tag (#136).
 - **A `Data` object with a route-parameter field answers 422 for a body
   that does not fit.** Its extractor answered 400 where the default
   extractor answers 422 for the same malformed or unknown-key body. This

@@ -2,6 +2,8 @@
 
 use sea_orm_migration::prelude::*;
 
+use crate::database::migration_guard::create_index_if_missing;
+
 /// Migration that creates roles, permissions, and polymorphic assignments.
 pub struct Migration;
 
@@ -97,17 +99,17 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_roles_name_guard_name")
-                    .table(Roles::Table)
-                    .col(Roles::Name)
-                    .col(Roles::GuardName)
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "roles",
+            Index::create()
+                .name("idx_roles_name_guard_name")
+                .col(Roles::Name)
+                .col(Roles::GuardName)
+                .unique()
+                .to_owned(),
+        )
+        .await?;
 
         manager
             .create_table(
@@ -148,17 +150,17 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_permissions_name_guard_name")
-                    .table(Permissions::Table)
-                    .col(Permissions::Name)
-                    .col(Permissions::GuardName)
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "permissions",
+            Index::create()
+                .name("idx_permissions_name_guard_name")
+                .col(Permissions::Name)
+                .col(Permissions::GuardName)
+                .unique()
+                .to_owned(),
+        )
+        .await?;
 
         manager
             .create_table(
@@ -185,17 +187,17 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_role_permissions_role_permission")
-                    .table(RolePermissions::Table)
-                    .col(RolePermissions::RoleId)
-                    .col(RolePermissions::PermissionId)
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "role_permissions",
+            Index::create()
+                .name("idx_role_permissions_role_permission")
+                .col(RolePermissions::RoleId)
+                .col(RolePermissions::PermissionId)
+                .unique()
+                .to_owned(),
+        )
+        .await?;
 
         manager
             .create_table(
@@ -223,18 +225,18 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_model_roles_model_role")
-                    .table(ModelRoles::Table)
-                    .col(ModelRoles::ModelType)
-                    .col(ModelRoles::ModelId)
-                    .col(ModelRoles::RoleId)
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "model_roles",
+            Index::create()
+                .name("idx_model_roles_model_role")
+                .col(ModelRoles::ModelType)
+                .col(ModelRoles::ModelId)
+                .col(ModelRoles::RoleId)
+                .unique()
+                .to_owned(),
+        )
+        .await?;
 
         manager
             .create_table(
@@ -266,18 +268,18 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_model_permissions_model_permission")
-                    .table(ModelPermissions::Table)
-                    .col(ModelPermissions::ModelType)
-                    .col(ModelPermissions::ModelId)
-                    .col(ModelPermissions::PermissionId)
-                    .unique()
-                    .to_owned(),
-            )
-            .await
+        create_index_if_missing(
+            manager,
+            "model_permissions",
+            Index::create()
+                .name("idx_model_permissions_model_permission")
+                .col(ModelPermissions::ModelType)
+                .col(ModelPermissions::ModelId)
+                .col(ModelPermissions::PermissionId)
+                .unique()
+                .to_owned(),
+        )
+        .await
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
