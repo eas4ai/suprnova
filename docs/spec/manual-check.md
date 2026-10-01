@@ -124,7 +124,7 @@ The gap check (MAN-101) searches, in this order:
    `fmap show`); if one exists, the finding is a wrong name, not a gap;
 2. the code's own docs and comments that point at the item;
 3. the CHANGELOG, for a claim that it shipped;
-4. `docs/spec`, `docs/commitments` and `docs/decisions`;
+4. `docs/spec`;
 5. `manual/parity.md`'s status for it, and the Laravel map for a Laravel
    equivalent;
 6. git history. The history begins at the import commit `9f48d02`
@@ -238,8 +238,8 @@ error: the text is corrected or cut. A true gap the code should close is a
 true constraint that is intended, such as a database's own behavior or a
 design choice, stays, stated as how Suprnova works rather than as a
 moment in its history. A claim that something is planned MUST stand on a
-record of the plan (`docs/spec`, `docs/commitments`, `docs/decisions`, the
-CHANGELOG) or the developer's word; the source cannot show intent, and
+record of the plan (`docs/spec`, the CHANGELOG) or the developer's word;
+the source cannot show intent, and
 without either the claim is the manual's error.
 Falsifier: A time-marked claim in an English chapter has no verdict, or a verdict that cites no source, or a claim that something is planned is kept with no plan record and no ruling from the developer.
 Mechanism: `feature-map/tools/manual_check.py` extracts `time_claim` findings; `feature-map/tools/manual_triage.py` requires a verdict for each.

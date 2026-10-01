@@ -130,3 +130,167 @@ The component library touches, by evidence:
 - Gate: the three Live steps `scripts/check-live-contracts.sh`, `scripts/check-live-browser.sh`, `scripts/check-live-gate.sh` (which runs Live's own 22-phase gate).
 
 Everything outside this list is one line in the keystone's spec map.
+
+## Cairn 1 mechanisms, carried for declare
+
+Recovered 2026-09-30 from Git history (`74b0122f^:.cairn/mechanisms/`, removed from the tree
+at `74b0122f` on 2026-09-21). Sudus reads no 1.x record; each line keeps the mechanism's
+command, inputs and the requirements it observed, so a commitment that needs one can
+`sudus declare` it again. Thread and job counts in the commands are the 1.x values; the
+current cap is 8 (see `CLAUDE.md`).
+Eleven commands run a script under `.cairn/tools/`; those scripts went with the same commit
+and are recovered from `74b0122f^:.cairn/tools/` when their mechanism is declared again.
+
+- **cache-content-encoding** (CACHE-005)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::content_encoding_replays)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/render_cache/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **cache-csp-nonce** (CACHE-004)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::csp_nonce_is_never_replayed)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/render_cache/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **cache-head-first** (CACHE-006)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::head_first_does_not_publish_get)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/render_cache/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **cache-named-connection** (CACHE-008)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::named_connection_is_preserved)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/render_cache/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **cache-no-store** (CACHE-001)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::no_store_is_a_storage_veto)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/render_cache/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **cache-request-directives** (CACHE-007)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::request_directives_are_honored)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/render_cache/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **cache-security-headers** (CACHE-003)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::security_headers_replay_or_decline)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/render_cache/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **cache-snapshot-failure** (CACHE-010)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::snapshot_failure_is_uncacheable)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/render_cache/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **cache-vary** (CACHE-002)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::vary_must_match_declared_dimensions)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/render_cache/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **cache-write-atomicity** (CACHE-009)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test render_cache -E 'test(hardening::write_and_generation_commit_together)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/render_cache/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **checker-soundness** (LIVE-025, LIVE-026, LIVE-027)
+  - command: `sh -c 'env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova-live --test checker_regressions --test binding_metadata -E "test(checker_proof) or test(live_error_target) or test(debounce)" && env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo test -p suprnova-macros --test live_ui'`
+  - inputs: `crates/suprnova-live/src/checker/`, `crates/suprnova-live/src/state/`, `crates/suprnova-live/tests/checker_regressions.rs`, `crates/suprnova-live/tests/binding_metadata.rs`, `crates/suprnova-live/tests/checker_support/`, `crates/suprnova-live/tests/fixtures/`, `crates/suprnova-live/fixtures/v4/`, `crates/suprnova-live/components/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `suprnova-macros/src/live/`, `suprnova-macros/tests/live_ui.rs`, `suprnova-macros/tests/ui/live/`, `app/src/live/`, `app/templates/`, `app/tests/`, `manual/`, `CHANGELOG.md`, `.manual-translations.lock`, `Cargo.lock`
+- **live-action-transaction** (LIVE-017)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E 'test(hardening::required_transaction_is_refused_until_real)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/live/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **live-async-issuance-cap** (LIVE-018)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E 'test(hardening::issuance_cap_holds_under_concurrency)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/live/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **live-async-revocation** (LIVE-016)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E 'test(hardening::revoked_gate_ends_delivery)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/live/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **live-contracts** (LIVE-013)
+  - command: `node crates/suprnova-live/scripts/check-specs.mjs && node crates/suprnova-live/scripts/check-implementation-docs.mjs && crates/suprnova-live/tests/documentation_contract.sh`
+  - inputs: `crates/suprnova-live/docs/`, `crates/suprnova-live/scripts/check-specs.mjs`, `crates/suprnova-live/scripts/check-implementation-docs.mjs`, `crates/suprnova-live/tests/documentation_contract.sh`
+- **live-gate** (LIVE-010, LIVE-011, LIVE-012, UI-008, UI-012, OVL-005, FDB-004, NAV-003)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 crates/suprnova-live/scripts/gate.sh`
+  - inputs: `crates/suprnova-live/`, `framework/src/live/`, `Cargo.lock`
+- **live-issuance-credentials** (LIVE-022, LIVE-023)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E 'test(hardening::concurrent_issuance_keeps_every_credential)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/live/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **live-key-vocabulary** (LIVE-024)
+  - command: `sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/live-key-identity.test.ts && cd ../../.. && env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova-live --test checker_regressions -E "test(live_key)"'`
+  - inputs: `crates/suprnova-live/browser/tests/live-key-identity.test.ts`, `crates/suprnova-live/browser/tests/support/`, `crates/suprnova-live/browser/src/morph/`, `crates/suprnova-live/browser/src/uploads/morph.ts`, `crates/suprnova-live/browser/src/stimulus/lifecycle.ts`, `crates/suprnova-live/browser/src/signals/lifecycle.ts`, `crates/suprnova-live/browser/src/transitions/lifecycle.ts`, `crates/suprnova-live/src/checker/`, `crates/suprnova-live/tests/checker_regressions.rs`, `crates/suprnova-live/components/`, `app/templates/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `manual/`, `CHANGELOG.md`, `.manual-translations.lock`
+- **live-library-review-remediation** (FORM-008, FORM-009, FORM-010, FORM-011, FORM-012, FDB-007, NAV-007, OVL-007, DATA-006, UI-020, UI-021, UI-022, UI-023, UI-024, LIVE-031, LIVE-032, LIVE-033, LIVE-034, LIVE-035, LIVE-036)
+  - command: `node .cairn/tools/live-library-review.mjs`
+  - inputs: `.cairn/tools/live-library-review.mjs`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `crates/suprnova-live/components/`, `crates/suprnova-live/browser/src/`, `crates/suprnova-live/browser/dist/`, `crates/suprnova-live/browser/e2e/`, `crates/suprnova-live/browser/tests/`, `crates/suprnova-live/browser/test-host/`, `crates/suprnova-live/browser/playwright.components.config.ts`, `crates/suprnova-live/browser/playwright.dogfood.config.ts`, `crates/suprnova-live/browser/package.json`, `suprnova-macros/src/live/`, `framework/src/live/`, `framework/src/view/`, `framework/tests/live/`, `framework/Cargo.toml`, `framework/tests/support/`, `framework/tests/templates/live/`, `app/`, `suprnova-cli/src/`, `suprnova-cli/tests/live_add.rs`, `manual/live.md`, `Cargo.lock`
+  - also: `results: per-requirement`
+- **live-model-render-baseline** (LIVE-037)
+  - command: `sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/model-render-baseline.test.ts && npx playwright test --config playwright.dogfood.config.ts --grep LIVE-037'`
+  - inputs: `crates/suprnova-live/browser/src/models/`, `crates/suprnova-live/browser/src/runtime/`, `crates/suprnova-live/browser/src/morph/`, `crates/suprnova-live/browser/src/continuity/`, `crates/suprnova-live/browser/tests/model-render-baseline.test.ts`, `crates/suprnova-live/browser/tests/support/`, `crates/suprnova-live/browser/dist/`, `crates/suprnova-live/browser/e2e/app-dogfood-forms.spec.ts`, `crates/suprnova-live/browser/playwright.dogfood.config.ts`, `app/`, `CHANGELOG.md`
+- **live-protocol-bounds** (LIVE-028, LIVE-029, LIVE-030)
+  - command: `sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/protocol-bounds.test.ts && cd ../../.. && env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova-live --test checker_regressions -E "test(submit_form_proposals)"'`
+  - inputs: `crates/suprnova-live/browser/src/protocol.ts`, `crates/suprnova-live/browser/src/transport/`, `crates/suprnova-live/browser/src/models/`, `crates/suprnova-live/browser/src/runtime/`, `crates/suprnova-live/browser/tests/protocol-bounds.test.ts`, `crates/suprnova-live/browser/tests/request-builder.test.ts`, `crates/suprnova-live/browser/tests/support/`, `crates/suprnova-live/browser/dist/`, `crates/suprnova-live/browser/test-host/`, `crates/suprnova-live/browser/e2e/`, `crates/suprnova-live/src/checker/`, `crates/suprnova-live/tests/checker_regressions.rs`, `crates/suprnova-live/docs/specs/suprnova-live/`, `framework/src/live/runtime.rs`, `app/templates/`, `manual/`, `CHANGELOG.md`, `.manual-translations.lock`
+- **live-session-deauthentication** (LIVE-021)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E 'test(hardening::plain_logout_ends_delivery)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/session/`, `framework/src/auth/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/live/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **live-session-reverification** (LIVE-020)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E 'test(hardening::stale_store_session_ends_delivery)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/session/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/live/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+  - also: `reviewed:`
+  - also: `- LIVE-020 sha256:72f635132fe8bbf23eeb8507f89ba6bfabebba19c7d48cc9dbc710fba979e32e`
+- **live-session-revocation** (LIVE-019)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E 'test(hardening::revoked_session_ends_delivery)'`
+  - inputs: `framework/src/render_cache/`, `framework/src/live/`, `framework/src/session/`, `framework/src/database/`, `framework/src/eloquent/`, `framework/tests/live/`, `crates/suprnova-live/src/`, `crates/suprnova-live/tests/`, `Cargo.lock`, `framework/tests/support/`, `framework/tests/templates/`, `framework/tests/database/`, `crates/suprnova-live/docs/specs/suprnova-live/`, `CHANGELOG.md`, `manual/`, `.manual-translations.lock`
+- **live-upload-store-flush** (LIVE-038)
+  - command: `sh -c 'set -e; env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 cargo test -q -p suprnova-live --test upload_file_provider --no-run; binary=$(env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 cargo test -p suprnova-live --test upload_file_provider --no-run --message-format json 2>/dev/null | node -e "let d=\"\";process.stdin.on(\"data\",c=>d+=c).on(\"end\",()=>{for(const l of d.split(\"\\n\")){if(!l.trim())continue;const m=JSON.parse(l);if(m.target&&m.target.name===\"upload_file_provider\"&&m.executable)console.log(m.executable);}})" | tail -1); for run in $(seq 1 60); do if "$binary" > /dev/null 2>&1; then echo "run $run: ok"; else echo "run $run: failed"; "$binary" 2>&1 | tail -20; exit 1; fi; done'`
+  - inputs: `crates/suprnova-live/crates/suprnova-live-test-support/src/`, `crates/suprnova-live/src/upload/`, `crates/suprnova-live/tests/upload_file_provider.rs`
+- **session-blocking** (SESS-001)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test session -E 'test(blocking::)'`
+  - inputs: `framework/src/session/`, `framework/src/cache/`, `framework/src/routing/`, `framework/src/http/request.rs`, `framework/src/lib.rs`, `framework/src/server.rs`, `framework/tests/session/blocking.rs`, `framework/tests/session/main.rs`, `framework/tests/support/`, `Cargo.lock`
+  - also: `reviewed:`
+  - also: `- SESS-001 sha256:6051490235d7b5016ffd46ad3ab622f09fb66b337a84bfa96c6bea4e078ecc30`
+- **spec-lint** (LIVE-014)
+  - command: `node .cairn/tools/spec-lint.mjs docs/spec`
+  - inputs: `docs/spec/`, `.cairn/tools/`
+- **ui-collection-morph** (DATA-003)
+  - command: `sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/collection-continuity.test.ts'`
+  - inputs: `crates/suprnova-live/browser/src/morph/`, `crates/suprnova-live/browser/tests/`
+- **ui-combobox-stale** (FORM-008)
+  - command: `sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/combobox-stale-results.test.ts'`
+  - inputs: `crates/suprnova-live/browser/tests/combobox-stale-results.test.ts`, `crates/suprnova-live/components/combobox/`
+- **ui-data-display** (DATA-001, DATA-002, DATA-004)
+  - command: `node .cairn/tools/ui-data-display.mjs crates/suprnova-live/components app/templates/live/data-display-gallery.html crates/suprnova-live/browser/src`
+  - inputs: `.cairn/tools/ui-data-display.mjs`, `crates/suprnova-live/components/`, `crates/suprnova-live/browser/src/`, `app/templates/live/`
+  - also: `results: per-requirement`
+- **ui-dogfood-tests** (UI-006, UI-015, FORM-004, FDB-003, DATA-005, FORM-005, NAV-005)
+  - command: `sh -c 'env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p app --test live_dogfood && env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live -E "test(library_namespace::)"'`
+  - inputs: `app/`, `framework/src/live/`, `framework/src/view/`, `framework/tests/live/`, `framework/tests/support/`, `suprnova-macros/src/live/`, `crates/suprnova-live/src/`, `crates/suprnova-live/components/`
+- **ui-elements** (UI-011, UI-018)
+  - command: `node .cairn/tools/ui-elements.mjs crates/suprnova-live/components`
+  - inputs: `.cairn/tools/ui-elements.mjs`, `crates/suprnova-live/components/`
+  - also: `results: per-requirement`
+- **ui-feed-status** (FDB-005)
+  - command: `sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/live-feed-status.test.ts'`
+  - inputs: `crates/suprnova-live/browser/tests/live-feed-status.test.ts`, `crates/suprnova-live/browser/src/feedback/`, `crates/suprnova-live/browser/src/islands/`, `crates/suprnova-live/components/live-feed/`, `crates/suprnova-live/components/notification-bell/`
+- **ui-feedback** (FDB-001, FDB-002, FDB-006)
+  - command: `node .cairn/tools/ui-feedback.mjs crates/suprnova-live/components app/templates/live/feedback-gallery.html`
+  - inputs: `.cairn/tools/ui-feedback.mjs`, `crates/suprnova-live/components/`, `app/templates/live/`
+  - also: `results: per-requirement`
+- **ui-framework-tests** (UI-019)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova --test live_assets`
+  - inputs: `framework/src/live/`, `framework/tests/live/assets.rs`, `framework/tests/support/`, `crates/suprnova-live/src/artifacts.rs`, `crates/suprnova-live/browser/dist/`
+- **ui-islands** (UI-013)
+  - command: `node .cairn/tools/ui-islands.mjs crates/suprnova-live/components app/templates/suprnova-ui`
+  - inputs: `.cairn/tools/ui-islands.mjs`, `crates/suprnova-live/components/`, `app/templates/`
+- **ui-light-dom** (UI-010)
+  - command: `sh -c '! grep -rn "attachShadow" crates/suprnova-live/browser/src crates/suprnova-live/components app/templates'`
+  - inputs: `crates/suprnova-live/browser/src/`, `app/templates/`, `crates/suprnova-live/components/`
+- **ui-live-add** (UI-017)
+  - command: `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RUST_TEST_THREADS=12 cargo nextest run -p suprnova-cli --test live_add`
+  - inputs: `suprnova-cli/build.rs`, `suprnova-cli/src/`, `suprnova-cli/tests/live_add.rs`, `crates/suprnova-live/components/`
+- **ui-live-check** (LIVE-008, LIVE-009, UI-009, UI-014, UI-016, FORM-001, FORM-002, FORM-003)
+  - command: `sh -c 'cd app && cargo run -q -p suprnova-cli -- live:check'`
+  - inputs: `app/`, `suprnova-cli/src/commands/live_check.rs`, `suprnova-cli/src/commands/live_tool.rs`, `crates/suprnova-live/src/checker/`, `framework/src/live/`
+- **ui-live-native** (FORM-006, FORM-007)
+  - command: `node .cairn/tools/ui-live-native.mjs crates/suprnova-live/components app/templates/live/live-native-gallery.html`
+  - inputs: `.cairn/tools/ui-live-native.mjs`, `crates/suprnova-live/components/`, `app/templates/live/`
+  - also: `results: per-requirement`
+- **ui-load-more-morph** (NAV-006)
+  - command: `sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/load-more-continuity.test.ts'`
+  - inputs: `crates/suprnova-live/browser/src/morph/`, `crates/suprnova-live/browser/tests/`
+- **ui-navigation** (NAV-001, NAV-002, NAV-004)
+  - command: `node .cairn/tools/ui-navigation.mjs crates/suprnova-live/components app/templates/live/navigation-gallery.html`
+  - inputs: `.cairn/tools/ui-navigation.mjs`, `crates/suprnova-live/components/`, `app/templates/live/`
+  - also: `results: per-requirement`
+- **ui-overlays** (OVL-001, OVL-002, OVL-003, OVL-004)
+  - command: `node .cairn/tools/ui-overlays.mjs crates/suprnova-live/components app/templates/live/overlay-gallery.html`
+  - inputs: `.cairn/tools/ui-overlays.mjs`, `crates/suprnova-live/components/`, `app/templates/live/`
+  - also: `results: per-requirement`
+  - also: `reviewed:`
+  - also: `- OVL-002 sha256:7ef7f0ca268a3e91c4fd96f81815c7c217c29e6e676ae37412ef320cd02ed405`
+- **ui-overlays-morph** (OVL-006)
+  - command: `sh -c 'cd crates/suprnova-live/browser && npx vitest run tests/overlay-continuity.test.ts'`
+  - inputs: `crates/suprnova-live/browser/src/morph/`, `crates/suprnova-live/browser/tests/`
+- **ui-tokens** (UI-001, UI-002, UI-003, UI-004, UI-005, UI-007)
+  - command: `node .cairn/tools/ui-tokens.mjs crates/suprnova-live/browser/src/styles/suprnova-ui.css app/templates/suprnova-ui crates/suprnova-live/browser/src/styles/suprnova-ui.tailwind.css crates/suprnova-live/components manual`
+  - inputs: `.cairn/tools/ui-tokens.mjs`, `crates/suprnova-live/browser/src/`, `app/templates/`, `crates/suprnova-live/components/`, `manual/`, `CHANGELOG.md`, `.manual-translations.lock`
+  - also: `results: per-requirement`
+- **ui-tooltip-dismissal** (OVL-002, OVL-008)
+  - command: `node .cairn/tools/ui-tooltip-dismissal.mjs`
+  - inputs: `.cairn/tools/ui-tooltip-dismissal.mjs`, `crates/suprnova-live/components/tooltip/`, `crates/suprnova-live/browser/e2e/components/tooltip.spec.ts`, `crates/suprnova-live/browser/e2e/components/support.ts`, `crates/suprnova-live/browser/playwright.components.config.ts`, `crates/suprnova-live/browser/src/styles/suprnova-ui.css`
+  - also: `results: per-requirement`
