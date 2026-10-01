@@ -229,6 +229,24 @@ runs the deltas inside a transaction. Duplicates in the input set
 collapse by their JSON-string form so `sync([1, 1, 2])` does what you
 mean.
 
+`sync_without_detaching` is the attach half of `sync`, Laravel's
+`syncWithoutDetaching`. It attaches each id the relation doesn't hold yet
+and leaves every other pivot row as it is, which suits an "add to
+favorites" action that must not drop the rows already there:
+
+```rust
+// The user holds roles 1 and 2.
+user.roles().sync_without_detaching([2, 3]).await?;
+// Now it holds 1, 2, and 3. The rows for 1 and 2 are unchanged.
+```
+
+An id the relation already holds is skipped, not rewritten, so its row
+keeps its extra pivot columns and its `created_at` and `updated_at`. The
+new rows get timestamps when the relation has `with_timestamps`. The
+inserts run in one transaction, so one that fails rolls back the others.
+Like `sync`, it returns `()` rather than Laravel's attached, detached, and
+updated report.
+
 Reading goes through the two-query strategy:
 
 ```rust
@@ -567,7 +585,7 @@ pub struct Taggable {
 ```
 
 `MorphToMany` is the mutating side - `attach` / `attach_with` / `detach`
-/ `sync` all live there. `MorphedByMany` is read-only: each `tag.posts()`
+/ `sync` / `sync_without_detaching` all live there. `MorphedByMany` is read-only: each `tag.posts()`
 call returns only `Post`-typed taggables, each `tag.videos()` returns
 only `Video`-typed taggables, no mixing in one collection.
 

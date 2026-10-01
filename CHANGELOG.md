@@ -156,6 +156,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   404. A parameter name the handler does not take fails to compile. This
   landed on main after the `v3.0.0` tag (#127).
 
+- **Model changes after a save, `sync_without_detaching`, and after-commit
+  callbacks.** A model reports what its last update changed
+  (`was_changed`, `was_changed_any`, `get_changes`), and `get_original` and
+  `get_raw_original` return the loaded values while its `updated` and
+  `saved` observers run, as Laravel's do; once the save returns, the
+  original is the saved row. `sync_without_detaching` attaches pivot rows
+  without touching the existing ones. `DB::after_commit` runs a callback
+  after the ambient `DB::transaction` commits, and never on rollback; a
+  transaction started with `DB::begin_transaction` takes its own
+  `tx.after_commit` and `Queue::push_after_commit_with_tx`, because ambient
+  code is outside that transaction. This landed on main after the `v3.0.0`
+  tag (#128).
+
 - **`FrameworkError::Timeout` tells a passed deadline from a failure.**
   `WorkflowHandle::wait_with_timeout` documented a timeout error that did not
   exist and returned `FrameworkError::Internal`, so a caller could not tell a

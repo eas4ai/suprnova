@@ -28,6 +28,9 @@
 //! - [`sync`](BelongsToMany::sync) - diff-and-apply against the current pivot
 //!   set; runs attach + detach inside a `DatabaseTransaction` so a
 //!   partial failure rolls back.
+//! - [`sync_without_detaching`](BelongsToMany::sync_without_detaching) -
+//!   the attach half of `sync`: adds the missing rows and leaves every
+//!   existing one untouched.
 //!
 //! Readers:
 //!
@@ -491,32 +494,53 @@ where
         I: IntoIterator<Item = V>,
         V: Into<serde_json::Value>,
     {
+        self.sync_ids(unique_pivot_ids(ids), true).await
+    }
+
+    /// Attach each of `ids` the relation does not hold yet, and leave
+    /// every pivot row it already has as it is. Mirrors Laravel's
+    /// `->syncWithoutDetaching([...])`.
+    ///
+    /// It is [`Self::sync`] without the detach half: an id already
+    /// attached is skipped, not rewritten, so that row's extra pivot
+    /// columns and its `created_at` / `updated_at` stay as they were. The
+    /// inserts run in one transaction, so one that fails rolls back the
+    /// others, and duplicate ids collapse to one attach as in `sync`.
+    /// Returns `()` like `sync`, not Laravel's attached / detached /
+    /// updated report.
+    pub async fn sync_without_detaching<I, V>(self, ids: I) -> Result<(), FrameworkError>
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<serde_json::Value>,
+    {
+        self.sync_ids(unique_pivot_ids(ids), false).await
+    }
+
+    /// The checks and the atomic wrapper shared by [`Self::sync`] and
+    /// [`Self::sync_without_detaching`]. `detaching` says whether rows
+    /// missing from `target_ids` are deleted.
+    async fn sync_ids(
+        self,
+        target_ids: Vec<serde_json::Value>,
+        detaching: bool,
+    ) -> Result<(), FrameworkError> {
         self.pivot_filters.reject_mutation()?;
         self.validate_meta()?;
-        use std::collections::HashSet;
-
-        // De-duplicate target IDs by JSON-string canonicalisation.
-        // Preserves the first occurrence for a deterministic insert
-        // order (relevant for snapshot tests).
-        let mut seen_target: HashSet<String> = HashSet::new();
-        let mut target_ids: Vec<serde_json::Value> = Vec::new();
-        for raw in ids {
-            let v: serde_json::Value = raw.into();
-            let key = v.to_string();
-            if seen_target.insert(key) {
-                target_ids.push(v);
-            }
-        }
         crate::render_cache::orm::atomic(L::default_connection_name(), || {
-            self.sync_inner(target_ids)
+            self.sync_inner(target_ids, detaching)
         })
         .await
     }
 
     /// The pivot reconciliation and its advance, run under [`Self::sync`]'s
     /// atomic wrapper (CACHE-009): inside the ambient transaction the
-    /// writes route through it and the advance joins it.
-    async fn sync_inner(self, target_ids: Vec<serde_json::Value>) -> Result<(), FrameworkError> {
+    /// writes route through it and the advance joins it. Without
+    /// `detaching` nothing is deleted.
+    async fn sync_inner(
+        self,
+        target_ids: Vec<serde_json::Value>,
+        detaching: bool,
+    ) -> Result<(), FrameworkError> {
         use std::collections::{HashMap, HashSet};
 
         // Resolve through ExecutorChoice so the SELECT + INSERTs +
@@ -581,11 +605,15 @@ where
                 attach_set.push(v);
             }
         }
-        // detach_set = current - target
-        let detach_set: Vec<serde_json::Value> = current_map
-            .into_iter()
-            .filter_map(|(k, v)| (!target_keys.contains(&k)).then_some(v))
-            .collect();
+        // detach_set = current - target, and nothing without `detaching`
+        let detach_set: Vec<serde_json::Value> = if detaching {
+            current_map
+                .into_iter()
+                .filter_map(|(k, v)| (!target_keys.contains(&k)).then_some(v))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Transactional attach + detach. Either all rows commit or
         // none do. When we already inherit a tx via `CURRENT_TX` the
@@ -939,6 +967,26 @@ where
 }
 
 // ---- Internal helpers ----------------------------------------------------
+
+/// `ids` as JSON values, each kept once. Ids are compared by their JSON
+/// string form, the framework-wide convention for foreign-key values, and
+/// the first occurrence keeps its place so inserts run in a deterministic
+/// order. Shared by the `sync` family here and on `MorphToMany`.
+pub(crate) fn unique_pivot_ids<I, V>(ids: I) -> Vec<serde_json::Value>
+where
+    I: IntoIterator<Item = V>,
+    V: Into<serde_json::Value>,
+{
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut unique = Vec::new();
+    for raw in ids {
+        let value: serde_json::Value = raw.into();
+        if seen.insert(value.to_string()) {
+            unique.push(value);
+        }
+    }
+    unique
+}
 
 /// Shared INSERT path used by `attach` / `attach_with` / `sync`. The
 /// connection-or-transaction handle is taken as a generic `&C: ConnectionTrait`

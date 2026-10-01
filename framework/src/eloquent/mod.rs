@@ -12,6 +12,7 @@
 pub mod attrs;
 pub mod builder;
 pub mod casts;
+pub(crate) mod changes;
 pub mod collection;
 pub mod console;
 pub mod events;

@@ -54,6 +54,8 @@
 //!   + type.
 //! - [`sync`](MorphToMany::sync) - diff-and-apply, transactional via
 //!   `DatabaseConnection::begin()`.
+//! - [`sync_without_detaching`](MorphToMany::sync_without_detaching) -
+//!   the attach half of `sync`, leaving existing rows untouched.
 //!
 //! Readers (both flavours):
 //!
@@ -90,6 +92,7 @@ use crate::eloquent::builder::{Builder, IntoColumn, IntoVal, WhereTerm};
 use crate::eloquent::collection::Collection;
 use crate::eloquent::lazy_loading::LazyLoadGuard;
 use crate::eloquent::model::{Model, json_value_to_sea_value};
+use crate::eloquent::relations::belongs_to_many::unique_pivot_ids;
 use crate::eloquent::relations::pivot_filters::{PivotFilters, pivot_filter_methods};
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::error::FrameworkError;
@@ -461,29 +464,49 @@ where
         I: IntoIterator<Item = V>,
         V: Into<serde_json::Value>,
     {
+        self.sync_ids(unique_pivot_ids(ids), true).await
+    }
+
+    /// Attach each of `ids` the parent does not hold yet, and leave every
+    /// pivot row it already has as it is. Mirrors Laravel's
+    /// `->syncWithoutDetaching([...])`, with the same contract as
+    /// [`BelongsToMany::sync_without_detaching`](crate::eloquent::relations::BelongsToMany::sync_without_detaching):
+    /// existing rows keep their extra columns and timestamps, the inserts
+    /// run in one transaction, and rows of other morph families are never
+    /// read or written.
+    pub async fn sync_without_detaching<I, V>(self, ids: I) -> Result<(), FrameworkError>
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<serde_json::Value>,
+    {
+        self.sync_ids(unique_pivot_ids(ids), false).await
+    }
+
+    /// The checks and the atomic wrapper shared by [`Self::sync`] and
+    /// [`Self::sync_without_detaching`]. `detaching` says whether rows
+    /// missing from `target_ids` are deleted.
+    async fn sync_ids(
+        self,
+        target_ids: Vec<serde_json::Value>,
+        detaching: bool,
+    ) -> Result<(), FrameworkError> {
         self.pivot_filters.reject_mutation()?;
         self.validate_meta()?;
-        use std::collections::HashSet;
-
-        let mut seen_target: HashSet<String> = HashSet::new();
-        let mut target_ids: Vec<serde_json::Value> = Vec::new();
-        for raw in ids {
-            let v: serde_json::Value = raw.into();
-            let key = v.to_string();
-            if seen_target.insert(key) {
-                target_ids.push(v);
-            }
-        }
         crate::render_cache::orm::atomic(L::default_connection_name(), || {
-            self.sync_inner(target_ids)
+            self.sync_inner(target_ids, detaching)
         })
         .await
     }
 
     /// The pivot reconciliation and its advance, run under [`Self::sync`]'s
     /// atomic wrapper (CACHE-009): inside the ambient transaction the
-    /// writes route through it and the advance joins it.
-    async fn sync_inner(self, target_ids: Vec<serde_json::Value>) -> Result<(), FrameworkError> {
+    /// writes route through it and the advance joins it. Without
+    /// `detaching` nothing is deleted.
+    async fn sync_inner(
+        self,
+        target_ids: Vec<serde_json::Value>,
+        detaching: bool,
+    ) -> Result<(), FrameworkError> {
         use std::collections::{HashMap, HashSet};
 
         // Phase 10C audit-fix AF2 - same shape as BelongsToMany::sync -
@@ -543,10 +566,14 @@ where
                 attach_set.push(v);
             }
         }
-        let detach_set: Vec<serde_json::Value> = current_map
-            .into_iter()
-            .filter_map(|(k, v)| (!target_keys.contains(&k)).then_some(v))
-            .collect();
+        let detach_set: Vec<serde_json::Value> = if detaching {
+            current_map
+                .into_iter()
+                .filter_map(|(k, v)| (!target_keys.contains(&k)).then_some(v))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Atomicity: inherit from CURRENT_TX when active, else open
         // inner SeaORM tx - same precedence as BelongsToMany::sync.
