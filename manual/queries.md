@@ -72,6 +72,103 @@ right-hand side, which covers `i64`, `String`, `&str`, `bool`, `f64`,
 `Option<T>`, `chrono::*`, `uuid::Uuid`, and `serde_json::Value` - every
 column type the backend understands.
 
+The rest of the `WHERE` vocabulary uses the Laravel names:
+
+```rust
+// Lists, and NULL checks.
+DB::table("users").where_in("role", ["admin", "editor"]).get().await?;
+DB::table("users").where_not_in("id", [1i64, 2]).get().await?;
+DB::table("users").where_null("deleted_at").get().await?;
+DB::table("users").where_not_null("verified_at").get().await?;
+
+// Two columns compared, with no value.
+DB::table("orders").where_column("shipped_at", "paid_at").get().await?;
+
+// A raw fragment. Write each value as `?` and pass it in the bindings;
+// Postgres gets `$N` markers numbered for their place in the statement.
+DB::table("orders")
+    .where_raw("total * ? > budget", vec![1.2.into()])
+    .get()
+    .await?;
+```
+
+An empty `where_in` list matches no row, and an empty `where_not_in`
+list excludes none.
+
+#### OR conditions
+
+Each `or_*` method folds its condition into the one before it, so an
+`OR` widens that one condition and never the whole `WHERE` clause:
+
+```rust
+// WHERE active = ? AND (role IN (?, ?) OR invited_by IS NOT NULL)
+DB::table("users")
+    .filter("active", true)
+    .where_in("role", ["admin", "editor"])
+    .or_where_not_null("invited_by")
+    .get()
+    .await?;
+```
+
+The `or_` family is `or_where_in`, `or_where_not_in`, `or_where_null`,
+`or_where_not_null`, `or_where_raw`, and the three grouped helpers below.
+
+#### One comparison across several columns
+
+`where_any` compares several columns with one operator and value, and
+matches when any of them does. `where_all` matches when every column
+does, and `where_none` when none does:
+
+```rust
+// WHERE (code LIKE ? OR description LIKE ?)
+let found = DB::table("products")
+    .where_any(["code", "description"], "like", format!("%{search}%"))
+    .get()
+    .await?;
+
+// WHERE is_admin = ? AND NOT (banned = ? OR suspended = ?)
+let staff = DB::table("users")
+    .filter("is_admin", true)
+    .where_none(["banned", "suspended"], "=", true)
+    .get()
+    .await?;
+```
+
+The comparisons sit in parentheses, so an `OR` inside never reaches the
+conditions around it: `filter("a", 1).where_any(["b", "c"], "=", 2)`
+returns only rows whose `a` is 1. `or_where_any`, `or_where_all`, and
+`or_where_none` fold the group into the condition before it. An empty
+column list adds no condition.
+
+#### Subqueries
+
+`where_in`, `where_not_in`, and their `or_` forms also take another
+`DB::table` builder, which runs as a subquery. `where_exists` and
+`where_not_exists` take one too, and the subquery can refer to the outer
+table through `where_column`:
+
+```rust
+// Rooms with a slot on Monday.
+let booked = DB::table("rooms")
+    .where_in("id", DB::table("slots").select(["room_id"]).filter("day", "mon"))
+    .get()
+    .await?;
+
+// Users who have written a post.
+let authors = DB::table("users")
+    .where_exists(
+        DB::table("posts")
+            .select_raw("1")
+            .where_column("posts.author_id", "users.id"),
+    )
+    .get()
+    .await?;
+```
+
+A subquery's values stay bound parameters, in the position they take in
+the statement. On Postgres the `$N` numbers continue through the
+subquery.
+
 #### Byte-exact comparison
 
 `where_binary` compares the raw bytes of a column instead of matching
@@ -101,7 +198,107 @@ DB::table("users").get().await?;
 
 // Restrict columns when you only need some.
 DB::table("users").select(["id", "email"]).get().await?;
+
+// An alias renames a column in the result; `table.*` selects one
+// table's columns, which matters once a query joins another table.
+DB::table("users").select(["users.*", "email as login"]).get().await?;
+
+// Add an expression with select_raw, and group the rows.
+DB::table("orders")
+    .select(["status_id"])
+    .select_raw("COUNT(*) AS total")
+    .group_by("status_id")
+    .get()
+    .await?;
 ```
+
+`select` replaces the list each time you call it. `select_raw` adds an
+expression to the end of the list, so it combines with `select`. The
+expression is written into the query as given, so never build it from
+request data.
+
+### Joins
+
+`join`, `left_join`, and `right_join` take the table and one `ON`
+condition between two columns. To join a table under an alias, write
+`"table as alias"`. `cross_join` takes only the table. This query lists
+every post with its category and author:
+
+```rust
+let rows = DB::table("posts")
+    .left_join("categories", "categories.id", "=", "posts.category_id")
+    .left_join("users as authors", "authors.id", "=", "posts.author_id")
+    .select([
+        "posts.title",
+        "categories.name as category_name",
+        "authors.name as author_name",
+    ])
+    .order_by_asc("posts.title")
+    .get()
+    .await?;
+
+for row in rows.iter() {
+    let author: Option<String> = row.get_optional_string("author_name")?;
+}
+```
+
+The rows come back as `DynamicRow`. Columns that the joined tables share,
+such as `id` or `name`, overwrite one another in the row, so alias them
+in `select`.
+
+For more than one condition, `join_with`, `left_join_with`, and
+`right_join_with` pass a `JoinClause` to a closure. `on` and `or_on`
+compare two columns. `filter`, `filter_op`, `or_filter`, and
+`or_filter_op` compare a column with a value, and `db_where`,
+`db_where_op`, `or_where`, and `or_where_op` are their Laravel names:
+
+```rust
+// INNER JOIN users ON users.id = posts.author_id
+//   AND (posts.views > ? OR users.role = ?)
+let rows = DB::table("posts")
+    .join_with("users", |join| {
+        join.on("users.id", "=", "posts.author_id")
+            .db_where_op("posts.views", ">", 100)
+            .or_where("users.role", "editor")
+    })
+    .get()
+    .await?;
+```
+
+A join condition's value is a bound parameter, like every other value.
+An `or_*` condition folds into the condition before it, as in the
+`WHERE` clause. A join other than `cross_join` needs at least one
+condition: the query fails with an error before it runs otherwise.
+
+To join a subquery, pass another `DB::table` builder and an alias to
+`join_sub` or `left_join_sub`. `join_sub_with` and `left_join_sub_with`
+take a closure instead of one condition. This query counts each status's
+orders, with zero for a status that has none:
+
+```rust
+let totals = DB::table("orders")
+    .select(["status_id"])
+    .select_raw("COUNT(*) AS total")
+    .group_by("status_id");
+
+let rows = DB::table("statuses")
+    .left_join_sub(totals, "order_totals", "order_totals.status_id", "=", "statuses.id")
+    .select(["statuses.name"])
+    .select_raw("COALESCE(order_totals.total, 0) AS total")
+    .get()
+    .await?;
+```
+
+The subquery's values bind ahead of the values of the conditions and
+`WHERE` clauses after it, so the order you call the methods in doesn't
+matter. On SQLite, read an aggregate column like `total` through
+`count()` or a typed path; see
+[Aggregate-column gotcha](#aggregate-column-gotcha).
+
+`get` and `count` record a read of every table the query touches,
+including joined tables and the tables a subquery reads, so a cached
+page that ran the query is invalidated when any of them changes. See
+[Render cache](render-cache.md).
 
 ### Ordering and windowing
 
@@ -117,6 +314,21 @@ DB::table("posts")
 
 `order_by_desc` and `order_by_asc` chain in insertion order; the
 generated SQL preserves it.
+
+`reorder()` drops every ordering set so far, and `reorder_by(col,
+Direction::Asc)` drops them and orders by `col` instead. Use it on a base
+query before you reuse it as a subquery:
+
+```rust
+use suprnova::Direction;
+
+let recent = DB::table("slots").select(["room_id"]).order_by_desc("starts_at");
+let rooms = DB::table("rooms")
+    .where_in("id", recent.reorder())
+    .reorder_by("name", Direction::Asc)
+    .get()
+    .await?;
+```
 
 ### Terminals
 
@@ -140,6 +352,8 @@ let n: u64 = DB::table("audit_log")
     .count()
     .await?;
 ```
+
+On a query with `group_by`, `count()` returns the number of groups.
 
 `get()` returns `Collection<DynamicRow>` - the same collection wrapper
 typed models use, with the same `.iter()`, `.len()`, `.into_vec()`
@@ -203,6 +417,11 @@ is supported by design - sometimes you really do want to truncate -
 but it's rarely correct. Always look at a `delete()` / `delete_all()`
 call and check whether there's a `filter` in front of it. The same is
 true of `update` / `update_all`.
+
+`update` and `delete` return an error on a builder with a join. The
+statement they render names one table, so it would ignore the join and
+change rows the join was there to exclude. To narrow the rows by another
+table, use `where_in` or `where_exists` with a subquery.
 
 #### Insert backend split
 
@@ -273,8 +492,8 @@ if row.contains_key("deleted_at") { /* … */ }
 
 ## Identifier trust boundary
 
-Table names, column names, ORDER BY directions, and SQL operators are
-interpolated into the SQL string verbatim - they are NOT bound as
+Table names, column names, aliases, ORDER BY directions, and SQL
+operators are written into the SQL string - they are NOT bound as
 parameters (SQL doesn't allow placeholder-bound identifiers). Treat
 every `impl Into<String>` argument as a trusted, compile-time literal.
 
@@ -293,11 +512,15 @@ The framework enforces a strict allowlist at the I/O boundary -
 identifiers must match `[A-Za-z_][A-Za-z0-9_]*` with one optional
 `schema.` prefix, and operators must come from a fixed list. Violations
 fail closed with a `FrameworkError::Database` before any SQL is
-rendered. That's a safety net, not a license: keep identifiers literal
-in your code.
+rendered. The builder then quotes every identifier for the backend:
+backticks on MySQL and MariaDB, double quotes on Postgres and SQLite.
+That's a safety net, not a license: keep identifiers literal in your
+code. `select_raw` and `where_raw` fragments are written as given and
+never checked.
 
-Values on the right-hand side of `filter` / `filter_op` are always
-bound as parameters and safe to splice through from request data.
+Values on the right-hand side of `filter` / `filter_op`, in `where_in`
+lists, in join conditions, and in raw-fragment bindings are always bound
+as parameters and safe to splice through from request data.
 
 ## Raw queries
 
@@ -378,6 +601,11 @@ expression in `CAST(… AS BIGINT)` to give it a type tag, or use
 `DB::scalar::<i64>` which goes through `query_one` + `try_get` and
 doesn't depend on the per-column type detection.
 
+The same applies to an aggregate column a `DB::table` builder selects
+with `select_raw`, including one read through a joined subquery. To
+filter on such a column, `filter("order_totals.total", 2)` works on
+every backend, and `count()` reads its result typed.
+
 ## Bridge to typed Eloquent
 
 When the table is worth a `#[suprnova::model]` struct, the chainable
@@ -409,7 +637,10 @@ let total = User::query().filter("active", true).count().await?;
 The full `Builder<M>` surface - every WHERE shape, aggregates,
 relations, eager loading, scopes, paginators, chunk iteration - is in
 [Eloquent](eloquent.md). The chainable shape you learned above is the
-same shape; the differences are typing and reach.
+same shape; the differences are typing and reach. The joins, the
+grouped `where_any` family, the `or_` helpers, subqueries, and `reorder`
+work the same way on both builders, and a model query takes a
+`DB::table` builder as its subquery.
 
 ## Routing to a named connection
 
@@ -462,6 +693,24 @@ throws a `RuntimeException` from the base grammar. The reason is the
 same and only the mechanism differs: public-surface code in Suprnova
 returns `Result` rather than panicking, so the refusal arrives as an
 `Err` from the terminal instead of an exception from the grammar.
+
+An `or_*` call folds into the condition before it. Laravel keeps a flat
+list of conditions joined by `and` and `or`, and SQL precedence then
+binds each `and` before any `or`. So `where(a)->where(b)->orWhere(c)`
+means `(a AND b) OR c` in Laravel and `a AND (b OR c)` here. Suprnova's
+rule matches the model builder's, and an `or` never widens past a
+condition written before it. When you port a query that mixes the two,
+check the SQL it renders; for Laravel's reading, write the condition
+with `where_raw`.
+
+Laravel's `join` and `whereExists` also take a closure that builds the
+subquery, an Eloquent builder, or a raw expression. Here a subquery is
+always a `DB::table` builder, and a join's closure only adds conditions.
+The column-list helpers take the operator every time -
+`where_any(cols, "=", value)` - because Rust has no optional arguments.
+`update` and `delete` refuse a join, where Laravel's MySQL grammar
+renders `UPDATE ... JOIN`, because the portable statement would ignore
+it.
 
 ## Next
 

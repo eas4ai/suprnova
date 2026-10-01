@@ -780,7 +780,10 @@ pub(crate) fn rewrite_raw_placeholders(
     Ok(rendered)
 }
 
-pub(crate) fn validate_raw_placeholders(sql: &str, binding_count: usize) -> Result<(), FrameworkError> {
+pub(crate) fn validate_raw_placeholders(
+    sql: &str,
+    binding_count: usize,
+) -> Result<(), FrameworkError> {
     if binding_count == 0 {
         return Ok(());
     }

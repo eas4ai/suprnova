@@ -93,12 +93,12 @@ pub mod route_binding;
 pub mod testing;
 pub mod transaction;
 
+pub use clauses::{IntoWhereIn, JoinClause, WhereIn};
 pub use config::{DatabaseConfig, DatabaseConfigBuilder, DatabaseType, UrlSource};
 pub use connection::DbConnection;
 pub use connection_registry::{
     ConnectionRegistry, PRIMARY_CONNECTION_NAME, READ_REPLICA_CONNECTION_NAME,
 };
-pub use clauses::{IntoWhereIn, JoinClause, WhereIn};
 pub use db_facade::DbTableBuilder;
 pub use dynamic_row::DynamicRow;
 pub use events::{

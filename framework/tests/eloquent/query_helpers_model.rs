@@ -67,8 +67,9 @@ async fn ids_matching(query: Builder<QhItem>, raw_where: &str) -> Vec<i64> {
         .iter()
         .map(|item| item.id)
         .collect();
-    let sql =
-        format!("SELECT id FROM qh_items WHERE deleted_at IS NULL AND ({raw_where}) ORDER BY id ASC");
+    let sql = format!(
+        "SELECT id FROM qh_items WHERE deleted_at IS NULL AND ({raw_where}) ORDER BY id ASC"
+    );
     let raw: Vec<i64> = json_rows(
         DB::select(&sql, Vec::<SeaValue>::new())
             .await
@@ -112,11 +113,7 @@ async fn grouped_helpers_stay_grouped() {
         "filter_any is the same method"
     );
     assert_eq!(
-        ids_matching(
-            items().where_all(["b", "c"], "=", 2),
-            "b = 2 AND c = 2"
-        )
-        .await,
+        ids_matching(items().where_all(["b", "c"], "=", 2), "b = 2 AND c = 2").await,
         vec![4]
     );
     assert_eq!(
@@ -196,7 +193,9 @@ async fn or_forms() {
     );
     assert_eq!(
         ids_matching(
-            items().filter("id", 1).or_filter_not_in("id", [1i64, 2, 3, 4]),
+            items()
+                .filter("id", 1)
+                .or_filter_not_in("id", [1i64, 2, 3, 4]),
             "id = 1 OR id NOT IN (1, 2, 3, 4)"
         )
         .await,
@@ -204,7 +203,9 @@ async fn or_forms() {
     );
     assert_eq!(
         ids_matching(
-            items().filter("id", 1).or_where_raw("b + c = ?", vec![json!(4)]),
+            items()
+                .filter("id", 1)
+                .or_where_raw("b + c = ?", vec![json!(4)]),
             "id = 1 OR b + c = 4"
         )
         .await,
@@ -212,7 +213,9 @@ async fn or_forms() {
     );
     assert_eq!(
         ids_matching(
-            items().filter("id", 1).or_filter_raw("a = ?", vec![json!(0)]),
+            items()
+                .filter("id", 1)
+                .or_filter_raw("a = ?", vec![json!(0)]),
             "id = 1 OR a = 0"
         )
         .await,
@@ -345,7 +348,10 @@ async fn reorder_drops_orderings() {
         .reorder()
         .try_to_sql_with_bindings_for(DatabaseBackend::Sqlite)
         .expect("renders");
-    assert!(!sql.contains("ORDER BY"), "reorder() leaves no ordering: {sql}");
+    assert!(
+        !sql.contains("ORDER BY"),
+        "reorder() leaves no ordering: {sql}"
+    );
 }
 
 async fn run_every_scenario() {
@@ -404,7 +410,11 @@ async fn model_reorder_drops_orderings_and_reorder_by_sets_one() {
 async fn model_helpers_refuse_invalid_input_before_any_sql_runs() {
     let _fx = seeded_sqlite().await;
     assert!(
-        items().where_any(["b", "c"], "= 2 OR 1 =", 2).get().await.is_err(),
+        items()
+            .where_any(["b", "c"], "= 2 OR 1 =", 2)
+            .get()
+            .await
+            .is_err(),
         "an operator outside the allowlist"
     );
     assert!(

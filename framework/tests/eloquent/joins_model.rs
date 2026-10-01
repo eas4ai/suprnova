@@ -173,19 +173,16 @@ async fn subquery_joins_and_count_on_a_model() {
         .where_null("deleted_at")
         .group_by("author_id");
     let prolific = JmUser::query()
-        .join_sub(
-            live_post_counts,
-            "pc",
-            "pc.author_id",
-            "=",
-            "jm_users.id",
-        )
+        .join_sub(live_post_counts, "pc", "pc.author_id", "=", "jm_users.id")
         .filter_op("pc.post_count", ">=", 2)
         .get()
         .await
         .expect("join_sub runs");
     assert_eq!(
-        prolific.iter().map(|u| (u.id, u.name.as_str())).collect::<Vec<_>>(),
+        prolific
+            .iter()
+            .map(|u| (u.id, u.name.as_str()))
+            .collect::<Vec<_>>(),
         vec![(1, "Ada")]
     );
 
@@ -351,10 +348,16 @@ async fn mass_writes_refuse_a_join() {
             .filter("jm_users.name", "Ada")
     };
     assert!(
-        joined().update_all(attrs! { title: "changed" }).await.is_err(),
+        joined()
+            .update_all(attrs! { title: "changed" })
+            .await
+            .is_err(),
         "update_all would ignore the join"
     );
-    assert!(joined().delete_all().await.is_err(), "delete_all would ignore the join");
+    assert!(
+        joined().delete_all().await.is_err(),
+        "delete_all would ignore the join"
+    );
     assert!(
         joined().force_delete_all().await.is_err(),
         "force_delete_all would ignore the join"

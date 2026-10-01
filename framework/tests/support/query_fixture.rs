@@ -29,7 +29,9 @@ pub struct Fixture {
 impl Fixture {
     /// A fresh in-memory SQLite database.
     pub async fn sqlite() -> Self {
-        let db = TestDatabase::sqlite_memory().await.expect("in-memory SQLite");
+        let db = TestDatabase::sqlite_memory()
+            .await
+            .expect("in-memory SQLite");
         Self {
             holder: Holder::Sqlite(db),
             backend: DatabaseBackend::Sqlite,

@@ -29,7 +29,11 @@ use crate::eloquent::builder::{IntoVal, rewrite_raw_placeholders, validate_raw_p
 /// character is doubled inside a segment, though a validated identifier
 /// never contains one.
 pub(crate) fn quote_identifier(backend: DbBackend, ident: &str) -> String {
-    let quote = if backend == DbBackend::MySql { '`' } else { '"' };
+    let quote = if backend == DbBackend::MySql {
+        '`'
+    } else {
+        '"'
+    };
     ident
         .split('.')
         .map(|segment| {
@@ -90,7 +94,10 @@ pub(crate) fn validate_select_column(item: &str) -> Result<(), FrameworkError> {
 }
 
 /// A validated select-list entry, quoted for `backend`.
-pub(crate) fn render_select_column(backend: DbBackend, item: &str) -> Result<String, FrameworkError> {
+pub(crate) fn render_select_column(
+    backend: DbBackend,
+    item: &str,
+) -> Result<String, FrameworkError> {
     let (column, alias) = split_alias(item)?;
     let column = quote_identifier(backend, column);
     Ok(match alias {
@@ -389,8 +396,12 @@ fn render_condition(
         // `OR` of nothing is false; `AND` of nothing is true. The public
         // surface never builds an empty group - `grouped` drops an empty
         // column list - but `()` is a syntax error, so these stay valid.
-        Condition::Any(conditions) => render_group(conditions, " OR ", "1 = 0", backend, values, n)?,
-        Condition::All(conditions) => render_group(conditions, " AND ", "1 = 1", backend, values, n)?,
+        Condition::Any(conditions) => {
+            render_group(conditions, " OR ", "1 = 0", backend, values, n)?
+        }
+        Condition::All(conditions) => {
+            render_group(conditions, " AND ", "1 = 1", backend, values, n)?
+        }
         Condition::Not(condition) => {
             let inner = render_condition(condition, backend, values, n)?;
             match condition.as_ref() {
@@ -814,7 +825,14 @@ mod tests {
 
     #[test]
     fn select_columns_take_an_alias_and_a_star() {
-        for ok in ["id", "posts.id", "*", "posts.*", "posts.title AS t", "c  as  alias"] {
+        for ok in [
+            "id",
+            "posts.id",
+            "*",
+            "posts.*",
+            "posts.title AS t",
+            "c  as  alias",
+        ] {
             assert!(validate_select_column(ok).is_ok(), "{ok}");
         }
         for bad in [
@@ -847,7 +865,10 @@ mod tests {
         let mut values = Vec::new();
         let mut n = 0;
         let sql = render_conditions(&conditions, DbBackend::Postgres, &mut values, &mut n).unwrap();
-        assert_eq!(sql, "\"a\" = $1 AND (\"b\" = $2 OR \"c\" = $3 OR \"d\" = $4)");
+        assert_eq!(
+            sql,
+            "\"a\" = $1 AND (\"b\" = $2 OR \"c\" = $3 OR \"d\" = $4)"
+        );
         assert_eq!(values.len(), 4);
     }
 

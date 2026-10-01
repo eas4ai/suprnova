@@ -174,7 +174,9 @@ async fn or_where_in_with_a_list() {
     );
     assert_eq!(
         ids_matching(
-            items().filter("id", 1).or_where_not_in("id", [1i64, 2, 3, 4]),
+            items()
+                .filter("id", 1)
+                .or_where_not_in("id", [1i64, 2, 3, 4]),
             "id = 1 OR id NOT IN (1, 2, 3, 4)"
         )
         .await,
@@ -241,7 +243,9 @@ async fn where_in_with_a_subquery() {
 async fn raw_and_null_or_forms() {
     assert_eq!(
         ids_matching(
-            items().filter("id", 1).or_where_raw("b + c = ?", vec![4.into()]),
+            items()
+                .filter("id", 1)
+                .or_where_raw("b + c = ?", vec![4.into()]),
             "id = 1 OR b + c = 4"
         )
         .await,

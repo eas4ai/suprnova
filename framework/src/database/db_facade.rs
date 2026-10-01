@@ -44,10 +44,9 @@
 use crate::FrameworkError;
 use crate::database::DB;
 use crate::database::clauses::{
-    Condition, Grouping, IntoWhereIn, JoinClause, JoinKind, JoinTarget, condition_tables,
-    grouped, in_condition, join_tables, push_or, quote_identifier, render_conditions,
-    render_join, render_select_column, validate_condition, validate_join,
-    validate_select_column,
+    Condition, Grouping, IntoWhereIn, JoinClause, JoinKind, JoinTarget, condition_tables, grouped,
+    in_condition, join_tables, push_or, quote_identifier, render_conditions, render_join,
+    render_select_column, validate_condition, validate_join, validate_select_column,
 };
 use crate::database::dynamic_row::DynamicRow;
 use crate::eloquent::Collection;

@@ -74,7 +74,12 @@ async fn chained_left_joins_with_alias(_fx: &Fixture) {
             "=",
             "pj_posts.category_id",
         )
-        .left_join("pj_users as authors", "authors.id", "=", "pj_posts.author_id")
+        .left_join(
+            "pj_users as authors",
+            "authors.id",
+            "=",
+            "pj_posts.author_id",
+        )
         .select([
             "pj_posts.title",
             "pj_categories.name as category_name",
@@ -171,7 +176,9 @@ async fn left_join_against_a_grouped_subquery(fx: &Fixture) {
     }
     let without_orders = DB::table("pj_statuses")
         .left_join_sub(
-            DB::table("pj_orders").select(["status_id"]).group_by("status_id"),
+            DB::table("pj_orders")
+                .select(["status_id"])
+                .group_by("status_id"),
             "order_totals",
             "order_totals.status_id",
             "=",
@@ -197,15 +204,16 @@ async fn correlated_exists(_fx: &Fixture) {
         .await
         .expect("where_exists runs")
         .into_vec();
-    let expected = raw(
-        "SELECT * FROM pj_users \
+    let expected = raw("SELECT * FROM pj_users \
          WHERE EXISTS (SELECT 1 FROM pj_posts WHERE pj_posts.author_id = pj_users.id) \
-         ORDER BY pj_users.id ASC",
-    )
+         ORDER BY pj_users.id ASC")
     .await;
     let has_posts = json_rows(has_posts);
     assert_eq!(has_posts, expected, "the builder and raw SQL disagree");
-    assert_eq!(column(&has_posts, "name"), vec![json!("Ada"), json!("Linus")]);
+    assert_eq!(
+        column(&has_posts, "name"),
+        vec![json!("Ada"), json!("Linus")]
+    );
 
     let without_posts = DB::table("pj_users")
         .where_not_exists(
@@ -218,11 +226,9 @@ async fn correlated_exists(_fx: &Fixture) {
         .await
         .expect("where_not_exists runs")
         .into_vec();
-    let expected = raw(
-        "SELECT * FROM pj_users \
+    let expected = raw("SELECT * FROM pj_users \
          WHERE NOT EXISTS (SELECT 1 FROM pj_posts WHERE pj_posts.author_id = pj_users.id) \
-         ORDER BY pj_users.id ASC",
-    )
+         ORDER BY pj_users.id ASC")
     .await;
     let without_posts = json_rows(without_posts);
     assert_eq!(without_posts, expected, "the builder and raw SQL disagree");
@@ -245,19 +251,14 @@ async fn join_closure_combines_on_and_where(_fx: &Fixture) {
         .await
         .expect("closure join runs")
         .into_vec();
-    let expected = raw(
-        "SELECT pj_posts.title, pj_users.name FROM pj_posts \
+    let expected = raw("SELECT pj_posts.title, pj_users.name FROM pj_posts \
          INNER JOIN pj_users ON pj_users.id = pj_posts.author_id \
          AND (pj_posts.views > 40 OR pj_users.name = 'Ada') \
-         ORDER BY pj_posts.id ASC",
-    )
+         ORDER BY pj_posts.id ASC")
     .await;
     let built = json_rows(built);
     assert_eq!(built, expected, "the builder and raw SQL disagree");
-    assert_eq!(
-        column(&built, "title"),
-        vec![json!("Beta"), json!("Gamma")]
-    );
+    assert_eq!(column(&built, "title"), vec![json!("Beta"), json!("Gamma")]);
 
     let either_key = DB::table("pj_posts")
         .join_with("pj_categories", |join| {
@@ -271,12 +272,10 @@ async fn join_closure_combines_on_and_where(_fx: &Fixture) {
         .await
         .expect("or_on join runs")
         .into_vec();
-    let expected = raw(
-        "SELECT pj_posts.title, pj_categories.name FROM pj_posts \
+    let expected = raw("SELECT pj_posts.title, pj_categories.name FROM pj_posts \
          INNER JOIN pj_categories ON (pj_categories.id = pj_posts.category_id \
          OR pj_categories.id = pj_posts.author_id) \
-         ORDER BY pj_posts.id ASC, pj_categories.id ASC",
-    )
+         ORDER BY pj_posts.id ASC, pj_categories.id ASC")
     .await;
     let either_key = json_rows(either_key);
     assert_eq!(either_key, expected, "the builder and raw SQL disagree");
@@ -302,10 +301,8 @@ async fn join_kinds(_fx: &Fixture) {
         .await
         .expect("inner join runs")
         .into_vec();
-    let expected = raw(
-        "SELECT pj_posts.title, u.name AS author FROM pj_posts \
-         INNER JOIN pj_users AS u ON u.id = pj_posts.author_id ORDER BY pj_posts.id ASC",
-    )
+    let expected = raw("SELECT pj_posts.title, u.name AS author FROM pj_posts \
+         INNER JOIN pj_users AS u ON u.id = pj_posts.author_id ORDER BY pj_posts.id ASC")
     .await;
     let inner = json_rows(inner);
     assert_eq!(inner, expected);
@@ -328,11 +325,9 @@ async fn join_kinds(_fx: &Fixture) {
         .await
         .expect("right join runs")
         .into_vec();
-    let expected = raw(
-        "SELECT pj_categories.name, pj_posts.title FROM pj_posts \
+    let expected = raw("SELECT pj_categories.name, pj_posts.title FROM pj_posts \
          RIGHT JOIN pj_categories ON pj_categories.id = pj_posts.category_id \
-         ORDER BY pj_categories.id ASC, pj_posts.id ASC",
-    )
+         ORDER BY pj_categories.id ASC, pj_posts.id ASC")
     .await;
     let right = json_rows(right);
     assert_eq!(right, expected);
@@ -344,7 +339,10 @@ async fn join_kinds(_fx: &Fixture) {
 
     let cross = DB::table("pj_statuses")
         .cross_join("pj_categories")
-        .select(["pj_statuses.name as status", "pj_categories.name as category"])
+        .select([
+            "pj_statuses.name as status",
+            "pj_categories.name as category",
+        ])
         .order_by_asc("pj_statuses.id")
         .order_by_asc("pj_categories.id")
         .get()
@@ -379,12 +377,10 @@ async fn join_kinds(_fx: &Fixture) {
         .await
         .expect("join_sub runs")
         .into_vec();
-    let expected = raw(
-        "SELECT pj_users.name FROM pj_users \
+    let expected = raw("SELECT pj_users.name FROM pj_users \
          INNER JOIN (SELECT author_id, COUNT(*) AS post_count FROM pj_posts GROUP BY author_id) \
          AS counts ON counts.author_id = pj_users.id WHERE counts.post_count >= 2 \
-         ORDER BY pj_users.id ASC",
-    )
+         ORDER BY pj_users.id ASC")
     .await;
     let busy_authors = json_rows(busy_authors);
     assert_eq!(busy_authors, expected);
@@ -422,14 +418,12 @@ async fn bound_values_keep_their_positions(_fx: &Fixture) {
         .await
         .expect("a statement binding in four places runs")
         .into_vec();
-    let expected = raw(
-        "SELECT pj_statuses.name FROM pj_statuses \
+    let expected = raw("SELECT pj_statuses.name FROM pj_statuses \
          LEFT JOIN (SELECT status_id, COUNT(*) AS large FROM pj_orders WHERE total >= 15 \
          GROUP BY status_id) AS big ON big.status_id = pj_statuses.id AND big.large >= 1 \
          WHERE EXISTS (SELECT 1 FROM pj_categories WHERE pj_categories.name = 'Rust') \
          AND pj_statuses.name <> 'open' AND big.status_id IS NOT NULL \
-         ORDER BY pj_statuses.id ASC",
-    )
+         ORDER BY pj_statuses.id ASC")
     .await;
     let built = json_rows(built);
     assert_eq!(built, expected, "the builder and raw SQL disagree");
@@ -584,7 +578,12 @@ async fn a_join_observes_every_table_it_reads() {
     let report = Collector::scope(async {
         begin_handler();
         DB::table("pj_posts")
-            .join("pj_users as authors", "authors.id", "=", "pj_posts.author_id")
+            .join(
+                "pj_users as authors",
+                "authors.id",
+                "=",
+                "pj_posts.author_id",
+            )
             .left_join_sub(
                 DB::table("pj_orders").select(["status_id"]),
                 "o",
@@ -593,7 +592,10 @@ async fn a_join_observes_every_table_it_reads() {
                 "pj_posts.id",
             )
             .where_exists(DB::table("pj_statuses").select_raw("1"))
-            .where_in("pj_posts.category_id", DB::table("pj_categories").select(["id"]))
+            .where_in(
+                "pj_posts.category_id",
+                DB::table("pj_categories").select(["id"]),
+            )
             .get()
             .await
             .expect("the statement runs");
@@ -619,7 +621,12 @@ async fn a_join_observes_every_table_it_reads() {
 async fn invalid_join_identifiers_fail_before_any_sql_runs() {
     let _fx = seeded_sqlite().await;
     let bad_table = DB::table("pj_posts")
-        .join("pj_users; DROP TABLE pj_posts", "pj_users.id", "=", "pj_posts.author_id")
+        .join(
+            "pj_users; DROP TABLE pj_posts",
+            "pj_users.id",
+            "=",
+            "pj_posts.author_id",
+        )
         .get()
         .await;
     assert!(bad_table.is_err(), "an injected table name must be refused");
@@ -637,10 +644,18 @@ async fn invalid_join_identifiers_fail_before_any_sql_runs() {
     assert!(bad_column.is_err(), "an injected column must be refused");
 
     let bad_operator = DB::table("pj_posts")
-        .join("pj_users", "pj_users.id", "= 1 OR 1 =", "pj_posts.author_id")
+        .join(
+            "pj_users",
+            "pj_users.id",
+            "= 1 OR 1 =",
+            "pj_posts.author_id",
+        )
         .get()
         .await;
-    assert!(bad_operator.is_err(), "an operator outside the allowlist must be refused");
+    assert!(
+        bad_operator.is_err(),
+        "an operator outside the allowlist must be refused"
+    );
 
     let bad_sub_alias = DB::table("pj_posts")
         .join_sub(
@@ -652,13 +667,19 @@ async fn invalid_join_identifiers_fail_before_any_sql_runs() {
         )
         .get()
         .await;
-    assert!(bad_sub_alias.is_err(), "a malformed subquery alias must be refused");
+    assert!(
+        bad_sub_alias.is_err(),
+        "a malformed subquery alias must be refused"
+    );
 
     let bad_inner = DB::table("pj_users")
         .where_exists(DB::table("pj_posts").where_column("pj_posts.author_id", "1=1; --"))
         .get()
         .await;
-    assert!(bad_inner.is_err(), "the subquery is validated like the outer query");
+    assert!(
+        bad_inner.is_err(),
+        "the subquery is validated like the outer query"
+    );
 
     let posts = DB::table("pj_posts").count().await.expect("count");
     assert_eq!(posts, 4, "nothing ran");
