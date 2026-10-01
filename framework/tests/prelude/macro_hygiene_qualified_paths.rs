@@ -67,6 +67,15 @@ mod hygiene_inside_shadow {
     pub async fn create(_req: HygCreateUser) -> Result<HttpResponse, ::suprnova::FrameworkError> {
         json_response!({ "ok": true })
     }
+
+    // `#[authorize]` - exercises the gate-check emission, both forms, and
+    // the attribute handing itself back below `#[handler]`.
+    #[::suprnova::authorize("view", HygUser)]
+    #[handler]
+    #[::suprnova::authorize("show", id)]
+    pub async fn guarded(id: i64) -> Result<HttpResponse, ::suprnova::FrameworkError> {
+        json_response!({ "id": id })
+    }
 }
 
 #[test]

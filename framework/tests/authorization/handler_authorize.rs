@@ -183,7 +183,9 @@ pub async fn show(post: RouteParam<HaPost>) -> Response {
 #[handler]
 #[authorize("update", post)]
 pub async fn update(post: RouteParam<HaPost>) -> Response {
-    post.into_inner().update(attrs! { title: "changed" }).await?;
+    post.into_inner()
+        .update(attrs! { title: "changed" })
+        .await?;
     text("updated")
 }
 
@@ -343,7 +345,10 @@ async fn denied_user_gets_403_and_the_body_never_runs() {
     let (status, body) = send(addr, "PUT", "/posts/1", Some(STRANGER), None).await;
 
     assert_eq!(status, 403, "body: {body}");
-    assert!(body.contains("This action is unauthorized."), "body: {body}");
+    assert!(
+        body.contains("This action is unauthorized."),
+        "body: {body}"
+    );
     assert_eq!(title_of(1).await, "open", "the handler body must not run");
 }
 
@@ -421,10 +426,24 @@ async fn type_form_authorizes_against_the_model_type() {
     let (_db, addr) = boot().await;
 
     assert_eq!(
-        send(addr, "POST", "/posts", Some(AUTHOR), Some(r#"{"title":"new"}"#)).await,
+        send(
+            addr,
+            "POST",
+            "/posts",
+            Some(AUTHOR),
+            Some(r#"{"title":"new"}"#)
+        )
+        .await,
         (200, "stored new".to_string())
     );
-    let (status, body) = send(addr, "POST", "/posts", Some(STRANGER), Some(r#"{"title":"new"}"#)).await;
+    let (status, body) = send(
+        addr,
+        "POST",
+        "/posts",
+        Some(STRANGER),
+        Some(r#"{"title":"new"}"#),
+    )
+    .await;
     assert_eq!(status, 403, "body: {body}");
     let (status, body) = send(addr, "POST", "/posts", None, Some(r#"{"title":"new"}"#)).await;
     assert_eq!(status, 401, "body: {body}");

@@ -22,11 +22,24 @@
 //! Rejected at expansion (clear macro error):
 //! - two or more `FormRequest` params
 //! - `Request` plus any `FormRequest` param
+//!
+//! ## `#[authorize]`
+//!
+//! The macro applies every `#[authorize(...)]` on the function (parsed in
+//! `authorize.rs`). Without one, the extractions run in declaration order,
+//! as always. With one, the route-bound extractions (`Primitive`, `Model`)
+//! run first, then one gate check per attribute in the order written, then
+//! the body-consuming extraction, then the body. That is the order of
+//! Laravel's `SubstituteBindings` and `can` middleware ahead of a form
+//! request: the check sees the bound model, a missing model is a 404 before
+//! the check, and a denied request never reaches validation.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{FnArg, ItemFn, Pat, Type};
+use syn::{FnArg, Ident, ItemFn, Pat, PatType, Type};
+
+use crate::authorize::{AuthorizeSpec, Target, is_authorize_attr, parse_spec};
 
 /// Parameter classification for extraction strategy
 enum ParamKind {
@@ -86,17 +99,29 @@ pub fn handler_impl(_attr: TokenStream, input: TokenStream) -> TokenStream {
 /// on the rendered output - the host `proc_macro::TokenStream` cannot be
 /// constructed outside a real macro-expansion context.
 fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
-    let input_fn: ItemFn = match syn::parse2(input) {
+    let mut input_fn: ItemFn = match syn::parse2(input) {
         Ok(f) => f,
         Err(e) => return e.to_compile_error(),
     };
+
+    // `#[authorize]` attributes are applied here, so take them off the
+    // function: left on, each would expand on its own.
+    let (authorize_attrs, fn_attrs): (Vec<_>, Vec<_>) = std::mem::take(&mut input_fn.attrs)
+        .into_iter()
+        .partition(is_authorize_attr);
+    let mut specs = Vec::with_capacity(authorize_attrs.len());
+    for attr in &authorize_attrs {
+        match parse_spec(attr) {
+            Ok(spec) => specs.push(spec),
+            Err(e) => return e.to_compile_error(),
+        }
+    }
 
     let fn_vis = &input_fn.vis;
     let fn_name = &input_fn.sig.ident;
     let fn_generics = &input_fn.sig.generics;
     let fn_output = &input_fn.sig.output;
     let fn_block = &input_fn.block;
-    let fn_attrs = &input_fn.attrs;
 
     let is_async = input_fn.sig.asyncness.is_some();
     let async_token = if is_async {
@@ -105,18 +130,18 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
         quote! {}
     };
 
+    if let Some(first) = authorize_attrs.first()
+        && !is_async
+    {
+        return syn::Error::new_spanned(
+            first,
+            "#[authorize] needs an `async fn` handler: the check awaits the gate",
+        )
+        .to_compile_error();
+    }
+
     // Collect all parameters
     let params: Vec<_> = input_fn.sig.inputs.iter().collect();
-
-    // Handle no parameters case
-    if params.is_empty() {
-        return quote! {
-            #(#fn_attrs)*
-            #fn_vis #async_token fn #fn_name #fn_generics(_: ::suprnova::Request) #fn_output {
-                #fn_block
-            }
-        };
-    }
 
     // First pass: classify every param and count the body-consuming
     // extractors so we can reject `Request` + `FormRequest` /
@@ -144,6 +169,22 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
         classifications.push((pat_type, kind));
     }
 
+    let checks = match authorize_checks(&specs, &classifications, fn_name) {
+        Ok(checks) => checks,
+        Err(e) => return e.to_compile_error(),
+    };
+
+    // Handle no parameters case
+    if params.is_empty() {
+        return quote! {
+            #(#fn_attrs)*
+            #fn_vis #async_token fn #fn_name #fn_generics(_: ::suprnova::Request) #fn_output {
+                #(#checks)*
+                #fn_block
+            }
+        };
+    }
+
     if request_consumer_count > 1 {
         // Point the diagnostic at the most-recent offending parameter so
         // the user's eye lands somewhere meaningful in the signature.
@@ -160,17 +201,20 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
     }
 
     // Second pass: emit extractions now that we know the signature is legal.
+    // With checks, the body-consuming extraction waits until they pass (see
+    // the module docs); without, every extraction keeps its place.
     let mut extractions = Vec::with_capacity(classifications.len());
+    let mut body_extractions = Vec::new();
     for (pat_type, kind) in &classifications {
         let param_pat = &pat_type.pat;
         let param_type = &pat_type.ty;
         let param_name = extract_param_name(param_pat);
-        extractions.push(generate_extraction(
-            param_pat,
-            param_type,
-            &param_name,
-            kind,
-        ));
+        let extraction = generate_extraction(param_pat, param_type, &param_name, kind);
+        if !checks.is_empty() && reads_body(kind) {
+            body_extractions.push(extraction);
+        } else {
+            extractions.push(extraction);
+        }
     }
 
     quote! {
@@ -178,9 +222,75 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
         #fn_vis #async_token fn #fn_name #fn_generics(__suprnova_req: ::suprnova::Request) #fn_output {
             let __suprnova_params = __suprnova_req.params().clone();
             #(#extractions)*
+            #(#checks)*
+            #(#body_extractions)*
             #fn_block
         }
     }
+}
+
+/// Whether an extraction of this kind consumes the request.
+fn reads_body(kind: &ParamKind) -> bool {
+    matches!(kind, ParamKind::Request | ParamKind::FormRequest)
+}
+
+/// Emit one gate check per `#[authorize]`, in the order written.
+///
+/// A parameter target must be a parameter of the handler, bound by an
+/// identifier pattern, that the route supplies; anything else is a
+/// compile error spanned on the name in the attribute.
+fn authorize_checks(
+    specs: &[AuthorizeSpec],
+    classifications: &[(&PatType, ParamKind)],
+    fn_name: &Ident,
+) -> syn::Result<Vec<TokenStream2>> {
+    specs
+        .iter()
+        .map(|spec| {
+            let ability = &spec.ability;
+            let name = match &spec.target {
+                Target::Type(ty) => {
+                    return Ok(quote! {
+                        ::suprnova::authorization::__authorize_handler_type::<#ty>(#ability).await?;
+                    });
+                }
+                Target::Param(name) => name,
+            };
+            let found = classifications.iter().find(
+                |(pat_type, _)| matches!(&*pat_type.pat, Pat::Ident(pat) if pat.ident == *name),
+            );
+            let Some((pat_type, kind)) = found else {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    format!(
+                        "#[authorize] names `{name}`, but `{fn_name}` takes no parameter \
+                         named `{name}`; name a parameter the route binds, written \
+                         as `{name}: RouteParam<Model>`"
+                    ),
+                ));
+            };
+            if reads_body(kind) {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    format!(
+                        "#[authorize] cannot check `{name}`: it reads the request body, \
+                         and the check runs before the body is read; name a route-bound \
+                         model (`RouteParam<M>` or `...::Model`) or a path parameter"
+                    ),
+                ));
+            }
+            // A `RouteParam<M>` is checked as the `M` inside it, the type
+            // its policy is registered for.
+            let resource = if is_route_param(&pat_type.ty) {
+                quote! { ::core::ops::Deref::deref(&#name) }
+            } else {
+                quote! { &#name }
+            };
+            Ok(quote! {
+                ::suprnova::authorization::__authorize_handler(#ability, #resource).await?;
+            })
+        })
+        .collect()
 }
 
 /// Extract the parameter name as a string from the pattern
@@ -231,9 +341,7 @@ fn classify_param_type(ty: &Type) -> ParamKind {
             // Routes through M::find (Eloquent's CRUD entrypoint) so
             // global scopes, soft-delete filter, and per-model
             // connection apply. See `suprnova::RouteParam` rustdoc.
-            if let Some(last_segment) = segments.last()
-                && last_segment.ident == "RouteParam"
-            {
+            if is_route_param(ty) {
                 return ParamKind::Model;
             }
 
@@ -242,6 +350,12 @@ fn classify_param_type(ty: &Type) -> ParamKind {
         }
         _ => ParamKind::FormRequest,
     }
+}
+
+/// Whether `ty` is the scoped binding wrapper `RouteParam<M>`.
+fn is_route_param(ty: &Type) -> bool {
+    matches!(ty, Type::Path(type_path)
+        if type_path.path.segments.last().is_some_and(|last| last.ident == "RouteParam"))
 }
 
 /// Check if a type name is a primitive that should use FromParam

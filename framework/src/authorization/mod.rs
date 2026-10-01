@@ -51,10 +51,13 @@
 //! ```
 
 mod gate;
+mod handler;
 mod registry;
 mod response;
 
 pub use gate::Gate;
+#[doc(hidden)]
+pub use handler::{__authorize_handler, __authorize_handler_type};
 pub use response::Response;
 
 /// User-side ergonomic shim for [`Gate`]: `user.can(action, &resource)`
