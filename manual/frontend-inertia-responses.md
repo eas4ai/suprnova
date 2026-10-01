@@ -49,7 +49,8 @@ Three things to know:
   the actual filenames on disk. Nested paths work the same way -
   `inertia_response!(&req, "Admin/Dashboard", …)` resolves
   `frontend/src/pages/Admin/Dashboard.svelte` (or your frontend's
-  extension).
+  extension). A project with another page layout sets its own lookup in
+  `Cargo.toml`; see [Another page layout](frontend-pages.md#another-page-layout).
 - **The macro expands to an `await`ed `Result`.** Your handler must
   return [`Response`](error-model.md) (which is
   `Result<HttpResponse, HttpResponse>`) or another type that absorbs

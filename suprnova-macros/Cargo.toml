@@ -15,10 +15,14 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
 regex = "1"
+# Reads `[package.metadata.suprnova.inertia]` from the application crate's
+# manifest. Only parsing is needed, so the writer stays out.
+toml = { version = "1.1.2", default-features = false, features = ["std", "serde", "parse"] }
 
 [dev-dependencies]
 suprnova = { path = "../framework" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
 validator = { version = "0.20", features = ["derive"] }
 trybuild = "=1.0.120"
