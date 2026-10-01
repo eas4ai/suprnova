@@ -4,7 +4,6 @@
 #[path = "../support/common.rs"]
 mod common;
 
-pub mod file_responses;
 pub mod multipart_limits;
 pub mod precognition;
 pub mod redirect;

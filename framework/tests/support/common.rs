@@ -1,5 +1,4 @@
-//! Shared test helpers for request-body tests (multipart + generic) and
-//! for driving a genuine request through `handle_request`.
+//! Shared test helpers for request-body tests (multipart + generic).
 //!
 //! `hyper::body::Incoming` is privately constructed in hyper 1.x, so
 //! we can't build a synthetic `Request` with a `Full<Bytes>` body
@@ -87,61 +86,6 @@ async fn request_from_http_bytes(http_bytes: Vec<u8>) -> Request {
 
     req_rx
         .await
-        .expect("server should have received the request")
-}
-
-/// Build a genuine `hyper::Request<hyper::body::Incoming>` for a `GET`
-/// on `path` carrying `headers`, by parsing real HTTP/1.1 bytes through
-/// an in-memory `tokio::io::duplex` pipe rather than binding a TCP port.
-///
-/// This is the request `handle_request` takes, so a test can drive the
-/// real `Router` and `MiddlewareRegistry` chain the server runs per
-/// connection. The wait is bounded so a regression fails the test
-/// instead of hanging the suite.
-pub async fn incoming_get_request(
-    path: &str,
-    headers: &[(&str, &str)],
-) -> hyper::Request<hyper::body::Incoming> {
-    let mut http_bytes = Vec::new();
-    http_bytes.extend_from_slice(format!("GET {path} HTTP/1.1\r\n").as_bytes());
-    http_bytes.extend_from_slice(b"Host: localhost\r\n");
-    for (name, value) in headers {
-        http_bytes.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
-    }
-    http_bytes.extend_from_slice(b"\r\n");
-
-    let (req_tx, req_rx) = oneshot::channel::<hyper::Request<hyper::body::Incoming>>();
-    let req_tx = Mutex::new(Some(req_tx));
-
-    let (client_io, server_io) = tokio::io::duplex(http_bytes.len() + 64 * 1024);
-
-    tokio::spawn(async move {
-        let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-            if let Ok(mut guard) = req_tx.lock()
-                && let Some(tx) = guard.take()
-            {
-                let _ = tx.send(req);
-            }
-            // Never resolve - the caller only wants the parsed
-            // `Incoming` request, not a response over this connection.
-            // Returning `Ok` here would stop hyper from pumping any
-            // remaining body bytes (see `request_from_http_bytes`).
-            async {
-                std::future::pending::<()>().await;
-                Ok::<_, Infallible>(hyper::Response::new(http_body_util::Empty::<Bytes>::new()))
-            }
-        });
-        let _ = http1::Builder::new()
-            .serve_connection(TokioIo::new(server_io), svc)
-            .await;
-    });
-
-    let mut client = client_io;
-    client.write_all(&http_bytes).await.unwrap();
-
-    tokio::time::timeout(std::time::Duration::from_secs(5), req_rx)
-        .await
-        .expect("timed out building the incoming request")
         .expect("server should have received the request")
 }
 
