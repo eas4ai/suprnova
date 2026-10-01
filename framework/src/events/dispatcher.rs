@@ -419,6 +419,13 @@ impl EventDispatcher {
             Err(_) => return,
         };
 
+        // A spawned task starts without the task-local context, so the
+        // listener gets a snapshot of the dispatcher's, taken now. It works
+        // on a copy for the reason a queued job does: it may run after the
+        // request that dispatched the event has finished. Every attempt
+        // starts from the snapshot, as every attempt of a queued job does,
+        // so a retry never sees what the failed attempt wrote.
+        let context = crate::context::Context::dehydrate();
         let mut tasks = self.queued_tasks.lock().await;
         tasks.spawn(async move {
             let _permit = permit; // released when the task ends
@@ -430,10 +437,16 @@ impl EventDispatcher {
                 // and silently disappearing - see drain_queued's is_panic
                 // log for the defense-in-depth case where a panic somehow
                 // escapes this boundary.
-                let attempt_result = match AssertUnwindSafe(listener.dispatch(&event))
-                    .catch_unwind()
-                    .await
-                {
+                //
+                // Each attempt also runs in a container scope of its own,
+                // outermost, as each attempt of a queued job does: the
+                // listener is a unit of work, it does not share the scoped
+                // values of the dispatcher, and a retry never sees what
+                // the failed attempt built.
+                let dispatch =
+                    crate::context::Context::restored(context.clone(), listener.dispatch(&event));
+                let dispatch = crate::container::scope::run_in_new_scope(dispatch);
+                let attempt_result = match AssertUnwindSafe(dispatch).catch_unwind().await {
                     Ok(r) => r,
                     Err(payload) => Err(FrameworkError::internal(format!(
                         "queued listener panicked: {}",
@@ -1004,6 +1017,41 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    struct ContextReader(Arc<std::sync::Mutex<Option<String>>>);
+    #[async_trait]
+    impl Listener<QueuedPing> for ContextReader {
+        async fn handle(&self, _event: &QueuedPing) -> Result<(), FrameworkError> {
+            *self.0.lock().unwrap() = crate::context::Context::get::<String>("trace_id");
+            crate::context::Context::add("added_by_the_listener", true);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_queued_listener_reads_the_context_of_the_dispatch() {
+        let d = EventDispatcher::new();
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        d.listen::<QueuedPing, _>(Arc::new(ContextReader(seen.clone())))
+            .await;
+
+        crate::context::Context::scope(crate::context::ContextStore::default(), async {
+            crate::context::Context::add("trace_id", "abc");
+            d.dispatch(QueuedPing).await.unwrap();
+            assert_eq!(d.drain_queued(std::time::Duration::from_secs(5)).await, 0);
+            assert!(
+                !crate::context::Context::has("added_by_the_listener"),
+                "the listener works on a copy"
+            );
+        })
+        .await;
+
+        assert_eq!(
+            seen.lock().unwrap().as_deref(),
+            Some("abc"),
+            "the spawned listener ran without the dispatcher's context"
+        );
     }
 
     #[tokio::test]

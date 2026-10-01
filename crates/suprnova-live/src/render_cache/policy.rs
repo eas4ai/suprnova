@@ -532,13 +532,13 @@ impl RenderCachePolicy {
         {
             return Err(RenderCacheError::new(RenderCacheErrorKind::PolicyInvalid));
         }
-        // Fix round 5 rejected `FeatureVersion`, `ConfigVersion`, and
-        // `Application` here on the grounds that no host had a producer for
-        // them. Fix round 6 moved that rejection to the host's own
-        // `variance_descriptor` (see its doc): whether a producer exists is
-        // a fact about one host's implementation, not about this
-        // host-neutral crate's own extension point, and refusing it here
-        // made the engine learn about the host to justify the refusal.
+        // `FeatureVersion`, `ConfigVersion`, and `Application` are accepted
+        // here. Whether a producer exists for them is a fact about one
+        // host's implementation, not about this host-neutral crate's own
+        // extension point, and refusing them here would make the engine
+        // learn about the host to justify the refusal. A host with no
+        // producer refuses the policy itself: the framework does so when a
+        // route or a group registers the policy, and when it builds a key.
         //
         // Fix round 5's `PrivateCached`-with-empty-variance rule is fixed in
         // place rather than moved: checking mere non-emptiness let a

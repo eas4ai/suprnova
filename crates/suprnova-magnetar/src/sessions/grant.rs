@@ -92,7 +92,6 @@ impl SessionGrant {
         )
     }
 
-    #[allow(dead_code)]
     pub(crate) fn new_at(
         session_id: String,
         user_id: String,
@@ -177,13 +176,11 @@ impl SessionGrant {
     }
 
     /// Internal digest used by persistence adapters at issuance.
-    #[allow(dead_code)]
     pub(crate) fn token_digest(&self) -> [u8; 32] {
         self.token_digest
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn digest_secret(value: &SecretString) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(value.expose_secret().as_bytes());

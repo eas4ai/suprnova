@@ -36,8 +36,8 @@ if !ok {
 
 | Driver | Storage | Selected via |
 |--------|---------|--------------|
-| `InMemoryRateLimiter` | Per-process `HashMap<String, Bucket>` with `tokio::time::Instant` so `start_paused` tests can drive the clock | `RATE_LIMIT_DRIVER=memory` (default) |
-| `RedisRateLimiter` | Redis ZSET + Lua atomic check-and-record | `RATE_LIMIT_DRIVER=redis` + `RATE_LIMIT_REDIS_URL` |
+| `InMemoryRateLimiter` | Per-process `HashMap<String, Bucket>` with `tokio::time::Instant` so `start_paused` tests can drive the clock (it does not follow `TestClock`) | `RATE_LIMIT_DRIVER=memory` (default) |
+| `RedisRateLimiter` | Redis ZSET + Lua atomic check-and-record; it reads `suprnova::clock::now()`, so `TestClock` moves its window ([Moving the clock](testing.md#moving-the-clock)) | `RATE_LIMIT_DRIVER=redis` + `RATE_LIMIT_REDIS_URL` |
 
 `bootstrap_from_env()` wires the matching driver into the container. Outside production an unknown driver value falls back to memory with a `warn!` log.
 
@@ -110,6 +110,74 @@ let mw = RateLimitMiddleware::new(
 ```
 
 On rejection (over quota) it returns HTTP 429 with a `Retry-After` header.
+
+### Per-address limit with `ip_based`
+
+`RateLimitMiddleware::ip_based(max_requests, window)` allows each client address `max_requests` requests in `window`. It is the limit a login form or a public API needs, and it takes no key function and no driver:
+
+```rust
+use std::time::Duration;
+use suprnova::rate_limit::RateLimitMiddleware;
+
+let twenty_a_minute = RateLimitMiddleware::ip_based(20, Duration::from_secs(60));
+```
+
+The arguments are a `u32` request count and a `Duration`. Three details matter:
+
+- **The driver is the installed one.** The middleware uses the rate limiter your application installed, which `RATE_LIMIT_DRIVER` selects. It looks the limiter up when a request arrives, so you can build the middleware where you register routes, before the drivers boot. When no limiter is installed the lookup fails as a backend error, and [the backend-error policy](#backend-error-policy) decides what the request gets.
+- **The key names the address and the limit.** The address is [`Request::ip()`](requests.md#host-scheme-ip), which resolves through the trusted proxies. The key also carries the limit's numbers, so two limits with different numbers never share a bucket. Two limits with the same numbers share one, so the budget belongs to the client, whichever route spends it.
+- **A request with no address gets a bucket of its own.** One shared bucket for all such requests would let one caller use it up and lock the others out. Every request the server accepts has a peer address, so only an in-process request has none.
+
+`.on_backend_error(...)`, `.only_when(...)` and `.key_reads_body(...)` chain onto it as they do onto `RateLimitMiddleware::new`. Set up [`APP_TRUSTED_PROXIES`](#the-client-address-behind-a-proxy) before you deploy behind a proxy, or every client shares one bucket.
+
+### Capping open connections with `connections_per_ip`
+
+`ip_based` counts how often a client asks. It does not count what a client holds. A WebSocket is asked for once and then stays open, so a client that opens sockets and keeps them can use all the connections the server accepts. `RateLimitMiddleware::connections_per_ip(max)` gives each client address `max` open connections and refuses the next one with `429 Too Many Requests`. Put it on a WebSocket route:
+
+```rust
+use suprnova::rate_limit::RateLimitMiddleware;
+use suprnova::ws;
+
+ws!("/ws/broadcast", Broadcast).middleware(RateLimitMiddleware::connections_per_ip(100));
+```
+
+It returns a `ConnectionsPerIp`, which is a `Middleware`. What it counts and how it answers:
+
+- **What is counted on a WebSocket route.** A socket counts from the moment the middleware lets the upgrade pass until the session of the socket ends, which is when the handler has returned and the close handshake is done. If a later middleware refuses the upgrade, the place is given back at once. A peer that vanishes without closing holds its place until the handler notices, which is when a read or a write on the socket fails.
+- **What is counted on any other route.** A request, while it is handled. The place is given back when the handler drops or consumes the request, and reading the body consumes it. A connection that is kept alive and idle is not counted, and a streamed response, such as server-sent events, outlives its place. Use this cap for WebSocket routes.
+- **The answer.** A request over the cap gets status `429` with the body `429 Too Many Requests`. It carries no `Retry-After` header, because nothing says when a socket will close.
+- **The counts are per process.** They are kept in the memory of one process, which is the right place: the sockets an address holds in a process are what that process runs out of. Behind several replicas each replica counts for itself, so the cap for one address is `max` for each replica.
+- **IPv6 addresses count by /64.** An IPv4 address counts by itself. An IPv6 address counts with its /64 network, because a subscriber line gets a /64 or more and a count for each of its addresses would be no cap. An IPv4 address written in IPv6 form, `::ffff:203.0.113.1`, counts as the IPv4 address.
+- **The address is `Request::ip()`.** It reads the forwarded headers of a trusted proxy and of nobody else. A request with no address to resolve is not counted. If you run your own accept loop, pass the peer address with `suprnova::server::handle_request_with_peer`. Through `handle_request` no request has an address, and nothing is capped.
+
+A clone of a `ConnectionsPerIp` shares its counts, so one cap can guard several routes. `open_for(address)` returns the connections an address holds through the cap right now, counted by /64 for IPv6, which is useful in a test or a diagnostic.
+
+The middleware counts through `Request::hold_for_connection(hold)`. That method takes a guard value whose `Drop` gives the place back, and keeps it on the request. For a WebSocket upgrade the server moves the guards into the task that runs the socket and drops them when the task ends. For any other request they drop with the request. Use it in your own middleware when you take something that a connection has to give back:
+
+```rust
+use suprnova::{async_trait, Middleware, Next, Request, Response};
+
+struct Slot(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct CountOpen(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait]
+impl Middleware for CountOpen {
+    async fn handle(&self, mut request: Request, next: Next) -> Response {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        request.hold_for_connection(Slot(self.0.clone()));
+        next(request).await
+    }
+}
+```
+
+`hold_for_connection` needs `&mut Request` and a value that is `Send + Sync + 'static`.
 
 ### Limiting per recipient, not just per caller
 
@@ -293,10 +361,13 @@ let l = Limit::per_minute(5)
 
 ## `ThrottleRequestsMiddleware`
 
-HTTP wrapper around the Cache-backed facade. Mirrors `Illuminate\Routing\Middleware\ThrottleRequests`. Three constructors:
+HTTP wrapper around the Cache-backed facade. Mirrors `Illuminate\Routing\Middleware\ThrottleRequests`. Four constructors:
 
 ```rust
 use suprnova::{Limit, ThrottleRequestsMiddleware};
+
+// The default limit - 60 requests a minute; see below.
+ThrottleRequestsMiddleware::default();
 
 // Named limiter - resolves at request time via RateLimiter::limiter(name).
 ThrottleRequestsMiddleware::by_name("api");
@@ -310,6 +381,41 @@ ThrottleRequestsMiddleware::with_limits(vec![
     Limit::per_minute(60).by("user:1"),
 ]);
 ```
+
+`.prefix(...)` sets a key prefix on any of them.
+
+### The default limit
+
+`ThrottleRequestsMiddleware::default()` allows 60 requests a minute. The constants `DEFAULT_MAX_ATTEMPTS` (`60`) and `DEFAULT_DECAY_SECONDS` (`60`) hold the numbers. It is the shape of Laravel's default `api` limiter: `Limit::perMinute(60)->by($request->user()?->id ?: $request->ip())`.
+
+The bucket is one for each signed-in user, and one for each client address when nobody is signed in. The two are spelled apart, as `user:<id>` and `ip:<address>`, so a user whose id reads like an address shares no bucket with it. The user's bucket follows the user across routes and across addresses, and the address's bucket is shared by every route, as in Laravel. `with(...)` differs: it counts per address and per path. Use `.prefix(...)` to give a group of routes a budget of its own.
+
+The user is the one the default guard signed in. Run the session middleware before this one, or a signed-in user counts as an address. The address is `Request::ip()`, so [the trusted proxies](#the-client-address-behind-a-proxy) apply.
+
+### Named aliases
+
+A route can name a throttle instead of building one. `ThrottleRequestsMiddleware::from_alias_args` reads the arguments of the alias the way Laravel reads `throttle:60,1`. Register it once at boot, then name it on routes with `.middleware_named(...)`:
+
+```rust
+use suprnova::middleware::register_middleware_alias_with_args;
+use suprnova::{Router, ThrottleRequestsMiddleware};
+
+register_middleware_alias_with_args("throttle", ThrottleRequestsMiddleware::from_alias_args);
+
+let router = Router::new()
+    .post("/login", login)
+    .middleware_named("throttle:5,1");
+```
+
+| A route writes | It gets |
+|---|---|
+| `throttle` | `ThrottleRequestsMiddleware::default()` |
+| `throttle:60` | 60 requests a minute, as `with(60, 1, "")` |
+| `throttle:60,5` | 60 requests in 5 minutes |
+| `throttle:60,5,uploads` | the same, with the key prefix `uploads` |
+| `throttle:api` | the limiter named `api`, as `by_name("api")` |
+
+A first argument that is not a number names a limiter, and a limiter takes no further arguments. The alias refuses a number that does not parse, a limit or a window of zero, and more than three arguments. The route that names it then fails to register. See [Middleware](middleware.md#named-aliases-and-groups) for how names resolve.
 
 Wire it into a route group:
 
@@ -328,23 +434,34 @@ let router = Router::new()
     .middleware(ThrottleRequestsMiddleware::by_name("api"));
 ```
 
-### Key on `req.ip()`, never on the header
+### The client address behind a proxy
 
-`X-Forwarded-For` is caller-supplied. A limiter keyed on the raw header is
-defeated by sending a different value on each request - the attacker picks
-their own bucket, so the quota is per-request rather than per-client.
+Key a limit on `req.ip()`, never on the header. `X-Forwarded-For` is caller-supplied. A limiter keyed on the raw header is defeated by sending a different value on each request - the attacker picks their own bucket, so the quota is per-request rather than per-client.
 
-`Request::ip()` is the safe read. It returns `X-Forwarded-For` / `X-Real-IP`
-**only when the TCP peer is listed in `APP_TRUSTED_PROXIES`**, and otherwise
-the peer address, so a header from anyone but your own proxy is ignored.
+`Request::ip()` is the safe read. It returns the TCP peer address unless the peer is listed in `APP_TRUSTED_PROXIES`. When the peer is a trusted proxy, `req.ip()` reads the client address from the **right** of `X-Forwarded-For`:
 
-The corollary matters as much: with that variable unset - the default -
-`req.ip()` behind a terminating proxy returns *the proxy's* address on every
-request, and every per-IP limit in the app collapses into a single shared
-bucket. `ThrottleRequestsMiddleware::with(20, 1, "login")` then means 20
-attempts a minute across all users combined, which any one caller can spend
-to lock everybody out. Deploying behind nginx, Traefik, an ALB or Cloudflare
-means setting [`APP_TRUSTED_PROXIES`](env-vars.md#behind-a-reverse-proxy-set-app_trusted_proxies).
+1. It starts at the rightmost entry, which the peer wrote.
+2. It skips each entry that is a trusted proxy.
+3. It returns the first entry that is not a trusted proxy. That entry is the client. Nothing to its left was written by a proxy you trust.
+
+Every proxy hop must be in the list. A proxy adds the address it saw to the right end of the header, and the client's own value stays at the left end. If a hop is missing from the list, `req.ip()` stops at that hop and takes it for the client, so every client behind it shares one address and one bucket. Behind a content delivery network in front of a proxy of your own, list the network's edge too.
+
+`APP_TRUSTED_PROXIES` takes addresses and ranges in CIDR form, separated by commas:
+
+```env
+APP_TRUSTED_PROXIES=10.0.0.5,173.245.48.0/20,2400:cb00::/32
+```
+
+Four more rules apply:
+
+- **A range must hold proxies and nothing else.** A client that connects from a listed range is believed like a proxy, and it writes the address `req.ip()` returns. The network of your cluster's pods and the range of a VPN have clients in them.
+- **`/0` is refused.** A range of every address, such as `0.0.0.0/0`, makes every client a trusted proxy. Boot fails on it, as it does on an entry that is neither an address nor a range.
+- **`X-Real-IP` is read only when there is no `X-Forwarded-For`.** With both headers present, `X-Real-IP` is ignored. A proxy that sets `X-Real-IP` and nothing else has to remove the client's `X-Forwarded-For` from the request.
+- **The proxy has to write the header.** A proxy that adds to `X-Forwarded-For` or replaces it is a proxy to list. A proxy that passes the client's header on unchanged is not, because the client then writes all of it. The `Forwarded` header of RFC 7239 is not read.
+
+An entry that is not an address, such as `unknown`, ends the walk, and `req.ip()` returns the proxy that wrote that entry. The clients of such a proxy share its address, and one limit.
+
+The corollary matters as much: with `APP_TRUSTED_PROXIES` unset - the default - `req.ip()` behind a terminating proxy returns *the proxy's* address on every request, and every per-IP limit in the app collapses into a single shared bucket. `ThrottleRequestsMiddleware::with(20, 1, "login")` then means 20 attempts a minute across all users combined, which any one caller can spend to lock everybody out. Deploying behind nginx, Traefik, an ALB or Cloudflare means setting [`APP_TRUSTED_PROXIES`](env-vars.md#behind-a-reverse-proxy-set-app_trusted_proxies). See [Requests](requests.md#host-scheme-ip) for the full order in which `ip()` reads the request.
 
 ### Response headers
 
@@ -401,8 +518,9 @@ The driver SPI is configured via environment variables; the Cache-backed facade 
 | `Limit::perMinute(60)->by($ip)->response(fn () => abort(429))` | `Limit::per_minute(60).by(ip).response(\|_\| HttpResponse::text("...").status(429))` |
 | `Limit::perMinutes(3, 100)` | `Limit::per_minutes(3, 100)` |
 | `Limit::none()` | `Limit::none()` |
-| `throttle:api` middleware | `ThrottleRequestsMiddleware::by_name("api")` |
-| `throttle:60,1` middleware | `ThrottleRequestsMiddleware::with(60, 1, "")` |
+| `throttle:api` middleware | `.middleware_named("throttle:api")` or `ThrottleRequestsMiddleware::by_name("api")` |
+| `throttle:60,1` middleware | `.middleware_named("throttle:60,1")` with `from_alias_args` registered, or `ThrottleRequestsMiddleware::with(60, 1, "")` |
+| `throttle` middleware (the default limit) | `ThrottleRequestsMiddleware::default()` |
 | `X-RateLimit-Limit/Remaining/Reset` + `Retry-After` headers | Same headers, same shape |
 
 ### Why Suprnova diverges

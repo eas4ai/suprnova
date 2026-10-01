@@ -33,7 +33,8 @@ pub struct Greet {
 impl TypedCommand for Greet {
     async fn run(self) -> Result<(), FrameworkError> {
         let prefix = if self.loud { "HELLO" } else { "Hello" };
-        println!("{prefix}, {name}!", name = self.name);
+        // `console::line`, not `println!`, so a test can read the greeting.
+        suprnova::console::line(format!("{prefix}, {name}!", name = self.name));
         Ok(())
     }
 }

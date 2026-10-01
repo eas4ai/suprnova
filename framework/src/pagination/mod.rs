@@ -5,6 +5,7 @@
 pub mod cursor;
 pub mod inertia;
 pub mod length_aware;
+pub mod links;
 pub mod simple;
 
 pub use cursor::{CursorDirection, CursorPaginator};
@@ -14,6 +15,7 @@ pub use cursor::{CursorDirection, CursorPaginator};
 use cursor::{finalize_page, plan_scan};
 pub use inertia::IntoInertiaScroll;
 pub use length_aware::LengthAwarePaginator;
+pub use links::PageLink;
 pub use simple::Paginator;
 
 use sea_orm::{ColumnTrait, EntityTrait, ModelTrait, QueryFilter, QueryOrder, QuerySelect, Select};
@@ -251,22 +253,126 @@ impl Pagination {
     }
 }
 
-/// Append a single `key=value` query pair to an optional base path,
-/// percent-encoding the pair. Shared by `LengthAwarePaginator::url_for_page`
-/// (numeric `page=N`) and the cursor paginator's JSON:API link builder
-/// (`cursor=<opaque>`), so both pick the separator the same way: `&` when
-/// the base already carries a query string, `?` otherwise, and a bare
-/// `?key=value` when there is no base path.
+/// The URL of one page: the base path with the pair `key=value` in its
+/// query string, percent-encoded. Shared by the three paginators and by
+/// the JSON:API link builder, so all of them build a URL the same way.
+///
+/// The base is used as it is written. What it has in its query string
+/// stays, in its order, so the filters of a listing are given with the
+/// path. A pair of the same key is taken out first: a base that is the
+/// URL of the current request has the current page in it, and the URL of
+/// the next page has one page and not two. A fragment stays at the end,
+/// behind the query string, where a browser reads it. With no base the
+/// URL is the bare `?key=value`.
 pub(crate) fn build_query_url(path: Option<&str>, key: &str, value: &str) -> String {
-    let pair = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair(key, value)
-        .finish();
-    match path {
-        Some(base) => {
-            let sep = if base.contains('?') { '&' } else { '?' };
-            format!("{base}{sep}{pair}")
+    let base = path.unwrap_or("");
+    let (base, fragment) = match base.split_once('#') {
+        Some((base, fragment)) => (base, Some(fragment)),
+        None => (base, None),
+    };
+    let (location, query) = base.split_once('?').unwrap_or((base, ""));
+
+    let mut url = String::with_capacity(base.len() + key.len() + value.len() + 4);
+    url.push_str(location);
+    url.push('?');
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let same_key = url::form_urlencoded::parse(pair.as_bytes())
+            .next()
+            .is_some_and(|(name, _)| name == key);
+        if !same_key {
+            url.push_str(pair);
+            url.push('&');
         }
-        None => format!("?{pair}"),
+    }
+    url.push_str(
+        &url::form_urlencoded::Serializer::new(String::new())
+            .append_pair(key, value)
+            .finish(),
+    );
+    if let Some(fragment) = fragment {
+        url.push('#');
+        url.push_str(fragment);
+    }
+    url
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::build_query_url;
+
+    #[test]
+    fn the_pair_is_the_query_string_of_a_base_that_has_none() {
+        assert_eq!(
+            build_query_url(Some("/users"), "page", "2"),
+            "/users?page=2"
+        );
+        assert_eq!(build_query_url(None, "page", "2"), "?page=2");
+        assert_eq!(
+            build_query_url(Some("/users/"), "page", "2"),
+            "/users/?page=2",
+            "the base is used as it is written"
+        );
+    }
+
+    #[test]
+    fn the_query_string_of_the_base_stays_in_its_order() {
+        assert_eq!(
+            build_query_url(Some("/users?role=admin&sort=-name"), "page", "2"),
+            "/users?role=admin&sort=-name&page=2"
+        );
+        assert_eq!(
+            build_query_url(Some("/users?q=a%20b&tag=x+y"), "page", "2"),
+            "/users?q=a%20b&tag=x+y&page=2",
+            "a pair of the base is not encoded a second time"
+        );
+        assert_eq!(
+            build_query_url(Some("?role=admin"), "page", "2"),
+            "?role=admin&page=2"
+        );
+    }
+
+    /// The base is often the URL of the current request, which has the
+    /// current page in it.
+    #[test]
+    fn a_pair_of_the_same_key_is_replaced() {
+        assert_eq!(
+            build_query_url(Some("/users?role=admin&page=3"), "page", "4"),
+            "/users?role=admin&page=4"
+        );
+        assert_eq!(
+            build_query_url(Some("/users?page=3&role=admin&page=9"), "page", "4"),
+            "/users?role=admin&page=4"
+        );
+        assert_eq!(
+            build_query_url(Some("/users?users%5Fpage=3"), "users_page", "4"),
+            "/users?users_page=4",
+            "the key is compared as it is read, not as it is written"
+        );
+        assert_eq!(
+            build_query_url(Some("/users?pages=3&page"), "page", "4"),
+            "/users?pages=3&page=4",
+            "a key that only begins the same stays, and a key with no value goes"
+        );
+    }
+
+    #[test]
+    fn a_fragment_stays_behind_the_query_string() {
+        assert_eq!(
+            build_query_url(Some("/users#list"), "page", "2"),
+            "/users?page=2#list"
+        );
+        assert_eq!(
+            build_query_url(Some("/users?role=admin#list"), "page", "2"),
+            "/users?role=admin&page=2#list"
+        );
+    }
+
+    #[test]
+    fn the_key_and_the_value_are_encoded() {
+        assert_eq!(
+            build_query_url(Some("/users"), "weird key", "a&b=c"),
+            "/users?weird+key=a%26b%3Dc"
+        );
     }
 }
 

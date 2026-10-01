@@ -43,7 +43,7 @@ impl Session {
     /// Returns whether the session has passed its expiry timestamp.
     #[must_use]
     pub fn is_expired(&self) -> bool {
-        Utc::now() > self.expires_at
+        crate::clock::now() > self.expires_at
     }
 }
 
@@ -125,7 +125,7 @@ impl SessionBuilder {
     ///
     /// Returns [`FrameworkError`] when no user identifier was supplied.
     pub fn build(self) -> Result<Session, FrameworkError> {
-        let now = Utc::now();
+        let now = crate::clock::now();
         let user_id = self
             .user_id
             .ok_or_else(|| FrameworkError::bad_request("a user identifier is required"))?;

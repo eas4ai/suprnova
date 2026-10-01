@@ -98,7 +98,10 @@ pub(crate) async fn take<State: DeserializeOwned>(
         .ok_or_else(missing)?;
     let plaintext = encryptor.decrypt(CryptoPurpose::CeremonyState, &record.payload)?;
     serde_json::from_slice(&plaintext).map_err(|error| Error::Internal {
-        message: format!("stored passkey ceremony is malformed: {error}"),
+        message: format!(
+            "stored passkey ceremony is malformed: {}",
+            crate::crypto::decode_failure(&error)
+        ),
     })
 }
 

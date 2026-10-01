@@ -175,14 +175,11 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
         match shape {
             FieldShape::FileScalar { validator } => {
                 let v_ident = quote::format_ident!("__v_{}", ident);
-                validator_decls.push(quote! {
-                    let #v_ident: #validator = <#validator as ::core::default::Default>::default();
-                });
-                validator_arms.push(quote! {
-                    #field_name_str => {
-                        <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, sniff, size)?;
-                    }
-                });
+                let (validator_decl, validator_arm) =
+                    validator_wiring(&validator, &v_ident, &field_name_str);
+                validator_decls.push(validator_decl);
+                validator_arms.push(validator_arm);
+                let uploaded_file = uploaded_file_from_backing(&validator);
                 field_arms.push(quote! {
                     #field_name_str => {
                         if let ::suprnova::http::upload::MultipartValue::File { backing, size, file_name, content_type, inferred_extension, sniff } = value {
@@ -191,16 +188,7 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                             )?;
                             if #ident.is_none() {
                                 #ident = ::core::option::Option::Some(
-                                    match backing {
-                                        ::suprnova::http::upload::UploadedFileBacking::Memory(b) =>
-                                            ::suprnova::http::upload::UploadedFile::<#validator>::from_memory(
-                                                b, file_name, content_type, inferred_extension,
-                                            ),
-                                        ::suprnova::http::upload::UploadedFileBacking::Disk(t) =>
-                                            ::suprnova::http::upload::UploadedFile::<#validator>::from_disk(
-                                                t, size, file_name, content_type, inferred_extension,
-                                            ),
-                                    }
+                                    #uploaded_file
                                 );
                             }
                         } else {
@@ -223,14 +211,11 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
             }
             FieldShape::FileOption { validator } => {
                 let v_ident = quote::format_ident!("__v_{}", ident);
-                validator_decls.push(quote! {
-                    let #v_ident: #validator = <#validator as ::core::default::Default>::default();
-                });
-                validator_arms.push(quote! {
-                    #field_name_str => {
-                        <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, sniff, size)?;
-                    }
-                });
+                let (validator_decl, validator_arm) =
+                    validator_wiring(&validator, &v_ident, &field_name_str);
+                validator_decls.push(validator_decl);
+                validator_arms.push(validator_arm);
+                let uploaded_file = uploaded_file_from_backing(&validator);
                 field_arms.push(quote! {
                     #field_name_str => {
                         if let ::suprnova::http::upload::MultipartValue::File { backing, size, file_name, content_type, inferred_extension, sniff } = value {
@@ -239,16 +224,7 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                             )?;
                             if #ident.is_none() {
                                 #ident = ::core::option::Option::Some(
-                                    match backing {
-                                        ::suprnova::http::upload::UploadedFileBacking::Memory(b) =>
-                                            ::suprnova::http::upload::UploadedFile::<#validator>::from_memory(
-                                                b, file_name, content_type, inferred_extension,
-                                            ),
-                                        ::suprnova::http::upload::UploadedFileBacking::Disk(t) =>
-                                            ::suprnova::http::upload::UploadedFile::<#validator>::from_disk(
-                                                t, size, file_name, content_type, inferred_extension,
-                                            ),
-                                    }
+                                    #uploaded_file
                                 );
                             }
                         }
@@ -261,14 +237,10 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
             }
             FieldShape::FileVec { validator } => {
                 let v_ident = quote::format_ident!("__v_{}", ident);
-                validator_decls.push(quote! {
-                    let #v_ident: #validator = <#validator as ::core::default::Default>::default();
-                });
-                validator_arms.push(quote! {
-                    #field_name_str => {
-                        <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, sniff, size)?;
-                    }
-                });
+                let (validator_decl, validator_arm) =
+                    validator_wiring(&validator, &v_ident, &field_name_str);
+                validator_decls.push(validator_decl);
+                validator_arms.push(validator_arm);
                 // `max_count` (when set) is enforced by the parser during
                 // streaming via `MultipartLimits::per_field_max_counts`: the
                 // (cap + 1)-th part with this name is rejected with 422
@@ -277,6 +249,7 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 if let Some(cap) = max_count {
                     max_count_entries.push(quote! { (#field_name_str, #cap) });
                 }
+                let uploaded_file = uploaded_file_from_backing(&validator);
                 field_arms.push(quote! {
                     #field_name_str => {
                         if let ::suprnova::http::upload::MultipartValue::File { backing, size, file_name, content_type, inferred_extension, sniff } = value {
@@ -284,16 +257,7 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                                 &#v_ident, &sniff, size, content_type.as_deref()
                             )?;
                             #ident.push(
-                                match backing {
-                                    ::suprnova::http::upload::UploadedFileBacking::Memory(b) =>
-                                        ::suprnova::http::upload::UploadedFile::<#validator>::from_memory(
-                                            b, file_name, content_type, inferred_extension,
-                                        ),
-                                    ::suprnova::http::upload::UploadedFileBacking::Disk(t) =>
-                                        ::suprnova::http::upload::UploadedFile::<#validator>::from_disk(
-                                            t, size, file_name, content_type, inferred_extension,
-                                        ),
-                                }
+                                #uploaded_file
                             );
                         }
                     }
@@ -304,19 +268,12 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 struct_init.push(quote! { #ident, });
             }
             FieldShape::TextScalar { inner_ty } => {
+                let parse_text = parse_text_field(&inner_ty, &field_name_str);
                 field_arms.push(quote! {
                     #field_name_str => {
                         if let ::suprnova::http::upload::MultipartValue::Text(s) = value {
                             if #ident.is_none() {
-                                let parsed = <#inner_ty as ::core::str::FromStr>::from_str(&s)
-                                    .map_err(|_| ::suprnova::FrameworkError::Domain {
-                                        message: format!(
-                                            "could not parse text field '{}' as {}",
-                                            #field_name_str,
-                                            ::core::stringify!(#inner_ty),
-                                        ),
-                                        status_code: 400,
-                                    })?;
+                                #parse_text
                                 #ident = ::core::option::Option::Some(parsed);
                             }
                         } else {
@@ -338,19 +295,12 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 });
             }
             FieldShape::TextOption { inner_ty } => {
+                let parse_text = parse_text_field(&inner_ty, &field_name_str);
                 field_arms.push(quote! {
                     #field_name_str => {
                         if let ::suprnova::http::upload::MultipartValue::Text(s) = value {
                             if #ident.is_none() {
-                                let parsed = <#inner_ty as ::core::str::FromStr>::from_str(&s)
-                                    .map_err(|_| ::suprnova::FrameworkError::Domain {
-                                        message: format!(
-                                            "could not parse text field '{}' as {}",
-                                            #field_name_str,
-                                            ::core::stringify!(#inner_ty),
-                                        ),
-                                        status_code: 400,
-                                    })?;
+                                #parse_text
                                 #ident = ::core::option::Option::Some(parsed);
                             }
                         }
@@ -370,18 +320,11 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 if let Some(cap) = max_count {
                     max_count_entries.push(quote! { (#field_name_str, #cap) });
                 }
+                let parse_text = parse_text_field(&inner_ty, &field_name_str);
                 field_arms.push(quote! {
                     #field_name_str => {
                         if let ::suprnova::http::upload::MultipartValue::Text(s) = value {
-                            let parsed = <#inner_ty as ::core::str::FromStr>::from_str(&s)
-                                .map_err(|_| ::suprnova::FrameworkError::Domain {
-                                    message: format!(
-                                        "could not parse text field '{}' as {}",
-                                        #field_name_str,
-                                        ::core::stringify!(#inner_ty),
-                                    ),
-                                    status_code: 400,
-                                })?;
+                            #parse_text
                             #ident.push(parsed);
                         }
                     }
@@ -468,6 +411,65 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
     };
 
     expanded
+}
+
+/// The `match backing { Memory => from_memory, Disk => from_disk }`
+/// expression that turns a parsed file part into an `UploadedFile`. It
+/// reads the `backing`, `size`, `file_name`, `content_type` and
+/// `inferred_extension` bindings that the file arms introduce, so every
+/// file shape builds the value the same way.
+fn uploaded_file_from_backing(validator: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    quote! {
+        match backing {
+            ::suprnova::http::upload::UploadedFileBacking::Memory(b) =>
+                ::suprnova::http::upload::UploadedFile::<#validator>::from_memory(
+                    b, file_name, content_type, inferred_extension,
+                ),
+            ::suprnova::http::upload::UploadedFileBacking::Disk(t) =>
+                ::suprnova::http::upload::UploadedFile::<#validator>::from_disk(
+                    t, size, file_name, content_type, inferred_extension,
+                ),
+        }
+    }
+}
+
+/// The validator instance declaration and the `validate_chunk` arm for
+/// one file field. The arm reads the `sniff` and `size` names of the
+/// chunk callback the caller emits.
+fn validator_wiring(
+    validator: &proc_macro2::TokenStream,
+    v_ident: &syn::Ident,
+    field_name_str: &str,
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    let decl = quote! {
+        let #v_ident: #validator = <#validator as ::core::default::Default>::default();
+    };
+    let arm = quote! {
+        #field_name_str => {
+            <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, sniff, size)?;
+        }
+    };
+    (decl, arm)
+}
+
+/// The `let parsed = ...?;` statement that parses a text part through
+/// `FromStr` and answers a parse failure with a 400. It reads the `s`
+/// binding of the `MultipartValue::Text(s)` pattern the caller emits.
+fn parse_text_field(
+    inner_ty: &proc_macro2::TokenStream,
+    field_name_str: &str,
+) -> proc_macro2::TokenStream {
+    quote! {
+        let parsed = <#inner_ty as ::core::str::FromStr>::from_str(&s)
+            .map_err(|_| ::suprnova::FrameworkError::Domain {
+                message: format!(
+                    "could not parse text field '{}' as {}",
+                    #field_name_str,
+                    ::core::stringify!(#inner_ty),
+                ),
+                status_code: 400,
+            })?;
+    }
 }
 
 enum FieldShape {

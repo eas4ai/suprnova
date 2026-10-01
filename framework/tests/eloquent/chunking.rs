@@ -185,6 +185,228 @@ async fn chunk_zero_n_errors() {
     assert_eq!(err.status_code(), 400);
 }
 
+// ---- chunk_by_id / lazy_by_id on keys that are not i64 ------------------
+
+#[model(
+    table = "t8_string_keys",
+    primary_key = "code",
+    key_type = "String",
+    auto_increment = false
+)]
+pub struct T8StringKey {
+    pub code: String,
+    pub label: String,
+}
+
+#[model(
+    table = "t8_uuid_keys",
+    primary_key = "id",
+    key_type = "String",
+    auto_increment = false,
+    unique_id = "uuid_v4"
+)]
+pub struct T8UuidKey {
+    pub id: String,
+    pub name: String,
+}
+
+#[model(
+    table = "t8_ulid_keys",
+    primary_key = "id",
+    key_type = "String",
+    auto_increment = false,
+    unique_id = "ulid"
+)]
+pub struct T8UlidKey {
+    pub id: String,
+    pub name: String,
+}
+
+/// A native `Uuid` key. The column holds a UUID value (a BLOB on SQLite,
+/// a `uuid` on Postgres) while the keyset cursor binds the key's JSON
+/// form, a string, and the two do not compare in key order. The model's
+/// metadata says so before any query runs.
+#[model(
+    table = "t8_native_uuid_keys",
+    primary_key = "id",
+    key_type = "uuid::Uuid",
+    auto_increment = false
+)]
+pub struct T8NativeUuidKey {
+    pub id: uuid::Uuid,
+    pub name: String,
+}
+
+async fn key_fixture() -> TestDatabase {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    for ddl in [
+        "CREATE TABLE t8_string_keys (code TEXT PRIMARY KEY, label TEXT NOT NULL)",
+        "CREATE TABLE t8_uuid_keys (id TEXT PRIMARY KEY, name TEXT NOT NULL)",
+        "CREATE TABLE t8_ulid_keys (id TEXT PRIMARY KEY, name TEXT NOT NULL)",
+        "CREATE TABLE t8_native_uuid_keys (id BLOB PRIMARY KEY, name TEXT NOT NULL)",
+    ] {
+        db.execute_unprepared(ddl).await.expect("create key table");
+    }
+    db
+}
+
+/// Three rows, so a walk of two per batch would hand the closure a full
+/// first batch if nothing refused the key.
+async fn seed_native_uuid_keys(db: &TestDatabase) {
+    db.execute_unprepared(
+        "INSERT INTO t8_native_uuid_keys (id, name) VALUES \
+         (X'00000000000000000000000000000001', 'a'), \
+         (X'00000000000000000000000000000002', 'b'), \
+         (X'00000000000000000000000000000003', 'c')",
+    )
+    .await
+    .expect("seed t8_native_uuid_keys");
+}
+
+#[tokio::test]
+async fn chunk_by_id_walks_string_keys_in_key_order() {
+    // Seven keys inserted out of order, three per batch: the cursor is a
+    // string, and every row is seen once, in key order.
+    let db = key_fixture().await;
+    db.execute_unprepared(
+        "INSERT INTO t8_string_keys (code, label) VALUES \
+         ('g', 'x'), ('a', 'x'), ('e', 'x'), ('c', 'x'), \
+         ('f', 'x'), ('b', 'x'), ('d', 'x')",
+    )
+    .await
+    .expect("seed t8_string_keys");
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut sizes: Vec<usize> = Vec::new();
+    T8StringKey::query()
+        .chunk_by_id(3, |batch: Collection<T8StringKey>| {
+            sizes.push(batch.len());
+            seen.extend(batch.iter().map(|row| row.code.clone()));
+            async move { Ok(()) }
+        })
+        .await
+        .expect("chunk_by_id over string keys");
+
+    assert_eq!(sizes, vec![3, 3, 1]);
+    assert_eq!(seen, ["a", "b", "c", "d", "e", "f", "g"]);
+}
+
+#[tokio::test]
+async fn chunk_by_id_walks_uuid_keys_in_key_order() {
+    // UUID v4 keys are random, so key order is not insertion order: a
+    // walk that followed insertion order, or lost a row at a batch
+    // boundary, would not match the sorted keys.
+    let _db = key_fixture().await;
+    let mut expected: Vec<String> = Vec::new();
+    for i in 0..7 {
+        let row = T8UuidKey::create(attrs! { name: format!("u{i}") })
+            .await
+            .expect("seed t8_uuid_keys");
+        expected.push(row.id);
+    }
+    expected.sort();
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut calls = 0_usize;
+    T8UuidKey::query()
+        .chunk_by_id(3, |batch: Collection<T8UuidKey>| {
+            calls += 1;
+            seen.extend(batch.iter().map(|row| row.id.clone()));
+            async move { Ok(()) }
+        })
+        .await
+        .expect("chunk_by_id over uuid keys");
+
+    assert_eq!(calls, 3);
+    assert_eq!(seen, expected);
+}
+
+#[tokio::test]
+async fn chunk_by_id_walks_ulid_keys_in_key_order() {
+    let _db = key_fixture().await;
+    let mut expected: Vec<String> = Vec::new();
+    for i in 0..7 {
+        let row = T8UlidKey::create(attrs! { name: format!("l{i}") })
+            .await
+            .expect("seed t8_ulid_keys");
+        expected.push(row.id);
+    }
+    expected.sort();
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut calls = 0_usize;
+    T8UlidKey::query()
+        .chunk_by_id(3, |batch: Collection<T8UlidKey>| {
+            calls += 1;
+            seen.extend(batch.iter().map(|row| row.id.clone()));
+            async move { Ok(()) }
+        })
+        .await
+        .expect("chunk_by_id over ulid keys");
+
+    assert_eq!(calls, 3);
+    assert_eq!(seen, expected);
+}
+
+#[tokio::test]
+async fn lazy_by_id_streams_ulid_keys_in_key_order() {
+    let _db = key_fixture().await;
+    let mut expected: Vec<String> = Vec::new();
+    for i in 0..7 {
+        let row = T8UlidKey::create(attrs! { name: format!("l{i}") })
+            .await
+            .expect("seed t8_ulid_keys");
+        expected.push(row.id);
+    }
+    expected.sort();
+
+    let mut stream = T8UlidKey::query().lazy_by_id(3);
+    let mut seen: Vec<String> = Vec::new();
+    while let Some(item) = stream.next().await {
+        seen.push(item.expect("lazy_by_id row").id);
+    }
+
+    assert_eq!(seen, expected);
+}
+
+#[tokio::test]
+async fn chunk_by_id_refuses_a_key_that_cannot_be_a_cursor_before_the_closure_runs() {
+    let db = key_fixture().await;
+    seed_native_uuid_keys(&db).await;
+
+    let mut calls = 0_usize;
+    let err = T8NativeUuidKey::query()
+        .chunk_by_id(2, |_batch: Collection<T8NativeUuidKey>| {
+            calls += 1;
+            async move { Ok(()) }
+        })
+        .await
+        .expect_err("a native Uuid key cannot carry the cursor");
+
+    assert_eq!(calls, 0, "the closure must not see a single row");
+    let msg = format!("{err}");
+    assert!(msg.contains("T8NativeUuidKey"), "names the model: {msg}");
+    assert!(msg.contains("`id`"), "names the column: {msg}");
+    assert!(msg.contains("keyset cursor"), "says why: {msg}");
+}
+
+#[tokio::test]
+async fn lazy_by_id_refuses_a_key_that_cannot_be_a_cursor_before_any_row() {
+    let db = key_fixture().await;
+    seed_native_uuid_keys(&db).await;
+
+    let mut stream = T8NativeUuidKey::query().lazy_by_id(2);
+    let first = stream
+        .next()
+        .await
+        .expect("the refusal is the stream's first item");
+    let err = first.expect_err("a native Uuid key is refused");
+    let msg = format!("{err}");
+    assert!(msg.contains("T8NativeUuidKey"), "names the model: {msg}");
+    assert!(msg.contains("keyset cursor"), "says why: {msg}");
+    assert!(stream.next().await.is_none(), "no row follows the refusal");
+}
+
 #[tokio::test]
 async fn chunk_by_id_zero_n_errors() {
     // Same explicit-parameter-error contract as `chunk(0)` - a zero

@@ -3,6 +3,7 @@
 //! Every queue driver round-trips through this exact JSON layout.
 //! Bumping `schema_version` requires a dual-read worker for one minor release.
 
+use crate::context::ContextSnapshot;
 use crate::queue::chain::ChainLink;
 use crate::queue::job::BackoffSchedule;
 use chrono::{DateTime, Utc};
@@ -159,6 +160,23 @@ pub struct Envelope {
     /// (the common case).
     #[serde(default)]
     pub chain_remaining: Vec<ChainLink>,
+    /// The [`Context`](crate::context::Context) of the code that pushed
+    /// this envelope, taken at push time. The worker runs the job inside a
+    /// scope restored from it, so a trace id or a tenant the request added
+    /// is there when the job reads it. `None` when the pusher had no
+    /// context to carry, which is code that runs outside a request and
+    /// added nothing itself: a request always carries its id.
+    ///
+    /// The snapshot holds the hidden bag too, as Laravel's job payload
+    /// does: a value the job needs has to reach the job. The queue store
+    /// therefore sees hidden values. A log does not, see
+    /// [`ContextSnapshot::without_hidden`].
+    ///
+    /// Additive under `#[serde(default)]`, and `skip_serializing_if` keeps
+    /// a push without context byte-identical on the wire, so
+    /// [`CURRENT_SCHEMA_VERSION`] stays at 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextSnapshot>,
 }
 
 /// Errors raised when decoding or validating a queue envelope.

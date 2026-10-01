@@ -1626,18 +1626,25 @@ async fn unique_rejects_malformed_identifiers() {
     TestContainer::singleton(db);
 
     // A hostile/typo'd table name errors at the identifier gate, before
-    // any SQL is built or run.
+    // any SQL is built or run. The cause goes to the log; the message,
+    // which reaches the response body, names none of it.
     let err = Unique::new("users; DROP TABLE users", "email")
         .passes("x@y.com")
         .await
         .unwrap_err();
+    assert_eq!(err.key, "validation-unchecked");
+    for leaked in ["identifier", "DROP", "users"] {
+        assert!(
+            !err.to_string().contains(leaked),
+            "{leaked} reached the message: {err}"
+        );
+    }
     assert!(
-        err.to_string().contains("identifier"),
-        "expected an identifier-validation error, got: {err}"
-    );
-    assert!(
-        !err.is_keyed(),
-        "an identifier-gate failure is operator-facing, not a translatable rule message"
+        Unique::new("users", "email")
+            .passes("x@y.com")
+            .await
+            .is_ok(),
+        "the table is still there"
     );
 }
 

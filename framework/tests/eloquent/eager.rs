@@ -27,8 +27,9 @@
 //! `<rel>_sum_of(col)` / `_avg_of` / `_min_of` / `_max_of` - which
 //! read using the same helper.
 
+use serial_test::serial;
 use suprnova::testing::TestDatabase;
-use suprnova::{Builder, Collection, Model, attrs, model};
+use suprnova::{Builder, Collection, DB, Model, attrs, model};
 
 #[model(table = "eg_users", relations = {
     posts: HasMany<EgPost>,
@@ -493,6 +494,161 @@ async fn load_missing_dotted_no_head_loads_full_path() {
         .map(|p| p.comments_loaded().len())
         .sum();
     assert_eq!(total, 3);
+}
+
+// ---- `Model::load` / `Model::load_missing` on one row ---------------------
+//
+// These models have tables of their own. The query log is process-wide and
+// the other tests in this file read `eg_*` tables concurrently, so a count
+// filtered on `lm_posts` sees only the reads of the test that counts. Every
+// test on these tables is `#[serial]` for the same reason.
+
+#[model(table = "lm_users", relations = {
+    posts: HasMany<LmPost>,
+})]
+pub struct LmUser {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "lm_posts", relations = {
+    comments: HasMany<LmComment>,
+})]
+pub struct LmPost {
+    pub id: i64,
+    pub lm_user_id: i64,
+    pub title: String,
+}
+
+#[model(table = "lm_comments")]
+pub struct LmComment {
+    pub id: i64,
+    pub lm_post_id: i64,
+    pub body: String,
+}
+
+/// One user with two posts: `first` with two comments, `second` with one.
+/// Returns the user as `create` hands it back, with nothing loaded.
+async fn lm_fixture() -> (TestDatabase, LmUser) {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for ddl in [
+        "CREATE TABLE lm_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE lm_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         lm_user_id INTEGER NOT NULL, title TEXT NOT NULL)",
+        "CREATE TABLE lm_comments (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         lm_post_id INTEGER NOT NULL, body TEXT NOT NULL)",
+    ] {
+        db.execute_unprepared(ddl).await.unwrap();
+    }
+    let user = LmUser::create(attrs! { name: "ada" }).await.unwrap();
+    for (title, comments) in [("first", 2), ("second", 1)] {
+        let post = LmPost::create(attrs! { lm_user_id: user.id, title: title })
+            .await
+            .unwrap();
+        for c in 0..comments {
+            LmComment::create(attrs! { lm_post_id: post.id, body: format!("{title}-{c}") })
+                .await
+                .unwrap();
+        }
+    }
+    (db, user)
+}
+
+/// Starts the query log empty.
+fn start_query_log() {
+    DB::enable_query_log().unwrap();
+    DB::flush_query_log().unwrap();
+}
+
+/// The SELECTs logged since [`start_query_log`] that read `lm_posts`,
+/// then the log switched off and emptied, so a failed assertion after
+/// this call does not leave it running for the next test.
+fn stop_query_log_counting_post_reads() -> usize {
+    let reads = DB::get_query_log()
+        .unwrap()
+        .into_iter()
+        .map(|q| q.sql.to_uppercase())
+        .filter(|sql| sql.trim_start().starts_with("SELECT"))
+        .filter(|sql| sql.contains("LM_POSTS"))
+        .count();
+    DB::disable_query_log().unwrap();
+    DB::flush_query_log().unwrap();
+    reads
+}
+
+#[tokio::test]
+#[serial]
+async fn model_load_fills_the_row_the_caller_holds() {
+    // One IN-query loads the relation into this row's own cache; reading
+    // it afterwards runs nothing.
+    let (_db, mut user) = lm_fixture().await;
+
+    start_query_log();
+    user.load(["posts"]).await.unwrap();
+    let load_reads = stop_query_log_counting_post_reads();
+
+    start_query_log();
+    let mut titles: Vec<String> = user
+        .posts_loaded()
+        .iter()
+        .map(|p| p.title.clone())
+        .collect();
+    let read_back_reads = stop_query_log_counting_post_reads();
+
+    assert_eq!(load_reads, 1, "load issues one query for the relation");
+    assert_eq!(read_back_reads, 0, "reading it back runs no query");
+    titles.sort();
+    assert_eq!(titles, ["first", "second"]);
+}
+
+#[tokio::test]
+#[serial]
+async fn model_load_resolves_a_nested_name() {
+    let (_db, mut user) = lm_fixture().await;
+
+    user.load(["posts.comments"]).await.unwrap();
+
+    let mut comments_per_post: Vec<(String, usize)> = user
+        .posts_loaded()
+        .iter()
+        .map(|p| (p.title.clone(), p.comments_loaded().len()))
+        .collect();
+    comments_per_post.sort();
+    let expected = [("first".to_string(), 2), ("second".to_string(), 1)];
+    assert_eq!(comments_per_post, expected);
+}
+
+#[tokio::test]
+#[serial]
+async fn model_load_missing_runs_no_query_for_a_loaded_relation() {
+    let (_db, user) = lm_fixture().await;
+    let mut user = LmUser::query()
+        .filter("id", user.id)
+        .with(["posts"])
+        .first()
+        .await
+        .unwrap()
+        .expect("the fixture user");
+
+    start_query_log();
+    user.load_missing(["posts"]).await.unwrap();
+    let reads = stop_query_log_counting_post_reads();
+
+    assert_eq!(reads, 0, "a loaded relation is not read again");
+    assert_eq!(user.posts_loaded().len(), 2);
+}
+
+#[tokio::test]
+#[serial]
+async fn model_load_missing_loads_a_relation_the_row_lacks() {
+    let (_db, mut user) = lm_fixture().await;
+
+    start_query_log();
+    user.load_missing(["posts"]).await.unwrap();
+    let reads = stop_query_log_counting_post_reads();
+
+    assert_eq!(reads, 1, "loaded with one query");
+    assert_eq!(user.posts_loaded().len(), 2);
 }
 
 #[tokio::test]

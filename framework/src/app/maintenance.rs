@@ -509,7 +509,7 @@ fn service_unavailable(payload: &MaintenancePayload) -> HttpResponse {
 fn bypass_response(secret: &str) -> Response {
     let payload = BypassCookie {
         secret: secret.to_string(),
-        expires_at: chrono::Utc::now()
+        expires_at: crate::clock::now()
             .timestamp()
             .saturating_add(BYPASS_TTL_SECS),
     };
@@ -571,7 +571,7 @@ fn has_valid_bypass_cookie(request: &Request, secret: &str) -> bool {
     let Ok(payload) = serde_json::from_str::<BypassCookie>(&plaintext) else {
         return false;
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = crate::clock::now().timestamp();
     let latest_issuable = now
         .saturating_add(BYPASS_TTL_SECS)
         .saturating_add(BYPASS_SKEW_SECS);

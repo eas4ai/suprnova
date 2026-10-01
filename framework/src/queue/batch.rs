@@ -346,7 +346,7 @@ impl BatchRepository for MemoryBatchRepository {
             .lock()
             .map_err(|_| FrameworkError::internal("batch repo poisoned"))?;
         if let Some(e) = g.get_mut(id) {
-            e.batch.cancelled_at = Some(Utc::now());
+            e.batch.cancelled_at = Some(crate::clock::now());
         }
         Ok(())
     }
@@ -376,7 +376,7 @@ impl BatchRepository for MemoryBatchRepository {
         if entry.batch.finished_at.is_some() {
             return Ok(None);
         }
-        let claimed_at = Utc::now();
+        let claimed_at = crate::clock::now();
         entry.batch.finished_at = Some(claimed_at);
         Ok(Some(TerminalCallbackClaim {
             finished_at: claimed_at,
@@ -712,7 +712,7 @@ impl DatabaseBatchRepository {
                     sea_orm::Value::from(id.to_string()),
                     sea_orm::Value::from(job_id.to_string()),
                     sea_orm::Value::from(i32::from(failed)),
-                    sea_orm::Value::from(Utc::now().timestamp()),
+                    sea_orm::Value::from(crate::clock::now().timestamp()),
                 ],
             ))
             .await
@@ -755,7 +755,7 @@ impl DatabaseBatchRepository {
                     placeholder(self.backend(), 2)?
                 ),
                 vec![
-                    sea_orm::Value::from(Utc::now().timestamp()),
+                    sea_orm::Value::from(crate::clock::now().timestamp()),
                     sea_orm::Value::from(id.to_string()),
                 ],
             ))
@@ -990,7 +990,7 @@ impl BatchRepository for DatabaseBatchRepository {
         }
 
         let cancelled_at = self.locked_cancelled_at(&txn, id).await?;
-        let claimed_at_secs = Utc::now().timestamp();
+        let claimed_at_secs = crate::clock::now().timestamp();
         let claimed_at = timestamp(claimed_at_secs, "finished_at")?;
         let result = txn
             .execute_raw(sea_orm::Statement::from_sql_and_values(
@@ -1214,6 +1214,9 @@ pub struct PendingBatch {
     /// Per-batch behavior switches (callbacks, fail policy).
     pub options: BatchOptions,
     envelopes: Vec<Envelope>,
+    /// The connection each envelope's job resolves to, in the order of
+    /// `envelopes`. The jobs of a batch may go to different connections.
+    connections: Vec<String>,
     /// Jobs added to this batch that declare a debounce window. Collected at
     /// `add` time because `add` returns `Self` and cannot fail; surfaced by
     /// [`PendingBatch::dispatch`] before anything is stored.
@@ -1237,6 +1240,7 @@ impl PendingBatch {
             name: String::new(),
             options: BatchOptions::default(),
             envelopes: Vec::new(),
+            connections: Vec::new(),
             debounce_rejected: Vec::new(),
             build_errors: Vec::new(),
         }
@@ -1259,8 +1263,11 @@ impl PendingBatch {
             self.debounce_rejected.push(J::job_name().to_string());
             return self;
         }
-        let now = Utc::now();
-        let mut env = match crate::queue::build_envelope::<J>(&job, now) {
+        let now = crate::clock::now();
+        // The context of the code that adds the job, which is the code that
+        // builds the batch: `add` is where the envelope is built.
+        let context = crate::context::Context::dehydrate();
+        let mut env = match crate::queue::build_envelope::<J>(&job, now, context) {
             Ok(e) => e,
             Err(error) => {
                 self.build_errors
@@ -1270,6 +1277,7 @@ impl PendingBatch {
         };
         env.batch_id = None; // overwritten on dispatch with the batch id
         self.envelopes.push(env);
+        self.connections.push(crate::queue::connection_of::<J>());
         self
     }
 
@@ -1310,8 +1318,12 @@ impl PendingBatch {
         self.envelopes.is_empty()
     }
 
-    /// Persist the batch and dispatch every queued job via the configured
-    /// driver. Returns the batch id.
+    /// Persist the batch and push every queued job to the connection the
+    /// job resolves to. Returns the batch id.
+    ///
+    /// Every connection is resolved before the batch is stored. A job for a
+    /// name that is no connection rejects the whole batch, and nothing is
+    /// stored or pushed.
     ///
     /// # A push that fails mid-loop (DATA-02)
     ///
@@ -1341,6 +1353,16 @@ impl PendingBatch {
     ///
     /// The caller gets the original push error either way.
     ///
+    /// # Under the queue fake
+    ///
+    /// Under [`Queue::fake`](crate::queue::Queue::fake) no job is pushed.
+    /// The batch is recorded for
+    /// [`assert_batched`](crate::queue::testing::assert_batched) and each of
+    /// its jobs for [`assert_pushed`](crate::queue::testing::assert_pushed).
+    /// The batch is still stored in the repository, so code that looks up
+    /// the id it was handed finds the batch. No job runs, so that batch
+    /// stays pending.
+    ///
     /// [`SkipIfBatchCancelled`]: crate::queue::SkipIfBatchCancelled
     pub async fn dispatch(self) -> Result<String, FrameworkError> {
         if !self.debounce_rejected.is_empty() {
@@ -1357,6 +1379,19 @@ impl PendingBatch {
                 self.build_errors.join("; ")
             )));
         }
+        // Every job's connection is resolved before anything is stored or
+        // pushed, so a connection nobody registered rejects the whole batch
+        // and leaves no batch behind. Not under the fake, which resolves no
+        // driver.
+        let faked = crate::queue::testing::is_active();
+        let drivers = if faked {
+            Vec::new()
+        } else {
+            self.connections
+                .iter()
+                .map(|name| crate::queue::connections::target(name).map(|target| target.driver))
+                .collect::<Result<Vec<_>, _>>()?
+        };
         ensure_default_repository();
         let repo = current_repository()
             .ok_or_else(|| FrameworkError::internal("batch repository not initialized"))?;
@@ -1371,23 +1406,38 @@ impl PendingBatch {
             failed_jobs: 0,
             failed_job_ids: Vec::new(),
             options: self.options.clone(),
-            created_at: Utc::now(),
+            created_at: crate::clock::now(),
             cancelled_at: None,
             finished_at: None,
         };
         repo.store(batch).await?;
 
-        let driver = crate::queue::current_driver()?;
-        let mut remaining = self.envelopes.into_iter();
+        // The fake comes before the driver lookup, as it does in the
+        // `Queue::push` funnel: a faked test has no driver to find, and one
+        // that has must not be written to.
+        if faked {
+            let envelopes: Vec<Envelope> = self
+                .envelopes
+                .into_iter()
+                .map(|mut env| {
+                    env.batch_id = Some(id.clone());
+                    env
+                })
+                .collect();
+            crate::queue::testing::record_batch(&id, &self.name, &envelopes);
+            return Ok(id);
+        }
+
+        let mut remaining = self.envelopes.into_iter().zip(drivers);
         let mut pushed = 0usize;
-        while let Some(mut env) = remaining.next() {
+        while let Some((mut env, driver)) = remaining.next() {
             env.batch_id = Some(id.clone());
             let undispatched = env.id;
             if let Err(e) = driver.push(env).await {
                 // Everything from here on never reached the queue, starting
                 // with the one that just failed.
                 let orphans: Vec<Uuid> = std::iter::once(undispatched)
-                    .chain(remaining.map(|e| e.id))
+                    .chain(remaining.map(|(e, _)| e.id))
                     .collect();
                 settle_undispatched(repo.as_ref(), &id, &orphans, pushed == 0).await;
                 return Err(e);
@@ -1469,7 +1519,7 @@ mod tests {
             failed_jobs: 0,
             failed_job_ids: Vec::new(),
             options: BatchOptions::default(),
-            created_at: Utc::now(),
+            created_at: crate::clock::now(),
             cancelled_at: None,
             finished_at: None,
         }

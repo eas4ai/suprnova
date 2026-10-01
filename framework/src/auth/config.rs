@@ -21,7 +21,9 @@
 //! // Or build one explicitly:
 //! let config = AuthConfig::new("web")
 //!     .guard("web", GuardConfig::session("users"))
-//!     .guard("admin", GuardConfig::session("admins"));
+//!     .guard("admin", GuardConfig::session("admins"))
+//!     // A driver the application registers with `Auth::extend("api_key", ...)`.
+//!     .guard("partner", GuardConfig::custom("api_key", "partners"));
 //! # }
 //! ```
 
@@ -29,18 +31,28 @@ use std::collections::HashMap;
 
 /// The kind of guard a named guard entry uses.
 ///
-/// Mirrors Laravel's `'driver' => 'session' | 'token'`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Mirrors Laravel's `'driver'` entry: `'session'`, `'token'`, or a driver
+/// the application registers with `Auth::extend`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardDriver {
     /// Session-backed, stateful (login/logout persist). [`crate::SessionGuard`].
     Session,
     /// Bearer-token, stateless (read-only). [`crate::auth::TokenGuard`].
     Token,
+    /// A driver the application registers by this name with
+    /// [`crate::Auth::extend`], for a guard the framework does not ship (an
+    /// API key in a header, a client certificate, a single sign-on cookie).
+    /// Declared in code with [`GuardConfig::custom`], so the environment can
+    /// never select an application guard by accident.
+    Custom(String),
 }
 
 impl GuardDriver {
     /// Parse a Laravel-style driver string (`"session"` / `"token"`),
     /// case-insensitively. Unknown values fall back to [`GuardDriver::Session`].
+    ///
+    /// Never yields [`GuardDriver::Custom`]: a custom driver is declared in
+    /// code with [`GuardConfig::custom`], never parsed from a string.
     pub fn from_str_lenient(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {
             "token" => GuardDriver::Token,
@@ -72,6 +84,19 @@ impl GuardConfig {
     pub fn token(provider: impl Into<String>) -> Self {
         Self {
             driver: GuardDriver::Token,
+            provider: provider.into(),
+        }
+    }
+
+    /// A guard of the application-registered `driver`, backed by `provider`.
+    ///
+    /// The driver's factory, registered with [`crate::Auth::extend`], builds
+    /// the guard from this entry's name and provider. Resolving the guard
+    /// before the factory is registered is an error, never a fallback to a
+    /// built-in driver.
+    pub fn custom(driver: impl Into<String>, provider: impl Into<String>) -> Self {
+        Self {
+            driver: GuardDriver::Custom(driver.into()),
             provider: provider.into(),
         }
     }
@@ -177,5 +202,22 @@ mod tests {
             GuardDriver::Session
         );
         assert_eq!(GuardDriver::from_str_lenient("weird"), GuardDriver::Session);
+    }
+
+    #[test]
+    fn custom_guard_names_its_driver_and_provider() {
+        let entry = GuardConfig::custom("api_key", "partners");
+        let config = AuthConfig::new("web").guard("partner", entry);
+        let partner = config.guard_config("partner").unwrap();
+        assert_eq!(partner.driver, GuardDriver::Custom("api_key".to_string()));
+        assert_eq!(partner.provider, "partners");
+    }
+
+    #[test]
+    fn driver_parse_never_yields_a_custom_driver() {
+        assert_eq!(
+            GuardDriver::from_str_lenient("api_key"),
+            GuardDriver::Session
+        );
     }
 }

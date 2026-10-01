@@ -514,9 +514,12 @@ async fn exercise_session_guard_identity_switch(
     let previous_plaintext = suprnova::auth::remember::issue(previous_user_id, ttl_minutes)
         .await
         .expect("issue the previous identity's remember credential");
-    let previous_cookie =
-        suprnova::Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, &previous_plaintext)
-            .expect("encrypt the previous identity's browser carrier");
+    let previous_cookie = suprnova::Crypt::encrypt_string_for(
+        suprnova::CryptPurpose::Cookie,
+        suprnova::auth::remember::COOKIE_NAME,
+        &previous_plaintext,
+    )
+    .expect("encrypt the previous identity's browser carrier");
 
     let mut config = SessionConfig::default();
     config.cookie_secure = false;
@@ -720,8 +723,12 @@ async fn persist_session_cookie(
         .write(session)
         .await
         .expect("persist prepared remember session");
-    suprnova::Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, &session.id)
-        .expect("encrypt prepared data-session cookie")
+    suprnova::Crypt::encrypt_string_for(
+        suprnova::CryptPurpose::Cookie,
+        "suprnova_session",
+        &session.id,
+    )
+    .expect("encrypt prepared data-session cookie")
 }
 
 /// Insert a raw row directly into `remember_tokens` (bypassing
@@ -1187,16 +1194,17 @@ fn middleware_without_magnetar_engine_uses_legacy_remember_fallback() {
         let ttl_minutes: i64 = 60 * 24; // 1 day
 
         // Step 1: issue a token directly and encrypt the plaintext
-        // into the wire format the middleware will receive.
-        //
-        // Compat-window regression: this still uses v1 `Crypt::encrypt_string`
-        // with name-unbound AAD so middleware still accepts pre-upgrade cookies.
+        // into the wire format the middleware will receive, bound to
+        // the remember-me cookie's logical name.
         let plaintext = suprnova::auth::remember::issue(user_id, ttl_minutes)
             .await
             .expect("issue token");
-        let encrypted =
-            suprnova::Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, &plaintext)
-                .expect("encrypt cookie");
+        let encrypted = suprnova::Crypt::encrypt_string_for(
+            suprnova::CryptPurpose::Cookie,
+            suprnova::auth::remember::COOKIE_NAME,
+            &plaintext,
+        )
+        .expect("encrypt cookie");
         assert_eq!(
             count_tokens_for(user_id).await,
             1,
@@ -1705,8 +1713,9 @@ fn named_logout_does_not_revoke_an_unverified_other_user_carrier() {
             .write(&authenticated_session)
             .await
             .expect("persist authenticated user's session");
-        let session_cookie = suprnova::Crypt::encrypt_string(
+        let session_cookie = suprnova::Crypt::encrypt_string_for(
             suprnova::CryptPurpose::Cookie,
+            &config.cookie_name,
             &authenticated_session.id,
         )
         .expect("encrypt authenticated user's data-session cookie");
@@ -2310,15 +2319,16 @@ fn middleware_clears_forged_remember_cookie() {
     Lazy::force(&SETUP);
 
     RT.block_on(async {
-        // A forged plaintext encrypted under the legitimate key - ciphertext
-        // valid, but no matching hashed row.
-        //
-        // Compat-window regression: this still uses v1 wire-format minting; middleware
-        // must reject it and clear the cookie.
+        // A forged plaintext encrypted under the legitimate key and bound
+        // to the remember-me cookie's name - ciphertext valid, but no
+        // matching hashed row.
         let forged_plaintext = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF";
-        let encrypted =
-            suprnova::Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, forged_plaintext)
-                .expect("encrypt forged");
+        let encrypted = suprnova::Crypt::encrypt_string_for(
+            suprnova::CryptPurpose::Cookie,
+            suprnova::auth::remember::COOKIE_NAME,
+            forged_plaintext,
+        )
+        .expect("encrypt forged");
 
         let mut http_bytes = Vec::new();
         http_bytes.extend_from_slice(b"GET / HTTP/1.1\r\n");

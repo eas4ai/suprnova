@@ -484,7 +484,13 @@ impl PasswordPlugin {
         }
         let status = match self.lockout.guarded_status(&identity).await {
             Ok(status) => status,
-            Err(_) => return Ok(unavailable()),
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "lockout status unavailable; failing closed"
+                );
+                return Ok(unavailable());
+            }
         };
         if status.is_locked {
             let _ = self

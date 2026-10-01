@@ -112,6 +112,7 @@ pub use suprnova_live::upload::{
 };
 pub use upload_host::LiveUploadHost;
 pub use upload_policy::{
-    UploadPolicy, UploadPolicyBuilder, UploadReplacement, UploadScan, UploadScanFailure, UploadType,
+    UploadPolicy, UploadPolicyBuilder, UploadPolicyError, UploadReplacement, UploadScan,
+    UploadScanFailure, UploadType,
 };
 pub use validation::{ErrorBag, ValidationIssue, ValidationMessageId, ValidationStatus};

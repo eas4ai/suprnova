@@ -510,6 +510,7 @@ fn env_at(available_at: chrono::DateTime<Utc>) -> Envelope {
         debounce_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
+        context: None,
     }
 }
 

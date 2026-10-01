@@ -258,6 +258,9 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
 
         // Run validation. Precognition runs the same validators as a
         // real submission - we just decide what to do with the result.
+        // Errors are keyed by the names the input used: validation reports
+        // Rust field names, and the derives register what serde renames
+        // them to (see `crate::data::input_names`).
         let validation_result = data.validate();
 
         if is_precognition {
@@ -271,11 +274,14 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
             // requested field still resolves through the same filter. An
             // empty bag means every stage passed.
             let bag = match validation_result {
-                Err(errors) => ValidationErrors::from_validator(errors),
+                Err(errors) => ValidationErrors::from_validator_keyed(
+                    errors,
+                    crate::data::input_names::input_key::<Self>,
+                ),
                 Ok(()) => match data.after_validation() {
-                    Err(errs) => errs,
+                    Err(errs) => errs.rename_keys(crate::data::input_names::input_key::<Self>),
                     Ok(()) => match data.after_validation_async().await {
-                        Err(errs) => errs,
+                        Err(errs) => errs.rename_keys(crate::data::input_names::input_key::<Self>),
                         Ok(()) => ValidationErrors::new(),
                     },
                 },
@@ -287,19 +293,26 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
         // structure as the Precognition branch above.
         if let Err(errors) = validation_result {
             return Err(FrameworkError::Validation(
-                ValidationErrors::from_validator(errors),
+                ValidationErrors::from_validator_keyed(
+                    errors,
+                    crate::data::input_names::input_key::<Self>,
+                ),
             ));
         }
 
         // Per-field rules passed - run the synchronous cross-field hook.
         if let Err(errs) = data.after_validation() {
-            return Err(FrameworkError::Validation(errs));
+            return Err(FrameworkError::Validation(
+                errs.rename_keys(crate::data::input_names::input_key::<Self>),
+            ));
         }
 
         // Synchronous stages passed - run the async cross-field hook
         // (DB-backed rules such as `Unique`). This is the final stage.
         if let Err(errs) = data.after_validation_async().await {
-            return Err(FrameworkError::Validation(errs));
+            return Err(FrameworkError::Validation(
+                errs.rename_keys(crate::data::input_names::input_key::<Self>),
+            ));
         }
 
         Ok(data)

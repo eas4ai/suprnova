@@ -27,9 +27,11 @@ Reach for it when:
   `?cursor=…`) from code that isn't a handler
 
 `Context` is **not** for cross-request state. It's bound to the
-current Tokio task and disappears when the request ends. For things
-that outlive a request, use the [Service Container](container.md) or
-[Cache](cache.md).
+current Tokio task and disappears when the request ends. The one
+exception is work you queue: a job, a queued mail or notification, and a
+queued event listener each receive a copy of the context of the code that
+queued them - see [Queued work](#queued-work). For things that outlive a
+request, use the [Service Container](container.md) or [Cache](cache.md).
 
 ## The two bags
 
@@ -56,10 +58,10 @@ below). You usually only read it, never write it.
 ## The active scope
 
 A `Context` scope is installed by the framework on every incoming
-HTTP request. Inside a handler, middleware, model observer, event
-listener, or anything else reachable from the request task, the
-scope is live and `Context::*` reads and writes work without
-ceremony.
+HTTP request, and by a queue worker around every attempt of a job.
+Inside a handler, middleware, model observer, event listener, job, or
+anything else reachable from those tasks, the scope is live and
+`Context::*` reads and writes work without ceremony.
 
 Outside a scope - early-boot code, a bare `tokio::spawn` that doesn't
 inherit context, a unit test that doesn't install one - every
@@ -321,6 +323,104 @@ task-scoped. Auto-inheriting across spawns would mean:
 The explicit `Context::current()` + `Context::scope` dance makes
 propagation a deliberate decision instead of a hidden default.
 
+## Queued work
+
+A job runs after the request that queued it, often in another process.
+Suprnova carries the `Context` across that gap for you. A push takes a
+`ContextSnapshot` of the visible and hidden bags, the queue stores it on the
+envelope, and the worker runs the job inside a scope restored from it:
+
+```rust
+use suprnova::{Context, Queue};
+
+// In a handler:
+Context::add("tenant_id", "acme");
+Context::hidden_add("api_key", token);
+Queue::push(SendInvoice { invoice_id: 7 }).await?;
+
+// In SendInvoice::handle, on a worker:
+let tenant: Option<String> = Context::get("tenant_id");
+let key: Option<String> = Context::hidden_get("api_key");
+```
+
+The same holds for `Mail::queue`, `Mail::later`, `Notify::queue` and a queued
+event listener. A chain and a batch give every job the snapshot of the code
+that dispatched it.
+
+Six rules describe what the job sees:
+
+- **The job works on a copy.** What it adds reaches neither the request nor
+  the next job. Every attempt of a job, and every retry, starts from the
+  snapshot again.
+- **The snapshot is taken at the push.** A push that waits for the commit of a
+  `DB::transaction` carries the snapshot of the code that called it.
+- **The query bag does not travel.** It describes the request that was being
+  served, and the job is not that request. `Context::query_param` returns
+  `None` in a job, including one that runs inline under the `sync` driver.
+- **The request id always travels.** The request middleware adds
+  `_request_id` to the visible bag, so a job queued while a request is served
+  always carries it. Code outside a request, such as a console command or a
+  scheduled task, carries only what it added itself. A push with nothing to
+  carry writes no context.
+- **Hidden values travel.** The job needs them, as it needs the rest of its
+  payload. They reach the queue store and the failed-job store, so keep
+  secrets out of the hidden bag unless the job needs them. They never reach a
+  log: the envelope a worker logs when no failed-job store is bound has no
+  hidden context, and the `Debug` output of a `ContextSnapshot` or a
+  `ContextStore` lists hidden keys and never their values.
+- **The lifecycle events run in the job's context.** `JobProcessing`,
+  `JobProcessed`, `JobFailed` and the other worker events are dispatched in the
+  same scope, so a listener reads what the job read and what the job added.
+
+### Dehydrating and hydrated hooks
+
+Two hooks run at the two ends of the trip. Register them once, at boot,
+in `bootstrap::register()`:
+
+```rust
+use suprnova::Context;
+
+// Runs on every snapshot taken for queued work, before it is stored.
+Context::dehydrating(|snapshot| {
+    snapshot.data.insert("locale".into(), serde_json::json!("fr"));
+    snapshot.hidden.remove("session_token");
+});
+
+// Runs when a worker has restored a snapshot, before the job runs.
+Context::hydrated(|snapshot| {
+    if let Some(locale) = snapshot.data.get("locale") {
+        Context::add("locale_restored", locale.clone());
+    }
+});
+```
+
+A `dehydrating` callback receives `&mut ContextSnapshot` and may add, change or
+remove entries. Use it to carry a value that lives outside the context, such
+as the request's locale, or to keep a value from leaving the process. It
+changes the snapshot only, never the live context.
+
+A `hydrated` callback receives `&ContextSnapshot` and runs inside the restored
+scope, so the `Context` methods read and write the job's context. It runs once
+for every attempt of a job.
+
+`ContextSnapshot` has two public fields, `data` and `hidden`, both
+`BTreeMap<String, serde_json::Value>`.
+
+### The functions behind the hooks
+
+You seldom call these yourself, but a custom worker or a test may need them:
+
+| Function | Purpose |
+|---|---|
+| `Context::dehydrate()` | Snapshot the current context, after every `dehydrating` callback has run. Returns `None` when there is nothing to carry. |
+| `Context::hydrate(Option<&ContextSnapshot>)` | Build the `ContextStore` that queued work runs in, and run every `hydrated` callback. Enter the store with `Context::scope`. |
+| `Context::restored(Option<ContextSnapshot>, fut)` | Run `fut` inside a fresh scope that holds the snapshot: `hydrate`, then `scope`. |
+
+The hooks are process-wide. A test that registers one removes it again with
+`Context::test_clear_hooks()`, which removes every `dehydrating` and
+`hydrated` callback. It is compiled under `cfg(test)` and the `testing`
+feature.
+
 ## Tests
 
 Inside `#[tokio::test]` or `#[suprnova_test]`, no `Context` scope is
@@ -461,31 +561,28 @@ let request_id: Option<String> = Context::get("_request_id");
 
 ### Carry tenant context into a queued job
 
-`Context` doesn't auto-propagate across the queue serialise /
-deserialise boundary - the worker runs in a different process from
-the dispatcher, often on a different machine. Pass anything you
-need into the job's payload:
+The tenant id you add in a handler is there when the job runs. Add it once,
+and push the job:
 
 ```rust
-use suprnova::{Context, FrameworkError, Queue};
+use suprnova::{Context, Queue};
 
-// In a handler:
-let tenant_id: String = Context::get("tenant_id")
-    .ok_or_else(|| FrameworkError::param("tenant_id missing"))?;
+// In a handler, or in the middleware that resolves the tenant:
+Context::add("tenant_id", "acme");
 
-Queue::push(SendInvoice { tenant_id, invoice_id }).await?;
+Queue::push(SendInvoice { invoice_id }).await?;
 ```
 
-When the worker processes `SendInvoice`, install a fresh `Context`
-scope at the top of `Job::handle` and re-seed the keys you need from
-the job payload - `Context::scope(ContextStore::default(), async {
-... })` wrapping the body. Then any logging or deeply-nested helper
-the job calls sees the same tenant id it would inside a request.
+`SendInvoice::handle` reads `Context::get::<String>("tenant_id")`, and so does
+any logging or deeply-nested helper the job calls. The job needs no field for
+the tenant and no scope of its own, because the worker installed one from the
+snapshot.
 
-This is also where `hidden_add` earns its keep - the job can fetch
-and stash an API key once at scope entry, and every downstream HTTP
-call inside the job reads it via `Context::hidden_get` without
-re-fetching. See [Queues](queues.md) for the `Job` trait shape.
+This is also where `hidden_add` earns its keep - add an API key to the hidden
+bag once in the handler, and every downstream HTTP call inside the job reads it
+via `Context::hidden_get`. Remember that hidden values are stored with the
+job, see [Queued work](#queued-work). See [Queues](queues.md#context-on-queued-work)
+for the queue side.
 
 ### Audit trail across a request
 
@@ -527,15 +624,17 @@ inspiration - same method names, same visible/hidden split, same
 "silent outside a request" contract. Two differences come from
 Rust's runtime:
 
-**Async propagation is explicit, not magical.** Laravel's `Context`
-flows through queued jobs automatically because Laravel serialises
-the context bag into the job payload at dispatch time. Rust's
-async model doesn't have a single "current request" Thread-Locals
-flow into - `tokio::spawn` starts fresh, and the queue boundary
-involves serialisation across processes. Suprnova exposes the
-propagation primitive (`Context::current()` + `Context::scope`) and
-lets you opt into it at the boundary, instead of pretending tasks
-inherit context they don't.
+**Across the queue the context travels, across `tokio::spawn` it does
+not.** Laravel's `Context` flows through queued jobs because Laravel
+serialises the context bag into the job payload at dispatch time.
+Suprnova does the same at the queue boundary: the envelope carries a
+`ContextSnapshot`, and the worker restores it, with `Context::dehydrating`
+and `Context::hydrated` as the hooks Laravel calls by the same names. A
+task you start with `tokio::spawn` is different. Rust's async model has no
+single "current request" that task-locals flow into, so `tokio::spawn`
+starts fresh. Suprnova exposes the propagation primitive
+(`Context::current()` + `Context::scope`) and lets you opt into it there,
+instead of pretending tasks inherit context they don't.
 
 **Wrong-type reads are observable.** `get::<T>` on a value stored
 as a different type silently returns `None` in Laravel (it's PHP,
@@ -557,10 +656,11 @@ provided you propagate the scope into the spawn.
 
 | Topic | File |
 |---|---|
-| `Context` facade + `ContextStore` | `framework/src/context/mod.rs` |
+| `Context` facade, `ContextStore` and `ContextSnapshot` | `framework/src/context/mod.rs` |
 | Scope installation on HTTP request | `framework/src/logging/request_id.rs` |
+| Snapshot on push, restore on the worker | `framework/src/queue/mod.rs`, `framework/src/queue/worker.rs` |
 | `Context::query_param` callers (pagination) | `framework/src/eloquent/builder.rs` |
-| Re-exports | `framework/src/lib.rs` (`pub use context::{Context, ContextStore}`) |
+| Re-exports | `framework/src/lib.rs` (`pub use context::{Context, ContextSnapshot, ContextStore}`) |
 
 ## Next
 
@@ -568,6 +668,8 @@ provided you propagate the scope into the spawn.
   installed on every request
 - [Service Container](container.md) - for cross-request state that
   outlives a single task
+- [Queues](queues.md#context-on-queued-work) - how a job receives the
+  context of the code that queued it
 - [Logging](logging.md) - how `Context::all()` ends up in structured
   log lines
 - [Pagination](pagination.md) - the main downstream reader of

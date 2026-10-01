@@ -1,5 +1,9 @@
 //! Integration tests for the `validation` module: one binary per module,
 //! one former top-level test file per submodule (folded 2026-09-05).
 
+pub mod dates;
+pub mod exists;
 pub mod password;
+pub mod postgres;
+pub mod presence;
 pub mod rules;

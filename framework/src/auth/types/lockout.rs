@@ -28,7 +28,7 @@ impl LockoutStatus {
     #[must_use]
     pub fn retry_after_seconds(&self) -> Option<i64> {
         self.locked_until.map(|until| {
-            let seconds = (until - Utc::now()).num_seconds();
+            let seconds = (until - crate::clock::now()).num_seconds();
             seconds.max(0)
         })
     }

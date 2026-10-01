@@ -2,42 +2,35 @@
 //! `read_for` / `mark_as_read` / `mark_as_unread` / `mark_all_as_read` /
 //! `delete_for`).
 //!
-//! Uses an in-memory SQLite via the same shared migration as
-//! `notification_database.rs`.
+//! Uses an in-memory SQLite migrated by the framework's
+//! `CreateNotificationsTable`, as `database.rs` does.
 
-use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
+use sea_orm::{Database, DatabaseConnection};
+use sea_orm_migration::{MigrationTrait, MigratorTrait};
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::Arc;
 use suprnova::notifications::channels::database::DatabaseChannel;
+use suprnova::notifications::migrations::CreateNotificationsTable;
 use suprnova::notifications::{
     Channel, Notifiable, Notification, NotificationDispatcher, all_for, delete_for,
     mark_all_as_read, mark_as_read, mark_as_unread, read_for, unread_for,
 };
 
-const NOTIFICATIONS_MIGRATION: &str =
-    include_str!("../../migrations/20260516_create_notifications_table.sql");
+/// The framework's own notifications migration, registered the way an app
+/// registers it.
+struct Migrator;
 
-fn strip_sql_line_comments(src: &str) -> String {
-    src.lines()
-        .map(|line| match line.find("--") {
-            Some(idx) => &line[..idx],
-            None => line,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+#[async_trait::async_trait]
+impl MigratorTrait for Migrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![Box::new(CreateNotificationsTable)]
+    }
 }
 
 async fn fresh_db() -> DatabaseConnection {
     let db = Database::connect("sqlite::memory:").await.unwrap();
-    let cleaned = strip_sql_line_comments(NOTIFICATIONS_MIGRATION);
-    for stmt in cleaned.split(';') {
-        let trimmed = stmt.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        db.execute_unprepared(trimmed).await.unwrap();
-    }
+    Migrator::up(&db, None).await.unwrap();
     db
 }
 

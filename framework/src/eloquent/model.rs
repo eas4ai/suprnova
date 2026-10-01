@@ -212,6 +212,33 @@ where
         ::core::option::Option::None
     }
 
+    /// Record that this row came out of a query that returned more than
+    /// one row: the mark lazy-loading prevention reads (see
+    /// [`crate::eloquent::lazy_loading`]).
+    ///
+    /// The `#[suprnova::model]` macro overrides it to set the mark in
+    /// the row's relation cache. The default does nothing: a model
+    /// without that cache has no relation methods to refuse.
+    ///
+    /// **Not part of the public API.** It is `pub` because the macro
+    /// emits the override.
+    #[doc(hidden)]
+    fn __mark_from_multi_row_query(&mut self) {}
+
+    /// Mark every row of one query's result when the query returned more
+    /// than one row. The one place that rule lives: every read path that
+    /// hydrates several rows at once calls it with the rows it hydrated.
+    ///
+    /// **Not part of the public API.**
+    #[doc(hidden)]
+    fn __mark_query_result(rows: &mut [Self]) {
+        if rows.len() > 1 {
+            for row in rows {
+                row.__mark_from_multi_row_query();
+            }
+        }
+    }
+
     /// Look up a row by primary key. `None` if no row matches.
     ///
     /// The trait default uses SeaORM's `find_by_id` directly - no
@@ -348,10 +375,11 @@ where
             })
             .collect::<Result<HashMap<_, _>, FrameworkError>>()
             .map_err(|error| table_read_then(Self::TABLE, error))?;
-        let ordered: Vec<Self> = id_vec
+        let mut ordered: Vec<Self> = id_vec
             .into_iter()
             .filter_map(|id| by_id.remove(&id))
             .collect();
+        Self::__mark_query_result(&mut ordered);
         if crate::render_cache::collector::is_active() {
             for row in &ordered {
                 crate::render_cache::collector::observe_record_read_json(
@@ -402,21 +430,27 @@ where
             .select_all(Self::Entity::find())
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        let out: Vec<Self> = rows
+        let mut out: Vec<Self> = rows
             .into_iter()
             .map(Self::try_from_storage)
             .collect::<Result<Vec<_>, _>>()?;
+        Self::__mark_query_result(&mut out);
         for row in &out {
             Self::__dispatch_retrieved(row).await?;
         }
         Ok(Collection::from_vec(out))
     }
 
-    /// Start a new builder against this model. Phase 10C T4 layers
-    /// registered global scopes onto the fresh builder so every read
-    /// path is scoped by default; callers opt out per-type with
-    /// [`Builder::without_global_scope::<S>`] or all-at-once with
-    /// [`Builder::without_global_scopes`].
+    /// Start a new builder against this model. The model's soft-delete
+    /// filter and its registered global scopes apply to every query the
+    /// builder runs, reads and mass writes alike; callers opt out
+    /// per-type with [`Builder::without_global_scope::<S>`] or
+    /// all-at-once with [`Builder::without_global_scopes`], anywhere in
+    /// the chain.
+    ///
+    /// The scopes are folded in when the query runs, not here. A scope
+    /// that reads per-request state, such as the current tenant, reads
+    /// it at that moment.
     ///
     /// The scope registry is keyed by `TypeId::of::<Self>()`. The
     /// `Model: 'static` supertrait bound makes that lookup well-defined
@@ -425,7 +459,7 @@ where
     /// [`Builder::without_global_scope::<S>`]: crate::eloquent::Builder::without_global_scope
     /// [`Builder::without_global_scopes`]: crate::eloquent::Builder::without_global_scopes
     fn query() -> Builder<Self> {
-        crate::eloquent::scopes::ScopeRegistry::apply_to::<Self>(Builder::new())
+        Builder::__scoped()
     }
 
     /// Mass-create a row from the given attributes. Attributes are
@@ -459,6 +493,7 @@ where
         // before consuming them to build the ActiveModel. The
         // Arc<Mutex<_>> handle is dropped once we leave this scope.
         let final_attrs = shared.lock().await.clone();
+        let touch_plan = Self::__plan_touches(None, &final_attrs)?;
         let am = Self::active_model_from_attrs(final_attrs)?;
         // T11/T12: route through resolve_write - insert lands in the
         // active transaction when called inside `DB::transaction`,
@@ -485,7 +520,81 @@ where
 
         Self::__dispatch_created(&row).await?;
         Self::__dispatch_saved(&row).await?;
-        row.touch_owners().await?;
+        row.__touch_planned(&touch_plan).await?;
+        Ok(row)
+    }
+
+    /// Insert this fully built row and fire the lifecycle events
+    /// [`Self::create`] fires, in the same order. This is the path a
+    /// factory takes, so an observer sees a factory's rows exactly as it
+    /// sees the application's.
+    ///
+    /// The row's values are the ones its builder produced, so the
+    /// fillable filter does not apply to them. A `Creating` or `Saving`
+    /// listener sees the row as attributes; whatever it changes there is
+    /// written over the built values, and a listener that cancels aborts
+    /// the insert.
+    ///
+    /// `database_assigns_key` says whether the primary key is left for
+    /// the database to assign, as an auto-increment key is, or written as
+    /// the row carries it.
+    ///
+    /// **Not part of the public API.** It is `pub` because the
+    /// `#[suprnova::model]` macro's `Persistable` impl calls it.
+    #[doc(hidden)]
+    async fn __insert_built(self, database_assigns_key: bool) -> Result<Self, FrameworkError> {
+        use sea_orm::{ActiveModelTrait, Iterable, PrimaryKeyToColumn};
+
+        let built = serde_json::to_value(&self).map_err(|e| {
+            FrameworkError::internal(format!("factory insert: serialize the built row: {e}"))
+        })?;
+        let built = Attrs::from(built);
+        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(built.clone()));
+        Self::__dispatch_creating(shared.clone()).await?;
+        Self::__dispatch_saving(shared.clone(), true).await?;
+
+        // Only what a listener changed goes over the built values. The
+        // attributes are the row as it serializes, which leaves out a
+        // hidden column and carries the placeholder key; writing them
+        // all back would lose the one and set the other.
+        let after = shared.lock().await.clone();
+        let mut changed = Attrs::new();
+        for (key, value) in after.iter() {
+            if built.get(key) != Some(value) {
+                changed.insert(key, value.clone());
+            }
+        }
+
+        let touch_plan = Self::__plan_touches(Some(&self), &changed)?;
+        let mut am = self.into_active_model_for_update()?;
+        if database_assigns_key {
+            for key in <<Self::Entity as EntityTrait>::PrimaryKey as Iterable>::iter() {
+                am.not_set(key.into_column());
+            }
+        }
+        Self::apply_attrs_to_active_model(&mut am, changed)?;
+
+        let row =
+            crate::render_cache::orm::atomic(Self::default_connection_name(), || async move {
+                let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                    None,
+                    None,
+                    Self::default_connection_name(),
+                )
+                .await?;
+                let inserted = exec
+                    .insert_active(am)
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                let row = Self::try_from_storage(inserted)?;
+                crate::render_cache::orm::after_model_write(&row).await?;
+                Ok(row)
+            })
+            .await?;
+
+        Self::__dispatch_created(&row).await?;
+        Self::__dispatch_saved(&row).await?;
+        row.__touch_planned(&touch_plan).await?;
         Ok(row)
     }
 
@@ -523,6 +632,7 @@ where
         // straight from `self.clone()` and silently dropped any
         // listener mutations to the Updating / Saving payload.
         let final_attrs = shared.lock().await.clone();
+        let touch_plan = Self::__plan_touches(Some(self), &final_attrs)?;
         let mut am = self.clone().into_active_model_for_update()?;
         Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
         // T11/T12: route through resolve_write.
@@ -546,7 +656,7 @@ where
 
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
-        current.touch_owners().await?;
+        current.__touch_planned(&touch_plan).await?;
         Ok(())
     }
 
@@ -567,6 +677,7 @@ where
         Self::__dispatch_saving(shared.clone(), false).await?;
 
         let final_attrs = shared.lock().await.clone();
+        let touch_plan = Self::__plan_touches(Some(&self), &final_attrs)?;
         let row = self.try_into_storage()?;
         let mut am = row.into_active_model();
         Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
@@ -591,7 +702,7 @@ where
 
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
-        current.touch_owners().await?;
+        current.__touch_planned(&touch_plan).await?;
         Ok(current)
     }
 
@@ -610,6 +721,7 @@ where
     /// dispatch `Trashed { model }` after step 2.
     async fn delete(self) -> Result<(), FrameworkError> {
         Self::__dispatch_deleting(&self, false).await?;
+        let touch_plan = Self::__plan_touches(Some(&self), &Attrs::new())?;
 
         let snapshot = self.clone();
         let row = self.try_into_storage()?;
@@ -630,7 +742,7 @@ where
         .await?;
 
         Self::__dispatch_deleted(&snapshot, false).await?;
-        snapshot.touch_owners().await?;
+        snapshot.__touch_planned(&touch_plan).await?;
         Ok(())
     }
 
@@ -643,6 +755,7 @@ where
     async fn force_delete(self) -> Result<(), FrameworkError> {
         Self::__dispatch_deleting(&self, true).await?;
         Self::__dispatch_force_deleting(&self).await?;
+        let touch_plan = Self::__plan_touches(Some(&self), &Attrs::new())?;
 
         let snapshot = self.clone();
         let row = self.try_into_storage()?;
@@ -664,7 +777,7 @@ where
 
         Self::__dispatch_force_deleted(&snapshot).await?;
         Self::__dispatch_deleted(&snapshot, true).await?;
-        snapshot.touch_owners().await?;
+        snapshot.__touch_planned(&touch_plan).await?;
         Ok(())
     }
 
@@ -681,19 +794,8 @@ where
     /// so inside a `DB::transaction` closure the touch joins the
     /// caller's transaction and a rollback reverts it.
     async fn touch_owners(&self) -> Result<(), FrameworkError> {
-        if Self::TOUCHES.is_empty() {
-            return Ok(());
-        }
-        crate::render_cache::orm::atomic(Self::default_connection_name(), || async {
-            let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-                None,
-                None,
-                Self::default_connection_name(),
-            )
-            .await?;
-            self.__touch_owners_via(&exec, None).await
-        })
-        .await
+        let plan = Self::__plan_touches(Some(self), &Attrs::new())?;
+        self.__touch_planned(&plan).await
     }
 
     /// [`Self::touch_owners`] pinned to an explicit transaction handle.
@@ -710,11 +812,97 @@ where
         &self,
         tx: &crate::database::Transaction,
     ) -> Result<(), FrameworkError> {
+        let plan = Self::__plan_touches(Some(self), &Attrs::new())?;
+        self.__touch_planned_with_tx(tx, &plan).await
+    }
+
+    /// Resolve the owners that a write of a row will touch, after the
+    /// pre-write listeners (`Creating`, `Saving`, `Updating`,
+    /// `Deleting`) have run and before the statement runs. Every name in
+    /// `#[model(touches = [...])]` is resolved here, so one name that
+    /// cannot be resolved stops the write before its statement runs,
+    /// before a post-write event (`Created`, `Saved`, `Updated`,
+    /// `Deleted`) is dispatched, and before any owner is touched. The
+    /// pre-write listeners have run by then, as they have for a write
+    /// that a listener cancels.
+    ///
+    /// Only a `MorphTo` name can fail: its owner model is chosen by the
+    /// row's `<name>_type` column, and a value that names none of the
+    /// relation's targets is an error. A `BelongsTo` owner is read from
+    /// the row after the write.
+    ///
+    /// The values come from `attrs` first and from `base` for a column
+    /// that `attrs` does not carry, which is the row as the statement
+    /// will write it: `create` passes the final attributes and no row,
+    /// `save`, `update` and the factory insert pass the row and the
+    /// attributes the listeners left, and a delete passes the row alone.
+    /// A listener that rewrites a `<name>_type` or `<name>_id` column is
+    /// therefore followed.
+    ///
+    /// Empty when `TOUCHES` is empty or touching is disabled for the
+    /// running task.
+    ///
+    /// **Not part of the public API.** It is `pub` because the macro's
+    /// soft-delete `delete` and `force_delete` call it.
+    #[doc(hidden)]
+    fn __plan_touches(base: Option<&Self>, attrs: &Attrs) -> Result<TouchPlan, FrameworkError> {
+        let mut plan = TouchPlan::default();
+        if Self::TOUCHES.is_empty() || crate::eloquent::touches_disabled() {
+            return Ok(plan);
+        }
+        for relation in Self::TOUCHES {
+            let Some(entry) = crate::eloquent::find_relation::<Self>(relation) else {
+                return Err(unregistered_touch(Self::TABLE, relation));
+            };
+            if entry.kind == crate::eloquent::RelationKind::MorphTo {
+                let owner = Self::__morph_owner(relation, base, attrs)?;
+                plan.morph_owners.push((*relation, owner));
+            }
+        }
+        Ok(plan)
+    }
+
+    /// Touch the owners of this row, `plan` being what
+    /// [`Self::__plan_touches`] resolved before the write. The row is
+    /// the one the write left, so a `BelongsTo` owner is read from it
+    /// and a `MorphTo` owner is taken from `plan`, not resolved again.
+    ///
+    /// **Not part of the public API.** It is `pub` because the macro's
+    /// soft-delete `delete` and `force_delete` call it.
+    #[doc(hidden)]
+    async fn __touch_planned(&self, plan: &TouchPlan) -> Result<(), FrameworkError> {
+        if Self::TOUCHES.is_empty() {
+            return Ok(());
+        }
+        crate::render_cache::orm::atomic(Self::default_connection_name(), || async {
+            let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                None,
+                None,
+                Self::default_connection_name(),
+            )
+            .await?;
+            self.__touch_owners_via(&exec, None, plan).await
+        })
+        .await
+    }
+
+    /// [`Self::__touch_planned`] pinned to an explicit transaction
+    /// handle, as [`Self::touch_owners_with_tx`] is for
+    /// [`Self::touch_owners`].
+    ///
+    /// **Not part of the public API.**
+    #[doc(hidden)]
+    async fn __touch_planned_with_tx(
+        &self,
+        tx: &crate::database::Transaction,
+        plan: &TouchPlan,
+    ) -> Result<(), FrameworkError> {
         if Self::TOUCHES.is_empty() {
             return Ok(());
         }
         let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
-        self.__touch_owners_via(&exec, Some(&tx.handle())).await
+        self.__touch_owners_via(&exec, Some(&tx.handle()), plan)
+            .await
     }
 
     /// The parent-touch cascade itself: one
@@ -726,6 +914,12 @@ where
     /// hydrated. That makes the cascade one level deep: Laravel
     /// recurses to grandparents by loading the parent model, and we
     /// trade that for not issuing a SELECT per touch.
+    ///
+    /// A `BelongsTo` owner's table and columns are in its entry. A
+    /// `MorphTo` owner's model varies from row to row, so it is found
+    /// from the row's `<name>_type` and `<name>_id` columns through the
+    /// morph registry by [`Self::__morph_owner`], before the statement
+    /// runs, and arrives here in `plan`. A null `<name>_id` touches nothing.
     ///
     /// `#[model(touches = [...])]` exists precisely to bust a parent's
     /// cached representation when a child write should invalidate it too;
@@ -751,23 +945,47 @@ where
         &self,
         exec: &crate::database::transaction::ExecutorChoice,
         tx_handle: Option<&crate::database::transaction::TxHandle>,
+        plan: &TouchPlan,
     ) -> Result<(), FrameworkError> {
         if Self::TOUCHES.is_empty() || crate::eloquent::touches_disabled() {
             return Ok(());
         }
-        let now = chrono::Utc::now().to_rfc3339();
-        let backend = exec.backend();
+        let now = crate::clock::now();
 
         for relation in Self::TOUCHES {
             let Some(entry) = crate::eloquent::find_relation::<Self>(relation) else {
                 // The macro rejects this at expansion time; reaching it
                 // means the registry and the const disagree.
-                return Err(FrameworkError::internal(format!(
-                    "`{}` declares touches = [\"{relation}\"] but no relation named \
-                     `{relation}` is registered for it",
-                    Self::TABLE,
-                )));
+                return Err(unregistered_touch(Self::TABLE, relation));
             };
+            if entry.kind == crate::eloquent::RelationKind::MorphTo {
+                // No owner in the plan: the row's `<name>_id` column is
+                // null, so there is no owner to identify.
+                let Some(owner) = plan.owner(relation) else {
+                    continue;
+                };
+                // As for a `BelongsTo` owner, one whose model disclaims
+                // timestamps is skipped: not an error, not a write.
+                if owner.updated_at_column.is_empty()
+                    || crate::eloquent::touches_ignored_for(owner.type_id)
+                {
+                    continue;
+                }
+                touch_owner_row(
+                    exec,
+                    tx_handle,
+                    OwnerRow {
+                        table: owner.table,
+                        updated_at: (owner.updated_at_storage)(&now)?,
+                        updated_at_column: owner.updated_at_column,
+                        key_column: owner.key_column,
+                        soft_deletes_column: owner.soft_deletes_column,
+                        key: &owner.key,
+                    },
+                )
+                .await?;
+                continue;
+            }
             // laravel/framework#61073 - an owner whose model disclaims
             // timestamps is skipped. Not an error, not a write.
             if entry.related_updated_at_column.is_empty() {
@@ -783,52 +1001,52 @@ where
             if key.is_null() {
                 continue;
             }
-
-            crate::database::validate_identifier(entry.target_table)?;
-            crate::database::validate_identifier(entry.related_updated_at_column)?;
-            crate::database::validate_identifier(entry.parent_key)?;
-
-            let set_ph = crate::database::placeholder::placeholder(backend, 1)?;
-            let key_ph = crate::database::placeholder::placeholder(backend, 2)?;
-            let mut sql = format!(
-                "UPDATE {} SET {} = {set_ph} WHERE {} = {key_ph}",
-                entry.target_table, entry.related_updated_at_column, entry.parent_key,
-            );
-            // Agree with the owner's own default scope: a trashed
-            // parent isn't a parent. Mirrors Laravel, where
-            // `Relation::touch` runs through the relation query and so
-            // inherits the related model's soft-delete scope.
-            if !entry.related_soft_deletes_column.is_empty() {
-                crate::database::validate_identifier(entry.related_soft_deletes_column)?;
-                sql.push_str(&format!(
-                    " AND {} IS NULL",
-                    entry.related_soft_deletes_column
-                ));
-            }
-
-            exec.run(sea_orm::Statement::from_sql_and_values(
-                backend,
-                &sql,
-                vec![
-                    sea_orm::Value::String(Some(now.clone())),
-                    json_value_to_sea_value(&key),
-                ],
-            ))
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-            match tx_handle {
-                Some(handle) => {
-                    crate::render_cache::orm::after_row_write_with_handle(
-                        handle,
-                        entry.target_table,
-                        &key,
-                    )
-                    .await?
-                }
-                None => crate::render_cache::orm::after_row_write(entry.target_table, &key).await?,
-            }
+            touch_owner_row(
+                exec,
+                tx_handle,
+                OwnerRow {
+                    table: entry.target_table,
+                    updated_at: (entry.related_updated_at_storage)(&now)?,
+                    updated_at_column: entry.related_updated_at_column,
+                    key_column: entry.parent_key,
+                    soft_deletes_column: entry.related_soft_deletes_column,
+                    key: &key,
+                },
+            )
+            .await?;
         }
         Ok(())
+    }
+
+    /// The owner row the `MorphTo` relation named `relation` points at,
+    /// for the parent-touch cascade of `#[model(touches = [...])]`.
+    /// `None` when the relation's `<name>_id` value is null. A
+    /// `<name>_type` value that names none of the relation's targets is
+    /// an error, and it is raised by [`Self::__plan_touches`] before the
+    /// statement runs, so nothing is written for such a row.
+    ///
+    /// `attrs` is read first and `base` for a column `attrs` does not
+    /// carry, as [`Self::__plan_touches`] describes.
+    ///
+    /// The `#[suprnova::model]` macro overrides this for a model that
+    /// declares `MorphTo` relations, choosing the target through the
+    /// relation's fetch helper, as `.get()` and the eager loader do. The
+    /// default is for a model without one and reports the name as
+    /// unknown.
+    ///
+    /// **Not part of the public API.** It is `pub` because the macro
+    /// emits the override.
+    #[doc(hidden)]
+    fn __morph_owner(
+        relation: &str,
+        base: Option<&Self>,
+        attrs: &Attrs,
+    ) -> Result<Option<crate::eloquent::relations::morph::MorphOwner>, FrameworkError> {
+        let _ = (base, attrs);
+        Err(FrameworkError::internal(format!(
+            "model `{}` has no MorphTo relation `{relation}`",
+            std::any::type_name::<Self>(),
+        )))
     }
 
     // ---- Phase 10C T11 - manual-transaction shims --------------------
@@ -865,6 +1083,7 @@ where
         // the listener-mutated attrs back and apply them to the
         // ActiveModel before the UPDATE fires.
         let final_attrs = shared.lock().await.clone();
+        let touch_plan = Self::__plan_touches(Some(self), &final_attrs)?;
         let mut am = self.clone().into_active_model_for_update()?;
         Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
         let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
@@ -877,7 +1096,7 @@ where
 
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
-        current.touch_owners_with_tx(tx).await?;
+        current.__touch_planned_with_tx(tx, &touch_plan).await?;
         Ok(())
     }
 
@@ -897,6 +1116,7 @@ where
         Self::__dispatch_saving(shared.clone(), false).await?;
 
         let final_attrs = shared.lock().await.clone();
+        let touch_plan = Self::__plan_touches(Some(&self), &final_attrs)?;
         let row = self.try_into_storage()?;
         let mut am = row.into_active_model();
         Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
@@ -910,7 +1130,7 @@ where
 
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
-        current.touch_owners_with_tx(tx).await?;
+        current.__touch_planned_with_tx(tx, &touch_plan).await?;
         Ok(current)
     }
 
@@ -922,6 +1142,7 @@ where
     /// the call site.
     async fn delete_with_tx(self, tx: &crate::database::Transaction) -> Result<(), FrameworkError> {
         Self::__dispatch_deleting(&self, false).await?;
+        let touch_plan = Self::__plan_touches(Some(&self), &Attrs::new())?;
 
         let snapshot = self.clone();
         let row = self.try_into_storage()?;
@@ -933,7 +1154,7 @@ where
         crate::render_cache::orm::after_model_write_with_tx(tx, &snapshot).await?;
 
         Self::__dispatch_deleted(&snapshot, false).await?;
-        snapshot.touch_owners_with_tx(tx).await?;
+        snapshot.__touch_planned_with_tx(tx, &touch_plan).await?;
         Ok(())
     }
 
@@ -955,6 +1176,7 @@ where
         Self::__dispatch_saving(shared.clone(), true).await?;
 
         let final_attrs = shared.lock().await.clone();
+        let touch_plan = Self::__plan_touches(None, &final_attrs)?;
         let am = Self::active_model_from_attrs(final_attrs)?;
         let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
         let inserted = exec
@@ -966,7 +1188,7 @@ where
 
         Self::__dispatch_created(&row).await?;
         Self::__dispatch_saved(&row).await?;
-        row.touch_owners_with_tx(tx).await?;
+        row.__touch_planned_with_tx(tx, &touch_plan).await?;
         Ok(row)
     }
 
@@ -979,6 +1201,7 @@ where
     ) -> Result<(), FrameworkError> {
         Self::__dispatch_deleting(&self, true).await?;
         Self::__dispatch_force_deleting(&self).await?;
+        let touch_plan = Self::__plan_touches(Some(&self), &Attrs::new())?;
 
         let snapshot = self.clone();
         let row = self.try_into_storage()?;
@@ -991,7 +1214,7 @@ where
 
         Self::__dispatch_force_deleted(&snapshot).await?;
         Self::__dispatch_deleted(&snapshot, true).await?;
-        snapshot.touch_owners_with_tx(tx).await?;
+        snapshot.__touch_planned_with_tx(tx, &touch_plan).await?;
         Ok(())
     }
 
@@ -1060,6 +1283,75 @@ where
         Self::find(self.primary_key_value()).await
     }
 
+    /// Eager-load the named relations onto this row after the fact.
+    /// Laravel's `$model->load(...)`.
+    ///
+    /// Runs the loader of
+    /// [`Collection::load`](crate::eloquent::Collection::load) with this
+    /// row as a one-row slice, so the relations land in this row's own
+    /// relation cache, and a dotted name (`"comments.author"`), the
+    /// eager-load dispatcher and the connection routing behave exactly
+    /// as they do for a collection. Read the result with the
+    /// macro-emitted `<relation>_loaded()` accessors, which do not query
+    /// again. Inside a `DB::transaction` closure the reads go through the
+    /// transaction.
+    ///
+    /// A relation that is already loaded is loaded again, as in Laravel;
+    /// [`Self::load_missing`] skips it instead.
+    ///
+    /// A trait method rather than a macro-emitted inherent one, so code
+    /// that holds a model through an `M: Model` bound can call it.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// let mut post = Post::find_or_fail(id).await?;
+    /// post.load(["comments.author"]).await?;
+    /// println!("{} comments", post.comments_loaded().len());
+    /// ```
+    async fn load<I, S>(&mut self, relations: I) -> Result<(), FrameworkError>
+    where
+        Self: crate::eloquent::EagerLoadDispatch,
+        I: IntoIterator<Item = S> + Send,
+        S: Into<String> + Send,
+    {
+        crate::eloquent::collection::load_relations::<Self, I, S>(
+            std::slice::from_mut(self),
+            relations,
+        )
+        .await
+    }
+
+    /// Eager-load the named relations onto this row, skipping any this
+    /// row already has loaded. Laravel's `$model->loadMissing(...)`.
+    ///
+    /// Runs the loader of
+    /// [`Collection::load_missing`](crate::eloquent::Collection::load_missing)
+    /// with this row as a one-row slice. A relation already in this
+    /// row's cache runs no query. A dotted name is checked at every
+    /// level: with `comments` loaded, `load_missing(["comments.author"])`
+    /// loads only the authors the cached comments lack.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// let mut post = Post::find_or_fail(id).await?;
+    /// post.load(["comments"]).await?;
+    /// post.load_missing(["comments", "tags"]).await?; // queries `tags` only
+    /// ```
+    async fn load_missing<I, S>(&mut self, relations: I) -> Result<(), FrameworkError>
+    where
+        Self: crate::eloquent::EagerLoadDispatch,
+        I: IntoIterator<Item = S> + Send,
+        S: Into<String> + Send,
+    {
+        crate::eloquent::collection::load_missing_relations::<Self, I, S>(
+            std::slice::from_mut(self),
+            relations,
+        )
+        .await
+    }
+
     /// Build an unsaved clone with the PK reset and any auto-managed
     /// columns cleared. Caller saves explicitly.
     ///
@@ -1067,10 +1359,13 @@ where
     ///
     /// Eager-loaded relations and pivot context are preserved on the
     /// replica (Laravel parity: `clone $user` retains `$user->posts`).
-    /// The macro-emitted `replicate_with` clones the source's
-    /// `__eager` cache via `EagerLoadCache::clone` - each cell
-    /// carries a clone trampoline so the replica's loaded rows are
-    /// independent of the source's - and `Arc`-clones the pivot slot.
+    /// The macro-emitted `replicate_with` copies the relations of the
+    /// source's `__eager` cache - each cell carries a clone trampoline
+    /// so the replica's loaded rows are independent of the source's -
+    /// and `Arc`-clones the pivot slot. The copy leaves out the mark of
+    /// a multi-row query: the replica is built in the process, and
+    /// [lazy-loading prevention](crate::eloquent::lazy_loading) never
+    /// refuses a relation read on such a model.
     /// Use [`Self::replicate_except`] if a specific relation should
     /// be dropped on the replica (column names only; relation cache
     /// keys are out of scope for the `except` filter).
@@ -1461,6 +1756,109 @@ where
     fn into_active_model_for_update(
         self,
     ) -> Result<<Self::Entity as EntityTrait>::ActiveModel, FrameworkError>;
+}
+
+/// The owners of the `MorphTo` relations named in a model's
+/// `#[model(touches = [...])]`, found from a row before it is written
+/// and used by the touch that follows the write. Built by
+/// [`Model::__plan_touches`].
+///
+/// **Not part of the public API.** It is `pub` because the `Model`
+/// trait methods that carry it are.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct TouchPlan {
+    /// One entry per `MorphTo` name of `TOUCHES`: the owner, or `None`
+    /// when the row's `<name>_id` value is null.
+    morph_owners: Vec<(
+        &'static str,
+        Option<crate::eloquent::relations::morph::MorphOwner>,
+    )>,
+}
+
+impl TouchPlan {
+    /// The resolved owner of the `MorphTo` relation `relation`, `None`
+    /// when the relation has no owner for the row.
+    fn owner(&self, relation: &str) -> Option<&crate::eloquent::relations::morph::MorphOwner> {
+        self.morph_owners
+            .iter()
+            .find(|(name, _)| *name == relation)
+            .and_then(|(_, owner)| owner.as_ref())
+    }
+}
+
+/// The error for a name in `touches` that the relation registry does
+/// not know. The macro rejects such a name at expansion time, so this is
+/// reached only when the registry and the `TOUCHES` const disagree.
+fn unregistered_touch(table: &str, relation: &str) -> FrameworkError {
+    FrameworkError::internal(format!(
+        "`{table}` declares touches = [\"{relation}\"] but no relation named \
+         `{relation}` is registered for it",
+    ))
+}
+
+/// One owner row the parent-touch cascade writes: where it lives, the
+/// columns the `UPDATE` names, and its key. A `BelongsTo` owner fills
+/// it from its [`RelationEntry`](crate::eloquent::RelationEntry), a
+/// `MorphTo` owner from the model its child's `<name>_type` names.
+struct OwnerRow<'a> {
+    table: &'a str,
+    /// The time, as the owner's `updated_at` cast stores it.
+    updated_at: sea_orm::Value,
+    updated_at_column: &'a str,
+    key_column: &'a str,
+    soft_deletes_column: &'a str,
+    key: &'a serde_json::Value,
+}
+
+/// One parent touch: `UPDATE <table> SET <updated_at> = ? WHERE <key> = ?`
+/// through `exec`, then the render-cache advance for the touched row.
+/// `tx_handle` is the explicit transaction of
+/// [`Model::touch_owners_with_tx`], whose advance cannot rely on the
+/// ambient task-local.
+///
+/// Every identifier is checked with
+/// [`crate::database::validate_identifier`] before it is rendered, on
+/// the principle [`Model::__touch_owners_via`] documents.
+async fn touch_owner_row(
+    exec: &crate::database::transaction::ExecutorChoice,
+    tx_handle: Option<&crate::database::transaction::TxHandle>,
+    owner: OwnerRow<'_>,
+) -> Result<(), FrameworkError> {
+    let backend = exec.backend();
+    crate::database::validate_identifier(owner.table)?;
+    crate::database::validate_identifier(owner.updated_at_column)?;
+    crate::database::validate_identifier(owner.key_column)?;
+
+    let set_ph = crate::database::placeholder::placeholder(backend, 1)?;
+    let key_ph = crate::database::placeholder::placeholder(backend, 2)?;
+    let mut sql = format!(
+        "UPDATE {} SET {} = {set_ph} WHERE {} = {key_ph}",
+        owner.table, owner.updated_at_column, owner.key_column,
+    );
+    // Agree with the owner's own default scope: a trashed
+    // parent isn't a parent. Mirrors Laravel, where
+    // `Relation::touch` runs through the relation query and so
+    // inherits the related model's soft-delete scope.
+    if !owner.soft_deletes_column.is_empty() {
+        crate::database::validate_identifier(owner.soft_deletes_column)?;
+        sql.push_str(&format!(" AND {} IS NULL", owner.soft_deletes_column));
+    }
+
+    exec.run(sea_orm::Statement::from_sql_and_values(
+        backend,
+        &sql,
+        vec![owner.updated_at, json_value_to_sea_value(owner.key)],
+    ))
+    .await
+    .map_err(|e| FrameworkError::database(e.to_string()))?;
+    match tx_handle {
+        Some(handle) => {
+            crate::render_cache::orm::after_row_write_with_handle(handle, owner.table, owner.key)
+                .await
+        }
+        None => crate::render_cache::orm::after_row_write(owner.table, owner.key).await,
+    }
 }
 
 /// Cross-cutting helper called from `increment` / `decrement` and

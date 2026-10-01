@@ -18,7 +18,8 @@
 //!
 //! These tests demonstrate the lifecycle is now wired:
 //!   - Form-urlencoded body extracts cleanly.
-//!   - Non-object JSON body is rejected with a clear 400.
+//!   - Non-object JSON body is rejected with a clear 422, as the default
+//!     extractor rejects a body that does not fit.
 //!   - A `Precognition: true` header short-circuits to 204
 //!     (PrecognitionSuccess) rather than completing normally.
 //!
@@ -160,8 +161,9 @@ async fn non_object_json_body_is_rejected_not_silently_emptied() {
     // silently turned `[1,2,3]` / `"string"` / `null` into `{}`, then
     // deserialize either passed (if route params + defaults filled
     // all required) or failed with confusing serde messages.
-    // Post-fix: non-object JSON is rejected explicitly with 400 and a
-    // clear message.
+    // Post-fix: non-object JSON is rejected explicitly with a clear
+    // message, and with 422, the status the default extractor gives a body
+    // that does not fit the struct.
     let (addr, captured) = spawn_extracting::<UpdateProfileDto>(route_params()).await;
 
     let body = b"[1, 2, 3]".to_vec();
@@ -173,8 +175,8 @@ async fn non_object_json_body_is_rejected_not_silently_emptied() {
     let msg = format!("{err}");
     assert_eq!(
         err.status_code(),
-        400,
-        "non-object body must produce 400, got {}: {msg}",
+        422,
+        "non-object body must produce 422, got {}: {msg}",
         err.status_code()
     );
     assert!(

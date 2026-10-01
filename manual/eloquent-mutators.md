@@ -218,6 +218,66 @@ pub struct Subscription {
 }
 ```
 
+### Native date-time casts
+
+The casts above store text. These four store a `DateTime<Utc>` in a native
+date-time column, so the database's own date functions - grouping by
+month, date arithmetic, `NOW()` comparisons - work on it:
+
+| Cast | Field | Column |
+|---|---|---|
+| `AsNativeDateTime` | `DateTime<Utc>` | `timestamp with time zone` on Postgres, `TIMESTAMP` or `DATETIME` on MySQL, text on SQLite |
+| `AsOptionalNativeDateTime` | `Option<DateTime<Utc>>` | the same, nullable |
+| `AsNaiveDateTime` | `DateTime<Utc>` | a column without a zone holding the UTC wall clock: `timestamp` on Postgres, `DATETIME` on MySQL, text on SQLite |
+| `AsOptionalNaiveDateTime` | `Option<DateTime<Utc>>` | the same, nullable |
+
+A `DateTime<Utc>` field defaults to `AsDateTime`, so declare these per
+field. The model's automatic timestamps, `touch()`, soft deletes and the
+touch of an owner all store through the declared cast.
+
+```rust
+#[model(
+    table = "orders",
+    casts = {
+        created_at = AsNativeDateTime,
+        updated_at = AsNativeDateTime,
+    },
+)]
+pub struct Order {
+    pub id: i64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+```
+
+Pick the cast that matches the column: the database driver checks the
+storage type against it. A table Laravel's `timestamps()` created is
+`TIMESTAMP` on MySQL, which only `AsNativeDateTime` reads, and `timestamp
+without time zone` on Postgres, which only `AsNaiveDateTime` reads. The
+schema builder's `timestamps_tz()` and `datetimes()` create the two shapes
+(see [Migrations](migrations.md#timestamps-and-soft-deletes)).
+
+Laravel's timestamp columns are nullable, and another application can leave
+them NULL. Declare such fields `Option<DateTime<Utc>>` with
+`AsOptionalNativeDateTime` or `AsOptionalNaiveDateTime`: a NULL reads as
+`None`, and the model's own writes still stamp them.
+
+Queries bind through the cast too, so `filter_op("created_at", ">", "2031-03-14T12:00:00Z")`,
+`where_between`, `where_date` and `update_all` send a native parameter for a
+native column; Postgres refuses to compare one with text. A bare date such
+as `"2031-03-14"` compares as midnight UTC. Two queries still bind text: a
+model-less `DB::table` query, which knows no casts, and a `where_has`
+through a `MorphTo` relation, whose related model varies by row. On
+Postgres, compare a native column there in raw SQL with a typed value.
+
+#### Why Suprnova diverges
+
+Laravel's `datetime` cast writes whatever column the migration made, because
+PHP binds every value as text and each database converts it. Postgres
+refuses a text parameter for a date-time column, so a Suprnova cast names
+its storage type and the default stays the text that round-trips on every
+backend.
+
 ### `AsTimestamp`
 
 Unix-epoch `i64` ↔ `INTEGER`. Use when the column is queried as a
@@ -284,6 +344,28 @@ Any `Serialize + DeserializeOwned` type ↔ JSON-encoded `TEXT`. Use
 when the field is a `serde_json::Value` or a user-defined struct
 that's already fully describable in serde terms but doesn't fit the
 fixed-shape `AsObject` pattern (e.g. enum payloads, untyped maps).
+
+### Nullable JSON columns
+
+The structured casts store non-null text, so they can't serve a
+nullable column: `AsJson<Option<T>>` writes the text `null` instead
+of SQL `NULL`, and a `NULL` row fails to decode. Each one has an
+optional form for that case - `AsOptionalArray<T>`,
+`AsOptionalObject<T>`, `AsOptionalCollection<T>`, `AsOptionalJson<T>`
+and `AsOptionalArrayObject<T>`. The field is an `Option` of the plain
+cast's type. `None` stores SQL `NULL` and a `NULL` column reads as
+`None`. A value is stored and read exactly as the plain cast does it,
+with the same error on malformed JSON.
+
+```rust
+use suprnova::AsOptionalJson;
+
+#[model(table = "events", casts = { metadata = AsOptionalJson<serde_json::Value> })]
+pub struct Event {
+    pub id: i64,
+    pub metadata: Option<serde_json::Value>,
+}
+```
 
 ### `AsArrayObject<T>`
 

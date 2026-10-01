@@ -1,8 +1,10 @@
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
+use sea_orm_migration::{MigrationTrait, MigratorTrait};
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::Arc;
 use suprnova::notifications::channels::database::DatabaseChannel;
+use suprnova::notifications::migrations::CreateNotificationsTable;
 use suprnova::notifications::{Channel, Notifiable, Notification, NotificationDispatcher};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -36,39 +38,20 @@ impl Notifiable for User {
     }
 }
 
-// Source-of-truth migration: embed at compile time so the test's schema
-// can never drift from production. SQLite's `execute_unprepared` runs a
-// single statement per call, and the migration's leading comment block
-// contains prose semicolons that would corrupt a naive `split(';')`. So
-// we first strip `--` line comments, then split on `;` and run each
-// non-empty trimmed statement.
-const NOTIFICATIONS_MIGRATION: &str =
-    include_str!("../../migrations/20260516_create_notifications_table.sql");
+/// The framework's own notifications migration, registered the way an app
+/// registers it, so the test's schema is the one production gets.
+struct Migrator;
 
-// Naive - truncates at the first `--` in each line. Safe ONLY because the
-// embedded migration has no quoted string literals containing "--". Don't
-// reuse this for arbitrary SQL; reach for a real tokenizer if the schema
-// ever grows a literal that contains the comment marker.
-fn strip_sql_line_comments(src: &str) -> String {
-    src.lines()
-        .map(|line| match line.find("--") {
-            Some(idx) => &line[..idx],
-            None => line,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+#[async_trait::async_trait]
+impl MigratorTrait for Migrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![Box::new(CreateNotificationsTable)]
+    }
 }
 
 async fn fresh_db() -> DatabaseConnection {
     let db = Database::connect("sqlite::memory:").await.unwrap();
-    let cleaned = strip_sql_line_comments(NOTIFICATIONS_MIGRATION);
-    for stmt in cleaned.split(';') {
-        let trimmed = stmt.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        db.execute_unprepared(trimmed).await.unwrap();
-    }
+    Migrator::up(&db, None).await.unwrap();
     db
 }
 

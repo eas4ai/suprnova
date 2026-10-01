@@ -34,7 +34,8 @@ pub struct AuthMiddleware {
     /// Let anonymous requests continue without principal evidence.
     optional: bool,
     /// Named guard to check (None = the sync session-backed default-guard
-    /// fast path; `Some(name)` checks that guard via the `AuthManager`).
+    /// fast path, or the default guard itself when it is a guard of the
+    /// application; `Some(name)` checks that guard via the `AuthManager`).
     guard: Option<String>,
 }
 
@@ -96,6 +97,13 @@ impl AuthMiddleware {
     /// Note: a token guard (e.g. `for_guard("api")`) expects the bearer-token
     /// middleware to have run earlier in the chain to populate the request's
     /// auth id; without it the guard always reports unauthenticated.
+    ///
+    /// A custom guard (registered with `Auth::extend`) decides alone: the
+    /// user it resolves is the request's principal, and an error it returns
+    /// fails the request rather than letting it through as a guest. For a
+    /// guard of `Auth::via_request`, this middleware first runs the resolver
+    /// with the request, once per request, and a resolver error fails the
+    /// request the same way.
     pub fn for_guard(mut self, name: impl Into<String>) -> Self {
         self.guard = Some(name.into());
         self
@@ -116,13 +124,48 @@ impl Middleware for AuthMiddleware {
         // and an ID-presence check would keep authorizing the removed
         // identity. A provider miss clears the stale slot so the next
         // request does not carry it.
-        let authenticated = match &self.guard {
+        //
+        // A custom guard keeps its identity outside the session and the
+        // default guard's request user, so its principal is the user it
+        // resolved, and it has no session slot to clear. A guard of
+        // `Auth::via_request` gets its resolver's answer bound first.
+        //
+        // Without a guard name, a custom default guard is asked the same
+        // way: the session fast path below would decide from an identity
+        // that guard never reads, and attest a different one.
+        let custom_default = match &self.guard {
+            Some(_) => None,
+            None => Auth::custom_default_guard(),
+        };
+        let mut custom_principal = None;
+        let authenticated = match self.guard.as_deref().or(custom_default.as_deref()) {
             Some(name) => {
-                let guard = Auth::guard(name)?;
+                let manager = Auth::manager()?;
+                manager.resolve_request_guard(name, &request).await?;
+                let guard = manager.guard(name)?;
+                let custom = manager.is_custom_guard(name);
                 match guard.user().await? {
-                    Some(_) => true,
+                    Some(user) => {
+                        if custom {
+                            // A guard of the application has an id space of
+                            // its own. Its name keeps its user `7` apart
+                            // from web user `7`.
+                            //
+                            // A session user attests its bare id, so a
+                            // session user id of the form `<guard>:<id>`
+                            // would attest the same principal as that guard's
+                            // user. The manager refuses a guard name that
+                            // contains `:`, which keeps two guards of the
+                            // application apart; an application whose
+                            // session user ids can contain `:` names its
+                            // guards so that no id starts with `<guard>:`.
+                            let id = user.get_auth_identifier();
+                            custom_principal = Some(format!("{name}:{id}"));
+                        }
+                        true
+                    }
                     None => {
-                        if guard.id().await?.is_some() {
+                        if !custom && guard.id().await?.is_some() {
                             crate::session::middleware::clear_guard_auth_user(name);
                         }
                         false
@@ -154,8 +197,9 @@ impl Middleware for AuthMiddleware {
             // Authentication proof belongs to this middleware's successful
             // branch. Merely carrying a session value or Authorization header
             // never mints principal evidence.
-            if let Some(principal_id) =
-                crate::auth::request_state::current_user_id().or_else(Auth::id)
+            if let Some(principal_id) = custom_principal
+                .or_else(crate::auth::request_state::current_user_id)
+                .or_else(Auth::id)
             {
                 request.record_live_security_check(
                     crate::live::attestation::SecurityCheck::Principal,
@@ -241,6 +285,9 @@ impl GuestMiddleware {
 
     /// Check a named guard instead of the default (chainable on
     /// `redirect_to(...)` / `new()`).
+    ///
+    /// For a guard of `Auth::via_request`, this first runs the resolver with
+    /// the request, once per request; a resolver error fails the request.
     pub fn for_guard(mut self, name: impl Into<String>) -> Self {
         self.guard = Some(name.into());
         self
@@ -257,7 +304,11 @@ impl Default for GuestMiddleware {
 impl Middleware for GuestMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
         let is_guest = match &self.guard {
-            Some(name) => Auth::guard(name)?.guest().await?,
+            Some(name) => {
+                let manager = Auth::manager()?;
+                manager.resolve_request_guard(name, &request).await?;
+                manager.guard(name)?.guest().await?
+            }
             None => Auth::guest(),
         };
         if is_guest {
@@ -507,5 +558,208 @@ mod realm_quoting_tests {
         // TAB is preserved (it's the one allowed control character
         // inside qdtext per RFC 7230 §3.2.6).
         assert_eq!(quote_realm("Tab\there"), "Tab\there");
+    }
+}
+
+// `Request::for_test` exists only with the `testing` feature, which the
+// minimal profile checked by scripts/check-feature-matrix.sh leaves off.
+#[cfg(all(test, feature = "testing"))]
+mod custom_guard_principal_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::auth::{AuthConfig, AuthManager, Authenticatable, Guard, GuardConfig, UserProvider};
+    use crate::container::testing::TestContainer;
+    use crate::error::FrameworkError;
+    use crate::live::attestation::SecurityCheck;
+    use crate::live::testing::{LiveTestOperation, prepare_live_request_for_test};
+
+    /// A user identified by a fixed string.
+    struct Named(&'static str);
+
+    impl Authenticatable for Named {
+        fn get_auth_identifier(&self) -> String {
+            self.0.to_string()
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn into_arc_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
+            self
+        }
+    }
+
+    /// Resolves nobody: the guards under test never ask it.
+    struct NoUsers;
+
+    #[async_trait]
+    impl UserProvider for NoUsers {
+        async fn retrieve_by_id(
+            &self,
+            _id: &str,
+        ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+            Ok(None)
+        }
+    }
+
+    /// Accepts every request as the partner it holds.
+    struct PartnerGuard(&'static str);
+
+    #[async_trait]
+    impl Guard for PartnerGuard {
+        async fn user(&self) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+            Ok(Some(Arc::new(Named(self.0)) as Arc<dyn Authenticatable>))
+        }
+
+        async fn id(&self) -> Result<Option<String>, FrameworkError> {
+            Ok(Some(self.0.to_string()))
+        }
+
+        async fn validate(&self, _credentials: &Credentials) -> Result<bool, FrameworkError> {
+            Ok(false)
+        }
+
+        async fn set_user(&self, _user: Arc<dyn Authenticatable>) {}
+
+        async fn has_user(&self) -> bool {
+            true
+        }
+    }
+
+    type GuardResult = Result<Arc<dyn Guard>, FrameworkError>;
+    type Factory = fn(&str, Arc<dyn UserProvider>) -> GuardResult;
+
+    fn api_7(_name: &str, _provider: Arc<dyn UserProvider>) -> GuardResult {
+        Ok(Arc::new(PartnerGuard("api-7")) as Arc<dyn Guard>)
+    }
+
+    fn b_colon_c(_name: &str, _provider: Arc<dyn UserProvider>) -> GuardResult {
+        Ok(Arc::new(PartnerGuard("b:c")) as Arc<dyn Guard>)
+    }
+
+    fn user_7(_name: &str, _provider: Arc<dyn UserProvider>) -> GuardResult {
+        Ok(Arc::new(PartnerGuard("7")) as Arc<dyn Guard>)
+    }
+
+    /// Installs a manager whose guard `partner`, of the custom driver
+    /// `api_key`, is built by `factory`; `default_guard` names the default.
+    fn install_partner(default_guard: &str, factory: Factory) {
+        install_guard("partner", default_guard, factory);
+    }
+
+    /// Installs a manager whose guard `name`, of the custom driver
+    /// `api_key`, is built by `factory`; `default_guard` names the default.
+    fn install_guard(name: &str, default_guard: &str, factory: Factory) {
+        let entry = GuardConfig::custom("api_key", "partners");
+        let config = AuthConfig::new(default_guard).guard(name, entry);
+        TestContainer::singleton(AuthManager::new(config));
+        Auth::register_provider("users", Arc::new(NoUsers)).unwrap();
+        Auth::register_provider("partners", Arc::new(NoUsers)).unwrap();
+        Auth::extend("api_key", factory).unwrap();
+    }
+
+    /// A request of a Live route, so the middleware's principal evidence is
+    /// recorded on it.
+    fn live_request() -> Request {
+        let request = Request::for_test("GET", "/live").with_route_pattern("/live");
+        prepare_live_request_for_test(request, LiveTestOperation::Action)
+    }
+
+    fn principal_fingerprint(request: &Request) -> Option<[u8; 32]> {
+        let attestation = request.live_security_attestation();
+        let fact = attestation.fact(request.live_request_identity(), SecurityCheck::Principal);
+        fact.and_then(|fact| fact.fingerprint)
+    }
+
+    /// The principal evidence a request carries once `principal` is attested.
+    fn attested(principal: &str) -> Option<[u8; 32]> {
+        let mut request = live_request();
+        let principal = Some(principal.as_bytes());
+        let recorded = request.record_live_security_check(SecurityCheck::Principal, principal);
+        assert!(recorded);
+        principal_fingerprint(&request)
+    }
+
+    /// Runs `middleware` on a Live request, after `Auth::set_user` signs in
+    /// `generic_user` when one is given, and returns the principal evidence
+    /// the middleware attested: `None` when it refused the request.
+    async fn attested_through(
+        middleware: AuthMiddleware,
+        generic_user: Option<&'static str>,
+    ) -> Option<[u8; 32]> {
+        let seen = Arc::new(Mutex::new(None));
+        let recorded = seen.clone();
+        let next: Next = Arc::new(move |request| {
+            *recorded.lock().unwrap() = principal_fingerprint(&request);
+            Box::pin(async { Ok(HttpResponse::text("reached")) })
+        });
+        crate::auth::request_state::scope(async {
+            if let Some(id) = generic_user {
+                Auth::set_user(Arc::new(Named(id)));
+            }
+            // A refusal is an error response and never reaches `next`.
+            let _ = middleware.handle(live_request(), next).await;
+        })
+        .await;
+        *seen.lock().unwrap()
+    }
+
+    // The default guard's user sits in the request's generic slot. A route
+    // behind a custom guard must attest the user that guard resolved, not
+    // that one.
+    #[tokio::test]
+    async fn custom_guard_attests_the_user_it_resolved() {
+        let _scope = TestContainer::fake();
+        install_partner("web", api_7);
+        let check = AuthMiddleware::new().for_guard("partner");
+        let evidence = attested_through(check, Some("7")).await;
+        assert!(attested("partner:api-7").is_some());
+        assert_eq!(evidence, attested("partner:api-7"));
+        assert_ne!(evidence, attested("7"));
+    }
+
+    // Id `7` of a guard of the application and web user `7` are two
+    // principals.
+    #[tokio::test]
+    async fn custom_principal_carries_the_guard_name() {
+        let _scope = TestContainer::fake();
+        install_partner("web", user_7);
+        let partner_check = AuthMiddleware::new().for_guard("partner");
+        let partner = attested_through(partner_check, Some("7")).await;
+        let web_check = AuthMiddleware::new().for_guard("web");
+        let web = attested_through(web_check, Some("7")).await;
+        assert_eq!(partner, attested("partner:7"));
+        assert_eq!(web, attested("7"));
+        assert_ne!(partner, web);
+    }
+
+    // A guard `a` whose user id is `b:c` attests `a:b:c`, and a guard whose
+    // own name has a `:` is refused before it can attest anything.
+    #[tokio::test]
+    async fn a_colon_in_an_id_is_attested_and_a_colon_in_a_guard_name_is_refused() {
+        let _scope = TestContainer::fake();
+        install_guard("a", "web", b_colon_c);
+        let check = AuthMiddleware::new().for_guard("a");
+        let evidence = attested_through(check, None).await;
+        assert!(attested("a:b:c").is_some());
+        assert_eq!(evidence, attested("a:b:c"));
+
+        install_guard("a:b", "web", user_7);
+        let refused = AuthMiddleware::new().for_guard("a:b");
+        assert_eq!(attested_through(refused, None).await, None);
+    }
+
+    // Without a guard name, a custom default guard decides, and the principal
+    // is the user it returned, never the generic user.
+    #[tokio::test]
+    async fn unnamed_check_asks_and_attests_a_custom_default_guard() {
+        let _scope = TestContainer::fake();
+        install_partner("partner", api_7);
+        let expected = attested("partner:api-7");
+        let with_generic_user = attested_through(AuthMiddleware::new(), Some("7")).await;
+        let alone = attested_through(AuthMiddleware::new(), None).await;
+        assert!(expected.is_some());
+        assert_eq!(with_generic_user, expected);
+        assert_eq!(alone, expected);
     }
 }

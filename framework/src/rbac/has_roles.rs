@@ -1,8 +1,11 @@
 //! Role and permission helpers for authenticatable models.
 
-use async_trait::async_trait;
-use sea_orm::{DatabaseBackend, Value};
+use std::collections::HashSet;
 
+use async_trait::async_trait;
+use sea_orm::{DatabaseBackend, Statement, Value};
+
+use crate::database::transaction::ExecutorChoice;
 use crate::{AppError, Authenticatable, DB, FrameworkError};
 
 const DEFAULT_GUARD: &str = "web";
@@ -120,6 +123,31 @@ const MODEL_HAS_INHERITED_PERMISSION: ObservedStatement = ObservedStatement {
             AND roles.guard_name = ?",
     tables: &["model_roles", "roles", "role_permissions", "permissions"],
 };
+/// The two existence checks above without the name filter, joined: every
+/// permission name the model holds, directly or through a role.
+const MODEL_PERMISSION_NAMES: ObservedStatement = ObservedStatement {
+    sql: "SELECT permissions.name FROM model_permissions \
+          INNER JOIN permissions ON permissions.id = model_permissions.permission_id \
+          WHERE model_permissions.model_type = ? \
+            AND model_permissions.model_id = ? \
+            AND permissions.guard_name = ? \
+          UNION \
+          SELECT permissions.name FROM model_roles \
+          INNER JOIN roles ON roles.id = model_roles.role_id \
+          INNER JOIN role_permissions ON role_permissions.role_id = roles.id \
+          INNER JOIN permissions ON permissions.id = role_permissions.permission_id \
+          WHERE model_roles.model_type = ? \
+            AND model_roles.model_id = ? \
+            AND permissions.guard_name = ? \
+            AND roles.guard_name = ?",
+    tables: &[
+        "model_permissions",
+        "permissions",
+        "model_roles",
+        "roles",
+        "role_permissions",
+    ],
+};
 
 const INSERT_ROLE: ObservedStatement = ObservedStatement {
     sql: "INSERT INTO roles (name, display_name, guard_name) VALUES (?, ?, ?)",
@@ -167,6 +195,7 @@ pub(crate) const READ_STATEMENTS: &[ObservedStatement] = &[
     MODEL_HAS_ROLE_NAMED,
     MODEL_HAS_DIRECT_PERMISSION,
     MODEL_HAS_INHERITED_PERMISSION,
+    MODEL_PERMISSION_NAMES,
 ];
 
 /// Every write statement this module issues, for the same contract.
@@ -196,6 +225,32 @@ async fn exists(statement: ObservedStatement, values: Vec<Value>) -> Result<bool
     let count: i64 =
         DB::scalar_observing(&render(statement.sql, backend()?), values, statement.tables).await?;
     Ok(count > 0)
+}
+
+/// Record every table `statement` names as read, for the render cache.
+fn observe_reads(statement: ObservedStatement) {
+    for table in statement.tables {
+        crate::render_cache::collector::observe_table_read(table);
+    }
+}
+
+/// Every row of a read, observed on the tables it names: the multi-row
+/// sibling of [`select_one`].
+///
+/// The `DB` facade has no observing form that returns every row, so this
+/// resolves the same read executor `DB::select_one_observing` resolves -
+/// transaction first - and runs the statement on it.
+async fn select_all(
+    statement: ObservedStatement,
+    values: Vec<Value>,
+) -> Result<Vec<sea_orm::QueryResult>, FrameworkError> {
+    observe_reads(statement);
+    let exec = ExecutorChoice::resolve_read(None, None, None).await?;
+    let backend = exec.backend();
+    let stmt = Statement::from_sql_and_values(backend, render(statement.sql, backend), values);
+    exec.query_all(stmt)
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))
 }
 
 /// `DB::affecting_statement_on_table` for this module's inserts: the one
@@ -664,6 +719,50 @@ pub async fn has_permission_for_model_on_guard(
         ],
     )
     .await
+}
+
+/// Every permission name a model holds on the default `"web"` guard, the
+/// guard [`HasRoles::has_permission_to`] checks: direct grants and grants
+/// through its roles, resolved exactly as [`has_permission_for_model`]
+/// resolves one name.
+///
+/// One statement for the whole set, so the gate bridge answers every
+/// ability a request asks about from a single read, where
+/// [`has_permission_for_model`] costs up to two statements per ability.
+pub(crate) async fn permission_names_for_model(
+    model_type: &str,
+    model_id: &str,
+) -> Result<HashSet<String>, FrameworkError> {
+    let rows = select_all(
+        MODEL_PERMISSION_NAMES,
+        vec![
+            value(model_type),
+            value(model_id),
+            value(DEFAULT_GUARD),
+            value(model_type),
+            value(model_id),
+            value(DEFAULT_GUARD),
+            value(DEFAULT_GUARD),
+        ],
+    )
+    .await?;
+    rows.iter()
+        .map(|row| {
+            row.try_get_by_index::<String>(0)
+                .map_err(|e| FrameworkError::database(format!("rbac permission names: {e}")))
+        })
+        .collect()
+}
+
+/// Record the tables [`permission_names_for_model`] reads, without reading
+/// them.
+///
+/// The gate bridge answers most abilities from a set it loaded earlier in the
+/// request. A render that asks after that load still depends on those
+/// tables, so every answer records them; otherwise a revocation would never
+/// reach the entry stored for that render.
+pub(crate) fn observe_permission_names_read() {
+    observe_reads(MODEL_PERMISSION_NAMES);
 }
 
 /// Trait for authenticatable models that can receive RBAC roles and

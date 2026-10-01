@@ -87,16 +87,15 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
         None
     }
 
-    /// Connection name this job resolves to. `None` (default) means the
-    /// globally configured connection name. Overridden by
+    /// Connection this job is pushed to. `None` (default) means the default
+    /// connection. Overridden by
     /// [`Queue::route`](crate::queue::Queue::route), same as [`Job::queue`].
     ///
-    /// One process-global driver currently receives every push: the resolved
-    /// name is carried on the `JobQueueing` / `JobQueued` lifecycle events so
-    /// listeners can attribute dispatches, but it does not select a different
-    /// driver. Declaring it is forward-compatible - when per-connection
-    /// drivers land, this is the name that will pick one - not behavioral
-    /// today. Contrast [`Job::queue`], which is honored end to end.
+    /// The name selects a driver among the connections registered with
+    /// [`Queue::register_connection`](crate::queue::Queue::register_connection),
+    /// and it is carried on the `JobQueueing` / `JobQueued` lifecycle events.
+    /// While no connection is registered there is one driver, and the name
+    /// is carried on those events and selects nothing.
     fn connection() -> Option<&'static str>
     where
         Self: Sized,
@@ -172,6 +171,11 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// [`EnvelopeOverrides::after_commit`](crate::queue::EnvelopeOverrides),
     /// with the sugar [`Queue::push_after_commit`](crate::queue::Queue::push_after_commit)
     /// for opting one dispatch in. Default: `false`.
+    ///
+    /// `QUEUE_AFTER_COMMIT=true` turns this on for every job in the
+    /// process, as the `after_commit` option of a Laravel queue connection
+    /// does. A job cannot turn that off here, because `false` is also the
+    /// answer of a job that never chose. The per-push override can.
     fn after_commit() -> bool
     where
         Self: Sized,

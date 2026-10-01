@@ -47,10 +47,12 @@
 //! tier, and they resolve in a single lookup rather than chaining.
 //!
 //! The queue dimension is honored end to end - envelope, driver storage,
-//! `queue:work --queue=...` filtering. The connection dimension currently
-//! resolves the connection *name* reported on queue lifecycle events; driver
-//! selection by connection is not implemented, and one process-global driver
-//! receives every push.
+//! `queue:work --queue=...` filtering. The connection dimension selects the
+//! driver an envelope is pushed to, among the connections registered with
+//! [`Queue::register_connection`](crate::queue::Queue::register_connection),
+//! and `queue:work --connection=...` drains one of them. While no connection
+//! is registered there is one driver, every push reaches it, and a connection
+//! is only the name reported on queue lifecycle events.
 
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
@@ -124,12 +126,14 @@ const FORWARD_LOCK_CONTEXT: &str = "queue forward registry";
 /// Register (or replace) the forward for the queue named `from`.
 ///
 /// `connection` gates the forward: `None` applies it everywhere, `Some(name)`
-/// only when `name` equals the *process* connection name
-/// ([`Queue::connection_name`](crate::queue::Queue::connection_name)), never
-/// the connection a route or a job declared. Every half of the redirect - the
-/// push, a per-push queue override, a chain link, and the worker's claim list -
-/// gates on that one value, because a worker has nothing else to gate on and a
-/// forward that moves the push without moving the claim strands work.
+/// only on the connection `name`. Every half of the redirect - the push, a
+/// per-push queue override, a chain link, and the worker's claim list - gates
+/// on one value, the label of the connection the envelope goes to, which is
+/// the name the worker draining it was started with. A forward that moved the
+/// push without moving the claim would strand work. While no connection is
+/// registered that label is the default connection's name
+/// ([`Queue::connection_name`](crate::queue::Queue::connection_name)),
+/// whatever connection a route or a job declared.
 /// Registering the same source twice replaces the earlier forward.
 ///
 /// A forward that points back at its own source (`a -> b` with `b -> a`
@@ -179,8 +183,9 @@ pub(crate) fn has_forwards() -> bool {
 
 /// Apply the registered forwards to one queue name.
 ///
-/// `connection` is the process connection name, which is the only value a
-/// connection-scoped forward is ever gated against - see [`try_set_forward`].
+/// `connection` is the label of the connection the envelope goes to, or the
+/// worker drains, which is the only value a connection-scoped forward is ever
+/// gated against - see [`try_set_forward`].
 ///
 /// `None` means "the driver's default queue", so it is looked up as
 /// [`DEFAULT_QUEUE`](crate::queue::envelope::DEFAULT_QUEUE) - Laravel resolves
@@ -211,7 +216,9 @@ pub(crate) fn forwarded_queue(queue: Option<&str>, connection: &str) -> Option<S
     };
     let applies = match forward.connection.as_deref() {
         None => true,
-        Some(gate) => gate == connection,
+        // The forward names a connection and `connection` is a label. A
+        // second name for the default connection is the default's label.
+        Some(gate) => crate::queue::connections::scoped_label(gate) == connection,
     };
     match forward.queue {
         Some(destination) if applies && destination != lookup => Some(destination),

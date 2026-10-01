@@ -25,8 +25,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 indexmap = { version = "2", features = ["serde"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
-suprnova-live = { path = "../crates/suprnova-live", version = "2.1.0" }
-suprnova-macros = { path = "../suprnova-macros", version = "2.1.0" }
+suprnova-live = { path = "../crates/suprnova-live", version = "3.0.0" }
+suprnova-macros = { path = "../suprnova-macros", version = "3.0.0" }
 dotenvy = "0.15"
 inventory = "0.3"
 sea-orm = { version = "2.0", features = ["runtime-tokio-rustls", "macros", "postgres-use-serial-pk", "with-rust_decimal", "with-bigdecimal"] }
@@ -52,7 +52,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json",
 uuid = { version = "1", features = ["v4", "v5", "v7", "fast-rng", "serde"] }
 dashmap = "6"
 webauthn-rs = { version = "0.5", features = ["resident-key-support", "danger-allow-state-serialisation"] }
-suprnova-magnetar = { path = "../crates/suprnova-magnetar", version = "2.1.0", default-features = false, features = ["password", "password-management", "magic-link", "passkey", "two-factor"] }
+suprnova-magnetar = { path = "../crates/suprnova-magnetar", version = "3.0.0", default-features = false, features = ["password", "password-management", "magic-link", "passkey", "two-factor"] }
 secrecy = "0.10"
 
 # Used by the `pagination` module to round-trip `sea_orm::Value::Decimal` /
@@ -65,9 +65,18 @@ once_cell = "1"
 # Pinned to the 0.31.x line because `tracing-opentelemetry 0.32.1` (latest)
 # still depends on `opentelemetry 0.31.0`. Mixing 0.31 and 0.32 fails to
 # compile (different `Tracer` trait identity).
+#
+# `reqwest-blocking-client` is what gives the OTLP exporters an HTTP client.
+# `reqwest-rustls` only picks the TLS backend: with it alone, and with
+# default features off, every exporter fails to build with "no http client
+# specified" and nothing is exported. The blocking client is the one that
+# fits, because the batch processors of the SDK export from threads of
+# their own, outside of the Tokio runtime. `gzip-http` is what
+# `OTEL_EXPORTER_OTLP_COMPRESSION=gzip` needs: without it that setting
+# makes every exporter fail to build.
 opentelemetry = { version = "0.31.0", optional = true, default-features = false, features = ["trace", "metrics", "logs"] }
 opentelemetry_sdk = { version = "0.31.0", optional = true, default-features = false, features = ["trace", "metrics", "logs", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.31.0", optional = true, default-features = false, features = ["http-proto", "reqwest-rustls", "trace", "metrics", "logs"] }
+opentelemetry-otlp = { version = "0.31.0", optional = true, default-features = false, features = ["http-proto", "gzip-http", "reqwest-blocking-client", "reqwest-rustls", "trace", "metrics", "logs"] }
 opentelemetry-appender-tracing = { version = "0.31.0", optional = true, default-features = false, features = ["log"] }
 opentelemetry-http = { version = "0.31.0", optional = true, default-features = false }
 opentelemetry-semantic-conventions = { version = "0.31.0", optional = true }
@@ -156,7 +165,7 @@ sea-streamer-redis = { version = "0.5.2", features = ["runtime-tokio"] }
 lettre = { version = "0.11.22", default-features = false, features = ["smtp-transport", "pool", "rustls-tls", "hostname", "builder", "tokio1", "tokio1-rustls"] }
 tera = "1"
 aws-sigv4 = "1"
-suprnova-web-push = { version = "2.1.0", path = "../crates/suprnova-web-push", optional = true }
+suprnova-web-push = { version = "3.0.0", path = "../crates/suprnova-web-push", optional = true }
 aws-credential-types = "1.2.14"
 fake = { version = "5.1.0", features = ["chrono", "derive", "uuid"] }
 envy = "0.4.2"
@@ -210,6 +219,7 @@ oxideav-png = { version = "=0.1.8", optional = true }
 oxideav-webp = { version = "=0.2.3", optional = true }
 oxideav-gif = { version = "=0.0.11", optional = true }
 oxideav-bmp = { version = "=0.1.6", optional = true }
+crypto_secretbox = "0.1.1"
 
 [features]
 default = [

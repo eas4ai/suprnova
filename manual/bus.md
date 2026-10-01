@@ -174,14 +174,15 @@ events, and a `BatchRepository`, use [`Queue::batch`](queues.md).
 
 ## Testing
 
-Install the fake at the top of the test. `install_fake()` acquires a
-process-wide `FAKE_SERIAL` mutex for the guard's lifetime, so two
+Install the fake at the top of the test with `Bus::fake()`.
+`bus::testing::install_fake()` is the same call. Either one acquires a
+process-wide mutex for the guard's lifetime, so two
 parallel `Bus::fake()` tests can't clobber each other's captured-store -
 the second blocks until the first guard drops. You still mark the
 test `#[serial]` if a sibling test in the same binary calls real
-`Bus::dispatch`: a real-dispatch caller doesn't acquire `FAKE_SERIAL`,
+`Bus::dispatch`: a real-dispatch caller doesn't acquire that mutex,
 so without `#[serial]` it can race a parallel fake test and observe
-`is_active() == true`. `FAKE_SERIAL` removes the fake-vs-fake hazard,
+`is_active() == true`. The mutex removes the fake-vs-fake hazard,
 `#[serial]` removes the real-vs-fake one.
 
 ```rust
@@ -192,13 +193,12 @@ use suprnova::bus::testing::{
     assert_dispatched_times,
     assert_not_dispatched,
     assert_nothing_dispatched,
-    install_fake,
 };
 
 #[tokio::test]
 #[serial]
 async fn order_placed_dispatches_charge() {
-    let _guard = install_fake();
+    let _guard = Bus::fake();
 
     place_order(/* … */).await.unwrap();
 
@@ -214,9 +214,14 @@ output) instead of `Executed`. Real errors - encode/decode failures, a
 missing registered handler before the fake was installed - still surface
 as `Err(_)`.
 
-`install_fake()` returns a `BusFakeGuard`. Drop it (it's RAII) and the
-fake is cleared and the `FAKE_SERIAL` mutex is released. The typical
-idiom is `let _guard = install_fake();` at the top of the test.
+`Bus::fake()` returns a `BusFakeGuard`. Drop it (it's RAII) and the
+fake is cleared and the mutex is released. The typical
+idiom is `let _guard = Bus::fake();` at the top of the test.
+
+`Bus::fake()` covers `Bus::dispatch`. The persisted `Queue::batch` and
+`Queue::chain` dispatchers go through `Queue::fake()` instead, which records
+them for `assert_batched` and `assert_chained` - see
+[Queues](queues.md#batches-chains-and-failed-job-retries).
 
 ### Assertion surface
 

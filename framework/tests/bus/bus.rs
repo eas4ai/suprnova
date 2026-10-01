@@ -88,6 +88,15 @@ async fn bus_fake_captures_dispatched_commands_without_executing() {
 
 #[tokio::test]
 #[serial]
+async fn bus_fake_is_installed_from_the_facade() {
+    let _guard = Bus::fake();
+    let r = Bus::dispatch(AddCommand { a: 2, b: 3 }).await.unwrap();
+    assert!(matches!(r, Dispatched::Captured));
+    assert_dispatched::<AddCommand>(|c| c.a == 2 && c.b == 3);
+}
+
+#[tokio::test]
+#[serial]
 async fn bus_fake_assert_not_dispatched_passes_when_no_match() {
     let _guard = install_fake();
     let _ = Bus::dispatch(AddCommand { a: 1, b: 1 }).await.unwrap();

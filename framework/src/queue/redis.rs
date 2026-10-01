@@ -1245,7 +1245,7 @@ where
 
     let prepared = match &*lifecycle {
         LifecycleState::Reserved => {
-            let prepared = PreparedSettlement::new(follow_ups, Utc::now(), encode)?;
+            let prepared = PreparedSettlement::new(follow_ups, crate::clock::now(), encode)?;
             *lifecycle = LifecycleState::SettlementPending(prepared.clone());
             prepared
         }
@@ -1725,7 +1725,7 @@ impl RedisQueueDriver {
     /// Run the promotion Lua script to flush all due delayed entries onto the
     /// stream. Called from `pop` on every entry; cheap on an empty ZSET.
     async fn promote_due(&self) -> Result<(), FrameworkError> {
-        let now = Utc::now().timestamp();
+        let now = crate::clock::now().timestamp();
         let stream_name = self.stream_key.name();
         let script = redis::Script::new(PROMOTE_DUE_SCRIPT);
         // Never retried: the script XADDs promoted entries onto the stream, so
@@ -1750,7 +1750,7 @@ impl RedisQueueDriver {
             .to_json()
             .map_err(|e| FrameworkError::internal(format!("envelope encode error: {e}")))?;
         let member = encode_delayed_member(&json);
-        let prepared_at = Utc::now();
+        let prepared_at = crate::clock::now();
         let score = delayed_score(&env.available_at, &prepared_at);
         let mut conn = self.conn.clone();
         let _added: i64 = conn
@@ -1982,7 +1982,7 @@ impl QueueDriver for RedisQueueDriver {
     /// runs the promotion script. Immediate envelopes go straight to the
     /// stream via the sea-streamer producer.
     async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
-        if env.available_at > Utc::now() {
+        if env.available_at > crate::clock::now() {
             return self.zadd_delayed(&env).await;
         }
 
@@ -2468,7 +2468,7 @@ impl RedisQueueDriver {
             RequeueRequest {
                 delay: requeue_delay,
                 kind,
-                requested_at: Utc::now(),
+                requested_at: crate::clock::now(),
             },
             |envelope| {
                 envelope.to_json().map_err(|e| {
@@ -2737,8 +2737,8 @@ mod tests {
             job_name: "redis-lifecycle-probe".into(),
             queue: None,
             payload: serde_json::json!({}),
-            dispatched_at: Utc::now(),
-            available_at: Utc::now(),
+            dispatched_at: crate::clock::now(),
+            available_at: crate::clock::now(),
             attempts: 0,
             max_tries: 3,
             backoff: crate::queue::BackoffSchedule::default(),
@@ -2750,6 +2750,7 @@ mod tests {
             debounce_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
+            context: None,
         }
     }
 
@@ -2988,7 +2989,7 @@ mod tests {
             &envelope,
             Duration::ZERO,
             RequeueKind::Release,
-            Utc::now(),
+            crate::clock::now(),
             |envelope| {
                 envelope
                     .to_json()
@@ -3011,7 +3012,7 @@ mod tests {
             &envelope,
             Duration::MAX,
             RequeueKind::Release,
-            Utc::now(),
+            crate::clock::now(),
             |_| {
                 encoded.set(true);
                 Ok("unexpected payload".to_string())
@@ -3031,7 +3032,7 @@ mod tests {
             &envelope,
             Duration::ZERO,
             RequeueKind::Nack,
-            Utc::now(),
+            crate::clock::now(),
             |envelope| {
                 envelope
                     .to_json()
@@ -3058,7 +3059,7 @@ mod tests {
             &envelope,
             Duration::ZERO,
             RequeueKind::Release,
-            Utc::now(),
+            crate::clock::now(),
             encode,
         )
         .expect("prepare release");
@@ -3066,7 +3067,7 @@ mod tests {
             &envelope,
             Duration::ZERO,
             RequeueKind::Nack,
-            Utc::now(),
+            crate::clock::now(),
             encode,
         )
         .expect("prepare nack");
@@ -3158,7 +3159,7 @@ mod tests {
             RequeueRequest {
                 delay: Duration::ZERO,
                 kind: RequeueKind::Nack,
-                requested_at: Utc::now(),
+                requested_at: crate::clock::now(),
             },
             |envelope| {
                 envelope
@@ -3594,7 +3595,7 @@ mod tests {
             RequeueRequest {
                 delay: Duration::ZERO,
                 kind: RequeueKind::Release,
-                requested_at: Utc::now(),
+                requested_at: crate::clock::now(),
             },
             |envelope| {
                 envelope
@@ -3632,7 +3633,7 @@ mod tests {
             RequeueRequest {
                 delay: Duration::from_secs(5),
                 kind: RequeueKind::Nack,
-                requested_at: Utc::now(),
+                requested_at: crate::clock::now(),
             },
             |_| Err(FrameworkError::internal("injected encode failure")),
             |_, _| {
@@ -3656,7 +3657,7 @@ mod tests {
             RequeueRequest {
                 delay: Duration::from_secs(5),
                 kind: RequeueKind::Nack,
-                requested_at: Utc::now(),
+                requested_at: crate::clock::now(),
             },
             |envelope| {
                 envelope
@@ -3681,7 +3682,7 @@ mod tests {
         let encoded = AtomicUsize::new(0);
         let settlement_attempts = AtomicUsize::new(0);
         let payloads = Mutex::new(Vec::<String>::new());
-        let requested_at = Utc::now();
+        let requested_at = crate::clock::now();
         let delay = Duration::from_secs(7);
 
         let first = requeue_pending_with(
@@ -3760,7 +3761,7 @@ mod tests {
             RequeueRequest {
                 delay: Duration::ZERO,
                 kind: RequeueKind::Release,
-                requested_at: Utc::now(),
+                requested_at: crate::clock::now(),
             },
             |envelope| {
                 encoded.fetch_add(1, Ordering::SeqCst);
@@ -3788,7 +3789,7 @@ mod tests {
             RequeueRequest {
                 delay: Duration::ZERO,
                 kind: RequeueKind::Release,
-                requested_at: Utc::now(),
+                requested_at: crate::clock::now(),
             },
             |_| Err(FrameworkError::internal("prepared payload was re-encoded")),
             |_, _| {
@@ -4107,7 +4108,7 @@ mod tests {
             .expect("pending entry");
         let payload = Arc::<str>::from(lifecycle_envelope().to_json().expect("follow-up JSON"));
         let publication = ScheduledPublication {
-            score: Utc::now().timestamp(),
+            score: crate::clock::now().timestamp(),
             member: Arc::from(encode_delayed_member(&payload)),
             payload,
         };
@@ -4184,7 +4185,7 @@ mod tests {
             operation_id: reservation.token.0,
             kind: MutationKind::Settle,
             publications: vec![ScheduledPublication {
-                score: Utc::now().timestamp(),
+                score: crate::clock::now().timestamp(),
                 member: Arc::from(encode_delayed_member(&payload)),
                 payload,
             }]
@@ -4240,7 +4241,7 @@ mod tests {
         let payload = Arc::<str>::from(lifecycle_envelope().to_json().expect("follow-up JSON"));
         let publications = (0..=MAX_ATOMIC_FOLLOW_UPS)
             .map(|_| ScheduledPublication {
-                score: Utc::now().timestamp(),
+                score: crate::clock::now().timestamp(),
                 member: Arc::from(encode_delayed_member(&payload)),
                 payload: Arc::clone(&payload),
             })

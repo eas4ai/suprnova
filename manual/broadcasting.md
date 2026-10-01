@@ -552,6 +552,8 @@ ws!("/ws/broadcast", broadcasting_handler())
     .middleware(RateLimitMiddleware::connections_per_ip(100)),
 ```
 
+`RateLimitMiddleware::connections_per_ip(100)` allows each client address 100 open connections on the route and answers the next upgrade with `429 Too Many Requests`. A connection counts until its session ends. The counts are per process, and an IPv6 address counts with its /64 network. See [Rate Limiting](rate-limiting.md#capping-open-connections-with-connections_per_ip).
+
 The split is intentional: **transport-level** (who may open the
 connection at all) lives in middleware; **channel-level** (who may
 subscribe to which channel) lives in `Channel::authorize`.
@@ -649,7 +651,7 @@ current process. For multi-replica deployments, enable the
 `Cargo.toml`:
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0", features = ["broadcasting-fanout"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0", features = ["broadcasting-fanout"] }
 ```
 
 `src/bootstrap.rs`:
@@ -774,9 +776,244 @@ configurations from that chapter apply unchanged - extend them to
 cover the `/ws/broadcast` path.
 
 Active WebSocket handler tasks (including broadcasting connections)
-are tracked in the framework's `WS_TASKS` set and drained on
+are tracked by the server and drained on
 graceful shutdown, so in-flight event deliveries complete before the
 process exits.
+
+## Pusher, Soketi and Reverb
+
+`PusherBroadcastHub` publishes your broadcasts through a Pusher-protocol
+service: Pusher Channels, Soketi, or Laravel Reverb. Browsers then
+subscribe with Laravel Echo and pusher-js instead of the JSON envelope
+protocol above. Every publish still reaches the in-process hub first, so
+a `ws!` broadcasting route in the same process keeps receiving events.
+
+### Configure the connection
+
+`PusherConfig::from_env()` reads the variables Laravel uses:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PUSHER_APP_ID` | required | The app id. |
+| `PUSHER_APP_KEY` | required | The public app key. |
+| `PUSHER_APP_SECRET` | required | The app secret. It signs every request. |
+| `PUSHER_HOST` | unset | A self-hosted server (Soketi, Reverb). Unset means Pusher Channels. |
+| `PUSHER_PORT` | 443 for `https`, 80 for `http` | The self-hosted server's port. |
+| `PUSHER_SCHEME` | `https` | `http` or `https`, for a self-hosted server. |
+| `PUSHER_APP_CLUSTER` | `mt1` | The Pusher Channels cluster. |
+| `PUSHER_ENCRYPTION_MASTER_KEY_BASE64` | unset | 32 bytes, base64. Needed for encrypted channels. |
+| `PUSHER_TIMEOUT_SECS` | 5 | How long one REST call may take. |
+
+An optional variable that is set but empty counts as unset, as in
+Laravel's `.env.example`. A missing required variable or an invalid value
+is an error that names the variable and never quotes the value. For
+Reverb's variable names, call `PusherConfig::from_env_prefix("REVERB")`,
+which reads `REVERB_APP_ID`, `REVERB_HOST`, and so on. To build the
+configuration in code, use `PusherConfig::new(app_id, key, secret)` and
+its `host`, `port`, `scheme`, `cluster`, `timeout`, and
+`encryption_master_key_base64` methods.
+
+`PusherBroadcastHub::new` checks every value before the first publish:
+the app id, key, and cluster must be letters, digits, `_`, or `-`; the
+host must be a plain hostname or IP address, with no scheme, port, or
+path; the secret must not be empty; and the timeout must be greater
+than zero. A bad value fails at boot with an error that names the
+field.
+
+### Bind the hub
+
+The hub and the authorization endpoints share one channel registry, so
+they always agree on a channel's Pusher name:
+
+```rust
+use std::sync::Arc;
+use suprnova::broadcasting::{BroadcastHub, ChannelRegistry};
+use suprnova::container::App;
+use suprnova::events::EventFacade;
+use suprnova::{PusherBroadcastHub, PusherConfig};
+
+pub async fn register() {
+    let mut registry = ChannelRegistry::new();
+    registry.register(OrderChannel);
+    let registry = Arc::new(registry);
+    App::singleton(Arc::clone(&registry));
+
+    let config = PusherConfig::from_env().expect("PUSHER_* configuration");
+    let hub = PusherBroadcastHub::new(config, Arc::clone(&registry)).expect("Pusher hub");
+
+    // The authorization endpoints resolve this from the container.
+    App::singleton(hub.auth());
+
+    let hub: Arc<dyn BroadcastHub> = Arc::new(hub);
+    App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
+    EventFacade::broadcast::<OrderShipped>(Arc::clone(&hub)).await;
+}
+```
+
+`publish` returns an error when the service answers with a non-2xx
+status or cannot be reached. The error names the status and up to 200
+bytes of the answer, never the secret or the request signature.
+
+### Mount the authorization routes
+
+Echo asks your server to sign every private, presence, and encrypted
+subscription. Mount the two endpoints where `SessionMiddleware` and
+`CsrfMiddleware` run (the scaffold installs both globally), so the
+endpoints see the logged-in user and refuse cross-site requests:
+
+```rust
+use suprnova::{post, pusher_channel_auth, pusher_user_auth, routes};
+
+routes! {
+    post!("/broadcasting/auth", pusher_channel_auth),
+    post!("/broadcasting/user-auth", pusher_user_auth),
+}
+```
+
+`pusher_channel_auth` resolves the channel in the registry and calls its
+`authorize` with the other request fields as `data`. It answers:
+
+- `200` with `auth`, plus `shared_secret` for an encrypted channel or
+  `channel_data` for a presence channel.
+- `403` with `{}` for a public name, an unknown channel, a name whose
+  prefix does not match the channel's visibility, a name the driver
+  refuses (see [Channel visibility](#channel-visibility)), a refused
+  `authorize`, or a presence channel without a logged-in user.
+- `422` when `socket_id` or `channel_name` is malformed.
+- `500` when `PusherAuth` is not bound, when an encrypted channel is
+  requested without a master key, or when `member_info` fails.
+
+A presence member's `user_id` is `Auth::id()`, and its `user_info` is
+the channel's `member_info`. `pusher_user_auth` signs
+`{"id": <Auth::id()>}` for pusher-js user authentication and answers
+`403` for a guest.
+
+### Connect with Laravel Echo
+
+```js
+import Echo from 'laravel-echo';
+import Pusher from 'pusher-js/with-encryption';
+
+window.Pusher = Pusher;
+
+const token = document
+  .querySelector('meta[name="csrf-token"]')
+  ?.getAttribute('content') ?? '';
+
+const echo = new Echo({
+  broadcaster: 'pusher',
+  key: import.meta.env.VITE_PUSHER_APP_KEY,
+  cluster: import.meta.env.VITE_PUSHER_APP_CLUSTER ?? 'mt1',
+  wsHost: import.meta.env.VITE_PUSHER_HOST
+    ? import.meta.env.VITE_PUSHER_HOST
+    : `ws-${import.meta.env.VITE_PUSHER_APP_CLUSTER}.pusher.com`,
+  wsPort: import.meta.env.VITE_PUSHER_PORT ?? 80,
+  wssPort: import.meta.env.VITE_PUSHER_PORT ?? 443,
+  forceTLS: (import.meta.env.VITE_PUSHER_SCHEME ?? 'https') === 'https',
+  enabledTransports: ['ws', 'wss'],
+  authEndpoint: '/broadcasting/auth',
+  auth: { headers: { 'X-CSRF-TOKEN': token } },
+  userAuthentication: {
+    endpoint: '/broadcasting/user-auth',
+    headers: { 'X-CSRF-TOKEN': token },
+  },
+});
+
+// Suprnova sends the bare event name, so listen with a leading dot.
+echo.private('orders.42').listen('.OrderShipped', (event) => {
+  console.log(event.order_id);
+});
+```
+
+The connection options follow Laravel's own Echo stub, so one
+configuration serves Pusher Channels, Soketi, and Reverb. Expose the
+server values to Vite in `.env`, for example
+`VITE_PUSHER_HOST="${PUSHER_HOST}"`, and the same for the key, cluster,
+port, and scheme. With `VITE_PUSHER_HOST` unset, Echo connects to Pusher
+Channels in your cluster. With it set, Echo connects to your Soketi or
+Reverb server on `VITE_PUSHER_PORT`. Keep the `cluster` value in both
+cases, as Laravel's stub does: pusher-js refuses options without one.
+
+The token is read once, when Echo is created. A login or a logout rotates it (see [CSRF](csrf.md)), so
+create the Echo instance again after either one. The plain
+`pusher-js` build works too if you use no encrypted channels.
+
+### Channel visibility
+
+The in-process hub authorizes every subscribe through `authorize`. A
+Pusher service decides by the channel's name instead, and a public
+Pusher channel never reaches your server at all. `Channel::visibility`
+chooses that name:
+
+| Channel | Pusher name | Echo call |
+|---|---|---|
+| `presence_info()` returns `Some` | `presence-{name}` | `echo.join(name)` |
+| `ChannelVisibility::Private` (the default) | `private-{name}` | `echo.private(name)` |
+| `ChannelVisibility::Public` | `{name}` | `echo.channel(name)` |
+| `ChannelVisibility::Encrypted` | `private-encrypted-{name}` | `echo.encryptedPrivate(name)` |
+
+`Private` is the default so the driver fails closed: a channel whose
+`authorize` restricts subscribers can never leak through a public Pusher
+channel. Return `Public` only when anyone may read the channel, because
+Pusher clients subscribe to it with no authorization at all and
+`authorize` is never consulted:
+
+```rust
+use async_trait::async_trait;
+use suprnova::broadcasting::{Channel, ChannelVisibility};
+
+pub struct Announcements;
+
+#[async_trait]
+impl Channel for Announcements {
+    fn name(&self) -> &'static str { "announcements" }
+
+    fn visibility(&self) -> ChannelVisibility {
+        ChannelVisibility::Public
+    }
+}
+```
+
+A presence channel is always `presence-`, whatever `visibility` returns.
+The one exception is `Encrypted`: Pusher has no encrypted presence
+channels, so the driver refuses a presence channel that returns it
+instead of sending its events as plaintext.
+
+Each Pusher name must belong to exactly one channel, so the driver also
+refuses a name that would read as a different channel:
+
+- A `Public` channel whose name starts with `private-` or `presence-`.
+- A `Private` channel, or an unregistered name, that starts with
+  `encrypted-`. It would read as the encrypted channel without that
+  prefix, and authorizing that channel would hand out the key to its
+  events.
+
+The rule applies to the concrete name, so a pattern such as
+`{slug}.orders` is refused for a slug that starts with `encrypted-`.
+Publishing to a refused name returns an error after the in-process
+delivery, and the authorization endpoint answers `403`.
+
+### Encrypted channels
+
+An `Encrypted` channel is end-to-end encrypted: the hub encrypts each
+event's data with a key derived from the channel name and
+`PUSHER_ENCRYPTION_MASTER_KEY_BASE64`, and the Pusher service only
+relays ciphertext. The authorization answer carries that channel's
+`shared_secret`, which pusher-js uses to decrypt. Generate a master key
+with `openssl rand -base64 32`.
+
+Publishing to an encrypted channel without a master key is an error. The
+hub never falls back to sending plaintext. For the same reason, a
+presence channel cannot be encrypted.
+
+### Why Suprnova diverges
+
+Laravel picks private or public per event: `broadcastOn()` returns a
+`PrivateChannel` or a `Channel`, so one event can publish a channel's
+data under a public name by mistake. Suprnova decides per channel,
+through `Channel::visibility`, and the default is private. Every event on
+a channel uses the same Pusher name, and a restricted channel cannot
+leak through a public one.
 
 ## Testing broadcasts
 
@@ -830,8 +1067,10 @@ the event itself - see [Events](events.md#testing--eventfacadefake).
 | `toOthers()` | `broadcast_to_others(&self) -> bool` |
 | `Broadcast::fake()` | `RecordingBroadcastHub` bound as `dyn BroadcastHub` |
 | `assertBroadcasted` | `RecordingBroadcastHub::assert_broadcast(channel, event)` |
-| Pusher / Reverb / Ably driver | `InMemoryBroadcastHub` (single-process) or `SeaStreamerBroadcastHub` (cross-process: Redis / Kafka / file / stdio) |
-| Echo client library | not shipped - wire the JSON envelope protocol from the browser by hand for now |
+| Pusher / Reverb driver | `PusherBroadcastHub` (Pusher Channels, Soketi, Reverb); see [Pusher, Soketi and Reverb](#pusher-soketi-and-reverb) |
+| Ably driver | none; `InMemoryBroadcastHub` (single-process) or `SeaStreamerBroadcastHub` (cross-process: Redis / Kafka / file / stdio) |
+| `/broadcasting/auth` | `pusher_channel_auth` and `pusher_user_auth`, mounted by hand |
+| Echo client library | Laravel Echo with the `pusher` broadcaster against `PusherBroadcastHub`; for the in-process hub, wire the JSON envelope protocol from the browser by hand |
 
 ## Reference
 
@@ -849,6 +1088,11 @@ the event itself - see [Events](events.md#testing--eventfacadefake).
 | `suprnova::broadcasting::BroadcastEnvelope` | One published event: `channel`, `event`, `data`, `except`. `new(ch, ev, data)` builder; `.with_except(socket_id)` for per-dispatch exclusion. |
 | `suprnova::broadcasting::ClientFrame` / `ServerFrame` | The JSON-envelope wire types. `ServerFrame::Lagged { channel, skipped }` surfaces per-channel ring-buffer overflows. |
 | `suprnova::broadcasting::BroadcastingWsHandler` | The framework's reusable `WebSocketHandler`. Constructor: `BroadcastingWsHandler::new(hub, registry)`. Pass to `ws!()`. |
+| `suprnova::PusherBroadcastHub` | Pusher-protocol hub. `new(config, registry)`; `auth()` returns the `PusherAuth` to bind. Also delivers to in-process subscribers. |
+| `suprnova::PusherConfig` / `PusherScheme` | Pusher connection settings. `from_env()`, `from_env_prefix(prefix)`, `new(app_id, key, secret)` plus builder methods. `Debug` redacts the secret and master key. |
+| `suprnova::PusherAuth` | The signing state the authorization endpoints resolve from the container. |
+| `suprnova::pusher_channel_auth` / `pusher_user_auth` | Echo's channel authorization and user authentication endpoints. |
+| `suprnova::ChannelVisibility` | `Public`, `Private` (default), or `Encrypted`: a channel's name on a Pusher service. Returned by `Channel::visibility`. |
 | `suprnova::broadcasting::fanout::SeaStreamerBroadcastHub` | Cross-process hub behind `broadcasting-fanout`. `new(uri, stream_key)`, `new_with_presence_ttl(uri, key, ttl)`, `new_loopback(uri, key)`. |
 | `EventFacade::broadcast::<E>(hub)` | Register the event → hub bridge for `E`. Call once per `Broadcastable` at boot. |
 | `EventFacade::dispatch(event)` | Fires in-process listeners AND publishes to the hub on every channel `E::broadcast_on()` returns. |

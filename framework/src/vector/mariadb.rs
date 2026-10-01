@@ -201,11 +201,65 @@ impl MariaDbVectorDriver {
     ///
     /// First operation absorbs the connection cost; if the URL points
     /// nowhere, that operation surfaces the failure, not registration.
+    ///
+    /// The URL may use the `mysql://` or the `mariadb://` scheme.
     pub fn from_url(url: &str) -> Result<Self, FrameworkError> {
         let pool = MySqlPoolOptions::new()
-            .connect_lazy(url)
-            .map_err(|e| FrameworkError::internal(format!("mariadb pool init at '{url}': {e}")))?;
+            .connect_lazy(crate::database::config::driver_url(url).as_ref())
+            // The URL carries the password, so the error names the fault
+            // and not the URL.
+            .map_err(|e| FrameworkError::internal(format!("mariadb pool init: {e}")))?;
         Ok(Self::from_pool(pool))
+    }
+
+    /// Construct from the environment:
+    ///
+    /// - `MARIADB_URL` - the URL of the MariaDB the vectors are in
+    /// - `DATABASE_URL` - read when `MARIADB_URL` is not set, and taken
+    ///   when it names a MariaDB or a MySQL database
+    ///
+    /// The fallback is for the application whose one database is a
+    /// MariaDB: its rows and its vectors are in one engine, and it has
+    /// one URL to set. A `DATABASE_URL` of another engine is not taken.
+    /// The driver would accept it and fail on the first query, with an
+    /// error that says nothing about a variable.
+    ///
+    /// A URL with the scheme `mysql` is taken, because a MariaDB is
+    /// written that way as well. When it is the URL of a MySQL server,
+    /// the driver fails on its first query: MySQL has no vector
+    /// functions.
+    ///
+    /// # Errors
+    ///
+    /// When neither variable gives a URL of a MariaDB or a MySQL
+    /// database, and when the pool cannot be built from the URL. The
+    /// error names the variables and never the URL, which carries the
+    /// password.
+    pub fn from_env() -> Result<Self, FrameworkError> {
+        Self::from_variables(|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::from_env`] with the variables looked up by `variable`.
+    fn from_variables(variable: impl Fn(&str) -> Option<String>) -> Result<Self, FrameworkError> {
+        let set = |name: &str| {
+            variable(name)
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        if let Some(url) = set("MARIADB_URL") {
+            return Self::from_url(&url);
+        }
+        match set("DATABASE_URL") {
+            Some(url) if names_mariadb(&url) => Self::from_url(&url),
+            Some(_) => Err(FrameworkError::param(
+                "MARIADB_URL is not set, and DATABASE_URL names a database that is no MariaDB \
+                 and no MySQL; set MARIADB_URL for the MariaDB vector driver",
+            )),
+            None => Err(FrameworkError::param(
+                "MARIADB_URL is not set; the MariaDB vector driver needs it, or a DATABASE_URL \
+                 that names a MariaDB",
+            )),
+        }
     }
 
     /// Set the distance metric. Default is [`MariaDbDistance::Cosine`].
@@ -710,6 +764,100 @@ impl VectorDriver for MariaDbVectorDriver {
             FrameworkError::internal(format!("mariadb count: decode COUNT column: {e}"))
         })?;
         Ok(n.max(0) as usize)
+    }
+}
+
+/// Whether `url` is the URL of a MariaDB or a MySQL database, by its
+/// scheme. The two are one wire protocol, and the driver takes both.
+fn names_mariadb(url: &str) -> bool {
+    let scheme = url.split_once("://").map(|(scheme, _)| scheme);
+    matches!(
+        scheme.map(str::to_ascii_lowercase).as_deref(),
+        Some("mariadb" | "mysql")
+    )
+}
+
+#[cfg(test)]
+mod from_env_tests {
+    use super::{MariaDbVectorDriver, names_mariadb};
+
+    fn variables(set: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            set.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
+
+    // The pool connects on its first query, so building it needs no
+    // MariaDB. It needs a runtime.
+    #[tokio::test]
+    async fn the_url_of_the_vectors_is_read_first() {
+        let driver = MariaDbVectorDriver::from_variables(variables(&[
+            ("MARIADB_URL", "mariadb://app:secret@127.0.0.1:3306/vectors"),
+            ("DATABASE_URL", "postgres://app:secret@127.0.0.1/app"),
+        ]));
+        assert!(driver.is_ok(), "{:?}", driver.err().map(|e| e.to_string()));
+    }
+
+    #[tokio::test]
+    async fn the_database_of_the_application_is_taken_when_it_is_a_mariadb() {
+        for url in [
+            "mariadb://app:secret@127.0.0.1:3306/app",
+            "mysql://app:secret@127.0.0.1:3306/app",
+            "MySQL://app:secret@127.0.0.1:3306/app",
+        ] {
+            let lookup = move |name: &str| (name == "DATABASE_URL").then(|| url.to_owned());
+            let driver = MariaDbVectorDriver::from_variables(lookup);
+            assert!(
+                driver.is_ok(),
+                "{url}: {:?}",
+                driver.err().map(|e| e.to_string())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_database_of_another_engine_is_not_taken() {
+        for url in [
+            "postgres://app:secret@127.0.0.1/app",
+            "sqlite://database.db",
+            "/var/lib/app/database.db",
+        ] {
+            let lookup = move |name: &str| (name == "DATABASE_URL").then(|| url.to_owned());
+            let error = MariaDbVectorDriver::from_variables(lookup)
+                .err()
+                .expect("no MariaDB is named");
+            let message = error.to_string();
+            assert!(message.contains("MARIADB_URL"), "{message}");
+            assert!(
+                !message.contains("secret") && !message.contains(url),
+                "the error must not show the URL: {message}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn with_no_url_at_all_the_error_names_the_variables() {
+        for set in [variables(&[]), variables(&[("MARIADB_URL", "  ")])] {
+            let error = MariaDbVectorDriver::from_variables(set)
+                .err()
+                .expect("there is no URL");
+            let message = error.to_string();
+            assert!(
+                message.contains("MARIADB_URL") && message.contains("DATABASE_URL"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scheme_is_what_names_the_engine() {
+        assert!(names_mariadb("mariadb://host/db"));
+        assert!(names_mariadb("mysql://host/db"));
+        assert!(!names_mariadb("postgres://host/mysql"));
+        assert!(!names_mariadb("mysql"));
+        assert!(!names_mariadb(""));
     }
 }
 

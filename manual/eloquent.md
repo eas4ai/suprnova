@@ -25,6 +25,7 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Scopes](#scopes)
 - [Relationships](#relationships)
 - [Eager loading](#eager-loading)
+- [Preventing lazy loading](#preventing-lazy-loading)
 - [Pagination](#pagination)
 - [Chunking and lazy iteration](#chunking-and-lazy-iteration)
 - [Collections](#collections)
@@ -112,7 +113,7 @@ configuration.
 | `timestamps` | flag / bool | `true` when both `created_at` and `updated_at` exist | Disable auto-managed timestamps |
 | `created_at` | string | `"created_at"` | Override the column name |
 | `updated_at` | string | `"updated_at"` | Override the column name |
-| `touches` | list of relation names | `[]` | `BelongsTo` relations whose parent row gets its `updated_at` bumped after this model is created, saved, updated, or deleted |
+| `touches` | list of relation names | `[]` | `BelongsTo` or `MorphTo` relations whose owner row gets its `updated_at` bumped after this model is created, saved, updated, or deleted |
 | `mutators` | list of strings | `[]` | Field names whose JSON-fill path routes through a `set_<field>(value)` mutator method |
 
 ### Full example
@@ -168,7 +169,7 @@ Function-level macros work alongside the struct attribute:
   `Model::scope_name(args)` shortcut. There is no function-level
   `#[scope]` form - scopes are declared per impl-block.
 - Global scopes are a runtime registration via the `GlobalScope`
-  trait, applied through `Model::global_scope::<GS>()`. There is no
+  trait, registered with `ScopeRegistry::register::<M, _>(scope)`. There is no
   function-level `#[global_scope]` macro - see
   [Macros](macros.md#suprnova-scopes-model) for the full pattern.
 - `#[prunable]` on `impl Prunable for T { ... }` registers the
@@ -432,8 +433,10 @@ values and the exclusive lock in one statement. Unlike `refresh`,
 under a lock - scoping it the way an ordinary read is scoped would
 hand admin tooling and cross-tenant callers a false not-found for a
 row they already hold a reference to. `replicate` builds an
-in-memory clone with the PK reset (`Default::default()` for the key
-type). Caller saves explicitly.
+in-memory clone with the PK and the timestamps reset
+(`Default::default()` for each type). Insert it with
+`replica.persist().await?` (the `Persistable` trait), which stamps
+`created_at` and `updated_at` the way `create` does.
 
 `refresh` and `refresh_for_update` both return an error when the row no
 longer exists, rather than leaving the model holding stale values.
@@ -517,6 +520,17 @@ let only_dead = User::only_trashed().get().await?;
 let all_including_dead = User::with_trashed().get().await?;
 
 user.force_delete().await?;       // actual DELETE
+```
+
+The mass form follows the row form. `delete_all()` on a builder soft-deletes
+every row the query matches with one `UPDATE`, and it sets `updated_at` when
+the model manages timestamps. `force_delete_all()` removes the rows for good.
+Neither fires per-row events. See
+[Mass mutation](#mass-mutation---update_all--delete_all--upsert--_each).
+
+```rust
+User::query().filter("active", false).delete_all().await?;        // soft delete
+User::only_trashed().force_delete_all().await?;                   // actual DELETE
 ```
 
 ### Default scope
@@ -903,11 +917,11 @@ If you need cross-row contention guarantees on SQLite, wrap the
 critical section in an explicit `BEGIN IMMEDIATE` transaction - at
 the file level that blocks every other writer.
 
-### What's not in v1
+### Not provided
 
 - **`NOWAIT` / `SKIP LOCKED`** - useful for job-queue claim
-  workflows but they add API surface. Deferred until a real
-  consumer needs them.
+  workflows but they add API surface, so they are added only when a
+  real consumer needs them.
 
 ## Transactions
 
@@ -922,8 +936,8 @@ without callers threading a handle through every call site.
 The closure form is the common case. The closure receives a
 `&Transaction` it can use to checkpoint with `savepoint(name)`;
 every `Model::*` / `Builder::*` operation inside the closure
-auto-routes through the transaction via a `tokio::task_local!`
-called `CURRENT_TX`.
+auto-routes through the transaction: the closure's task carries it as
+the ambient transaction.
 
 ```rust
 use suprnova::{DB, FrameworkError, Model};
@@ -948,7 +962,7 @@ DB::transaction(|_tx| {
   on unwind; SeaORM's `DatabaseTransaction::drop` rolls back).
 
 Reads inside the closure see writes from the same transaction
-(via `CURRENT_TX` lookup at every leaf SQL call). The first
+(every leaf SQL call looks up the ambient transaction). The first
 `DB::transaction` call after process start picks the database
 backend off `DB::connection()`; subsequent calls reuse the same
 connection registry.
@@ -1023,7 +1037,7 @@ SeaORM's `DatabaseConnection::begin()` doesn't compose - calling
 it on a connection that's already holding a transaction starts a
 brand-new physical transaction that commits / rolls back
 independently of the outer scope. That's a silent data-integrity
-footgun, so `DB::transaction` checks `CURRENT_TX` up front and
+footgun, so `DB::transaction` checks for an ambient transaction up front and
 returns a database error instead of producing the wrong
 semantics. Use `tx.savepoint(name)` for nested behaviour.
 
@@ -1108,7 +1122,7 @@ if some_condition {
 tx.commit().await?;  // or tx.rollback().await?;
 ```
 
-Manual mode does **not** install `CURRENT_TX`. Scope individual
+Manual mode does **not** install an ambient transaction. Scope individual
 operations through the transaction with `Builder::with_tx(&tx)`
 or the `Model::*_with_tx(&tx, ...)` shims:
 
@@ -1144,7 +1158,7 @@ Three-way precedence for routing an operation through a connection:
 
 1. **Builder-level override** - `Builder::with_tx(&tx)` or any
    `Model::*_with_tx(&tx, ...)` shim. Explicit beats ambient.
-2. **Ambient `CURRENT_TX`** - installed by `DB::transaction` /
+2. **The ambient transaction** - installed by `DB::transaction` /
    `DB::transaction_with_attempts` for the closure's task scope.
    A read that names another connection, through `on(name)` or a
    model's declared connection, still runs on that connection: the
@@ -1157,7 +1171,7 @@ Three-way precedence for routing an operation through a connection:
 
 Inside `DB::transaction(|tx| ...)`, calling
 `Builder::with_tx(&other_tx)` explicitly routes that one query
-through `other_tx` - bypassing the ambient `CURRENT_TX`. That's
+through `other_tx` - bypassing the ambient transaction. That's
 almost certainly a bug; the override path exists for the manual
 form, not for overriding the closure's own tx.
 
@@ -1167,27 +1181,17 @@ A builder carrying a `tx_override` still respects global scopes,
 named scopes, and the eager-load plan - the override only changes
 the connection routing, not the SQL.
 
-### Limitations (v1)
+### Relations and DDL inside a transaction
 
 - **Relation eager loads** - `Builder::with(["posts"])` and
-  `Collection::load(["posts"])` route the eager `IN (...)`
-  sub-queries through `DB::connection()`, not through the active
-  transaction. Pending writes inside a `DB::transaction` closure
-  are **not** visible to relations loaded via `.with(...)`. For
-  now, scope tx work to direct `Model::*` / `Builder::*` /
-  `DB::table(...)` calls; defer relation loads until after the
-  outer write lands (or before `DB::begin_transaction` on the
-  manual path). This is a known seam - the routing helper
-  (`ExecutorChoice`) is already in place at every SQL leaf; the
-  blocker is `EagerLoadDispatch::eager_load` taking
-  `&DatabaseConnection` (concrete), which the macro emits for
-  every relation kind. A follow-up sweep will adapt the trait to
-  the dispatch helper.
-- **DDL on Postgres** - `DB::statement(...)` inside a transaction
-  runs the DDL against the tx connection, which Postgres allows;
-  MySQL implicitly commits and is therefore unsupported inside a
-  Suprnova transaction (this matches Laravel's `DB::transaction`
-  caveat).
+  `Collection::load(["posts"])` run their `IN (...)` sub-queries
+  through the active transaction, so pending writes inside a
+  `DB::transaction` closure are visible to relations loaded there.
+- **DDL** - `DB::statement(...)` inside a transaction runs the DDL
+  against the transaction's connection, which Postgres allows;
+  MySQL and MariaDB commit implicitly on DDL, so DDL is unsupported
+  inside a Suprnova transaction on those engines (the same caveat as
+  Laravel's `DB::transaction`).
 
 ## Scopes
 
@@ -1223,8 +1227,26 @@ let active_users  = User::active().get().await?;
 let popular_users = User::query().active().popular(500).get().await?;
 ```
 
-Non-scope methods declared in the same `impl` block (anything whose
-first parameter isn't `query: Builder<Self>`) pass through unchanged.
+A method that does not handle a `Builder` passes through unchanged, so
+scopes and ordinary methods can share one `impl` block.
+
+A method that takes or returns a `Builder` in any other form is a scope
+written wrong, and the macro refuses it with a compile error that names
+the accepted shape. This covers a first parameter of `&mut Builder<User>`
+or `&Builder<Self>`, a model name in place of `Self` (`Builder<User>`),
+and a missing `Builder<Self>` return type. Left alone, such a method would
+be an ordinary method and no `.name()` would reach the builder. Put
+`#[not_scope]` on a helper that handles a builder and is not a scope:
+
+```rust
+#[suprnova::scopes(User)]
+impl User {
+    #[not_scope]
+    fn describe(query: &Builder<User>) -> String {
+        query.to_sql()
+    }
+}
+```
 
 ### Global scopes
 
@@ -1271,12 +1293,18 @@ let all_tenants = Article::without_global_scope::<TenantScope>().get().await?;
 let everything = Article::without_global_scopes().get().await?;
 ```
 
-**Important:** the opt-out helpers must be the entry point. Chaining
-`.without_global_scope::<S>()` onto a builder already returned by
-`Model::query()` doesn't undo scopes that have already run -
-`Model::query()` applies scopes eagerly at construction time, so the
-mask is set too late. Use the per-model static helpers (above) for
-correct semantics.
+The opt-outs also chain on a `Builder`:
+`Model::query().without_global_scope::<S>()` and
+`Model::query().without_global_scopes()` return the same rows as the
+static helpers, wherever you write them in the chain.
+
+The builder applies global scopes when the query runs, not when
+`Model::query()` builds it. The statement reads `<scopes> AND <your
+terms>`. Your own terms stay together after the scopes: an `or_where`
+never widens past a scope. `update_all`, `delete_all`, and
+`increment_each` resolve scopes the same way, so a mass write reaches
+only the rows a read returns. A scope that reads per-request state reads
+it when the query runs.
 
 ### Where global scopes apply
 
@@ -1285,6 +1313,8 @@ correct semantics.
 | `Model::query()` | Yes - the canonical scoped entry point |
 | `Model::without_global_scope::<S>()` | Yes, minus `S` |
 | `Model::without_global_scopes()` | No |
+| `Model::query().without_global_scope::<S>()` | Yes, minus `S`, wherever it is chained |
+| `Model::with_trashed()` / `Model::only_trashed()` | Yes - only the soft-delete filter is lifted |
 | `Model::find(id)` | No - PK lookup goes through SeaORM directly |
 | `Model::find_many([...])` | No - same reason |
 | `Model::all()` | No - same reason |
@@ -1304,10 +1334,10 @@ through the typed scope registry. Both layers compose:
 - `Model::without_global_scopes()` drops registered scopes but
   preserves the soft-delete filter - admin tooling that wants to read
   every column-set still excludes trashed rows by default.
-- `Model::with_trashed()` and `Model::only_trashed()` skip soft-delete
-  filtering and also bypass the registry (they build a fresh unscoped
-  builder). Pair with `.without_global_scope::<S>()` if you need
-  scope-aware reads over trashed rows.
+- `Model::with_trashed()` and `Model::only_trashed()` lift only the
+  soft-delete filter. Every registered scope still runs, so a tenant
+  scope keeps trashed reads inside the tenant, as Laravel's
+  `withTrashed()` does.
 
 ## Relationships
 
@@ -1320,7 +1350,7 @@ into. This section covers the per-kind shape and option table; the
 deep dive on join-key resolution, the morph registry, pivot rows,
 and the polymorphic enum lowering lives in
 [Eloquent Relationships](eloquent-relationships.md). The relation
-kinds shipped today:
+kinds:
 
 | Kind                | One/many | Across families | Backed by |
 |---------------------|----------|-----------------|-----------|
@@ -1380,7 +1410,7 @@ Common options:
 | `with_default = \|\| { ... }` | `BelongsTo`                 | Closure producing a default when the FK is null OR the parent is missing. |
 | `first_key`, `second_key`, `second_local_key` | `HasOneThrough`, `HasManyThrough` | JOIN key overrides - see the Through section below. |
 | `name = "..."`             | every morph kind              | Morph family name (e.g. `"commentable"`, `"taggable"`). Drives the `<name>_id` / `<name>_type` columns on the child/pivot. |
-| `targets = [T1, T2, ...]`  | `MorphTo`                     | The list of concrete morph targets. The macro emits a `<Name>Morph` enum at the declaration site with one variant per target plus `Unknown(String, i64)`. |
+| `targets = [T1, T2, ...]`  | `MorphTo`                     | The list of concrete morph targets. The macro emits a `<Name>Morph` enum at the declaration site with one variant per target plus `Unknown(String, serde_json::Value)`. |
 | `target_morph_type = "..."` | `MorphedByMany`              | The morph-type string identifying the target family on the pivot. |
 | `pivot_table`, `pivot_foreign_key`, `pivot_related_key` | `BelongsToMany`, `MorphToMany` | Pivot-side column / table overrides when the defaults don't fit. |
 
@@ -1586,8 +1616,10 @@ families. The child carries a `(<name>_id, <name>_type)` pair; the
 family it can point at via `targets = [...]`. The macro emits a
 per-family enum named `<RelationName>Morph` (matching the relation
 name's PascalCase form, suffixed with `Morph`) with one variant per
-target type plus `Unknown(String, i64)` for legacy rows whose
-`<name>_type` value doesn't match any registered target.
+target type plus `Unknown(String, serde_json::Value)` for legacy rows whose
+`<name>_type` value doesn't match any registered target. The second field
+is the value of `<name>_id` as JSON: a number for an integer key, a string
+for a `String`, UUID or ULID key, `null` for a null column.
 
 ```rust
 #[model(table = "posts", morph_type = "post")]
@@ -1779,25 +1811,54 @@ will error because the dispatcher has no arm for `posts_touched`. The
 in-macro declarations remain the path the framework knows how to
 eager-load, count, aggregate, and predicate-filter.
 
-### v1 restrictions
+### Polymorphic keys and nested loads
 
-A handful of things the v1 surface holds off on. Each is documented at
-its declaration site too - collected here for visibility:
+- **Morph IDs follow the target's primary key.** A `MorphTo` target
+  can declare an `i64`, `String`, UUID or ULID primary key, and the
+  child table's `<name>_id` column takes the same type. All targets of
+  one `MorphTo` relation share one key type. A relation that mixes key
+  types, or a child whose `<name>_id` field has another type than the
+  key, is a compile error.
+- **The parent side is not checked.** `MorphMany` and `MorphOne` are
+  not compared with the child's `<name>_id` field. Keep that field at
+  the key type of every parent that owns it.
+- **`MorphTo::morph_id` is a `serde_json::Value`.** So is the id in the
+  `Unknown` variant. Call `as_i64()` or `as_str()` to read it as a
+  number or a string.
+- **Lazy and eager reads treat global scopes differently.** The lazy
+  `comment.commentable().get()` finds the target by its key and applies
+  no global scope of the target. The eager `with(["commentable"])` runs
+  the query of the target and applies its global scopes, so a target
+  that a scope hides comes back as `Unknown`.
+- **Nested eager loading through `MorphTo`.** A dotted path like
+  `with(["commentable.user"])` loads `user` on every morph target,
+  one query per target type. The loader groups the targets by type and
+  loads the rest of the path once for each type that is present.
 
-- **Morph IDs are `i64`-only.** `MorphTo::morph_id` is hardcoded to
-  `i64`, so any model used as a `MorphTo` target must declare an `i64`
-  primary key, and the child table's `<name>_id` column must also be
-  `i64`. String / UUID-as-string morph FKs are v2.
-- **No nested eager loading through `MorphTo`.** The per-family enum
-  erases the child type, so a dotted path like
-  `with(["commentable.user"])` can't tail-recurse - the dispatcher
-  returns a typed error. Resolve per-family by matching on the enum
-  and calling `with(["user"])` on each variant individually.
+```rust
+// Comments on posts and on videos; both models declare `user`.
+// 1 query for comments + 1 for posts + 1 for videos
+// + 2 for the users (one per target type) = 5 queries,
+// however many comments there are.
+let comments = Comment::query()
+    .with(["commentable.user"])
+    .get()
+    .await?;
+```
+
+Every target of the relation must declare the next relation of the
+path. A target that does not is an error that names the type and the
+relation. The check covers all targets, so it fails also when no row of
+that type is loaded, and when no row is loaded at all.
+
 ## Eager loading
 
 Eager loading avoids N+1 queries. Instead of `posts.len()` queries to
 fetch every user's posts, Suprnova issues ONE query per top-level
 relation regardless of how many parent rows are loaded.
+
+To find the reads that should be eager loads, see
+[Preventing lazy loading](#preventing-lazy-loading).
 
 The full surface - flat list, nested paths, count, aggregates, and
 predicate-filtered eager loads - is reached through the
@@ -1971,9 +2032,8 @@ query - not the pivot scan.
 `with_where` is supported on every relation kind EXCEPT `MorphTo`.
 MorphTo's per-family enum erases the child type, so no single
 `Builder<R>` covers all variants. Nested eager loading through
-MorphTo is also not supported in v1 - `with(["commentable.user"])`
-where `commentable` is a `MorphTo` returns an error from the
-recurse-eager-load dispatcher.
+MorphTo does work: `with(["commentable.user"])` groups the loaded
+targets by type and loads `user` once per type.
 
 ### `Collection::load` / `load_missing`
 
@@ -2004,6 +2064,138 @@ For nested paths the partition repeats at every level. Given
 The same per-row partition repeats at every further segment of a
 longer dotted path (`"posts.comments.author"` etc.) - at each step
 only the rows missing that segment get the bulk-load.
+
+#### `load` / `load_missing` on one model
+
+When you hold one model, call the same methods on it. They are methods of
+the `Model` trait, so they work on any model and through an `M: Model`
+bound:
+
+```rust
+use suprnova::Model;
+
+let mut post = Post::find_or_fail(id).await?;
+post.load(["comments"]).await?;
+post.load_missing(["comments.user", "tags"]).await?;
+```
+
+The relations land in the model's own relation cache. Read them with the
+`<relation>_loaded()` accessors, which do not query again.
+
+Both methods take the same relation names as the collection methods,
+including dotted names, and run the same loader, so each relation costs
+one query. Inside a `DB::transaction` closure the reads go through the
+transaction.
+
+`load` loads a relation again when the model already has it.
+`load_missing` runs no query for a relation the model has. It checks a
+dotted name at every level: with `comments` loaded,
+`load_missing(["comments.user"])` loads only the users that the cached
+comments lack.
+
+## Preventing lazy loading
+
+A relation read on one model runs one query. A template that reads
+`post.author()` for each of 50 posts runs 51 queries. Eager loading
+(`with`, `load`, `load_missing`) reads the relation for every row with
+one query. `prevent_lazy_loading(true)` makes the 51-query loop fail
+where it is written, instead of under load in production.
+
+Turn it on in the bootstrap of the application, outside production.
+`Config::is_production()` reads `APP_ENV` (see
+[Configuration](configuration.md)):
+
+```rust
+use suprnova::{Config, prevent_lazy_loading};
+
+prevent_lazy_loading(!Config::is_production());
+```
+
+The switch is process-wide and off by default. With it off, every read
+behaves as if this section did not exist.
+
+### What is refused
+
+With the switch on, a relation read is refused when both hold:
+
+- The model came out of a query that returned more than one row: a
+  `get`, `all` or `find_many`, a page of a paginator, a batch of
+  `chunk`, `lazy` or `cursor`, a row of `each` over a query that matches
+  more than one row, the rows of a `HasManyThrough` relation, or the
+  related rows of an eager load that fetched more than one.
+- The relation is not in the model's cache, because it was not loaded
+  with `with`, `load` or `load_missing`.
+
+The reads are `get()` and `first()` of every relation kind. A refused
+read runs no query and returns an error that names the model and the
+relation and says to use `with` or `load`. The error holds no key and no
+value of the row.
+
+These reads are not refused:
+
+- A model from `find`, `first`, a `get` that returned one row, or
+  `create`. Its relations load lazily, as in Laravel.
+- A model you build in the process, and a replica from `replicate`.
+- A relation that is loaded.
+- `count()` of a relation. It loads no model. Its eager form is
+  `with_count`.
+- `attach`, `detach` and `sync`, which write.
+
+The last batch of a `chunk` walk that holds one row is not marked, in the
+same way that a `get` of one row is not.
+
+```rust
+prevent_lazy_loading(true);
+
+let posts = Post::query().get().await?;   // several rows
+for post in &posts {
+    // Err: lazy loading of the relation `author` of `Post` is prevented
+    let author = post.author().first().await?;
+}
+
+let posts = Post::with(["author"]).get().await?;
+for post in &posts {
+    let author = post.author_loaded();    // no query
+}
+```
+
+### Logging instead of failing
+
+`handle_lazy_loading_violation` registers one handler for the process.
+With a handler, a violation calls it and the read goes on and runs its
+query. A staging system can log the reads and keep serving:
+
+```rust
+use suprnova::{LazyLoadingViolation, handle_lazy_loading_violation, prevent_lazy_loading};
+
+prevent_lazy_loading(true);
+handle_lazy_loading_violation(|violation: &LazyLoadingViolation| {
+    tracing::warn!(
+        model = violation.model,
+        relation = violation.relation,
+        "lazy loading of a relation",
+    );
+})?;
+```
+
+`LazyLoadingViolation` has two fields: `model`, the struct name of the
+model (such as `"Post"`), and `relation`, the relation name as
+`relations = { ... }` declares it (such as `"author"`). Both are
+`&'static str`. The handler runs with no framework lock held, so a
+handler that panics does not break the next read.
+
+`clear_lazy_loading_violation_handler()` removes the handler, so a
+violation is an error again. `preventing_lazy_loading()` returns whether
+the switch is on.
+
+### Why Suprnova diverges
+
+The rule is Laravel's `preventLazyLoading`. Two behaviours differ:
+
+- `refresh()` replaces the row with a fresh `find`, so the row loses its
+  mark. Laravel keeps it.
+- `cursor()` and `lazy()` hydrate in batches, so their rows are marked.
+  Laravel's `cursor()` hydrates one row at a time and marks nothing.
 
 ## Pagination
 
@@ -2047,22 +2239,29 @@ let posts = Post::query().paginate_using("posts_page", 10).await?;
 let comments = Comment::query().paginate_using("comments_page", 25).await?;
 ```
 
-**JSON shape:**
+**JSON shape** (with `with_path("/api/users")`, page 1 of 3):
 
 ```json
 {
-  "data": [...],
   "current_page": 1,
-  "last_page": 3,
-  "per_page": 10,
-  "total": 25,
+  "data": [...],
+  "first_page_url": "/api/users?page=1",
   "from": 1,
+  "last_page": 3,
+  "last_page_url": "/api/users?page=3",
+  "links": [...],
+  "next_page_url": "/api/users?page=2",
+  "path": "/api/users",
+  "per_page": 10,
+  "prev_page_url": null,
   "to": 10,
-  "path": "/api/users"
+  "total": 25
 }
 ```
 
-`path` is omitted from JSON when unset.
+`path` is omitted from JSON when unset. The fields are Laravel's, and
+`links` is the row of page links. See [Pagination](pagination.md) for the
+`links` entries and the page URLs.
 
 ### Simple paginate (no count)
 
@@ -2084,14 +2283,21 @@ let page: Paginator<User> = User::query()
 // page.current_page, page.per_page, page.data, page.path: as above.
 ```
 
-**JSON shape:**
+**JSON shape** (with `with_path("/api/users")`, page 1):
 
 ```json
 {
-  "data": [...],
   "current_page": 1,
+  "current_page_url": "/api/users?page=1",
+  "data": [...],
+  "first_page_url": "/api/users?page=1",
+  "from": 1,
+  "has_more": true,
+  "next_page_url": "/api/users?page=2",
+  "path": "/api/users",
   "per_page": 10,
-  "has_more": true
+  "prev_page_url": null,
+  "to": 10
 }
 ```
 
@@ -2139,16 +2345,19 @@ slice deterministically.
 ```json
 {
   "data": [...],
+  "path": "/api/users",
   "per_page": 10,
   "next_cursor": "...",
+  "next_page_url": "/api/users?cursor=...",
   "prev_cursor": null,
-  "path": "/api/users"
+  "prev_page_url": null
 }
 ```
 
-`next_cursor` and `prev_cursor` are always present as JSON keys
-(emitted as `null` when absent) so client schemas can rely on the
-field's presence; `path` is omitted when unset.
+`next_cursor`, `next_page_url`, `prev_cursor`, and `prev_page_url` are
+always present as JSON keys (emitted as `null` when absent) so client
+schemas can rely on the field's presence; `path` is omitted when unset.
+A page URL is the `path` with the cursor in the `cursor` key.
 
 ### Errors
 
@@ -2242,9 +2451,36 @@ so rows inserted mid-iteration with PKs above the cursor land in a
 later batch (or are picked up by a subsequent run) - they never cause
 an original row to skip or duplicate.
 
-`chunk_by_id` requires an `i64` primary key. Models with `String` /
-`Uuid` PKs use `chunk` with the OFFSET caveat. (Generalising the
-cursor shape to non-`i64` keys is on the follow-up list.)
+The cursor is the value of the primary key, in the order of the key.
+These keys work:
+
+- An integer key (`i64`, `i32`, and the other integer types).
+- A text key: `String`, and the keys of `unique_id = "uuid"`,
+  `"uuid_v4"` and `"ulid"`, which the model stores as text.
+
+For a key that grows with the creation time of its row (auto-increment,
+UUID v7, ULID), a row inserted mid-run lands after the cursor, and a
+later batch finds it. A random key (UUID v4) has no such order: a row
+inserted mid-run with a key below the cursor is not seen by that walk,
+and the next run picks it up. Every row that existed when the walk
+started is seen once.
+
+`chunk_by_id` refuses a key that cannot carry the cursor with
+`FrameworkError::internal`. The error names the model and the column and
+never the value of the key. Two cases are refused before the first
+query:
+
+- A composite key.
+- A key column that is neither an integer nor text, such as a native
+  `uuid::Uuid` column, a timestamp or a decimal.
+
+A third case is found while the walk runs. A row whose key is null, or is
+not of the kind of its column, ends the walk with the same error. The
+check runs on each batch before the closure sees it, so the closure never
+processes a batch that holds such a row.
+
+For a key that `chunk_by_id` refuses, use `chunk()`. It paginates by
+OFFSET, so it needs no cursor, and it has the concurrency limits above.
 
 ### chunk_map - chunk + per-chunk map
 
@@ -2294,7 +2530,11 @@ batch only fetches when the in-memory buffer drains.
 Override the batch size with `lazy_by_id(500)`. `cursor()` is the
 Laravel name and is a zero-cost alias for `lazy()`.
 
-Same `i64`-PK constraint as `chunk_by_id`.
+`lazy()`, `lazy_by_id()` and `cursor()` use the same keyset cursor as
+`chunk_by_id`, so the same keys work and the same keys are refused. The
+error is the first item of the stream. Refusal by column type happens
+before the first query. A row with a null or mismatched key is refused
+when its batch arrives, before the stream yields any row of that batch.
 
 ### Eager loads inside chunks
 
@@ -2518,11 +2758,20 @@ pub struct User { /* ... */ }
 | `decimal:N` | `AsDecimal<N>` | `rust_decimal::Decimal` |
 | `string` | `AsString` | `String` |
 | `array` | `AsArray<T>` | `Vec<T>` (JSON-encoded) |
+| `array` (nullable column) | `AsOptionalArray<T>` | `Option<Vec<T>>` (`None` is SQL `NULL`) |
 | `object` | `AsObject<T>` | `T: Serialize + DeserializeOwned` |
+| `object` (nullable column) | `AsOptionalObject<T>` | `Option<T>` |
 | `collection` | `AsCollection<T>` | `Collection<T>` |
+| `collection` (nullable column) | `AsOptionalCollection<T>` | `Option<Collection<T>>` |
 | `json` | `AsJson<T>` | `T` (raw JSON column) |
+| `json` (nullable column) | `AsOptionalJson<T>` | `Option<T>` |
 | `date`, `date:format` | `AsDate` | `chrono::NaiveDate` |
 | `datetime`, `datetime:format` | `AsDateTime` | `chrono::DateTime<Utc>` |
+| `datetime` (nullable column) | `AsOptionalDateTime` | `Option<chrono::DateTime<Utc>>` |
+| `datetime` (native column with a zone) | `AsNativeDateTime` | `chrono::DateTime<Utc>` |
+| `datetime` (nullable native column with a zone) | `AsOptionalNativeDateTime` | `Option<chrono::DateTime<Utc>>` |
+| `datetime` (native column without a zone) | `AsNaiveDateTime` | `chrono::DateTime<Utc>` (stored as the UTC wall clock) |
+| `datetime` (nullable native column without a zone) | `AsOptionalNaiveDateTime` | `Option<chrono::DateTime<Utc>>` |
 | `immutable_date` | `AsImmutableDate` | `chrono::NaiveDate` |
 | `immutable_datetime` | `AsImmutableDateTime` | `chrono::DateTime<Utc>` |
 | `timestamp` | `AsTimestamp` | `i64` (unix epoch) |
@@ -2532,9 +2781,13 @@ pub struct User { /* ... */ }
 | `encrypted:collection` | `AsEncryptedCollection<T>` | `Collection<T>` |
 | `EnumClass::class` | `AsEnum<E>` | `E: EnumString + AsRefStr` |
 | `AsArrayObject::class` | `AsArrayObject<T>` | `IndexMap<String, T>` |
+| `AsArrayObject::class` (nullable column) | `AsOptionalArrayObject<T>` | `Option<IndexMap<String, T>>` |
 | `hashed` | `AsHashed` | `String` (`Hash::make` on write; never decrypts) |
 
-22 casts total. Most map one-to-one with Laravel; the
+31 casts total. Most map one-to-one with Laravel. A Laravel cast passes
+`null` through on any column; in Rust the field type says whether a
+value can be missing, so the five JSON casts and three of the
+date-time casts have `AsOptional*` forms for nullable columns. The
 `AsOptionalDateTime` (used by `soft_deletes`) is auto-injected by
 the macro when the soft-delete column is `Option<DateTime<Utc>>`.
 
@@ -2844,15 +3097,42 @@ After a comment is created, saved, updated, or deleted, its post's
 a cache key hanging off `post.updated_at` needs to stay honest when
 only a child changed.
 
-Every name in `touches` must be a `BelongsTo` relation declared in the
-same `relations = { ... }` block. A name that doesn't resolve, or one
-that resolves to a different relation kind, is a compile error rather
-than a surprise on the first save. Polymorphic (`MorphTo`) owners
-aren't touchable yet.
+Every name in `touches` must be a `BelongsTo` or a `MorphTo` relation
+declared in the same `relations = { ... }` block. A name that doesn't
+resolve, or one that resolves to a different relation kind, is a compile
+error rather than a surprise on the first save.
+
+A `MorphTo` name touches the owner that the row's `<name>_type` and
+`<name>_id` columns point at:
+
+```rust
+#[model(
+    table = "comments",
+    touches = ["commentable"],
+    relations = {
+        commentable: MorphTo { targets = [Post, Video] },
+    },
+)]
+pub struct Comment {
+    pub id: i64,
+    pub commentable_id: i64,
+    pub commentable_type: String,
+    // ...
+}
+```
+
+The write finds the owner after the pre-write listeners (`Creating`,
+`Saving`, `Updating`, `Deleting`) have run and before the statement, from
+the values the statement writes. A listener that rewrites `<name>_type`
+or `<name>_id` therefore decides which owner is touched. A
+`<name>_type` that names none of the targets makes the write fail: the
+write returns `Err`, no row is written, no post-write event is
+dispatched and no owner is touched.
 
 An owner whose model has `timestamps = false` is **skipped**: no error,
 no write, and the child's save still returns `Ok`. Same for an owner
-reached through a `NULL` foreign key, and for a soft-deleted owner.
+reached through a `NULL` foreign key or a `NULL` `<name>_id`, and for a
+soft-deleted owner.
 
 The touch runs on the same executor as the write that triggered it, so
 inside a `DB::transaction` closure it joins that transaction and a
@@ -3107,7 +3387,7 @@ trait defaults make non-overridden methods cheap no-ops.
   outside the name-match and don't register listeners.
 
 - **Observer structs the macro inspects must be zero-sized** (no
-  fields) in v1. The macro constructs the observer via `let obs =
+  fields). The macro constructs the observer via `let obs =
   MyObserver;` inside each adapter. Stateful observers (carrying
   `Arc<Inner>`) need the runtime `Model::observe()` path, which
   takes the observer by value and clones it into each adapter.
@@ -3169,15 +3449,22 @@ impl MassPrunable for AuditLog {
 
 ### Triggering pruning
 
-Run via the per-project console (which `app/cmd/main.rs` calls
-`suprnova::console::dispatch_argv` for, after `db:seed` and the
-other built-ins):
+Run it with the `suprnova` CLI. The CLI runs your project's console
+binary, which owns the command:
 
 ```bash
 suprnova model:prune                          # prune every registered type
 suprnova model:prune --model=ExpiredSession   # filter to one model
-suprnova model:prune --pretend                # dry run; logs what would delete
+suprnova model:prune --pretend                # dry run; deletes nothing
 ```
+
+`cargo run --bin console -- model:prune` runs the same command without the
+CLI.
+
+`--model` matches the last segment of the type name. When no registered
+pruner has that name, the command prints
+``model:prune: no pruner registered for `<name>` `` on the error stream,
+deletes nothing and exits with code 0.
 
 Programmatically the runners are at
 `suprnova::eloquent::{prune_all, prune_all_dry, prune_one}`.
@@ -3314,8 +3601,7 @@ replica - useful when read-your-writes consistency matters
 
 ### Routing precedence
 
-The dispatch chain runs every operation through
-`ExecutorChoice::resolve_read` or `resolve_write`. The order is:
+Every read and every write resolves its connection in this order:
 
 1. **Active transaction wins absolutely.** Inside `DB::transaction`
    every read AND every write uses the tx connection. `on(name)` is
@@ -3855,7 +4141,10 @@ fire per-row model events. Use them when scope-narrowing is sufficient
 and you don't need lifecycle hooks; for per-row hooks iterate with
 `.get()` and call `.update()` / `.delete()` per row.
 `delete_all` always targets the model's static `M::TABLE`; runtime table
-names are not accepted as executable SQL.
+names are not accepted as executable SQL. On a `soft_deletes` model it
+soft-deletes: one `UPDATE` sets the deleted-at column across the scope,
+as Laravel's builder `delete()` does. `force_delete_all` removes the rows
+for good.
 Explicit null attributes are emitted as SQL `NULL`, so nullable bigint,
 integer, boolean, timestamp, and other non-text columns retain their database
 type on PostgreSQL. Every non-null attribute remains parameter-bound. Upsert
@@ -4050,6 +4339,9 @@ without_touching_on::<Post, _, _>(async {
 }).await?;
 ```
 
+The per-type form also holds for a `MorphTo` owner: when the owner the
+row points at is a `Post`, the touch is skipped.
+
 Scopes nest, and both are `tokio::task_local`-backed.
 
 ## Next
@@ -4061,7 +4353,7 @@ Scopes nest, and both are `tokio::task_local`-backed.
   `Collection<T>` surface, the generic-vs-model split, and
   `LazyCollection<M>` streaming
 - [Eloquent Casts, Accessors & Mutators](eloquent-mutators.md) - the
-  22 built-in casts plus the `casts!` runtime override
+  31 built-in casts plus the `casts!` runtime override
 - [Eloquent Serialization](eloquent-serialization.md) - `to_array`,
   `to_json`, hidden / visible / appends, filtered terminals
 - [Eloquent Factories](eloquent-factories.md) - randomized model

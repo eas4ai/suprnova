@@ -16,6 +16,8 @@ use suprnova::payments::{
 };
 
 use crate::StripeProvider;
+use crate::deadline;
+use crate::sdk_error;
 
 // ---------------------------------------------------------------------------
 // Param structs
@@ -216,10 +218,11 @@ impl Payment for StripeProvider {
         let request = RequestBuilder::new(StripeMethod::Post, "/payment_intents")
             .form(&params)
             .customize::<PaymentIntent>();
-        let intent = crate::apply_idempotency(request, req.idempotency_key.as_deref())?
-            .send(self.client())
-            .await
-            .map_err(|e| PaymentError::Provider(format!("stripe payment_intents.create: {e}")))?;
+        let call =
+            crate::apply_idempotency(request, req.idempotency_key.as_deref())?.send(self.client());
+        let intent = deadline::change("payment_intents.create", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("payment_intents.create", e))?;
 
         pi_to_charge_result(intent, self.publishable_key())
     }
@@ -227,11 +230,12 @@ impl Payment for StripeProvider {
     /// Capture a previously-authorised (requires_capture) PaymentIntent.
     async fn capture(&self, provider_transaction_id: &str) -> PaymentResult<ChargeResult> {
         let path = format!("/payment_intents/{provider_transaction_id}/capture");
-        let intent: PaymentIntent = RequestBuilder::new(StripeMethod::Post, &path)
+        let call = RequestBuilder::new(StripeMethod::Post, &path)
             .customize::<PaymentIntent>()
-            .send(self.client())
-            .await
-            .map_err(|e| PaymentError::Provider(format!("stripe payment_intents.capture: {e}")))?;
+            .send(self.client());
+        let intent: PaymentIntent = deadline::change("payment_intents.capture", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("payment_intents.capture", e))?;
 
         pi_to_charge_result(intent, self.publishable_key())
     }
@@ -248,10 +252,11 @@ impl Payment for StripeProvider {
         let request = RequestBuilder::new(StripeMethod::Post, "/refunds")
             .form(&params)
             .customize::<Refund>();
-        let refund = crate::apply_idempotency(request, req.idempotency_key.as_deref())?
-            .send(self.client())
-            .await
-            .map_err(|e| PaymentError::Provider(format!("stripe refunds.create: {e}")))?;
+        let call =
+            crate::apply_idempotency(request, req.idempotency_key.as_deref())?.send(self.client());
+        let refund = deadline::change("refunds.create", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("refunds.create", e))?;
 
         refund_to_result(refund)
     }
@@ -263,20 +268,23 @@ impl Payment for StripeProvider {
     async fn void(&self, provider_transaction_id: &str) -> PaymentResult<()> {
         let path = format!("/payment_intents/{provider_transaction_id}/cancel");
 
-        let intent: PaymentIntent = RequestBuilder::new(StripeMethod::Post, &path)
+        let call = RequestBuilder::new(StripeMethod::Post, &path)
             .customize::<PaymentIntent>()
-            .send(self.client())
-            .await
+            .send(self.client());
+        let intent: PaymentIntent = deadline::change("payment_intents.cancel", call)
+            .await?
             .map_err(|e| {
-                let msg = format!("{e}");
                 // Stripe returns a 409 for intents already captured with a message
-                // containing "already succeeded" - surface that as Validation.
+                // containing "already succeeded" - surface that as Validation. The
+                // message is only read here: it can name the intent, so it is not
+                // put into the error.
+                let msg = format!("{e}");
                 if msg.contains("already succeeded") || msg.contains("You cannot cancel") {
-                    PaymentError::Validation(format!(
-                        "cannot void payment_intent {provider_transaction_id}: {msg}"
-                    ))
+                    PaymentError::Validation(
+                        "cannot void the payment_intent: it is already captured".into(),
+                    )
                 } else {
-                    PaymentError::Provider(format!("stripe payment_intents.cancel: {msg}"))
+                    sdk_error::provider_error("payment_intents.cancel", e)
                 }
             })?;
 
@@ -293,11 +301,12 @@ impl Payment for StripeProvider {
     async fn status(&self, provider_transaction_id: &str) -> PaymentResult<PaymentStatus> {
         let path = format!("/payment_intents/{provider_transaction_id}");
 
-        let intent: PaymentIntent = RequestBuilder::new(StripeMethod::Get, &path)
+        let call = RequestBuilder::new(StripeMethod::Get, &path)
             .customize::<PaymentIntent>()
-            .send(self.client())
-            .await
-            .map_err(|e| PaymentError::Provider(format!("stripe payment_intents.retrieve: {e}")))?;
+            .send(self.client());
+        let intent: PaymentIntent = deadline::read("payment_intents.retrieve", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("payment_intents.retrieve", e))?;
 
         Ok(map_pi_status(&intent.status))
     }

@@ -77,6 +77,20 @@ const READER_DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// Selected with `IMAGE_DRIVER=magick`. The binary name comes from
 /// `IMAGE_MAGICK_BINARY` and defaults to `magick`; an absent or
 /// non-executing binary is an error at first use, naming the env var.
+///
+/// Output formats are whatever the host's delegates can write. WebP goes
+/// through libwebp, and [`OutputFormat::WebP`] hands it the pipeline's
+/// quality for a lossy encode, with one difference from the built-in
+/// `oxideav` driver: an image with transparency is still written lossy,
+/// because libwebp stores the alpha channel beside the lossy picture. The
+/// built-in driver's lossy encoder has no alpha channel, so it writes such
+/// an image lossless.
+///
+/// The output is lossy at every quality. ImageMagick switches its WebP
+/// coder to lossless by itself at a quality of 100, so the driver passes
+/// `-define webp:lossless=false` with the quality.
+///
+/// [`OutputFormat::WebPLossless`] is lossless under both drivers.
 pub struct MagickCliDriver {
     binary: String,
 }
@@ -541,6 +555,21 @@ fn process_args(
     }
     args.push("-quality".into());
     args.push(pipeline.quality.to_string());
+    // Both WebP variants write through the one `webp` coder, and this
+    // coder option chooses between them. It is given for the lossy variant
+    // too, because ImageMagick switches to lossless by itself at a quality
+    // of 100.
+    match target {
+        OutputFormat::WebP => {
+            args.push("-define".into());
+            args.push("webp:lossless=false".into());
+        }
+        OutputFormat::WebPLossless => {
+            args.push("-define".into());
+            args.push("webp:lossless=true".into());
+        }
+        OutputFormat::Jpeg | OutputFormat::Png | OutputFormat::Gif | OutputFormat::Bmp => {}
+    }
     // `format:-` forces the output encoder and writes to stdout.
     args.push(format!("{}:-", target.extension()));
     args
@@ -703,6 +732,9 @@ mod tests {
                 "Gray",
                 "-quality",
                 "65",
+                // Lossy at every quality: ImageMagick goes lossless at 100.
+                "-define",
+                "webp:lossless=false",
                 "webp:-",
             ]
             .into_iter()
@@ -717,6 +749,47 @@ mod tests {
             ),
             expected
         );
+    }
+
+    #[test]
+    fn webp_lossless_switches_the_coder_to_lossless_mode() {
+        let pipeline = ImagePipeline {
+            transformations: Vec::new(),
+            format: Some(OutputFormat::WebPLossless),
+            quality: 65,
+        };
+        let lossless = process_args(
+            &pipeline,
+            &config(),
+            Some(sniff::InputFormat::Png),
+            OutputFormat::WebPLossless,
+        );
+        assert_eq!(
+            lossless[lossless.len() - 5..],
+            ["-quality", "65", "-define", "webp:lossless=true", "webp:-"]
+        );
+
+        // Lossy WebP hands the quality to the same coder and says that it
+        // is lossy, at a quality of 100 too.
+        let lossy = process_args(
+            &pipeline,
+            &config(),
+            Some(sniff::InputFormat::Png),
+            OutputFormat::WebP,
+        );
+        assert_eq!(
+            lossy[lossy.len() - 5..],
+            ["-quality", "65", "-define", "webp:lossless=false", "webp:-"]
+        );
+
+        // No other format gets the option of the WebP coder.
+        let jpeg = process_args(
+            &pipeline,
+            &config(),
+            Some(sniff::InputFormat::Png),
+            OutputFormat::Jpeg,
+        );
+        assert!(!jpeg.contains(&"-define".to_string()));
     }
 
     #[test]

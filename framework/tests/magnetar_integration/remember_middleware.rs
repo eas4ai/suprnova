@@ -257,8 +257,12 @@ async fn installed_engine_remember_hydration_rotates_and_binds_both_sessions() {
             anonymous_csrf.to_owned(),
         ))
         .await;
-    let anonymous_cookie = Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, &anonymous_id)
-        .expect("encrypt anonymous data-session cookie");
+    let anonymous_cookie = Crypt::encrypt_string_for(
+        suprnova::CryptPurpose::Cookie,
+        &config.cookie_name,
+        &anonymous_id,
+    )
+    .expect("encrypt anonymous data-session cookie");
 
     let observed = Arc::new(Mutex::new(None::<SessionData>));
     let observed_in_handler = observed.clone();
@@ -382,8 +386,12 @@ async fn installed_engine_remember_hydration_rotates_and_binds_both_sessions() {
         }),
     );
     store.seed(named_session).await;
-    let named_cookie = Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, &named_session_id)
-        .expect("encrypt named-guard data-session cookie");
+    let named_cookie = Crypt::encrypt_string_for(
+        suprnova::CryptPurpose::Cookie,
+        &config.cookie_name,
+        &named_session_id,
+    )
+    .expect("encrypt named-guard data-session cookie");
     let observed_named = Arc::new(Mutex::new(None::<SessionData>));
     let observed_in_handler = observed_named.clone();
     let named_next: suprnova::middleware::Next = Arc::new(move |_request| {
@@ -797,8 +805,12 @@ async fn installed_engine_rejects_default_guard_identity_without_compatibility_u
             serde_json::json!({ "web": guard_state }),
         );
         store.seed(session).await;
-        let session_cookie = Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, &session_id)
-            .expect("encrypt one-sided data-session cookie");
+        let session_cookie = Crypt::encrypt_string_for(
+            suprnova::CryptPurpose::Cookie,
+            &config.cookie_name,
+            &session_id,
+        )
+        .expect("encrypt one-sided data-session cookie");
 
         let observed = Arc::new(Mutex::new(None::<(Option<String>, SessionData)>));
         let observed_in_handler = observed.clone();

@@ -113,6 +113,9 @@ routes! {
 }
 ```
 
+`.middleware_named("auth")` applies a middleware by its registered name
+instead of its type. See [Named aliases and groups](#named-aliases-and-groups).
+
 ### Per group
 
 Apply middleware to every route in a `group(...)` block:
@@ -153,7 +156,9 @@ Request  →  RequestId  →  globals  →  group MW  →  route MW  →  handle
 Response ←  RequestId  ←  globals  ←  group MW  ←  route MW  ←  handler
 ```
 
-The first middleware added runs first. On the way back out, the order
+The first middleware added runs first, unless the
+[middleware priority list](#middleware-priority) moves a middleware it
+names. On the way back out, the order
 reverses - `MiddlewareChain::execute` nests each layer's post-processing
 inside the previous one.
 
@@ -399,26 +404,64 @@ for tests and boot-time diagnostics.
 
 For consumers that prefer string-keyed middleware (Laravel's
 `middlewareAliases` / `middlewareGroups`), Suprnova ships a
-process-global alias + group registry:
+process-global alias + group registry. A route names the middleware it
+wants with `.middleware_named(...)`:
 
 ```rust
 use suprnova::middleware::{
-    register_middleware_alias, register_middleware_group,
-    resolve_middleware_group,
+    register_middleware_alias, register_middleware_alias_with_args,
+    register_middleware_group, resolve_middleware_group,
 };
+use suprnova::rate_limit::ThrottleRequestsMiddleware;
+use suprnova::Router;
 
 // Aliases are factory closures - invoked fresh per resolution, so each
 // route registration produces an independent middleware instance.
 register_middleware_alias("auth", || AuthMiddleware::new());
-register_middleware_alias("throttle", || ThrottleRequestsMiddleware::default());
+
+// An alias that reads arguments takes a factory of `&[&str]`.
+register_middleware_alias_with_args("throttle", ThrottleRequestsMiddleware::from_alias_args);
 
 // Groups bundle aliases. Nested groups are supported.
 register_middleware_group("api", ["auth".into(), "throttle".into()]);
-register_middleware_group("web", ["session".into(), "auth".into()]);
 
-// Resolve into a Vec<BoxedMiddleware> at boot or per-route.
+// A route names an alias, an alias with arguments, or a group.
+let router = Router::new()
+    .get("/reports", reports_handler)
+    .middleware_named("auth")
+    .middleware_named("throttle:60,1");
+
+// Or resolve a group into a Vec<BoxedMiddleware> yourself.
 let api_mws = resolve_middleware_group("api")?;
 ```
+
+`.middleware_named(name)` is on every builder that has `.middleware(M)`:
+a route from `Router::get` and its siblings, `Router::group(...)`, and the
+route builders and `group!` of the `routes!` macro. The name is one of:
+
+| Name | Middleware it adds |
+|---|---|
+| `auth` | The alias `auth`. |
+| `throttle:60,1` | The alias `throttle`, called with the arguments `["60", "1"]`. Arguments follow the colon, separated by commas, and spaces around a name or an argument are trimmed. |
+| `api` | Every middleware of the group `api`, in order. A group wins over an alias of the same name. |
+
+A route resolves the name when it is registered, which is at boot. A name
+that no alias or group carries, an alias that takes no arguments but is
+given some, and an alias whose factory refuses its arguments all make
+`.middleware_named` panic, so a typo never becomes a route that serves
+without its middleware. `.try_middleware_named(name)` returns
+`Result<_, FrameworkError>` instead of panicking. Register every alias
+before the routes that name it.
+
+`register_middleware_alias` registers an alias that takes no arguments.
+`register_middleware_alias_with_args` registers one whose factory reads
+them. The factory receives `["60", "1"]` for `throttle:60,1` and an empty
+slice for the bare `throttle`. An alias is one kind or the other: a later
+registration replaces the earlier one whichever kind it was.
+
+`ThrottleRequestsMiddleware::from_alias_args` reads the arguments the way
+Laravel reads `throttle:60,1`. See
+[Rate Limiting](rate-limiting.md#named-aliases) for the forms it accepts.
 
 `resolve_middleware_group` returns `Err(MiddlewareResolveError)` on:
 
@@ -435,12 +478,14 @@ mirroring Laravel's reassignable kernel array.
 
 `prepend_middleware_priority::<M>()` / `append_middleware_priority::<M>()`
 register a `TypeId` in the process-global priority list - the Suprnova
-analogue of Laravel's `Kernel::$middlewarePriority`. Middleware whose
-type appears earlier in the list sorts to the front of the chain
-regardless of registration order:
+analogue of Laravel's `Kernel::$middlewarePriority`. The list gives
+order-dependent middleware a safe order when global, group and route
+registrations interleave. `MiddlewareChain::execute` applies it each time
+a chain runs, so the order holds for a matched route, the fallback, an
+unrouted request and a WebSocket upgrade alike.
 
 ```rust
-use suprnova::{append_middleware_priority};
+use suprnova::middleware::append_middleware_priority;
 
 // SessionMiddleware always runs before AuthMiddleware regardless of
 // the order they were registered.
@@ -448,8 +493,38 @@ append_middleware_priority::<SessionMiddleware>();
 append_middleware_priority::<AuthMiddleware>();
 ```
 
+`append_middleware_priority` puts a type at the end of the list and
+`prepend_middleware_priority` puts it in front of every type the list
+holds. Adding a type the list already holds does nothing.
+
+### What moves
+
+Only a middleware that the list names can move, and it only moves toward
+the front of the chain. When a listed middleware stands behind a
+middleware that the list places after it, it moves to just before that
+one. Everything else keeps its place relative to its neighbours.
+
+So a middleware the list does not name keeps its place behind the
+middleware it was registered after. If you register `CacheHeaders` after
+`AuthMiddleware`, `CacheHeaders` still runs after `AuthMiddleware`, even
+when the list moves `SessionMiddleware` in front of `AuthMiddleware`.
+
+An empty list leaves the chain in registration order.
+
+### What the list sees
+
+The list orders middleware by type, so it sees the middleware you
+register by type:
+
+- `.middleware(M)` on a route or a group;
+- `global_middleware!(M)` and `register_global_middleware(M)`;
+- an alias, through `.middleware_named(...)` or a group.
+
+A middleware you box by hand and add with `.middleware_boxed(...)` has no
+type the list could name, and it keeps its place.
+
 `middleware_priority()` returns a snapshot of the current `Vec<TypeId>`
-for diagnostics or for an embedder that wants to drive its own sorter.
+for diagnostics.
 
 ## Registry introspection
 

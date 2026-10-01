@@ -83,6 +83,19 @@ static REGISTRY: RwLock<Option<HashMap<TypeId, ErasedDispatcher>>> = RwLock::new
 pub struct Bus;
 
 impl Bus {
+    /// Install the bus fake for the current test. Returns an RAII guard
+    /// that uninstalls it on drop. While the guard is live, every
+    /// dispatched command is recorded instead of running its handler, and
+    /// the `assert_*` functions in [`testing`] read what was recorded.
+    ///
+    /// The guard holds a process-wide serialization mutex, so parallel
+    /// tests cannot share the fake store. It is the same guard
+    /// [`testing::install_fake`] returns; this is the spelling every other
+    /// facade's fake has.
+    pub fn fake() -> testing::BusFakeGuard {
+        testing::install_fake()
+    }
+
     /// Register a handler for command type `C`. Overwrites any previous handler
     /// for the same type and logs a warning when that happens - tests routinely
     /// re-register, but a duplicate binding from boot usually indicates two

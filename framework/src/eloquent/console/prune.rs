@@ -44,7 +44,9 @@ impl TypedCommand for PruneArgs {
             match crate::eloquent::prune_one(name, self.pretend).await? {
                 Some(n) => n,
                 None => {
-                    eprintln!("model:prune: no pruner registered for `{name}`");
+                    crate::console::error_line(format!(
+                        "model:prune: no pruner registered for `{name}`"
+                    ));
                     return Ok(());
                 }
             }
@@ -55,9 +57,9 @@ impl TypedCommand for PruneArgs {
         };
 
         if self.pretend {
-            println!("model:prune: would prune {count} rows");
+            crate::console::line(format!("model:prune: would prune {count} rows"));
         } else {
-            println!("model:prune: pruned {count} rows");
+            crate::console::line(format!("model:prune: pruned {count} rows"));
         }
         Ok(())
     }

@@ -32,6 +32,7 @@ pub mod hints;
 pub mod ledger;
 pub mod live;
 pub mod middleware;
+pub mod migration;
 pub mod no_delays;
 pub mod operations;
 pub mod orm;

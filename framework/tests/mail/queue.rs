@@ -399,3 +399,152 @@ async fn mail_on_queue_outranks_a_queue_route_and_the_mailables_own_hook() {
         .expect("builder .on_queue(...) outranks Mailable::queue()");
     assert_eq!(via_builder.envelope.queue.as_deref(), Some("urgent"));
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct InvoiceMail {
+    wait_for_commit: bool,
+}
+
+#[async_trait]
+impl Mailable for InvoiceMail {
+    fn mailable_name() -> &'static str {
+        "InvoiceMail"
+    }
+    fn subject(&self) -> String {
+        "Your invoice".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("Attached.".into())
+    }
+    fn after_commit(&self) -> bool {
+        self.wait_for_commit
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn a_mailable_that_opts_in_is_queued_at_the_commit() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = suprnova::testing::TestDatabase::sqlite_memory()
+        .await
+        .expect("sqlite");
+
+    suprnova::DB::transaction(|_tx| {
+        Box::pin(async {
+            Mail::to("alice@example.org")
+                .queue(InvoiceMail {
+                    wait_for_commit: true,
+                })
+                .await?;
+            assert_eq!(
+                Queue::size().await?,
+                0,
+                "the mail must not reach the queue before the commit"
+            );
+            Mail::to("alice@example.org")
+                .later(
+                    Duration::from_secs(60),
+                    InvoiceMail {
+                        wait_for_commit: true,
+                    },
+                )
+                .await?;
+            assert_eq!(Queue::size().await?, 0, "nor may a delayed one");
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(
+        driver.size().await.unwrap(),
+        2,
+        "both are queued at the commit"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_rollback_discards_a_queued_mailable_that_opted_in() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = suprnova::testing::TestDatabase::sqlite_memory()
+        .await
+        .expect("sqlite");
+
+    let result: Result<(), FrameworkError> = suprnova::DB::transaction(|_tx| {
+        Box::pin(async {
+            Mail::to("alice@example.org")
+                .queue(InvoiceMail {
+                    wait_for_commit: true,
+                })
+                .await?;
+            Err(FrameworkError::internal("force rollback"))
+        })
+    })
+    .await;
+
+    assert!(result.is_err(), "the transaction rolled back");
+    assert_eq!(
+        driver.size().await.unwrap(),
+        0,
+        "mail about work that was rolled back must never be queued"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_mailable_that_did_not_opt_in_is_queued_before_the_commit() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = suprnova::testing::TestDatabase::sqlite_memory()
+        .await
+        .expect("sqlite");
+
+    suprnova::DB::transaction(|_tx| {
+        Box::pin(async {
+            Mail::to("alice@example.org")
+                .queue(InvoiceMail {
+                    wait_for_commit: false,
+                })
+                .await?;
+            assert_eq!(Queue::size().await?, 1, "the default is unchanged");
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(driver.size().await.unwrap(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn queued_mail_carries_the_context_of_the_code_that_queued_it() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    suprnova::Context::scope(suprnova::ContextStore::default(), async {
+        suprnova::Context::add("trace_id", "abc");
+        Mail::to("alice@example.org")
+            .queue(WelcomeMail {
+                name: "Alice".into(),
+            })
+            .await
+            .unwrap();
+    })
+    .await;
+
+    let envelope = driver
+        .pop(Duration::from_secs(5))
+        .await
+        .unwrap()
+        .expect("the queued mail")
+        .envelope;
+    let context = envelope.context.expect("the mail job carries the context");
+    assert_eq!(
+        context.data.get("trace_id"),
+        Some(&serde_json::json!("abc"))
+    );
+}

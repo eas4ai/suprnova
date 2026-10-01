@@ -4,7 +4,6 @@ use crate::error::FrameworkError;
 use crate::queue::envelope::Envelope;
 use crate::queue::inspect::InspectedJob;
 use async_trait::async_trait;
-use chrono::Utc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -202,7 +201,7 @@ pub trait QueueDriver: Send + Sync {
     ) -> Result<(), FrameworkError> {
         let mut requeued = env.clone();
         requeued.attempts = requeued.attempts.saturating_sub(1);
-        requeued.available_at = Utc::now()
+        requeued.available_at = crate::clock::now()
             + chrono::Duration::from_std(delay).unwrap_or_else(|_| chrono::Duration::zero());
         self.push(requeued).await?;
         self.ack(token).await

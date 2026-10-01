@@ -119,7 +119,7 @@ the structured log.
 ### Reading the id
 
 ```rust
-use suprnova::{current_request_id, spawn_with_request_id};
+use suprnova::{current_request_id, spawn_with_request_id, HttpResponse};
 
 pub async fn checkout(req: suprnova::Request) -> suprnova::Response {
     // Inside a request, the id is always present.
@@ -137,7 +137,7 @@ pub async fn checkout(req: suprnova::Request) -> suprnova::Response {
         tracing::info!("post-checkout fanout running");
     });
 
-    Ok(suprnova::ok!())
+    Ok(HttpResponse::ok())
 }
 ```
 
@@ -291,7 +291,10 @@ async fn load_dashboard(db: &DatabaseConnection, user_id: i64) -> anyhow::Result
 
 | Var | Effect |
 |---|---|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector base URL. Unset → telemetry disabled. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector base URL. Unset or blank → telemetry disabled. Each signal is posted to its own path under it. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Full URL for traces, used as written. Takes precedence over the base URL for traces. |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Full URL for metrics, used as written. Takes precedence over the base URL for metrics. |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Full URL for logs, used as written. Takes precedence over the base URL for logs. |
 | `OTEL_SERVICE_NAME` | `service.name` resource attribute (default `"suprnova"`). |
 | `OTEL_SERVICE_VERSION` | `service.version` resource attribute (default: crate version). |
 | `OTEL_SDK_DISABLED` | Kill switch. Case-insensitive `true` or `1` disables export even with an endpoint set. |
@@ -302,15 +305,47 @@ configure them the normal way:
 | Var | Read by |
 |---|---|
 | `OTEL_EXPORTER_OTLP_HEADERS` | exporter (collector auth, e.g. `Authorization=Bearer ...`) |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | exporter (`http/protobuf`, etc.) |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | exporter (`http/protobuf`, the protocol the build compiles in) |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | exporter |
-| `OTEL_EXPORTER_OTLP_COMPRESSION` | exporter |
+| `OTEL_EXPORTER_OTLP_COMPRESSION` | exporter (`gzip` is supported; `zstd` is not) |
 
-Per-signal endpoint overrides (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
-`_METRICS_ENDPOINT`, `_LOGS_ENDPOINT`) are currently shadowed by the
-base endpoint - all three signals go to `OTEL_EXPORTER_OTLP_ENDPOINT`.
-If you need to fan signals to different collectors, run a local
-collector that routes them.
+#### Where each signal is sent
+
+`OTEL_EXPORTER_OTLP_ENDPOINT` is a base URL. Suprnova posts each signal to
+its own path under it:
+
+| Signal | URL posted to |
+|---|---|
+| Traces | `<base>/v1/traces` |
+| Metrics | `<base>/v1/metrics` |
+| Logs | `<base>/v1/logs` |
+
+A trailing slash on the base is ignored. With
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`, traces go to
+`http://localhost:4318/v1/traces`.
+
+The three per-signal variables hold a full URL. Suprnova uses it as
+written and adds no path, so include the path your collector expects. A
+per-signal URL takes precedence over the base URL for its signal, so traces,
+metrics and logs can go to different collectors:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4318/v1/traces
+OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://mimir:9009/otlp/v1/metrics
+# Logs have no variable of their own: http://localhost:4318/v1/logs
+```
+
+The base endpoint is what turns telemetry on. If it is not set, a per-signal
+variable has no effect.
+
+An endpoint must be an `http` or `https` URL with a host. A signal whose
+endpoint is not one is left out, the reason is written to the log, and the
+other signals are still exported. The reason never repeats the URL, because
+a URL can carry a password or a token.
+
+`OTEL_EXPORTER_OTLP_COMPRESSION=gzip` works. `zstd` is not compiled in: if you
+ask for it, the signals are left out and the reason is written to the log.
 
 ## Metrics
 
@@ -348,9 +383,50 @@ before initialization resolves against the no-op provider and stays
 inert. The idiomatic pattern is a `once_cell` / `LazyLock` handle
 resolved on first emit, well after boot.
 
-Attribute values are string-typed (`&[(&'static str, &str)]`). Numeric
-and boolean attributes are a planned enhancement; format them as strings
-at the call site for now.
+### Attribute values are typed
+
+`inc_with`, `record_with` and `set_with` take a slice of
+`(&'static str, V)` pairs, where `V` converts into `AttrValue`. A backend
+treats an attribute by its type, so a status `404` sent as text matches no
+filter on a number. `AttrValue` has four variants, and each arrives at the
+backend as its own OpenTelemetry type:
+
+| Variant | OpenTelemetry type | Made from |
+|---|---|---|
+| `AttrValue::Text(&str)` | string | `&str`, `&String`, `&&str`, `&Box<str>`, `&Arc<str>`, `&Rc<str>`, `&Cow<str>` |
+| `AttrValue::Int(i64)` | int | `i64`, `i32`, `i16`, `i8`, `u32`, `u16`, `u8`, `u64`, `usize`, `isize` |
+| `AttrValue::Float(f64)` | double | `f64`, `f32` |
+| `AttrValue::Bool(bool)` | boolean | `bool` |
+
+A `u64`, `usize` or `isize` value that does not fit an `i64` is sent as the
+nearest `i64` limit. The measurement is not lost.
+
+When every value in the slice has one type, write the values as they are.
+When the types differ, make each value an `AttrValue` with `AttrValue::from`,
+so the slice has one element type:
+
+```rust
+use suprnova::{AttrValue, Metrics};
+
+let requests = Metrics::counter("http.requests.total");
+
+// One type for every value.
+requests.inc_with(&[("route", "/posts"), ("method", "GET")]);
+requests.inc_with(&[("http.response.status_code", 404)]);
+
+// Several types: each value is an `AttrValue`.
+requests.inc_with(&[
+    ("route", AttrValue::from("/posts")),
+    ("http.response.status_code", AttrValue::from(404)),
+    ("error", AttrValue::from(true)),
+]);
+```
+
+For a call with no attributes, use `inc()`, `record(value)` or `set(value)`.
+An empty slice, `inc_with(&[])`, does not compile, because an empty list has
+no type for its values.
+
+`AttrValue` is `#[non_exhaustive]`, so a `match` on it needs a wildcard arm.
 
 Naming: stable, ASCII, dot-delimited (e.g. `"http.requests.total"`,
 `"http.request.duration"`). The standard OTel semantic conventions live

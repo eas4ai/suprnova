@@ -2,3 +2,5 @@
 //! one former top-level test file per submodule (folded 2026-09-05).
 
 pub mod claim_postgres;
+pub mod migrations;
+pub mod worker_config;

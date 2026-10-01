@@ -17,6 +17,7 @@ pub mod console;
 pub mod events;
 pub mod fillable;
 pub mod lazy;
+pub mod lazy_loading;
 pub mod model;
 pub mod observers;
 pub mod prunable;
@@ -32,7 +33,9 @@ pub use builder::{Builder, Direction, IntoColumn, IntoVal};
 pub use casts::{
     AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal, AsEncrypted,
     AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat, AsHashed,
-    AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsObject, AsOptionalDateTime, AsString,
+    AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsNaiveDateTime, AsNativeDateTime,
+    AsObject, AsOptionalArray, AsOptionalArrayObject, AsOptionalCollection, AsOptionalDateTime,
+    AsOptionalJson, AsOptionalNaiveDateTime, AsOptionalNativeDateTime, AsOptionalObject, AsString,
     AsTimestamp, Cast, DynCast, IntoDynCast,
 };
 pub use collection::Collection;
@@ -41,6 +44,10 @@ pub use fillable::{
     unguarded,
 };
 pub use lazy::LazyCollection;
+pub use lazy_loading::{
+    LazyLoadingViolation, clear_lazy_loading_violation_handler, handle_lazy_loading_violation,
+    prevent_lazy_loading, preventing_lazy_loading,
+};
 pub use model::{FirstOrCreate, Model, ReplicateExt};
 pub use prunable::{
     MassPrunable, Prunable, PrunerEntry, PrunerFn, prune_all, prune_all_dry, prune_one, pruners,
@@ -59,6 +66,17 @@ pub use timestamps::{
     Touchable, touches_disabled, touches_ignored_for, without_touching, without_touching_on,
 };
 pub use unique_id::{HasUniqueId, UniqueIdKind};
+
+/// The values a mass soft delete binds. Built by the `#[suprnova::model]`
+/// macro; not part of the public API.
+#[doc(hidden)]
+pub struct SoftDeleteStamp {
+    /// The tombstone, in the soft-delete column's storage form.
+    pub deleted_at: sea_orm::Value,
+    /// "Now" in the `updated_at` column's storage form, when the model
+    /// manages timestamps.
+    pub updated_at: Option<sea_orm::Value>,
+}
 
 /// Marker trait emitted by `#[suprnova::model]`. Indicates the struct
 /// is a Suprnova-managed model.
@@ -103,9 +121,28 @@ pub trait EloquentModel: Sized {
     /// must NOT match `has("children")`).
     const SOFT_DELETES_COLUMN: &'static str = "";
 
-    /// Names of the `BelongsTo` relations whose parent row gets its
-    /// `updated_at` bumped after this model is created, saved,
-    /// updated, or deleted. Populated by `#[model(touches = [...])]`.
+    /// What a mass soft delete writes for "now", each value in its
+    /// column's own storage form: the tombstone for
+    /// [`Self::SOFT_DELETES_COLUMN`], and the value for
+    /// [`Self::UPDATED_AT_COLUMN`] when the model manages timestamps.
+    /// `None` on a model without soft deletes. The macro emits it from
+    /// the columns' casts, so the mass form writes what a row's own
+    /// `delete()` and `save()` write.
+    #[doc(hidden)]
+    fn __soft_delete_stamp() -> Result<Option<SoftDeleteStamp>, crate::FrameworkError> {
+        Ok(None)
+    }
+
+    /// Names of the `BelongsTo` and `MorphTo` relations whose parent
+    /// row gets its `updated_at` bumped after this model is created,
+    /// saved, updated, or deleted. Populated by
+    /// `#[model(touches = [...])]`. A `MorphTo` owner is the row its
+    /// `<name>_type` and `<name>_id` columns name. A `<name>_type` that
+    /// names none of the relation's targets is an error of the write:
+    /// the owners are resolved once the pre-write listeners have run
+    /// and before the statement, so it returns `Err` with no statement
+    /// run and no post-write event dispatched. A pre-write listener that
+    /// rewrites `<name>_type` or `<name>_id` decides the owner.
     ///
     /// Read by [`crate::eloquent::Model::touch_owners`], which is a
     /// trait default - so the list has to live on a trait too, or the
@@ -128,6 +165,33 @@ pub trait EloquentModel: Sized {
     /// `#[model(updated_at = "...")]`. Meaningful only when
     /// [`Self::HAS_TIMESTAMPS`] is `true`.
     const UPDATED_AT_COLUMN: &'static str = "updated_at";
+
+    /// The parameter a query binds when it compares `column` with `value`,
+    /// through the column's cast ([`casts::Cast::bind_json`]). `None` binds
+    /// the value as it is. A column may carry this model's table
+    /// (`posts.created_at`); one qualified with another table answers
+    /// `None`, since this model's casts say nothing about that table. The
+    /// macro overrides this for a model with cast fields; the query
+    /// builder asks it for every comparison.
+    #[doc(hidden)]
+    fn bind_column(_column: &str, _value: &serde_json::Value) -> Option<sea_orm::Value> {
+        None
+    }
+
+    /// The value this model's `updated_at` column stores for `now`,
+    /// through the column's cast. The parent-touch cascade writes an
+    /// owner's column with it, so an owner with a native date-time
+    /// column receives a native value and not the text the default
+    /// cast stores, which Postgres refuses for such a column.
+    ///
+    /// The default is that RFC 3339 text; the macro overrides it with the
+    /// declared cast of the `updated_at` field.
+    #[doc(hidden)]
+    fn updated_at_storage(
+        now: &chrono::DateTime<chrono::Utc>,
+    ) -> Result<sea_orm::Value, crate::FrameworkError> {
+        Ok(sea_orm::Value::String(Some(now.to_rfc3339())))
+    }
 
     /// The per-model default connection name. Returns `None` for
     /// models that don't declare `#[model(connection = "...")]`; the

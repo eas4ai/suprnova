@@ -51,6 +51,7 @@ pub mod entities;
 pub mod migrations;
 #[doc(hidden)]
 pub mod registry;
+pub use registry::assert_no_duplicates;
 pub mod store;
 pub mod types;
 
@@ -61,7 +62,7 @@ pub use types::{StepStatus, WorkflowHandle, WorkflowStatus};
 use crate::config::Config;
 use crate::error::FrameworkError;
 use crate::workflow::types::ClaimedWorkflow;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::Duration as ChronoDuration;
 use futures::FutureExt;
 use rand::RngExt;
 use std::panic::AssertUnwindSafe;
@@ -222,29 +223,48 @@ impl WorkflowWorker {
     /// negative `retry_backoff_secs`, etc.) is caught with `.expect` at
     /// boot, not at first job pickup, so a failed config crashes the
     /// daemon visibly instead of letting it hang quietly. Callers that
-    /// want non-panicking handling can use [`Self::with_config`] after
-    /// calling `WorkflowConfig::validate` themselves.
+    /// want non-panicking handling use [`Self::try_with_config`], which
+    /// makes the same checks and returns the error.
     pub fn new() -> Self {
         let config = Config::get::<WorkflowConfig>().unwrap_or_default();
-        // Clamp + warn happens inside `from_env`; this re-check guards
-        // programmatic configs that bypassed it.
-        if let Err(err) = config.validate() {
-            tracing::error!(error = %err, "WorkflowConfig validation failed");
-            panic!("WorkflowConfig validation failed: {err}");
+        // Clamp + warn happens inside `from_env`; the check in
+        // `try_with_config` guards programmatic configs that bypassed it.
+        match Self::try_with_config(config) {
+            Ok(worker) => worker,
+            Err(err) => {
+                tracing::error!(error = %err, "the workflow worker cannot start");
+                panic!("the workflow worker cannot start: {err}");
+            }
         }
-        if let Err(err) = registry::assert_no_duplicates() {
-            tracing::error!(error = %err, "duplicate workflow registrations detected at worker boot");
-            panic!("{err}");
-        }
-        Self::with_config(config)
     }
 
-    /// Create a worker with a custom config.
+    /// Create a worker with a custom config, and check what
+    /// [`Self::new`] checks: the config, and that no two `#[workflow]`
+    /// functions have one name. Where `new` panics, this returns the
+    /// error.
+    ///
+    /// With two workflows under one name, which of them runs is decided
+    /// by the order they were linked in. That has to stop the worker
+    /// before it claims its first run.
+    ///
+    /// # Errors
+    ///
+    /// When [`WorkflowConfig::validate`] refuses the config, and when
+    /// [`assert_no_duplicates`] finds a name twice.
+    pub fn try_with_config(config: WorkflowConfig) -> Result<Self, FrameworkError> {
+        config.validate()?;
+        registry::assert_no_duplicates()?;
+        Ok(Self::with_config(config))
+    }
+
+    /// Create a worker with a custom config, with no check.
     ///
     /// Construction does not validate the config or check the registry.
-    /// The worker validates config before its run loop starts; callers that
-    /// need construction-time validation can call [`WorkflowConfig::validate`].
-    /// Call [`registry::assert_no_duplicates`] separately when needed.
+    /// The worker validates config before its run loop starts, and it
+    /// does not look at the registry at all, so two workflows with one
+    /// name go unseen. Use [`Self::try_with_config`], which checks both,
+    /// or call [`WorkflowConfig::validate`] and [`assert_no_duplicates`]
+    /// where the worker is built.
     pub fn with_config(config: WorkflowConfig) -> Self {
         let random: u64 = rand::rng().random();
         let worker_id = format!("{}-{}", std::process::id(), random);
@@ -473,7 +493,13 @@ async fn process_claimed_workflow(
     // pattern in `server::execute_chain_safely`: catch the unwind, downcast
     // the payload, fold into the existing Err arm so the row goes through
     // the same retry/fail accounting as a returned `FrameworkError`.
-    let body = AssertUnwindSafe(ctx.enter(async { (entry.run)(&claimed.input).await }));
+    //
+    // The body runs in a container scope of its own, outermost: one scope
+    // per claimed run. Its steps run inline in the body, on this task, so
+    // they share the run's scope and resolve the scoped values the body
+    // resolves. A retry is a new claim and gets a new scope.
+    let run = ctx.enter(async { (entry.run)(&claimed.input).await });
+    let body = AssertUnwindSafe(crate::container::scope::run_in_new_scope(run));
     let result = match body.catch_unwind().await {
         Ok(inner) => inner,
         Err(panic) => {
@@ -500,7 +526,11 @@ async fn process_claimed_workflow(
         Err(err) => {
             if claimed.attempts < claimed.max_attempts {
                 let backoff = config.retry_backoff_secs * claimed.attempts as i64;
-                let next_run_at = Utc::now().naive_utc() + ChronoDuration::seconds(backoff);
+                // A worker claims the run when `next_run_at <= NOW()` of the
+                // database, so the retry is stamped from the wall clock: a
+                // test clock would move one side of that comparison only.
+                let wall_now = chrono::Utc::now().naive_utc();
+                let next_run_at = wall_now + ChronoDuration::seconds(backoff);
                 store::requeue(
                     claimed.id,
                     &err.to_string(),
@@ -609,7 +639,7 @@ mod tests {
         use crate::container::testing::TestContainer;
         use crate::database::DbConnection;
         use crate::database::config::DatabaseConfig;
-        use chrono::{Duration as ChronoDuration, Utc};
+        use chrono::Duration as ChronoDuration;
 
         let url = std::env::var("PG_TEST_URL").expect("set PG_TEST_URL to a disposable Postgres");
         let _guard = TestContainer::fake();
@@ -631,7 +661,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let slow_client_clock = Utc::now().naive_utc() - ChronoDuration::hours(1);
+        let slow_client_clock = crate::clock::now().naive_utc() - ChronoDuration::hours(1);
         assert!(
             store::refresh_lock_if_owned_at(
                 claim.id,
@@ -1011,6 +1041,87 @@ mod tests {
         assert_eq!(status, WorkflowStatus::Succeeded);
         assert_eq!(ALWAYS_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(FLAKY_CALLS.load(Ordering::SeqCst), 2);
+    }
+
+    /// Numbers every `RunScoped` value the factory builds.
+    static RUN_SCOPED_BUILT: AtomicUsize = AtomicUsize::new(0);
+
+    /// A scoped binding that a workflow body and its step both resolve.
+    trait RunScoped: Send + Sync {
+        fn id(&self) -> usize;
+    }
+
+    struct RunScopedValue(usize);
+
+    impl RunScoped for RunScopedValue {
+        fn id(&self) -> usize {
+            self.0
+        }
+    }
+
+    /// The id of the run's scoped value, in a type a step output carries.
+    fn run_scoped_id() -> Result<i64, FrameworkError> {
+        let value = crate::container::App::resolve_make::<dyn RunScoped>()?;
+        <i64 as TryFrom<usize>>::try_from(value.id())
+            .map_err(|error| FrameworkError::internal(error.to_string()))
+    }
+
+    #[workflow_step]
+    async fn run_scoped_step() -> Result<i64, FrameworkError> {
+        run_scoped_id()
+    }
+
+    #[workflow]
+    async fn run_scoped_workflow() -> Result<i64, FrameworkError> {
+        let in_body = run_scoped_id()?;
+        let in_step = run_scoped_step().await?;
+        if in_body == in_step {
+            Ok(in_body)
+        } else {
+            Err(FrameworkError::internal(format!(
+                "the body resolved {in_body} and its step {in_step}"
+            )))
+        }
+    }
+
+    /// A workflow run gets a container scope of its own and its steps share
+    /// it: the body and its step resolve one value, and the next run builds
+    /// a new one.
+    #[tokio::test]
+    async fn a_run_and_its_steps_share_one_scope_and_the_next_run_gets_its_own() {
+        let _db = setup_db().await;
+        crate::container::App::bind_scoped::<dyn RunScoped, _>(|| {
+            Arc::new(RunScopedValue(
+                RUN_SCOPED_BUILT.fetch_add(1, Ordering::SeqCst),
+            )) as Arc<dyn RunScoped>
+        });
+        let name = format!("{}::run_scoped_workflow", module_path!());
+        let input = serde_json::to_string(&()).unwrap();
+        let config = Arc::new(WorkflowConfig::from_env());
+
+        let mut outputs = Vec::new();
+        for _ in 0..2 {
+            let handle = store::insert_workflow(&name, &input, 1)
+                .await
+                .expect("insert workflow");
+            let claimed = store::mark_running(handle.id(), "test-worker", Duration::from_secs(30))
+                .await
+                .expect("mark running");
+            process_claimed_workflow(claimed, config.clone())
+                .await
+                .expect("process workflow");
+            assert_eq!(
+                store::get_workflow_status(handle.id()).await.unwrap(),
+                WorkflowStatus::Succeeded,
+                "the body and its step must resolve the same value"
+            );
+            let record = store::get_workflow_record(handle.id()).await.unwrap();
+            outputs.push(record.output);
+        }
+
+        assert!(outputs[0].is_some(), "the run records its output");
+        assert_ne!(outputs[0], outputs[1], "each run builds a value of its own");
+        assert_eq!(RUN_SCOPED_BUILT.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -1539,7 +1650,7 @@ mod tests {
         let claimed = store::mark_running(handle.id(), "worker-a", Duration::from_secs(30))
             .await
             .expect("claim workflow");
-        let now = chrono::Utc::now()
+        let now = crate::clock::now()
             .naive_utc()
             .with_nanosecond(0)
             .expect("zero nanoseconds is valid");
@@ -1748,6 +1859,38 @@ mod tests {
             .expect("migrated workflow step exists");
     }
 
+    // The registry tests of this crate submit one name twice, so this test
+    // binary is an application with a duplicate: the checked constructor
+    // has to refuse it, where `with_config` builds a worker that would run.
+    #[test]
+    fn try_with_config_refuses_a_registry_with_a_name_twice() {
+        let error = WorkflowWorker::try_with_config(WorkflowConfig::default())
+            .err()
+            .expect("the registry of this binary has a duplicate");
+        assert!(
+            error
+                .to_string()
+                .contains("Duplicate `#[workflow]` registrations"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn try_with_config_refuses_a_config_that_is_none_before_it_looks_further() {
+        let config = WorkflowConfig {
+            concurrency: 0,
+            ..WorkflowConfig::default()
+        };
+        let expected = config
+            .validate()
+            .expect_err("no worker runs nothing at a time");
+
+        let error = WorkflowWorker::try_with_config(config)
+            .err()
+            .expect("the config is refused");
+        assert_eq!(error.to_string(), expected.to_string());
+    }
+
     // A cancelled worker must drain in-flight workflows before returning.
     // Spawns a worker that has no rows to claim (so it idles in the
     // poll/sleep path), cancels the token, and asserts run_with_cancel
@@ -1827,6 +1970,11 @@ mod tests {
             .expect_err("wait_with_timeout must error on a stuck workflow");
         let elapsed = start.elapsed();
 
+        assert!(
+            err.is_timeout(),
+            "a deadline that fires is FrameworkError::Timeout, got: {err:?}"
+        );
+        assert_eq!(err.status_code(), 504);
         let msg = err.to_string();
         assert!(
             msg.to_lowercase().contains("timed out") || msg.to_lowercase().contains("timeout"),

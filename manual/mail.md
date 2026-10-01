@@ -37,7 +37,7 @@ The Mailable serializes to JSON, which becomes the Tera context for the template
 
 ## Configuration
 
-`Server::serve` calls `suprnova::mail::boot::bootstrap_from_env()` once at startup. It reads `MAIL_DRIVER` and binds the matching transport. Defaults to the `log` driver when unset.
+`Server::run` calls `suprnova::mail::boot::bootstrap_from_env()` once at startup. It reads `MAIL_DRIVER` and binds the matching transport. Defaults to the `log` driver when unset.
 
 | `MAIL_DRIVER` | Behavior |
 |---------------|----------|
@@ -281,6 +281,8 @@ impl Mailable for OrderShipped {
 | `html_template_source(&self)` | optional | HTML body Tera template. Return `None` to skip HTML. |
 | `text_template_source(&self)` | optional | Plain-text body Tera template. Return `None` to skip text. |
 | `from(&self)` | optional | Override the global default `noreply@localhost`. |
+| `queue(&self)` | optional | Default queue for `Mail::queue` / `Mail::later`. See [Queueing](#queueing). |
+| `after_commit(&self)` | optional | `true` makes `Mail::queue` / `Mail::later` inside `DB::transaction` wait for the commit. Default `false`. See [Queueing](#queueing). |
 | `attachments(&self)` | optional | Files to attach. Each is `name + bytes + mime`. |
 | `render_subject(&self)` / `render_html(&self)` / `render_text(&self)` | optional | Override if you want to bypass Tera (Markdown → HTML, pre-rendered content, custom subject logic, etc.). |
 
@@ -350,6 +352,34 @@ Mail::to("alice@example.org")
 `.on_queue(...)` outranks both `Mailable::queue()` and any `Queue::route` registered for the mail-dispatch job - the same "per-push override wins" rule `Queue::push_with` applies everywhere. See [Queues](queues.md#queue-routing).
 
 The same empty-body guard runs on the queue path, so a misconfigured Mailable is rejected at push-time before any envelope is created.
+
+### Queued mail inside a transaction
+
+A mail queued inside a `DB::transaction` races that transaction. A worker can pop the job before the commit and render mail about a row the transaction has not committed, or about a row that a rollback then removes. Return `true` from `Mailable::after_commit` for mail about rows the transaction writes:
+
+```rust
+impl Mailable for OrderShipped {
+    fn mailable_name() -> &'static str { "OrderShipped" }
+    fn subject(&self) -> String { format!("Order #{} shipped", self.order_id) }
+    fn after_commit(&self) -> bool { true }
+    // ...
+}
+
+DB::transaction(|_tx| {
+    Box::pin(async move {
+        let order = Order::create(suprnova::attrs! { total: 4999i64 }).await?;
+        // Nothing reaches the queue here.
+        Mail::to("alice@example.org").queue(OrderShipped { order_id: order.id }).await?;
+        Ok::<(), FrameworkError>(())
+    })
+})
+.await?;
+// The job is on the queue now, and only now.
+```
+
+Inside a transaction, `Mail::queue` and `Mail::later` then push at the commit, and a rollback discards the push. Outside a transaction they push at once. `after_commit` takes `&self` for the reason `queue` does: every queued mailable rides one job type, `SendMailJob`, so the job's own `Job::after_commit` cannot answer for one mailable.
+
+A mailable that returns `false` defers to the process-wide `QUEUE_AFTER_COMMIT` setting, which makes every push wait for the commit. See [After-commit dispatch](queues.md#after-commit-dispatch).
 
 ## Telemetry
 
@@ -427,7 +457,7 @@ One smaller divergence is deliberate hardening. Laravel is content to leave `MAI
 
 ### Register factories at boot, not per-request
 
-`Mail::queue` and `Mail::later` push a `SendMailJob` carrying the mailable's name and JSON payload - the worker rebuilds the concrete type via `mailable_registry`. Register every queueable `Mailable` once at `Server::serve` time:
+`Mail::queue` and `Mail::later` push a `SendMailJob` carrying the mailable's name and JSON payload - the worker rebuilds the concrete type via `mailable_registry`. Register every queueable `Mailable` once at `Server::run` time:
 
 ```rust
 // bootstrap.rs

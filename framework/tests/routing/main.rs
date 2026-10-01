@@ -1,7 +1,9 @@
 //! Integration tests for the `routing` module: one binary per module,
 //! one former top-level test file per submodule (folded 2026-09-05).
 
+pub mod group_names;
 pub mod inertia;
+pub mod params;
 pub mod root_group_redirect;
 pub mod route_binding_route_param_scoped;
 pub mod router_middleware_keying;

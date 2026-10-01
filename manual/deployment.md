@@ -97,9 +97,17 @@ relational backends. The recommendation is environment-specific:
 DATABASE_URL=mysql://app_user:secret@db.internal:3306/app_production
 ```
 
-Use the `mysql://` scheme - SeaORM's MySQL driver handles MariaDB
-natively, and Suprnova's `MariaDbVectorDriver` (`VECTOR(N)` + HNSW)
-hooks in directly for vector workloads.
+Use the `mysql://` or the `mariadb://` scheme. Both select the MySQL family
+driver, which handles MariaDB natively. The framework accepts `mariadb://`
+for the primary connection, named connections, read replicas, the migrator
+and `MariaDbVectorDriver::from_url`. `DB::driver_title()` returns `MariaDB`
+for a `mariadb://` URL and `MySQL` for a `mysql://` URL, because the URL is
+the only thing that tells them apart. Suprnova's `MariaDbVectorDriver`
+(`VECTOR(N)` + HNSW) hooks in directly for vector workloads.
+
+```bash
+DATABASE_URL=mariadb://app_user:secret@db.internal:3306/app_production
+```
 
 The other relational backends are first-class too:
 
@@ -183,13 +191,13 @@ this shape by construction with two dependency entries:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0", default-features = false, features = [
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0", default-features = false, features = [
     "filesystem", "database-sqlite", "database-postgres", "database-mysql",
     "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
 ] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0", features = ["testing"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0", features = ["testing"] }
 ```
 
 The production entry turns default features off and lists the nine that

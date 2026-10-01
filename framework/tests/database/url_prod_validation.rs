@@ -18,58 +18,14 @@
 //!   3. Production + Explicit source → ok (builder set URL programmatically).
 //!   4. Local + Default source → ok (dev convenience preserved).
 
-use std::sync::Mutex;
-
 use suprnova::config::Environment;
 use suprnova::database::config::{DatabaseConfig, UrlSource};
 
-/// Serialize the whole module: every test reads / mutates `DATABASE_URL`
-/// indirectly via `DatabaseConfig::from_env`.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct EnvSnapshot {
-    keys: Vec<(&'static str, Option<String>)>,
-}
-
-impl EnvSnapshot {
-    fn capture(keys: &[&'static str]) -> Self {
-        Self {
-            keys: keys.iter().map(|k| (*k, std::env::var(k).ok())).collect(),
-        }
-    }
-}
-
-impl Drop for EnvSnapshot {
-    fn drop(&mut self) {
-        for (k, v) in &self.keys {
-            // SAFETY: ENV_LOCK serializes these tests within the suite.
-            // Process-wide getenv races against other test binaries are
-            // out of scope; the workspace runs each integration test
-            // suite in its own binary.
-            unsafe {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
-    }
-}
-
-fn set_env(key: &str, value: Option<&str>) {
-    // SAFETY: ENV_LOCK held by the caller.
-    unsafe {
-        match value {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
-    }
-}
+use crate::env_snapshot::{EnvSnapshot, set_env};
 
 #[test]
 fn production_with_default_source_refuses_silent_sqlite_fallback() {
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(&["DATABASE_URL"]);
 
     // The whole point: DATABASE_URL is unset.
@@ -100,7 +56,6 @@ fn production_with_default_source_refuses_silent_sqlite_fallback() {
 #[test]
 fn production_with_env_source_is_accepted() {
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(&["DATABASE_URL"]);
 
     set_env("DATABASE_URL", Some("postgres://prod.example/app"));
@@ -116,7 +71,6 @@ fn production_with_env_source_is_accepted() {
 #[test]
 fn production_with_explicit_source_is_accepted_even_for_sqlite() {
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(&["DATABASE_URL"]);
 
     set_env("DATABASE_URL", None);
@@ -140,7 +94,6 @@ fn staging_with_default_source_also_refuses() {
     // be configured." This guards against the regression where the
     // is-prod check is too narrow.
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(&["DATABASE_URL"]);
 
     set_env("DATABASE_URL", None);
@@ -159,7 +112,6 @@ fn local_with_default_source_is_accepted() {
     // `sqlite://./database.db` with zero setup. This documents the
     // intended dev posture as a hard-coded test guarantee.
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(&["DATABASE_URL"]);
 
     set_env("DATABASE_URL", None);
@@ -184,7 +136,6 @@ fn is_configured_reflects_url_source() {
     // is "configured" - they meant the local SQLite, didn't fall
     // through to it.
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(&["DATABASE_URL"]);
 
     set_env("DATABASE_URL", None);

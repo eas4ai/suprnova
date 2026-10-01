@@ -696,6 +696,111 @@ async fn a_per_push_override_of_false_pushes_immediately() {
     assert_eq!(driver.count(), 1);
 }
 
+/// Sets `QUEUE_AFTER_COMMIT` for one test and restores what was there.
+struct QueueAfterCommit {
+    saved: Option<String>,
+}
+
+impl QueueAfterCommit {
+    fn set(value: &str) -> Self {
+        let saved = std::env::var("QUEUE_AFTER_COMMIT").ok();
+        // SAFETY: env mutation is process-global; `#[serial]` keeps the
+        // tests that hold this guard from racing each other or any other
+        // `#[serial]` test in this binary.
+        unsafe { std::env::set_var("QUEUE_AFTER_COMMIT", value) };
+        Self { saved }
+    }
+}
+
+impl Drop for QueueAfterCommit {
+    fn drop(&mut self) {
+        // SAFETY: as in `set`; the guard is dropped inside the same
+        // `#[serial]` test that created it.
+        unsafe {
+            match &self.saved {
+                Some(value) => std::env::set_var("QUEUE_AFTER_COMMIT", value),
+                None => std::env::remove_var("QUEUE_AFTER_COMMIT"),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn queue_after_commit_defers_a_job_that_did_not_opt_in() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    let _setting = QueueAfterCommit::set("true");
+
+    DB::transaction(|_tx| {
+        Box::pin(async {
+            Queue::push(PlainJob).await?;
+            Queue::bulk(vec![PlainJob, PlainJob]).await?;
+            assert_eq!(
+                Queue::size().await?,
+                0,
+                "QUEUE_AFTER_COMMIT=true must hold every push until the commit"
+            );
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(driver.count(), 3);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_per_push_override_of_false_outranks_queue_after_commit() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    let _setting = QueueAfterCommit::set("true");
+
+    DB::transaction(|_tx| {
+        Box::pin(async {
+            Queue::push_with(
+                PlainJob,
+                EnvelopeOverrides {
+                    after_commit: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            assert_eq!(
+                Queue::size().await?,
+                1,
+                "one push can still go ahead of the commit"
+            );
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(driver.count(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn queue_after_commit_is_off_for_any_value_but_true_or_1() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    let _setting = QueueAfterCommit::set("yes please");
+
+    DB::transaction(|_tx| {
+        Box::pin(async {
+            Queue::push(PlainJob).await?;
+            assert_eq!(Queue::size().await?, 1, "the setting is off");
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(driver.count(), 1);
+}
+
 #[tokio::test]
 #[serial]
 async fn push_after_commit_defers_a_job_that_did_not_opt_in() {
@@ -1943,4 +2048,56 @@ async fn an_abort_after_commit_still_completes_every_callback_exactly_once() {
         names.contains(&OtherAfterCommitJob::job_name().to_string()),
         "the unstarted remainder must divert, got: {names:?}"
     );
+}
+
+// --- The pusher's Context crosses the deferral ------------------------------
+
+#[tokio::test]
+#[serial]
+async fn a_deferred_push_carries_the_context_of_the_code_that_pushed_it() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+
+    // The callbacks run at the commit, on a task outside this scope. The
+    // envelopes must carry what the pusher had when it pushed.
+    suprnova::Context::scope(suprnova::ContextStore::default(), async {
+        suprnova::Context::add("trace_id", "abc");
+        suprnova::Context::hidden_add("api_key", "s3cret");
+        DB::transaction(|_tx| {
+            Box::pin(async {
+                Queue::push(AfterCommitJob).await?;
+                Queue::bulk(vec![AfterCommitJob]).await?;
+                Queue::push_unique(UniqueAfterCommitJob {
+                    key: "context-1".into(),
+                })
+                .await?;
+                assert_eq!(Queue::size().await?, 0, "all three wait for the commit");
+                Ok::<(), FrameworkError>(())
+            })
+        })
+        .await
+        .expect("commit");
+    })
+    .await;
+
+    let envelopes = driver.envelopes();
+    assert_eq!(envelopes.len(), 3);
+    for envelope in envelopes {
+        let context = envelope
+            .context
+            .unwrap_or_else(|| panic!("{} lost the context at the deferral", envelope.job_name));
+        assert_eq!(
+            context.data.get("trace_id"),
+            Some(&serde_json::json!("abc")),
+            "{}",
+            envelope.job_name
+        );
+        assert_eq!(
+            context.hidden.get("api_key"),
+            Some(&serde_json::json!("s3cret")),
+            "{}",
+            envelope.job_name
+        );
+    }
 }

@@ -64,6 +64,17 @@ impl MiddlewareChain {
     /// - Each middleware can call `next(request)` to continue the chain
     /// - The final handler is called at the end of the chain
     ///
+    /// # Priority
+    ///
+    /// The middleware priority list
+    /// ([`append_middleware_priority`](crate::middleware::append_middleware_priority))
+    /// is applied first. A middleware the list names moves in front of any
+    /// middleware the list places after it, whichever was added first.
+    /// Every other middleware keeps its place. This is the one point every
+    /// request path runs a chain through, so the order holds for a matched
+    /// route, the fallback, an unrouted request and a WebSocket upgrade
+    /// alike.
+    ///
     /// # Panics
     ///
     /// This composition primitive does NOT catch panics. A panic in any
@@ -83,6 +94,7 @@ impl MiddlewareChain {
             // No middleware - call handler directly
             return handler(request).await;
         }
+        let middleware = super::identity::sort_by_priority(self.middleware);
 
         // Build the chain from inside-out
         // Start with the actual handler as the innermost "next"
@@ -91,7 +103,7 @@ impl MiddlewareChain {
 
         // Wrap each middleware around the next, from last to first
         // This creates the correct execution order: first middleware runs first
-        for middleware in self.middleware.into_iter().rev() {
+        for middleware in middleware.into_iter().rev() {
             let current_next = next;
             let mw = middleware;
             next = Arc::new(move |req| {

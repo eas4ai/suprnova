@@ -91,7 +91,7 @@ layer. Suprnova ships that layer:
 | Mail with multiple providers | Pick one, write your own abstraction | `Mail::driver("ses")` etc., uniform `Mailable` API |
 | WebPush | Read the spec, build a notifier | `WebPushChannel` ships, VAPID baked in |
 | Validation + form requests | Use `validator` + custom extractor | `#[derive(Data, Validate)]` form requests, async validation |
-| JSON:API resources | Hand-format responses | `#[derive(Resource)]` |
+| JSON:API resources | Hand-format responses | `#[derive(Data)]` + `#[json_resource]` |
 | Rate limiting with fail-open/closed policy | Build it | `RateLimiter` + `BackendErrorPolicy` |
 | Idempotency keys | Build it | `Idempotency::remember(key, ttl, body)` with Stripe-style replay |
 | CSRF (with Laravel-style glob exclusions) | Build it | `CsrfMiddleware` with `except` + `except_method` |

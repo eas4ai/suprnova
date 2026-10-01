@@ -29,7 +29,6 @@ use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
 use crate::queue::envelope::{Envelope, queue_filter, queue_matches};
 use crate::queue::inspect::InspectedJob;
 use async_trait::async_trait;
-use chrono::Utc;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
@@ -239,7 +238,7 @@ impl Default for MemoryQueueDriver {
 #[async_trait]
 impl QueueDriver for MemoryQueueDriver {
     async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
-        let now = Utc::now();
+        let now = crate::clock::now();
         if env.available_at <= now {
             let mut g = lock::lock(&self.inner, "memory queue state")?;
             g.visible.push_back(env);
@@ -409,7 +408,7 @@ impl MemoryQueueDriver {
                 let mut g = lock::lock(&self.inner, "memory queue state")?;
                 g.visible.push_front(env);
             } else {
-                env.available_at = Utc::now()
+                env.available_at = crate::clock::now()
                     + chrono::Duration::from_std(delay).map_err(|e| {
                         FrameworkError::internal(format!("requeue delay overflow: {e}"))
                     })?;

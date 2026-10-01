@@ -447,6 +447,7 @@ async fn subscription_updated_webhook_syncs_items_and_removes_stale() {
     mock.update(UpdateSubscriptionRequest {
         provider_subscription_id: sub_id.clone(),
         new_price_refs: Some(vec!["price_a".into()]),
+        proration: None,
         cancel_at_period_end: None,
         idempotency_key: None,
     })

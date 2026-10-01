@@ -236,8 +236,8 @@ and the compatibility `TwoFactor` facade remain framework-owned. See
 
 ### Migrations
 
-You write SeaORM migrators. The shape will look familiar even if the
-syntax is new:
+`make:migration` generates SeaORM migrators. The shape will look familiar even
+if the syntax is new:
 
 ```rust
 use sea_orm_migration::prelude::*;
@@ -269,7 +269,29 @@ impl MigrationTrait for Migration {
 `suprnova migrate`, `migrate:rollback`, `migrate:status`, `migrate:fresh`
 all do what you'd expect. `suprnova db:sync` runs migrations and
 regenerates the SeaORM entities the macro layer compiles against.
-See [Migrations](migrations.md).
+
+Suprnova also has a `Schema` builder that reads like Laravel's `Blueprint`.
+The `up` of the posts migration above reads:
+
+```rust
+use sea_orm_migration::prelude::*;
+use suprnova::schema::Schema;
+
+async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    Schema::create(manager, "posts", |t| {
+        t.id();
+        t.string("title");
+        t.text("body");
+        t.timestamps();
+    })
+    .await
+}
+```
+
+The function takes the migration's `manager` instead of a global facade, and
+`t` plays the part of `$table`. `timestamps()` creates string columns, and
+there is no `change()`. See [The schema builder](migrations.md#the-schema-builder)
+and [Migrations](migrations.md).
 
 ### Queues and scheduling
 
@@ -390,7 +412,7 @@ use std::sync::Arc;
 
 pub async fn register() {
     suprnova::App::bind::<dyn MyService>(Arc::new(MyServiceImpl::new()));
-    suprnova::Event::listen::<OrderShipped, _>(Arc::new(SendShipmentNotification)).await;
+    suprnova::EventFacade::listen::<OrderShipped, _>(Arc::new(SendShipmentNotification)).await;
     crate::observers::register();
 }
 ```
@@ -504,9 +526,9 @@ Quick lookup if you know what you're after but not where it lives:
 | Cashier (Paddle) | [Payments: Paddle](payments-paddle.md) |
 | Sanctum / Passport | Magnetar bearer sessions through `BearerTokenMiddleware`; no separate Sanctum or Passport API |
 | Horizon | Queue inspection is built into the framework; no Horizon dashboard |
-| Telescope / Pulse | (deferred to v2+) |
+| Telescope / Pulse | not built |
 
-Things Laravel has that Suprnova doesn't (yet):
+Things Laravel has that Suprnova doesn't:
 
 - Telescope / Pulse dashboards. Basic [observability](observability.md) ships.
 - Sanctum / Passport package APIs. Magnetar bearer sessions and

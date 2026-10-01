@@ -59,7 +59,7 @@ use crate::FrameworkError;
 use crate::auth::{Auth, Authenticatable};
 use crate::authorization::Gate;
 use crate::http::{HttpResponse, Request, Response};
-use crate::middleware::{BoxedMiddleware, Middleware, Next, into_boxed};
+use crate::middleware::{BoxedMiddleware, Middleware, Next, boxed_as};
 use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
@@ -452,7 +452,7 @@ impl ResourceRoutes {
                 _user: std::marker::PhantomData,
                 _resource: std::marker::PhantomData,
             };
-            Some(into_boxed(mw))
+            Some(boxed_as(mw))
         }));
         self
     }

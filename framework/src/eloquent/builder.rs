@@ -64,6 +64,7 @@ use crate::eloquent::EloquentModel;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::collection::Collection;
 use crate::eloquent::model::{Model, json_value_to_sea_value};
+use crate::eloquent::relations::{ColumnBinder, no_column_binder};
 use crate::error::FrameworkError;
 
 const AGGREGATE_RESULT_ALIAS: &str = "__suprnova_aggregate";
@@ -253,6 +254,44 @@ pub(crate) struct ExistsSpec {
     pub relation_column: Option<String>,
     pub relation_op: Option<String>,
     pub relation_value: Option<Value>,
+    /// How a value compared with a column of the related model is bound
+    /// (the relation entry's `related_bind_column`).
+    pub binder: ColumnBinder,
+    /// The relation is a BelongsTo: the foreign key sits on the parent
+    /// and `parent_key` names the related table's key, the reverse of a
+    /// has-one or has-many. The two fill the same slots, so only the
+    /// relation's kind tells them apart.
+    pub belongs_to: bool,
+}
+
+/// Which rows an existence clause keeps. Stands in for a bare `bool` so
+/// every `has*` / `doesnt_have*` method names the polarity it builds.
+enum Existence {
+    /// Rows whose relation has at least one match: `EXISTS (...)`.
+    Has,
+    /// Rows whose relation has no match: `NOT EXISTS (...)`.
+    DoesntHave,
+}
+
+/// The count comparison of [`Builder::has_count`]: the subquery renders as
+/// `(SELECT COUNT(*) ...) <op> <value>` in place of a bare `EXISTS`.
+struct CountConstraint<'a> {
+    /// The comparison operator, such as `>=`.
+    op: &'a str,
+    /// The count the related rows are compared against.
+    value: i64,
+}
+
+/// The `whereRelation` predicate on one column of the related table,
+/// rendered inline in the `EXISTS` subquery. Named fields keep the column
+/// and the operator, both strings, from trading places.
+struct RelationPredicate {
+    /// The related table's column.
+    column: String,
+    /// The comparison operator, such as `=`.
+    op: String,
+    /// The value the column is compared against.
+    value: Value,
 }
 
 /// Which part of a temporal column to compare against. Mapped per
@@ -421,6 +460,15 @@ pub struct Builder<M> {
     /// Phase 10C T4 - if true, the registered global scopes for this
     /// model are bypassed entirely on this query.
     pub(crate) skip_all_scopes: bool,
+    /// Folds the model's soft-delete filter and its registered global
+    /// scopes into a builder. Set by [`Builder::__scoped`], which is what
+    /// `Model::query()` returns, and run when the query is rendered. An
+    /// opt-out chained anywhere before the terminal therefore lands, and
+    /// no `or_*` fold can reach a scope's terms, because they do not exist
+    /// until the caller's own terms are complete. `None` on a bare
+    /// [`Builder::new`], which the framework's row-level operations use
+    /// unscoped.
+    pub(crate) scope_resolver: Option<fn(Builder<M>) -> Builder<M>>,
     /// Eager-load plan - populated by [`Builder::with`] /
     /// [`Builder::with_count`] / [`Builder::with_sum`] /
     /// [`Builder::with_avg`] / [`Builder::with_min`] /
@@ -453,6 +501,11 @@ pub struct Builder<M> {
     /// Bypassed by an active transaction (closure form CURRENT_TX or
     /// explicit `with_tx`) - transactions take precedence absolutely.
     pub(crate) connection_override: Option<String>,
+    /// How a value compared with one of `M`'s columns is bound: the model's
+    /// [`EloquentModel::bind_column`], set by [`Self::__scoped`], so a
+    /// native date-time column is compared with a native parameter. A
+    /// builder made with [`Self::new`] binds values as they are.
+    pub(crate) binder: ColumnBinder,
     _phantom: PhantomData<M>,
 }
 
@@ -497,6 +550,7 @@ impl<M> Clone for Builder<M> {
             global_scopes_disabled: self.global_scopes_disabled.clone(),
             excluded_scopes: self.excluded_scopes.clone(),
             skip_all_scopes: self.skip_all_scopes,
+            scope_resolver: self.scope_resolver,
             // Carried, not dropped. `WithWhere`'s predicate is an
             // `Arc<dyn Fn>`, so this shares the closure rather than
             // duplicating it - every variant clones cheaply.
@@ -509,6 +563,7 @@ impl<M> Clone for Builder<M> {
             // clones (chunk / lazy / clone-to-modify patterns) so the
             // routing stays consistent across the cloned query family.
             connection_override: self.connection_override.clone(),
+            binder: self.binder,
             _phantom: PhantomData,
         }
     }
@@ -843,6 +898,30 @@ pub(crate) fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError
 }
 
 impl<M> Builder<M> {
+    /// This builder as it runs: itself when it carries no scope resolver,
+    /// and otherwise a copy with the soft-delete filter and the global
+    /// scopes folded in. Every renderer starts here, so no path reaches
+    /// the database unscoped because it forgot to ask.
+    pub(crate) fn effective(&self) -> std::borrow::Cow<'_, Self> {
+        match self.scope_resolver {
+            None => std::borrow::Cow::Borrowed(self),
+            Some(resolve) => {
+                let mut owned = self.clone();
+                owned.scope_resolver = None;
+                std::borrow::Cow::Owned(resolve(owned))
+            }
+        }
+    }
+
+    /// The owning form of [`Self::effective`], for a terminal that
+    /// consumes the builder.
+    pub(crate) fn into_effective(mut self) -> Self {
+        match self.scope_resolver.take() {
+            None => self,
+            Some(resolve) => resolve(self),
+        }
+    }
+
     /// Walk the builder's accumulated identifiers and operators and
     /// reject any that don't pass
     /// [`crate::database::validate_identifier`] /
@@ -889,9 +968,9 @@ impl<M> Builder<M> {
                 }
             }
         }
-        // UNION arms must also pass.
+        // UNION arms must also pass, as they run.
         for (other, _is_all) in &self.unions {
-            other.validate_inputs()?;
+            other.effective().validate_inputs()?;
         }
         Ok(())
     }
@@ -914,10 +993,12 @@ impl<M> Builder<M> {
             global_scopes_disabled: Vec::new(),
             excluded_scopes: Vec::new(),
             skip_all_scopes: false,
+            scope_resolver: None,
             eager_specs: Vec::new(),
             lock_mode: LockMode::None,
             tx_override: None,
             connection_override: None,
+            binder: no_column_binder,
             _phantom: PhantomData,
         }
     }
@@ -1922,66 +2003,37 @@ impl<M> Builder<M> {
         self
     }
 
-    /// Append one global scope's `TypeId` to the per-builder
-    /// exclusion mask, consulted by
-    /// [`ScopeRegistry::apply_to`][reg_apply_to] when walking the
-    /// per-model registry.
+    /// Run this query without the global scope `S`. Every other
+    /// registered scope, and the soft-delete filter, still apply.
     ///
-    /// **Not part of the public API.** This is `pub` only because the
-    /// `#[suprnova::model]` macro emits the per-model static helper
-    /// `Self::without_global_scope::<S>()` into user crates, and that
-    /// helper needs to call this method to set the mask before the
-    /// registry runs. The macro-emitted helper is the correct surface
-    /// for end users - it constructs a fresh `Builder`, sets the mask,
-    /// THEN runs the registry, so the opt-out actually lands.
-    ///
-    /// Chaining this method onto the builder returned by
-    /// `Model::query()` is silently ineffective: `query()` applies
-    /// registered scopes EAGERLY at construction time, so the scope
-    /// has already mutated `where_terms` by the time
-    /// `.without_global_scope::<S>()` adds the `TypeId` to the
-    /// exclusion mask.
-    ///
-    /// Use the macro-emitted static helper instead:
+    /// Global scopes are folded in when the query runs, so the call
+    /// lands wherever it is written in the chain:
     ///
     /// ```ignore
-    /// // Constructs the builder, sets the mask, runs the registry -
-    /// // opt-out lands.
-    /// let everything = User::without_global_scope::<TenantScope>()
+    /// let everyone = User::query()
+    ///     .filter("active", true)
+    ///     .without_global_scope::<TenantScope>()
     ///     .get()
     ///     .await?;
     /// ```
     ///
-    /// [reg_apply_to]: crate::eloquent::ScopeRegistry
-    #[doc(hidden)]
+    /// `User::without_global_scope::<TenantScope>()` is the same query
+    /// started from the model.
     pub fn without_global_scope<S: 'static>(mut self) -> Self {
         self.excluded_scopes.push(std::any::TypeId::of::<S>());
         self
     }
 
-    /// Set `skip_all_scopes = true`. Consulted by
-    /// [`ScopeRegistry::apply_to`][reg_apply_to] to short-circuit
-    /// every registered scope for this builder.
+    /// Run this query without any registered global scope. The
+    /// soft-delete filter still applies; lift it with `with_trashed()`.
     ///
-    /// **Not part of the public API.** Same rationale as
-    /// [`Self::without_global_scope`]: this is `pub` only because the
-    /// `#[suprnova::model]` macro emits the per-model static helper
-    /// `Self::without_global_scopes()`, which needs to call this
-    /// method to set the bypass flag before the registry runs.
-    /// Chaining onto a builder returned by `Model::query()` is
-    /// silently ineffective - scopes already ran.
-    ///
-    /// Use the macro-emitted static helper instead:
+    /// Like [`Self::without_global_scope`], the call lands wherever it is
+    /// written in the chain:
     ///
     /// ```ignore
-    /// // Admin tooling: read every row.
-    /// let everything = User::without_global_scopes()
-    ///     .get()
-    ///     .await?;
+    /// // Admin tooling: read every tenant's rows.
+    /// let everything = User::query().without_global_scopes().get().await?;
     /// ```
-    ///
-    /// [reg_apply_to]: crate::eloquent::ScopeRegistry
-    #[doc(hidden)]
     pub fn without_global_scopes(mut self) -> Self {
         self.skip_all_scopes = true;
         self
@@ -2008,20 +2060,74 @@ fn placeholder(backend: DbBackend, n: usize) -> Result<String, FrameworkError> {
 /// column provide the type while every non-null value remains parameterized.
 fn write_value_expression(
     backend: DbBackend,
+    column: &str,
     value: &Value,
     values: &mut Vec<SeaValue>,
     position: &mut usize,
+    binder: ColumnBinder,
 ) -> Result<String, FrameworkError> {
     if value.is_null() {
         return Ok("NULL".to_owned());
     }
 
     *position += 1;
-    values.push(json_value_to_sea_value(value));
+    values.push(bind_value(backend, binder, column, value));
     placeholder(backend, *position)
 }
 
 /// Render a date-extraction function for the backend.
+/// Bind `value`, compared with `column`, through the model's binder, or
+/// as it is when the column's cast has no native form.
+///
+/// On MySQL and MariaDB a zone-aware moment binds as its UTC wall clock.
+/// MariaDB 12.3 matches a `TIMESTAMP` column against an `IN` list of
+/// zone-aware parameters wrongly - `IN (10:00, 16:00)` found one of the
+/// two rows, and the result changed with the list's order - while it
+/// matches the same moments sent without a zone. The connection's session
+/// zone is UTC (sqlx sets `+00:00`), so the wall clock names the same
+/// moment.
+fn bind_value(backend: DbBackend, binder: ColumnBinder, column: &str, value: &Value) -> SeaValue {
+    match binder(column, value) {
+        Some(SeaValue::ChronoDateTimeUtc(Some(moment))) if backend == DbBackend::MySql => {
+            SeaValue::from(moment.naive_utc())
+        }
+        Some(bound) => bound,
+        None => json_value_to_sea_value(value),
+    }
+}
+
+/// Bind the value of a date-part comparison (`where_date` and its
+/// siblings). On Postgres the left side is a `date`, a `time` or a number,
+/// and Postgres refuses to compare those with a text parameter, so a date
+/// or a time string binds as its own type there. Elsewhere, and for any
+/// value that does not parse, it binds as it is.
+fn date_part_value(backend: DbBackend, part: DatePart, value: &Value) -> SeaValue {
+    if backend == DbBackend::Postgres
+        && let Some(text) = value.as_str()
+    {
+        match part {
+            DatePart::Date => {
+                if let Ok(day) = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+                    return SeaValue::from(day);
+                }
+            }
+            DatePart::Time => {
+                let time = chrono::NaiveTime::parse_from_str(text, "%H:%M:%S%.f")
+                    .or_else(|_| chrono::NaiveTime::parse_from_str(text, "%H:%M"));
+                if let Ok(time) = time {
+                    return SeaValue::from(time);
+                }
+            }
+            DatePart::Day | DatePart::Month | DatePart::Year => {
+                if let Ok(number) = text.parse::<i64>() {
+                    return SeaValue::from(number);
+                }
+            }
+        }
+    }
+    json_value_to_sea_value(value)
+}
+
 fn render_date_part(
     backend: DbBackend,
     part: DatePart,
@@ -2135,9 +2241,20 @@ fn render_exists(
             ));
         }
         join_clause
+    } else if !spec.target_table.is_empty() && spec.belongs_to {
+        // Belongs-to path. The parent row carries `foreign_key`; the
+        // related row's `parent_key` (its owner key) must match it.
+        where_parts.push(format!(
+            "{target}.{owner_key} = {parent}.{fk}",
+            target = spec.target_table,
+            owner_key = spec.parent_key,
+            parent = spec.parent_table,
+            fk = spec.foreign_key,
+        ));
+        spec.target_table.clone()
     } else if !spec.target_table.is_empty() {
-        // Has / belongs-to path. The correlation column on the target
-        // side is `foreign_key`; on the parent side it's `parent_key`.
+        // Has path. The correlation column on the target side is
+        // `foreign_key`; on the parent side it's `parent_key`.
         where_parts.push(format!(
             "{target}.{fk} = {parent}.{pk}",
             target = spec.target_table,
@@ -2197,7 +2314,7 @@ fn render_exists(
         Some(spec.target_table.as_str())
     };
     for t in &spec.inner_terms {
-        let part = render_subquery_term(backend, inner_qualifier, t, values, n)?;
+        let part = render_subquery_term(backend, inner_qualifier, t, values, n, spec.binder)?;
         where_parts.push(part);
     }
 
@@ -2210,7 +2327,7 @@ fn render_exists(
             .unwrap_or_else(|| "=".to_string());
         *n += 1;
         let ph = placeholder(backend, *n)?;
-        values.push(json_value_to_sea_value(val));
+        values.push(bind_value(backend, spec.binder, col, val));
         // Qualify with the target table when present so the col reads
         // unambiguously in the subquery's WHERE - Laravel's
         // whereRelation always renders the qualified form.
@@ -2281,6 +2398,7 @@ pub(crate) fn render_subquery_term(
     term: &WhereTerm,
     values: &mut Vec<SeaValue>,
     n: &mut usize,
+    binder: ColumnBinder,
 ) -> Result<String, FrameworkError> {
     // Prefix a bare column with the subquery's target table when one is
     // present, so it reads unambiguously across the JOIN. A column the
@@ -2297,13 +2415,13 @@ pub(crate) fn render_subquery_term(
         WhereTerm::Eq(col, v) => {
             *n += 1;
             let ph = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(v));
+            values.push(bind_value(backend, binder, col, v));
             format!("{} = {ph}", q(col))
         }
         WhereTerm::Op(col, op, v) => {
             *n += 1;
             let ph = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(v));
+            values.push(bind_value(backend, binder, col, v));
             format!("{} {op} {ph}", q(col))
         }
         WhereTerm::In(col, vs) => {
@@ -2312,7 +2430,7 @@ pub(crate) fn render_subquery_term(
                 .map(|v| {
                     *n += 1;
                     let ph = placeholder(backend, *n)?;
-                    values.push(json_value_to_sea_value(v));
+                    values.push(bind_value(backend, binder, col, v));
                     Ok(ph)
                 })
                 .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -2328,7 +2446,7 @@ pub(crate) fn render_subquery_term(
                 .map(|v| {
                     *n += 1;
                     let ph = placeholder(backend, *n)?;
-                    values.push(json_value_to_sea_value(v));
+                    values.push(bind_value(backend, binder, col, v));
                     Ok(ph)
                 })
                 .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -2341,19 +2459,19 @@ pub(crate) fn render_subquery_term(
         WhereTerm::Between(col, a, b) => {
             *n += 1;
             let pa = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(a));
+            values.push(bind_value(backend, binder, col, a));
             *n += 1;
             let pb = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(b));
+            values.push(bind_value(backend, binder, col, b));
             format!("{} BETWEEN {pa} AND {pb}", q(col))
         }
         WhereTerm::NotBetween(col, a, b) => {
             *n += 1;
             let pa = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(a));
+            values.push(bind_value(backend, binder, col, a));
             *n += 1;
             let pb = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(b));
+            values.push(bind_value(backend, binder, col, b));
             format!("{} NOT BETWEEN {pa} AND {pb}", q(col))
         }
         WhereTerm::Null(col) => format!("{} IS NULL", q(col)),
@@ -2395,25 +2513,25 @@ pub(crate) fn render_subquery_term(
         WhereTerm::DatePart(part, col, v) => {
             *n += 1;
             let ph = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(v));
+            values.push(date_part_value(backend, *part, v));
             let lhs = render_date_part(backend, *part, &q(col))?;
             format!("{lhs} = {ph}")
         }
         WhereTerm::Not(inner) => {
-            let inner_sql = render_subquery_term(backend, qualifier, inner, values, n)?;
+            let inner_sql = render_subquery_term(backend, qualifier, inner, values, n, binder)?;
             format!("NOT ({inner_sql})")
         }
         WhereTerm::Or(terms) => {
             let parts: Vec<String> = terms
                 .iter()
-                .map(|t| render_subquery_term(backend, qualifier, t, values, n))
+                .map(|t| render_subquery_term(backend, qualifier, t, values, n, binder))
                 .collect::<Result<Vec<_>, _>>()?;
             format!("({})", parts.join(" OR "))
         }
         WhereTerm::Group(terms) => {
             let parts: Vec<String> = terms
                 .iter()
-                .map(|t| render_subquery_term(backend, qualifier, t, values, n))
+                .map(|t| render_subquery_term(backend, qualifier, t, values, n, binder))
                 .collect::<Result<Vec<_>, _>>()?;
             if parts.is_empty() {
                 // An empty group has no way to reach here through the
@@ -2498,18 +2616,19 @@ impl<M> Builder<M> {
         term: &WhereTerm,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
+        binder: ColumnBinder,
     ) -> Result<String, FrameworkError> {
         Ok(match term {
             WhereTerm::Eq(col, v) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(v));
+                values.push(bind_value(backend, binder, col, v));
                 format!("{col} = {ph}")
             }
             WhereTerm::Op(col, op, v) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(v));
+                values.push(bind_value(backend, binder, col, v));
                 format!("{col} {op} {ph}")
             }
             WhereTerm::In(col, vs) => {
@@ -2518,7 +2637,7 @@ impl<M> Builder<M> {
                     .map(|v| {
                         *n += 1;
                         let ph = placeholder(backend, *n)?;
-                        values.push(json_value_to_sea_value(v));
+                        values.push(bind_value(backend, binder, col, v));
                         Ok(ph)
                     })
                     .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -2534,7 +2653,7 @@ impl<M> Builder<M> {
                     .map(|v| {
                         *n += 1;
                         let ph = placeholder(backend, *n)?;
-                        values.push(json_value_to_sea_value(v));
+                        values.push(bind_value(backend, binder, col, v));
                         Ok(ph)
                     })
                     .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -2547,19 +2666,19 @@ impl<M> Builder<M> {
             WhereTerm::Between(col, a, b) => {
                 *n += 1;
                 let pa = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(a));
+                values.push(bind_value(backend, binder, col, a));
                 *n += 1;
                 let pb = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(b));
+                values.push(bind_value(backend, binder, col, b));
                 format!("{col} BETWEEN {pa} AND {pb}")
             }
             WhereTerm::NotBetween(col, a, b) => {
                 *n += 1;
                 let pa = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(a));
+                values.push(bind_value(backend, binder, col, a));
                 *n += 1;
                 let pb = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(b));
+                values.push(bind_value(backend, binder, col, b));
                 format!("{col} NOT BETWEEN {pa} AND {pb}")
             }
             WhereTerm::Null(col) => format!("{col} IS NULL"),
@@ -2601,25 +2720,25 @@ impl<M> Builder<M> {
             WhereTerm::DatePart(part, col, v) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(v));
+                values.push(date_part_value(backend, *part, v));
                 let lhs = render_date_part(backend, *part, col)?;
                 format!("{lhs} = {ph}")
             }
             WhereTerm::Not(inner) => {
-                let inner_sql = Self::render_where_term(backend, inner, values, n)?;
+                let inner_sql = Self::render_where_term(backend, inner, values, n, binder)?;
                 format!("NOT ({inner_sql})")
             }
             WhereTerm::Or(terms) => {
                 let parts: Vec<String> = terms
                     .iter()
-                    .map(|t| Self::render_where_term(backend, t, values, n))
+                    .map(|t| Self::render_where_term(backend, t, values, n, binder))
                     .collect::<Result<Vec<_>, _>>()?;
                 format!("({})", parts.join(" OR "))
             }
             WhereTerm::Group(terms) => {
                 let parts: Vec<String> = terms
                     .iter()
-                    .map(|t| Self::render_where_term(backend, t, values, n))
+                    .map(|t| Self::render_where_term(backend, t, values, n, binder))
                     .collect::<Result<Vec<_>, _>>()?;
                 if parts.is_empty() {
                     // See the matching arm in `render_subquery_term`:
@@ -2661,7 +2780,7 @@ impl<M> Builder<M> {
                     for (idx, v) in vs.iter().enumerate() {
                         *n += 1;
                         let ph = placeholder(backend, *n)?;
-                        values.push(json_value_to_sea_value(v));
+                        values.push(bind_value(backend, self.binder, col, v));
                         cases.push_str(&format!(" WHEN {col} = {ph} THEN {idx}"));
                     }
                     format!("CASE{cases} ELSE {} END", vs.len())
@@ -2684,7 +2803,7 @@ impl<M> Builder<M> {
         let parts: Vec<String> = self
             .having_terms
             .iter()
-            .map(|t| Self::render_where_term(backend, t, values, n))
+            .map(|t| Self::render_where_term(backend, t, values, n, self.binder))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(format!(" HAVING {}", parts.join(" AND ")))
     }
@@ -2705,16 +2824,18 @@ impl<M> Builder<M> {
         // Raw-SQL escape hatches (`select_raw`, `WhereTerm::Raw`,
         // `OrderTerm::Raw`) are deliberately skipped - they exist
         // precisely so power users can opt past the validator.
-        self.validate_inputs()?;
+        let this = self.effective();
+        let this = &*this;
+        this.validate_inputs()?;
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n = 0;
-        let mut sql = self.render_select_into(backend, table, column_expr, &mut values, &mut n)?;
+        let mut sql = this.render_select_into(backend, table, column_expr, &mut values, &mut n)?;
         // Phase 10C T9 - row-lock hint goes at the very end of the
         // compound statement, after every UNION arm and every
         // ORDER BY / LIMIT / OFFSET. The lock applies to the outer
         // SELECT, so emitting it inside `render_select_into` would
         // place it mid-statement on union arms - wrong shape.
-        let lock_clause: &str = match (backend, self.lock_mode) {
+        let lock_clause: &str = match (backend, this.lock_mode) {
             (_, LockMode::None) => "",
             (DbBackend::Postgres, LockMode::ForUpdate) => " FOR UPDATE",
             (DbBackend::Postgres, LockMode::Shared) => " FOR SHARE",
@@ -2765,12 +2886,14 @@ impl<M> Builder<M> {
         // Audit HIGH `eloquent` #1 - same identifier validation as
         // `render_select_for`. Count uses the same WHERE / GROUP BY /
         // HAVING clauses, so the attack surface is identical.
-        self.validate_inputs()?;
+        let this = self.effective();
+        let this = &*this;
+        this.validate_inputs()?;
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n = 0;
         let mut sql = String::new();
 
-        let needs_subquery_wrap = !self.group_by.is_empty() || !self.unions.is_empty();
+        let needs_subquery_wrap = !this.group_by.is_empty() || !this.unions.is_empty();
 
         if needs_subquery_wrap {
             // Wrap: SELECT COUNT(*) AS count FROM (<inner>) AS sub.
@@ -2781,12 +2904,12 @@ impl<M> Builder<M> {
             sql.push_str("SELECT COUNT(*) AS count FROM (");
             sql.push_str("SELECT 1 AS __paginate_marker FROM ");
             sql.push_str(table);
-            self.render_count_body(backend, &mut sql, &mut values, &mut n)?;
+            this.render_count_body(backend, &mut sql, &mut values, &mut n)?;
 
             // Union arms - recurse with the same placeholder counter
             // so Postgres `$N` stays monotonic. Each arm projects the
             // same `1 AS __paginate_marker` column.
-            for (other, all) in &self.unions {
+            for (other, all) in &this.unions {
                 let connector = if *all { " UNION ALL " } else { " UNION " };
                 sql.push_str(connector);
                 sql.push_str("SELECT 1 AS __paginate_marker FROM ");
@@ -2798,7 +2921,7 @@ impl<M> Builder<M> {
         } else {
             sql.push_str("SELECT COUNT(*) AS count FROM ");
             sql.push_str(table);
-            self.render_count_body(backend, &mut sql, &mut values, &mut n)?;
+            this.render_count_body(backend, &mut sql, &mut values, &mut n)?;
         }
 
         Ok((sql, values))
@@ -2816,22 +2939,25 @@ impl<M> Builder<M> {
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<(), FrameworkError> {
-        if !self.where_terms.is_empty() {
+        // A union arm arrives here directly, so it resolves its own scopes.
+        let this = self.effective();
+        let this = &*this;
+        if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
-            let parts: Vec<String> = self
+            let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, values, n))
+                .map(|t| Self::render_where_term(backend, t, values, n, self.binder))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
 
-        if !self.group_by.is_empty() {
+        if !this.group_by.is_empty() {
             sql.push_str(" GROUP BY ");
-            sql.push_str(&self.group_by.join(", "));
+            sql.push_str(&this.group_by.join(", "));
         }
 
-        sql.push_str(&self.render_having(backend, values, n)?);
+        sql.push_str(&this.render_having(backend, values, n)?);
         Ok(())
     }
 
@@ -2850,15 +2976,18 @@ impl<M> Builder<M> {
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<String, FrameworkError> {
+        // A union arm arrives here directly, so it resolves its own scopes.
+        let this = self.effective();
+        let this = &*this;
         let mut sql = String::new();
 
         sql.push_str("SELECT ");
-        if self.distinct {
+        if this.distinct {
             sql.push_str("DISTINCT ");
         }
-        if let Some(raw) = &self.select_raw {
+        if let Some(raw) = &this.select_raw {
             sql.push_str(raw);
-        } else if let Some(cols) = &self.select_cols {
+        } else if let Some(cols) = &this.select_cols {
             sql.push_str(&cols.join(", "));
         } else {
             sql.push_str(column_expr);
@@ -2866,28 +2995,28 @@ impl<M> Builder<M> {
         sql.push_str(" FROM ");
         sql.push_str(table);
 
-        if !self.where_terms.is_empty() {
+        if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
             let parts: Vec<String> = self
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, values, n))
+                .map(|t| Self::render_where_term(backend, t, values, n, self.binder))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
 
-        if !self.group_by.is_empty() {
+        if !this.group_by.is_empty() {
             sql.push_str(" GROUP BY ");
-            sql.push_str(&self.group_by.join(", "));
+            sql.push_str(&this.group_by.join(", "));
         }
 
-        sql.push_str(&self.render_having(backend, values, n)?);
-        sql.push_str(&self.render_orders(backend, values, n)?);
+        sql.push_str(&this.render_having(backend, values, n)?);
+        sql.push_str(&this.render_orders(backend, values, n)?);
 
-        if let Some(l) = self.limit {
+        if let Some(l) = this.limit {
             sql.push_str(&format!(" LIMIT {l}"));
         }
-        if let Some(o) = self.offset {
+        if let Some(o) = this.offset {
             sql.push_str(&format!(" OFFSET {o}"));
         }
 
@@ -2900,7 +3029,7 @@ impl<M> Builder<M> {
         // The inner SELECT is appended verbatim (no parens) because
         // SQLite rejects `UNION (SELECT ...)` while Postgres / MySQL
         // accept either form. Standard SQL doesn't require the parens.
-        for (other, all) in &self.unions {
+        for (other, all) in &this.unions {
             let connector = if *all { " UNION ALL " } else { " UNION " };
             sql.push_str(connector);
             let other_sql = other.render_select_into(backend, table, column_expr, values, n)?;
@@ -2930,6 +3059,20 @@ where
     <<M::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
+    /// A builder whose soft-delete filter and global scopes are folded in
+    /// when it runs. `Model::query()` returns one, and so does every static
+    /// entry point the `#[suprnova::model]` macro emits.
+    ///
+    /// **Not part of the public API.** It is `pub` because the macro
+    /// expands into user crates; reach for `Model::query()`.
+    #[doc(hidden)]
+    pub fn __scoped() -> Self {
+        let mut builder = Self::new();
+        builder.scope_resolver = Some(crate::eloquent::scopes::resolve_scopes::<M>);
+        builder.binder = <M as EloquentModel>::bind_column;
+        builder
+    }
+
     // ---- Has / where-has existence engine (Laravel parity) ---------------
     //
     // These methods produce correlated `EXISTS (...)` / `NOT EXISTS
@@ -2939,18 +3082,26 @@ where
     // a typo silently returns an empty result set instead of leaking
     // a full-table scan.
 
-    #[allow(clippy::too_many_arguments)]
     fn build_exists_spec_for(
         &self,
         relation: &str,
-        positive: bool,
-        count_op: Option<&str>,
-        count_value: Option<i64>,
+        existence: Existence,
+        count: Option<CountConstraint<'_>>,
         inner_terms: Vec<WhereTerm>,
-        relation_column: Option<String>,
-        relation_op: Option<String>,
-        relation_value: Option<Value>,
+        predicate: Option<RelationPredicate>,
     ) -> ExistsSpec {
+        let positive = match existence {
+            Existence::Has => true,
+            Existence::DoesntHave => false,
+        };
+        let (count_op, count_value) = match count {
+            Some(CountConstraint { op, value }) => (Some(op.to_string()), Some(value)),
+            None => (None, None),
+        };
+        let (relation_column, relation_op, relation_value) = match predicate {
+            Some(RelationPredicate { column, op, value }) => (Some(column), Some(op), Some(value)),
+            None => (None, None, None),
+        };
         let entry = crate::eloquent::relations::find_relation::<M>(relation);
         match entry {
             Some(e) => ExistsSpec {
@@ -2970,12 +3121,14 @@ where
                 morph_type_value: e.morph_type_value.to_string(),
                 related_soft_deletes_column: e.related_soft_deletes_column.to_string(),
                 positive,
-                count_op: count_op.map(str::to_string),
+                count_op,
                 count_value,
                 inner_terms,
                 relation_column,
                 relation_op,
                 relation_value,
+                binder: e.related_bind_column,
+                belongs_to: e.kind == crate::eloquent::relations::RelationKind::BelongsTo,
             },
             None => ExistsSpec {
                 parent_table: M::TABLE.to_string(),
@@ -2990,12 +3143,14 @@ where
                 morph_type_value: String::new(),
                 related_soft_deletes_column: String::new(),
                 positive,
-                count_op: count_op.map(str::to_string),
+                count_op,
                 count_value,
                 inner_terms,
                 relation_column,
                 relation_op,
                 relation_value,
+                binder: no_column_binder,
+                belongs_to: false,
             },
         }
     }
@@ -3008,8 +3163,7 @@ where
     /// let users = User::query().has("posts").get().await?;
     /// ```
     pub fn has(mut self, relation: &str) -> Self {
-        let spec =
-            self.build_exists_spec_for(relation, true, None, None, Vec::new(), None, None, None);
+        let spec = self.build_exists_spec_for(relation, Existence::Has, None, Vec::new(), None);
         self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
         self
     }
@@ -3024,12 +3178,9 @@ where
     pub fn has_count(mut self, relation: &str, op: &str, count: i64) -> Self {
         let spec = self.build_exists_spec_for(
             relation,
-            true,
-            Some(op),
-            Some(count),
+            Existence::Has,
+            Some(CountConstraint { op, value: count }),
             Vec::new(),
-            None,
-            None,
             None,
         );
         self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
@@ -3038,8 +3189,7 @@ where
 
     /// `OR EXISTS (...)` - disjunction form of [`Self::has`].
     pub fn or_has(mut self, relation: &str) -> Self {
-        let spec =
-            self.build_exists_spec_for(relation, true, None, None, Vec::new(), None, None, None);
+        let spec = self.build_exists_spec_for(relation, Existence::Has, None, Vec::new(), None);
         let new = WhereTerm::Exists(Box::new(spec));
         self.merge_or_term(new);
         self
@@ -3049,7 +3199,7 @@ where
     /// rows whose `relation` returns no matching children.
     pub fn doesnt_have(mut self, relation: &str) -> Self {
         let spec =
-            self.build_exists_spec_for(relation, false, None, None, Vec::new(), None, None, None);
+            self.build_exists_spec_for(relation, Existence::DoesntHave, None, Vec::new(), None);
         self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
         self
     }
@@ -3057,7 +3207,7 @@ where
     /// `OR NOT EXISTS (...)` - disjunction form of [`Self::doesnt_have`].
     pub fn or_doesnt_have(mut self, relation: &str) -> Self {
         let spec =
-            self.build_exists_spec_for(relation, false, None, None, Vec::new(), None, None, None);
+            self.build_exists_spec_for(relation, Existence::DoesntHave, None, Vec::new(), None);
         let new = WhereTerm::Exists(Box::new(spec));
         self.merge_or_term(new);
         self
@@ -3079,16 +3229,8 @@ where
         F: FnOnce(Builder<R>) -> Builder<R>,
     {
         let inner = predicate(Builder::<R>::new());
-        let spec = self.build_exists_spec_for(
-            relation,
-            true,
-            None,
-            None,
-            inner.where_terms,
-            None,
-            None,
-            None,
-        );
+        let spec =
+            self.build_exists_spec_for(relation, Existence::Has, None, inner.where_terms, None);
         self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
         self
     }
@@ -3100,16 +3242,8 @@ where
         F: FnOnce(Builder<R>) -> Builder<R>,
     {
         let inner = predicate(Builder::<R>::new());
-        let spec = self.build_exists_spec_for(
-            relation,
-            true,
-            None,
-            None,
-            inner.where_terms,
-            None,
-            None,
-            None,
-        );
+        let spec =
+            self.build_exists_spec_for(relation, Existence::Has, None, inner.where_terms, None);
         let new = WhereTerm::Exists(Box::new(spec));
         self.merge_or_term(new);
         self
@@ -3124,12 +3258,9 @@ where
         let inner = predicate(Builder::<R>::new());
         let spec = self.build_exists_spec_for(
             relation,
-            false,
-            None,
+            Existence::DoesntHave,
             None,
             inner.where_terms,
-            None,
-            None,
             None,
         );
         self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
@@ -3145,12 +3276,9 @@ where
         let inner = predicate(Builder::<R>::new());
         let spec = self.build_exists_spec_for(
             relation,
-            false,
-            None,
+            Existence::DoesntHave,
             None,
             inner.where_terms,
-            None,
-            None,
             None,
         );
         let new = WhereTerm::Exists(Box::new(spec));
@@ -3170,13 +3298,14 @@ where
     ) -> Self {
         let spec = self.build_exists_spec_for(
             relation,
-            true,
-            None,
+            Existence::Has,
             None,
             Vec::new(),
-            Some(col.col_name()),
-            Some("=".to_string()),
-            Some(val.into_val()),
+            Some(RelationPredicate {
+                column: col.col_name(),
+                op: "=".to_string(),
+                value: val.into_val(),
+            }),
         );
         self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
         self
@@ -3193,13 +3322,14 @@ where
     ) -> Self {
         let spec = self.build_exists_spec_for(
             relation,
-            true,
-            None,
+            Existence::Has,
             None,
             Vec::new(),
-            Some(col.col_name()),
-            Some(op.to_string()),
-            Some(val.into_val()),
+            Some(RelationPredicate {
+                column: col.col_name(),
+                op: op.to_string(),
+                value: val.into_val(),
+            }),
         );
         self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
         self
@@ -3214,13 +3344,14 @@ where
     ) -> Self {
         let spec = self.build_exists_spec_for(
             relation,
-            true,
-            None,
+            Existence::Has,
             None,
             Vec::new(),
-            Some(col.col_name()),
-            Some("=".to_string()),
-            Some(val.into_val()),
+            Some(RelationPredicate {
+                column: col.col_name(),
+                op: "=".to_string(),
+                value: val.into_val(),
+            }),
         );
         let new = WhereTerm::Exists(Box::new(spec));
         self.merge_or_term(new);
@@ -3570,12 +3701,13 @@ where
         sql.push_str("DELETE FROM ");
         sql.push_str(M::TABLE);
 
-        if !self.where_terms.is_empty() {
+        let this = self.effective();
+        if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
-            let parts: Vec<String> = self
+            let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
+                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n, self.binder))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
@@ -3679,7 +3811,10 @@ where
     /// `.into_vec()`. The model-aware surface (`pluck("col")`,
     /// `group_by("col")`, `sort_by("col")`, `sum::<T>("col")`, ...)
     /// composes on top.
-    pub async fn get(mut self) -> Result<Collection<M>, FrameworkError> {
+    pub async fn get(self) -> Result<Collection<M>, FrameworkError> {
+        // Resolved before anything reads the builder, so a scope that adds
+        // an eager load or an order is honoured like one that adds a filter.
+        let mut this = self.into_effective();
         crate::render_cache::collector::observe_table_read(M::TABLE);
         // Phase 10C T1 - Retrieving fires ONCE per query (not per
         // row) before any SQL runs. Aligns with Laravel's
@@ -3691,16 +3826,16 @@ where
         // explicit `with_tx` override > ambient `CURRENT_TX` >
         // builder `on(name)` > per-model default conn >
         // `__read_replica__` auto-routing > default pool.
-        let exec = self.resolve_read_executor().await?;
+        let exec = this.resolve_read_executor().await?;
         let backend = exec.backend();
-        let runtime_casts = self.runtime_casts.clone();
+        let runtime_casts = this.runtime_casts.clone();
         // Move the eager plan out of `self` - `EagerSpec::WithWhere`
         // owns a `Box<dyn Any>` (the type-erased predicate) which is
         // not `Clone`. The base SELECT consumes `self`'s WHERE / ORDER
         // / LIMIT terms; afterwards we hand the plan to the eager
         // orchestrator.
-        let eager_specs = std::mem::take(&mut self.eager_specs);
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, "*")?;
+        let eager_specs = std::mem::take(&mut this.eager_specs);
+        let (sql, vals) = this.render_select_for(backend, M::TABLE, "*")?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
 
         // Fetch into the entity's `Model` - the SeaORM type that's
@@ -3747,13 +3882,22 @@ where
                         }
                     }
                 }
+                // The row has the values of the casts in it by now, the
+                // decrypted ones among them, and the error of the decoder
+                // quotes the value it could not read.
                 let coerced_model: M = serde_json::from_value(as_json).map_err(|e| {
-                    FrameworkError::database(format!("rehydrate model after runtime cast: {e}"))
+                    FrameworkError::database(format!(
+                        "rehydrate model after runtime cast: {}",
+                        crate::crypto::json_decode_reason(&e)
+                    ))
                 })?;
                 buf.push(coerced_model);
             }
             buf
         };
+        // Lazy-loading prevention reads this mark. Every paginator, chunk
+        // walk and eager load hydrates through here, so they all set it.
+        M::__mark_query_result(&mut out);
 
         // T9 - eager loading. After the base SELECT lands, the
         // orchestrator walks each recorded `EagerSpec` and dispatches
@@ -3772,10 +3916,14 @@ where
         // `CURRENT_TX` and routes through the active transaction when
         // present. Outside a tx, leaves use the same pool we pass here;
         // inside a tx, this `db` is effectively ignored.
-        if !eager_specs.is_empty() && !out.is_empty() {
+        //
+        // An empty result still reaches the orchestrator: a dotted path
+        // is checked against its relations even when no row loads, so a
+        // path that fails with rows fails without them.
+        if !eager_specs.is_empty() {
             let eager_db = crate::eloquent::relations::eager::resolve_eager_connection(
-                self.tx_override.as_ref(),
-                self.connection_override.as_deref(),
+                this.tx_override.as_ref(),
+                this.connection_override.as_deref(),
                 M::default_connection_name(),
             )
             .await?;
@@ -4149,8 +4297,9 @@ where
     /// concurrent-safe by construction.
     ///
     /// `chunk()` exists as the simple form for read-only workloads
-    /// against stable tables and for models with non-`i64` primary
-    /// keys where `chunk_by_id` cannot be used.
+    /// against stable tables, and for models whose primary key cannot
+    /// carry the keyset cursor of `chunk_by_id`: a composite key, or a
+    /// key stored as neither an integer nor a string.
     ///
     /// ## Eager loads are not supported
     ///
@@ -4216,14 +4365,40 @@ where
     /// later batch (rather than skipping or duplicating, which
     /// [`Self::chunk`]'s OFFSET form is vulnerable to).
     ///
-    /// ## Requires an `i64` primary key
+    /// ## Key types
     ///
-    /// The cursor is read off [`Model::field_value`] as an `i64` -
-    /// models with `String` / `Uuid` PKs use [`Self::chunk`] with the
-    /// OFFSET caveat (or wait for a follow-up that generalises the
-    /// cursor shape). If [`Model::field_value`] returns a non-numeric
-    /// JSON value for the PK column the loop breaks rather than
-    /// looping forever; non-`i64` callers should reach for `chunk`.
+    /// The cursor is the primary key's own value, as
+    /// [`Model::field_value`] gives it, bound in `pk > cursor` the way
+    /// [`Self::filter_op`] binds any value. A single integer key works,
+    /// and so does a single string key, including the UUID and ULID
+    /// keys of `#[model(unique_id = "...")]`: the database orders both
+    /// the same way in `ORDER BY` and in `>`.
+    ///
+    /// A key that cannot carry the cursor is refused with
+    /// `FrameworkError::internal`, which names the model and the column
+    /// and never the key's value:
+    ///
+    /// - before the first query, when the model's metadata shows a
+    ///   composite key, or a column stored as neither an integer nor a
+    ///   string (a native `Uuid`, a timestamp, a decimal, JSON);
+    /// - otherwise when a batch holds a key value the cursor cannot
+    ///   bind, such as a null or an unsigned integer above `i64::MAX`,
+    ///   before that batch reaches `f`.
+    ///
+    /// `f` is never called with a batch before its key is known to be
+    /// usable, so a key the metadata refuses costs no work at all. Walk
+    /// such a model with [`Self::chunk`], which carries the OFFSET
+    /// caveat above.
+    ///
+    /// ## Keys with no time order
+    ///
+    /// A key that grows with its row's creation time, such as an
+    /// auto-increment integer, a UUID v7 or a ULID, puts a row inserted
+    /// during the walk after the cursor, where a later batch finds it.
+    /// A random key, such as a UUID v4, does not: a row inserted during
+    /// the walk with a key below the cursor is not seen by this walk.
+    /// Every row that existed when the walk started is still seen once,
+    /// in key order.
     ///
     /// ## Eager loads
     ///
@@ -4235,6 +4410,9 @@ where
     /// - `n == 0` → `FrameworkError::param("n")` (400). A zero batch
     ///   size would issue `LIMIT 0` forever; reject up front rather
     ///   than no-op silently.
+    /// - A primary key that cannot carry the cursor →
+    ///   `FrameworkError::internal` (500), as described under "Key
+    ///   types".
     ///
     /// ## Example
     ///
@@ -4261,35 +4439,26 @@ where
             ));
         }
         let pk = M::primary_key_name();
-        let mut last_id: Option<i64> = None;
+        let kind = Self::refuse_keyset_key_by_metadata("chunk_by_id", pk)?;
+        let mut cursor: Option<Value> = None;
         loop {
             let mut q = self.clone().order_by_asc(pk).limit(n);
-            if let Some(lid) = last_id {
-                q = q.filter_op(pk, ">", lid);
+            if let Some(after) = cursor.take() {
+                q = q.filter_op(pk, ">", after);
             }
             let batch = q.get().await?;
-            if batch.is_empty() {
-                break;
-            }
-            // Read the highest PK in the batch (the rows came back
-            // `ORDER BY pk ASC`, so `.last()` holds it). If the PK
-            // can't be coerced to `i64` we bail rather than loop
-            // forever - non-`i64` PK models should use `chunk()`.
-            last_id = batch
-                .last()
-                .and_then(|m| m.field_value(pk))
-                .and_then(|v| v.as_i64());
+            // The next cursor is read, and checked, before `f` sees the
+            // batch, so a key that cannot carry it ends the walk first.
+            let next = match Self::keyset_cursor_after("chunk_by_id", pk, kind, &batch)? {
+                Some(next) => next,
+                None => break,
+            };
             let count = batch.len() as u64;
             f(batch).await?;
             if count < n {
                 break;
             }
-            if last_id.is_none() {
-                return Err(FrameworkError::internal(
-                    "Builder::chunk_by_id: primary key column did not yield an i64 value - \
-                     models with non-i64 primary keys must use chunk() instead",
-                ));
-            }
+            cursor = Some(next);
         }
         Ok(())
     }
@@ -4385,6 +4554,12 @@ where
                 "Builder::each does not support eager loading (`.with(...)`); apply `.with(...)` inside the per-row closure instead",
             ));
         }
+        // Lazy-loading prevention refuses a relation read on a row of a
+        // multi-row read, and this walk is one query per row. The row
+        // count is asked once, and only while the switch is on, so a walk
+        // with the switch off runs the queries it always ran.
+        let mark_rows =
+            crate::eloquent::preventing_lazy_loading() && self.clone().count().await? > 1;
         let mut offset: u64 = 0;
         loop {
             let q = self.clone().limit(1).offset(offset);
@@ -4393,7 +4568,10 @@ where
                 break;
             }
             let count = batch.len() as u64;
-            for row in batch.into_vec() {
+            for mut row in batch.into_vec() {
+                if mark_rows {
+                    row.__mark_from_multi_row_query();
+                }
                 f(row).await?;
             }
             if count < 1 {
@@ -4413,12 +4591,12 @@ where
     ///
     /// Alias: [`Self::cursor`] (Laravel name).
     ///
-    /// ## Requires an `i64` primary key
+    /// ## Key types
     ///
-    /// Same constraint as [`Self::chunk_by_id`] - the underlying
-    /// batching uses an `id > last_id` filter. Models with `String` /
-    /// `Uuid` PKs need [`Self::chunk`] until the cursor shape
-    /// generalises.
+    /// Same keys as [`Self::lazy_by_id`], which this calls: a single
+    /// integer or string primary key, UUID and ULID keys included. A
+    /// key that cannot carry the cursor surfaces as the stream's first
+    /// item, an error, before any row.
     ///
     /// ## Example
     ///
@@ -4440,7 +4618,31 @@ where
     /// where 1000 in memory at once is too much, or very narrow rows
     /// where a larger batch reduces round trips.
     ///
-    /// Same `i64`-PK constraint as [`Self::chunk_by_id`].
+    /// ## Key types
+    ///
+    /// The batches are keyset batches, `pk > cursor ORDER BY pk ASC`,
+    /// with the primary key's own value as the cursor, exactly as in
+    /// [`Self::chunk_by_id`]. A single integer key works, and so does a
+    /// single string key, including the UUID and ULID keys of
+    /// `#[model(unique_id = "...")]`.
+    ///
+    /// A key that cannot carry the cursor is refused with
+    /// `FrameworkError::internal`, which names the model and the column
+    /// and never the key's value. A composite key, or a column stored as
+    /// neither an integer nor a string, is refused before the first
+    /// query, as the stream's first item. A key value the cursor cannot
+    /// bind, such as a null or an unsigned integer above `i64::MAX`, is
+    /// refused when its batch arrives, before any row of that batch is
+    /// yielded. No row is yielded before its key is known to be usable.
+    ///
+    /// ## Keys with no time order
+    ///
+    /// With a random key, such as a UUID v4, a row inserted during the
+    /// walk with a key below the cursor is not seen by this stream. Keys
+    /// that grow with creation time (an auto-increment integer, a UUID
+    /// v7, a ULID) put such a row after the cursor, where a later batch
+    /// finds it. Every row that existed when the stream started is still
+    /// yielded once, in key order.
     pub fn lazy_by_id(self, batch_size: u64) -> crate::eloquent::LazyCollection<M> {
         let builder = self;
         let stream = async_stream::try_stream! {
@@ -4453,20 +4655,20 @@ where
                 ))?;
             }
             let pk = M::primary_key_name();
-            let mut last_id: Option<i64> = None;
+            let kind = Self::refuse_keyset_key_by_metadata("lazy_by_id", pk)?;
+            let mut cursor: Option<Value> = None;
             loop {
                 let mut q = builder.clone().order_by_asc(pk).limit(batch_size);
-                if let Some(lid) = last_id {
-                    q = q.filter_op(pk, ">", lid);
+                if let Some(after) = cursor.take() {
+                    q = q.filter_op(pk, ">", after);
                 }
                 let batch = q.get().await?;
-                if batch.is_empty() {
-                    break;
-                }
-                last_id = batch
-                    .last()
-                    .and_then(|m| m.field_value(pk))
-                    .and_then(|v| v.as_i64());
+                // The next cursor is read, and checked, before the first
+                // row of the batch is yielded.
+                let next = match Self::keyset_cursor_after("lazy_by_id", pk, kind, &batch)? {
+                    Some(next) => next,
+                    None => break,
+                };
                 let count = batch.len() as u64;
                 for row in batch.into_vec() {
                     yield row;
@@ -4474,12 +4676,7 @@ where
                 if count < batch_size {
                     break;
                 }
-                if last_id.is_none() {
-                    Err(FrameworkError::internal(
-                        "Builder::lazy_by_id: primary key column did not yield an i64 value - \
-                         models with non-i64 primary keys cannot use lazy() / cursor()",
-                    ))?;
-                }
+                cursor = Some(next);
             }
         };
         crate::eloquent::LazyCollection::boxed(stream)
@@ -4487,11 +4684,110 @@ where
 
     /// Laravel-shape alias for [`Self::lazy`].
     ///
-    /// Same shape, same semantics, same `i64`-PK constraint. Ships
-    /// alongside `lazy` so users with Laravel muscle memory don't
-    /// have to translate.
+    /// Same shape, same semantics, same key types as
+    /// [`Self::lazy_by_id`]. Ships alongside `lazy` so users with
+    /// Laravel muscle memory don't have to translate.
     pub fn cursor(self) -> crate::eloquent::LazyCollection<M> {
         self.lazy()
+    }
+
+    /// Refuses, before any query, a primary key that the model's
+    /// metadata already shows cannot carry the cursor of
+    /// [`Self::chunk_by_id`] and [`Self::lazy_by_id`].
+    ///
+    /// The cursor is bound as a JSON value: a number binds as an
+    /// integer and a string as text. A composite key has no single
+    /// value to bind. A column stored as anything else (a native UUID,
+    /// a timestamp, a decimal, JSON) does not compare with that bind in
+    /// the order `ORDER BY` returns its rows, so the walk would repeat
+    /// rows, skip them, or fail on a later batch after the caller had
+    /// already processed the first.
+    ///
+    /// Returns the kind of value the column binds, which every row's key
+    /// then has to have.
+    fn refuse_keyset_key_by_metadata(method: &str, pk: &str) -> Result<KeysetKind, FrameworkError> {
+        use sea_orm::{ColumnTrait, ColumnType, Iterable, PrimaryKeyToColumn};
+
+        let columns: Vec<_> = <<M::Entity as sea_orm::EntityTrait>::PrimaryKey as Iterable>::iter()
+            .map(PrimaryKeyToColumn::into_column)
+            .collect();
+        let [column] = columns.as_slice() else {
+            return Err(Self::keyset_refusal(
+                method,
+                pk,
+                "the key spans more than one column",
+            ));
+        };
+        match column.def().get_column_type() {
+            ColumnType::TinyInteger
+            | ColumnType::SmallInteger
+            | ColumnType::Integer
+            | ColumnType::BigInteger
+            | ColumnType::TinyUnsigned
+            | ColumnType::SmallUnsigned
+            | ColumnType::Unsigned
+            | ColumnType::BigUnsigned => Ok(KeysetKind::Integer),
+            ColumnType::Char(_) | ColumnType::String(_) | ColumnType::Text => Ok(KeysetKind::Text),
+            _ => Err(Self::keyset_refusal(
+                method,
+                pk,
+                "the column is stored as neither an integer nor a string",
+            )),
+        }
+    }
+
+    /// The cursor to carry past `batch`: the primary key of its last
+    /// row, or `None` when the batch is empty and the walk is over.
+    ///
+    /// The first row is checked as well as the last, because
+    /// `ORDER BY pk ASC` puts a null key at one end of the batch or the
+    /// other, depending on the backend. A key the cursor cannot bind is
+    /// refused here, before the batch reaches the caller.
+    fn keyset_cursor_after(
+        method: &str,
+        pk: &str,
+        kind: KeysetKind,
+        batch: &[M],
+    ) -> Result<Option<Value>, FrameworkError> {
+        let (Some(first), Some(last)) = (batch.first(), batch.last()) else {
+            return Ok(None);
+        };
+        Self::keyset_key(method, pk, kind, first)?;
+        Self::keyset_key(method, pk, kind, last).map(Some)
+    }
+
+    /// One row's primary key as a keyset cursor. A null, an array, an
+    /// object or a number outside the `i64` range has no place in the
+    /// key's order that `pk > cursor` would respect, so it is refused.
+    /// So is a value of another kind than its column: a key type that
+    /// writes an integer column as a string would bind as text, and the
+    /// database refuses to compare an integer column with text.
+    fn keyset_key(
+        method: &str,
+        pk: &str,
+        kind: KeysetKind,
+        row: &M,
+    ) -> Result<Value, FrameworkError> {
+        match row.field_value(pk) {
+            Some(key) if kind.fits(&key) => Ok(key),
+            _ => Err(Self::keyset_refusal(
+                method,
+                pk,
+                "a row's key is not of the kind of its column: an integer in the i64 range \
+                 for an integer column, a string for a text column",
+            )),
+        }
+    }
+
+    /// The error both keyset walks return for a key that cannot carry
+    /// their cursor. It names the model and the column, and never the
+    /// key's value, which can be user data.
+    fn keyset_refusal(method: &str, pk: &str, reason: &str) -> FrameworkError {
+        FrameworkError::internal(format!(
+            "Builder::{method}: the primary key `{pk}` of `{}` cannot carry a keyset cursor \
+             ({reason}); use chunk() instead",
+            std::any::type_name::<M>(),
+        ))
     }
 
     // Terminal/aggregate type bounds are `TryGetable` - that's the
@@ -4745,10 +5041,13 @@ where
         for (k, _) in attrs.iter() {
             crate::database::validate_identifier(k)?;
         }
-        self.validate_inputs()?;
+        // A mass write is scoped like a read: the soft-delete filter and
+        // the global scopes decide which rows it may touch.
+        let this = self.into_effective();
+        this.validate_inputs()?;
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            self.tx_override.as_ref(),
-            self.connection_override.as_deref(),
+            this.tx_override.as_ref(),
+            this.connection_override.as_deref(),
             M::default_connection_name(),
         )
         .await?;
@@ -4764,18 +5063,19 @@ where
         let set_parts: Vec<String> = attrs
             .iter()
             .map(|(col, v)| {
-                let expression = write_value_expression(backend, v, &mut values, &mut n)?;
+                let expression =
+                    write_value_expression(backend, col, v, &mut values, &mut n, M::bind_column)?;
                 Ok(format!("{col} = {expression}"))
             })
             .collect::<Result<Vec<_>, FrameworkError>>()?;
         sql.push_str(&set_parts.join(", "));
 
-        if !self.where_terms.is_empty() {
+        if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
-            let parts: Vec<String> = self
+            let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
+                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n, this.binder))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
@@ -4785,7 +5085,7 @@ where
             .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        match self.tx_override.as_ref() {
+        match this.tx_override.as_ref() {
             Some(handle) => {
                 crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?
             }
@@ -4794,26 +5094,98 @@ where
         Ok(result.rows_affected())
     }
 
-    /// `DELETE FROM table WHERE <where_terms>`. Returns the affected
-    /// row count. Mass-delete - no per-row Model events fire. For
-    /// soft-delete model behaviour iterate with `get()` and call
-    /// `.delete()` per row.
+    /// Delete every row the query matches and return how many. No
+    /// per-row model events fire.
+    ///
+    /// On a model declared with `soft_deletes` this is a soft delete:
+    /// one `UPDATE table SET deleted_at = <now> WHERE <where_terms>`,
+    /// which also sets `updated_at` when the model manages timestamps.
+    /// The rows stay readable through `with_trashed()` and can be
+    /// restored. [`Self::force_delete_all`] removes them for good. On
+    /// any other model it is `DELETE FROM table WHERE <where_terms>`.
     pub async fn delete_all(self) -> Result<u64, FrameworkError> {
-        self.validate_inputs()?;
+        let Some(stamp) = M::__soft_delete_stamp()? else {
+            return self.force_delete_all().await;
+        };
+        let this = self.into_effective();
+        this.validate_inputs()?;
+        crate::database::validate_identifier(M::SOFT_DELETES_COLUMN)?;
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            self.tx_override.as_ref(),
-            self.connection_override.as_deref(),
+            this.tx_override.as_ref(),
+            this.connection_override.as_deref(),
             M::default_connection_name(),
         )
         .await?;
         let backend = exec.backend();
-        let (sql, vals) = self.render_model_delete_sql_with_bindings(backend)?;
+
+        let mut values: Vec<SeaValue> = Vec::new();
+        let mut n: usize = 0;
+        n += 1;
+        values.push(stamp.deleted_at);
+        let mut sql = format!(
+            "UPDATE {} SET {} = {}",
+            M::TABLE,
+            M::SOFT_DELETES_COLUMN,
+            placeholder(backend, n)?
+        );
+        if let Some(updated_at) = stamp.updated_at {
+            crate::database::validate_identifier(M::UPDATED_AT_COLUMN)?;
+            n += 1;
+            values.push(updated_at);
+            sql.push_str(&format!(
+                ", {} = {}",
+                M::UPDATED_AT_COLUMN,
+                placeholder(backend, n)?
+            ));
+        }
+        if !this.where_terms.is_empty() {
+            sql.push_str(" WHERE ");
+            let parts: Vec<String> = this
+                .where_terms
+                .iter()
+                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n, this.binder))
+                .collect::<Result<Vec<_>, _>>()?;
+            sql.push_str(&parts.join(" AND "));
+        }
+
+        let stmt = Statement::from_sql_and_values(backend, &sql, values);
+        let result = exec
+            .run(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        match this.tx_override.as_ref() {
+            Some(handle) => {
+                crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?
+            }
+            None => crate::render_cache::orm::after_bulk_write(M::TABLE).await?,
+        }
+        Ok(result.rows_affected())
+    }
+
+    /// `DELETE FROM table WHERE <where_terms>`: remove every row the
+    /// query matches, soft-delete model or not, and return how many. No
+    /// per-row model events fire.
+    ///
+    /// On a soft-delete model the query is still scoped to rows that are
+    /// not trashed; start from `with_trashed()` or `only_trashed()` to
+    /// remove trashed rows.
+    pub async fn force_delete_all(self) -> Result<u64, FrameworkError> {
+        let this = self.into_effective();
+        this.validate_inputs()?;
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            this.tx_override.as_ref(),
+            this.connection_override.as_deref(),
+            M::default_connection_name(),
+        )
+        .await?;
+        let backend = exec.backend();
+        let (sql, vals) = this.render_model_delete_sql_with_bindings(backend)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let result = exec
             .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        match self.tx_override.as_ref() {
+        match this.tx_override.as_ref() {
             Some(handle) => {
                 crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?
             }
@@ -4840,10 +5212,11 @@ where
         if owned.is_empty() {
             return Ok(0);
         }
-        self.validate_inputs()?;
+        let this = self.into_effective();
+        this.validate_inputs()?;
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            self.tx_override.as_ref(),
-            self.connection_override.as_deref(),
+            this.tx_override.as_ref(),
+            this.connection_override.as_deref(),
             M::default_connection_name(),
         )
         .await?;
@@ -4864,12 +5237,12 @@ where
             })
             .collect::<Result<Vec<_>, FrameworkError>>()?;
         sql.push_str(&set_parts.join(", "));
-        if !self.where_terms.is_empty() {
+        if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
-            let parts: Vec<String> = self
+            let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
+                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n, this.binder))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
@@ -4878,7 +5251,7 @@ where
             .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        match self.tx_override.as_ref() {
+        match this.tx_override.as_ref() {
             Some(handle) => {
                 crate::render_cache::orm::after_bulk_write_with_handle(handle, M::TABLE).await?
             }
@@ -4983,7 +5356,7 @@ where
                     .iter()
                     .map(|c| {
                         let v = attrs.get(c).cloned().unwrap_or(Value::Null);
-                        write_value_expression(backend, &v, &mut values, &mut n)
+                        write_value_expression(backend, c, &v, &mut values, &mut n, M::bind_column)
                     })
                     .collect::<Result<Vec<_>, FrameworkError>>()?;
                 Ok(format!("({})", phs.join(", ")))
@@ -5050,9 +5423,52 @@ fn current_cursor_from_request() -> Option<String> {
     crate::context::Context::query_param("cursor").filter(|s| !s.is_empty())
 }
 
+/// The kind of value that the cursor of a keyset walk binds for a key
+/// column. The cursor is bound as it is, so a key has to be of the kind
+/// of its column for the database to compare the two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeysetKind {
+    /// An integer column. The key is a number in the `i64` range.
+    Integer,
+    /// A text column. The key is a string.
+    Text,
+}
+
+impl KeysetKind {
+    /// Whether `key` binds as a value of this kind.
+    fn fits(self, key: &Value) -> bool {
+        match self {
+            Self::Integer => key.is_i64(),
+            Self::Text => key.is_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_keyset_key_has_the_kind_of_its_column() {
+        let number = serde_json::json!(42);
+        let text = serde_json::json!("42");
+        assert!(KeysetKind::Integer.fits(&number));
+        assert!(KeysetKind::Text.fits(&text));
+        // A key type that writes an integer column as a string binds as
+        // text, which the database does not compare with the column.
+        assert!(!KeysetKind::Integer.fits(&text));
+        assert!(!KeysetKind::Text.fits(&number));
+        for other in [
+            serde_json::json!(null),
+            serde_json::json!(1.5),
+            serde_json::json!(u64::MAX),
+            serde_json::json!([1]),
+            serde_json::json!({"id": 1}),
+        ] {
+            assert!(!KeysetKind::Integer.fits(&other), "{other}");
+            assert!(!KeysetKind::Text.fits(&other), "{other}");
+        }
+    }
 
     #[test]
     fn into_column_for_str() {
@@ -5077,6 +5493,103 @@ mod tests {
         assert_eq!(Direction::Desc.sql(), "DESC");
     }
 
+    /// A binder that answers for `created_at` only, standing in for a model
+    /// whose `created_at` has a native cast.
+    fn created_at_binder(column: &str, _value: &Value) -> Option<SeaValue> {
+        (column.rsplit('.').next() == Some("created_at")).then(|| SeaValue::BigInt(Some(7)))
+    }
+
+    #[test]
+    fn a_column_comparison_binds_through_the_model_binder() {
+        let term = WhereTerm::Op(
+            "created_at".to_owned(),
+            ">".to_owned(),
+            serde_json::json!("2031-03-14T12:00:00Z"),
+        );
+        let mut values = Vec::new();
+        let mut position = 0;
+        render_subquery_term(
+            DbBackend::Postgres,
+            Some("posts"),
+            &term,
+            &mut values,
+            &mut position,
+            created_at_binder,
+        )
+        .unwrap();
+        assert_eq!(values, [SeaValue::BigInt(Some(7))]);
+
+        let other = WhereTerm::Eq("title".to_owned(), serde_json::json!("x"));
+        let mut values = Vec::new();
+        render_subquery_term(
+            DbBackend::Postgres,
+            None,
+            &other,
+            &mut values,
+            &mut position,
+            created_at_binder,
+        )
+        .unwrap();
+        assert_eq!(
+            values,
+            [SeaValue::String(Some("x".to_owned()))],
+            "a column the binder declines binds as it is"
+        );
+    }
+
+    #[test]
+    fn a_zone_aware_moment_binds_as_the_utc_wall_clock_on_mysql() {
+        fn zoned(_column: &str, value: &Value) -> Option<SeaValue> {
+            let text = value.as_str()?;
+            let moment = chrono::DateTime::parse_from_rfc3339(text).ok()?;
+            Some(SeaValue::from(moment.with_timezone(&chrono::Utc)))
+        }
+        let moment = chrono::DateTime::parse_from_rfc3339("2031-03-14T16:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let value = serde_json::json!("2031-03-14T16:00:00Z");
+        assert_eq!(
+            bind_value(DbBackend::MySql, zoned, "created_at", &value),
+            SeaValue::from(moment.naive_utc())
+        );
+        assert_eq!(
+            bind_value(DbBackend::Postgres, zoned, "created_at", &value),
+            SeaValue::from(moment),
+            "Postgres keeps the zone-aware parameter a timestamptz needs"
+        );
+    }
+
+    #[test]
+    fn a_date_part_binds_as_its_own_type_on_postgres() {
+        let day = chrono::NaiveDate::from_ymd_opt(2031, 3, 14).unwrap();
+        assert_eq!(
+            date_part_value(
+                DbBackend::Postgres,
+                DatePart::Date,
+                &serde_json::json!("2031-03-14")
+            ),
+            SeaValue::from(day)
+        );
+        let nine = chrono::NaiveTime::from_hms_opt(9, 30, 0).unwrap();
+        assert_eq!(
+            date_part_value(
+                DbBackend::Postgres,
+                DatePart::Time,
+                &serde_json::json!("09:30")
+            ),
+            SeaValue::from(nine)
+        );
+        assert_eq!(
+            date_part_value(
+                DbBackend::Sqlite,
+                DatePart::Date,
+                &serde_json::json!("2031-03-14")
+            ),
+            SeaValue::String(Some("2031-03-14".to_owned())),
+            "SQLite compares text with text, unchanged"
+        );
+    }
+
     #[test]
     fn postgres_relationship_subquery_rebases_portable_raw_placeholders() {
         let term = WhereTerm::Raw(
@@ -5092,6 +5605,7 @@ mod tests {
             &term,
             &mut values,
             &mut position,
+            no_column_binder,
         )
         .unwrap();
 
@@ -5149,23 +5663,29 @@ mod tests {
 
         let first = write_value_expression(
             DbBackend::Postgres,
+            "status",
             &serde_json::json!(7),
             &mut values,
             &mut position,
+            no_column_binder,
         )
         .unwrap();
         let null = write_value_expression(
             DbBackend::Postgres,
+            "status",
             &Value::Null,
             &mut values,
             &mut position,
+            no_column_binder,
         )
         .unwrap();
         let second = write_value_expression(
             DbBackend::Postgres,
+            "status",
             &serde_json::json!("ready"),
             &mut values,
             &mut position,
+            no_column_binder,
         )
         .unwrap();
 

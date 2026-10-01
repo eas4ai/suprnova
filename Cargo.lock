@@ -168,7 +168,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "app"
-version = "2.1.0"
+version = "3.0.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1308,6 +1308,7 @@ checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
  "crypto-common 0.1.7",
  "inout 0.1.4",
+ "zeroize",
 ]
 
 [[package]]
@@ -1635,6 +1636,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
  "hybrid-array",
+]
+
+[[package]]
+name = "crypto_secretbox"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9d6cf87adf719ddf43a805e92c6870a531aedda35ff640442cbaf8674e141e1"
+dependencies = [
+ "aead",
+ "cipher 0.4.4",
+ "generic-array",
+ "poly1305",
+ "salsa20",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -4709,6 +4725,7 @@ version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f69cd6acbb9af919df949cd1ec9e5e7fdc2ef15d234b6b795aaa525cc02f71f"
 dependencies = [
+ "flate2",
  "http 1.4.1",
  "opentelemetry",
  "opentelemetry-http",
@@ -5261,6 +5278,17 @@ dependencies = [
  "fdeflate",
  "flate2",
  "miniz_oxide",
+]
+
+[[package]]
+name = "poly1305"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8159bd90725d2df49889a078b54f4f79e87f1f8a8444194cdca81d38f5393abf"
+dependencies = [
+ "cpufeatures 0.2.17",
+ "opaque-debug",
+ "universal-hash",
 ]
 
 [[package]]
@@ -6009,6 +6037,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -7436,7 +7465,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "suprnova"
-version = "2.1.0"
+version = "3.0.0"
 dependencies = [
  "aes-gcm",
  "ammonia",
@@ -7454,6 +7483,7 @@ dependencies = [
  "chrono-tz",
  "clap",
  "comrak",
+ "crypto_secretbox",
  "dashmap 6.2.1",
  "digest 0.11.3",
  "dotenvy",
@@ -7558,7 +7588,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-cli"
-version = "2.1.0"
+version = "3.0.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -7588,7 +7618,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-live"
-version = "2.1.0"
+version = "3.0.0"
 dependencies = [
  "askama",
  "askama_parser",
@@ -7618,7 +7648,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-live-macro-fixture"
-version = "2.1.0"
+version = "3.0.0"
 dependencies = [
  "askama",
  "suprnova-live",
@@ -7627,7 +7657,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-live-test-support"
-version = "2.1.0"
+version = "3.0.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -7648,7 +7678,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-macros"
-version = "2.1.0"
+version = "3.0.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7663,7 +7693,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-magnetar"
-version = "2.1.0"
+version = "3.0.0"
 dependencies = [
  "aes-gcm",
  "apple",
@@ -7688,6 +7718,7 @@ dependencies = [
  "tokio",
  "totp-rs",
  "tracing",
+ "tracing-test",
  "trybuild",
  "uuid",
  "webauthn-authenticator-rs",
@@ -7696,7 +7727,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-payments-nowpayments"
-version = "2.1.0"
+version = "3.0.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7720,7 +7751,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-payments-paddle"
-version = "2.1.0"
+version = "3.0.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7738,7 +7769,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-payments-stripe"
-version = "2.1.0"
+version = "3.0.0"
 dependencies = [
  "async-stripe",
  "async-stripe-client-core",
@@ -7765,7 +7796,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-web-push"
-version = "2.1.0"
+version = "3.0.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",

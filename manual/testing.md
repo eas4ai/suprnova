@@ -21,6 +21,9 @@ the long form.
 | `TestDatabase::fresh` / `sqlite_memory` | In-memory SQLite + container registration, with or without your migrator |
 | `TestContainer::fake` / `scope` / `spawn` | Thread-local or task-local DI overrides, hermetic across parallel tests |
 | `install_test_encryption_key[ring]` | Deterministic `APP_KEY` for tests that touch encrypted casts or signed payloads |
+| `TestClock` | Freeze and move the clock the framework reads, without a sleep - see [Moving the clock](#moving-the-clock) |
+| `crypto::testing::encrypt_string_under` | A value encrypted under an old key, for a rotation test |
+| `console::test` | Run a console command, read what it printed, and answer what it asks - see [Console](console.md#testing-a-command) |
 | Per-surface `fake()` helpers | Mail, Notify, Queue, Bus, Events, Storage, HTTP - see [Mocking](mocking.md) |
 | `TestResponse` | Fluent assertions over an HTTP test's `(status, headers, body)` triple - see [HTTP Tests](http-tests.md#fluent-response-assertions-with-testresponse) |
 | `AssertableInertia` | Fluent assertions over an Inertia page object - see [HTTP Tests](http-tests.md#testing-inertia-responses) |
@@ -306,18 +309,18 @@ TestContainer::scope(async {
 .await;
 ```
 
-### Why there's a `FAKE_GUARDS` refcount
+### Why named connections survive parallel tests
 
 The thread-local container is per-test, but Suprnova also has a
 process-global `ConnectionRegistry` keyed by name (`__read_replica__`,
 custom connection labels) that survives a thread-local reset. A naive
-`Drop` impl would call `ConnectionRegistry::clear()` every time *any*
+`Drop` impl would clear that registry every time *any*
 `TestContainerGuard` went away - wiping another concurrent test's
 named connection halfway through it running.
 
-The fix is a process-wide `AtomicUsize` (`FAKE_GUARDS`). `fake()`
-increments it; `drop` decrements; only the transition back to zero
-clears the named registry. Two parallel tests using
+So the guards are refcounted process-wide: `fake()` counts up, each
+guard's drop counts down, and only the last guard to drop clears the
+named registry. Two parallel tests using
 `__read_replica__` are safe: whichever guard drops last owns the
 clear.
 
@@ -325,6 +328,29 @@ You don't call this from a test - it runs from `TestContainerGuard`'s
 `Drop`. You only need to know it's there if you're debugging a
 "named connection vanished mid-test" symptom, which usually means a
 sibling test forgot to wait for its own guard to drop first.
+
+## Console tests
+
+`suprnova::console::test` runs a console command through the dispatcher the
+`console` binary uses and returns a `ConsoleRun` with what the command
+printed, what it asked, and how it ended. A command prints with
+`console::line` and asks with `console::ask` and `console::confirm`, so the
+test can read the output and prepare the answers:
+
+```rust
+use suprnova::console;
+
+#[tokio::test]
+async fn greet_says_hello() {
+    let run = console::test(["greet", "--name", "Alice"]).run().await;
+
+    run.assert_successful();
+    run.assert_output_contains("Hello, Alice!");
+}
+```
+
+See [Console](console.md#testing-a-command) for the questions, the assert
+methods, and the rules a command follows to be testable.
 
 ## Encryption key test helpers
 
@@ -363,13 +389,162 @@ assert!(installed, "first install wins");
 ```
 
 The keyring helper returns `true` only if the call actually installed
-the ring (the `OnceLock` was empty). To mint ciphertext under an
-arbitrary key for a rotation test, use
-`suprnova::crypto::_test_encrypt_with` rather than installing twice.
+the ring (the `OnceLock` was empty). To build a value that was encrypted
+under an old key, use `suprnova::crypto::testing::encrypt_string_under`
+rather than installing twice. It takes the key, the `CryptPurpose`, and the
+plaintext, and returns the wire string. `encrypt_string_for_under` takes a
+context between the purpose and the plaintext, the way
+`Crypt::encrypt_string_for` does.
 
-Both helpers are `#[doc(hidden)]` at the crypto layer and re-exported
-under the `testing` module - they're test-only and bypass the
-production `APP_KEY` validation path.
+```rust
+use suprnova::crypto::testing::encrypt_string_under;
+use suprnova::testing::install_test_encryption_keyring;
+use suprnova::{Crypt, CryptPurpose, EncryptionKey};
+
+let new = EncryptionKey::generate();
+let old = EncryptionKey::generate();
+install_test_encryption_keyring(new, vec![old.clone()]);
+
+// A value written when `old` was the current key.
+let stored = encrypt_string_under(&old, CryptPurpose::Cast, "a value").unwrap();
+
+let (plain, origin) =
+    Crypt::decrypt_string_with_origin(CryptPurpose::Cast, &stored).unwrap();
+assert_eq!(plain, "a value");
+assert!(origin.needs_reencryption());
+```
+
+Both `install_test_encryption_key` and the keyring helper live in
+`suprnova::testing`. The `suprnova::crypto::testing` functions are compiled
+with the `testing` feature, so an application that ships without the feature
+has none of them. They bypass the production `APP_KEY` validation path.
+
+## Moving the clock
+
+A test of an expiry should not sleep. The framework reads the time through
+`suprnova::clock::now()`: signed URL deadlines, session idle timeouts, due
+scheduled tasks, prune cutoffs, queue availability, the timestamps a
+`#[model]` writes and the window of the Redis rate limiter. Under the
+`testing` feature, `TestClock` moves what `clock::now()` returns, so a test
+jumps to the moment it wants.
+
+`tokio::time::pause` does not do this. It moves the timers of Tokio and
+nothing that reads the wall clock.
+
+```rust
+use chrono::{DateTime, Duration, Utc};
+use suprnova::http::Request;
+use suprnova::routing::SignatureVerdict;
+use suprnova::routing::url::{signature_verdict, signed_url};
+use suprnova::testing::{install_test_encryption_key, TestClock};
+
+#[test]
+fn a_signed_url_expires() {
+    install_test_encryption_key();
+    let start = DateTime::from_timestamp(1_900_000_000, 0).unwrap();
+    let clock = TestClock::travel_to(start);
+
+    let deadline = (suprnova::clock::now() + Duration::minutes(10)).timestamp();
+    let url = signed_url("/download?file=report", Some(deadline)).unwrap();
+    let verdict = || signature_verdict(&Request::for_test("GET", &url)).unwrap();
+
+    assert_eq!(verdict(), SignatureVerdict::Valid);
+
+    clock.advance(Duration::minutes(9));
+    assert_eq!(verdict(), SignatureVerdict::Valid);
+
+    clock.advance(Duration::minutes(2));
+    assert_eq!(verdict(), SignatureVerdict::Expired);
+}
+```
+
+### The guard
+
+| Call | Effect |
+|---|---|
+| `TestClock::freeze()` | Stops the clock of the current thread at the time of the call |
+| `TestClock::travel_to(at)` | Sets the clock of the current thread to `at` (a `DateTime<Utc>`) and stops it there |
+| `guard.advance(by)` | Moves the clock forward by a `chrono::Duration`, or back for a negative one |
+| `guard.set(at)` | Sets the clock to `at` |
+| `guard.now()` | The time the clock shows |
+
+Both constructors return a `TestClockGuard`. Keep it in a binding, because
+dropping it at once gives the system clock back.
+
+A clock under a guard stands still until you move it. Two reads in a row
+return the same time, so "exactly at the deadline" is a state your test can
+hold.
+
+When the guard drops, the thread gets its previous clock back. That also
+happens when the test panics. Guards nest: an inner guard hands back the time
+of the outer one when it drops. A guard is not `Send`, because it belongs to
+one thread.
+
+### Threads and tasks
+
+A guard holds for the current thread. A `#[tokio::test]` of the default
+`current_thread` flavour runs the test, and any task it spawns, on that
+thread, so a guard works across `.await` there.
+
+For a `multi_thread` runtime, or for code that spawns onto other threads,
+use `TestClock::scope`. It sets the clock for one future, across awaits and
+worker-thread hops. The closure gets a `TestClockHandle` with `advance`,
+`set` and `now`:
+
+```rust
+use chrono::{DateTime, Duration};
+use suprnova::testing::TestClock;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scoped_clock() {
+    let at = DateTime::from_timestamp(1_900_000_000, 0).unwrap();
+
+    TestClock::scope(at, |clock| async move {
+        assert_eq!(suprnova::clock::now(), at);
+
+        clock.advance(Duration::hours(1));
+        assert_eq!(suprnova::clock::now(), at + Duration::hours(1));
+
+        // A task started with `tokio::spawn` does not inherit the scope.
+        // Run it through the handle to give it the same clock.
+        let mover = clock.clone();
+        let seen = tokio::spawn(async move {
+            mover.run(async { suprnova::clock::now() }).await
+        })
+        .await
+        .unwrap();
+        assert_eq!(seen, at + Duration::hours(1));
+    })
+    .await;
+}
+```
+
+Outside the scope, the system clock answers again.
+
+### Parallel tests
+
+No call moves the clock of the whole process. A guard affects its own
+thread and a scope affects its own future, so tests that run side by side
+do not see each other's time.
+
+### Your own code
+
+Code of your own that reads the time to make a decision, such as "is this
+invite older than seven days", should read `suprnova::clock::now()` when
+its tests need to move that time. A direct `chrono::Utc::now()` follows the
+system clock.
+
+The health endpoint reports the time of the machine and ignores a test
+clock.
+
+### The `testing` feature
+
+`TestClock`, `TestClockGuard` and `TestClockHandle` exist when the `testing`
+feature is on. It is in the default feature set, so an application that
+depends on `suprnova` with default features has them in its tests. See
+[The `testing` feature and production builds](#the-testing-feature-and-production-builds)
+for a build that leaves the feature off. Without the feature,
+`suprnova::clock::now()` is `Utc::now()` and nothing else.
 
 ## The `testing` feature and production builds
 
@@ -380,7 +555,7 @@ consuming test suites get them for free:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0" }
 
 [dev-dependencies]
 # `testing` is on transitively via the dependency above - nothing extra.
@@ -400,10 +575,10 @@ features off and enable only what you ship:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0", default-features = false, features = ["..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0", default-features = false, features = ["..."] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0", features = ["testing", "..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0", features = ["testing", "..."] }
 ```
 
 This is a tightening, not a fix - boot validation closes the actual
@@ -420,8 +595,8 @@ next test's lookup the instant they overlap on a worker thread.
 
 That's why `TestContainer` has both flavours - thread-local for the
 common `current_thread` case, task-local for `multi_thread`. The
-refcounted `FAKE_GUARDS` clear on the process-global
-`ConnectionRegistry` exists for the same reason: shared state that
+refcounted clear of the process-global
+named-connection registry exists for the same reason: shared state that
 can't be made per-test must at least know not to wipe itself while
 another test is still leaning on it.
 
@@ -439,8 +614,11 @@ matcher is a build error, not a flaky test.
 | `expect!` macro + `Expect<T>` matchers | `framework/src/lib.rs` (macro), `framework/src/testing/expect.rs` (impls) |
 | `TestDatabase::fresh` / `sqlite_memory` / helpers | `framework/src/database/testing.rs` |
 | `test_database!` macro | `framework/src/database/testing.rs` |
-| `TestContainer` + `TestContainerGuard` + `FAKE_GUARDS` | `framework/src/container/testing.rs` |
+| `TestContainer` + `TestContainerGuard` | `framework/src/container/testing.rs` |
 | `install_test_encryption_key[ring]` | `framework/src/testing/mod.rs` |
+| `clock::now`, `TestClock`, `TestClockGuard`, `TestClockHandle` | `framework/src/clock.rs` (re-exported from `suprnova::testing`) |
+| `encrypt_string_under`, `encrypt_string_for_under` | `framework/src/crypto/testing.rs` |
+| `console::test`, `ConsoleRun` | `framework/src/console/testing.rs` |
 | Per-surface fakes (Mail, Notify, Queue, Bus, Events, Storage, HTTP) | per-domain `testing` submodules - see [Mocking](mocking.md) |
 | `TestResponse` | `framework/src/testing/response.rs` |
 | `AssertableInertia`, `ReloadRequest` | `framework/src/testing/inertia.rs` |

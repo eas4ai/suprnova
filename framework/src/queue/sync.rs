@@ -115,7 +115,6 @@ mod tests {
     use crate::queue::worker::register_job;
     use crate::queue::{CURRENT_SCHEMA_VERSION, Envelope};
     use async_trait::async_trait;
-    use chrono::Utc;
     use serde::{Deserialize, Serialize};
     use serial_test::serial;
     use std::sync::Arc;
@@ -147,8 +146,8 @@ mod tests {
             job_name: J::job_name().into(),
             queue: None,
             payload: serde_json::to_value(job).unwrap(),
-            dispatched_at: Utc::now(),
-            available_at: Utc::now(),
+            dispatched_at: crate::clock::now(),
+            available_at: crate::clock::now(),
             attempts: 0,
             max_tries: 1,
             backoff: crate::queue::BackoffSchedule::default(),
@@ -160,6 +159,7 @@ mod tests {
             debounce_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
+            context: None,
         }
     }
 

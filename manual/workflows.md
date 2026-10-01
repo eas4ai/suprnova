@@ -46,10 +46,13 @@ identifying the enqueued instance. A separate worker process picks the
 row up, runs the body, and persists each step's output as it goes.
 
 `#[workflow]` collects the function into the workflow inventory under
-its fully-qualified path (`module_path::fn_name`). Duplicate
-registrations under the same name abort worker boot via
-`registry::assert_no_duplicates` - silent shadowing would be
-undebuggable, so the framework fails loud.
+its fully-qualified path (`module_path::fn_name`). Two functions under
+one name would leave the choice of which one runs to the order the
+binary was linked in, so the framework fails loud. `WorkflowWorker::new()`
+panics at boot when a name is registered twice.
+`suprnova::workflow::assert_no_duplicates()` runs the same check and
+returns a `Result<(), FrameworkError>` whose message lists every
+duplicated name.
 
 ## Schema
 
@@ -135,9 +138,32 @@ cannot brick the daemon.
 | `WORKFLOW_MAX_ATTEMPTS` | `3` | Per-workflow attempt budget (min 1) |
 | `WORKFLOW_RETRY_BACKOFF_SECS` | `5` | Linear backoff: `attempts * value` (min 0) |
 
-For programmatic configs (built in code rather than parsed from env),
-call `WorkflowConfig::validate()` to fail fast on the same invariants
-before constructing a `WorkflowWorker`.
+`WorkflowWorker::new()` reads the config from the typed config registry and
+panics at boot when the config is invalid or a `#[workflow]` name is
+registered twice. For a config built in code, choose the constructor by
+the checks you want:
+
+| Constructor | Validates the config | Checks for duplicate names | On failure |
+|---|---|---|---|
+| `WorkflowWorker::new()` | yes | yes | panics |
+| `WorkflowWorker::try_with_config(config)` | yes | yes | returns `Err(FrameworkError)` |
+| `WorkflowWorker::with_config(config)` | no | no | never fails |
+
+```rust
+use suprnova::{FrameworkError, WorkflowConfig, WorkflowWorker};
+
+fn build_worker() -> Result<WorkflowWorker, FrameworkError> {
+    let config = WorkflowConfig {
+        concurrency: 8,
+        ..WorkflowConfig::default()
+    };
+    WorkflowWorker::try_with_config(config)
+}
+```
+
+`with_config` skips both checks. If you use it, call
+`WorkflowConfig::validate()` and `suprnova::workflow::assert_no_duplicates()`
+where you build the worker.
 
 ## Crash recovery
 
@@ -237,7 +263,7 @@ match handle.wait_with_timeout(Duration::from_secs(30)).await {
     Ok(WorkflowStatus::Succeeded) => { /* done */ }
     Ok(WorkflowStatus::Failed) => { /* persisted error column */ }
     Ok(_) => unreachable!("wait_* only returns terminal status"),
-    Err(FrameworkError::Internal { message }) if message.contains("Timed out") => {
+    Err(FrameworkError::Timeout { .. }) => {
         // Workflow is still running; fall through to async UX.
     }
     Err(other) => return Err(other),
@@ -247,9 +273,14 @@ match handle.wait_with_timeout(Duration::from_secs(30)).await {
 `wait()` polls indefinitely - use only in tests or short-lived scripts
 where blocking forever is acceptable. For HTTP request paths,
 `wait_with_timeout(Duration)` always wins against the inner poll loop,
-even if the underlying status query stalls. A timeout error does **not**
-cancel the workflow - the worker continues, and `handle.status().await`
-returns the live state later.
+even if the underlying status query stalls. When the deadline passes, the
+wait returns `FrameworkError::Timeout`, which carries the deadline
+(`elapsed`) and what was awaited (`message`). `err.is_timeout()` asks for it
+without a `match`. That is how you tell a workflow that is still running
+from a failed status query, which is a different error. A timeout error
+does **not** cancel the workflow - the worker continues, and
+`handle.status().await` returns the live state later. If the error reaches
+a response, it renders as `504 Gateway Timeout`.
 
 `wait_with_options(Some(poll), Some(deadline))` exposes both knobs when
 the defaults don't fit.

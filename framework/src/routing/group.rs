@@ -1,10 +1,11 @@
 //! Route grouping with shared prefix and middleware
 
 use super::macros::{convert_route_params, join_paths};
+use super::router::ANY_METHODS;
 use super::{BoxedHandler, RouteBuilder, Router};
 use crate::FrameworkError;
 use crate::http::{Request, Response};
-use crate::middleware::{BoxedMiddleware, Middleware, into_boxed};
+use crate::middleware::{BoxedMiddleware, Middleware, boxed_as};
 use crate::session::SessionBlock;
 use crate::session::blocking::register_route_block;
 use hyper::Method;
@@ -87,8 +88,31 @@ impl GroupBuilder {
     ///     .middleware(ApiMiddleware);
     /// ```
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
-        self.middleware.push(into_boxed(middleware));
+        self.middleware.push(boxed_as(middleware));
         self
+    }
+
+    /// Add the middleware a name stands for: an alias registered with
+    /// [`register_middleware_alias`](crate::middleware::register_middleware_alias),
+    /// an alias with arguments such as `"throttle:60,1"`, or a group, which
+    /// adds every middleware of the group in order.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not registered, or the alias refuses the
+    /// arguments. That is when the route is registered, which is at boot,
+    /// and never on a request. Use [`Self::try_middleware_named`] to get
+    /// the error instead.
+    pub fn middleware_named(self, name: &str) -> Self {
+        self.try_middleware_named(name)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::middleware_named`].
+    pub fn try_middleware_named(mut self, name: &str) -> Result<Self, FrameworkError> {
+        self.middleware
+            .extend(crate::middleware::resolve_named_middleware(name)?);
+        Ok(self)
     }
 
     /// Serialize the requests that carry one session on every route in
@@ -332,27 +356,14 @@ impl GroupRouter {
     /// seven method-routes within the group. Group middleware applied
     /// via [`GroupBuilder::middleware`] fans across every method at
     /// finalize time, matching the fluent `Router::any` fan-out
-    /// semantics.
+    /// semantics. The verbs come from the list [`Router::any`] uses, so
+    /// the two cannot drift apart.
     pub fn any<H, Fut>(self, path: &str, handler: H) -> Self
     where
         H: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
-        let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
-        let arc = Arc::new(boxed);
-        self.push_routes_for_methods(
-            path,
-            [
-                GroupMethod::Get,
-                GroupMethod::Post,
-                GroupMethod::Put,
-                GroupMethod::Patch,
-                GroupMethod::Delete,
-                GroupMethod::Head,
-                GroupMethod::Options,
-            ],
-            arc,
-        )
+        self.methods(ANY_METHODS, path, handler)
     }
 
     /// Register one handler against an explicit list of HTTP methods -
@@ -418,8 +429,8 @@ impl GroupRouter {
         Ok(self.push_routes_for_methods(path, group_methods, arc))
     }
 
-    /// Internal helper used by [`GroupRouter::any`] and
-    /// [`GroupRouter::methods`]. Pushes one `GroupRoute` entry per
+    /// Internal helper behind [`GroupRouter::methods`], and so behind
+    /// [`GroupRouter::any`] too. Pushes one `GroupRoute` entry per
     /// requested method, all sharing the same `Arc<BoxedHandler>` so
     /// per-method dispatch stays O(1) at finalize time.
     fn push_routes_for_methods(

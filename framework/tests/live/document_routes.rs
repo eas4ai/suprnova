@@ -1,6 +1,8 @@
 //! Canonical document mounting through real Suprnova request and route machinery.
 
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use base64::Engine as _;
@@ -410,43 +412,54 @@ fn live_action_request(
         .expect("build Live action request")
 }
 
+type DocumentFuture = Pin<Box<dyn Future<Output = Response> + Send>>;
+
+/// The GET handler of the happy-path document routes: it mounts `mount` once,
+/// renders the public document view around the island, and answers 500 with a
+/// fixed body on any failure.
+fn document_get_handler(
+    mount: &LiveMount<PublicCounter>,
+) -> impl Fn(Request) -> DocumentFuture + Send + Sync + 'static {
+    let mount = mount.clone();
+    move |request: Request| -> DocumentFuture {
+        let mount = mount.clone();
+        Box::pin(async move {
+            let result: Result<HttpResponse, FrameworkError> = async {
+                let mut document = LiveDocument::from_request(&request)?;
+                let island = document
+                    .mount(
+                        &mount,
+                        CanonicalValue::Object(BTreeMap::new()),
+                        MountFlags::empty(),
+                    )
+                    .await?;
+                document
+                    .render(
+                        ViewName::parse("live/public-document.html")
+                            .map_err(|_| FrameworkError::internal("test view identity"))?,
+                        &PublicDocumentView {
+                            island: island.html(),
+                        },
+                        DocumentResponseIntent::html(StatusCode::OK)
+                            .map_err(|_| FrameworkError::internal("test response intent"))?,
+                        AssetSet::empty(),
+                    )
+                    .map_err(FrameworkError::from)
+            }
+            .await;
+            result.map_err(|_| HttpResponse::text("Live document failed").status(500))
+        })
+    }
+}
+
 fn response_intent_router(mount: &LiveMount<PublicCounter>) -> Router {
-    let handler_mount = mount.clone();
     let router = Router::new()
         .get("/flash-receipts/{receipt}", |_request: Request| async {
             Ok(HttpResponse::text("receipt"))
         })
         .name("live-response-intent.flash-receipt");
     let router: Router = router
-        .get("/catalog/{section}", move |request: Request| {
-            let mount = handler_mount.clone();
-            async move {
-                let result: Result<HttpResponse, FrameworkError> = async {
-                    let mut document = LiveDocument::from_request(&request)?;
-                    let island = document
-                        .mount(
-                            &mount,
-                            CanonicalValue::Object(BTreeMap::new()),
-                            MountFlags::empty(),
-                        )
-                        .await?;
-                    document
-                        .render(
-                            ViewName::parse("live/public-document.html")
-                                .map_err(|_| FrameworkError::internal("test view identity"))?,
-                            &PublicDocumentView {
-                                island: island.html(),
-                            },
-                            DocumentResponseIntent::html(StatusCode::OK)
-                                .map_err(|_| FrameworkError::internal("test response intent"))?,
-                            AssetSet::empty(),
-                        )
-                        .map_err(FrameworkError::from)
-                }
-                .await;
-                result.map_err(|_| HttpResponse::text("Live document failed").status(500))
-            }
-        })
+        .get("/catalog/{section}", document_get_handler(mount))
         .get("/session-start", |_request: Request| async {
             let present = suprnova::session::session_mut(|session| {
                 session.put("live-test-marker", true);
@@ -517,37 +530,8 @@ async fn public_seed_document_is_visible_before_javascript_and_carries_no_instan
     );
     let mount = LiveMount::<PublicCounter>::public_seed("/catalog", "counter", "catalog-counter")
         .expect("declare public mount");
-    let handler_mount = mount.clone();
     let router: Router = Router::new()
-        .get("/catalog", move |request: Request| {
-            let mount = handler_mount.clone();
-            async move {
-                let result: Result<HttpResponse, FrameworkError> = async {
-                    let mut document = LiveDocument::from_request(&request)?;
-                    let island = document
-                        .mount(
-                            &mount,
-                            CanonicalValue::Object(BTreeMap::new()),
-                            MountFlags::empty(),
-                        )
-                        .await?;
-                    document
-                        .render(
-                            ViewName::parse("live/public-document.html")
-                                .map_err(|_| FrameworkError::internal("test view identity"))?,
-                            &PublicDocumentView {
-                                island: island.html(),
-                            },
-                            DocumentResponseIntent::html(StatusCode::OK)
-                                .map_err(|_| FrameworkError::internal("test response intent"))?,
-                            AssetSet::empty(),
-                        )
-                        .map_err(FrameworkError::from)
-                }
-                .await;
-                result.map_err(|_| HttpResponse::text("Live document failed").status(500))
-            }
-        })
+        .get("/catalog", document_get_handler(&mount))
         .into();
     let router = router
         .try_live()
@@ -581,37 +565,8 @@ async fn identity_bound_document_mints_instance_authority_before_publication() {
     let mount =
         LiveMount::<PublicCounter>::identity_bound("/account", "counter", "account-counter")
             .expect("declare identity-bound mount");
-    let handler_mount = mount.clone();
     let router: Router = Router::new()
-        .get("/account", move |request: Request| {
-            let mount = handler_mount.clone();
-            async move {
-                let result: Result<HttpResponse, FrameworkError> = async {
-                    let mut document = LiveDocument::from_request(&request)?;
-                    let island = document
-                        .mount(
-                            &mount,
-                            CanonicalValue::Object(BTreeMap::new()),
-                            MountFlags::empty(),
-                        )
-                        .await?;
-                    document
-                        .render(
-                            ViewName::parse("live/public-document.html")
-                                .map_err(|_| FrameworkError::internal("test view identity"))?,
-                            &PublicDocumentView {
-                                island: island.html(),
-                            },
-                            DocumentResponseIntent::html(StatusCode::OK)
-                                .map_err(|_| FrameworkError::internal("test response intent"))?,
-                            AssetSet::empty(),
-                        )
-                        .map_err(FrameworkError::from)
-                }
-                .await;
-                result.map_err(|_| HttpResponse::text("Live document failed").status(500))
-            }
-        })
+        .get("/account", document_get_handler(&mount))
         .middleware(IdentityFacts)
         .into();
     let router = router
@@ -706,37 +661,8 @@ async fn public_seed_get_promotes_and_executes_an_action_through_the_real_http_e
     let mount =
         LiveMount::<PublicCounter>::public_seed("/interactive", "counter", "interactive-counter")
             .expect("declare interactive mount");
-    let handler_mount = mount.clone();
     let router: Router = Router::new()
-        .get("/interactive", move |request: Request| {
-            let mount = handler_mount.clone();
-            async move {
-                let result: Result<HttpResponse, FrameworkError> = async {
-                    let mut document = LiveDocument::from_request(&request)?;
-                    let island = document
-                        .mount(
-                            &mount,
-                            CanonicalValue::Object(BTreeMap::new()),
-                            MountFlags::empty(),
-                        )
-                        .await?;
-                    document
-                        .render(
-                            ViewName::parse("live/public-document.html")
-                                .map_err(|_| FrameworkError::internal("test view identity"))?,
-                            &PublicDocumentView {
-                                island: island.html(),
-                            },
-                            DocumentResponseIntent::html(StatusCode::OK)
-                                .map_err(|_| FrameworkError::internal("test response intent"))?,
-                            AssetSet::empty(),
-                        )
-                        .map_err(FrameworkError::from)
-                }
-                .await;
-                result.map_err(|_| HttpResponse::text("Live document failed").status(500))
-            }
-        })
+        .get("/interactive", document_get_handler(&mount))
         .into();
     let router = router
         .try_live()
@@ -851,42 +777,13 @@ async fn registered_action_redirect_resolves_through_the_real_http_endpoint() {
     let mount =
         LiveMount::<PublicCounter>::public_seed("/redirecting", "counter", "redirecting-counter")
             .expect("declare redirecting mount");
-    let handler_mount = mount.clone();
     let router = Router::new()
         .get("/receipts/{receipt}", |_request: Request| async {
             Ok(HttpResponse::text("receipt"))
         })
         .name("live-response-intent.receipt");
     let router: Router = router
-        .get("/redirecting", move |request: Request| {
-            let mount = handler_mount.clone();
-            async move {
-                let result: Result<HttpResponse, FrameworkError> = async {
-                    let mut document = LiveDocument::from_request(&request)?;
-                    let island = document
-                        .mount(
-                            &mount,
-                            CanonicalValue::Object(BTreeMap::new()),
-                            MountFlags::empty(),
-                        )
-                        .await?;
-                    document
-                        .render(
-                            ViewName::parse("live/public-document.html")
-                                .map_err(|_| FrameworkError::internal("test view identity"))?,
-                            &PublicDocumentView {
-                                island: island.html(),
-                            },
-                            DocumentResponseIntent::html(StatusCode::OK)
-                                .map_err(|_| FrameworkError::internal("test response intent"))?,
-                            AssetSet::empty(),
-                        )
-                        .map_err(FrameworkError::from)
-                }
-                .await;
-                result.map_err(|_| HttpResponse::text("Live document failed").status(500))
-            }
-        })
+        .get("/redirecting", document_get_handler(&mount))
         .into();
     let router = router
         .try_live()

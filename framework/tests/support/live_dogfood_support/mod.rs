@@ -409,7 +409,7 @@ fn with_form_route(router: Router) -> Router {
 /// A request on the form island that proposes `proposals`, one `sync_model`
 /// operation per proposed field, followed by `save` when `save` is set and
 /// alone otherwise, which is a model sync. A snapshot carrying a revision is
-/// an instance, which a model sync needs; any other is the public seed.
+/// an instance; any other is the public seed, which the request promotes.
 pub fn form_action_request(
     spec: ActionRequest<'_>,
     proposals: Value,

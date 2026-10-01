@@ -23,6 +23,21 @@ type AsyncGateFn =
 // resource-agnostic - put resource-specific logic in the gate itself).
 type BeforeFn = dyn Fn(&dyn Any, &str) -> Option<bool> + Send + Sync;
 
+// An async before-hook: the sibling of `BeforeFn` for a decision that has to
+// wait on I/O, such as a database read. It returns an owned, boxed future for
+// the reason `AsyncGateFn` does. Only the async evaluation path can await it.
+type BeforeAsyncFn =
+    dyn Fn(&dyn Any, &str) -> Pin<Box<dyn Future<Output = Option<bool>> + Send>> + Send + Sync;
+
+// One registered before-hook. Sync and async hooks share one list per user
+// type, so both evaluation paths walk them in registration order; the sync
+// path skips the async entries it cannot wait for.
+#[derive(Clone)]
+enum BeforeHook {
+    Sync(Arc<BeforeFn>),
+    Async(Arc<BeforeAsyncFn>),
+}
+
 // An after-hook: receives the user, the action name, and the running decision
 // (`None` while still undecided). Mirrors Laravel's `??=` semantic - an after
 // hook can only *fill in* an undecided result, never override an existing one.
@@ -138,8 +153,9 @@ pub(crate) struct GateRegistry {
     // clone the hook list out under a short read lock and invoke the user
     // closures *outside* the lock - a before hook that itself calls
     // `Gate::allows` re-enters this registry, and holding the read lock across
-    // that nested call could deadlock a non-reentrant `RwLock`.
-    before: RwLock<HashMap<TypeId, Vec<Arc<BeforeFn>>>>,
+    // that nested call could deadlock a non-reentrant `RwLock`. The same copy
+    // lets an async before hook's future be awaited with no lock held.
+    before: RwLock<HashMap<TypeId, Vec<BeforeHook>>>,
     after: RwLock<HashMap<TypeId, Vec<Arc<AfterFn>>>>,
 }
 
@@ -295,8 +311,36 @@ impl GateRegistry {
                 None => None,
             }
         });
+        self.insert_before::<U>(BeforeHook::Sync(erased));
+    }
+
+    /// Register an async before-hook keyed by the user type `U`. It joins the
+    /// same ordered list as [`register_before`](Self::register_before), and
+    /// only [`raw_async`](Self::raw_async) awaits it.
+    pub(crate) fn register_before_async<U, F, Fut>(&self, f: F)
+    where
+        U: 'static,
+        F: Fn(&U, &str) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<bool>> + Send + 'static,
+    {
+        let erased: Arc<BeforeAsyncFn> = Arc::new(move |u: &dyn Any, action: &str| {
+            // Same unreachable mismatch as the sync hook above, and the same
+            // answer: abstain, so the gate decides and defaults to deny.
+            let pending: Pin<Box<dyn Future<Output = Option<bool>> + Send>> =
+                match u.downcast_ref::<U>() {
+                    Some(u) => Box::pin(f(u, action)),
+                    None => Box::pin(async { None::<bool> }),
+                };
+            pending
+        });
+        self.insert_before::<U>(BeforeHook::Async(erased));
+    }
+
+    // Append a before-hook to the user type's ordered list. Poison skips the
+    // registration with a log line, like every other registration here.
+    fn insert_before<U: 'static>(&self, hook: BeforeHook) {
         match self.before.write() {
-            Ok(mut map) => map.entry(TypeId::of::<U>()).or_default().push(erased),
+            Ok(mut map) => map.entry(TypeId::of::<U>()).or_default().push(hook),
             Err(_) => tracing::error!(
                 user_type = std::any::type_name::<U>(),
                 "before-hook registry poisoned; skipping registration."
@@ -333,7 +377,7 @@ impl GateRegistry {
     // Clone the hook list for a user type out from under a short read lock so
     // the closures can be invoked without holding the lock (see `before`/`after`
     // field docs for the re-entrancy reasoning). Poison → empty (safe-skip).
-    fn before_hooks(&self, tid: TypeId) -> Vec<Arc<BeforeFn>> {
+    fn before_hooks(&self, tid: TypeId) -> Vec<BeforeHook> {
         match self.before.read() {
             Ok(map) => map.get(&tid).cloned().unwrap_or_default(),
             Err(_) => {
@@ -464,8 +508,9 @@ impl GateRegistry {
         self.run_after(tid, user as &dyn Any, action, result)
     }
 
-    /// Async sibling of [`raw`](Self::raw). before/after hooks are synchronous;
-    /// only the gate dispatch awaits.
+    /// Async sibling of [`raw`](Self::raw). The before hooks run in the same
+    /// place and order, and here the async ones are awaited too; the gate
+    /// dispatch awaits; the after hooks are synchronous.
     pub(crate) async fn raw_async<U: 'static, R: 'static>(
         &self,
         action: &str,
@@ -473,17 +518,41 @@ impl GateRegistry {
         resource: &R,
     ) -> Option<Response> {
         let tid = TypeId::of::<U>();
-        let mut result = self.run_before(tid, user as &dyn Any, action);
+        let mut result = self.run_before_async(user, action).await;
         if result.is_none() {
             result = self.invoke_async::<U, R>(action, user, resource).await;
         }
         self.run_after(tid, user as &dyn Any, action, result)
     }
 
-    // Run before hooks; first `Some` short-circuits.
+    // Run before hooks; first `Some` short-circuits. An async hook is skipped:
+    // this path has no way to wait for its future, so it answers nothing here.
     fn run_before(&self, tid: TypeId, user: &dyn Any, action: &str) -> Option<Response> {
         for hook in self.before_hooks(tid) {
+            let BeforeHook::Sync(hook) = hook else {
+                continue;
+            };
             if let Some(decision) = hook(user, action) {
+                return Some(bool_to_response(decision));
+            }
+        }
+        None
+    }
+
+    // Run every before hook, sync and async, in registration order; first
+    // `Some` short-circuits. Generic over the user type rather than taking
+    // `&dyn Any` like `run_before`: `dyn Any` is not `Sync`, so a `&dyn Any`
+    // alive across the `.await` would make every async gate check `!Send`.
+    async fn run_before_async<U: 'static>(&self, user: &U, action: &str) -> Option<Response> {
+        for hook in self.before_hooks(TypeId::of::<U>()) {
+            let decision = match hook {
+                BeforeHook::Sync(hook) => hook(user as &dyn Any, action),
+                BeforeHook::Async(hook) => {
+                    let pending = hook(user as &dyn Any, action);
+                    pending.await
+                }
+            };
+            if let Some(decision) = decision {
                 return Some(bool_to_response(decision));
             }
         }

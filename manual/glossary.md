@@ -74,8 +74,8 @@ The trait that gives a user type the policy entry points (`can`,
 ### Backoff schedule
 
 The sequence of delays a queue worker waits between retries of a
-failing job. `BackoffSchedule::linear`, `BackoffSchedule::exponential`,
-or a custom `Vec<Duration>`. See [Queues - Backoff schedules](queues.md#backoff-schedules).
+failing job. A `BackoffSchedule`: `Fixed`, `Exponential`, or an explicit
+`Sequence` of delays. See [Queues - Backoff schedules](queues.md#backoff-schedules).
 
 ### Batch (queue)
 
@@ -307,8 +307,8 @@ evaluator on top. See [Feature Flags](feature-flags.md).
 
 The compile-time allowlist that says which model columns can be
 mass-assigned from a hash of untrusted attributes - declared on the
-model struct via the `#[fillable]` attribute or the `Fillable` trait.
-The dual of `#[guarded]`. See [Eloquent - Mass assignment](eloquent.md#mass-assignment).
+model via `fillable = [...]` inside `#[model(...)]`. The dual of
+`guarded = [...]`. See [Eloquent - Mass assignment](eloquent.md#mass-assignment).
 
 ### Filesystem
 
@@ -343,7 +343,7 @@ post)`. Resolves against registered policies (declared via the
 ### Global scope
 
 A query constraint applied to every `Model::query()` call until
-explicitly removed (`Builder::without_global_scope`). Implemented via
+explicitly removed (`Model::without_global_scope::<S>()`). Implemented via
 the `GlobalScope` trait and registered in bootstrap. See
 [Eloquent - Scopes](eloquent.md#scopes).
 
@@ -629,7 +629,7 @@ the subscribing user. Useful for per-user notification streams. See
 ### Prunable
 
 The trait that marks a soft-deleted (or queryable) model as eligible
-for cleanup by `model:prune` - `Prunable::prunable_query()` returns
+for cleanup by `suprnova model:prune` - `Prunable::prunable()` returns
 the builder for rows that should go. `MassPrunable` deletes in a
 single `DELETE WHERE`; the default issues per-row deletes so observers
 fire. Tagged for the registry via the `#[prunable]` macro. See
@@ -726,7 +726,8 @@ the collision. See [Responses](responses.md),
 
 Two unrelated things share the name; both ship.
 
-1. **JSON:API resource** - a `#[derive(Resource)]` struct that
+1. **JSON:API resource** - a `#[derive(Data)]` struct with
+   `#[json_resource("type")]` that
    serialises a model into the JSON:API shape with sparse fieldsets
    and includes. See [API Resources](eloquent-resources.md).
 2. **Resource routing** - a route helper that mounts a CRUD
@@ -736,7 +737,7 @@ Two unrelated things share the name; both ship.
 ### `routes!` macro
 
 The compile-time macro that expands a routing DSL
-(`get!("/users", users::index)`, `group!`, `middleware!(Auth)`) into
+(`get!("/users", users::index)`, `group!`, `.middleware(...)`) into
 a `Router` factory function. The single source of route truth for an
 application. See [Routing](routing.md), [Macros](macros.md).
 
@@ -753,7 +754,8 @@ counterpart of [Global scope](#global-scope). See
 ### Seeder
 
 A type implementing the `Seeder` trait that populates the database
-with starting data - registered through `suprnova db:seed`. Often
+with starting data. `suprnova db:seed` runs every seeder, and
+`suprnova db:seed UserSeeder` runs one. Often
 backed by a [Factory](#factory-eloquent). See [Eloquent](eloquent.md).
 
 ### Signed URL
@@ -903,9 +905,13 @@ timeout, origin policy. Used by `ws!()` routes. See [WebSockets](websockets.md).
 ### `WsSocket`
 
 The framework's typed WebSocket handle handed to a `ws!()` handler.
-Split into a `Sink` (send) and a `Stream` (receive) half via
-`WsSocket::split()`; pings/pongs are managed by a heartbeat task with
-an `AbortHandle` so a dropped handler always tears down cleanly. See
+`WsSocket::sender()` returns a cloneable `WsSender`, so another task can
+send while the handler waits in `recv`. `WsSocket::split()` takes the socket
+apart into a `WsSender` and a `WsReceiver`. The sending half is not a `Sink`:
+it has `send_text` and `send_binary` methods that take `&self`. The receiving
+half is a `Stream` of `Result<Message, FrameworkError>`, and also has `recv`
+and `recv_text`. Pings/pongs are managed by a heartbeat task with an
+`AbortHandle` so a dropped handler always tears down cleanly. See
 [WebSockets](websockets.md).
 
 ## Next

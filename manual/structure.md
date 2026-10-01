@@ -150,7 +150,7 @@ pub async fn register() {
     crate::models::user::register_observer();
 
     // Listen for events
-    suprnova::Event::listen::<OrderShipped, _>(Arc::new(SendShipmentNotification)).await;
+    suprnova::EventFacade::listen::<OrderShipped, _>(Arc::new(SendShipmentNotification)).await;
 }
 ```
 

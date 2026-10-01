@@ -17,8 +17,8 @@ its fake in depth.
 |-----------------|---------------------------------------------------|---------------------------------------|----------------------------------------------------|--------------------------------------|
 | Mail            | `Mail::fake()` → `MailFake` guard                 | methods on the guard                  | needs `#[serial]` - global transport, no serializer | [mail.md](mail.md)                   |
 | Notifications   | `Notify::fake()` → `NotifyFakeGuard`              | free functions in `notifications::testing` | guard holds process-wide serializer            | [notifications.md](notifications.md) |
-| Queue           | `suprnova::queue::testing::install_fake()`        | free functions in `queue::testing`    | guard holds process-wide serializer                | [queues.md](queues.md)               |
-| Bus             | `suprnova::bus::testing::install_fake()`          | free functions in `bus::testing`      | guard holds process-wide serializer                | [bus.md](bus.md)                     |
+| Queue           | `Queue::fake()` → `QueueFakeGuard`                | free functions in `queue::testing`    | guard holds process-wide serializer                | [queues.md](queues.md)               |
+| Bus             | `Bus::fake()` → `BusFakeGuard`                    | free functions in `bus::testing`      | guard holds process-wide serializer                | [bus.md](bus.md)                     |
 | Events          | `EventFacade::fake()` → `EventFakeGuard`          | free functions in `events`            | guard holds process-wide serializer                | [events.md](events.md)               |
 | Storage         | `Storage::fake()` → `StorageFakeGuard`            | `DiskAssertExt` methods on a disk     | guard holds process-wide serializer                | [filesystem.md](filesystem.md)       |
 | HTTP client     | `Http::fake(\|\| async { … }).await`              | `assert_sent` / `assert_not_sent`     | task-local - truly concurrent across tests         | [http-client.md](http-client.md)     |
@@ -66,9 +66,10 @@ installed; the assertions live in a `testing` submodule next to the
 fake's internals. Import what you need:
 
 ```rust,ignore
-use suprnova::queue::testing::{install_fake, assert_pushed, pushed};
+use suprnova::Queue;
+use suprnova::queue::testing::{assert_pushed, pushed};
 
-let _guard = install_fake();
+let _guard = Queue::fake();
 schedule_welcome_email(user_id).await?;
 assert_pushed::<WelcomeJob>(|j| j.user_id == user_id);
 ```
@@ -84,9 +85,9 @@ can join what it captured to what a listener saw:
 ```rust,ignore
 use suprnova::events::{EventFacade, dispatched};
 use suprnova::queue::events::JobQueued;
-use suprnova::queue::testing::{install_fake, pushed_with_id};
+use suprnova::queue::testing::pushed_with_id;
 
-let _queue = install_fake();
+let _queue = Queue::fake();
 let _events = EventFacade::fake();
 
 Queue::push(SendInvoice { order_id: 7 }).await?;
@@ -154,7 +155,7 @@ so production code can't accidentally call `disk.assert_exists(…)`.
 ## Parallel safety, in one paragraph
 
 Six of the seven fakes guard a process-global static. Each one's
-guard, on construction, takes a dedicated `FAKE_SERIAL`
+guard, on construction, takes a dedicated process-wide
 `std::sync::Mutex` and holds it until drop. The effect is that any
 two `#[tokio::test]`s that install the same fake run serialized
 under one process - no need for `#[serial]` from the
@@ -259,17 +260,15 @@ recipients are keyed on the per-channel `route_for` value, so
 the id-as-string for `"database"`, …) - see [Notifications](notifications.md)
 for the routing model.
 
-## Queue - `queue::testing::install_fake()`
+## Queue - `Queue::fake()`
 
 ```rust,ignore
 use suprnova::Queue;
-use suprnova::queue::testing::{
-    install_fake, assert_pushed, assert_pushed_later, pushed,
-};
+use suprnova::queue::testing::{assert_pushed, assert_pushed_later, pushed};
 
 #[tokio::test]
 async fn order_placed_enqueues_charge() {
-    let _guard = install_fake();
+    let _guard = Queue::fake();
 
     place_order(42).await.unwrap();
 
@@ -283,6 +282,11 @@ async fn order_placed_enqueues_charge() {
 | `assert_pushed_later::<J>(\|j, at\| pred)`     | a push of `J` was scheduled at `at` (delayed dispatch)         |
 | `assert_pushed_on_queue::<J>(queue)`           | a push of `J` declared `queue` via [`EnvelopeOverrides`](queues.md#per-push-overrides-with-envelopeoverrides) |
 | `assert_pushed_on_connection::<J>(connection)` | a push of `J` declared `connection` via `EnvelopeOverrides`    |
+| `assert_batched(\|batch\| pred)`               | at least one recorded batch matches                            |
+| `assert_batch_count(n)`                        | exactly `n` batches were recorded                              |
+| `assert_nothing_batched()`                     | no batch was recorded                                          |
+| `assert_chained(&["JobA", "JobB"])`            | a recorded chain is made of exactly these `Job::job_name()`s, head first |
+| `assert_nothing_chained()`                     | no chain was recorded                                          |
 
 The data side returns the typed jobs themselves:
 
@@ -291,11 +295,24 @@ The data side returns the typed jobs themselves:
   with each job's scheduled timestamp
 - `pushed_with_overrides::<J>() -> Vec<(J, EnvelopeOverrides)>` - same,
   with each job's declared per-push overrides
+- `batched() -> Vec<FakedBatch>` - every recorded batch, in dispatch order.
+  A `FakedBatch` has `id`, `name` and `jobs`, and `jobs_of::<J>()` decodes
+  the jobs of one type.
+- `chained() -> Vec<FakedChain>` - every recorded chain, in dispatch order.
+  A `FakedChain` has `links`, `job_names()` and `link::<J>(index)`, which
+  decodes the link at `index`.
 
 Every `Queue::push`, `Queue::push_later`, `Queue::later`,
-`Queue::push_unique*`, and the chain/batch dispatchers all funnel
-into the same recorder. See [Queues](queues.md) for `push_unique`
-semantics under the fake (it always records and reports "pushed").
+`Queue::push_unique*`, `Queue::batch().dispatch()`,
+`Queue::chain().dispatch()`, `Queue::retry_failed` and
+`Queue::retry_all_failed` funnel into the same recorder, and none of them
+writes to a driver. No driver has to be installed. A batch, a chain and a
+retried job also record as pushes, so `assert_pushed` sees the jobs of a
+batch, the head of a chain and every retried job. A chain records only its
+head as a push, because the links after it have no envelope until the link
+before them completes. See [Queues](queues.md#batches-chains-and-failed-job-retries)
+for the details, and for `push_unique` semantics under the fake (it always
+records and reports "pushed").
 
 Only `Queue::push_with` and `Queue::later_with` carry an
 `EnvelopeOverrides`, so `pushed_with_overrides` records
@@ -312,18 +329,18 @@ override at all. Reach for `pushed_with_overrides` directly to assert
 anything else the overlay carries - `timeout`, `fail_on_timeout`,
 `max_tries`, `backoff`.
 
-## Bus - `bus::testing::install_fake()`
+## Bus - `Bus::fake()`
 
 ```rust,ignore
 use suprnova::Bus;
 use suprnova::bus::testing::{
-    install_fake, assert_dispatched, assert_dispatched_times,
+    assert_dispatched, assert_dispatched_times,
     assert_not_dispatched, assert_nothing_dispatched,
 };
 
 #[tokio::test]
 async fn order_placed_dispatches_charge() {
-    let _guard = install_fake();
+    let _guard = Bus::fake();
 
     place_order(42).await.unwrap();
 
@@ -344,6 +361,10 @@ Under the fake, `Bus::dispatch` returns `Ok(Dispatched::Captured)`
 instead of running the handler. Real failures - encode/decode
 errors, no handler registered before the fake was installed - still
 surface as `Err(_)`. See [Command Bus](bus.md).
+
+`Bus::fake()` and `bus::testing::install_fake()` are the same call and return
+the same `BusFakeGuard`. The same holds for `Queue::fake()` and
+`queue::testing::install_fake()`.
 
 ## Events - `EventFacade::fake()`
 

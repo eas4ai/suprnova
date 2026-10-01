@@ -2,13 +2,15 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use sea_orm::TransactionTrait;
 use sea_orm::sea_query::Expr;
 use sea_orm::{ColumnTrait, EntityTrait, ExprTrait, IntoActiveModel, QueryFilter};
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 
-use super::{AuthTransaction, SeaOrmStorage, db_error, expose_secret, random_id, random_token};
+use super::{
+    AuthTransaction, SeaOrmStorage, db_error, expose_secret, in_transaction, random_id,
+    random_token,
+};
 use crate::schema::{
     AuthSchema, EntityBinding, SessionEpoch, SessionFields, TokenFields, UserFields,
     UserOptionalFields,
@@ -219,15 +221,14 @@ where
     }
 
     async fn consume(&self, token: PresentedToken, purpose: &str) -> Result<ConsumedToken> {
-        let mut transaction = self.database().begin().await.map_err(db_error)?;
-        let mut borrowed = AuthTransaction::new(&mut transaction);
-        match self.consume_in(&mut borrowed, token, purpose).await {
-            Ok(value) => transaction.commit().await.map_err(db_error).map(|()| value),
-            Err(error) => {
-                let _ = transaction.rollback().await;
-                Err(error)
-            }
-        }
+        // The transaction body must not borrow `self`, so it works through a
+        // handle of its own over the same connection.
+        let this = SeaOrmStorage::<S>::new(self.database().clone());
+        let purpose = purpose.to_owned();
+        in_transaction(self.database(), move |tx| {
+            Box::pin(async move { this.consume_in(tx, token, &purpose).await })
+        })
+        .await
     }
 
     async fn consume_in(
@@ -317,13 +318,14 @@ where
     <S::Session as EntityBinding>::Column: ColumnTrait,
 {
     async fn apply_password_reset(&self, input: PasswordResetInput) -> Result<PasswordResetCommit> {
-        let mut transaction = self.database().begin().await.map_err(db_error)?;
-        let result = {
-            let mut tx = AuthTransaction::new(&mut transaction);
-            async {
-                let consumed = <Self as TokenStore>::consume_in(
-                    self,
-                    &mut tx,
+        // The transaction body must not borrow `self`, so it works through a
+        // handle of its own over the same connection.
+        let this = SeaOrmStorage::<S>::new(self.database().clone());
+        in_transaction(self.database(), move |tx| {
+            Box::pin(async move {
+                let consumed = <SeaOrmStorage<S> as TokenStore>::consume_in(
+                    &this,
+                    &mut *tx,
                     input.token,
                     PASSWORD_RESET_PURPOSE,
                 )
@@ -395,15 +397,8 @@ where
                     auth_epoch: current_epoch.saturating_add(1),
                     revoked_sessions,
                 })
-            }
-            .await
-        };
-        match result {
-            Ok(value) => transaction.commit().await.map_err(db_error).map(|()| value),
-            Err(error) => {
-                let _ = transaction.rollback().await;
-                Err(error)
-            }
-        }
+            })
+        })
+        .await
     }
 }

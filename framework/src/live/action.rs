@@ -24,7 +24,8 @@ use suprnova_live::endpoint::{
 use suprnova_live::execution::{
     ActionExecutionRequest, ExecutionResult, ExecutionService, ExecutionTracePort,
     InstancedActionRequest, InstancedFreshRenderRequest, InstancedLifecycleOperation,
-    InstancedLifecycleRequest, PromotedActionRequest, PromotedRequestIdentity, TransactionPort,
+    InstancedLifecycleRequest, PromotedActionRequest, PromotedModelSyncRequest,
+    PromotedRequestIdentity, TransactionPort,
 };
 use suprnova_live::identity::{
     ActionName, BrowserNonce, BrowserOperationName, ContentDigest, IdempotencyKey, InstanceId,
@@ -388,6 +389,19 @@ impl SuprnovaEndpointKernel {
                 .await?
             }
         };
+        // The browser is only told to refresh the island, so the closed cause of a failed
+        // operation is recorded here for an operator. A refresh without a cause, such as a
+        // stale revision or a duplicate, is an ordinary outcome and is not a fault.
+        if let ExecutionResult::RefreshRequired(refresh) = &result
+            && let Some(cause) = refresh.cause()
+        {
+            tracing::warn!(
+                component = request.component().as_str(),
+                reason = ?refresh.reason(),
+                cause = ?cause,
+                "Live operation failed and the browser must refresh the island"
+            );
+        }
         dispatch_execution_result(request.request(), result)
     }
 
@@ -550,14 +564,49 @@ impl SuprnovaEndpointKernel {
         digest: ContentDigest,
         response_sealer: AcceptedResponseSealer,
     ) -> Result<suprnova_live::execution::ExecutionResult, EndpointKernelError> {
-        let RequestedOperation::Action {
-            name,
-            arguments,
-            synchronized,
-            proposals,
-        } = operation
-        else {
-            return Err(EndpointKernelError::unavailable());
+        let identity = PromotedRequestIdentity::new(
+            browser_nonce,
+            idempotency_key(request.request()).clone(),
+            digest,
+        );
+        let (name, arguments, synchronized, proposals) = match operation {
+            RequestedOperation::Action {
+                name,
+                arguments,
+                synchronized,
+                proposals,
+            } => (name, arguments, synchronized, proposals),
+            // The browser runtime sends an immediate `live:model` edit on a
+            // public seed as a model sync, so it promotes the seed too. It needs
+            // no upload finalization: `prepare_proposals` refuses an upload
+            // handle unless the request names the field's finalize action.
+            RequestedOperation::ModelSync {
+                synchronized,
+                proposals,
+            } => {
+                let proposal_batch = self
+                    .prepare_proposals(request.descriptor(), None, &synchronized, proposals)
+                    .await?
+                    .ok_or_else(EndpointKernelError::unavailable)?;
+                return Ok(self
+                    .execution
+                    .execute_promoted_model_sync(
+                        PromotedModelSyncRequest::new(
+                            request.descriptor(),
+                            request.context(),
+                            browser,
+                            promoted,
+                            identity,
+                            &proposal_batch.batch,
+                            self.trace.as_ref(),
+                        )
+                        .with_response_sealer(response_sealer, request.response_binding()),
+                    )
+                    .await);
+            }
+            RequestedOperation::ParamsChanged
+            | RequestedOperation::FreshRender
+            | RequestedOperation::LazyComplete => return Err(EndpointKernelError::unavailable()),
         };
         let proposal_batch = self
             .prepare_proposals(request.descriptor(), Some(name), &synchronized, proposals)
@@ -585,11 +634,7 @@ impl SuprnovaEndpointKernel {
                 request.context(),
                 browser,
                 promoted,
-                PromotedRequestIdentity::new(
-                    browser_nonce,
-                    idempotency_key(request.request()).clone(),
-                    digest,
-                ),
+                identity,
                 action,
             ))
             .await;

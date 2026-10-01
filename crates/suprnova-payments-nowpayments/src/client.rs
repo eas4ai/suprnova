@@ -17,8 +17,11 @@ impl NowPaymentsProvider {
             .header("accept", "application/json")
             .send()
             .await
-            .map_err(|_| {
-                PaymentError::Provider("NOWPayments request failed or timed out".into())
+            .map_err(|error| {
+                PaymentError::Provider(format!(
+                    "NOWPayments request failed or timed out: {}",
+                    transport_cause(error)
+                ))
             })?;
         let status = response.status();
         if !status.is_success() {
@@ -45,11 +48,12 @@ impl NowPaymentsProvider {
             ));
         }
         let mut body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| PaymentError::Provider("NOWPayments response could not be read".into()))?
-        {
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            PaymentError::Provider(format!(
+                "NOWPayments response could not be read: {}",
+                transport_cause(error)
+            ))
+        })? {
             if chunk.len() > MAX_BODY_BYTES - body.len() {
                 return Err(PaymentError::Provider(
                     "NOWPayments response exceeds 64 KiB".into(),
@@ -57,8 +61,26 @@ impl NowPaymentsProvider {
             }
             body.extend_from_slice(&chunk);
         }
-        let value = crate::json::parse(&body)
-            .map_err(|_| PaymentError::Provider("NOWPayments returned invalid JSON".into()))?;
+        let value = crate::json::parse(&body).map_err(|error| {
+            PaymentError::Provider(format!("NOWPayments returned invalid JSON: {error}"))
+        })?;
         Ok(JsonResponse { value, body })
     }
+}
+
+/// A transport error's own text and each cause beneath it, without the
+/// request URL. `reqwest::Error` names the URL, which carries payment
+/// identifiers, and its `Display` stops at the first level, where the text is
+/// only "error sending request"; the refused connection or the elapsed
+/// deadline an operator needs is one or two causes down.
+fn transport_cause(error: reqwest::Error) -> String {
+    let error = error.without_url();
+    let mut text = error.to_string();
+    let mut cause = std::error::Error::source(&error);
+    while let Some(next) = cause {
+        text.push_str(": ");
+        text.push_str(&next.to_string());
+        cause = next.source();
+    }
+    text
 }

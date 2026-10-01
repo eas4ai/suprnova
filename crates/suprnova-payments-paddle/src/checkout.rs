@@ -6,8 +6,6 @@
 //! returned `transaction_id` is opened by the frontend via paddle.js with
 //! the `client_token`.
 
-use std::time::Duration;
-
 use async_trait::async_trait;
 use paddle_rust_sdk::enums::TransactionStatus;
 use suprnova::payments::{
@@ -16,9 +14,8 @@ use suprnova::payments::{
 };
 
 use crate::PaddleProvider;
-
-// The SDK constructs a reqwest client without a request deadline.
-const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(30);
+use crate::deadline;
+use crate::sdk_error;
 
 #[async_trait]
 impl Checkout for PaddleProvider {
@@ -42,12 +39,9 @@ impl Checkout for PaddleProvider {
             builder.custom_data(metadata);
         }
 
-        let resp = tokio::time::timeout(TRANSACTION_TIMEOUT, builder.send())
-            .await
-            .map_err(|_| PaymentError::Provider(
-                "paddle transaction_create timed out; outcome is unknown, reconcile before retrying".into(),
-            ))?
-            .map_err(|e| PaymentError::Provider(format!("paddle transaction_create: {e}")))?;
+        let resp = deadline::change("transaction_create", builder.send())
+            .await?
+            .map_err(|e| sdk_error::provider_error("transaction_create", e))?;
 
         Ok(SessionPayload::PaddleInline {
             transaction_id: resp.data.id.to_string(),
@@ -75,13 +69,12 @@ impl Checkout for PaddleProvider {
                 "Paddle session ID must be a transaction identifier".into(),
             ));
         }
-        let transaction = tokio::time::timeout(
-            TRANSACTION_TIMEOUT,
+        let transaction = deadline::read(
+            "transaction_get",
             self.client().transaction_get(provider_session_id).send(),
         )
-        .await
-        .map_err(|_| PaymentError::Provider("paddle transaction_get timed out".into()))?
-        .map_err(|e| PaymentError::Provider(format!("paddle transaction_get: {e}")))?
+        .await?
+        .map_err(|e| sdk_error::provider_error("transaction_get", e))?
         .data;
         match transaction.status {
             TransactionStatus::Draft

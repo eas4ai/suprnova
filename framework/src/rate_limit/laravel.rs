@@ -177,6 +177,9 @@ pub struct RateLimiter;
 
 const TIMER_SUFFIX: &str = ":timer";
 
+/// The time a window is measured against. It is the wall clock, not
+/// [`crate::clock::now`]: the window is also the time to live of its cache
+/// key, which the cache measures in real time, and the two must agree.
 fn unix_now_secs() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

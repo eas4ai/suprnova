@@ -447,7 +447,6 @@ mod tests {
     use crate::cache::{CacheStore, InMemoryCache};
     use crate::queue::{BackoffSchedule, CURRENT_SCHEMA_VERSION};
     use crate::testing::{TestContainer, TestContainerGuard};
-    use chrono::Utc;
     use serial_test::serial;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -479,8 +478,8 @@ mod tests {
             job_name: name.into(),
             queue: None,
             payload: serde_json::json!({}),
-            dispatched_at: Utc::now(),
-            available_at: Utc::now(),
+            dispatched_at: crate::clock::now(),
+            available_at: crate::clock::now(),
             attempts: 0,
             max_tries: 3,
             backoff: BackoffSchedule::default(),
@@ -492,6 +491,7 @@ mod tests {
             debounce_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
+            context: None,
         }
     }
 
@@ -683,7 +683,6 @@ mod release_failure_tests {
     use crate::error::FrameworkError;
     use crate::queue::{BackoffSchedule, CURRENT_SCHEMA_VERSION};
     use crate::testing::TestContainer;
-    use chrono::Utc;
     use serial_test::serial;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -766,8 +765,8 @@ mod release_failure_tests {
             job_name: name.into(),
             queue: None,
             payload: serde_json::json!({}),
-            dispatched_at: Utc::now(),
-            available_at: Utc::now(),
+            dispatched_at: crate::clock::now(),
+            available_at: crate::clock::now(),
             attempts: 0,
             max_tries: 3,
             backoff: BackoffSchedule::default(),
@@ -779,6 +778,7 @@ mod release_failure_tests {
             debounce_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
+            context: None,
         }
     }
 

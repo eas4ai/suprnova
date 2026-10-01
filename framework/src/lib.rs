@@ -48,6 +48,7 @@ pub mod boot;
 pub mod broadcasting;
 pub mod bus;
 pub mod cache;
+pub mod clock;
 pub mod config;
 pub mod console;
 pub mod container;
@@ -93,6 +94,7 @@ pub mod render_cache;
 pub mod resources;
 pub mod routing;
 pub mod schedule;
+pub mod schema;
 pub mod seed;
 pub mod server;
 pub mod session;
@@ -134,8 +136,8 @@ pub use auth::{
     Auth, AuthConfig, AuthFlowUser, AuthManager, AuthMiddleware, Authenticatable,
     BasicAuthMiddleware, CanResetPassword, Credentials, DatabaseUserProvider, EloquentUserProvider,
     GenericUser, Guard, GuardConfig, GuardDriver, GuestMiddleware, LockoutStatus, MustVerifyEmail,
-    Session, SessionBuilder, SessionGuard, SessionToken, StatefulGuard, TokenGuard, User,
-    UserBuilder, UserId, UserProvider,
+    RequestUserFuture, RequestUserResult, Session, SessionBuilder, SessionGuard, SessionToken,
+    StatefulGuard, TokenGuard, User, UserBuilder, UserId, UserProvider,
 };
 pub use authorization::{Authorizable, Gate};
 // The crate root binds `Response` to the HTTP response contract, so the
@@ -148,17 +150,17 @@ pub use config::{
     env_optional, env_required, try_env_required,
 };
 pub use container::{App, Container};
-pub use context::{Context, ContextStore};
-pub use crypto::{Crypt, CryptPurpose, EncryptionKey};
+pub use context::{Context, ContextSnapshot, ContextStore};
+pub use crypto::{AadVersion, Crypt, CryptPurpose, DecryptOrigin, EncryptionKey, KeyOrigin};
 pub use csrf::{CsrfMiddleware, OriginPolicy, csrf_field, csrf_meta_tag, csrf_token};
 pub use data::{
     Field, IncludeError, IncludeMiddleware, IsRelationLoaded, RequestIncludeSet,
     current_include_set, scope_include_set, with_include_overrides,
 };
 pub use database::{
-    AutoRouteBinding, ConnectionEstablished, ConnectionRegistry, DB, Database, DatabaseBusy,
-    DatabaseConfig, DatabaseType, DbConnection, DbTableBuilder, DynamicRow, EntityExt,
-    EntityExtMut, PRIMARY_CONNECTION_NAME, QueryExecuted, QueryListener,
+    AutoRouteBinding, ConnectionCount, ConnectionEstablished, ConnectionRegistry, DB, Database,
+    DatabaseBusy, DatabaseConfig, DatabaseType, DbConnection, DbTableBuilder, DynamicRow,
+    EntityExt, EntityExtMut, PRIMARY_CONNECTION_NAME, QueryExecuted, QueryListener,
     READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, RouteParam, Transaction,
     TransactionBeginning, TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource,
 };
@@ -254,7 +256,8 @@ pub use ::opendal;
 pub use ::tokio;
 pub use broadcasting::{
     BroadcastEnvelope, BroadcastHub, BroadcastListener, Broadcastable, BroadcastingWsHandler,
-    InMemoryBroadcastHub,
+    ChannelVisibility, InMemoryBroadcastHub, PusherAuth, PusherBroadcastHub, PusherConfig,
+    PusherScheme, pusher_channel_auth, pusher_user_auth,
 };
 pub use bus::{Bus, Dispatched};
 pub use console::{CommandEntry, CommandHandler, TypedCommand, dispatch_argv, two_column_detail};
@@ -271,8 +274,8 @@ pub use filesystem::AzBlobConfig;
 pub use filesystem::GcsConfig;
 #[cfg(feature = "filesystem")]
 pub use filesystem::{
-    ATOMIC_STAGING_DIR, ChecksumAlgorithm, DiskExt, ReadThroughConfig, S3Config, Storage,
-    copy_between_disks,
+    ATOMIC_STAGING_DIR, ChecksumAlgorithm, DiskExt, ENV_S3_DISK, ReadThroughConfig, S3Config,
+    Storage, copy_between_disks,
 };
 pub use hashing::{
     Algorithm as HashAlgorithm, Argon2Options, Argon2iHasher, Argon2idHasher, BcryptHasher,
@@ -334,7 +337,7 @@ pub use middleware::{
     registered_terminables, resolve_middleware_alias, resolve_middleware_group, terminable_count,
 };
 pub use pagination::{
-    CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, Paginated,
+    CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, PageLink, Paginated,
     Pagination, Paginator,
 };
 pub use queue::{
@@ -350,11 +353,11 @@ pub use queue::{
     ThrottlesExceptions, TimeoutExceeded, UpdatedBatchJobCounts, WithoutOverlapping,
 };
 pub use rate_limit::{
-    BackendErrorPolicy, GlobalLimit, Limit, LimitResult, RateLimitMiddleware, RateLimiter,
-    RateLimiterDriver, SlidingWindowConfig, ThrottleRequestsMiddleware, Unlimited, identity_key,
-    names_identity,
+    BackendErrorPolicy, ConnectionsPerIp, GlobalLimit, Limit, LimitResult, RateLimitMiddleware,
+    RateLimiter, RateLimiterDriver, SlidingWindowConfig, ThrottleRequestsMiddleware, Unlimited,
+    identity_key, names_identity,
 };
-pub use rbac::{HasRoles, PermissionMiddleware, RoleMiddleware};
+pub use rbac::{GateBridgeMiddleware, HasRoles, PermissionMiddleware, RoleMiddleware};
 pub use render_cache::RenderCache;
 pub use resources::{
     AsRelationshipValue, DEFAULT_MAX_RELATIONSHIP_DEPTH, IncludeResolutionError, IncludeTree,
@@ -382,6 +385,7 @@ pub use routing::{
     GroupRoute,
     GroupRouter,
     IntoGroupItem,
+    ParamConstraint,
     ResourceAction,
     ResourceController,
     ResourceRoutes,
@@ -389,6 +393,7 @@ pub use routing::{
     RouteDefBuilder,
     Router,
     SignatureVerdict,
+    WholeValuePattern,
     WsRouteDef,
     clear_route_names_for_test,
     redirect,
@@ -423,18 +428,20 @@ pub use sse::{EndSignal, SseEvent, StreamedEvent};
 pub use static_files::StaticFiles;
 pub use supervisor::{RestartPolicy, Supervisor, SupervisorEntry, SupervisorRegistry};
 pub use telemetry::{
-    CounterHandle, GaugeHandle, HistogramHandle, Metrics, OtelConfig, TelemetryGuard,
+    AttrValue, CounterHandle, GaugeHandle, HistogramHandle, Metrics, OtelConfig, TelemetryGuard,
     init_telemetry,
 };
 pub use timeout::TimeoutMiddleware;
 pub use validation::message::{TranslateArgs, ValidationMessage};
 pub use validation::rule::{
-    AsyncRule, ContextualRule, FormContext, Rule, Unique, ValueRule, async_rules, rules,
+    AsyncRule, ContextualRule, Exists, FormContext, Rule, Unique, ValueRule, async_rules, rules,
     rules::{
-        Alpha, AlphaDash, AlphaNum, ArrayKeys, Between, Boolean, CompareWith, Confirmed, Contains,
-        Different, Distinct, DoesntContain, Email, Gt, Gte, HibpVerifier, HttpUrl, In, InArray,
-        Integer, Lt, Lte, Max, Min, NotIn, Numeric, Password, Required, RequiredIf, RequiredUnless,
-        RequiredWith, RequiredWithAll, Same, UncompromisedVerifier, Url, UrlProtocols, Uuid,
+        Accepted, After, AfterOrEqual, Alpha, AlphaDash, AlphaNum, ArrayKeys, Before,
+        BeforeOrEqual, Between, Boolean, CompareWith, Confirmed, Contains, DateBound, DateFormat,
+        Different, Digits, Distinct, DoesntContain, Email, ExcludeIf, ExcludeUnless, Gt, Gte,
+        HibpVerifier, HttpUrl, In, InArray, Integer, Lt, Lte, Max, Min, Missing, NotIn, Numeric,
+        Password, Prohibited, Required, RequiredIf, RequiredUnless, RequiredWith, RequiredWithAll,
+        Same, UncompromisedVerifier, Url, UrlProtocols, Uuid,
     },
 };
 // The media subsystem's flat names. `Image` is the image-manipulation
@@ -507,16 +514,20 @@ pub use features::{Evaluator, EvaluatorRef, Feature};
 pub use eloquent::{
     AggregateKind, AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal,
     AsEncrypted, AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat,
-    AsHashed, AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsObject, AsOptionalDateTime,
-    AsString, AsTimestamp, Attrs, BelongsTo, BelongsToMany, Builder, Cast, Collection, Direction,
-    DynCast, EagerLoadCache, EagerLoadDispatch, EloquentModel, Fillable, FirstOrCreate,
-    GlobalScope, HasMany, HasManyThrough, HasOne, HasOneThrough, IntoColumn, IntoDynCast, IntoVal,
-    LazyCollection, MassPrunable, Model, ModelEntry, MorphMany, MorphOne, MorphTo, MorphToMany,
-    MorphTypeEntry, MorphedByMany, Prunable, PrunerEntry, Relation, RelationEntry, RelationKind,
-    ReplicateExt, ScopeRegistry, SoftDeletes, Touchable, find_model_by_table, find_morph_type,
-    find_morph_type_by_id, find_relation, models, morph_types,
-    prevent_silently_discarding_attributes, preventing_silently_discarding_attributes, prune_all,
-    prune_all_dry, prune_one, relations, relations_of, unguarded,
+    AsHashed, AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsNaiveDateTime,
+    AsNativeDateTime, AsObject, AsOptionalArray, AsOptionalArrayObject, AsOptionalCollection,
+    AsOptionalDateTime, AsOptionalJson, AsOptionalNaiveDateTime, AsOptionalNativeDateTime,
+    AsOptionalObject, AsString, AsTimestamp, Attrs, BelongsTo, BelongsToMany, Builder, Cast,
+    Collection, Direction, DynCast, EagerLoadCache, EagerLoadDispatch, EloquentModel, Fillable,
+    FirstOrCreate, GlobalScope, HasMany, HasManyThrough, HasOne, HasOneThrough, IntoColumn,
+    IntoDynCast, IntoVal, LazyCollection, LazyLoadingViolation, MassPrunable, Model, ModelEntry,
+    MorphMany, MorphOne, MorphTo, MorphToMany, MorphTypeEntry, MorphedByMany, Prunable,
+    PrunerEntry, Relation, RelationEntry, RelationKind, ReplicateExt, ScopeRegistry, SoftDeletes,
+    Touchable, clear_lazy_loading_violation_handler, find_model_by_table, find_morph_type,
+    find_morph_type_by_id, find_relation, handle_lazy_loading_violation, models, morph_types,
+    prevent_lazy_loading, prevent_silently_discarding_attributes, preventing_lazy_loading,
+    preventing_silently_discarding_attributes, prune_all, prune_all_dry, prune_one, relations,
+    relations_of, unguarded,
 };
 // Phase 10C T1 - model lifecycle events. The 16 per-type event
 // structs (`Created`, `Saving`, ...) are macro-emitted into each
@@ -551,7 +562,7 @@ pub use notifications::{
     NotificationSent, Notify, NotifyFakeGuard, SendNotificationJob, StoredNotification,
 };
 
-pub use ws::{WebSocketHandler, WsConfig, WsSocket};
+pub use ws::{WebSocketHandler, WsConfig, WsReceiver, WsSender, WsSocket};
 
 // Re-export async_trait for middleware implementations
 pub use async_trait::async_trait;
@@ -600,13 +611,40 @@ pub use chrono;
 #[doc(hidden)]
 pub use tera as __tera;
 
-// Re-export fake for the `#[derive(Factory)]` macro and for consumers
-// who want to hand-write `Mailable::definition`-style code referencing
-// `::suprnova::__fake::Faker.fake()`. The public re-exports below cover
-// the common surface: `Dummy` derive (struct auto-fill), `Fake` trait
-// (`.fake()` method), `Faker` (universal generator).
+// Re-export fake for the code `#[derive(Factory)]` generates, which
+// names `::suprnova::__fake`. Code that is written by hand uses the
+// public `suprnova::fake` below.
 #[doc(hidden)]
 pub use fake as __fake;
+/// The `fake` crate, for a factory that is written by hand: the fakers of
+/// `suprnova::fake::faker`, such as `faker::internet::en::SafeEmail`, and
+/// `suprnova::fake::rand::Rng` for `fake_with_rng`.
+///
+/// An application that added `fake` to its own dependencies would have to
+/// keep its version the one of this crate: `Dummy` and `Fake` of two
+/// versions are two pairs of traits, and a value that implements the one
+/// does not implement the other.
+///
+/// # `#[derive(Dummy)]`
+///
+/// The code the derive generates names the crate `::fake`, which an
+/// application without `fake` among its dependencies does not have. The
+/// derive is told where the crate is:
+///
+/// ```rust
+/// use suprnova::{Dummy, Fake, Faker};
+///
+/// #[derive(Debug, Dummy)]
+/// #[dummy(crate_name = "suprnova::fake")]
+/// struct Row {
+///     id: u32,
+///     note: String,
+/// }
+///
+/// let row: Row = Faker.fake();
+/// # let _ = (row.id, row.note);
+/// ```
+pub use fake;
 pub use fake::{Dummy, Fake, Faker};
 
 // Re-export validator for FormRequest validation
@@ -618,6 +656,7 @@ pub use suprnova_macros::Command;
 pub use suprnova_macros::Data;
 pub use suprnova_macros::FormRequest as FormRequestDerive;
 pub use suprnova_macros::InertiaProps;
+pub use suprnova_macros::InputNames;
 pub use suprnova_macros::LiveComponent;
 pub use suprnova_macros::accessor;
 pub use suprnova_macros::command;

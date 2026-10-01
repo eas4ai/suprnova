@@ -4,6 +4,8 @@ mod templates;
 pub mod ui;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use commands::console_forward::ConsoleCommand;
+use commands::queue_failed::FailedJobs;
 
 #[derive(Parser)]
 #[command(name = "suprnova")]
@@ -101,6 +103,16 @@ enum Commands {
         /// event already carries its own timestamp).
         #[arg(long)]
         timestamps: bool,
+
+        /// When the pending migrations run: once when serve starts
+        /// (start), on every restart of the backend (always), or not at
+        /// all (never)
+        #[arg(long, value_enum, default_value_t, conflicts_with = "no_migrate")]
+        migrate: commands::serve::MigrateWhen,
+
+        /// Run no migrations. The same as --migrate never
+        #[arg(long)]
+        no_migrate: bool,
 
         /// Emit one JSON object per line on stdout (NDJSON) instead of
         /// colored [name]-prefixed text - one event per process start,
@@ -307,6 +319,25 @@ enum Commands {
         #[arg(long)]
         with_minio: bool,
     },
+    /// Run the database seeders (all of them, or the one named)
+    #[command(name = "db:seed")]
+    DbSeed {
+        /// Name of the one seeder to run
+        seeder: Option<String>,
+        /// Name of the one seeder to run, as an option: --class=UserSeeder
+        #[arg(long, conflicts_with = "seeder")]
+        class: Option<String>,
+    },
+    /// Delete the rows that prunable models no longer need
+    #[command(name = "model:prune")]
+    ModelPrune {
+        /// Prune one model only, named by its type name (User)
+        #[arg(long)]
+        model: Option<String>,
+        /// Report how many rows would be deleted, and delete none
+        #[arg(long)]
+        pretend: bool,
+    },
     /// Run all due scheduled tasks once (typically called by cron every minute)
     #[command(name = "schedule:run")]
     ScheduleRun,
@@ -315,7 +346,41 @@ enum Commands {
     ScheduleWork,
     /// List all registered scheduled tasks
     #[command(name = "schedule:list")]
-    ScheduleList,
+    ScheduleList {
+        /// IANA timezone the listing should be read in (default: UTC)
+        #[arg(long)]
+        timezone: Option<String>,
+    },
+    /// List the failed queue jobs
+    #[command(name = "queue:failed")]
+    QueueFailed,
+    /// Push failed queue jobs back onto the queue
+    #[command(name = "queue:retry")]
+    QueueRetry {
+        /// Ids of the failed jobs to retry, or `all` for every one
+        #[arg(required = true)]
+        ids: Vec<String>,
+    },
+    /// Delete one failed queue job
+    #[command(name = "queue:forget")]
+    QueueForget {
+        /// Id of the failed job to delete
+        id: String,
+    },
+    /// Delete the failed queue jobs
+    #[command(name = "queue:flush")]
+    QueueFlush {
+        /// Only delete jobs that failed more than this many hours ago
+        #[arg(long)]
+        hours: Option<u64>,
+    },
+    /// Delete the failed queue jobs older than --hours
+    #[command(name = "queue:prune-failed")]
+    QueuePruneFailed {
+        /// Delete jobs that failed more than this many hours ago
+        #[arg(long, default_value = "24")]
+        hours: u64,
+    },
     /// Start the workflow worker daemon
     #[command(name = "workflow:work")]
     WorkflowWork,
@@ -402,7 +467,14 @@ fn main() {
             restart_tries,
             timestamps,
             json,
+            migrate,
+            no_migrate,
         } => {
+            let migrate = if no_migrate {
+                commands::serve::MigrateWhen::Never
+            } else {
+                migrate
+            };
             commands::serve::run(
                 port,
                 frontend_port,
@@ -413,6 +485,7 @@ fn main() {
                 restart_tries,
                 timestamps,
                 json,
+                migrate,
             );
         }
         Commands::DevTls {
@@ -512,14 +585,37 @@ fn main() {
         } => {
             commands::docker_compose::run(with_mailpit, with_minio);
         }
+        Commands::DbSeed { seeder, class } => {
+            commands::console_forward::run(ConsoleCommand::Seed {
+                class: class.or(seeder),
+            });
+        }
+        Commands::ModelPrune { model, pretend } => {
+            commands::console_forward::run(ConsoleCommand::Prune { model, pretend });
+        }
         Commands::ScheduleRun => {
             commands::schedule_run::run();
         }
         Commands::ScheduleWork => {
             commands::schedule_work::run();
         }
-        Commands::ScheduleList => {
-            commands::schedule_list::run();
+        Commands::ScheduleList { timezone } => {
+            commands::schedule_list::run(timezone.as_deref());
+        }
+        Commands::QueueFailed => {
+            commands::queue_failed::run(FailedJobs::List);
+        }
+        Commands::QueueRetry { ids } => {
+            commands::queue_failed::run(FailedJobs::Retry(ids));
+        }
+        Commands::QueueForget { id } => {
+            commands::queue_failed::run(FailedJobs::Forget(id));
+        }
+        Commands::QueueFlush { hours } => {
+            commands::queue_failed::run(FailedJobs::Flush(hours));
+        }
+        Commands::QueuePruneFailed { hours } => {
+            commands::queue_failed::run(FailedJobs::Prune(hours));
         }
         Commands::WorkflowWork => {
             commands::workflow_work::run();
@@ -707,6 +803,132 @@ mod tests {
             "the curated help screen names the same commands as clap but not \
              the same number of times; a duplicated line is the usual cause"
         );
+    }
+
+    /// `serve` migrates when it starts unless it is told otherwise.
+    #[test]
+    fn serve_takes_when_to_migrate() {
+        use commands::serve::MigrateWhen;
+
+        let when = |argv: &[&str]| match Cli::try_parse_from(argv) {
+            Ok(Cli {
+                command:
+                    Some(Commands::Serve {
+                        migrate,
+                        no_migrate,
+                        ..
+                    }),
+                ..
+            }) => Ok((migrate, no_migrate)),
+            Ok(_) => panic!("`{}` must be serve", argv.join(" ")),
+            Err(e) => Err(e.to_string()),
+        };
+
+        assert_eq!(
+            when(&["suprnova", "serve"]),
+            Ok((MigrateWhen::Start, false))
+        );
+        assert_eq!(
+            when(&["suprnova", "serve", "--migrate", "always"]),
+            Ok((MigrateWhen::Always, false))
+        );
+        assert_eq!(
+            when(&["suprnova", "serve", "--migrate=never"]),
+            Ok((MigrateWhen::Never, false))
+        );
+        assert_eq!(
+            when(&["suprnova", "serve", "--no-migrate"]),
+            Ok((MigrateWhen::Start, true)),
+            "the flag alone; `main` reads it as never"
+        );
+        assert!(
+            when(&["suprnova", "serve", "--migrate", "always", "--no-migrate"]).is_err(),
+            "always and never at once is a mistake to report"
+        );
+        assert!(when(&["suprnova", "serve", "--migrate", "sometimes"]).is_err());
+    }
+
+    /// `schedule:list` takes the flag the application's own command
+    /// takes. It was a unit variant, so the CLI refused `--timezone` with
+    /// exit code 2 before the application could see it.
+    #[test]
+    fn schedule_list_takes_the_timezone_the_application_takes() {
+        for argv in [
+            vec!["suprnova", "schedule:list", "--timezone=Asia/Tokyo"],
+            vec!["suprnova", "schedule:list", "--timezone", "Asia/Tokyo"],
+        ] {
+            let cli = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("`{}` must parse: {e}", argv.join(" ")));
+            match cli.command {
+                Some(Commands::ScheduleList { timezone }) => {
+                    assert_eq!(timezone.as_deref(), Some("Asia/Tokyo"));
+                }
+                _ => panic!("`{}` must be schedule:list", argv.join(" ")),
+            }
+        }
+
+        let cli = Cli::try_parse_from(["suprnova", "schedule:list"]).expect("the flag is optional");
+        match cli.command {
+            Some(Commands::ScheduleList { timezone }) => assert_eq!(timezone, None),
+            _ => panic!("`suprnova schedule:list` must be schedule:list"),
+        }
+    }
+
+    /// `db:seed` names its seeder the two ways the console's own command
+    /// takes it, and not both at once.
+    #[test]
+    fn db_seed_takes_the_seeder_as_a_name_or_as_the_class_option() {
+        for argv in [
+            vec!["suprnova", "db:seed", "UserSeeder"],
+            vec!["suprnova", "db:seed", "--class=UserSeeder"],
+            vec!["suprnova", "db:seed", "--class", "UserSeeder"],
+        ] {
+            let cli = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("`{}` must parse: {e}", argv.join(" ")));
+            match cli.command {
+                Some(Commands::DbSeed { seeder, class }) => {
+                    assert_eq!(class.or(seeder).as_deref(), Some("UserSeeder"));
+                }
+                _ => panic!("`{}` must be db:seed", argv.join(" ")),
+            }
+        }
+
+        let cli = Cli::try_parse_from(["suprnova", "db:seed"]).expect("a bare db:seed parses");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::DbSeed {
+                seeder: None,
+                class: None
+            })
+        ));
+
+        assert!(
+            Cli::try_parse_from(["suprnova", "db:seed", "A", "--class=B"]).is_err(),
+            "two names for one seeder is a mistake the CLI must not guess at"
+        );
+    }
+
+    #[test]
+    fn model_prune_takes_the_options_the_console_command_takes() {
+        let cli = Cli::try_parse_from(["suprnova", "model:prune", "--model=User", "--pretend"])
+            .expect("`suprnova model:prune --model=User --pretend` parses");
+        match cli.command {
+            Some(Commands::ModelPrune { model, pretend }) => {
+                assert_eq!(model.as_deref(), Some("User"));
+                assert!(pretend);
+            }
+            _ => panic!("it must be model:prune"),
+        }
+
+        let cli =
+            Cli::try_parse_from(["suprnova", "model:prune"]).expect("a bare model:prune parses");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::ModelPrune {
+                model: None,
+                pretend: false
+            })
+        ));
     }
 
     /// A subcommand invoked without a help flag still parses, or the

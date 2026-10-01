@@ -34,7 +34,9 @@ use suprnova::payments::{
 
 use crate::StripeProvider;
 use crate::customer::metadata_to_string_map;
+use crate::deadline;
 use crate::payment::stripe_currency_to_money;
+use crate::sdk_error;
 
 #[derive(Serialize)]
 struct CreatePaymentIntentParams<'a> {
@@ -102,6 +104,11 @@ where
         seq.serialize_element(item)?;
     }
     seq.end()
+}
+
+/// The error of a call that creates a Checkout Session.
+fn session_create_error(e: stripe::StripeError) -> PaymentError {
+    sdk_error::provider_error("checkout.sessions.create", e)
 }
 
 /// Map a retrieved Checkout Session onto the provider-neutral state enum.
@@ -178,15 +185,11 @@ impl Checkout for StripeProvider {
                     let request = RequestBuilder::new(StripeMethod::Post, "/checkout/sessions")
                         .form(&params)
                         .customize::<CheckoutSession>();
-                    let session =
-                        crate::apply_idempotency(request, req.idempotency_key.as_deref())?
-                            .send(self.client())
-                            .await
-                            .map_err(|e| {
-                                PaymentError::Provider(format!(
-                                    "stripe checkout.sessions.create: {e}"
-                                ))
-                            })?;
+                    let call = crate::apply_idempotency(request, req.idempotency_key.as_deref())?
+                        .send(self.client());
+                    let session = deadline::change("checkout.sessions.create", call)
+                        .await?
+                        .map_err(session_create_error)?;
 
                     let url = session.url.ok_or_else(|| {
                         PaymentError::Provider("CheckoutSession missing url on create".into())
@@ -219,12 +222,11 @@ impl Checkout for StripeProvider {
                 let request = RequestBuilder::new(StripeMethod::Post, "/payment_intents")
                     .form(&params)
                     .customize::<PaymentIntent>();
-                let intent = crate::apply_idempotency(request, req.idempotency_key.as_deref())?
-                    .send(self.client())
-                    .await
-                    .map_err(|e| {
-                        PaymentError::Provider(format!("stripe payment_intents.create: {e}"))
-                    })?;
+                let call = crate::apply_idempotency(request, req.idempotency_key.as_deref())?
+                    .send(self.client());
+                let intent = deadline::change("payment_intents.create", call)
+                    .await?
+                    .map_err(|e| sdk_error::provider_error("payment_intents.create", e))?;
 
                 let client_secret = intent.client_secret.ok_or_else(|| {
                     PaymentError::Provider("PaymentIntent missing client_secret on create".into())
@@ -271,12 +273,11 @@ impl Checkout for StripeProvider {
                 let request = RequestBuilder::new(StripeMethod::Post, "/checkout/sessions")
                     .form(&params)
                     .customize::<CheckoutSession>();
-                let session = crate::apply_idempotency(request, req.idempotency_key.as_deref())?
-                    .send(self.client())
-                    .await
-                    .map_err(|e| {
-                        PaymentError::Provider(format!("stripe checkout.sessions.create: {e}"))
-                    })?;
+                let call = crate::apply_idempotency(request, req.idempotency_key.as_deref())?
+                    .send(self.client());
+                let session = deadline::change("checkout.sessions.create", call)
+                    .await?
+                    .map_err(session_create_error)?;
 
                 let url = session.url.ok_or_else(|| {
                     PaymentError::Provider("CheckoutSession missing url on create".into())
@@ -309,14 +310,15 @@ impl Checkout for StripeProvider {
             ));
         }
         if provider_session_id.starts_with("pi_") {
-            let intent: PaymentIntent = RequestBuilder::new(
+            let call = RequestBuilder::new(
                 StripeMethod::Get,
                 format!("/payment_intents/{provider_session_id}"),
             )
             .customize::<PaymentIntent>()
-            .send(self.client())
-            .await
-            .map_err(|e| PaymentError::Provider(format!("stripe payment_intents.retrieve: {e}")))?;
+            .send(self.client());
+            let intent: PaymentIntent = deadline::read("payment_intents.retrieve", call)
+                .await?
+                .map_err(|e| sdk_error::provider_error("payment_intents.retrieve", e))?;
             return match intent.status {
                 PaymentIntentStatus::Succeeded => Ok(CheckoutSessionState::Complete {
                     paid: true,
@@ -340,13 +342,12 @@ impl Checkout for StripeProvider {
         }
         let path = format!("/checkout/sessions/{provider_session_id}");
 
-        let session: CheckoutSession = RequestBuilder::new(StripeMethod::Get, &path)
+        let call = RequestBuilder::new(StripeMethod::Get, &path)
             .customize::<CheckoutSession>()
-            .send(self.client())
-            .await
-            .map_err(|e| {
-                PaymentError::Provider(format!("stripe checkout.sessions.retrieve: {e}"))
-            })?;
+            .send(self.client());
+        let session: CheckoutSession = deadline::read("checkout.sessions.retrieve", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("checkout.sessions.retrieve", e))?;
 
         session_to_state(session)
     }

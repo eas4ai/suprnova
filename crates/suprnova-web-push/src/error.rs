@@ -41,6 +41,19 @@ pub enum WebPushError {
     Json(#[from] serde_json::Error),
     #[error("subscription expired or invalid (HTTP 404/410)")]
     SubscriptionGone,
+    /// The stored subscription cannot be sent to, and nothing was sent.
+    /// Its endpoint is no URL, or the `Strict` endpoint policy refuses it
+    /// because it is not `https`, names an address in place of a host, or
+    /// names a host that is no push service. Or one of its keys is not
+    /// what RFC 8291 asks for: `p256dh` is no base64url, is not 65 bytes,
+    /// is not in uncompressed form or is no point of the P-256 curve,
+    /// `auth` is no base64url or is not 16 bytes.
+    ///
+    /// This is a fault of the stored data and not of this crate. No retry
+    /// changes it, so the caller removes the subscription, as it does for
+    /// [`Self::SubscriptionGone`]. The text says which rule refused it.
+    #[error("subscription cannot be used: {0}")]
+    InvalidSubscription(String),
     /// Refused before any I/O: a caller-supplied HTTP client with an
     /// unknown redirect policy must not send under the `Strict` endpoint
     /// policy, which validates only the initial URL. Build the transport
@@ -64,8 +77,8 @@ impl WebPushError {
     /// (request timeout), 429 (too many requests), or any 5xx status.
     /// Returns `false` for terminal outcomes: `SubscriptionGone` (404/410),
     /// other 4xx (authn/authz/protocol errors), and for the local errors
-    /// that fired before any HTTP I/O (`Vapid`, `Encryption`, `Base64`,
-    /// `Json`, `Internal`, `UnconfinedRedirects`).
+    /// that fired before any HTTP I/O (`InvalidSubscription`, `Vapid`,
+    /// `Encryption`, `Base64`, `Json`, `Internal`, `UnconfinedRedirects`).
     ///
     /// When `Some`, [`Self::retry_after`] gives the push-service-suggested
     /// minimum delay.
@@ -76,6 +89,7 @@ impl WebPushError {
                 matches!(*status, 408 | 429) || (500..=599).contains(status)
             }
             Self::SubscriptionGone
+            | Self::InvalidSubscription(_)
             | Self::Vapid(_)
             | Self::Encryption(_)
             | Self::Base64(_)

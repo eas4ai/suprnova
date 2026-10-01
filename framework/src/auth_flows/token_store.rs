@@ -14,7 +14,7 @@
 //! conditional `used_at` UPDATE (the UPDATE's `rows_affected` is the
 //! single-use authority, so consume is race-safe under concurrency).
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use sea_orm::sea_query::Expr;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
 
@@ -175,7 +175,7 @@ impl TokenStore {
     ) -> Result<String, FrameworkError> {
         let plaintext = generate_plaintext()?;
         let token_hash = hash_token(&plaintext);
-        let now = Utc::now().naive_utc();
+        let now = crate::clock::now().naive_utc();
         let expires_at = now + ttl;
 
         let conn = DB::connection()?;
@@ -202,7 +202,7 @@ impl TokenStore {
     /// indexed equality lookup returning 0 or 1 rows.
     pub async fn check(token: &str, purpose: TokenPurpose) -> Result<bool, FrameworkError> {
         let conn = DB::connection()?;
-        let now = Utc::now().naive_utc();
+        let now = crate::clock::now().naive_utc();
         let token_hash = hash_token(token);
 
         let row = entity::Entity::find()
@@ -223,7 +223,7 @@ impl TokenStore {
         purpose: TokenPurpose,
     ) -> Result<Option<String>, FrameworkError> {
         let conn = DB::connection()?;
-        let now = Utc::now().naive_utc();
+        let now = crate::clock::now().naive_utc();
         let token_hash = hash_token(token);
         entity::Entity::find()
             .filter(entity::Column::TokenHash.eq(token_hash))
@@ -276,7 +276,7 @@ impl TokenStore {
         purpose: TokenPurpose,
     ) -> Result<Option<String>, FrameworkError> {
         let conn = DB::connection()?;
-        let now = Utc::now().naive_utc();
+        let now = crate::clock::now().naive_utc();
         let token_hash = hash_token(token);
 
         let txn = conn.inner().begin().await.map_err(|e| {
@@ -358,7 +358,7 @@ impl TokenStore {
     /// table does not accumulate dead rows.
     pub async fn prune_expired() -> Result<u64, FrameworkError> {
         let conn = DB::connection()?;
-        let now = Utc::now().naive_utc();
+        let now = crate::clock::now().naive_utc();
         let result = entity::Entity::delete_many()
             .filter(entity::Column::ExpiresAt.lt(now))
             .exec(conn.inner())

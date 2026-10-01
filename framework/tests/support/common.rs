@@ -24,23 +24,31 @@ use tokio::sync::oneshot;
 /// `hyper::body::Incoming` body so streaming parsers work end-to-end
 /// without a network socket.
 pub async fn request_from_multipart(boundary: &str, body: Bytes) -> Request {
-    let (req_tx, req_rx) = oneshot::channel::<Request>();
-    let req_tx = Mutex::new(Some(req_tx));
-
-    let content_length = body.len();
     let mut http_bytes = Vec::new();
     http_bytes.extend_from_slice(b"POST /upload HTTP/1.1\r\n");
     http_bytes.extend_from_slice(b"Host: localhost\r\n");
     http_bytes.extend_from_slice(
         format!("Content-Type: multipart/form-data; boundary={boundary}\r\n").as_bytes(),
     );
-    http_bytes.extend_from_slice(format!("Content-Length: {content_length}\r\n\r\n").as_bytes());
+    http_bytes.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
     http_bytes.extend_from_slice(&body);
+    request_from_http_bytes(http_bytes).await
+}
 
-    // Duplex buffer must hold the entire request - for oversize-rejection
-    // tests (6 MiB body in Task 5) the client writes synchronously before
-    // the server can read.
-    let (client_io, server_io) = tokio::io::duplex(64 * 1024 + content_length);
+/// Internal: build a `Request` from a hand-assembled HTTP/1.1 request
+/// wire payload. The bytes you pass must be a complete HTTP request
+/// (request line, headers, blank line, body). Every builder in this file
+/// goes through here; the caller controls every header, which the body-cap
+/// tests need for honest, lying, and absent `Content-Length`.
+async fn request_from_http_bytes(http_bytes: Vec<u8>) -> Request {
+    let (req_tx, req_rx) = oneshot::channel::<Request>();
+    let req_tx = Mutex::new(Some(req_tx));
+
+    // Duplex buffer must fit the whole request - the client writes
+    // synchronously before the server task gets to read, and the
+    // oversize-rejection tests send a 6 MiB body.
+    let duplex_cap = http_bytes.len() + 64 * 1024;
+    let (client_io, server_io) = tokio::io::duplex(duplex_cap);
 
     tokio::spawn(async move {
         let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
@@ -73,52 +81,7 @@ pub async fn request_from_multipart(boundary: &str, body: Bytes) -> Request {
         // Drop the client to signal EOF after the write completes. The
         // hyper server reads the full body before EOF arrives because
         // `write_all` only returns after the bytes are queued in the
-        // duplex buffer (sized `content_length + 64 KiB`).
-    }
-
-    req_rx
-        .await
-        .expect("server should have received the request")
-}
-
-/// Internal: build a `Request` from a hand-assembled HTTP/1.1 request
-/// wire payload. The bytes you pass must be a complete HTTP request
-/// (request line, headers, blank line, body). This drives the same
-/// duplex-pipe pattern as `request_from_multipart` but lets the caller
-/// control every header - needed for the body-cap tests, which want
-/// honest, lying, and absent `Content-Length`.
-async fn request_from_http_bytes(http_bytes: Vec<u8>) -> Request {
-    let (req_tx, req_rx) = oneshot::channel::<Request>();
-    let req_tx = Mutex::new(Some(req_tx));
-
-    // Duplex buffer must fit the whole request - the client writes
-    // synchronously before the server task gets to read.
-    let duplex_cap = http_bytes.len() + 64 * 1024;
-    let (client_io, server_io) = tokio::io::duplex(duplex_cap);
-
-    tokio::spawn(async move {
-        let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-            let wrapped = Request::new(req);
-            if let Ok(mut guard) = req_tx.lock()
-                && let Some(tx) = guard.take()
-            {
-                let _ = tx.send(wrapped);
-            }
-            // Never resolve - see request_from_multipart for the rationale.
-            async {
-                std::future::pending::<()>().await;
-                Ok::<_, Infallible>(hyper::Response::new(http_body_util::Empty::<Bytes>::new()))
-            }
-        });
-        let _ = http1::Builder::new()
-            .serve_connection(TokioIo::new(server_io), svc)
-            .await;
-    });
-
-    {
-        let mut client = client_io;
-        client.write_all(&http_bytes).await.unwrap();
-        // Drop the client to signal EOF after the write completes.
+        // duplex buffer, which is sized to hold them all.
     }
 
     req_rx

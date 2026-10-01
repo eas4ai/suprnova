@@ -5,7 +5,7 @@ wires the controllers, routes, migrations, frontend pages, and tests for a
 complete product surface - so you start from a running app, not an empty
 scaffold.
 
-Three kits ship today, modelled on Laravel's lineage. Pick the one closest to
+Three kits ship, modelled on Laravel's lineage. Pick the one closest to
 what you're building and customise from there.
 
 ## Nebula - authentication (Breeze-tier)

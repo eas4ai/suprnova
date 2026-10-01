@@ -58,7 +58,11 @@ pub mod db_facade;
 pub mod dynamic_row;
 pub mod events;
 pub mod identifier;
+// Internal: the framework's own migrations create their indexes through
+// here, so `up` can run over a schema that already exists on every backend.
+pub(crate) mod migration_guard;
 pub mod model;
+pub mod monitor;
 // Internal: hand-written SQL in the queue / notification stores renders its
 // placeholders through here so Postgres gets `$1` instead of `?`.
 pub(crate) mod placeholder;
@@ -99,6 +103,7 @@ pub use events::{
 };
 pub use identifier::{validate_identifier, validate_sql_operator};
 pub use model::{EntityExt, EntityExtMut};
+pub use monitor::ConnectionCount;
 pub use query_builder::QueryBuilder;
 pub use route_binding::{AutoRouteBinding, RouteBinding, RouteParam};
 pub use testing::TestDatabase;

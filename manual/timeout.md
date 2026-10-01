@@ -190,10 +190,10 @@ The check is case-insensitive on the token value (`WebSocket`,
 without `Upgrade: websocket` is *not* treated as a WS upgrade - that
 flows through the timeout normally.
 
-Today, WebSocket upgrades take a separate server path that doesn't run
+WebSocket upgrades take a separate server path that doesn't run
 global middleware at all, so this guard is defence in depth - it
 keeps the timeout from ever bounding a long-lived bidirectional channel
-the day that changes. See [WebSockets](websockets.md) for how upgrades
+if that path changes. See [WebSockets](websockets.md) for how upgrades
 are dispatched and the lifetime of a connected socket.
 
 ## What happens at the deadline

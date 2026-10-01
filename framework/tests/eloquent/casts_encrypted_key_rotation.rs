@@ -25,8 +25,9 @@
 //! 1. Decide the final ring shape (current = B, previous = [A]).
 //! 2. Install it once at the top of the binary via a mutex-guarded
 //!    helper.
-//! 3. Use `crate::crypto::_test_encrypt_with(&A, plaintext)` to mint
-//!    ciphertext "as if it had been written when A was current."
+//! 3. Use `suprnova::crypto::testing::encrypt_string_under(&A, purpose,
+//!    plaintext)` to mint ciphertext "as if it had been written when A
+//!    was current."
 //! 4. Decrypt it through the public `Crypt::decrypt_string` and
 //!    assert success + origin.
 //!
@@ -37,6 +38,7 @@
 
 use std::sync::OnceLock;
 
+use suprnova::crypto::testing::{encrypt_string_for_under, encrypt_string_under};
 use suprnova::testing::TestDatabase;
 use suprnova::{
     AsEncrypted, Crypt, CryptPurpose, EncryptionKey, Model,
@@ -99,7 +101,7 @@ fn current_key_decrypts_and_reports_current_origin() {
 
     // Sanity: the wire was actually produced under `current` - confirm
     // by minting an equivalent payload via the test helper directly.
-    let wire_via_helper = suprnova::crypto::_test_encrypt_with(
+    let wire_via_helper = encrypt_string_under(
         &keys.current,
         CryptPurpose::Cast,
         "rotation-payload-current",
@@ -118,7 +120,7 @@ fn previous_key_decrypts_and_reports_previous_origin() {
     // observation hook reports which key in the previous list won.
     let keys = rotation_keys();
 
-    let wire = suprnova::crypto::_test_encrypt_with(
+    let wire = encrypt_string_under(
         &keys.previous_oldest,
         CryptPurpose::Cast,
         "rotation-payload-legacy",
@@ -141,7 +143,7 @@ fn ring_walks_full_previous_list_to_find_match() {
     // key (not the oldest) must still decrypt - proves the ring
     // doesn't stop at index 0.
     let keys = rotation_keys();
-    let wire = suprnova::crypto::_test_encrypt_with(
+    let wire = encrypt_string_under(
         &keys.previous_middle,
         CryptPurpose::Cast,
         "two-step-rotation",
@@ -167,9 +169,8 @@ fn unrelated_key_fails_loudly_not_silently() {
     // `cargo test` scheduling this test may be the first to run.
     let _ = rotation_keys();
     let stranger = EncryptionKey::generate();
-    let wire =
-        suprnova::crypto::_test_encrypt_with(&stranger, CryptPurpose::Cast, "should-not-decrypt")
-            .expect("encrypt under unrelated key");
+    let wire = encrypt_string_under(&stranger, CryptPurpose::Cast, "should-not-decrypt")
+        .expect("encrypt under unrelated key");
 
     let public_result = Crypt::decrypt_string(CryptPurpose::Cast, &wire);
     assert!(
@@ -235,16 +236,16 @@ fn decrypt_t_round_trip_via_fallback() {
     // Mint A-encrypted JSON via low-level AEAD + base64 the same way
     // `Crypt::encrypt` would, but under the previous (oldest) key.
     let aead_wire = {
-        // We reuse `_test_encrypt_with` by feeding it the JSON bytes
+        // We reuse `encrypt_string_under` by feeding it the JSON bytes
         // as a UTF-8 string - JSON output is always valid UTF-8 for
         // safe primitives, so this is fine.
         let plaintext = std::str::from_utf8(&json).expect("json is utf-8");
-        suprnova::crypto::_test_encrypt_with(&keys.previous_oldest, CryptPurpose::Cookie, plaintext)
+        encrypt_string_under(&keys.previous_oldest, CryptPurpose::Cast, plaintext)
             .expect("encrypt JSON under legacy key")
     };
 
     let (decoded, origin): (Bag, DecryptOrigin) =
-        Crypt::decrypt_inner(CryptPurpose::Cookie, &aead_wire).expect("decrypt JSON via fallback");
+        Crypt::decrypt_inner(CryptPurpose::Cast, &aead_wire).expect("decrypt JSON via fallback");
     assert_eq!(decoded, bag);
     assert_eq!(origin.key, KeyOrigin::Previous(0));
     assert_eq!(origin.aad, AadVersion::Current);
@@ -279,7 +280,7 @@ async fn model_round_trips_row_written_under_previous_key() {
     // Mint A-encrypted ciphertext (under the Cast purpose so the
     // AsEncrypted cast can authenticate it on read) and shove it
     // straight into the DB.
-    let legacy_wire = suprnova::crypto::_test_encrypt_with(
+    let legacy_wire = encrypt_string_under(
         &keys.previous_oldest,
         CryptPurpose::Cast,
         "social-security-number-legacy",
@@ -316,12 +317,9 @@ async fn model_save_re_encrypts_under_current_key() {
     .await
     .unwrap();
 
-    let legacy_wire = suprnova::crypto::_test_encrypt_with(
-        &keys.previous_oldest,
-        CryptPurpose::Cast,
-        "re-encrypt-me",
-    )
-    .expect("encrypt under legacy key");
+    let legacy_wire =
+        encrypt_string_under(&keys.previous_oldest, CryptPurpose::Cast, "re-encrypt-me")
+            .expect("encrypt under legacy key");
     db.execute_unprepared(&format!(
         "INSERT INTO rotation_enc (id, secret) VALUES (1, '{legacy_wire}')"
     ))
@@ -382,3 +380,177 @@ async fn model_save_re_encrypts_under_current_key() {
 // This procedure was executed once during P7 dev to confirm the
 // fallback path is load-bearing; left as a comment for future
 // maintainers who suspect a test is no-op.
+
+// ---- The origin of a value, for the job that ends a rotation ----------
+
+#[test]
+fn a_value_under_the_current_key_needs_no_reencryption() {
+    let _ = rotation_keys();
+    let stored = Crypt::encrypt_string(CryptPurpose::Cast, "kept").expect("encrypt");
+
+    let (plain, origin) =
+        Crypt::decrypt_string_with_origin(CryptPurpose::Cast, &stored).expect("decrypt");
+
+    assert_eq!(plain, "kept");
+    assert_eq!(origin.key, KeyOrigin::Current);
+    assert_eq!(origin.aad, AadVersion::Current);
+    assert!(!origin.needs_reencryption());
+}
+
+#[test]
+fn a_value_under_a_previous_key_is_found_and_written_again() {
+    let keys = rotation_keys();
+    let stored = encrypt_string_under(&keys.previous_middle, CryptPurpose::Cast, "rotated")
+        .expect("a value from before the rotation");
+
+    let (plain, origin) =
+        Crypt::decrypt_string_with_origin(CryptPurpose::Cast, &stored).expect("decrypt");
+    assert_eq!(plain, "rotated");
+    assert_eq!(origin.key, KeyOrigin::Previous(1));
+    assert!(origin.needs_reencryption());
+
+    // What the rotation job does with it.
+    let written_again = Crypt::encrypt_string(CryptPurpose::Cast, &plain).expect("encrypt");
+    let (again, origin) =
+        Crypt::decrypt_string_with_origin(CryptPurpose::Cast, &written_again).expect("decrypt");
+    assert_eq!(again, "rotated");
+    assert!(!origin.needs_reencryption());
+}
+
+#[test]
+fn the_origin_of_a_typed_value_is_the_origin_of_its_text() {
+    let keys = rotation_keys();
+    let stored = encrypt_string_under(&keys.previous_oldest, CryptPurpose::Cast, "[1,2,3]")
+        .expect("a value from before the rotation");
+
+    let (value, origin): (Vec<u8>, DecryptOrigin) =
+        Crypt::decrypt_with_origin(CryptPurpose::Cast, &stored).expect("decrypt");
+
+    assert_eq!(value, [1, 2, 3]);
+    assert_eq!(origin.key, KeyOrigin::Previous(0));
+    assert!(origin.needs_reencryption());
+}
+
+#[test]
+fn the_label_of_a_value_is_the_second_thing_its_origin_says() {
+    let keys = rotation_keys();
+
+    // Written before the label had the name of the context in it.
+    let legacy = encrypt_string_under(&keys.current, CryptPurpose::Cast, "legacy label")
+        .expect("a value under the label of before");
+    let (plain, origin) =
+        Crypt::decrypt_string_for_with_origin(CryptPurpose::Cast, "users.ssn", &legacy)
+            .expect("decrypt");
+    assert_eq!(plain, "legacy label");
+    assert_eq!(origin.key, KeyOrigin::Current);
+    assert_eq!(origin.aad, AadVersion::Legacy);
+    assert!(
+        origin.needs_reencryption(),
+        "a value under the current key and the legacy label is written again as well"
+    );
+
+    // A previous key and the current label: no call of `Crypt` writes it.
+    let rotated = encrypt_string_for_under(
+        &keys.previous_oldest,
+        CryptPurpose::Cast,
+        "users.ssn",
+        "current label",
+    )
+    .expect("a value under a previous key");
+    let (plain, origin) =
+        Crypt::decrypt_string_for_with_origin(CryptPurpose::Cast, "users.ssn", &rotated)
+            .expect("decrypt");
+    assert_eq!(plain, "current label");
+    assert_eq!(origin.key, KeyOrigin::Previous(0));
+    assert_eq!(origin.aad, AadVersion::Current);
+    assert!(origin.needs_reencryption());
+
+    // The label binds the value to its context.
+    assert!(
+        Crypt::decrypt_string_for_with_origin(CryptPurpose::Cast, "users.email", &rotated).is_err(),
+        "a value of one column must not decrypt as a value of another"
+    );
+}
+
+#[test]
+fn a_value_under_a_key_that_is_not_in_the_ring_has_no_origin() {
+    let _ = rotation_keys();
+    let stranger = EncryptionKey::generate();
+    let stored = encrypt_string_under(&stranger, CryptPurpose::Cast, "unreadable")
+        .expect("a value under a key of nobody");
+
+    Crypt::decrypt_string_with_origin(CryptPurpose::Cast, &stored)
+        .expect_err("no key of the ring decrypts it");
+    Crypt::decrypt_with_origin::<String>(CryptPurpose::Cast, &stored)
+        .expect_err("no key of the ring decrypts it as a typed value");
+}
+
+/// A value that decrypts and is of another type than the one that was
+/// asked for. The JSON decoder names what it read in its own message, and
+/// what it read is the decrypted value.
+#[test]
+fn a_value_of_another_type_is_not_shown_in_the_error() {
+    let keys = rotation_keys();
+    let stored = encrypt_string_under(&keys.current, CryptPurpose::Cast, "\"123-45-6789\"")
+        .expect("a text where a number is read");
+
+    for said in [
+        Crypt::decrypt_with_origin::<u32>(CryptPurpose::Cast, &stored)
+            .expect_err("a text is no number")
+            .to_string(),
+        Crypt::decrypt::<u32>(CryptPurpose::Cast, &stored)
+            .expect_err("a text is no number")
+            .to_string(),
+    ] {
+        assert!(said.contains("JSON decode failed"), "{said}");
+        assert!(
+            !said.contains("123") && !said.contains("6789"),
+            "the error shows the decrypted value: {said}"
+        );
+    }
+}
+
+/// The encrypted casts decrypt and decode. A stored value of another
+/// type than the field has now is the case: a column that was a list of
+/// texts and is read as a list of numbers.
+#[test]
+fn an_encrypted_cast_does_not_show_the_value_it_cannot_decode() {
+    use suprnova::{AsEncryptedArray, AsEncryptedObject, Cast, IntoDynCast};
+
+    #[derive(Debug, serde::Serialize, serde::Deserialize)]
+    struct Card {
+        last_four: u16,
+    }
+
+    let _ = rotation_keys();
+    let list = Crypt::encrypt_string(CryptPurpose::Cast, "[\"123-45-6789\"]").expect("encrypt");
+    let object = Crypt::encrypt_string(CryptPurpose::Cast, "{\"last_four\":\"4111-1111\"}")
+        .expect("encrypt");
+
+    let said = [
+        AsEncryptedArray::<u32>::from_storage(&list)
+            .expect_err("a text is no number")
+            .to_string(),
+        AsEncryptedArray::<u32>::into_dyn()
+            .from_storage_json(&serde_json::Value::String(list.clone()))
+            .expect_err("a text is no number")
+            .to_string(),
+        AsEncryptedObject::<Card>::from_storage(&object)
+            .expect_err("a text is no number")
+            .to_string(),
+        AsEncryptedObject::<Card>::into_dyn()
+            .from_storage_json(&serde_json::Value::String(object.clone()))
+            .expect_err("a text is no number")
+            .to_string(),
+    ];
+
+    for said in said {
+        assert!(said.contains("another type"), "{said}");
+        for part in ["123", "6789", "4111"] {
+            assert!(
+                !said.contains(part),
+                "the error shows the decrypted value: {said}"
+            );
+        }
+    }
+}

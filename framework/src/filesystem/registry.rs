@@ -22,7 +22,55 @@ use opendal::Operator;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-static REGISTRY: RwLock<Option<HashMap<String, Operator>>> = RwLock::new(None);
+/// A registered disk, and the public base URL it was given. A disk with
+/// no URL is a private disk.
+///
+/// The two are one entry under one lock. With a lock for each, a disk
+/// that is registered again while another thread gives the name a URL
+/// could end as a private disk with the URL of the one before.
+struct Disk {
+    operator: Operator,
+    public_url: Option<String>,
+}
+
+static REGISTRY: RwLock<Option<HashMap<String, Disk>>> = RwLock::new(None);
+
+/// Whether a disk is registered under `name`.
+pub(crate) fn contains(name: &str) -> bool {
+    REGISTRY
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .is_some_and(|disks| disks.contains_key(name))
+}
+
+/// Set the public base URL of the disk `name`. `false` when no disk is
+/// registered under the name.
+pub(crate) fn set_public_url(name: &str, base: String) -> bool {
+    let mut guard = REGISTRY
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match guard.as_mut().and_then(|disks| disks.get_mut(name)) {
+        Some(disk) => {
+            disk.public_url = Some(base);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The public base URL of the disk `name`: `Ok(None)` for a private
+/// disk, and the error of [`get`] when no disk has the name.
+pub(crate) fn public_url(name: &str) -> Result<Option<String>, FrameworkError> {
+    let guard = REGISTRY
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .as_ref()
+        .and_then(|disks| disks.get(name))
+        .map(|disk| disk.public_url.clone())
+        .ok_or_else(|| FrameworkError::internal(format!("storage disk '{name}' not registered")))
+}
 
 /// Register an `Operator` under `name`, replacing any previous registration.
 ///
@@ -37,7 +85,14 @@ pub(crate) fn register(name: impl Into<String>, op: Operator) {
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
-    if map.insert(name.clone(), op).is_some() {
+    // A disk that is registered again under a name is another disk, and
+    // it starts as a private one: the URL of the disk before is not its
+    // URL.
+    let disk = Disk {
+        operator: op,
+        public_url: None,
+    };
+    if map.insert(name.clone(), disk).is_some() {
         tracing::warn!(
             disk = %name,
             "storage disk re-registered; the previously registered operator for this name was replaced"
@@ -52,7 +107,7 @@ pub(crate) fn get(name: &str) -> Result<Operator, FrameworkError> {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard
         .as_ref()
-        .and_then(|m| m.get(name).cloned())
+        .and_then(|m| m.get(name).map(|disk| disk.operator.clone()))
         .ok_or_else(|| FrameworkError::internal(format!("storage disk '{name}' not registered")))
 }
 

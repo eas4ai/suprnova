@@ -26,10 +26,19 @@ pub use response::Response;
 pub trait Authorizable: Sized + 'static {
     /// `true` iff the gate registered for `(action, Self, R)` allows.
     /// Missing gates deny by default.
+    ///
+    /// Synchronous, so async before-hooks do not run, neither their allows
+    /// nor their denials - among them the hook
+    /// [`register_gate_bridge`](crate::rbac::register_gate_bridge) installs.
+    /// Ask [`Authorizable::can_async`] when a permission should answer.
     fn can<R: 'static>(&self, action: &str, resource: &R) -> bool {
         Gate::allows(action, self, resource)
     }
     /// Opposite of [`Authorizable::can`].
+    ///
+    /// Skips async before-hooks like [`Authorizable::can`], so a denial from
+    /// [`Gate::before_async`] is not enforced here; see
+    /// [`Authorizable::cannot_async`].
     fn cannot<R: 'static>(&self, action: &str, resource: &R) -> bool {
         Gate::denies(action, self, resource)
     }
@@ -40,6 +49,11 @@ pub trait Authorizable: Sized + 'static {
     /// with a custom message/status - maps to `FrameworkError::Domain`
     /// carrying that message and status (e.g. 404 from
     /// `Response::deny_as_not_found()`).
+    ///
+    /// Synchronous like [`Authorizable::can`], with the same limit: an async
+    /// before-hook's denial is not enforced here, and a permission connected
+    /// by [`register_gate_bridge`](crate::rbac::register_gate_bridge) answers
+    /// [`Authorizable::authorize_async`] only.
     fn authorize<R: 'static>(
         &self,
         action: &str,

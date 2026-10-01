@@ -303,14 +303,22 @@ pub(crate) fn events_muted() -> bool {
     EVENTS_MUTED.try_with(|m| *m).unwrap_or(false)
 }
 
-/// Clear every registered seeder. Test-only helper - production code
-/// should never need to call this because the registry is built once
-/// at boot.
+/// Forget every registered seeder, so a test starts from a registry it
+/// filled itself.
 ///
-/// Silently no-ops on poison (matches the test-helper-friendly
-/// shape `ScopeRegistry::__clear_for_tests` and
-/// `ConnectionRegistry::clear` already use).
-#[doc(hidden)]
+/// The registry is one for the process, and the guard of the test
+/// container does not reset it: clearing a registry is a thing a test
+/// asks for. A test that registers a seeder calls this first, and again
+/// when it is done, so the test that runs behind it does not run the
+/// seeders of this one. The tests that use the registry run one at a
+/// time, because they share it.
+///
+/// Compiled with the `testing` feature alone. An application registers
+/// its seeders once, when it boots, and has nothing to clear.
+///
+/// A poisoned registry is left as it is, without an error, as the other
+/// resets of the test helpers do.
+#[cfg(any(test, feature = "testing"))]
 pub fn clear() {
     if let Ok(mut g) = lock::write(&REGISTRY, "seeder registry") {
         *g = None;

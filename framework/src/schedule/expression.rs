@@ -304,14 +304,13 @@ impl CronExpression {
         })
     }
 
-    /// Check if this expression is due now (wall clock).
+    /// Check if this expression is due now, in the local time zone.
     ///
-    /// Thin wrapper over [`Self::is_due_at`] that uses `Local::now()` as the
-    /// clock. Production schedulers should call this; tests should prefer
-    /// `is_due_at` so they can inject a synthetic clock and avoid clock-skew
-    /// flakiness.
+    /// Thin wrapper over [`Self::is_due_at`] that reads the time from
+    /// [`crate::clock::now`], so a test that moves the clock with
+    /// `TestClock` makes a task due without waiting for it.
     pub fn is_due(&self) -> bool {
-        self.is_due_at(Local::now())
+        self.is_due_at(crate::clock::now().with_timezone(&Local))
     }
 
     /// Check if this expression is due for the supplied instant.

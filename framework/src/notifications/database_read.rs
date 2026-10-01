@@ -17,7 +17,6 @@
 
 use crate::database::placeholder::placeholder;
 use crate::error::FrameworkError;
-use chrono::Utc;
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, FromQueryResult, QueryResult, Statement, Value,
 };
@@ -149,7 +148,7 @@ pub async fn read_for(
 /// Mark a single notification row as read. No-op if `read_at` is already set
 /// (matches Laravel's `markAsRead` idempotence).
 pub async fn mark_as_read(db: &DatabaseConnection, id: &str) -> Result<(), FrameworkError> {
-    let now = Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
     let backend = db.get_database_backend();
     let stmt = Statement::from_sql_and_values(
         backend,
@@ -171,7 +170,7 @@ pub async fn mark_as_read(db: &DatabaseConnection, id: &str) -> Result<(), Frame
 /// Mark a single notification row as unread. No-op if `read_at` is already
 /// NULL (matches Laravel's `markAsUnread` idempotence).
 pub async fn mark_as_unread(db: &DatabaseConnection, id: &str) -> Result<(), FrameworkError> {
-    let now = Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
     let backend = db.get_database_backend();
     let stmt = Statement::from_sql_and_values(
         backend,
@@ -197,7 +196,7 @@ pub async fn mark_all_as_read(
     notifiable_type: &str,
     notifiable_id: &str,
 ) -> Result<u64, FrameworkError> {
-    let now = Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
     let backend = db.get_database_backend();
     let stmt = Statement::from_sql_and_values(
         backend,

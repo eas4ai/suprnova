@@ -97,12 +97,38 @@ pub fn derive_inertia_props_impl(input: TokenStream) -> TokenStream {
         }
     };
 
-    let field_count = fields.len();
-    let field_names: Vec<_> = fields.iter().map(|f| &f.ident).collect();
-    let field_name_strings: Vec<_> = fields
-        .iter()
-        .map(|f| f.ident.as_ref().unwrap().to_string())
-        .collect();
+    let container = match crate::serde_attrs::parse_container(&input.attrs, "InertiaProps") {
+        Ok(container) => container,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let mut field_names = Vec::new();
+    let mut field_name_strings: Vec<String> = Vec::new();
+    for field in fields {
+        let names = match crate::serde_attrs::field_names(field, &container, "InertiaProps") {
+            Ok(names) => names,
+            Err(e) => return e.to_compile_error().into(),
+        };
+        // Props are only serialized: the derive reads the serialize side of
+        // the attributes, and leaves a `deserialize` half and
+        // `skip_deserializing` to a `Deserialize` derive on the same struct.
+        if names.skip_serializing {
+            continue;
+        }
+        if field_name_strings.contains(&names.serialize) {
+            return syn::Error::new_spanned(
+                field,
+                format!(
+                    "two props are sent under the key `{}`; give each its own name",
+                    names.serialize
+                ),
+            )
+            .to_compile_error()
+            .into();
+        }
+        field_names.push(&field.ident);
+        field_name_strings.push(names.serialize);
+    }
+    let field_count = field_names.len();
 
     let expanded = quote! {
         impl #impl_generics ::suprnova::serde::Serialize for #name #ty_generics #where_clause {

@@ -25,7 +25,7 @@ pub struct Greet {
 impl TypedCommand for Greet {
     async fn run(self) -> Result<(), FrameworkError> {
         let prefix = if self.loud { "HELLO" } else { "Hello" };
-        println!("{prefix}, {}!", self.name);
+        suprnova::console::line(format!("{prefix}, {}!", self.name));
         Ok(())
     }
 }
@@ -53,10 +53,12 @@ use suprnova::{command, FrameworkError};
 
 #[command(name = "ping", description = "Smoke test")]
 pub async fn ping(_args: Vec<String>) -> Result<(), FrameworkError> {
-    println!("pong");
+    suprnova::console::line("pong");
     Ok(())
 }
 ```
+
+A command prints with `suprnova::console::line`, not `println!`. See [Printing and asking](#printing-and-asking).
 
 Under the hood both paths land in the same `CommandEntry` registry; the raw shape just uses a clap subcommand with a `trailing_var_arg` to capture argv into the `Vec<String>`. Prefer the typed shape for any command with arguments - you get per-command `--help`, value parsing, default values, and short/long flag pairs without writing a parser by hand.
 
@@ -97,7 +99,7 @@ Tokio runs in `current_thread` flavor - there's no work to parallelize across co
 Two things to notice:
 
 - **Bootstrap is lazy.** The closure passed to `dispatch_argv_with_init` only runs when clap matches a real registered subcommand. `console --help`, `console --version`, missing-subcommand, and parse-error paths all skip it - so `console --help` works on a fresh checkout that doesn't have `DATABASE_URL` set yet.
-- **`main` doesn't print errors.** `dispatch_argv_with_init` owns all user-facing stderr - it eprintlns the handler's error message (unless the error is silent, like a clap parse failure that clap already printed) and prints clap's own help / version / parse-error output. `main` is pure `Result → ExitCode` translation; adding a redundant `eprintln!` would double-print.
+- **`main` doesn't print errors.** `dispatch_argv_with_init` owns all user-facing stderr - it writes the handler's error message as `error: <message>` (unless the error is silent, like a clap parse failure that clap already printed) and prints clap's own help / version / parse-error output. `main` is pure `Result → ExitCode` translation; adding a redundant `eprintln!` would double-print.
 
 If you want a particular command to skip an expensive bootstrap step entirely, gate the step itself on an env var rather than threading a "lazy bootstrap" flag through the framework.
 
@@ -109,6 +111,7 @@ The framework registers a small set of commands itself. Linking the framework in
 |---------------|-------------------------------------------|
 | `db:seed`     | Run every registered `Seeder` in order. Accepts `--class=<Name>` (or a bare positional) to run a single named seeder, matching `php artisan db:seed --class=UserSeeder`. |
 | `model:prune` | Walk the `PrunerEntry` registry and force-delete every row each registered `Prunable` / `MassPrunable` scope returns. `--model=<Name>` restricts to one type; `--pretend` reports rowcount without modifying any rows. |
+| `db:monitor`  | Print how many connections the database server of each connection has. `--max=<n>` also dispatches `DatabaseBusy` for each server at or over that number. See [Database](database.md#busy-database---dbmonitor-and-dbmonitor). |
 | `--help` / `-h` | List available commands; per-subcommand `--help` is built by clap from the typed args. |
 | `--version`   | Print the version registered by `set_version` (typically your app's `CARGO_PKG_VERSION`). Omitted entirely if `set_version` was never called. |
 
@@ -158,10 +161,39 @@ Attributes:
 | Attribute    | Required | Purpose                                       |
 |--------------|----------|-----------------------------------------------|
 | `#[console(name = "...")]` | yes | The invocation name on the CLI (`"users:purge"`, `"mail:send"`, `"greet"`). |
-| `#[console(description = "...")]` | no | One-line description shown in top-level help. |
+| `#[console(description = "...")]` | no | One-line description shown in top-level help. Without it, the command keeps the about text clap has for the struct: its doc comment, or `#[command(about = "...")]`. A `description` overrides both. |
 | `#[arg(...)]` (clap) | n/a | Clap's own field attributes for short/long flags, defaults, value parsers, etc. |
 
 You also get clap's auto-generated per-command help (`console users:purge --help`) for free.
+
+A command can take its about text from the doc comment instead of the attribute:
+
+```rust
+use async_trait::async_trait;
+use clap::Parser;
+use suprnova::{Command, FrameworkError, TypedCommand};
+
+/// Rebuild the search index
+#[derive(Parser, Command, Debug)]
+#[console(name = "search:rebuild")]
+pub struct SearchRebuild {}
+
+#[async_trait]
+impl TypedCommand for SearchRebuild {
+    async fn run(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+```
+
+`CommandEntry::about()` returns the text the help shows for a command, whichever of the three sources it came from, and `None` when the command has none. To list commands with their descriptions, read `about()`. `CommandEntry::description` holds only the text of the `description` attribute and is empty when the attribute is missing.
+
+```rust
+for entry in suprnova::console::list() {
+    let about = entry.about().unwrap_or_default();
+    suprnova::console::line(format!("{:<20} {about}", entry.name));
+}
+```
 
 ### `#[command]` - raw `Vec<String>` (simple cases)
 
@@ -180,6 +212,100 @@ The annotated function must be `async fn(Vec<String>) -> Result<(), FrameworkErr
 
 Names in both shapes support Laravel-style namespacing: `mail:send`, `queue:work`, `db:fresh`. The colon is purely cosmetic - it's a string the dispatcher matches against `argv[1]`.
 
+## Printing and asking
+
+Print with `suprnova::console::line` and `suprnova::console::error_line`, and ask with `suprnova::console::ask` and `suprnova::console::confirm`. In the console binary they use the standard streams. Under [`console::test`](#testing-a-command) they use a buffer and a list of prepared answers, so the same command body runs in both.
+
+| Function | What it does |
+|---|---|
+| `line(text)` | Print one line on the standard output. Takes anything that implements `Display`. |
+| `error_line(text)` | Print one line on the standard error: a warning, or a note that must stay out of piped output. |
+| `ask(question) -> Result<String, FrameworkError>` | Print the question, wait on the standard input, and return the line typed, without its line ending. |
+| `confirm(question, default) -> Result<bool, FrameworkError>` | Ask a yes or no question. `y` and `yes` are yes, `n` and `no` are no, in any case. An empty line is `default`, and the `[Y/n]` or `[y/N]` hint shows which one that is. |
+
+```rust
+use async_trait::async_trait;
+use clap::Parser;
+use suprnova::console;
+use suprnova::{Command, FrameworkError, TypedCommand};
+
+#[derive(Parser, Command, Debug)]
+#[console(name = "users:purge", description = "Delete users older than N days")]
+pub struct UsersPurge {
+    #[arg(long)]
+    pub older_than_days: u32,
+}
+
+#[async_trait]
+impl TypedCommand for UsersPurge {
+    async fn run(self) -> Result<(), FrameworkError> {
+        let question = format!("Delete users older than {} days?", self.older_than_days);
+        if !console::confirm(&question, false)? {
+            console::line("nothing deleted");
+            return Ok(());
+        }
+        console::line("deleted 12 users");
+        Ok(())
+    }
+}
+```
+
+Three rules keep a command honest:
+
+- `line` does not panic when the write fails. `println!` panics when the reader of a pipe has gone away, as in `console list | head`.
+- `ask` and `confirm` return an error when the input ends before a line was read, which is what a command gets with no terminal and nothing piped in. The command stops instead of acting on an answer nobody gave. `confirm` also returns an error for an answer that is neither yes nor no.
+- Return the error of a failed command. The console prints it as `error: <message>`, so printing it with `error_line` as well shows it twice.
+
+`ask` blocks the thread while it waits on the standard input. That is right for a console command, which has nothing else to do until you answer, and wrong inside a server.
+
+What a command prints with `println!` reaches the standard output of the process, and a test cannot read it. The framework's own commands, `db:seed` and `model:prune` among them, print through the console.
+
+## Testing a command
+
+`suprnova::console::test(argv)` runs a command through the dispatcher the console binary uses and collects what it printed. `argv` is what you type after the name of the binary. `.expects_question(question, answer)` prepares an answer, and `.run().await` returns a `ConsoleRun`.
+
+```rust
+use suprnova::console;
+
+#[tokio::test]
+async fn purge_asks_before_it_deletes() {
+    let run = console::test(["users:purge", "--older-than-days", "30"])
+        .expects_question("Delete users older than 30 days?", "yes")
+        .run()
+        .await;
+
+    run.assert_successful().assert_every_question_was_asked();
+    run.assert_output_contains("deleted 12 users");
+}
+```
+
+The test binary has to link the module that holds your commands. Make sure the crate declares `pub mod commands;` in `src/lib.rs`, and reference the crate from the test. `console::test` runs no bootstrap: `dispatch_argv` has no init closure, so set up the database and the container in the test, as in [Testing](testing.md).
+
+`ConsoleRun` has these methods:
+
+| Method | Returns or asserts |
+|---|---|
+| `output()` | The standard output as a `&str`. Questions are part of it, one line each. |
+| `errors()` | The standard error as a `&str`. The error of a failed command is in it, as `error: <message>`. |
+| `exit_code()` | `0` when the command succeeded, `1` when it failed or its arguments did not parse. Help and the version end with `0`. |
+| `error()` | The `FrameworkError` the run ended with, as an `Option`. |
+| `unasked_questions()` | The questions with a prepared answer that the command did not ask, in the order you gave them. |
+| `assert_successful()`, `assert_failed()` | Assert that the run ended with exit code `0`, or with a failure. |
+| `assert_output_contains(text)`, `assert_errors_contain(text)` | Assert that a stream contains `text`. |
+| `assert_every_question_was_asked()` | Assert that `unasked_questions()` is empty. |
+
+The assert methods return `&Self`, so you can chain them.
+
+Help, the version, parse errors and the error of a failed command are collected too, so `console::test(["--help"])` and an argument the command does not take are testable.
+
+Answers are given in order. A question that comes out of order, or one with no prepared answer, makes `ask` return an error and the command fails. An answer that went to another question than the one it was written for would let a test pass while the command deleted something the test never agreed to. For `confirm`, the question is the text without the `[y/N]` hint.
+
+The collection belongs to the task the command runs on. What a task that the command spawned prints is not collected.
+
+### Why Suprnova diverges
+
+Laravel collects the output of a command in `$this->artisan(...)` and checks it with `expectsOutput` and `expectsQuestion`. Suprnova follows the same shape, but commands are plain Rust functions, so nothing can hook `println!`. A command has to print through `console::line`, `console::error_line`, `console::ask` and `console::confirm` for a test to see it, and a test states its questions in the order the command asks them.
+
 ## `suprnova make:command`
 
 The CLI generator drops a runnable stub. The generated file uses the **typed shape** (`#[derive(Parser, Command)]` + `impl TypedCommand`) - that's the recommended default, and it gives you per-command `--help` for free:
@@ -190,7 +316,7 @@ suprnova make:command cache:clear
 # → src/commands/mod.rs gets `pub mod cache_clear;` appended (created if missing)
 ```
 
-The stub is runnable as-is - `cargo run --bin console -- cache:clear` will print `cache:clear: not yet implemented` and return `Ok(())` so you can wire it in and iterate. Fill in fields on the struct for typed args and replace the body of `TypedCommand::run`.
+The stub prints with `suprnova::console::line`, so a test can read it. It is runnable as-is - `cargo run --bin console -- cache:clear` will print a line that names the command and says it is not implemented, and return `Ok(())` so you can wire it in and iterate. Fill in fields on the struct for typed args and replace the body of `TypedCommand::run`.
 
 Name normalization:
 
@@ -207,12 +333,7 @@ Make sure `pub mod commands;` is declared in `src/lib.rs` so the inventory submi
 
 ### Why Suprnova diverges
 
-The framework deliberately does **not** make a global `suprnova` CLI command for runtime tasks like `db:seed`. A global binary can't statically load your app's seeders, factories, or `#[command]` async fns without either:
-
-- shelling out to `cargo run --bin app -- ...` (slow - full compile per invocation, defeats the point), or
-- dynamic loading (too much complexity for v1)
-
-So the user's project produces a `console` binary. Run it directly:
+A global binary can't statically load your app's seeders, factories, or `#[command]` async fns, so the work runs in your project's own binaries. The `suprnova` CLI forwards framework tasks (`migrate`, `db:seed`, `schedule:list`, and the rest) to them through `cargo run`, which compiles on first use. Your own `#[command]`s live in the project's `console` binary. Run it directly:
 
 ```bash
 ./target/debug/console db:seed
@@ -231,6 +352,8 @@ There are three distinct command-invocation paths in a Suprnova project, and the
 | `suprnova new`, `suprnova make:*`, `suprnova serve`, `suprnova key:generate`, … | Global CLI binary (installed via `cargo install --git`) | File-only generators and scaffolders; don't need user code. |
 | `suprnova migrate`, `suprnova migrate:status`, `suprnova schedule:run`, `suprnova schedule:work`, `suprnova schedule:list`, `suprnova workflow:work` | Global CLI shells into `cargo run --quiet -- <name>` against the app/server binary | Long-running daemons and schema work that the same `Application::run` clap parser owns. The server binary's `queue:work` lives here too - `cargo run --bin <app> -- queue:work`. |
 | `console db:seed`, `console model:prune`, `console <your-command>` | Per-project `console` binary (`src/bin/console.rs`) | One-shot commands that need user types (seeders, commands, prunable models) compiled into the user's crate. |
+
+`suprnova db:seed` and `suprnova model:prune` are forwards to the console binary: the CLI runs `cargo run --quiet --bin console -- <name>` and checks no name itself. See [CLI Overview](cli.md#database).
 
 The split is intentional. The server binary already needs a clap parser to choose between `serve`, `migrate`, `queue:work`, etc.; daemons that share its lifecycle live there. The console binary exists for everything else - short-lived, user-defined, type-rich. New runtime commands belong in `#[command]` / `#[derive(Command)]` dispatched by the project's `console` binary.
 
@@ -275,7 +398,10 @@ Console handlers print to stdout for human-readable output. If a downstream tool
 | `suprnova::console::find(name)`           | Look up a registered command by exact name.   |
 | `suprnova::two_column_detail(left, right)` | Render a name, a dot leader, and a status word as one 80-column progress line. Mirrors Laravel's `$this->components->twoColumnDetail(...)`. |
 | `suprnova::console::list()`               | All registered commands, sorted by name.      |
-| `suprnova::CommandEntry`                  | Inventory record: `{ name, description, clap_builder, handler }`. Submitted by both macros. |
+| `suprnova::CommandEntry`                  | Inventory record: `{ name, description, clap_builder, handler }`. Submitted by both macros. `about()` returns the text the help shows. |
+| `suprnova::console::line(text)`, `error_line(text)` | Print one line on the standard output or the standard error. A test reads them. |
+| `suprnova::console::ask(question)`, `confirm(question, default)` | Read an answer from the standard input, or from the answers a test prepared. |
+| `suprnova::console::test(argv)`           | Prepare a run of the console for a test. Returns a `ConsoleTest`; `.expects_question(..)` prepares an answer and `.run().await` returns a `ConsoleRun`. |
 | `suprnova::CommandHandler`                | The handler fn-pointer type: `fn(&clap::ArgMatches) -> Pin<Box<dyn Future<...>>>`. |
 | `FrameworkError::silent()` / `.is_silent()` | Construct / detect an error that the dispatcher will NOT print to stderr. Used internally to suppress double-prints when clap already wrote a parse error to the terminal. |
 

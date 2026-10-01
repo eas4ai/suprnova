@@ -26,8 +26,10 @@ suprnova serve [OPTIONS]
 | `--backend-only` | `false` | Skip the Vite dev server |
 | `--frontend-only` | `false` | Skip the backend, just run Vite |
 | `--skip-types` | `false` | Don't regenerate TypeScript types on Rust changes |
-| `--no-restart` | `false` | Don't respawn a crashed dev process - tear the whole session down instead (the old behaviour) |
+| `--no-restart` | `false` | Don't respawn a crashed dev process - tear the whole session down instead |
 | `--restart-tries <N>` | `5` | Give up retrying a process after this many consecutive crashes. Ignored with `--no-restart`, which already ends the session on the first crash. |
+| `--migrate <WHEN>` | `start` | When `serve` runs the pending migrations: `start` (once, when `serve` starts), `always` (each time the backend starts, so on every save), or `never`. See [Migrations](#migrations). |
+| `--no-migrate` | `false` | Run no migration. The same as `--migrate never`. Cannot be combined with `--migrate`. |
 | `--timestamps` | `false` | Prefix each output line with an `HH:MM:SS` clock time |
 | `--json` | `false` | Emit one JSON object per line (NDJSON) on stdout instead of prefixed text - see [JSON output](#json-output). Combining with `--timestamps` isn't an error; `--timestamps` has no extra effect, since every event already carries its own timestamp. |
 
@@ -135,7 +137,13 @@ When you run `suprnova serve`, the CLI:
    starting a dev server should not also be choosing versions for you.
 6. Runs `npm install` in `frontend/` if `node_modules` doesn't exist yet.
    Skipped under `--backend-only`, and when the project has no frontend.
-7. Spawns `cargo watch` for the backend, scoped with `-w` to the paths the
+7. Runs `cargo run --bin <package-name> -- migrate` once, so your pending
+   migrations are applied before the backend starts (see
+   [Migrations](#migrations)). The frontend and the other processes start
+   first and do not wait for it. Skipped under `--frontend-only`,
+   `--migrate always`, and `--migrate never`, and when the project has no
+   `src/migrations` directory.
+8. Spawns `cargo watch` for the backend, scoped with `-w` to the paths the
    server is actually built from: `src/`, `cmd/`, `Cargo.toml`,
    `Cargo.lock`, `.env`, and `lang/`. `cmd/` is where the full-stack
    scaffold puts the server binary's `main.rs`; the `--api` scaffold puts
@@ -155,17 +163,20 @@ When you run `suprnova serve`, the CLI:
 
    On a scaffolded full-stack project the full invocation is
    `cargo watch --no-vcs-ignores -w src -w cmd -w Cargo.toml -w Cargo.lock
-   -w .env -w lang -x 'run --bin <package-name>'`. Frontend edits and the
+   -w .env -w lang -x 'run --bin <package-name> -- serve --no-migrate'`.
+   Under `--migrate always`, or when step 7 could not run the migrations, the
+   command is `run --bin <package-name>` and the backend migrates by itself.
+   Frontend edits and the
    generated `frontend/src/types/*.ts` are outside that scope, so they
    never restart the backend.
-8. Spawns `npm run dev` in `frontend/` for Vite, which gives you HMR for
+9. Spawns `npm run dev` in `frontend/` for Vite, which gives you HMR for
    Svelte/React/Vue components and Tailwind classes. Skipped under
    `--backend-only`, and when the project has no frontend.
-9. Spawns every extra process declared in the project's `Suprnova.toml`
+10. Spawns every extra process declared in the project's `Suprnova.toml`
    (see [Extra dev processes](#extra-dev-processes) below), each with its
    own `[name]` prefix - queue workers, log tailers, anything else you'd
    otherwise juggle in another terminal.
-10. Starts a file watcher on `src/` that re-runs the type generator whenever
+11. Starts a file watcher on `src/` that re-runs the type generator whenever
     a `.rs` file changes, once the burst of saves has been quiet for 500 ms.
     Only real changes count - a creation, a write, or a deletion. Reads do
     not, which matters because the generator reads every `.rs` file under
@@ -180,7 +191,7 @@ When you run `suprnova serve`, the CLI:
     an edit that doesn't change any prop shape prints nothing and emits no
     `types_regenerated` event. Silence after a save means your edit didn't
     change the generated types.
-11. Forwards every child's stdout/stderr to your terminal with a `[name]`
+12. Forwards every child's stdout/stderr to your terminal with a `[name]`
     prefix (`[backend]`, `[frontend]`, or the process's configured name),
     optionally timestamped with `--timestamps` - or, with `--json`, as
     NDJSON events instead (see [JSON output](#json-output) below).
@@ -191,8 +202,8 @@ for `cargo watch` to recover, a crashed Vite process, a `Suprnova.toml`
 process that failed - it's respawned after a short backoff (200ms,
 doubling on each consecutive crash, capped at 5s; a process that stayed
 up 30s resets the climb) instead of tearing the session down. Pass
-`--no-restart` to get the old behaviour back: any child exiting shuts the
-whole session down immediately.
+`--no-restart` and any child exiting shuts the whole session down
+immediately.
 
 A process that keeps crashing doesn't retry forever: `--restart-tries`
 (default `5`) caps how many consecutive crashes `serve` retries before
@@ -253,6 +264,47 @@ untouched and the watcher says nothing, so a regeneration that changed
 nothing isn't a change anything downstream has to react to - not Vite, not
 the backend watcher, and not whatever is reading `--json`.
 
+## Migrations
+
+The backend runs under `cargo watch`, which starts it again on every save.
+An application that starts with no subcommand migrates before it serves. If
+`serve` left it at that, every save would run every pending migration
+against your database, including the draft of a migration you saved a moment
+ago. A migration that has run does not run again when its file changes, so
+your database would keep the schema of the first draft.
+
+By default (`--migrate start`), `serve` runs the pending migrations once,
+before it starts the backend, and starts the watched backend with
+`serve --no-migrate`, so a restart runs none. The run is a process named
+`migrate`. Its output carries the `[migrate]` prefix, and with `--json` its
+`started`, `output`, and `exited` events carry `"name":"migrate"`. Ctrl+C
+ends the run and the session.
+
+| Option | The pending migrations run |
+|---|---|
+| `--migrate start` (default) | Once, when `serve` starts. |
+| `--migrate always` | Each time the backend starts, which is on every save. |
+| `--migrate never`, `--no-migrate` | Never. `suprnova migrate` runs them. |
+
+When a `.rs` file under `src/migrations` changes after the start, `serve` prints this
+notice once for each burst of writes:
+
+```text
+[migrate] src/migrations changed. The dev server does not run migrations when the backend restarts: run `suprnova migrate` to apply them, or start with `suprnova serve --migrate always`.
+```
+
+With `--json`, the event is `migrations_changed` instead (see
+[JSON output](#json-output)).
+
+Two cases leave the backend to migrate by itself, as it does under
+`--migrate always`:
+
+- The run at the start fails. `serve` prints a warning with the reason. For
+  that session the backend runs the migrations each time it starts and does
+  not serve until they pass.
+- The project has no `src/migrations` directory. Its migrator is somewhere
+  the CLI cannot see, so the application runs it.
+
 ## Extra dev processes
 
 `suprnova serve` always runs the backend and Vite, but most projects have
@@ -265,7 +317,7 @@ backend and frontend:
 [[serve.process]]
 name = "queue"
 command = "cargo"
-args = ["run", "--bin", "console", "--", "queue:work"]
+args = ["run", "--", "queue:work"]
 color = "yellow"
 
 [[serve.process]]
@@ -302,13 +354,14 @@ field:
 
 | `type` | Fields | Meaning |
 |---|---|---|
-| `started` | `ts`, `name`, `pid` | A process (backend, frontend, or a `Suprnova.toml` entry) was spawned for the first time. |
+| `started` | `ts`, `name`, `pid` | A process (backend, frontend, the `migrate` run, or a `Suprnova.toml` entry) was spawned for the first time. |
 | `output` | `ts`, `name`, `stream` (`"stdout"` or `"stderr"`), `line` | One line of a child's output, carried as a field rather than passed through raw. |
 | `exited` | `ts`, `name`, `code` (nullable) | A process exited. `code` is `null` if it was killed by a signal rather than returning a status. |
 | `restart_scheduled` | `ts`, `name`, `delay_ms` | A crashed process will be respawned after `delay_ms` (see the backoff schedule above). |
 | `restart_succeeded` | `ts`, `name`, `pid` | A scheduled respawn succeeded; the process is running again under a new PID. |
 | `gave_up` | `ts`, `name`, `tries` | The process crashed `tries` consecutive times (`--restart-tries`) and `serve` stopped retrying it. The session, and every other process, keep running. |
 | `types_regenerated` | `ts`, `artifact` (`"inertia_props"` or `"lang_keys"`), `count` | The file watcher rewrote a TypeScript artifact after a `.rs`/`.ftl` change. Fires only when the generated file actually changed: a `.rs` edit that leaves the emitted TypeScript byte-identical writes nothing and emits nothing, so an event always means the file on disk is different now. `count` is the number of structs (or message ids) in the rewritten file, not the number that changed. |
+| `migrations_changed` | `ts` | A `.rs` file under `src/migrations` changed and the session runs no migration when the backend restarts (`--migrate start` or `--migrate never`). One event for each burst of writes. Run `suprnova migrate` to apply the change. |
 | `shutdown` | `ts` | The session is shutting down. Always the last line. |
 
 For example, a Vite crash and its respawn look like:
@@ -394,8 +447,7 @@ right before each "respawning in …ms" notice for the real error (a rustc
 `error[E…]`, an ENOENT, whatever the child printed). Fix the cause; the
 next respawn attempt picks it up automatically. To stop the retries and
 see the failure once, re-run with `--no-restart` - the session then tears
-down on the first crash, same as `suprnova serve` behaved before this
-existed.
+down on the first crash.
 
 After `--restart-tries` (default `5`) consecutive crashes, `serve` stops
 retrying that process on its own and prints a message naming it:

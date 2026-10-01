@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 //! `#[derive(Data)]` - composite derive that produces:
 //! - `Serialize` (skipping `#[data(input_only)]` fields)
 //! - `Deserialize` (rejecting payloads containing `#[data(output_only)]`
@@ -133,6 +132,8 @@ struct FieldOptions {
     /// Set by `#[data(lazy)]` or derived from `#[data(auto_lazy)]` at the
     /// struct level when the field's type is `Prop<T>`.
     lazy: Option<LazyFlavor>,
+    /// The names serde's attributes give the field, and its skips.
+    names: crate::serde_attrs::FieldNames,
 }
 
 #[derive(Default)]
@@ -144,6 +145,17 @@ struct StructOptions {
     /// impl (body parsing, validation, Precognition, route-param
     /// injection, `after_validation`) is always emitted.
     authorize_fn: Option<syn::ExprPath>,
+    /// `#[data(after_validation = "path::to::fn")]`: the generated
+    /// `FormRequest::after_validation` calls this `fn(&Self) ->
+    /// Result<(), ValidationErrors>`. The derive owns the `FormRequest`
+    /// impl, so without it a Data Object has no place for `validate!`
+    /// rules or any other cross-field check.
+    after_validation_fn: Option<syn::ExprPath>,
+    /// `#[data(after_validation_async = "path::to::fn")]`: the same for
+    /// `FormRequest::after_validation_async`, an `async fn(&Self) ->
+    /// Result<(), ValidationErrors>`, where `Unique`, `Exists` and other
+    /// database rules run.
+    after_validation_async_fn: Option<syn::ExprPath>,
     /// `#[data(allow_unknown_fields)]` - when set, the generated
     /// `Deserialize` visitor silently drops payload keys that don't
     /// match any struct field (the serde-default permissive behaviour).
@@ -191,6 +203,12 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                     let lit: syn::LitStr = meta.value()?.parse()?;
                     let path: syn::ExprPath = lit.parse()?;
                     opts.authorize_fn = Some(path);
+                } else if meta.path.is_ident("after_validation") {
+                    let lit: syn::LitStr = meta.value()?.parse()?;
+                    opts.after_validation_fn = Some(lit.parse()?);
+                } else if meta.path.is_ident("after_validation_async") {
+                    let lit: syn::LitStr = meta.value()?.parse()?;
+                    opts.after_validation_async_fn = Some(lit.parse()?);
                 } else if meta.path.is_ident("allow_unknown_fields") {
                     opts.allow_unknown_fields = true;
                 } else if meta.path.is_ident("max_body_bytes") {
@@ -229,7 +247,7 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                     ));
                 } else {
                     return Err(meta.error(
-                        "unknown struct-level #[data(...)] flag - expected auto_lazy, authorize, allow_unknown_fields, or max_body_bytes",
+                        "unknown struct-level #[data(...)] flag - expected auto_lazy, authorize, after_validation, after_validation_async, allow_unknown_fields, or max_body_bytes",
                     ));
                 }
                 Ok(())
@@ -385,36 +403,33 @@ fn classify_route_param_type(ty: &syn::Type) -> RouteParamKind {
 /// If `ty` is `Path<T>` where Path ends in `Option` or `Field`, return the
 /// first generic arg; otherwise return `ty` unchanged.
 fn unwrap_single_generic(ty: &syn::Type) -> &syn::Type {
-    if let syn::Type::Path(p) = ty {
-        if let Some(seg) = p.path.segments.last() {
-            if seg.ident == "Option" || seg.ident == "Field" {
-                if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
-                    if let Some(syn::GenericArgument::Type(inner)) = ab.args.first() {
-                        return inner;
-                    }
-                }
-            }
-        }
+    if let syn::Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+        && (seg.ident == "Option" || seg.ident == "Field")
+        && let syn::PathArguments::AngleBracketed(ab) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = ab.args.first()
+    {
+        return inner;
     }
     ty
 }
 
 fn last_ident_kind(ty: &syn::Type) -> RouteParamKind {
-    if let syn::Type::Path(p) = ty {
-        if let Some(seg) = p.path.segments.last() {
-            return match seg.ident.to_string().as_str() {
-                "i64" => RouteParamKind::I64,
-                "u64" => RouteParamKind::U64,
-                "i32" => RouteParamKind::I32,
-                "u32" => RouteParamKind::U32,
-                "i128" => RouteParamKind::I128,
-                "u128" => RouteParamKind::U128,
-                "f64" => RouteParamKind::F64,
-                "f32" => RouteParamKind::F32,
-                "bool" => RouteParamKind::Bool,
-                _ => RouteParamKind::Str,
-            };
-        }
+    if let syn::Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+    {
+        return match seg.ident.to_string().as_str() {
+            "i64" => RouteParamKind::I64,
+            "u64" => RouteParamKind::U64,
+            "i32" => RouteParamKind::I32,
+            "u32" => RouteParamKind::U32,
+            "i128" => RouteParamKind::I128,
+            "u128" => RouteParamKind::U128,
+            "f64" => RouteParamKind::F64,
+            "f32" => RouteParamKind::F32,
+            "bool" => RouteParamKind::Bool,
+            _ => RouteParamKind::Str,
+        };
     }
     RouteParamKind::Str
 }
@@ -438,10 +453,10 @@ fn route_param_parser_path(kind: RouteParamKind) -> TokenStream2 {
 
 /// Returns `true` when the outermost type is `Option<_>` or `Field<_>`.
 fn is_option_type(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(p) = ty {
-        if let Some(seg) = p.path.segments.last() {
-            return seg.ident == "Option" || seg.ident == "Field";
-        }
+    if let syn::Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+    {
+        return seg.ident == "Option" || seg.ident == "Field";
     }
     false
 }
@@ -450,22 +465,39 @@ fn is_option_type(ty: &syn::Type) -> bool {
 /// Used by `auto_lazy` logic to infer which fields should be treated
 /// as lazy props without an explicit `#[data(lazy)]` annotation.
 fn is_prop_type(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(p) = ty {
-        if let Some(seg) = p.path.segments.last() {
-            return seg.ident == "Prop";
-        }
+    if let syn::Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+    {
+        return seg.ident == "Prop";
     }
     false
 }
 
-fn build_form_request(
-    struct_name: &Ident,
-    struct_opts: &StructOptions,
-    impl_generics: &syn::ImplGenerics,
-    ty_generics: &syn::TypeGenerics,
-    where_clause: Option<&syn::WhereClause>,
-    parsed: &[(&Field, FieldOptions)],
-) -> TokenStream2 {
+/// The inputs every `build_*` function of the derive reads, built once by
+/// `derive_data_impl`. Bundling them keeps the builders' signatures to what
+/// each one adds, and names the generics so an `impl` header cannot be fed the
+/// wrong `ImplGenerics` / `TypeGenerics` pair by position.
+struct DataCodegen<'a> {
+    /// The identifier of the struct the derive is applied to.
+    struct_name: &'a Ident,
+    /// `struct_name` as a string, for diagnostics and `expecting` messages.
+    struct_name_str: &'a str,
+    /// The struct's own `impl<...>` generics.
+    impl_generics: syn::ImplGenerics<'a>,
+    /// The struct's `<...>` type arguments.
+    ty_generics: syn::TypeGenerics<'a>,
+    /// The struct's `where` clause, when it has one.
+    where_clause: Option<&'a syn::WhereClause>,
+    /// Every named field with its parsed `#[data(...)]` options.
+    parsed: &'a [(&'a Field, FieldOptions)],
+}
+
+fn build_form_request(ctx: &DataCodegen<'_>, struct_opts: &StructOptions) -> TokenStream2 {
+    let struct_name = ctx.struct_name;
+    let impl_generics = &ctx.impl_generics;
+    let ty_generics = &ctx.ty_generics;
+    let where_clause = ctx.where_clause;
+    let parsed = ctx.parsed;
     // Build the `fn authorize` body. With `#[data(authorize = "path::fn")]`
     // we route to the user's function; without it, we keep Laravel's
     // permissive default (true). Either way the rest of the `FormRequest`
@@ -483,9 +515,13 @@ fn build_form_request(
         .filter_map(|(f, opts)| {
             let param_spec = opts.from_route_param.as_ref()?;
             let field_ident = f.ident.as_ref().unwrap();
-            let field_key = field_ident.to_string();
-            // Use explicit name if provided, otherwise use the field name.
-            let resolved_name = param_spec.clone().unwrap_or_else(|| field_key.clone());
+            // The value is injected under the key the input carries the
+            // field under; the route parameter keeps its own name, the
+            // field's Rust name unless the attribute names one.
+            let field_key = opts.names.deserialize.clone();
+            let resolved_name = param_spec
+                .clone()
+                .unwrap_or_else(|| syn::ext::IdentExt::unraw(field_ident).to_string());
 
             let parser = route_param_parser_path(classify_route_param_type(&f.ty));
             let optional = is_option_type(&f.ty);
@@ -517,6 +553,31 @@ fn build_form_request(
     // lifecycle (with route-param) arms emit it; the inlined arm calls
     // `Self::max_body_bytes()` directly, so the override propagates
     // automatically once present on the impl.
+    // `#[data(after_validation = "fn")]` / `#[data(after_validation_async =
+    // "fn")]` - both arms below emit these, and both run them through the
+    // trait: the default `extract` calls the trait methods, and the
+    // inlined arm calls them fully qualified so an inherent method of the
+    // same name on the struct can never stand in for the hook.
+    let after_validation_override: TokenStream2 = match &struct_opts.after_validation_fn {
+        Some(path) => quote! {
+            fn after_validation(&self) -> ::core::result::Result<(), ::suprnova::ValidationErrors> {
+                #path(self)
+            }
+        },
+        None => quote! {},
+    };
+    let after_validation_async_override: TokenStream2 = match &struct_opts.after_validation_async_fn
+    {
+        Some(path) => quote! {
+            async fn after_validation_async(
+                &self,
+            ) -> ::core::result::Result<(), ::suprnova::ValidationErrors> {
+                #path(self).await
+            }
+        },
+        None => quote! {},
+    };
+
     let max_body_bytes_override: TokenStream2 = match struct_opts.max_body_bytes {
         Some(n) => {
             let lit = syn::LitInt::new(&n.to_string(), proc_macro2::Span::call_site());
@@ -531,12 +592,15 @@ fn build_form_request(
     // (delegates to the trait's default `extract` which reads the body normally).
     if route_param_injections.is_empty() {
         return quote! {
+            #[::suprnova::__async_trait::async_trait]
             impl #impl_generics ::suprnova::http::FormRequest for #struct_name #ty_generics #where_clause {
                 fn authorize(req: &::suprnova::Request) -> bool {
                     #authorize_body
                 }
 
                 #max_body_bytes_override
+                #after_validation_override
+                #after_validation_async_override
             }
         };
     }
@@ -561,6 +625,8 @@ fn build_form_request(
             }
 
             #max_body_bytes_override
+            #after_validation_override
+            #after_validation_async_override
 
             async fn extract(req: ::suprnova::Request) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
                 if !Self::authorize(&req) {
@@ -614,20 +680,23 @@ fn build_form_request(
                             _ => {
                                 // JSON: must be an object. Reject non-object payloads
                                 // explicitly rather than silently treating them as `{}`.
+                                // A body that is not a JSON object answers 422,
+                                // as the default extractor's parse does.
                                 let parsed: ::suprnova::serde_json::Value =
                                     ::suprnova::serde_json::from_slice(&body_bytes)
-                                        .map_err(|e| ::suprnova::FrameworkError::bad_request(
-                                            ::std::format!("malformed JSON body: {e}"),
+                                        .map_err(|e| ::suprnova::FrameworkError::domain(
+                                            ::std::format!("Failed to parse JSON body: {e}"),
+                                            422,
                                         ))?;
                                 match parsed {
                                     ::suprnova::serde_json::Value::Object(m) => m,
                                     _ => {
                                         return ::core::result::Result::Err(
-                                            ::suprnova::FrameworkError::bad_request(
-                                                "request body must be a JSON object \
-                                                 (DTOs with route-param fields cannot \
-                                                 accept arrays / strings / null at the \
-                                                 top level)",
+                                            ::suprnova::FrameworkError::domain(
+                                                "Failed to parse JSON body: the body must be a JSON \
+                                                 object (DTOs with route-param fields cannot \
+                                                 accept arrays / strings / null at the top level)",
+                                                422,
                                             ),
                                         );
                                     }
@@ -640,67 +709,83 @@ fn build_form_request(
                 #(#route_param_injections)*
 
                 // Deserialize the merged map into Self.
+                // A body that does not fit the struct answers 422, as the
+                // default extractor's parse does.
                 let dto: Self = ::suprnova::serde_json::from_value(
                     ::suprnova::serde_json::Value::Object(map),
-                ).map_err(|e| ::suprnova::FrameworkError::bad_request(e.to_string()))?;
+                ).map_err(|e| ::suprnova::FrameworkError::domain(
+                    ::std::format!("Failed to parse request body: {e}"),
+                    422,
+                ))?;
 
-                // --- Validate + Precognition + after_validation (mirrors default) ---
+                // --- Validate + Precognition + both cross-field hooks (mirrors default) ---
+                //
+                // The stages run in the default `extract`'s order and bail at
+                // the first failure: the derived `validate()`, the sync hook,
+                // then the async hook, so a malformed value never reaches a
+                // database rule.
                 use ::validator::Validate;
                 let validation_result = dto.validate();
 
                 if is_precognition {
-                    return match validation_result {
+                    let bag = match validation_result {
+                        ::core::result::Result::Err(errors) => {
+                            ::suprnova::ValidationErrors::from_validator_keyed(
+                                errors,
+                                ::suprnova::data::input_names::input_key::<Self>,
+                            )
+                        }
                         ::core::result::Result::Ok(()) => {
-                            match dto.after_validation() {
-                                ::core::result::Result::Ok(()) => ::core::result::Result::Err(
-                                    ::suprnova::FrameworkError::PrecognitionSuccess,
+                            match <Self as ::suprnova::http::FormRequest>::after_validation(&dto) {
+                                ::core::result::Result::Err(errs) => errs.rename_keys(
+                                    ::suprnova::data::input_names::input_key::<Self>,
                                 ),
-                                ::core::result::Result::Err(errs) => {
-                                    let filtered = if validate_only.is_empty() {
-                                        errs
-                                    } else {
-                                        errs.retain_fields(&validate_only)
-                                    };
-                                    if filtered.is_empty() {
-                                        ::core::result::Result::Err(
-                                            ::suprnova::FrameworkError::PrecognitionSuccess,
-                                        )
-                                    } else {
-                                        ::core::result::Result::Err(
-                                            ::suprnova::FrameworkError::PrecognitionFailure(filtered),
-                                        )
+                                ::core::result::Result::Ok(()) => {
+                                    match <Self as ::suprnova::http::FormRequest>::after_validation_async(&dto).await {
+                                        ::core::result::Result::Err(errs) => errs.rename_keys(
+                                            ::suprnova::data::input_names::input_key::<Self>,
+                                        ),
+                                        ::core::result::Result::Ok(()) => ::suprnova::ValidationErrors::new(),
                                     }
                                 }
                             }
                         }
-                        ::core::result::Result::Err(errors) => {
-                            let errs = ::suprnova::ValidationErrors::from_validator(errors);
-                            let filtered = if validate_only.is_empty() {
-                                errs
-                            } else {
-                                errs.retain_fields(&validate_only)
-                            };
-                            if filtered.is_empty() {
-                                ::core::result::Result::Err(
-                                    ::suprnova::FrameworkError::PrecognitionSuccess,
-                                )
-                            } else {
-                                ::core::result::Result::Err(
-                                    ::suprnova::FrameworkError::PrecognitionFailure(filtered),
-                                )
-                            }
-                        }
                     };
+                    let filtered = if validate_only.is_empty() {
+                        bag
+                    } else {
+                        bag.retain_fields(&validate_only)
+                    };
+                    return ::core::result::Result::Err(if filtered.is_empty() {
+                        ::suprnova::FrameworkError::PrecognitionSuccess
+                    } else {
+                        ::suprnova::FrameworkError::PrecognitionFailure(filtered)
+                    });
                 }
 
                 if let ::core::result::Result::Err(errors) = validation_result {
                     return ::core::result::Result::Err(::suprnova::FrameworkError::Validation(
-                        ::suprnova::ValidationErrors::from_validator(errors),
+                        ::suprnova::ValidationErrors::from_validator_keyed(
+                            errors,
+                            ::suprnova::data::input_names::input_key::<Self>,
+                        ),
                     ));
                 }
 
-                if let ::core::result::Result::Err(errs) = dto.after_validation() {
-                    return ::core::result::Result::Err(::suprnova::FrameworkError::Validation(errs));
+                if let ::core::result::Result::Err(errs) =
+                    <Self as ::suprnova::http::FormRequest>::after_validation(&dto)
+                {
+                    return ::core::result::Result::Err(::suprnova::FrameworkError::Validation(
+                        errs.rename_keys(::suprnova::data::input_names::input_key::<Self>),
+                    ));
+                }
+
+                if let ::core::result::Result::Err(errs) =
+                    <Self as ::suprnova::http::FormRequest>::after_validation_async(&dto).await
+                {
+                    return ::core::result::Result::Err(::suprnova::FrameworkError::Validation(
+                        errs.rename_keys(::suprnova::data::input_names::input_key::<Self>),
+                    ));
                 }
 
                 ::core::result::Result::Ok(dto)
@@ -811,7 +896,10 @@ fn build_prop_entry(
     fallible: bool,
 ) -> TokenStream2 {
     let ident = f.ident.as_ref().unwrap();
-    let name = ident.to_string();
+    // The prop key, the include name and the allowlist entry are one
+    // string, the serialize name: the include gate looks a lazy prop up by
+    // its key.
+    let name = opts.names.serialize.clone();
 
     if let Some(flavor) = &opts.lazy {
         // `owner` is the FULLY-QUALIFIED type name so include-allowlist
@@ -922,26 +1010,27 @@ fn build_prop_entry(
 }
 
 fn build_into_inertia_props(
-    struct_name: &Ident,
-    struct_name_str: &str,
+    ctx: &DataCodegen<'_>,
     qualified_name_expr: &TokenStream2,
-    impl_generics: &syn::ImplGenerics,
-    ty_generics: &syn::TypeGenerics,
-    where_clause: Option<&syn::WhereClause>,
-    parsed: &[(&Field, FieldOptions)],
 ) -> TokenStream2 {
+    let struct_name = ctx.struct_name;
+    let struct_name_str = ctx.struct_name_str;
+    let impl_generics = &ctx.impl_generics;
+    let ty_generics = &ctx.ty_generics;
+    let where_clause = ctx.where_clause;
+    let parsed = ctx.parsed;
     // Two parallel entry lists: the infallible (panicking) escape hatch and
     // the `?`-propagating fallible sibling. They differ only in the eager
     // (default) serialize arm; lazy flavors are identical. See
     // `build_prop_entry`.
     let entries: Vec<TokenStream2> = parsed
         .iter()
-        .filter(|(_, o)| !o.input_only)
+        .filter(|(_, o)| !o.input_only && !o.names.skip_serializing)
         .map(|(f, opts)| build_prop_entry(f, opts, struct_name_str, qualified_name_expr, false))
         .collect();
     let try_entries: Vec<TokenStream2> = parsed
         .iter()
-        .filter(|(_, o)| !o.input_only)
+        .filter(|(_, o)| !o.input_only && !o.names.skip_serializing)
         .map(|(f, opts)| build_prop_entry(f, opts, struct_name_str, qualified_name_expr, true))
         .collect();
 
@@ -1029,6 +1118,56 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
 
+    // One name per direction for every field, from serde's attributes.
+    let container = match crate::serde_attrs::parse_container(&input.attrs, "Data") {
+        Ok(container) => container,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    for (field, opts) in parsed.iter_mut() {
+        opts.names = match crate::serde_attrs::field_names(field, &container, "Data") {
+            Ok(names) => names,
+            Err(e) => return e.to_compile_error().into(),
+        };
+        if opts.from_route_param.is_some() && opts.names.skip_deserializing {
+            return syn::Error::new_spanned(
+                field,
+                "#[data(from_route_param)] on a field serde skips when deserializing: the route \
+                 parameter would never be read",
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
+    // Two fields under one key would shadow each other in the input or the
+    // output; refuse it, as serde's own derive does.
+    for (direction, name_of) in [
+        (
+            "serialize",
+            (|o: &FieldOptions| {
+                (!o.names.skip_serializing && !o.input_only).then(|| o.names.serialize.clone())
+            }) as fn(&FieldOptions) -> Option<String>,
+        ),
+        ("deserialize", |o: &FieldOptions| {
+            (!o.names.skip_deserializing).then(|| o.names.deserialize.clone())
+        }),
+    ] {
+        let mut seen = std::collections::HashSet::new();
+        for (field, opts) in parsed.iter() {
+            if let Some(name) = name_of(opts)
+                && !seen.insert(name.clone())
+            {
+                return syn::Error::new_spanned(
+                    field,
+                    format!(
+                        "two fields {direction} under the key `{name}`; give each its own name"
+                    ),
+                )
+                .to_compile_error()
+                .into();
+            }
+        }
+    }
+
     // auto_lazy: when the struct-level flag is set, implicitly mark any
     // `Prop<T>`-typed field as lazy (equivalent to `#[data(lazy)]`).
     if struct_opts.auto_lazy {
@@ -1064,24 +1203,22 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
     // own extractor or use a separate input DTO without lazy fields.
     let has_lazy_fields = parsed.iter().any(|(_, o)| o.lazy.is_some());
 
-    let serialize_impl = build_serialize(
+    let ctx = DataCodegen {
         struct_name,
-        &impl_generics,
-        &ty_generics,
+        struct_name_str: &struct_name_str,
+        impl_generics,
+        ty_generics,
         where_clause,
-        &parsed,
-    );
+        parsed: &parsed,
+    };
+
+    let serialize_impl = build_serialize(&ctx);
     let deserialize_impl = if has_reference_fields || has_lazy_fields {
         proc_macro2::TokenStream::new()
     } else {
         build_deserialize(
-            struct_name,
-            &struct_name_str,
+            &ctx,
             &de_impl_generics,
-            &impl_generics,
-            &ty_generics,
-            where_clause,
-            &parsed,
             has_type_params,
             struct_opts.allow_unknown_fields,
         )
@@ -1101,38 +1238,49 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
     // Users who need FormRequest on a generic struct must write the impl manually
     // with the appropriate where bounds (e.g., `where T: Send + Validate + ...`).
     let is_generic = !input.generics.params.is_empty();
-    let form_request_impl = if is_generic || has_reference_fields || has_lazy_fields {
+    let emits_form_request = !(is_generic || has_reference_fields || has_lazy_fields);
+    // A validation hook on a struct that gets no `FormRequest` impl would
+    // never run: refuse it rather than let the author believe it guards
+    // anything.
+    if !emits_form_request
+        && (struct_opts.after_validation_fn.is_some()
+            || struct_opts.after_validation_async_fn.is_some())
+    {
+        return syn::Error::new_spanned(
+            struct_name,
+            "#[data(after_validation)] and #[data(after_validation_async)] need the generated \
+             FormRequest impl, which a generic struct, a struct with reference fields, or a \
+             struct with lazy fields does not get; write the FormRequest impl by hand instead",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let form_request_impl = if !emits_form_request {
         proc_macro2::TokenStream::new()
     } else {
-        build_form_request(
-            struct_name,
-            &struct_opts,
-            &impl_generics,
-            &ty_generics,
-            where_clause,
-            &parsed,
-        )
+        build_form_request(&ctx, &struct_opts)
+    };
+    // The input names the FormRequest extractor keys validation errors by:
+    // every field the input can set, under the key it is read from.
+    let input_names_registration = if !emits_form_request {
+        proc_macro2::TokenStream::new()
+    } else {
+        let fields: Vec<crate::input_names::InputFieldSpec<'_>> = parsed
+            .iter()
+            .filter(|(_, o)| !o.output_only && !o.names.skip_deserializing)
+            .map(|(f, o)| crate::input_names::InputFieldSpec {
+                rust: f.ident.as_ref().unwrap().to_string(),
+                input: o.names.deserialize.clone(),
+                ty: &f.ty,
+            })
+            .collect();
+        crate::input_names::registration(struct_name, &fields)
     };
 
-    let into_inertia_props_impl = build_into_inertia_props(
-        struct_name,
-        &struct_name_str,
-        &qualified_name_expr,
-        &impl_generics,
-        &ty_generics,
-        where_clause,
-        &parsed,
-    );
+    let into_inertia_props_impl = build_into_inertia_props(&ctx, &qualified_name_expr);
 
     let into_json_resource_impl = if let Some(jr_opts) = &struct_opts.json_resource {
-        build_into_json_resource(
-            struct_name,
-            &impl_generics,
-            &ty_generics,
-            where_clause,
-            &parsed,
-            jr_opts,
-        )
+        build_into_json_resource(&ctx, jr_opts)
     } else {
         proc_macro2::TokenStream::new()
     };
@@ -1142,6 +1290,7 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
         #deserialize_impl
         #allowlist_registration
         #form_request_impl
+        #input_names_registration
         #into_inertia_props_impl
         #into_json_resource_impl
     };
@@ -1159,10 +1308,10 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
 /// short forms. False positives require a user type named exactly `Option` or
 /// `Field` - an acceptable and easily documented limitation.
 fn is_option_or_field(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(p) = ty {
-        if let Some(seg) = p.path.segments.last() {
-            return seg.ident == "Option" || seg.ident == "Field";
-        }
+    if let syn::Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+    {
+        return seg.ident == "Option" || seg.ident == "Field";
     }
     false
 }
@@ -1173,21 +1322,20 @@ fn is_option_or_field(ty: &syn::Type) -> bool {
 /// "omit the key entirely" behaviour from `framework/src/data/field.rs`
 /// into the derive's custom Serialize.
 fn is_field_type(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(p) = ty {
-        if let Some(seg) = p.path.segments.last() {
-            return seg.ident == "Field";
-        }
+    if let syn::Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+    {
+        return seg.ident == "Field";
     }
     false
 }
 
-fn build_serialize(
-    struct_name: &Ident,
-    impl_generics: &syn::ImplGenerics,
-    ty_generics: &syn::TypeGenerics,
-    where_clause: Option<&syn::WhereClause>,
-    parsed: &[(&Field, FieldOptions)],
-) -> TokenStream2 {
+fn build_serialize(ctx: &DataCodegen<'_>) -> TokenStream2 {
+    let struct_name = ctx.struct_name;
+    let impl_generics = &ctx.impl_generics;
+    let ty_generics = &ctx.ty_generics;
+    let where_clause = ctx.where_clause;
+    let parsed = ctx.parsed;
     // Build the output field list, tagging each entry as either always-emit
     // or `Field`-typed-conditional-emit. `Field<T>` honors its documented
     // contract: `Field::Absent` omits the key from the serialized output,
@@ -1200,10 +1348,12 @@ fn build_serialize(
         // - input_only: never sent to the client in the response
         // - lazy: Prop<T> is not directly serializable; goes through
         //   __into_inertia_props -> PropEntry -> InertiaResponse resolution
-        .filter(|(_, opts)| !opts.input_only && opts.lazy.is_none())
-        .map(|(f, _)| {
+        .filter(|(_, opts)| {
+            !opts.input_only && opts.lazy.is_none() && !opts.names.skip_serializing
+        })
+        .map(|(f, opts)| {
             let ident = f.ident.as_ref().unwrap();
-            let name = ident.to_string();
+            let name = &opts.names.serialize;
             if is_field_type(&f.ty) {
                 quote! {
                     if !::suprnova::data::Field::is_absent(&self.#ident) {
@@ -1220,13 +1370,27 @@ fn build_serialize(
         })
         .collect();
     let field_count = output_fields.len();
+    // An absent `Field` is skipped, so it is not counted in the length the
+    // serializer is told.
+    let absent_fields: Vec<&Ident> = parsed
+        .iter()
+        .filter(|(f, opts)| {
+            !opts.input_only
+                && opts.lazy.is_none()
+                && !opts.names.skip_serializing
+                && is_field_type(&f.ty)
+        })
+        .map(|(f, _)| f.ident.as_ref().unwrap())
+        .collect();
     let name_str = struct_name.to_string();
 
     quote! {
         impl #impl_generics ::serde::Serialize for #struct_name #ty_generics #where_clause {
             fn serialize<__S: ::serde::Serializer>(&self, ser: __S) -> ::core::result::Result<__S::Ok, __S::Error> {
                 use ::serde::ser::SerializeStruct;
-                let mut state = ser.serialize_struct(#name_str, #field_count)?;
+                let __len = #field_count
+                    #( - usize::from(::suprnova::data::Field::is_absent(&self.#absent_fields)) )*;
+                let mut state = ser.serialize_struct(#name_str, __len)?;
                 #(#output_fields)*
                 state.end()
             }
@@ -1244,77 +1408,71 @@ fn is_reference_type(ty: &syn::Type) -> bool {
     matches!(ty, syn::Type::Reference(_))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_deserialize(
-    struct_name: &Ident,
-    struct_name_str: &str,
+    ctx: &DataCodegen<'_>,
     de_impl_generics: &syn::ImplGenerics,
-    impl_generics: &syn::ImplGenerics,
-    ty_generics: &syn::TypeGenerics,
-    where_clause: Option<&syn::WhereClause>,
-    parsed: &[(&Field, FieldOptions)],
     has_type_params: bool,
     allow_unknown_fields: bool,
 ) -> TokenStream2 {
+    let struct_name = ctx.struct_name;
+    let struct_name_str = ctx.struct_name_str;
+    let impl_generics = &ctx.impl_generics;
+    let ty_generics = &ctx.ty_generics;
+    let where_clause = ctx.where_clause;
+    let parsed = ctx.parsed;
+    // Keys the input may not set. An `output_only` key is refused with its
+    // own message; a key serde skips when deserializing is unknown, as it
+    // is to serde. Both kinds of field are filled with `Default`.
     let output_only_names: Vec<String> = parsed
         .iter()
-        .filter(|(_, o)| o.output_only)
-        .map(|(f, _)| f.ident.as_ref().unwrap().to_string())
+        .filter(|(_, o)| o.output_only && !o.names.skip_deserializing)
+        .map(|(_, o)| o.names.deserialize.clone())
         .collect();
 
-    // Split input fields into groups based on how an absent key is handled.
-    // Reference-typed fields (e.g. `&'a T`) cannot be deserialized in general;
-    // they are treated as reference-backed (skipped from the key-match, given
-    // Default::default() in the constructor - caller must accept this semantic).
-    let input_fields: Vec<(&Ident, &str, &syn::Type)> = parsed
+    // The fields the input sets: the field, the local slot the visitor
+    // collects it in (prefixed, so a field named `key` or `map` cannot
+    // shadow the visitor's own variables), the key, and the type.
+    let input_fields: Vec<(&Ident, Ident, String, &syn::Type)> = parsed
         .iter()
-        .filter(|(_, o)| !o.output_only)
-        .map(|(f, _)| {
+        .filter(|(_, o)| !o.output_only && !o.names.skip_deserializing)
+        .map(|(f, o)| {
             let ident = f.ident.as_ref().unwrap();
-            let name: &str = Box::leak(ident.to_string().into_boxed_str());
-            (ident, name, &f.ty)
+            let slot = quote::format_ident!("__field_{}", syn::ext::IdentExt::unraw(ident));
+            (ident, slot, o.names.deserialize.clone(), &f.ty)
         })
         .collect();
 
     // Required fields - missing key is an error (non-Option, non-Field).
     // Note: reference-typed fields never appear here because build_deserialize
     // is only called when has_reference_fields is false (see derive_data_impl).
-    let req_idents: Vec<&Ident> = input_fields
+    let required: Vec<&(&Ident, Ident, String, &syn::Type)> = input_fields
         .iter()
-        .filter(|(_, _, ty)| !is_option_or_field(ty))
-        .map(|(id, _, _)| *id)
+        .filter(|(_, _, _, ty)| !is_option_or_field(ty))
         .collect();
-    let req_names: Vec<&str> = input_fields
+    let req_idents: Vec<&Ident> = required.iter().map(|(id, _, _, _)| *id).collect();
+    let req_slots: Vec<&Ident> = required.iter().map(|(_, slot, _, _)| slot).collect();
+    let req_names: Vec<&str> = required
         .iter()
-        .filter(|(_, _, ty)| !is_option_or_field(ty))
-        .map(|(_, name, _)| *name)
+        .map(|(_, _, name, _)| name.as_str())
         .collect();
-    let req_types: Vec<&syn::Type> = input_fields
-        .iter()
-        .filter(|(_, _, ty)| !is_option_or_field(ty))
-        .map(|(_, _, ty)| *ty)
-        .collect();
+    let req_types: Vec<&syn::Type> = required.iter().map(|(_, _, _, ty)| *ty).collect();
 
     // Defaultable fields - missing key yields Default::default().
-    let def_idents: Vec<&Ident> = input_fields
+    let defaultable: Vec<&(&Ident, Ident, String, &syn::Type)> = input_fields
         .iter()
-        .filter(|(_, _, ty)| is_option_or_field(ty))
-        .map(|(id, _, _)| *id)
+        .filter(|(_, _, _, ty)| is_option_or_field(ty))
         .collect();
-    let def_names: Vec<&str> = input_fields
+    let def_idents: Vec<&Ident> = defaultable.iter().map(|(id, _, _, _)| *id).collect();
+    let def_slots: Vec<&Ident> = defaultable.iter().map(|(_, slot, _, _)| slot).collect();
+    let def_names: Vec<&str> = defaultable
         .iter()
-        .filter(|(_, _, ty)| is_option_or_field(ty))
-        .map(|(_, name, _)| *name)
+        .map(|(_, _, name, _)| name.as_str())
         .collect();
-    let def_types: Vec<&syn::Type> = input_fields
-        .iter()
-        .filter(|(_, _, ty)| is_option_or_field(ty))
-        .map(|(_, _, ty)| *ty)
-        .collect();
+    let def_types: Vec<&syn::Type> = defaultable.iter().map(|(_, _, _, ty)| *ty).collect();
 
     let output_only_idents: Vec<&Ident> = parsed
         .iter()
-        .filter(|(_, o)| o.output_only)
+        .filter(|(_, o)| o.output_only || o.names.skip_deserializing)
         .map(|(f, _)| f.ident.as_ref().unwrap())
         .collect();
 
@@ -1385,10 +1543,10 @@ fn build_deserialize(
 
                     fn visit_map<__A: ::serde::de::MapAccess<'__de>>(self, mut map: __A) -> ::core::result::Result<#struct_name #ty_generics, __A::Error> {
                         // Required fields - slot is None until the key appears.
-                        #(let mut #req_idents: ::core::option::Option<#req_types> = None;)*
+                        #(let mut #req_slots: ::core::option::Option<#req_types> = None;)*
                         // Defaultable fields (Option<T>, Field<T>) - slot is
                         // None until the key appears; absent yields Default.
-                        #(let mut #def_idents: ::core::option::Option<#def_types> = None;)*
+                        #(let mut #def_slots: ::core::option::Option<#def_types> = None;)*
 
                         while let Some(key) = map.next_key::<String>()? {
                             match key.as_str() {
@@ -1405,12 +1563,12 @@ fn build_deserialize(
                                 )*
                                 #(
                                     #req_names => {
-                                        #req_idents = Some(map.next_value()?);
+                                        #req_slots = Some(map.next_value()?);
                                     }
                                 )*
                                 #(
                                     #def_names => {
-                                        #def_idents = Some(map.next_value()?);
+                                        #def_slots = Some(map.next_value()?);
                                     }
                                 )*
                                 #unknown_field_arm
@@ -1420,12 +1578,12 @@ fn build_deserialize(
                         Ok(#struct_name {
                             // Required fields: missing key is an error.
                             #(
-                                #req_idents: #req_idents
+                                #req_idents: #req_slots
                                     .ok_or_else(|| <__A::Error as ::serde::de::Error>::missing_field(#req_names))?,
                             )*
                             // Defaultable fields: missing key yields Default::default().
                             #(
-                                #def_idents: #def_idents
+                                #def_idents: #def_slots
                                     .unwrap_or_default(),
                             )*
                             #(
@@ -1449,14 +1607,12 @@ fn build_deserialize(
 ///   (lazy = Inertia/Prop fields; they can't satisfy `IntoJsonResource`).
 /// - id field: the field named by `opts.id_field` (default "id").
 /// - Default-deny: `resource_included` rejects unknown keys in the include tree.
-fn build_into_json_resource(
-    struct_name: &Ident,
-    impl_generics: &syn::ImplGenerics,
-    ty_generics: &syn::TypeGenerics,
-    where_clause: Option<&syn::WhereClause>,
-    parsed: &[(&Field, FieldOptions)],
-    opts: &JsonResourceOptions,
-) -> TokenStream2 {
+fn build_into_json_resource(ctx: &DataCodegen<'_>, opts: &JsonResourceOptions) -> TokenStream2 {
+    let struct_name = ctx.struct_name;
+    let impl_generics = &ctx.impl_generics;
+    let ty_generics = &ctx.ty_generics;
+    let where_clause = ctx.where_clause;
+    let parsed = ctx.parsed;
     let resource_type = &opts.resource_type;
     let id_field = syn::Ident::new(&opts.id_field, proc_macro2::Span::call_site());
 
@@ -1467,11 +1623,15 @@ fn build_into_json_resource(
         .iter()
         .filter(|(f, fo)| {
             let ident = f.ident.as_ref().unwrap();
-            !fo.input_only && ident != &id_field && !fo.allow_include && fo.lazy.is_none()
+            !fo.input_only
+                && ident != &id_field
+                && !fo.allow_include
+                && fo.lazy.is_none()
+                && !fo.names.skip_serializing
         })
-        .map(|(f, _)| {
+        .map(|(f, fo)| {
             let ident = f.ident.as_ref().unwrap();
-            let name = ident.to_string();
+            let name = fo.names.serialize.clone();
             let is_field = is_field_type(&f.ty);
             (ident, name, is_field)
         })
@@ -1480,13 +1640,31 @@ fn build_into_json_resource(
     // Relationship fields: allow_include=true AND not lazy (Prop fields excluded).
     let rel_fields: Vec<(&Ident, String)> = parsed
         .iter()
-        .filter(|(_, fo)| fo.allow_include && fo.lazy.is_none())
-        .map(|(f, _)| {
+        .filter(|(_, fo)| fo.allow_include && fo.lazy.is_none() && !fo.names.skip_serializing)
+        .map(|(f, fo)| {
             let ident = f.ident.as_ref().unwrap();
-            let name = ident.to_string();
-            (ident, name)
+            (ident, fo.names.serialize.clone())
         })
         .collect();
+
+    // JSON:API reserves `type` and `id` for the resource object itself: an
+    // attribute or relationship by either name would make an invalid
+    // document.
+    if let Some((ident, name)) = attr_fields
+        .iter()
+        .map(|(ident, name, _)| (*ident, name))
+        .chain(rel_fields.iter().map(|(ident, name)| (*ident, name)))
+        .find(|(_, name)| *name == "type" || *name == "id")
+    {
+        return syn::Error::new_spanned(
+            ident,
+            format!(
+                "#[json_resource] cannot send a member named `{name}`: JSON:API reserves `type` and \
+                 `id` for the resource object; rename the field with #[serde(rename = \"...\")]"
+            ),
+        )
+        .to_compile_error();
+    }
 
     let struct_name_str = struct_name.to_string();
     let attrs_entries = attr_fields.iter().map(|(ident, name, is_field)| {
@@ -1618,8 +1796,8 @@ fn build_allowlist_registration(
 ) -> TokenStream2 {
     let allow_include_names: Vec<String> = parsed
         .iter()
-        .filter(|(_, o)| o.allow_include)
-        .map(|(f, _)| f.ident.as_ref().unwrap().to_string())
+        .filter(|(_, o)| o.allow_include && !o.names.skip_serializing)
+        .map(|(_, o)| o.names.serialize.clone())
         .collect();
 
     if allow_include_names.is_empty() {

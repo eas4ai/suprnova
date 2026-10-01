@@ -123,6 +123,114 @@ pub async fn show(req: Request) -> Response {
 For typed extraction without the `unwrap_or` dance, see route model
 binding below or `#[handler]` in [Controllers](controllers.md).
 
+### Optional parameters
+
+End a parameter name with `?` to make the segment optional. `/posts/{id?}`
+matches `/posts` and `/posts/42`:
+
+```rust
+routes! {
+    get!("/posts/{id?}", controllers::posts::show),
+    get!("/archive/{year?}/{month?}", controllers::posts::archive),
+}
+```
+
+On the short form the request has no `id`, and `req.param("id")` returns
+`Err(ParamError)`. Read it with `req.param("id").ok()` when you want an
+`Option`. The colon spelling takes the `?` too: `/posts/:id?`.
+
+- **Optional parameters fill from the left.** In
+  `/archive/{year?}/{month?}` the router matches `/archive`,
+  `/archive/2026` and `/archive/2026/05`. It never matches a month
+  without a year.
+- **Only optional parameters may follow an optional one.**
+  `/posts/{id?}/comments` is refused when you register it, because the
+  router could not tell a request that leaves `id` out from one that fills
+  it. So is an optional parameter that is only part of a segment
+  (`/a/pre-{x?}`), and a pattern with an optional parameter and an empty
+  segment, such as a trailing slash.
+- **Middleware, name and constraints apply to every form.** The route's
+  middleware runs on `/posts` as it does on `/posts/42`.
+- **A second route for one form of an optional route is refused.**
+  `/posts/{id?}` and a separate `/posts` route, or a separate
+  `/posts/{id}` route, collide when you register them.
+- **A WebSocket route takes optional parameters as well.**
+- **`route(...)` leaves an optional segment out when it has no value.**
+  `route("archive", &[])` returns `/archive`. A value for a later parameter
+  with none for an earlier one is a missing parameter: `try_route` returns
+  `RouteUrlError::MissingParams`.
+
+### Parameter constraints
+
+A constraint holds a parameter to the values it may take. The router checks
+it after the path has matched. A value the constraint refuses is a `404`, as
+if the route had not matched, and neither the route's middleware nor its
+handler runs. Chain a constraint onto a route:
+
+```rust
+use suprnova::{get, routes};
+
+routes! {
+    get!("/posts/{id}", controllers::posts::show).where_number("id"),
+    get!("/reports/{year}", controllers::reports::show)
+        .where_pattern("year", "[0-9]{4}"),
+    get!("/posts/{id}/{status}", controllers::posts::by_status)
+        .where_uuid("id")
+        .where_in("status", ["draft", "published"]),
+}
+```
+
+The same methods are on the `Router` builder, where they apply to the route
+you just registered:
+
+```rust
+use suprnova::Router;
+
+let router = Router::new()
+    .get("/posts/{id}", show).where_number("id")
+    .get("/archive/{year?}/{month?}", archive)
+    .where_pattern("year", "[0-9]{4}")
+    .where_in("month", ["01", "02", "03"]);
+```
+
+| Method | The parameter must be |
+|---|---|
+| `where_number(param)` | One or more ASCII digits. |
+| `where_alpha(param)` | One or more ASCII letters. |
+| `where_alpha_numeric(param)` | One or more ASCII letters and digits. |
+| `where_uuid(param)` | A UUID in its hyphenated form, in either case. |
+| `where_ulid(param)` | A ULID: 26 characters of Crockford base 32. |
+| `where_in(param, values)` | One of `values`, compared exactly. |
+| `where_pattern(param, expression)` | A value that the regular expression matches from its first character to its last. |
+
+There is no `where!` macro. The constraints are methods on the route.
+
+- **A pattern has to match the whole value.** `where_pattern("id", "[0-9]+")`
+  refuses `12a`, as it does in Laravel.
+- **`\d` and `\w` match every script.** They match the digits and letters
+  of all scripts, where Laravel's match ASCII alone. Write `[0-9]` for the
+  ASCII digits, or use `where_number`.
+- **A constraint skips a parameter the request left out.** An optional
+  parameter is checked only when it is there.
+- **A constraint holds for the method you set it on.** A constraint on a
+  `GET` route does not apply to a `POST` route with the same pattern. An
+  `any!` route and a route with several methods hold every method they
+  cover.
+- **A group's constraint may name a parameter of the group's prefix.** In
+  `group!("/teams/{team}", { get!("/members", h).where_number("team") })`,
+  `team` is a parameter of the prefix.
+- **A constraint on a parameter the route does not have stops the boot.**
+  It would never be checked, and the route would look guarded while it is
+  not. `where_pattern` also panics on an expression that is not a regular
+  expression.
+
+Every route builder also has `.constrain(param, ParamConstraint)`, which the
+`where_*` methods call. A `Router` route has `.try_constrain(param,
+constraint)`, which returns `Result<_, FrameworkError>` where `constrain`
+panics. `ParamConstraint::pattern(expression)` returns a `Result` for an
+expression that is not a regular expression, and `ParamConstraint::one_of`
+builds the list form.
+
 ## Route model binding
 
 When a handler parameter is a SeaORM `*::Model` type, `#[handler]`
@@ -281,6 +389,11 @@ routes! {
 }
 ```
 
+`.middleware_named("auth")` adds the middleware that a registered alias
+stands for. `.middleware_named("throttle:60,1")` gives the alias its
+arguments, and a name can stand for a group of middleware. See
+[Middleware](middleware.md#named-aliases-and-groups).
+
 Route-local middleware runs after any global middleware
 (`Server::with_middleware`) and any group middleware that wraps the
 route. The middleware map is keyed by `(method, path)`, so attaching
@@ -317,6 +430,64 @@ routes! {
 A group prefix is concatenated with each route path. A route at `/`
 inside a group resolves to the group prefix exactly
 (`group!("/users", { get!("/", index) })` → `GET /users`).
+
+### Group name prefix
+
+`.name(prefix)` puts a prefix in front of the name of every route in the
+group. Mirrors Laravel's `Route::name('admin.')->group(...)`. Each route
+then names itself by the part the group leaves out:
+
+```rust
+routes! {
+    group!("/admin/users", {
+        get!("/", controllers::admin::users::index).name("index"),   // admin.users.index
+        get!("/{id}", controllers::admin::users::show).name("show"), // admin.users.show
+        get!("/export", controllers::admin::users::export),          // no name
+    }).name("admin.users."),
+}
+```
+
+The route is known by its full name, `route("admin.users.index", &[])`, and
+not by `index`. Three rules:
+
+- **The prefix is used as you write it.** End it with the separator your
+  names use, here the dot.
+- **A group inside adds its own prefix after this one.** With
+  `.name("admin.")` outside and `.name("users.")` inside, a route named
+  `index` is `admin.users.index`. A group with no prefix of its own passes
+  the outer one on.
+- **A route without a name stays without one.** The prefix names nothing by
+  itself.
+
+The name prefix is on `group!`. The `Router::group(...)` builder has no
+name prefix.
+
+### Group controller
+
+A group can name the module its handlers live in. Write `controller =` after
+the path prefix, and a route names its handler by function alone:
+
+```rust
+routes! {
+    group!("/admin/users", controller = controllers::admin::users, {
+        get!("/", index).name("index"),
+        post!("/", store).name("store"),
+        get!("/{id}", show).name("show"),
+    }).name("admin.users."),
+}
+```
+
+This is the same as writing `controllers::admin::users::index` in each
+route. The path prefix stays the first argument of the macro. Two rules:
+
+- **The controller applies to a handler written as one bare name.** A
+  handler written as a path, `get!("/health", controllers::health::check)`,
+  is used as written. That lets a route reach a handler in another module.
+- **A group inside names its own controller.** A nested `group!` is added as
+  written, so it takes its own `controller =`, or none.
+
+`.name(...)` and `.middleware(...)` chain onto the group in the same way
+with or without `controller =`.
 
 ### Nested groups
 

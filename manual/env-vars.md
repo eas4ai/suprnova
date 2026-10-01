@@ -52,7 +52,7 @@ becomes relevant as you opt into subsystems.
 | `APP_KEY_PREVIOUS` | none | `String` (comma-separated base64 keys, max 8) | Comma-separated previous keys used during rotation. `Crypt::decrypt` tries the current `APP_KEY` first, then each entry in order. Hard cap of 8 entries - `crypto::MAX_PREVIOUS_KEYS`. A half-rotated entry that fails to decode aborts boot. See [Encryption](encryption.md#key-rotation). |
 | `APP_PREVIOUS_KEYS` | none | `String` (alias of `APP_KEY_PREVIOUS`) | Laravel-compat alias accepted so a Laravel `.env` dropped into a Suprnova deploy still graceful-decrypts legacy data. When both are set with different values, `APP_KEY_PREVIOUS` wins with a `warn!` to surface the duplicate; identical values are accepted silently. |
 | `APP_BASE_PATH` | current working directory | `Path` | Root directory the path resolver uses for `config/`, `database/`, `public/`, `storage/`, `resources/`, `lang/`. Useful when running the binary from a different CWD than the project root (e.g. systemd unit, `WorkingDirectory=` not pointing at the project). Falls back to CWD, then `.` if CWD is unavailable. |
-| `APP_TRUSTED_PROXIES` | none - empty allowlist | `String` (comma-separated IPs) | TCP peer addresses whose `X-Forwarded-*` / `X-Real-IP` headers `Request::ip()` and the host / scheme / port accessors may believe. **Empty by default, so proxy headers are ignored and the TCP peer always wins** - see the note below before deploying behind a proxy. An unparseable entry fails boot (`try_from_env`). |
+| `APP_TRUSTED_PROXIES` | none - empty allowlist | `String` (comma-separated IPs and CIDR ranges) | Addresses and ranges of the proxies whose `X-Forwarded-*` / `X-Real-IP` headers `Request::ip()` and the host / scheme / port accessors may believe. An entry is an address (`10.0.0.5`) or a range in CIDR form (`173.245.48.0/20`, `2400:cb00::/32`). A range of every address (`0.0.0.0/0`, `::/0`) is refused. **Empty by default, so proxy headers are ignored and the TCP peer always wins** - see the note below before deploying behind a proxy. An entry that is neither an address nor a valid range fails boot (`try_from_env`). |
 | `AUTH_GUARD` | `"web"` | `String` | Name of the default guard read by `Auth::*`. Mirrors Laravel - only the default is env-selectable; named guards live in code via `AuthConfig::guard(name, …)`. |
 
 Two more `APP_*` variables - `APP_LOCALE` and `APP_FALLBACK_LOCALE` -
@@ -67,24 +67,52 @@ terminating proxy is in front of you (nginx, Traefik, an ALB, Cloudflare), the
 TCP peer is *the proxy*, on every request, and leaving this unset does not merely
 lose the client's address:
 
-- **Per-IP rate limits collapse into one bucket.** `ThrottleRequestsMiddleware`'s
-  default key is `request.ip()`, so `ThrottleRequestsMiddleware::with(20, 1,
+- **Per-IP rate limits collapse into one bucket.** `ThrottleRequestsMiddleware::with(...)`
+  keys on `request.ip()` and the request path, so `ThrottleRequestsMiddleware::with(20, 1,
   "login")` stops meaning "20 login attempts per client per minute" and starts
-  meaning 20 *in total, across everyone*. That is both weaker (no per-attacker
+  meaning 20 *in total, across everyone*. `ThrottleRequestsMiddleware::default()`
+  keys on the user id when a user is signed in and on `request.ip()` otherwise,
+  so it collapses the same way for every visitor who is not signed in. That is both weaker (no per-attacker
   budget) and actively dangerous: any single caller can spend the quota and lock
   every legitimate user out of the login form. See [Rate limiting](rate-limiting.md).
 - `Request::host()`, `scheme()` and `port()` fall back to the connection rather
   than to `X-Forwarded-Host` / `-Proto` / `-Port`, so generated absolute URLs can
   name the internal address and scheme instead of the public one.
 
-List the addresses the proxy hops reach you from - not the client's:
+List the addresses the proxy hops reach you from - not the client's. An entry is
+one address or a range in CIDR form:
 
 ```bash
-APP_TRUSTED_PROXIES=10.0.0.5,10.0.0.6
+APP_TRUSTED_PROXIES=10.0.0.5,173.245.48.0/20,2400:cb00::/32
 ```
 
-Nothing detects this for you: an app behind a proxy with the variable unset
-looks healthy, serves correctly, and quietly rate-limits everyone as one user.
+Four rules decide how the list is used:
+
+- **List every proxy of the chain, not the last one alone.** `Request::ip()`
+  reads `X-Forwarded-For` from the right and returns the first address that is
+  not in the list. A proxy that is not listed is taken for the client, and all
+  of its clients share one address. This includes an address that a load
+  balancer adds behind the client's, as the external Application Load Balancer
+  of Google Cloud does.
+- **A range must hold proxies and nothing else.** A client that connects from a
+  trusted address is believed like a proxy: it writes its own
+  `X-Forwarded-For`, and with it the address `ip()` returns, and the forwarded
+  host and scheme as well. The network of the pods of a cluster and the range of
+  a VPN have clients in them. Do not list them.
+- **The proxy must write `X-Forwarded-For` itself**, by adding the address it
+  saw to the header or by replacing the header. A proxy that passes the client's
+  header on as it came lets the client write all of it.
+- **`X-Real-IP` is read only when the request has no `X-Forwarded-For` at all.**
+  A proxy that writes `X-Real-IP` alone must remove the client's
+  `X-Forwarded-For`. The `Forwarded` header of RFC 7239 is not read.
+
+An IPv4 address written as an IPv6 one (`::ffff:10.0.0.5`) counts as the IPv4
+address, in the headers and for the peer. `Request::ips()` returns the whole
+chain. It is a record, not something to decide by.
+
+Nothing detects a missing list for you: an app behind a proxy with the variable
+unset looks healthy, serves correctly, and quietly rate-limits everyone as one
+user.
 
 ### App-key required matrix
 
@@ -186,15 +214,18 @@ boots with the framework's embedded English validation catalog.
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
-| `QUEUE_DRIVER` | `memory` | `String` (`memory`, `redis`, `database`, `failover`) | Active queue backend. Unknown values log a `warn!` and fall back to memory. `failover` wraps an ordered list of the others - see `QUEUE_FAILOVER_CONNECTIONS`. |
+| `QUEUE_DRIVER` | `memory` | `String` (`memory`, `sync`, `null`, `redis`, `database`, `failover`) | Active queue backend. `sync` runs each job inline when it is pushed, with no worker and no retry. `null` accepts every job and runs none. An unknown value is a boot error in production, where an in-memory queue would lose every job at the next restart. Elsewhere it logs a `warn!` that lists the accepted names and falls back to memory. `failover` wraps an ordered list of the others - see `QUEUE_FAILOVER_CONNECTIONS`. |
+| `QUEUE_CONNECTIONS` | unset | `String` (comma-separated, e.g. `redis,database`) | Registers one named connection per entry, next to the default connection. Each connection is named for its driver and reads that driver's own variables, exactly as it would if it were `QUEUE_DRIVER`. An entry accepts the same names as `QUEUE_DRIVER`. An unknown name is a boot error in every environment. An entry that names the driver `QUEUE_DRIVER` selects is a second name for the default connection. Any other entry over a Redis stream or a jobs table that another connection already uses is refused at boot, because one queue has one connection. A job, a route or a push selects a connection by name - see [Queues](queues.md). |
+| `QUEUE_AFTER_COMMIT` | `false` | `bool` (`true` or `1` turns it on; anything else leaves it off) | When on, every push made inside `DB::transaction` waits for the commit, whatever the job declares, as the `after_commit` option of a Laravel queue connection does. A rollback discards the push. It applies to jobs, queued mail and queued notifications. Read at each push, not once at boot. |
+| `QUEUE_PAUSABLE` | `true` | `bool` (`false` or `0` turns it off) | Whether workers and the `queue:pause` command honour pause signals. `queue:resume` never checks it, so an existing pause can always be cleared. |
 | `QUEUE_FAILOVER_CONNECTIONS` | - | `String` (comma-separated, e.g. `redis,database`) | Priority-ordered connection list for `QUEUE_DRIVER=failover`. Required when that driver is selected; a missing or blank value is a boot error, as is an entry naming `failover` (no nesting) or a driver that doesn't exist. Each entry reads its own driver's variables. Only pushes fall through the list; every read and every acknowledgement goes to the first connection, so each fallback needs its own worker. |
 | `QUEUE_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis URL (required-by-driver when `QUEUE_DRIVER=redis`). |
 | `QUEUE_REDIS_STREAM` | `"suprnova-queue"` | `String` | Redis Stream key used for fan-out. |
 | `QUEUE_REDIS_GROUP` | `"default"` | `String` | Consumer-group name. |
-| `QUEUE_REDIS_CONSUMER` | `"consumer-1"` | `String` | Consumer name within the group. Set per-worker for parallel workers. |
+| `QUEUE_REDIS_CONSUMER` | `suprnova-<uuid>` (a fresh UUID for each process) | `String` | Consumer name within the group. Set it per worker to keep the name stable across restarts. |
 | `QUEUE_VISIBILITY_TIMEOUT_SECS` | `60` | `u64` | How long a claimed job stays invisible before another consumer can reclaim it. Match this to your slowest job. |
 | `QUEUE_DB_TABLE` | `"jobs"` | `String` | Table name for the database driver. Validated as a SQL identifier - a malformed value fails at boot, not at SQL composition time. Required-by-driver when `QUEUE_DRIVER=database`; the driver also requires `DB::init()` to have run first. |
-| `QUEUE_FAILED_DB_TABLE` | `"failed_jobs"` | `String` | Table the dead-letter store writes to. Bound automatically when `QUEUE_DRIVER=database` - `queue:retry` reads it and `Queue::retry_failed` needs it, so the table is part of that driver's contract. Not used by `memory` (ephemeral by construction) or `redis` (no table to write to). Unlike `QUEUE_DB_TABLE` a malformed identifier here does **not** fail boot: it logs at `error!` and leaves no store bound, so dead-lettered jobs are logged in full rather than persisted. Recoverable by hand, but not by `queue:retry`. |
+| `QUEUE_FAILED_DB_TABLE` | `"failed_jobs"` | `String` | Table the dead-letter store writes to. Bound automatically when `QUEUE_DRIVER=database` - the failed-job commands (`queue:failed`, `queue:retry`, `queue:forget`, `queue:flush`, `queue:prune-failed`) read it and `Queue::retry_failed` needs it, so the table is part of that driver's contract. The commands read no variable of their own: they boot the application as `queue:work` does and use the store that boot bound. With no store bound, they exit non-zero and say so. Not used by `memory` (ephemeral by construction) or `redis` (no table to write to). Unlike `QUEUE_DB_TABLE` a malformed identifier here does **not** fail boot: it logs at `error!` and leaves no store bound, so dead-lettered jobs are logged in full rather than persisted. Recoverable by hand, but not by the failed-job commands. |
 
 ## Schedule
 
@@ -297,6 +328,51 @@ selected; an unknown driver value logs a `warn!` and falls back to
 | `RATE_LIMIT_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis URL (required-by-driver when `RATE_LIMIT_DRIVER=redis`). |
 | `RATE_LIMIT_PREFIX` | `"suprnova:"` | `String` | Key prefix in Redis. |
 
+## Filesystem
+
+When `S3_BUCKET` is set, the server registers an S3 disk named `s3` as it boots,
+beside the queue, the rate limiter and the mail transport. The variables work for
+AWS S3 and for S3-compatible services (MinIO, RustFS, R2, B2). With `S3_BUCKET`
+unset, nothing is registered. A disk that your `bootstrap()` registered under the
+name `s3` is kept as it is, and the variables are not read then.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `S3_BUCKET` | unset (no disk) | `String` | The bucket. Setting it registers the `s3` disk. |
+| `S3_REGION` | none - see `AWS_REGION` | `String` | The region. The driver needs one, and the server does not boot when none is set. A service that is not AWS takes any name, such as `us-east-1` or `auto`. |
+| `AWS_REGION`, `AWS_DEFAULT_REGION` | unset | `String` | Read, in this order, when `S3_REGION` is not set. |
+| `S3_ENDPOINT` | unset (AWS) | `String` | The endpoint of a service that is not AWS. |
+| `S3_ACCESS_KEY`, `S3_SECRET_KEY` | unset | `String` | The access key and the secret. Set both or neither. One without the other fails boot. With neither, the driver uses the default credential chain of AWS: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, the profile, and the role of the instance. |
+| `S3_ROOT` | unset | `String` | A prefix inside the bucket that every path is under. |
+| `S3_PUBLIC_URL` | unset | `String` | The public base URL of the `s3` disk, which `Storage::url("s3", path)` joins with the path. It is an absolute `http` or `https` URL (`https://cdn.example.com/files`) or a path of your own host (`/storage`). A value with a user or a password, a query or a fragment, a backslash, or a `.` or `..` segment fails boot. With it unset, `Storage::url` on the `s3` disk returns an error. |
+
+Blank values count as unset. No error repeats the value of a variable.
+
+There is no default disk. Every call names the disk it uses, so `FILESYSTEM_DISK`
+is not read. The console binary boots no driver of the environment. A command
+that uses the `s3` disk calls `suprnova::filesystem::bootstrap_from_env()` in its
+own bootstrap. To register the same configuration under a name of your own, use
+`S3Config::from_env()`. See [Filesystem](filesystem.md).
+
+## Vector search
+
+The three vector drivers read their connection from the environment when you
+call their `from_env()` constructor. Nothing reads these variables at boot. You
+choose the driver in Rust and register it in `bootstrap()`. See [Vector](vector.md).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `QDRANT_URL` | none - required | `String` | The gRPC URL of Qdrant, port 6334 by default. `QdrantVectorDriver::from_env()` fails when it is unset or blank. |
+| `QDRANT_API_KEY` | unset | `String` | The key of Qdrant Cloud, or of a self-hosted instance that asks for one. |
+| `MARIADB_URL` | none - see `DATABASE_URL` | `String` | The URL of the MariaDB that holds the vectors. `MariaDbVectorDriver::from_env()` reads it first. |
+| `DATABASE_URL` | none | `String` | Read by `MariaDbVectorDriver::from_env()` when `MARIADB_URL` is unset, and taken only when its scheme is `mariadb://` or `mysql://`. A URL of another engine is not taken. |
+| `PINECONE_API_KEY` | none - required | `String` | The Pinecone API key. `PineconeVectorDriver::from_env()` fails when it is unset or blank. |
+| `PINECONE_CONTROLLER_HOST` | `https://api.pinecone.io` | `String` | The base URL of the Pinecone control plane. |
+| `PINECONE_API_VERSION` | `2025-04` | `String` | The value of the `X-Pinecone-Api-Version` header. |
+
+A missing variable is named in the error at boot, and the error never shows a
+URL, because a URL carries the password.
+
 ## Images
 
 Image driver selection and the decode limits that bound hostile input.
@@ -376,10 +452,22 @@ explicit value always wins.
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset (telemetry disabled) | `String` | OTLP collector endpoint. When unset (or whitespace), exporters are not installed and the framework keeps using the standard `tracing` subscriber. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset (telemetry disabled) | `String` | Base URL of the OTLP collector, for example `http://localhost:4318`. Each signal is sent to its own path under it: `/v1/traces`, `/v1/metrics`, `/v1/logs`. A trailing slash is trimmed. When unset (or whitespace), exporters are not installed and the framework keeps using the standard `tracing` subscriber. This variable is what turns telemetry on; the three per-signal variables below have no effect without it. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | `String` | The URL the traces are sent to, used as it is written, with no path added. Unset sends traces to `/v1/traces` under the base endpoint. |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | unset | `String` | The URL the metrics are sent to, used as it is written. Unset sends metrics to `/v1/metrics` under the base endpoint. |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | unset | `String` | The URL the logs are sent to, used as it is written. Unset sends logs to `/v1/logs` under the base endpoint. |
+| `OTEL_EXPORTER_OTLP_COMPRESSION` | unset (no compression) | `String` (`gzip`) | Read by the OpenTelemetry exporter, not by Suprnova. `gzip` works. `zstd` is not compiled in: asking for it leaves the signals out, with the reason in the log. |
 | `OTEL_SERVICE_NAME` | `"suprnova"` | `String` | `service.name` resource attribute on every span / metric / log record. |
 | `OTEL_SERVICE_VERSION` | `CARGO_PKG_VERSION` at build time | `String` | `service.version` resource attribute. |
 | `OTEL_SDK_DISABLED` | `false` | `bool` | Standard OTel kill switch. When true, exporters are not installed regardless of `OTEL_EXPORTER_OTLP_ENDPOINT`. |
+
+An endpoint must be a URL with the scheme `http` or `https` and a host. A
+signal whose endpoint is not one, such as a path alone, is left out and
+reported in the log, and the other signals are still exported. The report never
+repeats the endpoint, which can carry a password or a token. The exporters need
+the `otel` cargo feature. The other standard OTLP variables
+(`OTEL_EXPORTER_OTLP_HEADERS`, `_PROTOCOL`, `_TIMEOUT`) are read by the
+OpenTelemetry exporter directly.
 
 ## CLI / dev server
 
@@ -400,11 +488,13 @@ A few subsystems are configured entirely in Rust code via the
 container or service registration - they have **zero** env vars the
 framework reads:
 
-- **Filesystem / Storage.** Disks are registered with
-  `FilesystemRegistry::add_disk(name, driver)` in `bootstrap()`. There
-  is no `FILESYSTEM_DISK` env var (the name appears in some starter
-  `.env` files but is not consulted by the framework - see "Variables
-  the framework does not read" below).
+- **Filesystem / Storage, apart from S3.** Disks are registered by name with
+  `Storage::register_*` in `bootstrap()` and addressed by name at the
+  call site (`Storage::disk("public")`). There is no default disk, so
+  there is no `FILESYSTEM_DISK` env var (see "Variables the framework
+  does not read" below). The one exception is the S3-compatible `s3`
+  disk, which the `S3_*` variables configure (see **Filesystem** above and
+  [Docker](cli-docker.md)).
 - **Broadcasting & WebSockets.** Channels are registered with the
   `ws!()` macro and `BroadcastHub` configuration in code. The driver
   itself rides on whatever the configured `CACHE_DRIVER` selects.
@@ -417,10 +507,13 @@ framework reads:
   scopes, transports, and policy values are supplied programmatically through
   the Magnetar provider registry. Applications may source those values from
   environment variables or a secret manager.
-- **Vector search, Notifications, Payments, Feature Flags.** Each
+- **Notifications, Payments, Feature Flags.** Each
   registers concrete drivers via `App::bind` in `bootstrap()`. Pick
   your driver in Rust; pass any URLs/keys it needs as your own env
   vars.
+- **Vector search** registers its drivers the same way. The Qdrant,
+  MariaDB and Pinecone drivers have a `from_env()` constructor that reads the
+  variables in **Vector search** above.
 
 ## Variables the framework does not read
 
@@ -434,8 +527,9 @@ here so a reader searching for them isn't left wondering:
   `env_optional` if you want to keep the Laravel name, but nothing in
   `suprnova::*` does. (`MAIL_FROM_NAME` **is** read as of 0.5.9 - see the
   Mail chapter - so it's no longer listed here.)
-- `FILESYSTEM_DISK` - placeholder for the default disk name. Set the
-  default in code via `FilesystemRegistry::set_default(name)` instead.
+- `FILESYSTEM_DISK` - Laravel's default disk name. Suprnova has no
+  default disk: every call names the disk it uses
+  (`Storage::disk("s3")`).
 
 ## How values are parsed
 
@@ -473,7 +567,7 @@ overrides both for secrets that should never land in a committed
 file.
 
 See [Configuration](configuration.md#how-env-loading-works) for the
-exact loader behaviour and the `LOADED_KEYS` tracking that prevents
+exact loader behaviour and the tracking of loaded keys that prevents
 stale `.env` values from promoting into the "real system env" tier
 across reloads.
 

@@ -2,21 +2,28 @@
 //! `#[suprnova::scopes]` macro live in `suprnova-macros/src/scopes.rs`)
 //! and global scopes (this file).
 //!
-//! Global scopes apply automatically to every [`Model::query`] call.
-//! Users register them at boot via [`ScopeRegistry::register::<M, S>`].
-//! Each query can opt out of a single scope by type with
-//! [`Builder::without_global_scope::<S>`] or bypass the registry
-//! entirely with [`Builder::without_global_scopes`].
+//! Global scopes apply automatically to every query that starts from
+//! [`Model::query`]. Users register them at boot via
+//! [`ScopeRegistry::register::<M, S>`]. Each query can opt out of a single
+//! scope by type with [`Builder::without_global_scope::<S>`] or bypass the
+//! registry entirely with [`Builder::without_global_scopes`], anywhere in
+//! its chain.
+//!
+//! ## When scopes are applied
+//!
+//! When the query runs, not when it is built. One resolver does it: it
+//! sets the caller's terms aside, adds the soft-delete filter, runs the
+//! registry, and appends the caller's terms after them. The statement therefore reads
+//! `<scopes> AND <caller's terms>`, with a caller's `OR` group as one
+//! atom, so no `or_where` can widen a query past a scope.
 //!
 //! ## Soft deletes coexistence
 //!
-//! Suprnova's [`SoftDeletes`][crate::eloquent::SoftDeletes] pathway
-//! does **not** route through this registry - it ships its own inherent
-//! `Model::query` override (emitted by `#[suprnova::model(soft_deletes)]`)
-//! that prepends a `deleted_at IS NULL` filter, and a
-//! `global_scopes_disabled: Vec<&'static str>` tag system on the
-//! builder. The two paths coexist; T4 does not retroactively fold
-//! soft-deletes into the registry.
+//! The soft-delete filter does **not** route through this registry. It is
+//! folded in by the same resolver, from the model's
+//! `SOFT_DELETES_COLUMN`, and has its own opt-out: the `"soft_deletes"`
+//! tag that `with_trashed()` and `only_trashed()` set. Lifting one never
+//! lifts the other.
 //!
 //! ## PK lookups
 //!
@@ -98,9 +105,12 @@ where
     <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
-    /// Mutate the builder however the scope needs. Called once per
-    /// `Model::query()` invocation. Return the (possibly modified)
-    /// builder. The framework chains scopes in registration order.
+    /// Mutate the builder however the scope needs, and return it. Called
+    /// once per query, when the query runs: the builder a scope receives
+    /// holds the soft-delete filter and the scopes registered before this
+    /// one, and none of the caller's own terms, which are appended after
+    /// every scope has run. The framework chains scopes in registration
+    /// order.
     fn apply(&self, query: Builder<M>) -> Builder<M>;
 
     /// What this scope's filter depends on.
@@ -183,6 +193,42 @@ static REGISTRY: OnceLock<RwLock<HashMap<TypeId, PerModelScopes>>> = OnceLock::n
 
 fn registry() -> &'static RwLock<HashMap<TypeId, PerModelScopes>> {
     REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Fold `M`'s soft-delete filter and registered global scopes into
+/// `builder`. This is the resolver [`Builder::__scoped`] installs; it runs
+/// when the query is rendered.
+///
+/// The caller's own terms are set aside while the scopes run and appended
+/// after them, so the statement reads `<scopes> AND <caller's terms>` with
+/// each caller term, an `OR` group included, as one atom. Neither side can
+/// fold into the other: a scope that ends in an `or_*` cannot swallow a
+/// caller's filter, and a caller's `or_where` cannot widen past a tenant
+/// scope or un-delete a trashed row.
+///
+/// [`Builder::__scoped`]: crate::eloquent::Builder::__scoped
+pub(crate) fn resolve_scopes<M>(mut builder: Builder<M>) -> Builder<M>
+where
+    M: Model + 'static,
+    M: From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    let callers_terms = std::mem::take(&mut builder.where_terms);
+    if !M::SOFT_DELETES_COLUMN.is_empty()
+        && !builder.global_scopes_disabled.contains(&"soft_deletes")
+    {
+        builder = builder.filter_null(M::SOFT_DELETES_COLUMN);
+    }
+    let mut builder = ScopeRegistry::apply_to::<M>(builder);
+    builder.where_terms.extend(callers_terms);
+    builder
 }
 
 /// The process-global scope registry.

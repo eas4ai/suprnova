@@ -484,21 +484,7 @@ where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let specs: Vec<EagerSpec> = relations
-            .into_iter()
-            .map(|s| EagerSpec::With(s.into()))
-            .collect();
-        if specs.is_empty() || self.0.is_empty() {
-            return Ok(());
-        }
-        let db = crate::eloquent::relations::eager::resolve_eager_connection(
-            None,
-            None,
-            M::default_connection_name(),
-        )
-        .await?;
-        crate::eloquent::relations::eager::apply_eager_specs::<M>(&mut self.0, specs, db.inner())
-            .await
+        load_relations::<M, I, S>(&mut self.0, relations).await
     }
 
     /// Like [`Self::load`] but evaluate the cache per row, not per
@@ -524,21 +510,76 @@ where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let paths: Vec<String> = relations.into_iter().map(|s| s.into()).collect();
-        if paths.is_empty() || self.0.is_empty() {
-            return Ok(());
-        }
-        let db = crate::eloquent::relations::eager::resolve_eager_connection(
-            None,
-            None,
-            M::default_connection_name(),
-        )
-        .await?;
-        for path in paths {
-            load_missing_path::<M>(&mut self.0, &path, db.inner()).await?;
-        }
-        Ok(())
+        load_missing_relations::<M, I, S>(&mut self.0, relations).await
     }
+}
+
+/// The body of [`Collection::load`], over a slice of rows.
+///
+/// [`Model::load`] calls it with its one row as a one-row slice
+/// (`std::slice::from_mut(self)`), so the row the caller holds is the
+/// row whose relation cache receives the loaded relations, and a
+/// single row loads through the same dispatcher, nested-path
+/// resolution and connection routing as a collection does.
+///
+/// An empty slice still walks every dotted path, so a path with a tail
+/// that one target of a `MorphTo` lacks is an error with no row, as it
+/// is with rows.
+pub(crate) async fn load_relations<M, I, S>(
+    rows: &mut [M],
+    relations: I,
+) -> Result<(), FrameworkError>
+where
+    M: EagerLoadDispatch + crate::eloquent::EloquentModel + Send + Sync,
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let specs: Vec<EagerSpec> = relations
+        .into_iter()
+        .map(|s| EagerSpec::With(s.into()))
+        .collect();
+    if specs.is_empty() {
+        return Ok(());
+    }
+    let db = crate::eloquent::relations::eager::resolve_eager_connection(
+        None,
+        None,
+        M::default_connection_name(),
+    )
+    .await?;
+    crate::eloquent::relations::eager::apply_eager_specs::<M>(rows, specs, db.inner()).await
+}
+
+/// The body of [`Collection::load_missing`], over a slice of rows.
+///
+/// [`Model::load_missing`] calls it with its one row as a one-row
+/// slice, for the same reason as [`load_relations`]. A relation the row
+/// already has in its cache is partitioned out before any query runs.
+/// An empty slice still walks every dotted path, as [`load_relations`]
+/// does.
+pub(crate) async fn load_missing_relations<M, I, S>(
+    rows: &mut [M],
+    relations: I,
+) -> Result<(), FrameworkError>
+where
+    M: EagerLoadDispatch + crate::eloquent::EloquentModel + Send + Sync,
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let paths: Vec<String> = relations.into_iter().map(|s| s.into()).collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let db = crate::eloquent::relations::eager::resolve_eager_connection(
+        None,
+        None,
+        M::default_connection_name(),
+    )
+    .await?;
+    for path in paths {
+        load_missing_path::<M>(rows, &path, db.inner()).await?;
+    }
+    Ok(())
 }
 
 // ─── Phase 10C T5b: model-aware string-keyed Laravel surface ─────────

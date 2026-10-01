@@ -3,12 +3,28 @@
 use crate::FrameworkError;
 use crate::config::{Environment, env, env_optional};
 
+/// The scheme a MariaDB operator naturally writes.
+const MARIADB_SCHEME: &str = "mariadb://";
+
+/// `url` as the database driver accepts it. SeaORM and sqlx know a MariaDB
+/// server by the `mysql` scheme only, so a `mariadb://` URL is handed over
+/// with its scheme rewritten; every other URL passes through unchanged.
+/// Every place that gives a URL to the driver goes through here, so the
+/// primary connection, a named connection, a read replica, the migrator and
+/// the vector driver all accept the same spellings.
+pub(crate) fn driver_url(url: &str) -> std::borrow::Cow<'_, str> {
+    match url.strip_prefix(MARIADB_SCHEME) {
+        Some(rest) => std::borrow::Cow::Owned(format!("mysql://{rest}")),
+        None => std::borrow::Cow::Borrowed(url),
+    }
+}
+
 /// Database type enumeration
 #[derive(Debug, Clone, PartialEq)]
 pub enum DatabaseType {
     /// PostgreSQL - `postgres://` or `postgresql://` URL.
     Postgres,
-    /// MySQL or MariaDB - `mysql://` URL.
+    /// MySQL or MariaDB - `mysql://` or `mariadb://` URL.
     Mysql,
     /// SQLite - `sqlite://` URL, or an absolute file path.
     Sqlite,
@@ -160,11 +176,18 @@ impl DatabaseConfig {
         DatabaseConfigBuilder::default()
     }
 
+    /// Whether the URL names a MariaDB server by its own scheme,
+    /// `mariadb://`. A MariaDB server reached through `mysql://` cannot be
+    /// told from MySQL by its URL.
+    pub fn names_mariadb(&self) -> bool {
+        self.url.starts_with(MARIADB_SCHEME)
+    }
+
     /// Detect database type from URL
     pub fn database_type(&self) -> DatabaseType {
         if self.url.starts_with("postgres://") || self.url.starts_with("postgresql://") {
             DatabaseType::Postgres
-        } else if self.url.starts_with("mysql://") {
+        } else if self.url.starts_with("mysql://") || self.url.starts_with(MARIADB_SCHEME) {
             DatabaseType::Mysql
         } else if self.url.starts_with("sqlite://") || self.url.starts_with("sqlite:") {
             DatabaseType::Sqlite
@@ -375,6 +398,33 @@ impl DatabaseConfigBuilder {
                 .unwrap_or(defaults.test_before_acquire),
             ping_after_idle: self.ping_after_idle.or(defaults.ping_after_idle),
             url_source,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::driver_url;
+
+    #[test]
+    fn a_mariadb_url_reaches_the_driver_under_the_mysql_scheme() {
+        assert_eq!(
+            driver_url("mariadb://app:secret@db.internal:3306/shop?ssl-mode=required"),
+            "mysql://app:secret@db.internal:3306/shop?ssl-mode=required"
+        );
+    }
+
+    #[test]
+    fn every_other_url_reaches_the_driver_unchanged() {
+        for url in [
+            "mysql://app@db/shop",
+            "postgres://app@db/shop",
+            "sqlite://./database.db",
+            "sqlite::memory:",
+            // Only the scheme is rewritten, never a later occurrence.
+            "postgres://app@db/mariadb://",
+        ] {
+            assert_eq!(driver_url(url), url);
         }
     }
 }

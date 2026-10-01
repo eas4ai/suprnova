@@ -36,13 +36,37 @@
 //! are visible to the other for as long as the child holds the clone.
 //! This is what audit/logging spawns want; if you need an isolated
 //! snapshot, clone the maps explicitly.
+//!
+//! ### Travelling with queued work
+//!
+//! A queued job, a queued mail or notification, and a queued event listener
+//! run after the request that asked for them, often in another process. The
+//! framework carries the context to them: a push takes a
+//! [`ContextSnapshot`] of the visible and hidden bags
+//! ([`Context::dehydrate`]), the envelope stores it, and the worker runs the
+//! job inside a scope restored from it ([`Context::restored`]). A value a
+//! request adds, such as a trace id or a tenant, is there when the job reads
+//! it. The job works on its own copy, so what it adds does not reach the
+//! request, or the next job.
+//!
+//! The query bag does not travel. It describes the request that was being
+//! served, and the work that runs later is not that request.
+//!
+//! Code that serves a request always has context to carry: the request
+//! middleware adds the request's id as `_request_id`, so that a job, and
+//! the log lines it writes, can be traced to the request that queued it.
+//! Code outside a request, such as a console command or a scheduled task,
+//! carries only what it added itself.
+//!
+//! [`Context::dehydrating`] and [`Context::hydrated`] register callbacks for
+//! the two ends of the trip, as Laravel's hooks of the same names do.
 
 use dashmap::DashMap;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, RwLock};
 
 /// The backing store inside a request's context scope. Two maps -
 /// visible (`data`) and hidden (`hidden`) - so logging serializers
@@ -53,11 +77,26 @@ use std::sync::Arc;
 /// by [`Context::query_param`] downstream. Stored separately from
 /// `data` so paginate / scope-aware code can't accidentally collide
 /// with user-set context keys.
-#[derive(Default, Debug, Clone)]
+///
+/// The `Debug` output names the hidden keys and never their values, for the
+/// reason the hidden bag exists.
+#[derive(Default, Clone)]
 pub struct ContextStore {
     data: Arc<DashMap<String, Value>>,
     hidden: Arc<DashMap<String, Value>>,
     query: Arc<DashMap<String, String>>,
+}
+
+impl std::fmt::Debug for ContextStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut hidden_keys: Vec<String> = self.hidden.iter().map(|kv| kv.key().clone()).collect();
+        hidden_keys.sort();
+        f.debug_struct("ContextStore")
+            .field("data", &self.data)
+            .field("hidden_keys", &hidden_keys)
+            .field("query", &self.query)
+            .finish()
+    }
 }
 
 impl ContextStore {
@@ -75,6 +114,84 @@ impl ContextStore {
             query: Arc::new(q),
         }
     }
+}
+
+impl ContextStore {
+    /// A fresh store holding a snapshot's two bags, with an empty query
+    /// bag. The store shares nothing with the snapshot: a write to it
+    /// changes neither the snapshot nor the context it was taken from.
+    pub fn from_snapshot(snapshot: &ContextSnapshot) -> Self {
+        let fill = |bag: &BTreeMap<String, Value>| {
+            let map = DashMap::with_capacity(bag.len());
+            for (key, value) in bag {
+                map.insert(key.clone(), value.clone());
+            }
+            Arc::new(map)
+        };
+        Self {
+            data: fill(&snapshot.data),
+            hidden: fill(&snapshot.hidden),
+            query: Arc::new(DashMap::new()),
+        }
+    }
+}
+
+/// The part of a context that travels with queued work: the visible and the
+/// hidden bag, as plain maps.
+///
+/// It is what a queue envelope stores, so it is `Serialize` and
+/// `Deserialize`, and an empty bag stays off the wire. Its `Debug` output
+/// names the hidden keys and never their values, because a hidden value is
+/// one the application asked to keep out of logs.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ContextSnapshot {
+    /// The visible bag, what [`Context::all`] returns.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub data: BTreeMap<String, Value>,
+    /// The hidden bag, what [`Context::hidden_get`] reads.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub hidden: BTreeMap<String, Value>,
+}
+
+impl ContextSnapshot {
+    /// `true` when both bags are empty.
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty() && self.hidden.is_empty()
+    }
+
+    /// A copy without the hidden bag, for output that more people can read
+    /// than the queue store, such as a log line.
+    pub fn without_hidden(&self) -> Self {
+        Self {
+            data: self.data.clone(),
+            hidden: BTreeMap::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for ContextSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContextSnapshot")
+            .field("data", &self.data)
+            .field("hidden_keys", &self.hidden.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+type DehydratingHook = Arc<dyn Fn(&mut ContextSnapshot) + Send + Sync>;
+type HydratedHook = Arc<dyn Fn(&ContextSnapshot) + Send + Sync>;
+
+static DEHYDRATING_HOOKS: RwLock<Vec<DehydratingHook>> = RwLock::new(Vec::new());
+static HYDRATED_HOOKS: RwLock<Vec<HydratedHook>> = RwLock::new(Vec::new());
+
+/// The registered hooks, cloned out so none runs under the registry lock. A
+/// poisoned registry yields the hooks it holds: a panic in one registration
+/// must not stop context from travelling.
+fn hooks<T: Clone>(registry: &RwLock<Vec<T>>) -> Vec<T> {
+    registry
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
 }
 
 tokio::task_local! {
@@ -142,6 +259,115 @@ impl Context {
         F: std::future::Future,
     {
         CONTEXT.scope(store, fut)
+    }
+
+    /// Snapshot the context for work that runs later: the visible and the
+    /// hidden bag, after every [`Self::dehydrating`] callback has seen the
+    /// snapshot.
+    ///
+    /// Returns `None` when there is nothing to carry: outside a scope with
+    /// no callback adding a value, or when both bags are empty. A push then
+    /// writes an envelope with no context on it. Inside a request there is
+    /// always the request's id to carry, see the module docs.
+    pub fn dehydrate() -> Option<ContextSnapshot> {
+        let mut snapshot = CONTEXT
+            .try_with(|store| {
+                let copy = |bag: &DashMap<String, Value>| {
+                    bag.iter()
+                        .map(|kv| (kv.key().clone(), kv.value().clone()))
+                        .collect::<BTreeMap<_, _>>()
+                };
+                ContextSnapshot {
+                    data: copy(&store.data),
+                    hidden: copy(&store.hidden),
+                }
+            })
+            .unwrap_or_default();
+        for hook in hooks(&DEHYDRATING_HOOKS) {
+            hook(&mut snapshot);
+        }
+        (!snapshot.is_empty()).then_some(snapshot)
+    }
+
+    /// Build the store that queued work runs in: a fresh one that holds
+    /// `snapshot`'s two bags, or an empty one for `None`.
+    ///
+    /// Every [`Self::hydrated`] callback runs before this returns, inside
+    /// the new store's scope, when there is a snapshot to read. Enter the
+    /// store with [`Self::scope`]. A queue worker enters the same store for
+    /// the job and for the lifecycle events around it, so a listener of
+    /// `JobProcessed` reads what the job read and what the job added.
+    pub fn hydrate(snapshot: Option<&ContextSnapshot>) -> ContextStore {
+        let Some(snapshot) = snapshot else {
+            return ContextStore::default();
+        };
+        let store = ContextStore::from_snapshot(snapshot);
+        let hydrated = hooks(&HYDRATED_HOOKS);
+        if !hydrated.is_empty() {
+            CONTEXT.sync_scope(store.clone(), || {
+                for hook in hydrated {
+                    hook(snapshot);
+                }
+            });
+        }
+        store
+    }
+
+    /// Run `fut` inside a fresh scope that holds `snapshot`'s two bags:
+    /// [`Self::hydrate`], then [`Self::scope`].
+    pub async fn restored<F>(snapshot: Option<ContextSnapshot>, fut: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        CONTEXT.scope(Self::hydrate(snapshot.as_ref()), fut).await
+    }
+
+    /// Register a callback that runs on every snapshot taken for queued
+    /// work, before it is stored. Mirrors Laravel's `Context::dehydrating`.
+    ///
+    /// The callback may add, change or remove entries. Use it to carry a
+    /// value that lives outside the context, such as the request's locale,
+    /// or to keep a value from leaving the process. It changes the
+    /// snapshot only, never the live context. Register it once, at boot.
+    pub fn dehydrating(hook: impl Fn(&mut ContextSnapshot) + Send + Sync + 'static) {
+        DEHYDRATING_HOOKS
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(Arc::new(hook));
+    }
+
+    /// Register a callback that runs when a worker has restored a snapshot,
+    /// before the job runs. Mirrors Laravel's `Context::hydrated`.
+    ///
+    /// It runs inside the restored scope, so the `Context` methods read and
+    /// write the job's context. Use it to put a carried value back where
+    /// the application reads it. Register it once, at boot. It runs once
+    /// for every attempt of a job, because every attempt starts from the
+    /// snapshot.
+    pub fn hydrated(hook: impl Fn(&ContextSnapshot) + Send + Sync + 'static) {
+        HYDRATED_HOOKS
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(Arc::new(hook));
+    }
+
+    /// **Testing hook.** Remove every [`Self::dehydrating`] and
+    /// [`Self::hydrated`] callback. The callbacks are process-wide, so a
+    /// test that registers one removes it again to stay hermetic.
+    ///
+    /// Compiled under `cfg(test)` or the `testing` Cargo feature. `testing` is
+    /// enabled by default, including in release builds; consumers can remove
+    /// this hook with `default-features = false` and without `testing`.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn test_clear_hooks() {
+        DEHYDRATING_HOOKS
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        HYDRATED_HOOKS
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     }
 
     /// Set `key` to `value` (replacing any existing entry).
@@ -541,6 +767,183 @@ mod tests {
                 assert_eq!(Context::hidden_get::<String>("public_key"), None);
             })
             .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(context_hooks)]
+    async fn dehydrate_outside_a_scope_has_nothing_to_carry() {
+        Context::test_clear_hooks();
+        assert_eq!(Context::dehydrate(), None);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(context_hooks)]
+    async fn dehydrate_copies_both_bags_and_leaves_the_query_behind() {
+        Context::test_clear_hooks();
+        let store = ContextStore::with_query([("page".to_owned(), "3".to_owned())].into());
+        CONTEXT
+            .scope(store, async {
+                assert_eq!(Context::dehydrate(), None, "both bags are empty");
+
+                Context::add("trace_id", "abc");
+                Context::hidden_add("api_key", "s3cret");
+                let snapshot = Context::dehydrate().expect("there is context to carry");
+
+                assert_eq!(
+                    snapshot.data,
+                    [("trace_id".to_owned(), json!("abc"))].into()
+                );
+                assert_eq!(
+                    snapshot.hidden,
+                    [("api_key".to_owned(), json!("s3cret"))].into()
+                );
+                let wire = serde_json::to_string(&snapshot).unwrap();
+                assert!(!wire.contains("page"), "the query bag travelled: {wire}");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(context_hooks)]
+    async fn restored_runs_on_a_copy() {
+        Context::test_clear_hooks();
+        CONTEXT
+            .scope(ContextStore::default(), async {
+                Context::add("trace_id", "abc");
+                Context::hidden_add("api_key", "s3cret");
+                let snapshot = Context::dehydrate();
+
+                Context::restored(snapshot, async {
+                    assert_eq!(Context::get::<String>("trace_id").as_deref(), Some("abc"));
+                    assert_eq!(
+                        Context::hidden_get::<String>("api_key").as_deref(),
+                        Some("s3cret")
+                    );
+                    Context::add("trace_id", "changed by the job");
+                    Context::add("added_by_the_job", true);
+                })
+                .await;
+
+                assert_eq!(
+                    Context::get::<String>("trace_id").as_deref(),
+                    Some("abc"),
+                    "the job changed the pusher's context"
+                );
+                assert!(!Context::has("added_by_the_job"));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(context_hooks)]
+    async fn restored_without_a_snapshot_is_an_empty_scope() {
+        Context::test_clear_hooks();
+        Context::restored(None, async {
+            assert!(Context::all().is_empty());
+            Context::add("k", "v");
+            assert_eq!(
+                Context::get::<String>("k").as_deref(),
+                Some("v"),
+                "a job can use the context even when none was carried"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(context_hooks)]
+    async fn the_hooks_run_at_both_ends_of_the_trip() {
+        Context::test_clear_hooks();
+        // The hooks are process-wide, and under plain `cargo test` other
+        // tests take snapshots while these are registered. Both act only on
+        // a snapshot that carries this test's marker.
+        Context::dehydrating(|snapshot| {
+            if snapshot.data.contains_key("hook_test") {
+                snapshot.data.insert("locale".into(), json!("fr"));
+                snapshot.hidden.remove("stays_home");
+            }
+        });
+        Context::hydrated(|snapshot| {
+            // Inside the restored scope: the facade writes the job's context.
+            if let (true, Some(locale)) = (
+                snapshot.data.contains_key("hook_test"),
+                snapshot.data.get("locale"),
+            ) {
+                Context::add("locale_seen_by_the_worker", locale.clone());
+            }
+        });
+
+        let snapshot = CONTEXT
+            .scope(ContextStore::default(), async {
+                Context::add("hook_test", true);
+                Context::hidden_add("stays_home", "yes");
+                let snapshot = Context::dehydrate().expect("the hook added a value");
+                assert!(
+                    Context::hidden_get::<String>("stays_home").is_some(),
+                    "a dehydrating hook changes the snapshot, never the live context"
+                );
+                assert!(!Context::has("locale"));
+                snapshot
+            })
+            .await;
+        assert_eq!(snapshot.data.get("locale"), Some(&json!("fr")));
+        assert!(snapshot.hidden.is_empty());
+
+        Context::restored(Some(snapshot), async {
+            assert_eq!(
+                Context::get::<String>("locale_seen_by_the_worker").as_deref(),
+                Some("fr")
+            );
+        })
+        .await;
+        Context::test_clear_hooks();
+    }
+
+    #[test]
+    fn the_debug_output_names_hidden_keys_and_never_their_values() {
+        let snapshot = ContextSnapshot {
+            data: [("trace_id".to_owned(), json!("abc"))].into(),
+            hidden: [("api_key".to_owned(), json!("s3cret"))].into(),
+        };
+        let shown = format!("{snapshot:?}");
+        assert!(shown.contains("trace_id") && shown.contains("abc"));
+        assert!(shown.contains("api_key"));
+        assert!(
+            !shown.contains("s3cret"),
+            "a hidden value was shown: {shown}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_debug_output_of_a_store_never_shows_a_hidden_value() {
+        CONTEXT
+            .scope(ContextStore::default(), async {
+                Context::add("trace_id", "abc");
+                Context::hidden_add("api_key", "s3cret");
+                let shown = format!("{:?}", Context::current().unwrap());
+                assert!(shown.contains("trace_id") && shown.contains("abc"));
+                assert!(shown.contains("api_key"));
+                assert!(
+                    !shown.contains("s3cret"),
+                    "a hidden value was shown: {shown}"
+                );
+            })
+            .await;
+    }
+
+    #[test]
+    fn an_empty_bag_stays_off_the_wire() {
+        let snapshot = ContextSnapshot {
+            data: [("trace_id".to_owned(), json!("abc"))].into(),
+            hidden: BTreeMap::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&snapshot).unwrap(),
+            r#"{"data":{"trace_id":"abc"}}"#
+        );
+        let back: ContextSnapshot = serde_json::from_str("{}").unwrap();
+        assert!(back.is_empty());
+        assert_eq!(snapshot.without_hidden(), snapshot);
     }
 
     #[tokio::test]

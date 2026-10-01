@@ -19,6 +19,7 @@ mod factory;
 mod handler;
 mod inertia;
 mod injectable;
+mod input_names;
 mod live;
 mod main_macro;
 mod model;
@@ -30,6 +31,7 @@ mod policy;
 mod redirect;
 mod request;
 mod scopes;
+mod serde_attrs;
 mod service;
 mod suprnova_test;
 mod test_macro;
@@ -110,25 +112,51 @@ pub fn view_filter(args: TokenStream, item: TokenStream) -> TokenStream {
 ///     pub computed_handle: String,
 /// }
 /// ```
-#[proc_macro_derive(Data, attributes(data, json_resource))]
+#[proc_macro_derive(Data, attributes(data, json_resource, serde))]
 pub fn derive_data(input: TokenStream) -> TokenStream {
     data::derive_data_impl(input)
 }
 
 /// Derive macro for generating `Serialize` implementation for Inertia props
 ///
+/// It honors serde's `rename_all` on the struct and `rename`, `skip` and
+/// `skip_serializing` on a field, and refuses any other serde attribute.
+///
 /// # Example
 ///
 /// ```rust,ignore
 /// #[derive(InertiaProps)]
+/// #[serde(rename_all = "camelCase")]
 /// struct HomeProps {
 ///     title: String,
-///     user: User,
+///     current_user: User, // sent as `currentUser`
 /// }
 /// ```
-#[proc_macro_derive(InertiaProps)]
+#[proc_macro_derive(InertiaProps, attributes(serde))]
 pub fn derive_inertia_props(input: TokenStream) -> TokenStream {
     inertia::derive_inertia_props_impl(input)
+}
+
+/// Registers a struct's input names - the keys serde reads each field
+/// from - so the validation errors of a request object that nests it are
+/// keyed by those names too.
+///
+/// `#[derive(Data)]`, `#[derive(FormRequest)]` and `#[request]` register
+/// their own struct. A plain `#[derive(Deserialize, Validate)]` struct nested
+/// in one of them derives this to have its renamed fields reported by their
+/// input names at the nested level too.
+///
+/// ```rust,ignore
+/// #[derive(Deserialize, Validate, suprnova::InputNames)]
+/// #[serde(rename_all = "camelCase")]
+/// struct Address {
+///     #[validate(length(min = 5))]
+///     zip_code: String, // an error on it is keyed `address.zipCode`
+/// }
+/// ```
+#[proc_macro_derive(InputNames, attributes(serde))]
+pub fn derive_input_names(input: TokenStream) -> TokenStream {
+    input_names::derive_input_names(input)
 }
 
 /// Create an Inertia response with compile-time component validation.

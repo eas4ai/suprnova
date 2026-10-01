@@ -79,7 +79,7 @@ that product).
 
 **Component family.** One of the five groups Live's specs partition the
 library into: form and input (21), navigation (22), overlay and disclosure
-(23), feedback and status (24), data display and layout (25); one Cairn
+(23), feedback and status (24), data display and layout (25); one
 spec file per family (`component-library-*.md`), components inside each
 ordered by complexity. Avoid:
 category (the 2026-09-12 inventory's six-way grouping, which the developer

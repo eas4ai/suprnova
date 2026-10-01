@@ -17,8 +17,9 @@
 //! stderr. Matches Laravel's `php artisan db:seed --class=UserSeeder`.
 //!
 //! A targeted run reports progress on stdout - a `RUNNING` line before
-//! the seeder and a `<elapsed> ms DONE` line after it, both through
-//! [`crate::console::two_column_detail`]. A bare `db:seed` stays silent
+//! the seeder and a `<elapsed> ms DONE` line after it, both laid out by
+//! [`crate::console::two_column_detail`] and written with
+//! [`crate::console::line`], so a test can read them. A bare `db:seed` stays silent
 //! so a full seed does not bury its own output. The `tracing::info!` in
 //! `seed::run_one` remains the machine channel; this is the human one.
 //! The name is resolved before anything prints - an unknown class fails
@@ -40,11 +41,11 @@ async fn db_seed(args: Vec<String>) -> Result<(), FrameworkError> {
     let class = parse_class_arg(&args)?;
 
     if seed::count() == 0 {
-        // Two channels by design: eprintln so the user actually
-        // sees feedback in the absence of a configured tracing
+        // Two channels by design: the standard error so the user
+        // actually sees feedback in the absence of a configured tracing
         // subscriber; tracing::warn so observability tools still
         // pick it up in production.
-        eprintln!("db:seed: no seeders registered - nothing to run");
+        crate::console::error_line("db:seed: no seeders registered - nothing to run");
         tracing::warn!("db:seed: no seeders registered - nothing to run");
         return Ok(());
     }
@@ -66,7 +67,7 @@ async fn db_seed(args: Vec<String>) -> Result<(), FrameworkError> {
             // class". Suprnova has no root-seeder class (`run_all` walks
             // the whole registry), so the rule is exactly that: a named
             // class reports, a bare `db:seed` stays quiet.
-            println!("{}", output::two_column_detail(&name, "RUNNING"));
+            crate::console::line(output::two_column_detail(&name, "RUNNING"));
             let started = Instant::now();
             let result = seed::run_one(&name).await;
             // DONE only on success. A failure is reported once, by the
@@ -74,11 +75,11 @@ async fn db_seed(args: Vec<String>) -> Result<(), FrameworkError> {
             // double up.
             if result.is_ok() {
                 let elapsed = started.elapsed().as_millis();
-                println!(
-                    "{}",
-                    output::two_column_detail(&name, &format!("{elapsed} ms DONE"))
-                );
-                println!();
+                crate::console::line(output::two_column_detail(
+                    &name,
+                    &format!("{elapsed} ms DONE"),
+                ));
+                crate::console::line("");
             }
             result
         }

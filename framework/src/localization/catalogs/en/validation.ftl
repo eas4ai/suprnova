@@ -78,3 +78,14 @@ validation-range =
     }
 validation-must-match = The { $field } field must match the field it is paired with.
 validation-regex = The { $field } field format is invalid.
+validation-accepted = The { $field } field must be accepted.
+validation-digits = The { $field } field must be { $digits } digits.
+validation-date-format = The { $field } field must match the format { $format }.
+validation-after = The { $field } field must be a date after { $date }.
+validation-after-or-equal = The { $field } field must be a date after or equal to { $date }.
+validation-before = The { $field } field must be a date before { $date }.
+validation-before-or-equal = The { $field } field must be a date before or equal to { $date }.
+validation-prohibited = The { $field } field is prohibited.
+validation-missing = The { $field } field must be missing.
+validation-exists = The selected { $field } is invalid.
+validation-unchecked = The { $field } field could not be checked. Try again.

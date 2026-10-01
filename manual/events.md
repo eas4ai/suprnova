@@ -298,9 +298,9 @@ events are no-ops.
 | Error handling | `ErrorOccurred` | Every 5xx response (returned `FrameworkError` or recovered panic) |
 | Auth (guards) | `Auth\\Attempting`, `Auth\\Authenticated`, `Auth\\Login`, `Auth\\Logout`, `Auth\\Failed` | `StatefulGuard::attempt` / `login` / `logout` / `once` |
 | Auth flows | `EmailVerified`, `PasswordResetLinkSent`, `PasswordResetCompleted`, `AccountLocked`, `AccountUnlocked`, `TwoFactorEnrolled`, `TwoFactorChallenged`, `TwoFactorChallengeFailed`, `TwoFactorDisabled` | `auth_flows::{EmailVerification, PasswordReset, BruteForce, TwoFactor}` |
-| Database | `Database\\ConnectionEstablished`, `Database\\QueryExecuted`, `Database\\TransactionBeginning`, `Database\\TransactionCommitted`, `Database\\TransactionRolledBack`, `Database\\DatabaseBusy` | `DbConnection::connect`, `ExecutorChoice` helpers, `DB::transaction` |
-| Mail | `Suprnova\\Mail\\MessageSending`, `Suprnova\\Mail\\MessageSent` | `MailBuilder::send` before/after transport |
-| Notifications | `Suprnova::Notifications::Sending`, `Suprnova::Notifications::Sent`, `Suprnova::Notifications::Failed` | Each channel delivery |
+| Database | `Database\\ConnectionEstablished`, `Database\\QueryExecuted`, `Database\\TransactionBeginning`, `Database\\TransactionCommitted`, `Database\\TransactionRolledBack`, `Database\\DatabaseBusy` | `DbConnection::connect`, every query, `DB::transaction`; `DatabaseBusy` by `DB::monitor` and the `db:monitor` command |
+| Mail | `MessageSending`, `MessageSent` | `MailBuilder::send` before/after transport |
+| Notifications | `NotificationSending`, `NotificationSent`, `NotificationFailed` | Each channel delivery |
 | Queue (worker) | `queue::JobQueueing`, `JobQueued`, `JobProcessing`, `JobProcessed`, `JobAttempted`, `JobExceptionOccurred`, `JobFailed`, `JobReleased`, `JobReleasedAfterException`, `JobTimedOut`, `Looping`, `WorkerStarting`, `WorkerStopping`, `WorkerInterrupted`, `UniqueJobSkipped`, `QueuePaused`, `QueueResumed`, `QueuesPaused`, `QueuesResumed` | `Queue::push` / `Queue::push_unique` / `run_worker` / `Queue::pause` / `resume` / `pause_all` / `resume_all` |
 | Features | `FeatureUpdated`, `FeatureDeleted` | `features::admin` CRUD |
 | Eloquent (per model) | 16 lifecycle events - `Retrieved`, `Saving`, `Saved`, `Creating`, `Created`, `Updating`, `Updated`, `Deleting`, `Deleted`, `Restoring`, `Restored`, `ForceDeleting`, `ForceDeleted`, `Replicating`, `Pruning`, `Pruned` - emitted under each model's `events::` submodule | The `#[suprnova::model]` macro wires these into save/update/delete |

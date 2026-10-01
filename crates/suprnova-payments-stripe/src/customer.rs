@@ -4,14 +4,15 @@
 //! `/v1/customers` API.
 
 use crate::StripeProvider;
+use crate::deadline;
+use crate::sdk_error;
 use async_trait::async_trait;
 use serde::Serialize;
 use std::collections::HashMap;
 use stripe_client_core::{RequestBuilder, StripeMethod};
 use stripe_shared::{Customer, DeletedCustomer};
 use suprnova::payments::{
-    CreateCustomerRequest, CustomerRef, CustomerStore, PaymentError, PaymentResult,
-    UpdateCustomerRequest,
+    CreateCustomerRequest, CustomerRef, CustomerStore, PaymentResult, UpdateCustomerRequest,
 };
 
 // ---------------------------------------------------------------------------
@@ -125,12 +126,13 @@ impl CustomerStore for StripeProvider {
             metadata: metadata_to_string_map(req.metadata.as_ref()),
         };
 
-        let c: Customer = RequestBuilder::new(StripeMethod::Post, "/customers")
+        let call = RequestBuilder::new(StripeMethod::Post, "/customers")
             .form(&params)
             .customize::<Customer>()
-            .send(self.client())
-            .await
-            .map_err(|e| PaymentError::Provider(format!("stripe customers.create: {e}")))?;
+            .send(self.client());
+        let c: Customer = deadline::change("customers.create", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("customers.create", e))?;
 
         Ok(customer_to_ref(
             c,
@@ -147,12 +149,13 @@ impl CustomerStore for StripeProvider {
             metadata: metadata_to_string_map(req.metadata.as_ref()),
         };
 
-        let c: Customer = RequestBuilder::new(StripeMethod::Post, &path)
+        let call = RequestBuilder::new(StripeMethod::Post, &path)
             .form(&params)
             .customize::<Customer>()
-            .send(self.client())
-            .await
-            .map_err(|e| PaymentError::Provider(format!("stripe customers.update: {e}")))?;
+            .send(self.client());
+        let c: Customer = deadline::change("customers.update", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("customers.update", e))?;
 
         // update_customer returns user_id: None because Stripe's
         // Customer object doesn't carry the app's user identifier as a
@@ -167,11 +170,12 @@ impl CustomerStore for StripeProvider {
 
     async fn get_customer(&self, provider_customer_id: &str) -> PaymentResult<CustomerRef> {
         let path = format!("/customers/{provider_customer_id}");
-        let c: Customer = RequestBuilder::new(StripeMethod::Get, &path)
+        let call = RequestBuilder::new(StripeMethod::Get, &path)
             .customize::<Customer>()
-            .send(self.client())
-            .await
-            .map_err(|e| PaymentError::Provider(format!("stripe customers.retrieve: {e}")))?;
+            .send(self.client());
+        let c: Customer = deadline::read("customers.retrieve", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("customers.retrieve", e))?;
 
         // See update_customer above for why user_id is None on the
         // get path. customer_to_ref reads `c.metadata` and only falls
@@ -185,11 +189,12 @@ impl CustomerStore for StripeProvider {
         let path = format!("/customers/{provider_customer_id}");
         // Stripe customer deletion returns a DeletedCustomer object.
         // We only care that the call succeeded - discard the result.
-        let _: DeletedCustomer = RequestBuilder::new(StripeMethod::Delete, &path)
+        let call = RequestBuilder::new(StripeMethod::Delete, &path)
             .customize::<DeletedCustomer>()
-            .send(self.client())
-            .await
-            .map_err(|e| PaymentError::Provider(format!("stripe customers.delete: {e}")))?;
+            .send(self.client());
+        let _: DeletedCustomer = deadline::change("customers.delete", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("customers.delete", e))?;
         Ok(())
     }
 }

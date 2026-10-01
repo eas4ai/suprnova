@@ -433,3 +433,40 @@ async fn array_keys_message_translates_per_locale() {
     })
     .await;
 }
+
+/// A renamed input key reads as Laravel's displayable attribute: the key
+/// snake-cased, `_` as spaces, nested segments included. `unitPrice` is
+/// the key a `rename_all = "camelCase"` request object reports; the label
+/// must not read "unitPrice", and a snake_case key keeps reading as before.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_renamed_input_key_reads_snake_cased_in_the_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(
+        tmp.path(),
+        "en",
+        "validation.ftl",
+        "validation-min = The { $field } field must be at least { $min } characters.\n",
+    );
+    bind_translator(tmp.path());
+
+    let mut errs = ValidationErrors::new();
+    errs.add(
+        "lineItems.1.unitPrice",
+        rules::Min(3).passes("ab").unwrap_err(),
+    );
+    errs.add("customer_email", rules::Min(3).passes("ab").unwrap_err());
+
+    scope_locale(Locale::parse("en").unwrap(), async move {
+        let json = errs.to_json();
+        assert_eq!(
+            json["errors"]["lineItems.1.unitPrice"][0],
+            "The line items.1.unit price field must be at least 3 characters."
+        );
+        assert_eq!(
+            json["errors"]["customer_email"][0],
+            "The customer email field must be at least 3 characters."
+        );
+    })
+    .await;
+}

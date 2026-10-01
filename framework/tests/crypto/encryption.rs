@@ -11,7 +11,7 @@ use std::sync::{Mutex, OnceLock};
 use serde::{Deserialize, Serialize};
 use suprnova::Crypt;
 #[cfg(feature = "testing")]
-use suprnova::{CryptPurpose, EncryptionKey};
+use suprnova::{AadVersion, CryptPurpose, EncryptionKey, KeyOrigin};
 
 #[cfg(feature = "testing")]
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -35,9 +35,9 @@ fn ensure_key() {
 fn round_trip_string() {
     let _g = TEST_LOCK.lock().unwrap();
     ensure_key();
-    let wire = Crypt::encrypt_string(CryptPurpose::Cookie, "hello, world").unwrap();
+    let wire = Crypt::encrypt_string(CryptPurpose::Cast, "hello, world").unwrap();
     assert_ne!(wire, "hello, world");
-    let plain = Crypt::decrypt_string(CryptPurpose::Cookie, &wire).unwrap();
+    let plain = Crypt::decrypt_string(CryptPurpose::Cast, &wire).unwrap();
     assert_eq!(plain, "hello, world");
 }
 
@@ -46,13 +46,13 @@ fn round_trip_string() {
 fn tamper_detection() {
     let _g = TEST_LOCK.lock().unwrap();
     ensure_key();
-    let wire = Crypt::encrypt_string(CryptPurpose::Cookie, "don't touch me").unwrap();
+    let wire = Crypt::encrypt_string(CryptPurpose::Cast, "don't touch me").unwrap();
     let mut bytes = wire.into_bytes();
     let idx = bytes.len() - 1;
     // Flip one ASCII character to something else in the base64 alphabet
     bytes[idx] = if bytes[idx] == b'A' { b'B' } else { b'A' };
     let tampered = String::from_utf8(bytes).unwrap();
-    assert!(Crypt::decrypt_string(CryptPurpose::Cookie, &tampered).is_err());
+    assert!(Crypt::decrypt_string(CryptPurpose::Cast, &tampered).is_err());
 }
 
 #[cfg(feature = "testing")]
@@ -63,7 +63,7 @@ fn url_safe_no_padding() {
     // Encrypt enough data that the base64 output covers multiple
     // alphabet positions; padding would show up at the end.
     let wire = Crypt::encrypt_string(
-        CryptPurpose::Cookie,
+        CryptPurpose::Cast,
         "the quick brown fox jumps over the lazy dog -- multiple times",
     )
     .unwrap();
@@ -88,8 +88,8 @@ fn encrypt_t_round_trip() {
         user_id: 7,
         role: "admin".to_string(),
     };
-    let wire = Crypt::encrypt(CryptPurpose::Cookie, &payload).unwrap();
-    let decoded: Payload = Crypt::decrypt(CryptPurpose::Cookie, &wire).unwrap();
+    let wire = Crypt::encrypt(CryptPurpose::Cast, &payload).unwrap();
+    let decoded: Payload = Crypt::decrypt(CryptPurpose::Cast, &wire).unwrap();
     assert_eq!(decoded, payload);
 }
 
@@ -103,7 +103,9 @@ fn cross_purpose_ciphertext_is_rejected() {
     // injecting a 2FA recovery blob into a cookie slot).
     let _g = TEST_LOCK.lock().unwrap();
     ensure_key();
-    let cookie_wire = Crypt::encrypt_string(CryptPurpose::Cookie, "session-id-42").unwrap();
+    let cookie_wire =
+        Crypt::encrypt_string_for(CryptPurpose::Cookie, "suprnova_session", "session-id-42")
+            .unwrap();
     // Same wire, every other purpose - must reject.
     for foreign in [
         CryptPurpose::Cursor,
@@ -118,8 +120,9 @@ fn cross_purpose_ciphertext_is_rejected() {
             foreign
         );
     }
-    // Sanity: original purpose still decrypts.
-    let plain = Crypt::decrypt_string(CryptPurpose::Cookie, &cookie_wire).unwrap();
+    // Sanity: original purpose and cookie name still decrypt.
+    let plain =
+        Crypt::decrypt_string_for(CryptPurpose::Cookie, "suprnova_session", &cookie_wire).unwrap();
     assert_eq!(plain, "session-id-42");
 }
 
@@ -149,12 +152,83 @@ fn appears_encrypted_matches_real_ciphertext() {
     // cookies on the egress pass.
     let _g = TEST_LOCK.lock().unwrap();
     ensure_key();
-    let wire = Crypt::encrypt_string(CryptPurpose::Cookie, "hello").unwrap();
+    let wire = Crypt::encrypt_string(CryptPurpose::Cast, "hello").unwrap();
     assert!(Crypt::appears_encrypted(&wire));
     // Even the empty plaintext, encrypted, is recognised - the
     // ciphertext still carries nonce + tag.
-    let wire_empty = Crypt::encrypt_string(CryptPurpose::Cookie, "").unwrap();
+    let wire_empty = Crypt::encrypt_string(CryptPurpose::Cast, "").unwrap();
     assert!(Crypt::appears_encrypted(&wire_empty));
+}
+
+#[cfg(feature = "testing")]
+#[test]
+fn encrypting_a_cookie_value_without_its_name_is_refused() {
+    // A cookie value whose label has no cookie name in it would open in
+    // every cookie, so no call writes one - with a key installed, and
+    // whatever the value. The error names the calls that bind the name,
+    // and nothing of the value.
+    let _g = TEST_LOCK.lock().unwrap();
+    ensure_key();
+    let payload = Payload {
+        user_id: 4711,
+        role: "refused-role".to_string(),
+    };
+    for err in [
+        Crypt::encrypt_string(CryptPurpose::Cookie, "refused-plaintext").unwrap_err(),
+        Crypt::encrypt(CryptPurpose::Cookie, &payload).unwrap_err(),
+    ] {
+        let message = format!("{err}");
+        assert!(message.contains("Cookie::encrypted"), "{message}");
+        assert!(message.contains("Crypt::encrypt_string_for"), "{message}");
+        assert!(!message.contains("refused-plaintext"), "{message}");
+        assert!(!message.contains("refused-role"), "{message}");
+    }
+}
+
+#[cfg(feature = "testing")]
+#[test]
+fn reading_a_cookie_value_without_its_name_is_refused() {
+    // Only a read with the cookie's name checks the name the value was
+    // written for, so a read without it opens nothing - not even a value
+    // that opens under its name. The error names the read to use, and
+    // nothing of the value.
+    let _g = TEST_LOCK.lock().unwrap();
+    ensure_key();
+    let plaintext = r#"{"user_id":4711,"role":"refused-role"}"#;
+    let wire =
+        Crypt::encrypt_string_for(CryptPurpose::Cookie, "suprnova_session", plaintext).unwrap();
+    let errors = [
+        Crypt::decrypt_string(CryptPurpose::Cookie, &wire).unwrap_err(),
+        Crypt::decrypt_string_with_origin(CryptPurpose::Cookie, &wire).unwrap_err(),
+        Crypt::decrypt::<Payload>(CryptPurpose::Cookie, &wire).unwrap_err(),
+        Crypt::decrypt_with_origin::<Payload>(CryptPurpose::Cookie, &wire).unwrap_err(),
+    ];
+    for err in errors {
+        let message = format!("{err}");
+        assert!(message.contains("Cookie::read_encrypted_for"), "{message}");
+        assert!(!message.contains(&wire), "{message}");
+        assert!(!message.contains("refused-role"), "{message}");
+    }
+    let opened =
+        Crypt::decrypt_string_for(CryptPurpose::Cookie, "suprnova_session", &wire).unwrap();
+    assert_eq!(opened, plaintext);
+}
+
+#[cfg(feature = "testing")]
+#[test]
+fn a_stored_value_without_a_context_still_opens_with_one() {
+    // The fallback stays for the purposes that hold stored values: a cast
+    // column written without a context opens when it is read with one,
+    // and its origin says that it is to be written again.
+    let _g = TEST_LOCK.lock().unwrap();
+    ensure_key();
+    let wire = Crypt::encrypt_string(CryptPurpose::Cast, "stored-without-context").unwrap();
+    let (plain, origin) =
+        Crypt::decrypt_string_for_with_origin(CryptPurpose::Cast, "users.secret", &wire).unwrap();
+    assert_eq!(plain, "stored-without-context");
+    assert_eq!(origin.key, KeyOrigin::Current);
+    assert_eq!(origin.aad, AadVersion::Legacy);
+    assert!(origin.needs_reencryption());
 }
 
 #[test]

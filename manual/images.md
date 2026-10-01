@@ -84,7 +84,7 @@ filled memory.
 | `blur(amount)` | Gaussian blur, `0..=100`. `0` is a no-op |
 | `sharpen(amount)` | Unsharp mask, `0..=100`. `0` is a no-op. `50` is the classic strength |
 | `grayscale()` | Desaturate. Spelled the Laravel way |
-| `to_format(format)` | Choose the output container |
+| `to_format(format)` | Choose the output container: `Jpeg`, `Png`, `WebP`, `WebPLossless`, `Gif` or `Bmp` |
 | `quality(q)` | Encode quality, clamped to `1..=100`, default `70` |
 
 Values that would be nonsense are clamped rather than rejected:
@@ -139,28 +139,68 @@ async fn describe() -> Result<(), FrameworkError> {
 
 ## Formats
 
-Five formats are read and written today: **PNG, JPEG, WebP, GIF, and
+Five formats are read and written: **PNG, JPEG, WebP, GIF, and
 BMP**.
 
 | Format | Reads | Writes | Quality knob |
 |---|---|---|---|
 | PNG | yes | yes | ignored (lossless) |
 | JPEG | yes | yes | honoured |
-| WebP | yes | yes (lossless) | no effect today |
+| WebP (`OutputFormat::WebP`) | yes | yes | honoured (lossy; see below for the lossless cases) |
+| WebP (`OutputFormat::WebPLossless`) | yes | yes | ignored (lossless) |
 | GIF | yes | yes | ignored (palette) |
 | BMP | yes | yes | ignored (lossless) |
 
-AVIF is neither read nor written yet. The in-house AV1 encoder it
-depends on has not published, and shipping an `OutputFormat::Avif` that
-always failed would be a promise the framework could not keep. It
-arrives with that publish, as a new enum variant and nothing else.
+AVIF is neither read nor written: there is no AVIF encoder crate with a
+license compatible with Suprnova's. WebP is the modern-format path.
 
 GIF output is palette-quantised to at most 256 colours with
 Floyd-Steinberg dithering before encoding, so a photographic source
 converts cleanly rather than erroring.
 
-WebP is written losslessly, so `quality()` currently has no effect on
-WebP output. Use JPEG when you need a size/quality dial.
+### WebP
+
+`OutputFormat::WebP` is lossy and uses the quality of the pipeline, the
+same dial JPEG has. The quality is `70` when you set none.
+`OutputFormat::WebPLossless` is always lossless and ignores the quality.
+Use it when the pixels of the file must be exact. Both variants have the
+content type `image/webp` and the extension `webp`.
+
+```rust
+use suprnova::{FrameworkError, Image, OutputFormat};
+
+async fn encode() -> Result<(), FrameworkError> {
+    // Lossy at quality 80.
+    let small = Image::from_path("storage/photos/hero.jpg")
+        .to_format(OutputFormat::WebP)
+        .quality(80)
+        .to_bytes()
+        .await?;
+
+    // Lossless: the quality has no effect.
+    let exact = Image::from_path("storage/photos/hero.jpg")
+        .to_format(OutputFormat::WebPLossless)
+        .to_bytes()
+        .await?;
+
+    Ok(())
+}
+```
+
+The built-in driver writes `OutputFormat::WebP` lossless, and ignores the
+quality, in two cases. In both the lossy form of WebP cannot hold the
+image:
+
+- A pixel is not fully opaque. The lossy encoder has no alpha channel,
+  so a lossy file would lose the transparency.
+- A side is longer than 16383 px, the largest side a lossy frame can
+  have.
+
+The ImageMagick driver writes `WebP` lossy at every quality, and keeps
+the alpha channel. It writes `WebPLossless` lossless.
+
+A WebP source that you resize and do not convert is written as `WebP`.
+An opaque one is therefore written lossy.
 
 ## Storage
 
@@ -313,7 +353,9 @@ impl ImageDriver for MyDriver {
         pipeline: &ImagePipeline,
     ) -> Result<Vec<u8>, FrameworkError> {
         // Decode `contents`, replay `pipeline.transformations`, then encode
-        // to `pipeline.format` at `pipeline.quality`.
+        // to `pipeline.format` at `pipeline.quality`. Give every
+        // `OutputFormat` variant an arm, `WebPLossless` included: the
+        // enum is not `#[non_exhaustive]`.
         todo!()
     }
 
@@ -410,17 +452,13 @@ compiled into **both** the system ImageMagick binary and the PHP
 `imagick` extension. In Suprnova the default driver does not read HEIC,
 and `IMAGE_DRIVER=magick` reads it whenever the host's ImageMagick
 carries the libheif delegate - no extension layer in between. So HEIC
-ingestion works today: install ImageMagick with libheif through your
+ingestion works: install ImageMagick with libheif through your
 package manager and flip the env var. The licensing sits where it
 belongs, with the host.
 
 When the `oxideav` driver meets a HEIC file it says so by name, points
 at this chapter, and names both ways forward, rather than returning a
 generic "unsupported format".
-
-**AVIF is pending, not skipped.** It is royalty-free and it is the
-modern-format answer we want; the in-house AV1 encoder simply has not
-published yet. WebP is the modern-format path in the meantime.
 
 **No base64 or URL constructors.** Laravel's `ImageManager` has
 `->read($base64)` and `->read($url)`. `from_bytes` composes with

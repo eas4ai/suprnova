@@ -8,8 +8,8 @@
 //! The `assert_session_has` tests double as the honesty check for that
 //! one assertion: it needs a real `SessionStore` and a cookie that
 //! really decrypts to that store's session id, so they seed an
-//! in-memory store and mint the cookie under the same `Crypt` purpose
-//! `SessionMiddleware` uses - mirroring the fake-store pattern in
+//! in-memory store and mint the cookie under the same `Crypt` purpose and
+//! cookie name `SessionMiddleware` uses - mirroring the fake-store pattern in
 //! `framework/tests/session_lazy_persistence.rs`.
 
 use std::collections::HashMap;
@@ -181,13 +181,11 @@ impl SessionStore for InMemoryStore {
 /// Mint a `Set-Cookie` header carrying `session_id`, encrypted the same
 /// way `SessionMiddleware::create_session_cookie` does
 /// (`framework/src/session/middleware.rs:340-371`) - id + `.` + a
-/// touched-at timestamp, under `CryptPurpose::Cookie`.
-///
-/// Compat-window regression: this intentionally mints a v1, name-unbound
-/// cookie so `assert_session_has` continues to cover the legacy fallback.
+/// touched-at timestamp, under `CryptPurpose::Cookie` and bound to the
+/// logical cookie name `suprnova_session`.
 fn encrypted_session_cookie_header(session_id: &str) -> (String, String) {
     let payload = format!("{session_id}.1700000000");
-    let wire = Crypt::encrypt_string(CryptPurpose::Cookie, &payload)
+    let wire = Crypt::encrypt_string_for(CryptPurpose::Cookie, "suprnova_session", &payload)
         .expect("encrypt session cookie payload");
     (
         "set-cookie".to_string(),

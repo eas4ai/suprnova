@@ -3,8 +3,13 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use syn::ext::IdentExt;
+use syn::punctuated::Punctuated;
 use syn::visit::Visit;
-use syn::{Attribute, Fields, GenericArgument, ItemStruct, PathArguments, Type};
+use syn::{
+    Attribute, Expr, ExprLit, Fields, GenericArgument, ItemStruct, Lit, Meta, MetaNameValue,
+    PathArguments, Token, Type,
+};
 use walkdir::WalkDir;
 
 use crate::ui;
@@ -33,9 +38,23 @@ pub struct DataFieldFlags {
 
 #[derive(Debug, Clone)]
 pub struct StructField {
+    /// The key the field is sent under: the name serde's attributes give it
+    /// for serialization. The derives honor the same attributes.
     pub name: String,
+    /// The key the field is read from in request input: serde's name for
+    /// deserialization. Equal to `name` except on a `Data` struct that
+    /// renames the two directions apart.
+    pub input_name: String,
+    /// The field is sent: serde does not skip it when serializing.
+    pub in_output: bool,
+    /// The field is read from input: a `Data` struct's serde does not skip
+    /// it when deserializing. Equal to `in_output` for every other struct.
+    pub in_input: bool,
     pub ty: RustType,
     pub data_flags: DataFieldFlags,
+    /// `#[serde(skip_serializing_if = "...")]`: serde may leave the key out,
+    /// so the output interface declares it optional.
+    pub may_be_absent: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +97,36 @@ struct InertiaPropsVisitor {
     plain_structs: Vec<InertiaPropsStruct>,
 }
 
+/// Whether the `#[derive(...)]` lists of `attrs` name the derive `name`,
+/// written bare (`Name`) or through the framework crate root
+/// (`suprnova::Name`). A path from another crate (`other::Name`) is not
+/// the framework derive, so it does not count. Every scanner that picks
+/// structs by derive goes through here so a qualified spelling is
+/// recognised the same way by all of them.
+pub(crate) fn derive_list_names(attrs: &[Attribute], name: &str) -> bool {
+    attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("derive"))
+        .filter_map(|attr| {
+            attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+            )
+            .ok()
+        })
+        .flatten()
+        .any(|path| names_framework_item(&path, name))
+}
+
+/// Whether `path` names the item `name` of the framework: written bare
+/// (`name`) or through the crate root (`suprnova::name`). A path from
+/// another crate does not count.
+pub(crate) fn names_framework_item(path: &syn::Path, name: &str) -> bool {
+    path.is_ident(name)
+        || (path.segments.len() == 2
+            && path.segments[0].ident == "suprnova"
+            && path.segments[1].ident == name)
+}
+
 impl InertiaPropsVisitor {
     fn new() -> Self {
         Self {
@@ -87,53 +136,11 @@ impl InertiaPropsVisitor {
     }
 
     fn has_inertia_props_derive(&self, attrs: &[Attribute]) -> bool {
-        for attr in attrs {
-            if attr.path().is_ident("derive")
-                && let Ok(nested) = attr.parse_args_with(
-                    syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
-                )
-            {
-                for path in nested {
-                    if path.is_ident("InertiaProps") {
-                        return true;
-                    }
-                    // Also check for suprnova::InertiaProps
-                    if path.segments.len() == 2 {
-                        let first = &path.segments[0].ident;
-                        let second = &path.segments[1].ident;
-                        if first == "suprnova" && second == "InertiaProps" {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-        false
+        derive_list_names(attrs, "InertiaProps")
     }
 
     fn has_data_derive(&self, attrs: &[Attribute]) -> bool {
-        for attr in attrs {
-            if attr.path().is_ident("derive")
-                && let Ok(nested) = attr.parse_args_with(
-                    syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
-                )
-            {
-                for path in nested {
-                    if path.is_ident("Data") {
-                        return true;
-                    }
-                    // Also check for suprnova::Data
-                    if path.segments.len() == 2 {
-                        let first = &path.segments[0].ident;
-                        let second = &path.segments[1].ident;
-                        if first == "suprnova" && second == "Data" {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-        false
+        derive_list_names(attrs, "Data")
     }
 
     fn parse_type(ty: &Type) -> RustType {
@@ -152,6 +159,23 @@ impl InertiaPropsVisitor {
                     && type_path.path.segments[0].ident == "serde_json"
                 {
                     return RustType::Json;
+                }
+
+                // chrono's date and time types serialize as ISO 8601 text.
+                // `DateTime` is claimed only with its zone argument or through
+                // `chrono::`, so a project type of that name still resolves
+                // as its own struct.
+                let chrono_path = type_path.path.segments.len() == 2
+                    && type_path.path.segments[0].ident == "chrono";
+                match ident.as_str() {
+                    "NaiveDate" | "NaiveDateTime" | "NaiveTime" => return RustType::String,
+                    "DateTime"
+                        if chrono_path
+                            || matches!(segment.arguments, PathArguments::AngleBracketed(_)) =>
+                    {
+                        return RustType::String;
+                    }
+                    _ => {}
                 }
 
                 match ident.as_str() {
@@ -255,27 +279,217 @@ fn parse_data_flags(attrs: &[Attribute]) -> DataFieldFlags {
     flags
 }
 
+/// What serde's attributes on one field say about its key on the wire.
+#[derive(Debug, Default)]
+struct SerdeField {
+    skip_serializing: bool,
+    skip_deserializing: bool,
+    rename: Option<String>,
+    rename_input: Option<String>,
+    may_be_absent: bool,
+}
+
+/// serde's `rename_all` rules, applied to a field name the way serde applies
+/// them: the name is taken to be snake_case already.
+#[derive(Debug, Clone, Copy)]
+enum RenameRule {
+    Lower,
+    Upper,
+    Pascal,
+    Camel,
+    Snake,
+    ScreamingSnake,
+    Kebab,
+    ScreamingKebab,
+}
+
+impl RenameRule {
+    /// `None` for a rule serde does not know; serde refuses to compile it,
+    /// so the field keeps its own name here.
+    fn parse(rule: &str) -> Option<Self> {
+        Some(match rule {
+            "lowercase" => Self::Lower,
+            "UPPERCASE" => Self::Upper,
+            "PascalCase" => Self::Pascal,
+            "camelCase" => Self::Camel,
+            "snake_case" => Self::Snake,
+            "SCREAMING_SNAKE_CASE" => Self::ScreamingSnake,
+            "kebab-case" => Self::Kebab,
+            "SCREAMING-KEBAB-CASE" => Self::ScreamingKebab,
+            _ => return None,
+        })
+    }
+
+    fn apply(self, field: &str) -> String {
+        match self {
+            Self::Lower | Self::Snake => field.to_owned(),
+            Self::Upper | Self::ScreamingSnake => field.to_ascii_uppercase(),
+            Self::Pascal => {
+                let mut pascal = String::with_capacity(field.len());
+                let mut capitalize = true;
+                for ch in field.chars() {
+                    if ch == '_' {
+                        capitalize = true;
+                    } else if capitalize {
+                        pascal.push(ch.to_ascii_uppercase());
+                        capitalize = false;
+                    } else {
+                        pascal.push(ch);
+                    }
+                }
+                pascal
+            }
+            Self::Camel => {
+                let pascal = Self::Pascal.apply(field);
+                let mut chars = pascal.chars();
+                chars.next().map_or_else(String::new, |first| {
+                    first.to_ascii_lowercase().to_string() + chars.as_str()
+                })
+            }
+            Self::Kebab => field.replace('_', "-"),
+            Self::ScreamingKebab => field.to_ascii_uppercase().replace('_', "-"),
+        }
+    }
+}
+
+/// The arguments of every `#[serde(...)]` attribute in `attrs`. An argument
+/// that does not parse is skipped: serde refuses to compile it anyway.
+fn serde_args(attrs: &[Attribute]) -> impl Iterator<Item = Meta> + '_ {
+    attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("serde"))
+        .filter_map(|attr| {
+            attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+                .ok()
+        })
+        .flatten()
+}
+
+fn string_literal(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Lit(ExprLit {
+            lit: Lit::Str(value),
+            ..
+        }) => Some(value.value()),
+        _ => None,
+    }
+}
+
+/// The value serde uses in one direction from `rename = "x"`, or from the
+/// direction-specific `rename(serialize = "x", deserialize = "y")`, and the
+/// same two forms of `rename_all`. `direction` is `serialize` or
+/// `deserialize`.
+fn direction_value(meta: &Meta, direction: &str) -> Option<String> {
+    match meta {
+        Meta::NameValue(pair) => string_literal(&pair.value),
+        Meta::List(list) => list
+            .parse_args_with(Punctuated::<MetaNameValue, Token![,]>::parse_terminated)
+            .ok()?
+            .into_iter()
+            .find(|pair| pair.path.is_ident(direction))
+            .and_then(|pair| string_literal(&pair.value)),
+        Meta::Path(_) => None,
+    }
+}
+
+fn parse_serde_field(attrs: &[Attribute]) -> SerdeField {
+    let mut field = SerdeField::default();
+    for meta in serde_args(attrs) {
+        let path = meta.path();
+        if path.is_ident("skip") {
+            field.skip_serializing = true;
+            field.skip_deserializing = true;
+        } else if path.is_ident("skip_serializing") {
+            field.skip_serializing = true;
+        } else if path.is_ident("skip_deserializing") {
+            field.skip_deserializing = true;
+        } else if path.is_ident("skip_serializing_if") {
+            field.may_be_absent = true;
+        } else if path.is_ident("rename") {
+            if let Some(name) = direction_value(&meta, "serialize") {
+                field.rename = Some(name);
+            }
+            if let Some(name) = direction_value(&meta, "deserialize") {
+                field.rename_input = Some(name);
+            }
+        }
+    }
+    field
+}
+
+/// The struct's `rename_all` rule for serialization and for
+/// deserialization.
+fn parse_serde_rename_all(attrs: &[Attribute]) -> (Option<RenameRule>, Option<RenameRule>) {
+    let rule = |direction: &str| {
+        serde_args(attrs)
+            .filter(|meta| meta.path().is_ident("rename_all"))
+            .filter_map(|meta| direction_value(&meta, direction))
+            .find_map(|rule| RenameRule::parse(&rule))
+    };
+    (rule("serialize"), rule("deserialize"))
+}
+
 impl<'ast> Visit<'ast> for InertiaPropsVisitor {
     fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
-        let derived =
-            self.has_inertia_props_derive(&node.attrs) || self.has_data_derive(&node.attrs);
+        let data = self.has_data_derive(&node.attrs);
+        let derived = self.has_inertia_props_derive(&node.attrs) || data;
 
-        let fields: Vec<StructField> = match &node.fields {
-            Fields::Named(named) => named
-                .named
-                .iter()
-                .filter_map(|f| {
-                    f.ident.as_ref().map(|ident| StructField {
-                        name: ident.to_string(),
-                        ty: Self::parse_type(&f.ty),
-                        data_flags: parse_data_flags(&f.attrs),
+        // serde's attributes decide the keys of every struct here: a plain
+        // one a prop reaches is serialized by serde's own derive, and
+        // `InertiaProps` and `Data` honor the same attributes in the impls
+        // they write. Only a `Data` struct is read from input, so only it can
+        // name the two directions apart.
+        let (rename_all, rename_all_input) = parse_serde_rename_all(&node.attrs);
+
+        let (named_fields, fields): (bool, Vec<StructField>) = match &node.fields {
+            Fields::Named(named) => (
+                !named.named.is_empty(),
+                named
+                    .named
+                    .iter()
+                    .filter_map(|f| {
+                        let ident = f.ident.as_ref()?;
+                        let serde = parse_serde_field(&f.attrs);
+                        let base = ident.unraw().to_string();
+                        let apply = |rule: Option<RenameRule>| match rule {
+                            Some(rule) => rule.apply(&base),
+                            None => base.clone(),
+                        };
+                        let name = serde.rename.clone().unwrap_or_else(|| apply(rename_all));
+                        let in_output = !serde.skip_serializing;
+                        let (input_name, in_input) = if data {
+                            (
+                                serde
+                                    .rename_input
+                                    .clone()
+                                    .unwrap_or_else(|| apply(rename_all_input)),
+                                !serde.skip_deserializing,
+                            )
+                        } else {
+                            (name.clone(), in_output)
+                        };
+                        if !in_output && !in_input {
+                            return None;
+                        }
+                        Some(StructField {
+                            name,
+                            input_name,
+                            in_output,
+                            in_input,
+                            ty: Self::parse_type(&f.ty),
+                            data_flags: parse_data_flags(&f.attrs),
+                            // The derives refuse `skip_serializing_if`.
+                            may_be_absent: !derived && serde.may_be_absent,
+                        })
                     })
-                })
-                .collect(),
-            _ => Vec::new(),
+                    .collect(),
+            ),
+            _ => (false, Vec::new()),
         };
 
-        if derived || !fields.is_empty() {
+        // A plain struct whose every field serde skips still sends `{}`, so
+        // it counts by the fields it declares, not the ones left.
+        if derived || named_fields {
             let parsed = InertiaPropsStruct {
                 name: node.ident.to_string(),
                 type_params: node
@@ -650,6 +864,22 @@ fn optional_marker(ty: &RustType) -> &'static str {
     }
 }
 
+/// A property key as TypeScript accepts it: bare when it is an identifier,
+/// quoted otherwise. `#[serde(rename = "display-name")]` or a kebab-case
+/// `rename_all` names a key no identifier can spell.
+fn ts_property_key(name: &str) -> String {
+    let mut chars = name.chars();
+    let identifier = chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_' || first == '$')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$');
+    if identifier {
+        name.to_owned()
+    } else {
+        serde_json::Value::String(name.to_owned()).to_string()
+    }
+}
+
 /// Order structs by dependency, dependents first.
 ///
 /// The in-degree here counts how many structs *reference* a given one, so
@@ -843,10 +1073,16 @@ fn warn_unresolved_refs(structs: &[InertiaPropsStruct]) {
 /// `input_only`, `output_only`, or `lazy` flag - i.e. whenever the input and
 /// output shapes differ.
 fn emit_ts_for_struct(s: &InertiaPropsStruct, known: &HashSet<String>) -> String {
-    let has_flags = s
-        .fields
-        .iter()
-        .any(|f| f.data_flags.input_only || f.data_flags.output_only || f.data_flags.lazy);
+    // An `Input` interface is emitted when what the frontend sends differs
+    // from what it receives: a data flag, a key renamed per direction, or a
+    // field serde skips in one direction only.
+    let has_flags = s.fields.iter().any(|f| {
+        f.data_flags.input_only
+            || f.data_flags.output_only
+            || f.data_flags.lazy
+            || f.name != f.input_name
+            || f.in_output != f.in_input
+    });
 
     // Build generic type parameter suffix, e.g. "<T>" or "<A, B>" or "".
     let generics = if s.type_params.is_empty() {
@@ -859,11 +1095,20 @@ fn emit_ts_for_struct(s: &InertiaPropsStruct, known: &HashSet<String>) -> String
 
     // Output interface - what the frontend RECEIVES
     out.push_str(&format!("export interface {}{} {{\n", s.name, generics));
-    for f in s.fields.iter().filter(|f| !f.data_flags.input_only) {
+    for f in s
+        .fields
+        .iter()
+        .filter(|f| !f.data_flags.input_only && f.in_output)
+    {
+        let marker = if f.may_be_absent {
+            "?"
+        } else {
+            optional_marker(&f.ty)
+        };
         out.push_str(&format!(
             "  {}{}: {};\n",
-            f.name,
-            optional_marker(&f.ty),
+            ts_property_key(&f.name),
+            marker,
             rust_type_to_ts(&f.ty, known, &s.type_params)
         ));
     }
@@ -879,11 +1124,11 @@ fn emit_ts_for_struct(s: &InertiaPropsStruct, known: &HashSet<String>) -> String
         for f in s
             .fields
             .iter()
-            .filter(|f| !f.data_flags.output_only && !f.data_flags.lazy)
+            .filter(|f| !f.data_flags.output_only && !f.data_flags.lazy && f.in_input)
         {
             out.push_str(&format!(
                 "  {}{}: {};\n",
-                f.name,
+                ts_property_key(&f.input_name),
                 optional_marker(&f.ty),
                 rust_type_to_ts(&f.ty, known, &s.type_params)
             ));
@@ -3201,5 +3446,47 @@ mod lang_keys_tests {
         let written = fs::read_to_string(&output_path).expect("read generated file");
         assert!(written.contains(r#"| "only-a""#));
         assert!(written.contains(r#"| "only-b""#));
+    }
+}
+
+#[cfg(test)]
+mod derive_list_names_tests {
+    use super::*;
+
+    fn attrs_of(source: &str) -> Vec<Attribute> {
+        let item: ItemStruct = syn::parse_str(source).expect("parse struct");
+        item.attrs
+    }
+
+    #[test]
+    fn bare_name_is_recognised() {
+        let attrs = attrs_of("#[derive(Debug, FormRequest)] struct A;");
+        assert!(derive_list_names(&attrs, "FormRequest"));
+    }
+
+    #[test]
+    fn framework_qualified_name_is_recognised() {
+        let attrs = attrs_of("#[derive(Debug, suprnova::FormRequest)] struct A;");
+        assert!(derive_list_names(&attrs, "FormRequest"));
+    }
+
+    #[test]
+    fn another_crates_path_is_not_recognised() {
+        let attrs = attrs_of("#[derive(other::FormRequest)] struct A;");
+        assert!(!derive_list_names(&attrs, "FormRequest"));
+    }
+
+    #[test]
+    fn a_struct_without_the_derive_is_not_recognised() {
+        let attrs = attrs_of("#[derive(Debug, Clone)] #[serde(default)] struct A;");
+        assert!(!derive_list_names(&attrs, "FormRequest"));
+        let none = attrs_of("struct B;");
+        assert!(!derive_list_names(&none, "FormRequest"));
+    }
+
+    #[test]
+    fn the_name_is_matched_whole() {
+        let attrs = attrs_of("#[derive(suprnova::DataExt, DataX)] struct A;");
+        assert!(!derive_list_names(&attrs, "Data"));
     }
 }

@@ -70,6 +70,108 @@ impl TypedCommand for TypedRequire {
     }
 }
 
+/// Rebuild the search index
+///
+/// The second paragraph is for the command's own `--help` and is not a
+/// part of the one line the list of commands shows.
+#[derive(Parser, Command, Debug)]
+#[console(name = "typed:documented")]
+struct TypedDocumented {}
+
+#[async_trait]
+impl TypedCommand for TypedDocumented {
+    async fn run(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+#[derive(Parser, Command, Debug)]
+#[command(about = "Send the weekly digest")]
+#[console(name = "typed:about-attribute")]
+struct TypedAboutAttribute {}
+
+#[async_trait]
+impl TypedCommand for TypedAboutAttribute {
+    async fn run(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+/// The doc comment says one thing
+#[derive(Parser, Command, Debug)]
+#[console(name = "typed:both", description = "The description says another")]
+struct TypedBoth {}
+
+#[async_trait]
+impl TypedCommand for TypedBoth {
+    async fn run(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+/// The list of commands the console's top-level help prints, for the
+/// commands named. The console builds its root the same way: one
+/// subcommand from each entry's `clap_builder`.
+fn help_listing(names: &[&str]) -> String {
+    let mut root = clap::Command::new("console");
+    for name in names {
+        let entry = console::find(name).unwrap_or_else(|| panic!("{name} is registered"));
+        root = root.subcommand((entry.clap_builder)());
+    }
+    root.render_help().to_string()
+}
+
+/// The line of `listing` that is about the command `name`.
+fn line_of<'a>(listing: &'a str, name: &str) -> &'a str {
+    listing
+        .lines()
+        .find(|line| line.trim_start().starts_with(name))
+        .unwrap_or_else(|| panic!("the help lists {name}:\n{listing}"))
+}
+
+#[test]
+fn a_command_with_no_description_keeps_the_about_text_of_its_doc_comment() {
+    let entry = console::find("typed:documented").expect("typed:documented is registered");
+
+    assert_eq!(entry.description, "", "the attribute declared none");
+    assert_eq!(entry.about().as_deref(), Some("Rebuild the search index"));
+
+    let listing = help_listing(&["typed:documented"]);
+    assert!(
+        line_of(&listing, "typed:documented").ends_with("Rebuild the search index"),
+        "the list of commands must show the doc line:\n{listing}"
+    );
+}
+
+#[test]
+fn a_command_with_no_description_keeps_an_explicit_clap_about() {
+    let entry =
+        console::find("typed:about-attribute").expect("typed:about-attribute is registered");
+
+    assert_eq!(entry.about().as_deref(), Some("Send the weekly digest"));
+    let listing = help_listing(&["typed:about-attribute"]);
+    assert!(
+        line_of(&listing, "typed:about-attribute").ends_with("Send the weekly digest"),
+        "the list of commands must show the clap about text:\n{listing}"
+    );
+}
+
+#[test]
+fn a_description_overrides_the_doc_comment() {
+    let entry = console::find("typed:both").expect("typed:both is registered");
+
+    assert_eq!(entry.description, "The description says another");
+    assert_eq!(
+        entry.about().as_deref(),
+        Some("The description says another")
+    );
+    let listing = help_listing(&["typed:both"]);
+    assert!(
+        line_of(&listing, "typed:both").ends_with("The description says another"),
+        "the description must win over the doc comment:\n{listing}"
+    );
+}
+
 #[tokio::test]
 async fn typed_command_is_registered_via_derive() {
     let entry = console::find("typed:greet").expect("derive(Command) auto-registered typed:greet");

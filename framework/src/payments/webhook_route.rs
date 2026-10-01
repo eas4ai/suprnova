@@ -38,7 +38,6 @@ use crate::payments::{
     PaymentSnapshot, SubscriptionResult, SubscriptionStatus, WebhookContext, WebhookEvent,
 };
 use crate::routing::Router;
-use chrono::Utc;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
@@ -220,7 +219,7 @@ async fn handle_webhook_inner(
             provider_event_type: Set(event.provider_event_type.clone()),
             neutral_event_kind: Set(neutral_str),
             payload: Set(event.raw_payload.clone()),
-            received_at: Set(Utc::now().to_rfc3339()),
+            received_at: Set(crate::clock::now().to_rfc3339()),
             processed_at: Set(None),
             process_error: Set(None),
             ..Default::default()
@@ -381,7 +380,7 @@ async fn try_hydrate(
     let txn = db
         .begin()
         .await
-        .map_err(|e| PaymentError::Internal(format!("begin tx: {e}")))?;
+        .map_err(|e| PaymentError::database("begin tx", e))?;
 
     // Serialize concurrent retries: lock the audit row, then re-check whether
     // a racing attempt already finished. `lock_exclusive` emits
@@ -397,7 +396,7 @@ async fn try_hydrate(
         Ok(row) => row,
         Err(e) => {
             let _ = txn.rollback().await;
-            return Err(PaymentError::Internal(format!("lock audit row: {e}")));
+            return Err(PaymentError::database("lock audit row", e));
         }
     };
     if locked.as_ref().is_some_and(|r| r.processed_at.is_some()) {
@@ -427,7 +426,7 @@ async fn try_hydrate(
                     advance_touched_mirror_tables(&touched).await?;
                     Ok(HydrationOutcome::Processed)
                 }
-                Err(e) => Err(PaymentError::Internal(format!("commit: {e}"))),
+                Err(e) => Err(PaymentError::database("commit", e)),
             },
             Err(e) => {
                 let _ = txn.rollback().await;
@@ -591,14 +590,13 @@ where
         .filter(subscription::Column::Provider.eq(provider))
         .filter(subscription::Column::ProviderSubscriptionId.eq(&result.provider_subscription_id))
         .one(db)
-        .await
-        .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+        .await?;
 
     let status_str = subscription_status_to_str(result.status);
     let mark_canceled = matches!(neutral, NeutralEventKind::SubscriptionCanceled)
         || matches!(result.status, SubscriptionStatus::Canceled);
 
-    let now = Utc::now().to_rfc3339();
+    let now = crate::clock::now().to_rfc3339();
 
     match existing {
         Some(model) => {
@@ -614,9 +612,7 @@ where
             }
             am.provider_metadata = Set(result.provider_metadata.clone());
             am.updated_at = Set(now);
-            am.update(db)
-                .await
-                .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+            am.update(db).await?;
             touched.push(crate::database::model::entity_table_name::<
                 subscription::Entity,
             >());
@@ -641,9 +637,7 @@ where
                 updated_at: Set(now),
                 ..Default::default()
             };
-            am.insert(db)
-                .await
-                .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+            am.insert(db).await?;
             touched.push(crate::database::model::entity_table_name::<
                 subscription::Entity,
             >());
@@ -666,8 +660,7 @@ where
         .filter(subscription::Column::Provider.eq(provider))
         .filter(subscription::Column::ProviderSubscriptionId.eq(provider_subscription_id))
         .one(db)
-        .await
-        .map_err(|e| PaymentError::Internal(format!("{e}")))?
+        .await?
         .ok_or_else(|| {
             PaymentError::Internal(
                 "parent subscription vanished between upsert and item sync".into(),
@@ -678,10 +671,9 @@ where
     let existing_items = subscription_item::Entity::find()
         .filter(subscription_item::Column::SubscriptionId.eq(parent_id))
         .all(db)
-        .await
-        .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+        .await?;
 
-    let now = Utc::now().to_rfc3339();
+    let now = crate::clock::now().to_rfc3339();
 
     let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
     for item in &result.items {
@@ -710,9 +702,7 @@ where
                 am.unit_amount_minor = Set(unit_amount);
                 am.unit_currency = Set(unit_currency);
                 am.updated_at = Set(now.clone());
-                am.update(db)
-                    .await
-                    .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+                am.update(db).await?;
                 touched.push(crate::database::model::entity_table_name::<
                     subscription_item::Entity,
                 >());
@@ -730,9 +720,7 @@ where
                     updated_at: Set(now.clone()),
                     ..Default::default()
                 };
-                am.insert(db)
-                    .await
-                    .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+                am.insert(db).await?;
                 touched.push(crate::database::model::entity_table_name::<
                     subscription_item::Entity,
                 >());
@@ -748,9 +736,7 @@ where
         .filter(|row| !keep.contains(&row.provider_item_id))
     {
         let am: subscription_item::ActiveModel = stale.clone().into();
-        am.delete(db)
-            .await
-            .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+        am.delete(db).await?;
         touched.push(crate::database::model::entity_table_name::<
             subscription_item::Entity,
         >());
@@ -773,10 +759,9 @@ where
         .filter(transaction::Column::Provider.eq(provider))
         .filter(transaction::Column::ProviderTransactionId.eq(&snapshot.provider_transaction_id))
         .one(db)
-        .await
-        .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+        .await?;
 
-    let now = Utc::now().to_rfc3339();
+    let now = crate::clock::now().to_rfc3339();
 
     match existing {
         Some(model) => {
@@ -796,9 +781,7 @@ where
             }
             am.provider_metadata = Set(snapshot.provider_metadata.clone());
             am.updated_at = Set(now);
-            am.update(db)
-                .await
-                .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+            am.update(db).await?;
             touched.push(crate::database::model::entity_table_name::<
                 transaction::Entity,
             >());
@@ -819,9 +802,7 @@ where
                 updated_at: Set(now),
                 ..Default::default()
             };
-            am.insert(db)
-                .await
-                .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+            am.insert(db).await?;
             touched.push(crate::database::model::entity_table_name::<
                 transaction::Entity,
             >());
@@ -846,8 +827,7 @@ where
         .filter(transaction::Column::Provider.eq(provider))
         .filter(transaction::Column::ProviderTransactionId.eq(provider_transaction_id))
         .one(db)
-        .await
-        .map_err(|e| PaymentError::Internal(format!("{e}")))?
+        .await?
         .ok_or_else(|| {
             PaymentError::Validation(
                 "partial payment webhook references an unknown transaction_id".into(),
@@ -856,10 +836,8 @@ where
 
     let mut am: transaction::ActiveModel = existing.into();
     am.status = Set(status.to_owned());
-    am.updated_at = Set(Utc::now().to_rfc3339());
-    am.update(db)
-        .await
-        .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+    am.updated_at = Set(crate::clock::now().to_rfc3339());
+    am.update(db).await?;
     touched.push(crate::database::model::entity_table_name::<
         transaction::Entity,
     >());
@@ -888,8 +866,7 @@ where
         .filter(customer::Column::Provider.eq(provider))
         .filter(customer::Column::ProviderCustomerId.eq(provider_customer_id))
         .one(db)
-        .await
-        .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+        .await?;
 
     let Some(model) = existing else {
         tracing::info!(
@@ -907,10 +884,8 @@ where
         }
         am.provider_metadata = Set(snap.provider_metadata.clone());
     }
-    am.updated_at = Set(Utc::now().to_rfc3339());
-    am.update(db)
-        .await
-        .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+    am.updated_at = Set(crate::clock::now().to_rfc3339());
+    am.update(db).await?;
     touched.push(crate::database::model::entity_table_name::<customer::Entity>());
     Ok(())
 }
@@ -927,15 +902,12 @@ where
         .filter(webhook_event::Column::Provider.eq(&event.provider))
         .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
         .one(db)
-        .await
-        .map_err(|e| PaymentError::Internal(format!("{e}")))?
+        .await?
         .ok_or_else(|| PaymentError::Internal("webhook event vanished after insert".into()))?;
     let mut am: webhook_event::ActiveModel = model.into();
-    am.processed_at = Set(Some(Utc::now().to_rfc3339()));
+    am.processed_at = Set(Some(crate::clock::now().to_rfc3339()));
     am.process_error = Set(None);
-    am.update(db)
-        .await
-        .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+    am.update(db).await?;
     touched.push(crate::database::model::entity_table_name::<
         webhook_event::Entity,
     >());
@@ -956,8 +928,7 @@ async fn mark_failed(
         .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
         .filter(webhook_event::Column::ProcessedAt.is_null())
         .exec(db)
-        .await
-        .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+        .await?;
     if updated.rows_affected >= 1 {
         advance_mirror_table::<webhook_event::Entity>().await?;
     }
@@ -972,8 +943,7 @@ async fn mark_failed(
         .filter(webhook_event::Column::Provider.eq(&event.provider))
         .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
         .one(db)
-        .await
-        .map_err(|e| PaymentError::Internal(format!("{e}")))?;
+        .await?;
     match row {
         Some(model) if model.processed_at.is_some() => Ok(()),
         Some(_) => Err(PaymentError::Internal(
@@ -1127,7 +1097,7 @@ mod tests {
             provider_event_type: Set("payment.succeeded".into()),
             neutral_event_kind: Set(Some("payment_succeeded".into())),
             payload: Set(serde_json::json!({})),
-            received_at: Set(Utc::now().to_rfc3339()),
+            received_at: Set(crate::clock::now().to_rfc3339()),
             processed_at: Set(None),
             process_error: Set(None),
             ..Default::default()
@@ -1149,7 +1119,7 @@ mod tests {
             .await
             .expect("TestDatabase::fresh");
         let conn = db.conn();
-        let processed_at = Utc::now().to_rfc3339();
+        let processed_at = crate::clock::now().to_rfc3339();
         let event = WebhookEvent {
             provider: "mock".into(),
             provider_event_id: "evt_processed_before_failure_record".into(),
@@ -1215,7 +1185,7 @@ mod tests {
             provider_event_type: Set("payment.succeeded".into()),
             neutral_event_kind: Set(Some("payment_succeeded".into())),
             payload: Set(serde_json::json!({})),
-            received_at: Set(Utc::now().to_rfc3339()),
+            received_at: Set(crate::clock::now().to_rfc3339()),
             processed_at: Set(None),
             process_error: Set(None),
             ..Default::default()
@@ -1287,7 +1257,7 @@ mod tests {
             provider_event_type: Set("payment.succeeded".into()),
             neutral_event_kind: Set(Some("payment_succeeded".into())),
             payload: Set(serde_json::json!({})),
-            received_at: Set(Utc::now().to_rfc3339()),
+            received_at: Set(crate::clock::now().to_rfc3339()),
             processed_at: Set(None),
             process_error: Set(Some("transient failure on first attempt".into())),
             ..Default::default()

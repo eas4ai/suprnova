@@ -6,4 +6,5 @@
 //!
 //! [`CommandEntry`]: crate::console::CommandEntry
 
+pub mod db_monitor;
 pub mod db_seed;

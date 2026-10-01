@@ -15,8 +15,8 @@ Add the adapter crate. Until Suprnova ships its v0.1 release, the framework and 
 ```toml
 # Cargo.toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0" }
-suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0" }
+suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0" }
 ```
 
 Register the provider and the webhook router at boot. The webhook router is a regular `Router` you compose into your `routes::register()`:
@@ -56,6 +56,8 @@ pub fn register() -> Router {
 ```
 
 `webhook_routes(db)` returns a `Router` containing just `POST /webhooks/payments/{provider}`. Because `Router::get` and `Router::post` each return a `RouteBuilder` that converts back to `Router` via `.into()`, chaining on top of the payments router is the most direct way to compose. If you already use the `routes!{}` macro for your normal routes, drop the webhook POST into the same block - `webhook_routes` is a convenience wrapper around one `Router::new().post(...)` call.
+
+Every payments type has one path, `suprnova::payments::<Type>`, for example `suprnova::payments::StartSessionRequest`. The modules that hold the request and result types are reached as `suprnova::payments::dto::<module>`; a path such as `suprnova::payments::session::StartSessionRequest` does not compile.
 
 In your controller, look up the provider, create a customer, and open a checkout session:
 
@@ -99,7 +101,7 @@ That `SessionPayload` goes into your Inertia page props. The frontend dispatches
 
 ```toml
 # Cargo.toml
-suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0" }
+suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0" }
 ```
 
 Required env vars:
@@ -130,7 +132,7 @@ Stripe implements every trait including the optional `Payment` (server-side capt
 
 ```toml
 # Cargo.toml
-suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0" }
+suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0" }
 ```
 
 Required env vars:
@@ -316,6 +318,30 @@ let sub = provider.cancel(&sub_id, true).await?;
 let sub = provider.cancel(&sub_id, false).await?;
 // sub.status == Canceled
 ```
+
+Change the prices of a subscription with `update` and `new_price_refs`. The list is the set of prices the subscription has after the call. An item whose price is in the list keeps its id and quantity. An item whose price is not in the list is removed. A price with no item is added with a quantity of 1, except in a swap: when the change removes exactly one item and adds exactly one price, the new price takes the quantity of the removed item. The adapter computes the change from a read of the subscription, so it is not atomic. An empty list, or a list that names a price twice, is `PaymentError::Validation` on every adapter and on the mock.
+
+```rust,ignore
+use suprnova::payments::{Proration, UpdateSubscriptionRequest};
+
+let sub = provider.update(UpdateSubscriptionRequest {
+    provider_subscription_id: sub_id.clone(),
+    new_price_refs: Some(vec!["price_team_yearly".into()]),
+    proration: Some(Proration::ProrateNow),
+    cancel_at_period_end: None,
+    idempotency_key: None,
+}).await?;
+```
+
+`proration` says how the change is billed and is read only when `new_price_refs` is `Some`. `None` is `ProrateAtRenewal`.
+
+| `Proration` | Meaning | Stripe `proration_behavior` | Paddle `proration_billing_mode` |
+|---|---|---|---|
+| `ProrateNow` | Bill the prorated difference at once. | `always_invoice` | `prorated_immediately` |
+| `ProrateAtRenewal` | Put the prorated difference on the next invoice. | `create_prorations` | `prorated_next_billing_period` |
+| `DoNotProrate` | Charge nothing for the change. | `none` | `do_not_bill` |
+
+`Proration` is `#[non_exhaustive]`, so a `match` on it needs a wildcard arm. On Paddle, a price change together with `cancel_at_period_end`, or with an `idempotency_key`, is `NotSupported`. See [Payments - Stripe Adapter](payments-stripe.md#update-changes-prices-and-the-cancellation-flag) and [Payments - Paddle Adapter](payments-paddle.md#change-the-prices-of-a-subscription).
 
 Note: `Paddle::subscribe` returns `PaymentError::NotSupported` - Paddle creates subscriptions through checkout completion, not direct API calls. Use `Checkout::start_session` and wait for the `SubscriptionCreated` webhook.
 
@@ -534,6 +560,25 @@ The handler treats provider retries as the recovery mechanism:
 - **Provider retries the failed event:** idempotency check sees the existing audit row but `processed_at IS NULL`, so hydration runs again. The retry replaces the stale `process_error` with the current attempt's outcome.
 - **Provider retries a succeeded event:** idempotency check sees `processed_at IS NOT NULL`, returns `200 duplicate` immediately. No re-hydration.
 
+A database error during hydration stays a `PaymentError::Database { context, source }`. `source` is the `suprnova::DbErr`, and `context` names the step that failed (`begin tx`, `lock audit row`, `commit`) or is `None`. The route answers `503` for every database error, and `process_error` records the text of the error. The type lets your own code ask what kind of failure it was: a lost connection is gone at the next attempt, a violated constraint is not. `Debug` prints the text of the database error and not its `Debug`, because the driver's detail for a violated constraint names the values of the key.
+
+```rust
+use std::error::Error;
+use suprnova::DbErr;
+use suprnova::payments::PaymentError;
+
+fn worth_a_retry(error: &PaymentError) -> bool {
+    error
+        .source()
+        .and_then(|source| source.downcast_ref::<DbErr>())
+        .is_some_and(|database| {
+            matches!(database, DbErr::ConnectionAcquire(_) | DbErr::Conn(_))
+        })
+}
+```
+
+A statement of your own that returns a `DbErr` ends in `?` inside a function that returns `PaymentResult`, because `PaymentError` implements `From<DbErr>`. `PaymentError::database("commit", error)` builds the variant with a context.
+
 A subscription/customer event with a missing `subscription_id` / `customer_id` in the payload is treated as a `Validation` error (also 503 + `process_error` recorded). Silent success on a malformed payload would leave the mirror stale without operator visibility.
 
 Items removed from a subscription on the provider side (e.g. user dropped a seat add-on) are removed from `payments_subscription_items` when the next `subscription.updated` webhook arrives. The provider's `Subscription::get(id)` response is the source of truth on every sync.
@@ -581,7 +626,7 @@ pub enum StablecoinAsset {
 }
 ```
 
-The named operators and assets are the ones we've enumerated. The `Custom { ... }` variants on each cover regional operators and stablecoins we haven't pinned yet, so adding support for one doesn't force a framework release.
+The named operators and assets are the ones we've enumerated. The `Custom { ... }` variants on each cover regional operators and stablecoins the enums don't name, so adding support for one doesn't force a framework release.
 
 `PhoneNumber` and `CountryCode` are validated DTOs in `suprnova::payments` - they reject malformed input at construction time, which is where you want the failure rather than at the provider call.
 
@@ -665,11 +710,14 @@ provider.subscribe(SubscribeRequest {
 
 Stripe forwards supported request keys in the `Idempotency-Key` HTTP header.
 Retry the same operation with the same key and parameters. Paddle does not
-accept client-supplied idempotency keys; its checkout and subscription update
-methods return `NotSupported` when a key is present. Persist the transaction ID
+accept client-supplied idempotency keys; its checkout, its price change, and
+its scheduling of a cancellation with `update` return `NotSupported` when a
+key is present. Persist the transaction ID
 when creation succeeds. After an uncertain Paddle create, reconcile provider
 state before issuing another create. Correlation metadata does not deduplicate
 requests.
+
+Every call of the Stripe and Paddle adapters has a deadline of 30 seconds. A read that runs out of time returns `PaymentError::Provider` with the text `<provider> <operation> timed out`. A call that changes something returns `PaymentError::Provider` with the text `<provider> <operation> timed out; outcome is unknown, reconcile before retrying`. In that case the provider may have carried out the change: read the state at the provider before you send the call again. On Stripe you can also send it again with the same idempotency key. See [Payments - Stripe Adapter](payments-stripe.md#deadlines-and-unknown-outcomes) and [Payments - Paddle Adapter](payments-paddle.md#deadlines-and-unknown-outcomes).
 
 ## The discriminator pattern
 

@@ -46,7 +46,151 @@ pub use streaming::copy_between_disks;
 
 use crate::FrameworkError;
 use opendal::{Operator, services};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use std::path::Path;
+
+/// The name of the disk [`bootstrap_from_env`] registers.
+pub const ENV_S3_DISK: &str = "s3";
+
+/// What is written as `%XX` in one segment of the path of a public URL:
+/// everything but the letters, the digits and `-`, `.`, `_`, `~`, which
+/// are the characters a URL gives no meaning to.
+///
+/// A server decodes what need not have been encoded, so no link breaks
+/// by it. Left as they are, `+` is a space to S3, and `;` starts a path
+/// parameter on Tomcat and Jetty, which read `..;` as `..`.
+const URL_PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// Register the disks the environment describes. The server calls this
+/// when it boots, beside the queue, the rate limiter and the mail
+/// transport, so an application sets the variables and has the disk.
+///
+/// When `S3_BUCKET` is set, an S3 disk is registered under the name `s3`
+/// ([`ENV_S3_DISK`]), from the variables [`S3Config::from_env`] reads.
+/// `S3_PUBLIC_URL` gives the disk its public base URL, see
+/// [`Storage::url`]. With `S3_BUCKET` not set, nothing is registered.
+///
+/// A disk the application registered under the name `s3` is left as it
+/// is, and the variables are not read then: the bootstrap of the
+/// application runs first, and what it registered is what it meant. In
+/// this the disk differs from the queue and the mail transport, where
+/// the environment decides.
+///
+/// The disk is there when the server has booted its drivers. A `booted`
+/// callback runs before that, and the console binary boots no driver of
+/// the environment. An application that needs the disk in either place
+/// calls this function in its own bootstrap.
+///
+/// There is no default disk. Every call names the disk it uses, so
+/// `FILESYSTEM_DISK` is not read.
+///
+/// # Errors
+///
+/// When the variables describe no usable disk: no region, one half of
+/// the pair of keys, an S3 driver that refuses the configuration, a
+/// public URL that is none. The server does not boot then. No error
+/// repeats the value of a variable.
+pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
+    bootstrap_from_variables(|name| std::env::var(name).ok())
+}
+
+/// [`bootstrap_from_env`] with the variables looked up by `variable`.
+fn bootstrap_from_variables(
+    variable: impl Fn(&str) -> Option<String>,
+) -> Result<(), FrameworkError> {
+    // The disk of the application is looked for first. With it there the
+    // variables describe nothing that will be used, and a fault in them
+    // must not stop the boot.
+    if registry::contains(ENV_S3_DISK) {
+        return Ok(());
+    }
+    let Some(config) = S3Config::from_variables(&variable)? else {
+        return Ok(());
+    };
+    Storage::register_s3(ENV_S3_DISK, config)?;
+    if let Some(url) = set_variable(&variable, "S3_PUBLIC_URL") {
+        let base = public_base(&url).map_err(|reason| {
+            FrameworkError::internal(format!(
+                "S3_PUBLIC_URL was refused: {reason}. Write an absolute URL \
+                 (https://cdn.example.com/files) or a path of this host (/storage)"
+            ))
+        })?;
+        registry::set_public_url(ENV_S3_DISK, base);
+    }
+    Ok(())
+}
+
+/// `base_url` as the base of the public URLs of a disk, with no slash at
+/// its end, or the reason it is none. The reason never repeats the URL.
+fn public_base(base_url: &str) -> Result<String, &'static str> {
+    let base = base_url.trim();
+    if base.is_empty() {
+        return Err("it is empty");
+    }
+    if base.contains('\\') {
+        // A browser reads a backslash as a slash, so `/\host` is `//host`:
+        // a URL of another host.
+        return Err("it has a backslash");
+    }
+    if base.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("it has a space or a control character");
+    }
+    if base.contains(['?', '#']) {
+        return Err("it has a query or a fragment");
+    }
+    let has_dot_segment = |path: &str| {
+        path.split('/').any(|segment| {
+            let segment = segment.to_ascii_lowercase().replace("%2e", ".");
+            segment == "." || segment == ".."
+        })
+    };
+
+    if base.starts_with('/') {
+        if base.starts_with("//") {
+            return Err("it begins with two slashes, which is a URL of another host");
+        }
+        if has_dot_segment(base) {
+            return Err("it has a `.` or `..` segment");
+        }
+        return Ok(base.trim_end_matches('/').to_owned());
+    }
+
+    let (scheme, rest) = base
+        .split_once("://")
+        .ok_or("it has no scheme and is no path")?;
+    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")) {
+        return Err("its scheme is neither http nor https");
+    }
+    if rest.is_empty() || rest.starts_with('/') {
+        // `https:///files` has nothing where the host is. A browser
+        // takes the first segment of the path for the host.
+        return Err("it has no host");
+    }
+    // What the parser makes of the URL is what a browser makes of it.
+    let parsed = url::Url::parse(base).map_err(|_| "it is no URL")?;
+    if parsed.host_str().is_none_or(str::is_empty) {
+        return Err("it has no host");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("it has a user or a password, which every link would show");
+    }
+    let path = rest.split_once('/').map_or("", |(_, path)| path);
+    if has_dot_segment(path) {
+        return Err("it has a `.` or `..` segment");
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_owned())
+}
+
+/// The value of `name`, trimmed, and `None` when it is not set or blank.
+fn set_variable(variable: &impl Fn(&str) -> Option<String>, name: &str) -> Option<String> {
+    variable(name)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
 
 /// Directory name reserved inside every local-filesystem disk root.
 ///
@@ -139,7 +283,7 @@ pub struct S3Config {
     pub bucket: String,
     /// AWS region (e.g. `"us-east-1"`).
     pub region: Option<String>,
-    /// Custom endpoint, for S3-compatible services (MinIO, R2, etc.).
+    /// Custom endpoint, for S3-compatible services (RustFS, MinIO, R2, etc.).
     pub endpoint: Option<String>,
     /// Static access key id. Leave `None` to use the default provider chain.
     pub access_key_id: Option<String>,
@@ -147,6 +291,89 @@ pub struct S3Config {
     pub secret_access_key: Option<String>,
     /// Root prefix within the bucket. All operations are relative to this prefix.
     pub root: Option<String>,
+}
+
+impl S3Config {
+    /// The S3 disk the environment describes, and `None` when `S3_BUCKET`
+    /// is not set. Use it to register the disk under a name of your own:
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{S3Config, Storage};
+    ///
+    /// # fn ex() -> Result<(), suprnova::FrameworkError> {
+    /// if let Some(config) = S3Config::from_env()? {
+    ///     Storage::register_s3("uploads", config)?;
+    /// }
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// | Variable | |
+    /// |---|---|
+    /// | `S3_BUCKET` | The bucket. With it not set there is no disk. |
+    /// | `S3_REGION` | The region, which the driver needs. `AWS_REGION` and `AWS_DEFAULT_REGION` are read when it is not set. A service that is no AWS takes any name: `us-east-1`, `auto`. |
+    /// | `S3_ENDPOINT` | The endpoint of a service that is no AWS: MinIO, RustFS, R2, B2. |
+    /// | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | The keys, both or none. |
+    /// | `S3_ROOT` | A prefix inside the bucket that every path is under. |
+    ///
+    /// With no keys set the driver asks the default provider chain of
+    /// AWS, which reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`,
+    /// the profile, and the role of the instance.
+    ///
+    /// # Errors
+    ///
+    /// When one of `S3_ACCESS_KEY` and `S3_SECRET_KEY` is set and the
+    /// other is not. The driver would go on with the provider chain, and
+    /// the disk would work with credentials nobody meant it to have, or
+    /// fail on its first request with an error that names no variable.
+    /// When no region is set, which the driver refuses with an error
+    /// that names no variable either.
+    pub fn from_env() -> Result<Option<Self>, FrameworkError> {
+        Self::from_variables(&|name: &str| std::env::var(name).ok())
+    }
+
+    /// [`Self::from_env`] with the variables looked up by `variable`.
+    fn from_variables(
+        variable: &impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<Self>, FrameworkError> {
+        let set = |name: &str| set_variable(variable, name);
+        let Some(bucket) = set("S3_BUCKET") else {
+            return Ok(None);
+        };
+        let (access_key_id, secret_access_key) = match (set("S3_ACCESS_KEY"), set("S3_SECRET_KEY"))
+        {
+            (Some(key), Some(secret)) => (Some(key), Some(secret)),
+            (None, None) => (None, None),
+            (Some(_), None) => {
+                return Err(FrameworkError::internal(
+                    "S3_ACCESS_KEY is set and S3_SECRET_KEY is not; set both, or neither to \
+                     use the default credential chain",
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(FrameworkError::internal(
+                    "S3_SECRET_KEY is set and S3_ACCESS_KEY is not; set both, or neither to \
+                     use the default credential chain",
+                ));
+            }
+        };
+        let region = set("S3_REGION")
+            .or_else(|| set("AWS_REGION"))
+            .or_else(|| set("AWS_DEFAULT_REGION"))
+            .ok_or_else(|| {
+                FrameworkError::internal(
+                    "S3_BUCKET is set and no region is; set S3_REGION. A service that is no \
+                     AWS takes any name, such as `us-east-1` or `auto`",
+                )
+            })?;
+        Ok(Some(Self {
+            bucket,
+            region: Some(region),
+            endpoint: set("S3_ENDPOINT"),
+            access_key_id,
+            secret_access_key,
+            root: set("S3_ROOT"),
+        }))
+    }
 }
 
 impl std::fmt::Debug for S3Config {
@@ -885,6 +1112,88 @@ impl Storage {
         registry::purge()
     }
 
+    /// Give the disk `disk` a public base URL, which makes it a disk of
+    /// public files: [`Storage::url`] returns links to them.
+    ///
+    /// `base_url` is an absolute URL, `https://cdn.example.com/files`, or
+    /// a path of the application's own host, `/storage`. It is where the
+    /// root of the disk is served from. Serving it is not done here: a
+    /// local disk needs a route or a web server in front of its
+    /// directory, and a bucket needs to be public or behind a CDN.
+    ///
+    /// # Errors
+    ///
+    /// When no disk is registered under `disk`, and when `base_url` is
+    /// neither of the two forms. An absolute URL has the scheme `http` or
+    /// `https`, a host, and no user, password, query or fragment. A path
+    /// begins with one `/`. Neither has a `.` or `..` segment, a
+    /// backslash or a control character. The error says what is wrong
+    /// and does not repeat the URL, which can carry a token.
+    pub fn set_public_url(disk: &str, base_url: &str) -> Result<(), FrameworkError> {
+        let base = public_base(base_url).map_err(|reason| {
+            FrameworkError::internal(format!(
+                "the public base URL of the storage disk '{disk}' was refused: {reason}. \
+                 Write an absolute URL (https://cdn.example.com/files) or a path of this \
+                 host (/storage)"
+            ))
+        })?;
+        if !registry::set_public_url(disk, base) {
+            return Err(FrameworkError::internal(format!(
+                "storage disk '{disk}' not registered; register the disk before it is given \
+                 a public URL"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The public URL of the file at `path` on the disk `disk`. Mirrors
+    /// Laravel's `Storage::disk(..)->url(..)`.
+    ///
+    /// The URL is the public base URL of the disk and the path, each
+    /// segment of it written so that it stays one segment: `a b#1.png`
+    /// becomes `a%20b%231.png`. Nothing is asked of the disk, so the URL
+    /// of a file that does not exist is returned as well.
+    ///
+    /// For a file that is not public use
+    /// [`DiskExt::temporary_url`], which signs a link that expires.
+    ///
+    /// # Errors
+    ///
+    /// When the disk has no public base URL ([`Storage::set_public_url`]):
+    /// a private disk must not hand out a link that can be guessed. When
+    /// `path` is empty or has a `.` or `..` segment, which a browser
+    /// resolves before it sends the request, so the link would lead
+    /// somewhere else than the path says.
+    pub fn url(disk: &str, path: &str) -> Result<String, FrameworkError> {
+        let Some(base) = registry::public_url(disk)? else {
+            return Err(FrameworkError::internal(format!(
+                "storage disk '{disk}' has no public URL. Give it one with \
+                 Storage::set_public_url, or sign a link that expires with temporary_url"
+            )));
+        };
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            return Err(FrameworkError::internal(format!(
+                "`{path}` is no path of a file on the storage disk '{disk}'"
+            )));
+        }
+        if segments
+            .iter()
+            .any(|segment| matches!(*segment, "." | ".."))
+        {
+            return Err(FrameworkError::internal(format!(
+                "`{path}` has a `.` or `..` segment; a public URL is made from the path of \
+                 the file itself"
+            )));
+        }
+        let mut url = base;
+        for segment in segments {
+            url.push('/');
+            url.extend(utf8_percent_encode(segment, URL_PATH_SEGMENT));
+        }
+        Ok(url)
+    }
+
     /// Return the sorted names of every currently-registered disk.
     ///
     /// Handy for diagnostic endpoints, admin dashboards, and tests that need
@@ -907,5 +1216,233 @@ impl Storage {
     #[cfg(any(test, feature = "testing"))]
     pub fn fake() -> testing::StorageFakeGuard {
         testing::install_fake()
+    }
+}
+
+#[cfg(test)]
+mod env_bootstrap_tests {
+    use super::*;
+
+    fn variables(set: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            set.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
+
+    const MINIO: &[(&str, &str)] = &[
+        ("S3_ENDPOINT", "http://localhost:9000"),
+        ("S3_ACCESS_KEY", "minioadmin"),
+        ("S3_SECRET_KEY", "minioadmin"),
+        ("S3_BUCKET", "local"),
+        ("S3_REGION", "us-east-1"),
+    ];
+
+    #[test]
+    fn the_variables_of_the_docker_guide_describe_a_disk() {
+        let config = S3Config::from_variables(&variables(MINIO))
+            .expect("the variables are a whole configuration")
+            .expect("the bucket is set");
+
+        assert_eq!(config.bucket, "local");
+        assert_eq!(config.region.as_deref(), Some("us-east-1"));
+        assert_eq!(config.endpoint.as_deref(), Some("http://localhost:9000"));
+        assert_eq!(config.access_key_id.as_deref(), Some("minioadmin"));
+        assert_eq!(config.secret_access_key.as_deref(), Some("minioadmin"));
+        assert_eq!(config.root, None);
+    }
+
+    #[test]
+    fn with_no_bucket_there_is_no_disk() {
+        for set in [
+            variables(&[]),
+            variables(&[("S3_BUCKET", "  ")]),
+            variables(&[("S3_ENDPOINT", "http://localhost:9000")]),
+        ] {
+            assert!(
+                S3Config::from_variables(&set)
+                    .expect("no disk is no error")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn with_no_keys_the_provider_chain_is_left_to_find_them() {
+        let config = S3Config::from_variables(&variables(&[
+            ("S3_BUCKET", "files"),
+            ("AWS_REGION", "eu-central-1"),
+            ("S3_ROOT", "/tenant-7"),
+        ]))
+        .expect("a configuration")
+        .expect("the bucket is set");
+
+        assert_eq!(config.access_key_id, None);
+        assert_eq!(config.secret_access_key, None);
+        assert_eq!(
+            config.region.as_deref(),
+            Some("eu-central-1"),
+            "the region of the AWS variables is read when S3_REGION is not set"
+        );
+        assert_eq!(config.root.as_deref(), Some("/tenant-7"));
+    }
+
+    #[test]
+    fn the_region_of_the_disk_wins_over_the_region_of_aws() {
+        let config = S3Config::from_variables(&variables(&[
+            ("S3_BUCKET", "files"),
+            ("S3_REGION", "auto"),
+            ("AWS_REGION", "eu-central-1"),
+        ]))
+        .expect("a configuration")
+        .expect("the bucket is set");
+        assert_eq!(config.region.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn one_key_without_the_other_is_refused_and_the_error_shows_no_key() {
+        for (set, missing) in [
+            (
+                variables(&[
+                    ("S3_BUCKET", "files"),
+                    ("S3_REGION", "us-east-1"),
+                    ("S3_ACCESS_KEY", "AKIA-EXAMPLE"),
+                ]),
+                "S3_SECRET_KEY",
+            ),
+            (
+                variables(&[
+                    ("S3_BUCKET", "files"),
+                    ("S3_REGION", "us-east-1"),
+                    ("S3_SECRET_KEY", "a-secret-value"),
+                ]),
+                "S3_ACCESS_KEY",
+            ),
+        ] {
+            let error = S3Config::from_variables(&set).expect_err("half a pair of keys");
+            let message = error.to_string();
+            assert!(message.contains(missing), "{message}");
+            assert!(
+                !message.contains("AKIA-EXAMPLE") && !message.contains("a-secret-value"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bucket_with_no_region_names_the_variable_to_set() {
+        let error = S3Config::from_variables(&variables(&[("S3_BUCKET", "files")]))
+            .expect_err("the driver needs a region");
+        assert!(error.to_string().contains("S3_REGION"), "{error}");
+
+        // A blank region is no region.
+        let error = S3Config::from_variables(&variables(&[
+            ("S3_BUCKET", "files"),
+            ("S3_REGION", " "),
+            ("AWS_REGION", ""),
+        ]))
+        .expect_err("the driver needs a region");
+        assert!(error.to_string().contains("S3_REGION"), "{error}");
+    }
+
+    #[test]
+    fn a_fault_in_the_variables_does_not_stop_an_application_with_a_disk_of_its_own() {
+        let _storage = Storage::fake();
+        Storage::register_memory(ENV_S3_DISK);
+
+        // Half a pair of keys and no region: the variables describe no
+        // disk that would be used.
+        bootstrap_from_variables(variables(&[
+            ("S3_BUCKET", "files"),
+            ("S3_ACCESS_KEY", "AKIA-EXAMPLE"),
+        ]))
+        .expect("the disk of the application is the disk");
+    }
+
+    #[test]
+    fn a_public_url_that_is_refused_names_its_variable_and_not_its_value() {
+        let _storage = Storage::fake();
+
+        let error = bootstrap_from_variables(variables(&[
+            ("S3_BUCKET", "local"),
+            ("S3_REGION", "us-east-1"),
+            (
+                "S3_PUBLIC_URL",
+                "https://files.internal.test/public?sig=a-signed-token",
+            ),
+        ]))
+        .expect_err("a base URL has no query");
+
+        let message = error.to_string();
+        assert!(message.contains("S3_PUBLIC_URL"), "{message}");
+        assert!(message.contains("query"), "{message}");
+        assert!(
+            !message.contains("a-signed-token") && !message.contains("internal.test"),
+            "the value must not be repeated: {message}"
+        );
+    }
+
+    #[test]
+    fn the_disk_is_registered_under_the_name_s3() {
+        let _storage = Storage::fake();
+
+        bootstrap_from_variables(variables(MINIO)).expect("the disk registers");
+
+        assert!(Storage::disks().contains(&ENV_S3_DISK.to_owned()));
+        assert!(
+            Storage::url(ENV_S3_DISK, "a.png").is_err(),
+            "with no S3_PUBLIC_URL the disk is a private one"
+        );
+    }
+
+    #[test]
+    fn the_public_url_of_the_environment_is_the_public_url_of_the_disk() {
+        let _storage = Storage::fake();
+
+        bootstrap_from_variables(variables(&[
+            ("S3_BUCKET", "local"),
+            ("S3_REGION", "us-east-1"),
+            ("S3_PUBLIC_URL", "https://cdn.example.com/files/"),
+        ]))
+        .expect("the disk registers");
+
+        assert_eq!(
+            Storage::url(ENV_S3_DISK, "avatars/7.png").expect("a public disk"),
+            "https://cdn.example.com/files/avatars/7.png"
+        );
+    }
+
+    #[test]
+    fn with_no_bucket_nothing_is_registered() {
+        let _storage = Storage::fake();
+        let before = Storage::disks();
+
+        bootstrap_from_variables(variables(&[
+            ("S3_ENDPOINT", "http://localhost:9000"),
+            ("S3_ACCESS_KEY", "half-a-pair"),
+        ]))
+        .expect("with no bucket the other variables are not read");
+
+        assert_eq!(Storage::disks(), before);
+    }
+
+    #[tokio::test]
+    async fn a_disk_the_application_registered_under_the_name_is_left_as_it_is() {
+        let _storage = Storage::fake();
+        Storage::register_memory(ENV_S3_DISK);
+        let disk = Storage::disk(ENV_S3_DISK).expect("the disk of the application");
+        disk.write("kept.txt", "of the application")
+            .await
+            .expect("a write");
+
+        bootstrap_from_variables(variables(MINIO)).expect("nothing to do");
+
+        let still = Storage::disk(ENV_S3_DISK).expect("a disk");
+        assert_eq!(
+            still.read("kept.txt").await.expect("a read").to_vec(),
+            b"of the application",
+            "the memory disk is still the one under the name"
+        );
     }
 }

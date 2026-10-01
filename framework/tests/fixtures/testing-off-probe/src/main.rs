@@ -29,18 +29,17 @@
 //! struct/type ..."), confirmed empirically (a throwaway single-file
 //! `rustc` compile of the three shapes) before writing this file. Most of
 //! the framework's actual test seams take this third shape
-//! (`RenderCache::*_for_test`, `RenderCacheConfig::with_*_for_test`,
-//! `Context::test_*`, `Storage::fake`, `DbConnection::observe_statements_for_test`),
+//! (`RenderCache::*_for_test`, `RenderCacheConfig::with_clock` and
+//! `with_coordinator_for_test`, `Context::test_*`, `Storage::fake`,
+//! `DbConnection::observe_statements_for_test`),
 //! so `scripts/check-production-build.sh` accepts `E0599` alongside
 //! `E0425`/`E0433` rather than the two the design names - a deviation from
 //! the literal design text, made because the alternative (rewriting every
 //! associated-function seam as a free function to fit two error codes)
 //! would be a framework API change section 5 does not ask for.
 //!
-//! # Two pairs of items the design lists that are not actually gated
+//! # One pair of items the design lists that is not actually gated
 //!
-//! `RenderCacheConfig::with_clock_for_test` / `with_coordinator_for_test`
-//! (`framework/src/render_cache/config.rs`) and
 //! `render_cache::console::epoch_advance_report_for_test` /
 //! `inspect_report_for_test` (`framework/src/render_cache/console.rs`) carry
 //! no `cfg(any(test, feature = "testing"))` gate at all - `#[doc(hidden)]`
@@ -74,6 +73,7 @@ fn main() {
     let _ = suprnova::crypto::_test_encrypt_with;
     let _ = suprnova::crypto::_test_encrypt_with_for;
     let _ = suprnova::crypto::_test_force_next_encrypt_failure;
+    let _ = suprnova::seed::clear;
     let _ = suprnova::rbac::observed_rbac_statements_for_test;
     let _ = suprnova::testing::install_test_encryption_key;
     let _ = suprnova::testing::install_test_encryption_keyring;
@@ -81,6 +81,26 @@ fn main() {
     let _ = suprnova::render_cache::telemetry::recorded_lookups_for_test;
     let _ = suprnova::render_cache::telemetry::reset_recorded_lookups_for_test;
     let _ = suprnova::render_cache::telemetry::decline_reason_labels_for_test;
+
+    // --- A module gated as a whole (E0433 without `with-testing`) ---
+    let _ = filesystem_testing_guard;
+    let _ = suprnova::crypto::testing::encrypt_string_under;
+    let _ = suprnova::crypto::testing::encrypt_string_for_under;
+    let _ = suprnova::render_cache::middleware::race_points::arm;
+    let _ = suprnova::render_cache::middleware::race_points::disarm;
+    let _ = &suprnova::render_cache::middleware::race_points::EPOCH_CAPTURED;
+    let _ = suprnova::render_cache::testing::RenderCacheProbe::route;
+    let _ = suprnova::render_cache::testing::RenderCacheProbe::params;
+    let _ = suprnova::render_cache::testing::RenderCacheProbe::login;
+    let _ = suprnova::render_cache::testing::RenderCacheProbe::at_epoch;
+    let _ = suprnova::render_cache::testing::RenderCacheProbe::tenant;
+    let _ = suprnova::render_cache::testing::RenderCacheProbe::locale;
+    let _ = suprnova::render_cache::testing::RenderCacheProbe::host;
+    let _ = suprnova::render_cache::testing::RenderCacheProbe::key;
+    let _ = suprnova::render_cache::testing::RenderCacheProbe::l0;
+    let _ = suprnova::render_cache::testing::RenderCacheProbe::l1;
+    let _ = suprnova::render_cache::testing::RenderCacheProbe::clear_l0;
+    let _ = suprnova::render_cache::testing::policy_table;
     // Generic over its edit closure. Calling it - never polling or awaiting
     // the returned future, so nothing actually runs - lets the closure's
     // parameter type (a `suprnova-live` type this crate never names
@@ -91,12 +111,18 @@ fn main() {
         "probe-pattern",
         |_graph| {},
     );
+    let _future = suprnova::render_cache::testing::nested_publish_check_for_test(
+        "probe-pattern",
+        |_graph| {},
+    );
+    let _ = suprnova::render_cache::testing::publish_bare_entry_for_test;
 
-    // --- A module gated as a whole (E0433 without `with-testing`) ---
-    let _ = filesystem_testing_guard;
-    let _ = suprnova::render_cache::middleware::race_points::arm;
-    let _ = suprnova::render_cache::middleware::race_points::disarm;
-    let _ = &suprnova::render_cache::middleware::race_points::EPOCH_CAPTURED;
+    // --- A type gated inside an otherwise-always-present module (E0433
+    // without `with-testing`: resolution fails at the missing type, before
+    // it reaches the associated function named after it) ---
+    let _ = suprnova::database::testing::StatementCounter::install;
+    let _ = suprnova::database::testing::StatementCounter::count;
+    let _ = suprnova::database::testing::StatementCounter::reset;
 
     // --- Associated functions/methods on a type that itself always exists
     // (E0599 without `with-testing` - see this file's header comment) ---
@@ -111,7 +137,13 @@ fn main() {
     Context::test_set_query("probe-name", "probe-value");
     let _query_guard = Context::test_query_guard("probe-name", "probe-value");
     let _ = Context::test_clear_query;
+    let _ = RenderCache::key_for_route_for_test;
+    let _ = RenderCache::key_for_route_at_epoch_for_test;
+    let _ = RenderCache::inspect_route_for_test;
+    let _ = RenderCache::clear_l0_for_test;
+    let _ = RenderCache::inspect_l1_for_test;
     let _ = RenderCache::shell_for_test;
+    let _ = RenderCache::stored_fence_token_for_test;
     let _ = RenderCache::l0_hot_for_test;
     let _ = RenderCache::l0_body_ptr_for_test;
     let _ = RenderCache::hot_response_body_ptr_for_test;
@@ -121,14 +153,21 @@ fn main() {
     let _ = RenderCache::uninstall_for_test;
     let _ = RenderCache::set_write_side_enabled_for_test;
     let _ = RenderCache::write_side_decision_for_test;
+    let _ = RenderCache::deliver_hint_for_test;
+    let _ = RenderCache::hint_body_for_test;
+    let _ = RenderCache::pause_hint_applier_for_test;
+    let _ = RenderCache::resume_hint_applier_for_test;
+    let _ = RenderCache::hint_subscriptions_for_test;
+    let _ = RenderCache::await_hint_subscriptions_for_test;
+    let _ = RenderCache::fail_next_snapshot_begin_for_test;
+    let _ = RenderCacheConfig::with_clock;
+    let _ = RenderCacheConfig::with_coordinator_for_test;
     let _ = Storage::fake;
     let _ = DbConnection::observe_statements_for_test::<fn()>;
     let _ = DatabaseEvaluator::execute_unprepared_for_test;
 
     // --- Named by the design as seams, but not actually gated today (see
     // this file's header comment); these resolve either way. ---
-    let _ = RenderCacheConfig::with_clock_for_test;
-    let _ = RenderCacheConfig::with_coordinator_for_test;
     let _ = suprnova::render_cache::console::epoch_advance_report_for_test;
     let _ = suprnova::render_cache::console::inspect_report_for_test;
 }

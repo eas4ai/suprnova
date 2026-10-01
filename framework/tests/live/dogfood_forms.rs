@@ -173,3 +173,256 @@ async fn live_031_an_undecodable_proposal_is_a_field_error_and_the_action_does_n
         "the instanced save did not run: {answer}"
     );
 }
+
+/// The browser runtime sends an immediate `live:model` edit on a public seed
+/// as a model sync with no action. That first request promotes the seed for
+/// the visitor, applies the proposal, and answers the promoted instance; a
+/// save on that instance then runs with the synchronized value.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_model_sync_promotes_a_public_seed() {
+    let _container = TestContainer::fake();
+    form_fixture();
+    let router = Arc::new(build_form_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+    let middleware = production_middleware();
+
+    let (status, headers, body) =
+        dispatch(router.clone(), middleware.clone(), get(FORM_DOCUMENT_PATH)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let cookie = session_cookie(&headers);
+    let seed = decoded_snapshot(&body);
+
+    let (status, _, body) = dispatch(
+        router.clone(),
+        middleware.clone(),
+        form_action_request(
+            ActionRequest {
+                snapshot: seed,
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "SEhISEhISEhISEhISEhISA",
+            },
+            json!({"seats": 4}),
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let answer: Value = serde_json::from_slice(&body).expect("sync JSON");
+    assert_eq!(answer["outcome"], "accepted", "{answer}");
+    let html = answer["render"]["html"].as_str().expect("render html");
+    assert!(
+        html.contains("value=\"4\""),
+        "the proposal was applied: {answer}"
+    );
+    assert!(
+        html.contains("<p id=\"saves\">0</p>"),
+        "no action ran: {answer}"
+    );
+    assert!(
+        !answer["snapshot"]["body"]["revision"].is_null(),
+        "the answer carries the promoted instance: {answer}"
+    );
+
+    let (status, _, body) = dispatch(
+        router.clone(),
+        middleware.clone(),
+        form_action_request(
+            ActionRequest {
+                snapshot: answer["snapshot"].clone(),
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "SUlJSUlJSUlJSUlJSUlJSQ",
+            },
+            json!({}),
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let answer: Value = serde_json::from_slice(&body).expect("save JSON");
+    let html = answer["render"]["html"].as_str().expect("render html");
+    assert!(html.contains("<p id=\"saves\">1</p>"), "{answer}");
+    assert!(
+        html.contains("value=\"4\""),
+        "the instance kept the synchronized seats: {answer}"
+    );
+}
+
+/// A first model sync whose proposal its field cannot decode promotes the
+/// seed and answers the field error, as the same sync does on an instance.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_undecodable_first_model_sync_answers_the_field_error() {
+    let _container = TestContainer::fake();
+    form_fixture();
+    let router = Arc::new(build_form_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+    let middleware = production_middleware();
+
+    let (status, headers, body) =
+        dispatch(router.clone(), middleware.clone(), get(FORM_DOCUMENT_PATH)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let cookie = session_cookie(&headers);
+    let seed = decoded_snapshot(&body);
+
+    let (status, _, body) = dispatch(
+        router,
+        middleware,
+        form_action_request(
+            ActionRequest {
+                snapshot: seed,
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "SkpKSkpKSkpKSkpKSkpKSg",
+            },
+            json!({"seats": null}),
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let answer: Value = serde_json::from_slice(&body).expect("sync JSON");
+    assert!(
+        answer["validation"].get("seats").is_some(),
+        "the first model sync carries the field error: {answer}"
+    );
+}
+
+/// The same first model sync sent twice, with one seed, nonce and
+/// idempotency key, never mints a second instance.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_replayed_first_model_sync_does_not_mint_a_second_instance() {
+    let _container = TestContainer::fake();
+    form_fixture();
+    let router = Arc::new(build_form_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+    let middleware = production_middleware();
+
+    let (status, headers, body) =
+        dispatch(router.clone(), middleware.clone(), get(FORM_DOCUMENT_PATH)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let cookie = session_cookie(&headers);
+    let seed = decoded_snapshot(&body);
+    let sync = || {
+        form_action_request(
+            ActionRequest {
+                snapshot: seed.clone(),
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "S0tLS0tLS0tLS0tLS0tLSw",
+            },
+            json!({"seats": 4}),
+            false,
+        )
+    };
+
+    let (status, _, body) = dispatch(router.clone(), middleware.clone(), sync()).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let first: Value = serde_json::from_slice(&body).expect("sync JSON");
+    let instance = first["snapshot"]["body"]["instance_id"].clone();
+    assert!(instance.is_string(), "{first}");
+
+    let (status, _, body) = dispatch(router, middleware, sync()).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let replay: Value = serde_json::from_slice(&body).expect("replay JSON");
+    assert_eq!(replay["outcome"], "refresh_required", "{replay}");
+    assert!(
+        replay["snapshot"].is_null(),
+        "the replay carries no second instance: {replay}"
+    );
+}
+
+/// A first model sync can only propose model fields: a proposal for the
+/// public `saves` counter is refused and nothing is accepted.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_first_model_sync_cannot_write_a_non_model_field() {
+    let _container = TestContainer::fake();
+    form_fixture();
+    let router = Arc::new(build_form_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+    let middleware = production_middleware();
+
+    let (status, headers, body) =
+        dispatch(router.clone(), middleware.clone(), get(FORM_DOCUMENT_PATH)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let cookie = session_cookie(&headers);
+    let seed = decoded_snapshot(&body);
+
+    let (status, _, body) = dispatch(
+        router,
+        middleware,
+        form_action_request(
+            ActionRequest {
+                snapshot: seed,
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "TExMTExMTExMTExMTExMTA",
+            },
+            json!({"saves": 99}),
+            false,
+        ),
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "a proposal for a non-model field is refused: {status} {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(!String::from_utf8_lossy(&body).contains(">99<"));
+}
+
+/// A first model sync without same-origin evidence is refused like any other
+/// Live request, before promotion.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_cross_site_first_model_sync_is_refused() {
+    let _container = TestContainer::fake();
+    form_fixture();
+    let router = Arc::new(build_form_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+    let middleware = production_middleware();
+
+    let (status, headers, body) =
+        dispatch(router.clone(), middleware.clone(), get(FORM_DOCUMENT_PATH)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let cookie = session_cookie(&headers);
+    let seed = decoded_snapshot(&body);
+
+    for fetch_site in [None, Some("cross-site")] {
+        let (status, _, body) = dispatch(
+            router.clone(),
+            middleware.clone(),
+            form_action_request(
+                ActionRequest {
+                    snapshot: seed.clone(),
+                    cookie: &cookie,
+                    fetch_site,
+                    login: Some("user-7"),
+                    idempotency_key: "TU1NTU1NTU1NTU1NTU1NTQ",
+                },
+                json!({"seats": 4}),
+                false,
+            ),
+        )
+        .await;
+        assert!(
+            status.is_client_error(),
+            "{fetch_site:?}: a model sync without same-origin evidence is refused: {status} {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+}

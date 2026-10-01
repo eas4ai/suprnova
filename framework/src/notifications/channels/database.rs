@@ -1,7 +1,8 @@
 //! Database notification channel - writes one row per notification.
 //!
-//! Persists notifications to the `notifications` table created by the
-//! `20260516_create_notifications_table.sql` migration. Each delivery is
+//! Persists notifications to the `notifications` table created by
+//! [`CreateNotificationsTable`](crate::notifications::migrations::CreateNotificationsTable),
+//! which the app registers in its `Migrator`. Each delivery is
 //! one `INSERT`: a fresh UUID id, the notification name as `type`, the
 //! `notifiable_type` registered at construction (the model's table /
 //! class name, e.g. `"users"`), the recipient route as `notifiable_id`,
@@ -12,7 +13,6 @@ use crate::database::placeholder::placeholder_list;
 use crate::error::FrameworkError;
 use crate::notifications::{Channel, DynNotification};
 use async_trait::async_trait;
-use chrono::Utc;
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use uuid::Uuid;
 
@@ -51,7 +51,7 @@ impl Channel for DatabaseChannel {
         notification: &dyn DynNotification,
     ) -> Result<(), FrameworkError> {
         let id = Uuid::new_v4().to_string();
-        let now = Utc::now().naive_utc();
+        let now = crate::clock::now().naive_utc();
         let data_json = serde_json::to_string(&notification.data())
             .map_err(|e| FrameworkError::internal(format!("DatabaseChannel encode: {e}")))?;
 

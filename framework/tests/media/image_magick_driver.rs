@@ -18,6 +18,8 @@ use std::process::Command;
 
 use suprnova::{Image, ImageDriver, ImagePipeline, MagickCliDriver, OutputFormat, Transformation};
 
+use crate::image_processing::{photo_bmp, webp_chunks};
+
 /// 1x1 red PNG, the same verified fixture the pure-Rust tests use.
 const RED_PNG_1X1: &[u8] = &[
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
@@ -161,6 +163,64 @@ fn every_output_format_encodes_through_the_real_binary() {
             &out[..out.len().min(8)]
         );
     }
+}
+
+#[test]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn webp_quality_reaches_the_lossy_encoder_through_the_real_binary() {
+    if !supports_format("webp") {
+        eprintln!("skipping: this host's ImageMagick has no WebP delegate");
+        return;
+    }
+    let source = photo_bmp();
+    let encode = |quality: u8| {
+        driver()
+            .process(
+                &source,
+                &ImagePipeline {
+                    format: Some(OutputFormat::WebP),
+                    quality,
+                    ..ImagePipeline::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("magick must write WebP at quality {quality}: {e}"))
+    };
+    let (low, high) = (encode(50), encode(90));
+    assert!(
+        low.len() < high.len(),
+        "quality 50 ({} bytes) must be smaller than quality 90 ({} bytes)",
+        low.len(),
+        high.len()
+    );
+    let chunks = webp_chunks(&high);
+    assert!(
+        chunks.iter().any(|chunk| chunk == "VP8 "),
+        "an opaque image must carry a lossy VP8 bitstream, got {chunks:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn webp_lossless_reaches_the_lossless_encoder_through_the_real_binary() {
+    if !supports_format("webp") {
+        eprintln!("skipping: this host's ImageMagick has no WebP delegate");
+        return;
+    }
+    let out = driver()
+        .process(
+            &photo_bmp(),
+            &pipeline(Vec::new(), OutputFormat::WebPLossless),
+        )
+        .expect("magick must write lossless WebP");
+    let chunks = webp_chunks(&out);
+    assert!(
+        chunks.iter().any(|chunk| chunk == "VP8L"),
+        "the lossless define must select a VP8L bitstream, got {chunks:?}"
+    );
+    assert!(
+        !chunks.iter().any(|chunk| chunk == "VP8 "),
+        "a lossless file must carry no lossy bitstream, got {chunks:?}"
+    );
 }
 
 #[test]

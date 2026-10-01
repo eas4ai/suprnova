@@ -292,9 +292,38 @@ impl ValidationErrors {
     /// was empty: the request was correctly rejected, but nothing on the
     /// page could say why.
     pub fn from_validator(errors: validator::ValidationErrors) -> Self {
+        Self::from_validator_keyed(errors, |key| key.to_owned())
+    }
+
+    /// [`Self::from_validator`], with each key (a dotted path in Rust field
+    /// names) passed through `key` before its message is built, so the
+    /// message names the field as the client knows it. The `FormRequest`
+    /// extractor passes the request type's input names.
+    #[doc(hidden)]
+    pub fn from_validator_keyed(
+        errors: validator::ValidationErrors,
+        key: fn(&str) -> String,
+    ) -> Self {
         let mut result = Self::new();
-        result.absorb_validator_errors(&errors, "");
+        result.absorb_validator_errors(&errors, "", key);
         result
+    }
+
+    /// Every key passed through `key`, the messages of keys that meet
+    /// merged. The `FormRequest` extractor renames a validation hook's
+    /// errors with it, the way [`Self::from_validator_keyed`] names the
+    /// derived rules' errors.
+    #[doc(hidden)]
+    pub fn rename_keys(self, key: fn(&str) -> String) -> Self {
+        let mut renamed = Self::new();
+        for (field, messages) in self.errors {
+            renamed
+                .errors
+                .entry(key(&field))
+                .or_default()
+                .extend(messages);
+        }
+        renamed
     }
 
     /// Walk a `validator::ValidationErrors` tree and flatten every leaf
@@ -311,7 +340,12 @@ impl ValidationErrors {
     /// Keys follow Laravel's nested-attribute notation, so the same
     /// `errors["items.1.name"]` lookup works in a Blade app, an Inertia
     /// page, and a JSON API client.
-    fn absorb_validator_errors(&mut self, errors: &validator::ValidationErrors, prefix: &str) {
+    fn absorb_validator_errors(
+        &mut self,
+        errors: &validator::ValidationErrors,
+        prefix: &str,
+        rename: fn(&str) -> String,
+    ) {
         let qualify = |field: &str| -> String {
             if prefix.is_empty() {
                 field.to_string()
@@ -323,19 +357,19 @@ impl ValidationErrors {
         for (field, kind) in errors.errors() {
             match kind {
                 validator::ValidationErrorsKind::Field(field_errors) => {
-                    let key = qualify(field);
+                    let key = rename(&qualify(field));
                     for error in field_errors {
                         let message = validator_error_message(&key, error);
                         self.add(key.clone(), message);
                     }
                 }
                 validator::ValidationErrorsKind::Struct(inner) => {
-                    self.absorb_validator_errors(inner, &qualify(field));
+                    self.absorb_validator_errors(inner, &qualify(field), rename);
                 }
                 validator::ValidationErrorsKind::List(items) => {
                     let base = qualify(field);
                     for (index, inner) in items {
-                        self.absorb_validator_errors(inner, &format!("{base}.{index}"));
+                        self.absorb_validator_errors(inner, &format!("{base}.{index}"), rename);
                     }
                 }
             }
@@ -360,7 +394,9 @@ impl ValidationErrors {
 
             // The human label for the field: the `field-<name>` catalog
             // message when the app defines one (Laravel's custom
-            // attribute names), else the raw name with `_` as spaces.
+            // attribute names), else Laravel's displayable attribute: the
+            // name snake-cased (`unitPrice` reads `unit price`, as a
+            // renamed input key reads in Laravel) with `_` as spaces.
             fn display_field(field: &str) -> String {
                 let key = format!("field-{field}");
                 if Lang::has(&key)
@@ -368,7 +404,7 @@ impl ValidationErrors {
                 {
                     return label;
                 }
-                field.replace('_', " ")
+                snake_case(field).replace('_', " ")
             }
 
             if m.is_keyed() && Lang::has(&m.key) {
@@ -424,8 +460,10 @@ impl ValidationErrors {
         })
     }
 
-    /// Return a new `ValidationErrors` containing only the entries whose
-    /// field name appears in `keep`. Used by Precognition's
+    /// Return a new `ValidationErrors` containing only the entries for the
+    /// fields in `keep`: the same key, a key nested under one (`tag_ids`
+    /// keeps `tag_ids.3`), or a key a `*` segment matches (`tag_ids.*`
+    /// keeps `tag_ids.3`). Used by Precognition's
     /// `Precognition-Validate-Only` header - the server runs full
     /// validation but reports errors only for the fields the client
     /// asked about.
@@ -433,11 +471,50 @@ impl ValidationErrors {
         let kept = self
             .errors
             .iter()
-            .filter(|(k, _)| keep.iter().any(|w| w == *k))
+            .filter(|(k, _)| keep.iter().any(|w| field_covers(w, k)))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         Self { errors: kept }
     }
+}
+
+/// Whether the field a Precognition client asked about, `wanted`, covers
+/// the error key `key`: the same key, a key nested under it (`tag_ids`
+/// covers `tag_ids.3` and `address.city` covers `address.city.0`), or a key
+/// its `*` segments match (`tag_ids.*` covers `tag_ids.3`, Laravel's rule
+/// key for the elements). An array rule reports each element under its
+/// own index, so without this, asking about the array would drop exactly
+/// the errors it has.
+fn field_covers(wanted: &str, key: &str) -> bool {
+    let mut wanted = wanted.split('.');
+    let mut key = key.split('.');
+    loop {
+        match (wanted.next(), key.next()) {
+            (None, _) => return true,
+            (Some(_), None) => return false,
+            (Some(want), Some(have)) if want == "*" || want == have => {}
+            (Some(_), Some(_)) => return false,
+        }
+    }
+}
+
+/// Laravel's `Str::snake`: an `_` before every uppercase letter that
+/// follows another character, then lower case. A snake_case name is
+/// unchanged.
+#[cfg(feature = "localization")]
+fn snake_case(name: &str) -> String {
+    let mut snake = String::with_capacity(name.len() + 4);
+    for (position, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() {
+            if position > 0 {
+                snake.push('_');
+            }
+            snake.extend(ch.to_lowercase());
+        } else {
+            snake.push(ch);
+        }
+    }
+    snake
 }
 
 /// Translate one `validator::ValidationError` into a [`ValidationMessage`].
@@ -497,6 +574,25 @@ fn validator_error_message(field: &str, error: &validator::ValidationError) -> V
 #[cfg(test)]
 mod validation_tests {
     use super::*;
+
+    #[test]
+    fn a_field_covers_itself_its_nested_keys_and_its_wildcards() {
+        assert!(field_covers("tag_ids", "tag_ids"));
+        assert!(field_covers("tag_ids", "tag_ids.3"));
+        assert!(field_covers("address.city", "address.city.0"));
+        assert!(field_covers("tag_ids.*", "tag_ids.3"));
+        assert!(field_covers("items.*.name", "items.2.name"));
+        assert!(field_covers("*", "anything"));
+    }
+
+    #[test]
+    fn a_field_does_not_cover_a_longer_name_or_its_own_parent() {
+        assert!(!field_covers("tag", "tags"));
+        assert!(!field_covers("tag", "tag_ids.1"));
+        assert!(!field_covers("tag_ids.*", "tag_ids"));
+        assert!(!field_covers("items.*.name", "items.2.title"));
+        assert!(!field_covers("", "tag_ids"));
+    }
 
     #[test]
     fn retain_fields_keeps_only_listed() {
@@ -925,6 +1021,21 @@ pub enum FrameworkError {
         message: String,
     },
 
+    /// A deadline passed before the awaited work finished.
+    ///
+    /// The work is not cancelled by this error: a caller waiting on a
+    /// workflow learns only that the wait ended. Matching on this variant,
+    /// or asking [`Self::is_timeout`], is how a caller tells "still running"
+    /// from a failure of the work or of the status query. It renders as
+    /// `504 Gateway Timeout` when it reaches a response.
+    #[error("Timed out after {elapsed:?}: {message}")]
+    Timeout {
+        /// The deadline that passed.
+        elapsed: std::time::Duration,
+        /// What was being waited on.
+        message: String,
+    },
+
     /// A failure originating outside the framework, carrying the original
     /// error as a [`std::error::Error::source`].
     ///
@@ -983,6 +1094,20 @@ impl FrameworkError {
         Self::Internal {
             message: message.into(),
         }
+    }
+
+    /// Create a [`Self::Timeout`]: `elapsed` is the deadline that passed and
+    /// `message` names what was being waited on.
+    pub fn timeout(elapsed: std::time::Duration, message: impl Into<String>) -> Self {
+        Self::Timeout {
+            elapsed,
+            message: message.into(),
+        }
+    }
+
+    /// Whether this error is a [`Self::Timeout`].
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::Timeout { .. })
     }
 
     /// CLI sentinel: returns a [`Self::AlreadyReported`] variant signaling
@@ -1135,6 +1260,7 @@ impl FrameworkError {
             Self::PrecognitionFailure(_) => 422,
             Self::AlreadyReported => 500,
             Self::RateLimited { .. } => 429,
+            Self::Timeout { .. } => 504,
             Self::External { .. } => 500,
         }
     }
@@ -1277,6 +1403,7 @@ impl FrameworkError {
             Self::PrecognitionFailure(_) => "Precognition validation failed",
             Self::AlreadyReported => "",
             Self::RateLimited { message, .. } => message,
+            Self::Timeout { message, .. } => message,
             Self::External { message, .. } => message,
         }
     }
@@ -1358,6 +1485,12 @@ impl FrameworkError {
                 message,
             } => Self::RateLimited {
                 retry_after,
+                message: format!("{}: {}", prefix, message),
+            },
+            // A contexted timeout stays a timeout, so a caller further up
+            // can still match on it.
+            Self::Timeout { elapsed, message } => Self::Timeout {
+                elapsed,
                 message: format!("{}: {}", prefix, message),
             },
             // Variants whose body is fully fixed by the variant itself

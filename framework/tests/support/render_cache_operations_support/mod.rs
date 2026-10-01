@@ -26,17 +26,20 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
 use suprnova::auth::Authenticatable;
+use suprnova::database::testing::StatementCounter;
 use suprnova::render_cache::config::RenderCacheConfig;
 use suprnova::render_cache::registry::GroupPolicy;
 use suprnova::render_cache::{
-    CoordinatorConfig, FreshnessPolicy, L1Config, RenderCache, RenderCachePolicy,
+    CoherenceMode, CoordinatorConfig, FreshnessPolicy, L1Config, RenderCache, RenderCachePolicy,
     RepresentationClass, StorageLayers, VarianceDimension,
 };
 use suprnova::testing::TestContainer;
 use suprnova::{
-    App, Auth, ConnectionTrait, Crypt, EncryptionKey, HttpResponse, MiddlewareRegistry, Model,
-    Next, Request, Response, Router, handle_request,
+    App, Auth, ConnectionTrait, Crypt, EncryptionKey, FrameworkError, HttpResponse,
+    MiddlewareRegistry, Model, Next, Request, Response, Router, handle_request,
 };
+#[cfg(feature = "localization")]
+use suprnova::{Locale, scope_locale};
 use suprnova_live::clock::{Clock, ClockError};
 use suprnova_live::identity::UnixMillis;
 
@@ -88,6 +91,37 @@ impl suprnova::Middleware for LoginHeader {
             Auth::set_user(Arc::new(Principal(id.to_owned())));
         }
         next(request).await
+    }
+}
+
+/// Resolves the tenant of a request from its `x-test-tenant` header, through
+/// the framework's own `LiveTenantMiddleware`, which is the only thing that
+/// sets a request's tenant.
+pub struct TenantHeader;
+
+#[async_trait]
+impl suprnova::live::LiveTenantResolver for TenantHeader {
+    async fn resolve(&self, request: &Request) -> Result<Option<String>, FrameworkError> {
+        Ok(request.header("x-test-tenant").map(str::to_owned))
+    }
+}
+
+/// Renders a request in the locale its `x-test-locale` header names, `en`
+/// without one, as the framework's locale middleware does once a translator
+/// is bound. Must run before `RenderCacheMiddleware` so `Lang::locale()`
+/// reflects it when the middleware builds `Locale` variance.
+#[cfg(feature = "localization")]
+pub struct LocaleHeader;
+
+#[cfg(feature = "localization")]
+#[async_trait]
+impl suprnova::Middleware for LocaleHeader {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let locale = request
+            .header("x-test-locale")
+            .and_then(|tag| Locale::parse(tag).ok())
+            .unwrap_or_else(|| Locale::parse("en").expect("en is a valid locale"));
+        scope_locale(locale, next(request)).await
     }
 }
 
@@ -182,45 +216,28 @@ async fn posts_handler(_request: Request) -> Response {
 /// The route whose entry a write from an uninstalled process must reach.
 pub const POSTS_ROUTE: &str = "/posts/{id}";
 
-/// Counts the statements this harness's connection runs, the same way the
-/// middleware support's own counter does, so a test can prove a fixed
-/// `Closed` decision issues no ledger SQL at all.
-pub mod statements {
-    use std::sync::atomic::{AtomicU64, Ordering};
+/// Lists posts like [`POSTS_ROUTE`], under `CoherenceMode::Lease`: its render
+/// reaches the database, and once the lease is granted a hit reaches it not
+/// at all.
+pub const LEASED_POSTS_ROUTE: &str = "/leased-posts/{id}";
 
-    static STATEMENTS: AtomicU64 = AtomicU64::new(0);
+/// A cached route that varies on `Locale`.
+pub const LOCALIZED_ROUTE: &str = "/localized/{id}";
 
-    /// How many statements have run since the last [`reset`].
-    #[must_use]
-    pub fn count() -> u64 {
-        STATEMENTS.load(Ordering::SeqCst)
-    }
+/// A cached route that varies on `Tenant`.
+pub const TENANTED_ROUTE: &str = "/tenanted/{id}";
 
-    /// Zeroes the counter.
-    pub fn reset() {
-        STATEMENTS.store(0, Ordering::SeqCst);
-    }
-
-    /// Points `conn`'s metric callback at this counter. Installing needs
-    /// sole ownership of the pool, so this runs immediately after
-    /// connecting and before the connection is cloned anywhere.
-    ///
-    /// Compiled only under the `testing` feature, because
-    /// `DbConnection::observe_statements_for_test` only exists there.
-    #[cfg(feature = "testing")]
-    pub(crate) fn install(conn: &mut suprnova::database::DbConnection) -> bool {
-        conn.observe_statements_for_test(|| {
-            STATEMENTS.fetch_add(1, Ordering::SeqCst);
-        })
-    }
-}
+/// A cached route that varies on `Host`.
+pub const HOSTED_ROUTE: &str = "/hosted/{id}";
 
 /// Everything one test needs: the router and middleware registry to
-/// dispatch through, plus the adjustable clock.
+/// dispatch through, the adjustable clock, and the counter of the
+/// statements the harness's connection runs.
 pub struct Harness {
     router: Arc<Router>,
     middleware: Arc<MiddlewareRegistry>,
     clock: Arc<AdjustableTestClock>,
+    statements: StatementCounter,
     _conn: suprnova::database::DbConnection,
     _guard: suprnova::testing::TestContainerGuard,
     _tempdir: tempfile::TempDir,
@@ -276,12 +293,10 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
         .execute_unprepared("PRAGMA busy_timeout=5000")
         .await
         .expect("set busy timeout");
-    #[cfg(feature = "testing")]
-    assert!(
-        statements::install(&mut conn),
-        "the statement counter needs sole ownership of the pool"
-    );
-    statements::reset();
+    // Before the connection is cloned into the container: installing needs
+    // sole ownership of the pool.
+    let statements = StatementCounter::install(&mut conn)
+        .expect("the statement counter needs sole ownership of the pool");
     OperationsMigrator::up(conn.inner(), None)
         .await
         .expect("apply render cache migration");
@@ -337,6 +352,21 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
         .layers(StorageLayers::l0_and_l1())
         .build()
         .expect("private l1 policy");
+    // Once the lease is granted, a hit asks the ledger nothing, so a hit on
+    // this route is the one that runs no statement at all.
+    let leased_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .coherence(CoherenceMode::Lease { max_age_ms: 60_000 })
+        .build()
+        .expect("leased policy");
+
+    let varying_policy = |dimension: VarianceDimension| {
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+            .vary(dimension)
+            .build()
+            .expect("varying policy")
+    };
 
     let router: Router = Router::new().get("/cached/{id}", cached_handler).into();
     let router: Router = router.get("/private/{id}", private_handler).into();
@@ -344,7 +374,11 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
     let router: Router = router.get("/inverted/{id}", stale_handler).into();
     let router: Router = router.get("/private-l1/{id}", private_handler).into();
     let router: Router = router.get(POSTS_ROUTE, posts_handler).into();
+    let router: Router = router.get(LEASED_POSTS_ROUTE, posts_handler).into();
     let router: Router = router.get(NOT_FOUND_ROUTE, not_found_handler).into();
+    let router: Router = router.get(LOCALIZED_ROUTE, cached_handler).into();
+    let router: Router = router.get(TENANTED_ROUTE, cached_handler).into();
+    let router: Router = router.get(HOSTED_ROUTE, cached_handler).into();
     let router = router
         .try_render_cache("/cached/{id}", GroupPolicy::from(cached_policy.clone()))
         .expect("attach cached policy")
@@ -358,12 +392,29 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
         .expect("attach private l1 policy")
         .try_render_cache(POSTS_ROUTE, GroupPolicy::from(cached_policy.clone()))
         .expect("attach posts policy")
+        .try_render_cache(LEASED_POSTS_ROUTE, GroupPolicy::from(leased_policy))
+        .expect("attach leased posts policy")
         .try_render_cache(NOT_FOUND_ROUTE, GroupPolicy::from(cached_policy))
-        .expect("attach not-found policy");
+        .expect("attach not-found policy")
+        .try_render_cache(
+            LOCALIZED_ROUTE,
+            GroupPolicy::from(varying_policy(VarianceDimension::Locale)),
+        )
+        .expect("attach localized policy")
+        .try_render_cache(
+            TENANTED_ROUTE,
+            GroupPolicy::from(varying_policy(VarianceDimension::Tenant)),
+        )
+        .expect("attach tenanted policy")
+        .try_render_cache(
+            HOSTED_ROUTE,
+            GroupPolicy::from(varying_policy(VarianceDimension::Host)),
+        )
+        .expect("attach hosted policy");
 
     let mut config = RenderCacheConfig::from_env()
         .expect("the test environment configures a valid render cache")
-        .with_clock_for_test(Arc::clone(&clock) as Arc<dyn Clock>);
+        .with_clock(Arc::clone(&clock) as Arc<dyn Clock>);
     config.enabled = true;
     config.l1 = match l1_directory {
         Some(directory) => L1Config::File {
@@ -385,6 +436,11 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
     // `RenderCache::install` so `Auth::id()` reflects it when the
     // middleware builds `Principal` variance.
     suprnova::middleware::register_global_middleware(LoginHeader);
+    suprnova::middleware::register_global_middleware(suprnova::live::LiveTenantMiddleware::new(
+        Arc::new(TenantHeader),
+    ));
+    #[cfg(feature = "localization")]
+    suprnova::middleware::register_global_middleware(LocaleHeader);
     let router = RenderCache::install(router, config)
         .await
         .expect("install render cache");
@@ -394,6 +450,7 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
         router: Arc::new(router),
         middleware,
         clock,
+        statements,
         _conn: conn,
         _guard: guard,
         _tempdir: tempdir,
@@ -403,6 +460,13 @@ async fn boot(l1_directory: Option<std::path::PathBuf>) -> Arc<Harness> {
 /// The adjustable clock `install` was configured with.
 pub fn clock(harness: &Harness) -> &Arc<AdjustableTestClock> {
     &harness.clock
+}
+
+/// The counter installed on the harness's connection. Every connection the
+/// container hands out is a clone of that one, so the count covers the
+/// handler's own queries and the RenderCache ledger's reads and writes alike.
+pub fn statement_counter(harness: &Harness) -> &StatementCounter {
+    &harness.statements
 }
 
 /// One dispatched response: status and body bytes.
@@ -423,8 +487,13 @@ pub async fn dispatch_get(
 ) -> TestResponse {
     let mut builder = hyper::Request::builder()
         .method(hyper::Method::GET)
-        .uri(path)
-        .header("host", "127.0.0.1");
+        .uri(path);
+    if !extra_headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        builder = builder.header("host", "127.0.0.1");
+    }
     for (name, value) in extra_headers {
         builder = builder.header(*name, *value);
     }

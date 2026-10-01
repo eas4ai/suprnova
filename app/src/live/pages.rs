@@ -87,7 +87,7 @@ fn intent() -> Result<DocumentResponseIntent, FrameworkError> {
 fn html(view: &impl ViewTemplate) -> Result<HttpResponse, FrameworkError> {
     let mut body = String::new();
     view.render_view(&mut body)
-        .map_err(|_| FrameworkError::internal("Live page template"))?;
+        .map_err(|failure| FrameworkError::internal(format!("Live page template: {failure:?}")))?;
     Ok(HttpResponse::html(body))
 }
 

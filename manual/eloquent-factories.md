@@ -103,6 +103,7 @@ the derive collapses the marker + impl into one line on the model:
 use suprnova::{Dummy, Factory};
 
 #[derive(Dummy, Factory)]
+#[dummy(crate_name = "suprnova::fake")]
 pub struct Post {
     pub id: i64,
     pub title: String,
@@ -118,7 +119,9 @@ The derive emits `pub struct PostFactory;` as a sibling type and an
 `impl Factory for PostFactory` whose `definition()` calls
 `Faker.fake::<Post>()`. Visibility on the factory mirrors visibility
 on the model - a `pub` model gets a `pub` factory, a `pub(crate)`
-model gets a `pub(crate)` factory.
+model gets a `pub(crate)` factory. The `#[dummy(crate_name = ...)]`
+attribute tells `Dummy` where the `fake` crate is; see
+[Hand-written `Dummy`](#hand-written-dummy-for-richer-randomization).
 
 ### Overriding the generated name
 
@@ -127,6 +130,7 @@ the `name` attribute:
 
 ```rust
 #[derive(Dummy, Factory)]
+#[dummy(crate_name = "suprnova::fake")]
 #[factory(name = "AccountFactory")]
 pub struct User { /* … */ }
 ```
@@ -144,8 +148,8 @@ non-trivial, write the `Dummy` impl by hand and pair it with
 `#[derive(Factory)]`:
 
 ```rust
-use suprnova::__fake::rand::Rng;
-use suprnova::__fake::{Dummy, Fake, Faker, faker::lorem::en::{Paragraph, Sentence}};
+use suprnova::fake::rand::Rng;
+use suprnova::fake::{Dummy, Fake, Faker, faker::lorem::en::{Paragraph, Sentence}};
 use suprnova::Factory;
 
 #[derive(Factory)]
@@ -173,9 +177,28 @@ impl Dummy<Faker> for Post {
 }
 ```
 
-The `fake` crate is re-exported as `suprnova::__fake` so consumers
-don't need a separate `fake = "…"` line in `Cargo.toml`. Common types
-are also re-exported under the crate root: `suprnova::{Dummy, Fake, Faker}`.
+The `fake` crate is re-exported as `suprnova::fake` so consumers
+don't need a separate `fake = "…"` line in `Cargo.toml`. It carries the
+fakers of `suprnova::fake::faker` and `suprnova::fake::rand::Rng` for
+`fake_with_rng`. Common types are also re-exported under the crate
+root: `suprnova::{Dummy, Fake, Faker}`.
+
+If you do add `fake` to your own dependencies, keep its version the same
+as the one the framework uses. Two versions are two separate pairs of
+`Dummy` and `Fake` traits, and a value that implements one does not
+implement the other.
+
+`#[derive(Dummy)]` generates code that names the crate `::fake`. An
+application without `fake` among its own dependencies has no such crate,
+so tell the derive where it is:
+
+```rust
+use suprnova::{Dummy, Factory};
+
+#[derive(Dummy, Factory)]
+#[dummy(crate_name = "suprnova::fake")]
+pub struct Post { /* … */ }
+```
 
 ### Why `#[derive(Factory)]` only takes plain structs
 
@@ -415,14 +438,19 @@ pub trait Persistable: Sized + Send {
 }
 ```
 
-A blanket impl in `factory::persist` covers every SeaORM model that
-can `IntoActiveModel<ActiveModel>` - which is every model the
-`#[suprnova::model]` macro emits. No per-model boilerplate; if `User`
-is a model, `UserFactory::new().create()` works.
+Two impls cover the models you write:
 
-The blanket pulls `DB::connection()` and inserts. The returned `Self`
-is what SeaORM hands back from the insert - assigned id, defaulted
-columns resolved, etc.
+- The `#[suprnova::model]` macro emits `Persistable` for the struct it
+  generates. It runs the same insert that `Model::create` runs, so a
+  factory insert fires `Creating`, `Saving`, `Created`, and `Saved` and
+  reaches every observer. See [Lifecycle events](#lifecycle-events).
+- A blanket impl in `factory::persist` covers every plain SeaORM model
+  that can `IntoActiveModel<ActiveModel>`. It pulls `DB::connection()`
+  and inserts with SeaORM directly, so no model event fires.
+
+No per-model boilerplate; if `User` is a model, `UserFactory::new().create()`
+works. The returned `Self` is what the insert hands back - assigned id,
+defaulted columns resolved, etc.
 
 ### Primary-key handling
 
@@ -433,7 +461,9 @@ second call with a UNIQUE constraint failure.
 
 `persist_via_seaorm` (the helper that backs the blanket) flips every
 primary-key column to `NotSet` before inserting, which lets the
-database assign its own id - the semantic factories actually need:
+database assign its own id - the semantic factories actually need. The
+`Persistable` impl of a `#[suprnova::model]` struct does the same for an auto-increment key. A model whose
+key is not auto-increment keeps the key its factory set:
 
 ```rust
 pub async fn persist_via_seaorm<M, E, C>(model: M, db: &C) -> Result<M, FrameworkError>
@@ -522,27 +552,23 @@ Reach for `make` whenever the test doesn't care that the row exists.
 Reach for `create` when you'll query the row back, when a foreign key
 needs a real id, or when you're populating fixtures for a sub-system
 that reads the DB. Note that `create_many` persists sequentially - if
-a later insert fails, the prior inserts are NOT rolled back. `create`
-/ `create_many` go through the `Persistable` blanket, which talks to
-the framework's bound `DB::connection()` directly - they do **not**
-join an ambient `DB::transaction(...)` scope. If you need atomicity
-across a batch of inserts, drop into the Model trait's
-`Model::create(attrs!{...})` inside the closure (that path routes
-through the same executor that honours `CURRENT_TX`):
+a later insert fails, the prior inserts are NOT rolled back. For a
+`#[suprnova::model]` struct, `create` / `create_many` take the same
+write path as `Model::create`, so inside a `DB::transaction(...)` closure
+they join the ambient transaction. Wrap a batch in one when you need
+atomicity:
 
 ```rust
-use suprnova::{DB, Model, attrs};
+use suprnova::{DB, Factory, FrameworkError};
 
 DB::transaction(|_tx| Box::pin(async move {
-    for i in 0..50 {
-        User::create(attrs!{
-            name: format!("user-{i}"),
-            email: format!("user-{i}@example.test"),
-        }).await?;
-    }
-    Ok::<_, suprnova::FrameworkError>(())
+    UserFactory::times(50).create_many().await?;
+    Ok::<_, FrameworkError>(())
 })).await?;
 ```
+
+A plain SeaORM model uses the blanket `Persistable` impl, which inserts
+through `DB::connection()` and does not join an ambient transaction.
 
 ## "After-creating" behaviour
 
@@ -588,6 +614,25 @@ impl Observer<User> for AuditUser {
 
 Factory-only callbacks would invite divergence between test inserts
 and real inserts. Observers stay consistent across both.
+
+### Lifecycle events
+
+A factory insert of a `#[suprnova::model]` struct fires the same events
+as `Model::create`, in the same order: `Creating` and `Saving` before
+the insert, `Created` and `Saved` after it. A `Creating` or `Saving`
+listener sees the row as attributes. What it changes is written over the
+values the factory built, and a listener that cancels aborts the insert.
+The fillable filter does not apply, because the values are the
+factory's own.
+
+To insert a row without running any listener, use `create_quietly()` or
+`create_many_quietly()`. Both mute the model events for the insert, as
+`seed::without_events` does:
+
+```rust
+let user = UserFactory::new().create_quietly().await?;
+let users = UserFactory::times(50).create_many_quietly().await?;
+```
 
 ## Seeders
 

@@ -83,7 +83,7 @@ follow-up builds are much faster thanks to Docker layer caching.
 
 ## Add a scheduler service
 
-If your app uses `#[derive(Task)]` schedules, the scheduler needs its
+If your app schedules tasks (`impl Task` or `Schedule::call`), the scheduler needs its
 own long-running process. Add a second service from the same repo:
 
 1. **New** → **GitHub Repo** → pick the same repository.

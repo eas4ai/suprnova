@@ -81,60 +81,39 @@ pub fn workflow_step_impl(_attr: TokenStream, input: TokenStream) -> TokenStream
 }
 
 fn ensure_result_framework_error(output: &ReturnType) -> Result<(), syn::Error> {
-    match output {
-        ReturnType::Type(_, ty) => match &**ty {
-            Type::Path(path) => {
-                let last = path.path.segments.last().ok_or_else(|| {
-                    syn::Error::new_spanned(ty, "Invalid return type for #[workflow_step]")
-                })?;
+    const EXPECTED: &str = "#[workflow_step] must return Result<T, FrameworkError>";
 
-                if last.ident != "Result" {
-                    return Err(syn::Error::new_spanned(
-                        ty,
-                        "#[workflow_step] must return Result<T, FrameworkError>",
-                    ));
-                }
-
-                match &last.arguments {
-                    syn::PathArguments::AngleBracketed(args) => {
-                        let mut iter = args.args.iter();
-                        iter.next().ok_or_else(|| {
-                            syn::Error::new_spanned(ty, "Result must have ok type")
-                        })?;
-                        let err = iter.next().ok_or_else(|| {
-                            syn::Error::new_spanned(ty, "Result must have error type")
-                        })?;
-
-                        let err_ty = match err {
-                            syn::GenericArgument::Type(t) => t,
-                            _ => return Err(syn::Error::new_spanned(err, "Invalid error type")),
-                        };
-
-                        if !is_framework_error(err_ty) {
-                            return Err(syn::Error::new_spanned(
-                                err_ty,
-                                "#[workflow_step] must return Result<T, FrameworkError>",
-                            ));
-                        }
-
-                        Ok(())
-                    }
-                    _ => Err(syn::Error::new_spanned(
-                        ty,
-                        "#[workflow_step] must return Result<T, FrameworkError>",
-                    )),
-                }
-            }
-            _ => Err(syn::Error::new_spanned(
-                ty,
-                "#[workflow_step] must return Result<T, FrameworkError>",
-            )),
-        },
-        ReturnType::Default => Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "#[workflow_step] must return Result<T, FrameworkError>",
-        )),
+    let ReturnType::Type(_, ty) = output else {
+        return Err(syn::Error::new(proc_macro2::Span::call_site(), EXPECTED));
+    };
+    let Type::Path(path) = &**ty else {
+        return Err(syn::Error::new_spanned(ty, EXPECTED));
+    };
+    let last =
+        path.path.segments.last().ok_or_else(|| {
+            syn::Error::new_spanned(ty, "Invalid return type for #[workflow_step]")
+        })?;
+    if last.ident != "Result" {
+        return Err(syn::Error::new_spanned(ty, EXPECTED));
     }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return Err(syn::Error::new_spanned(ty, EXPECTED));
+    };
+
+    let mut iter = args.args.iter();
+    iter.next()
+        .ok_or_else(|| syn::Error::new_spanned(ty, "Result must have ok type"))?;
+    let err = iter
+        .next()
+        .ok_or_else(|| syn::Error::new_spanned(ty, "Result must have error type"))?;
+    let syn::GenericArgument::Type(err_ty) = err else {
+        return Err(syn::Error::new_spanned(err, "Invalid error type"));
+    };
+    if !is_framework_error(err_ty) {
+        return Err(syn::Error::new_spanned(err_ty, EXPECTED));
+    }
+
+    Ok(())
 }
 
 fn is_framework_error(ty: &Type) -> bool {
@@ -157,5 +136,51 @@ fn build_input_json(arg_idents: &[syn::Ident]) -> TokenStream2 {
             ::suprnova::serde_json::to_string(&(#(&#arg_idents),*,))
                 .map_err(|e| ::suprnova::FrameworkError::internal(format!("Workflow step serialize error: {}", e)))?
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_result_framework_error;
+    use syn::{ReturnType, parse_quote};
+
+    const EXPECTED: &str = "#[workflow_step] must return Result<T, FrameworkError>";
+
+    fn refusal(output: &ReturnType) -> String {
+        ensure_result_framework_error(output)
+            .expect_err("the return type is not the accepted shape")
+            .to_string()
+    }
+
+    #[test]
+    fn a_result_over_framework_error_is_accepted() {
+        let plain: ReturnType = parse_quote!(-> Result<u32, FrameworkError>);
+        let qualified: ReturnType =
+            parse_quote!(-> std::result::Result<(), suprnova::FrameworkError>);
+
+        assert!(ensure_result_framework_error(&plain).is_ok());
+        assert!(ensure_result_framework_error(&qualified).is_ok());
+    }
+
+    #[test]
+    fn every_other_shape_is_refused_with_the_accepted_shape_named() {
+        let shapes: [ReturnType; 5] = [
+            ReturnType::Default,
+            parse_quote!(-> u32),
+            parse_quote!(-> (u32, u32)),
+            parse_quote!(-> Option<u32>),
+            parse_quote!(-> Result<u32, String>),
+        ];
+
+        for shape in &shapes {
+            assert_eq!(refusal(shape), EXPECTED);
+        }
+    }
+
+    #[test]
+    fn a_result_missing_its_error_type_says_so() {
+        let one_argument: ReturnType = parse_quote!(-> Result<u32>);
+
+        assert_eq!(refusal(&one_argument), "Result must have error type");
     }
 }

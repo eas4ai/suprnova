@@ -1,7 +1,7 @@
 # Suprnova Live -- 07 Security and Trust Boundaries
 
 Status: Normative design specification
-Last revised: 2026-08-31
+Last revised: 2026-09-30
 
 ## Scope
 
@@ -77,7 +77,10 @@ Acceptance criteria:
 - Session expiry, logout, rotation, and principal change invalidate incompatible
   identity-bound work.
 - Seed promotion requires the same current CSRF, origin, session, tenant, and
-  middleware checks as an ordinary first action.
+  middleware checks as any ordinary Live request.
+- A first model synchronization promotes a seed without naming an action, so
+  it needs no action authorization; its proposals reach only model fields, as on
+  an instance.
 - Cookie-authorized WebSocket upgrades reject missing, null, or unapproved
   `Origin` before accepting the connection. Explicit cross-origin streaming
   requires a configured non-wildcard allowlist and a separate transport

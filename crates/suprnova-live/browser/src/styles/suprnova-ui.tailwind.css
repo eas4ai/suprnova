@@ -39,6 +39,8 @@
   --color-info-soft: var(--sn-color-info-soft);
   --color-link: var(--sn-color-link);
   --color-link-hover: var(--sn-color-link-hover);
+  --color-accent: var(--sn-color-accent);
+  --color-on-accent: var(--sn-color-on-accent);
   --color-focus-ring: var(--sn-color-focus-ring);
   --color-selection: var(--sn-color-selection);
   --color-backdrop: var(--sn-color-backdrop);

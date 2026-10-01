@@ -58,9 +58,101 @@ Add `#[derive(Validate)]` separately so `#[validate(...)]` attributes stay visib
 |---|---|
 | `#[data(auto_lazy)]` | Every `Prop`-typed field is implicitly `#[data(lazy)]` |
 | `#[data(authorize = "path::to::fn")]` | Route the generated `FormRequest::authorize` to a free function with signature `fn(req: &Request) -> bool`. The body parser, validator, Precognition support, and route-param injection still come from the derive |
+| `#[data(after_validation = "path::to::fn")]` | Route the generated `FormRequest::after_validation` to `fn(dto: &Self) -> Result<(), ValidationErrors>`, where `validate!` rules run. See [Validation rules and database checks](#validation-rules-and-database-checks) |
+| `#[data(after_validation_async = "path::to::fn")]` | Route `FormRequest::after_validation_async` to `async fn(dto: &Self) -> Result<(), ValidationErrors>`, where `Exists`, `Unique` and other async rules run |
 | `#[data(allow_unknown_fields)]` | Accept payload keys that don't match any struct field. The default is **strict**: an unrecognised key fails the deserialize with `serde::de::Error::unknown_field(..)` and surfaces as a 422 through `FormRequest`. Opt into permissive only for response DTOs that read forward-compatible third-party payloads |
 
 The earlier `#[data(custom_authorize)]` flag - which suppressed the whole `FormRequest` impl and forced you to reimplement body parsing, validation, and Precognition by hand - is gone. The macro emits a migration error if you try to use it. Use `#[data(authorize = "fn")]` instead.
+
+## Field names and serde attributes
+
+A Data Object writes its own `Serialize` and `Deserialize`, and it honors serde's naming attributes in them:
+
+| Attribute | Effect |
+|---|---|
+| `#[serde(rename_all = "camelCase")]` on the struct | Every field's key follows the rule. Serde's rules are all accepted: `lowercase`, `UPPERCASE`, `PascalCase`, `camelCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`, `SCREAMING-KEBAB-CASE` |
+| `#[serde(rename = "id")]` on a field | The field's key, winning over `rename_all` |
+| `rename(serialize = "..", deserialize = "..")`, `rename_all(serialize = "..", deserialize = "..")` | A different name in the output than in the input |
+| `#[serde(skip)]` | The field is neither sent nor read; it takes its `Default` |
+| `#[serde(skip_serializing)]` / `#[serde(skip_deserializing)]` | Left out of the output, or out of the input |
+
+```rust
+#[derive(Data, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct OrderDto {
+    #[validate(email)]
+    pub customer_email: String,        // `customerEmail`
+    #[validate(nested)]
+    pub line_items: Vec<LineDto>,      // `lineItems`
+    #[serde(rename = "ref")]
+    pub reference: String,             // `ref`
+}
+```
+
+The name is used everywhere the field meets the client:
+
+- **Output** (the serialize name): the JSON body, Inertia props and partial reloads, the `?include=` allowlist of a lazy prop, and JSON:API attribute, relationship and include names.
+- **Input** (the deserialize name): the request body, and so the strict unknown-field check, a required field's "missing field" error, and the key a [route parameter](#route-parameter-field-injection) is injected under. The route parameter itself keeps its own name, the Rust field name unless `from_route_param("..")` names one.
+- **Validation errors** are keyed by the input name, so the error bag, the page and `Precognition-Validate-Only` all use the names the client sent; a Rust name in `Precognition-Validate-Only` matches nothing. A localized message labels the name snake-cased, as Laravel's does: `unitPrice` reads "unit price". A `validate!` row or a hook names a field by its Rust name, as `validate!` does; the error is keyed by the input name. A key that is already an input name passes through, unless it is also another field's Rust name.
+- **Nested objects** are renamed at their own level when their type registers its names: a type that derives `Data`, `FormRequest` or `#[request]` does, and a plain `#[derive(Deserialize, Validate)]` struct does with `#[derive(suprnova::InputNames)]`. Without it, the nested part of the key keeps Rust names (`lineItems.1.unit_price`); so does a generic nested type. A field serde `flatten`s is reported under its own field name, a key the input does not have. A field the input cannot set (`output_only`, `skip_deserializing`) keeps its Rust name in an error key. With serde's `alias`, errors use the field's main name.
+
+A raw identifier loses its `r#`, as it does with serde: `pub r#type: String` is sent as `type`.
+
+Any other serde attribute on a Data Object fails to compile with an error that lists the supported ones: the derive would otherwise leave it silently unapplied. Two fields under the same key fail to compile too.
+
+A `#[derive(FormRequest)]` or `#[request]` struct is deserialized by serde's own derive, which reads all of serde's attributes. Its validation errors are keyed by the input names in the same way.
+
+## Validation rules and database checks
+
+`#[validate(...)]` attributes cover the per-field checks. Everything else
+in [Validation](validation.md) - `validate!` rows, cross-field rules like
+`After::new(DateBound::Field(..))` or `ExcludeIf`, and database rules like
+`Exists` - runs in the `FormRequest` hooks. The derive writes a Data
+Object's `FormRequest` impl, so you name the functions it calls:
+
+```rust
+use suprnova::rules::{Accepted, After, DateBound, DateFormat};
+use suprnova::{Data, Exists, FormContext, ValidationErrors, validate};
+use validator::Validate;
+
+#[derive(Data, Validate)]
+#[data(after_validation = "booking_rules", after_validation_async = "booking_rows")]
+pub struct BookingDto {
+    pub room_id: i64,
+    pub starts_on: String,
+    pub ends_on: String,
+    pub terms: bool,
+}
+
+fn booking_rules(dto: &BookingDto) -> Result<(), ValidationErrors> {
+    let ctx: FormContext = [("starts_on".to_string(), dto.starts_on.clone())].into();
+    validate! { dto =>
+        starts_on => DateFormat(&["%Y-%m-%d"]);
+        ends_on => DateFormat(&["%Y-%m-%d"]), After::new(DateBound::Field("starts_on")) => with ctx;
+        terms => Accepted;
+    }
+}
+
+async fn booking_rows(dto: &BookingDto) -> Result<(), ValidationErrors> {
+    let mut errs = ValidationErrors::new();
+    Exists::new("rooms", "id")
+        .check_value(dto.room_id, &mut errs, "room_id")
+        .await;
+    errs.into_result()
+}
+```
+
+The stages run in order and stop at the first that fails: the
+`#[validate(...)]` attributes, then `after_validation`, then
+`after_validation_async`. A malformed date therefore never reaches the
+database. Precognition runs the same stages and reports the fields the
+client asked about - asking about an array keeps the errors of its elements
+(`tag_ids` keeps `tag_ids.3`). A Data Object with a `from_route_param` field
+runs both hooks too.
+
+A generic struct, or one with reference or lazy fields, gets no
+`FormRequest` impl, so it would never run a hook; the derive refuses both
+attributes on it.
 
 ## `Field<T>` - Absent / Null / Value
 
@@ -76,7 +168,7 @@ match dto.bio {
 }
 ```
 
-`Field::Absent` (default) round-trips to omitted-from-JSON when paired with `#[serde(default, skip_serializing_if = "Field::is_absent")]` at the call site. Without `skip_serializing_if`, `Absent` serializes to JSON `null`.
+`Field::Absent` (default) is left out of a Data Object's output: the derive omits the key itself. In a plain struct that derives serde's `Serialize`, pair the field with `#[serde(default, skip_serializing_if = "Field::is_absent")]` for the same result; without `skip_serializing_if`, serde writes `Absent` as JSON `null`.
 
 For three-way DB upserts: `dto.bio.into_option_or_null() -> Option<Option<T>>` maps `Absent → None`, `Null → Some(None)`, `Value(v) → Some(Some(v))`. Use this when "don't touch" and "set to NULL" need to be distinct downstream.
 
@@ -268,7 +360,7 @@ Note: lazy-bearing structs suppress `Serialize`, `Deserialize`, and `FormRequest
 Mirrors Laravel-Data's `#[AutoWhenLoadedLazy]`. The user's `From<Entity>` impl decides whether the relation was preloaded:
 
 ```rust
-use suprnova::data::{when_loaded, IsRelationLoaded};
+use suprnova::{when_loaded, IsRelationLoaded};
 
 impl From<&AlbumEntity> for AlbumDto {
     fn from(album: &AlbumEntity) -> Self {
@@ -296,11 +388,14 @@ SeaORM entities need a custom `IsRelationLoaded` impl that consults their loaded
 `suprnova generate-types` emits TypeScript definitions for every `#[derive(Data)]` (and legacy `#[derive(InertiaProps)]`) struct. Behavior:
 
 - `Field<T>` → `field?: T | null`
+- chrono's `DateTime`, `NaiveDate`, `NaiveDateTime` and `NaiveTime` → `string`, the ISO 8601 text they serialize as
 - `Prop` → `field?: T` (the lazy may-be-absent semantic; the `?` carries it, the type itself is plain)
 - `#[data(input_only)]` → excluded from output type
 - `#[data(output_only)]` → excluded from input type
 - Generic struct → TypeScript generic interface (`export interface Paginated<T>`)
-- When ANY field has `input_only` / `output_only` / `lazy`, two interfaces are emitted: `<Name>` (output) and `<Name>Input` (input)
+- When ANY field has `input_only` / `output_only` / `lazy`, or the input and the output name a field differently or skip it in one direction only, two interfaces are emitted: `<Name>` (output) and `<Name>Input` (input)
+- A plain struct a prop reaches, one that derives serde's `Serialize`, follows serde's attributes: `#[serde(skip)]` and `skip_serializing` leave the field out, `skip_serializing_if` makes it optional (`field?: T`), and `rename` and `rename_all` (or their `serialize = ...` forms) name the key. Other serde attributes, such as `flatten` and `transparent`, are not read. A key that is not an identifier, such as `display-name`, is quoted
+- `#[derive(Data)]` and `#[derive(InertiaProps)]` structs follow the serde attributes they honor (see [Field names and serde attributes](#field-names-and-serde-attributes)): `<Name>` declares the serialize names, `<Name>Input` the deserialize names
 
 Generated types never leak Rust-only types (`Prop<...>` won't appear in the output `.d.ts`).
 
@@ -317,5 +412,5 @@ Emits a `#[derive(Data, Validate)]` skeleton instead of the legacy `#[derive(Ine
 - [Validation](validation.md) - `#[derive(Validate)]`, async validators, and how `FormRequest` calls into them
 - [Requests](requests.md) - the request extractor surface that `FormRequest` plugs into
 - [Inertia Responses](frontend-inertia-responses.md) - the `Inertia::data` path and how lazy props become partial-reload-eligible
-- [Eloquent Resources](eloquent-resources.md) - `#[derive(Resource)]` for JSON:API outputs (sibling of `Data` for serialization-only payloads)
+- [Eloquent Resources](eloquent-resources.md) - `#[derive(Data)]` with `#[json_resource]` for JSON:API outputs (sibling of `Data` for serialization-only payloads)
 - [Error Model](error-model.md) - how `unknown_field` rejection becomes a 422 and how `FormRequest` failures travel back as `ValidationErrors`

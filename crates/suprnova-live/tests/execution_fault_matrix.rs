@@ -9,18 +9,20 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use suprnova_live::action::{
     ActionArgumentSchema, ActionAuthorizationPort, ActionAuthorizationRequest, ActionEntry,
-    ActionError, ActionFuture, ActionResult, ActionTable, ActionTarget, AuthorizationDecision,
-    AuthorizationRequirement, AuthorizedAction, PreparedActionArguments, RawActionArguments,
-    TransactionPolicy,
+    ActionError, ActionErrorKind, ActionFuture, ActionResult, ActionTable, ActionTarget,
+    AuthorizationDecision, AuthorizationRequirement, AuthorizedAction, PreparedActionArguments,
+    RawActionArguments, TransactionPolicy,
 };
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::clock::{Clock, ClockError};
+use suprnova_live::component::ActionExecutionErrorKind;
 use suprnova_live::endpoint::{EndpointNavigationTarget, EndpointResponseIntents};
 use suprnova_live::execution::{
-    AcceptedExecutionReport, AcceptedOutcomeReporter, ActionExecutionRequest, ExecutionPhase,
-    ExecutionRefreshReason, ExecutionResult, ExecutionService, ExecutionTracePort, HostError,
-    HostErrorKind, HostTransaction, InstancedActionRequest, ResponseIntentPreparationPort,
-    ResponseIntentPreparationRequest, RetryLegality, TransactionPort,
+    AcceptedExecutionReport, AcceptedOutcomeReporter, ActionExecutionRequest, ExecutionFailure,
+    ExecutionPhase, ExecutionRefreshReason, ExecutionResult, ExecutionService, ExecutionTracePort,
+    HostError, HostErrorKind, HostTransaction, InstancedActionRequest,
+    ResponseIntentPreparationPort, ResponseIntentPreparationRequest, RetryLegality,
+    TransactionPort,
 };
 use suprnova_live::host::{
     MountCatalogBuilder, MountCatalogEntry, MountScopeRequirements, MountSelection,
@@ -32,8 +34,8 @@ use suprnova_live::identity::{
 };
 use suprnova_live::ledger::{
     AcceptedOutcome, ClaimOutcome, ClaimRequest, ClaimToken, InstanceAuthority, LedgerError,
-    LedgerLimits, LedgerPhase, LiveInstanceLedger, MemoryInstanceLedger, MountInstanceRecord,
-    PromotionOutcome, PromotionRecord, RefreshReason,
+    LedgerErrorKind, LedgerLimits, LedgerPhase, LiveInstanceLedger, MemoryInstanceLedger,
+    MountInstanceRecord, PromotionOutcome, PromotionRecord, RefreshReason,
 };
 use suprnova_live::limits::InputLimits;
 use suprnova_live::metadata::{ActionMetadata, ComponentMetadata, ContractVersions, FieldMetadata};
@@ -41,14 +43,16 @@ use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
 use suprnova_live::snapshot::state::{FieldCategory, StateCodec};
 use suprnova_live::snapshot::{
     ComponentContract, CompositionChildLineageV1, CompositionLineageV1, ExpectedInstanceV1,
-    InstanceBodyV1, InstanceFieldsV1, VerifiedInstanceV1, verify_instance,
+    InstanceBodyV1, InstanceFieldsV1, SnapshotErrorKind, VerifiedInstanceV1, verify_instance,
 };
 use suprnova_live::state::{ModelBindingSchema, ProposalBatch, ProposalLimits};
 use suprnova_live::validation::{
     BagPolicy, ValidationFuture, ValidationPort, ValidationPortError, ValidationRequest,
     ValidationSelection,
 };
-use suprnova_live::view::{AssetSet, ChildMount, IslandRender, RenderLimits, ViewRenderer};
+use suprnova_live::view::{
+    AssetSet, ChildMount, IslandRender, RenderLimits, ViewErrorKind, ViewRenderer,
+};
 use suprnova_live_test_support::SyntheticLiveRequestContextBuilder;
 use suprnova_live_test_support::VerifiedResponseSealing;
 use tokio::sync::Notify;
@@ -250,8 +254,15 @@ impl Clock for LifecycleClock {
 struct AcceptanceControl {
     pause_next: AtomicBool,
     fail_next: AtomicBool,
+    claim_error: Mutex<Option<LedgerErrorKind>>,
     entered: Notify,
     release: Notify,
+}
+
+impl AcceptanceControl {
+    fn fail_next_claim(&self, kind: LedgerErrorKind) {
+        *self.claim_error.lock().expect("claim error lock") = Some(kind);
+    }
 }
 
 struct ControlledLedger {
@@ -274,6 +285,15 @@ impl LiveInstanceLedger for ControlledLedger {
     }
 
     async fn claim(&self, request: ClaimRequest) -> Result<ClaimOutcome, LedgerError> {
+        let injected = self
+            .control
+            .claim_error
+            .lock()
+            .expect("claim error lock")
+            .take();
+        if let Some(kind) = injected {
+            return Err(LedgerError::new(kind));
+        }
         self.inner.claim(request).await
     }
 
@@ -739,6 +759,16 @@ impl ClaimLifecycleFixture {
         response_sealer: suprnova_live::endpoint::AcceptedResponseSealer,
         response_binding: suprnova_live::endpoint::AcceptedResponseRequestBinding,
     ) -> ExecutionResult {
+        self.execute_with_identity(idempotency(0x50), response_sealer, response_binding)
+            .await
+    }
+
+    async fn execute_with_identity(
+        &self,
+        idempotency_key: suprnova_live::identity::IdempotencyKey,
+        response_sealer: suprnova_live::endpoint::AcceptedResponseSealer,
+        response_binding: suprnova_live::endpoint::AcceptedResponseRequestBinding,
+    ) -> ExecutionResult {
         let validation_engine =
             suprnova_live::validation::ValidationEngine::new(16).expect("validation engine");
         let validation_port = Validation { fail: false };
@@ -755,7 +785,7 @@ impl ClaimLifecycleFixture {
                 &self.context,
                 browser_context(),
                 &self.snapshot,
-                idempotency(0x50),
+                idempotency_key,
                 digest(0x60),
                 ActionExecutionRequest::new(
                     &action_name,
@@ -816,6 +846,7 @@ async fn child_delivery_response_sealing_failure_rolls_back_before_acceptance() 
     };
 
     assert_eq!(refresh.reason(), ExecutionRefreshReason::ExecutionFailed);
+    assert_eq!(refresh.cause(), Some(ExecutionFailure::ResponseSealing));
     assert_eq!(fixture.transaction.domain_commits.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.transaction.rollbacks.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.inspection().accepted_outcome_count(), 0);
@@ -853,6 +884,7 @@ async fn foreign_request_sealer_fails_before_host_or_ledger_acceptance() {
     };
 
     assert_eq!(refresh.reason(), ExecutionRefreshReason::ExecutionFailed);
+    assert_eq!(refresh.cause(), Some(ExecutionFailure::ResponseSealing));
     assert_eq!(fixture.transaction.domain_commits.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.inspection().accepted_outcome_count(), 0);
 }
@@ -895,6 +927,7 @@ async fn semantic_request_sealer_swap_fails_before_host_or_ledger_acceptance() {
     };
 
     assert_eq!(refresh.reason(), ExecutionRefreshReason::ExecutionFailed);
+    assert_eq!(refresh.cause(), Some(ExecutionFailure::ResponseSealing));
     assert_eq!(fixture.transaction.domain_commits.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.inspection().accepted_outcome_count(), 0);
 }
@@ -908,6 +941,7 @@ fn assert_consumed_refresh(result: ExecutionResult) {
         ExecutionRefreshReason::Ledger(RefreshReason::Consumed)
     );
     assert_eq!(refresh.retry_legality(), RetryLegality::Prohibited);
+    assert_eq!(refresh.cause(), None);
 }
 
 #[tokio::test]
@@ -994,6 +1028,10 @@ async fn ledger_failure_after_host_commit_fences_base_revision_from_replay() {
         first.reason(),
         ExecutionRefreshReason::LedgerAcceptanceFailed
     );
+    assert_eq!(
+        first.cause(),
+        Some(ExecutionFailure::Ledger(LedgerErrorKind::ClockUnavailable))
+    );
     assert_eq!(fixture.transaction.domain_commits.load(Ordering::SeqCst), 1);
 
     fixture.ledger_clock.fail.store(false, Ordering::SeqCst);
@@ -1001,6 +1039,91 @@ async fn ledger_failure_after_host_commit_fences_base_revision_from_replay() {
     assert_eq!(fixture.transaction.domain_commits.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.inspection().phase(), LedgerPhase::Consumed);
     assert_eq!(fixture.inspection().accepted_outcome_count(), 0);
+}
+
+#[tokio::test]
+async fn ledger_claim_errors_keep_their_kind_as_the_refresh_cause() {
+    let kinds = [
+        LedgerErrorKind::ProviderUnavailable,
+        LedgerErrorKind::ClockUnavailable,
+        LedgerErrorKind::InstanceConflict,
+        LedgerErrorKind::CounterExhausted,
+        LedgerErrorKind::CapacityExceeded,
+        LedgerErrorKind::InvalidConfiguration,
+    ];
+
+    for kind in kinds {
+        let fixture = ClaimLifecycleFixture::new().await;
+        fixture.acceptance.fail_next_claim(kind);
+
+        let ExecutionResult::RefreshRequired(refresh) = fixture.execute().await else {
+            panic!("a ledger that cannot arbitrate the claim must require refresh");
+        };
+
+        assert_eq!(
+            refresh.reason(),
+            ExecutionRefreshReason::LedgerUnavailable,
+            "{kind:?}"
+        );
+        assert_eq!(
+            refresh.retry_legality(),
+            RetryLegality::Prohibited,
+            "{kind:?}"
+        );
+        assert_eq!(
+            refresh.cause(),
+            Some(ExecutionFailure::Ledger(kind)),
+            "{kind:?}"
+        );
+        assert_eq!(
+            fixture.transaction.domain_commits.load(Ordering::SeqCst),
+            0,
+            "{kind:?}"
+        );
+        assert_eq!(fixture.inspection().phase(), LedgerPhase::Ready, "{kind:?}");
+        assert_eq!(fixture.inspection().accepted_outcome_count(), 0, "{kind:?}");
+    }
+}
+
+#[tokio::test]
+async fn stale_and_duplicate_refreshes_carry_no_failure_cause() {
+    let fixture = ClaimLifecycleFixture::new().await;
+    let ExecutionResult::Accepted(accepted) = fixture.execute().await else {
+        panic!("the first request against the base revision is accepted");
+    };
+    assert_eq!(accepted.revision(), Revision::new(1));
+
+    let ExecutionResult::RefreshRequired(duplicate) = fixture.execute().await else {
+        panic!("an exact duplicate of an accepted request must require refresh");
+    };
+    assert_eq!(
+        duplicate.reason(),
+        ExecutionRefreshReason::DuplicateResponseUnavailable
+    );
+    assert_eq!(duplicate.cause(), None);
+
+    let response_sealing = admitted_response_sealer_with_snapshot_limits(
+        fixture.descriptor.clone(),
+        trusted_context_for(metadata(), None),
+        &fixture.encoded_snapshot,
+        Revision::new(0),
+        0x45,
+        None,
+        fixture.snapshot_limits.clone(),
+    )
+    .await;
+    let (response_sealer, response_binding) = response_sealing.into_parts();
+    let ExecutionResult::RefreshRequired(stale) = fixture
+        .execute_with_identity(idempotency(0x51), response_sealer, response_binding)
+        .await
+    else {
+        panic!("a new request against a superseded base revision must require refresh");
+    };
+    assert_eq!(stale.reason(), ExecutionRefreshReason::Stale);
+    assert_eq!(stale.retry_legality(), RetryLegality::Prohibited);
+    assert_eq!(stale.cause(), None);
+    assert_eq!(fixture.transaction.domain_commits.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.inspection().accepted_outcome_count(), 1);
 }
 
 fn expected_trace(fault: Fault) -> &'static [ExecutionPhase] {
@@ -1199,6 +1322,45 @@ fn expected_trace(fault: Fault) -> &'static [ExecutionPhase] {
             Phase::LedgerAcceptance,
             Phase::Reporting,
         ],
+    }
+}
+
+fn expected_cause(fault: Fault) -> Option<ExecutionFailure> {
+    let dispatcher = ActionExecutionErrorKind::Action(ActionErrorKind::DispatcherContract);
+    match fault {
+        // A missing instance is the ledger's classified answer, not a fault; reporting faults
+        // never refresh.
+        Fault::Claim | Fault::Reporting | Fault::ReportingPanic => None,
+        Fault::Hydrate
+        | Fault::Bind
+        | Fault::BeforeAction
+        | Fault::AfterAction
+        | Fault::Render
+        | Fault::Dehydrate => Some(ExecutionFailure::Action(
+            ActionExecutionErrorKind::Lifecycle,
+        )),
+        Fault::Authorize | Fault::Action => Some(ExecutionFailure::Action(dispatcher)),
+        Fault::Validate => Some(ExecutionFailure::Action(
+            ActionExecutionErrorKind::Validation,
+        )),
+        // A rollback that panics after a failed hook replaces the hook failure.
+        Fault::TransactionBegin | Fault::TransactionBeginPanic | Fault::RollbackPanic => {
+            Some(ExecutionFailure::Action(ActionExecutionErrorKind::Host))
+        }
+        Fault::Sign => Some(ExecutionFailure::Snapshot(
+            SnapshotErrorKind::UnknownStateField,
+        )),
+        Fault::OutcomeValidation => Some(ExecutionFailure::View(
+            ViewErrorKind::ExecutableMountMetadata,
+        )),
+        Fault::ResponseIntent => Some(ExecutionFailure::Host(HostErrorKind::ResponseIntent)),
+        Fault::ResponseIntentShape => Some(ExecutionFailure::ResponseIntents),
+        Fault::ResponseSealing => Some(ExecutionFailure::ResponseSealing),
+        Fault::HostCommit | Fault::HostCommitPanic => {
+            Some(ExecutionFailure::Host(HostErrorKind::Commit))
+        }
+        // The host commit moves the ledger clock past the one-hundred millisecond claim lease.
+        Fault::LedgerAcceptance => Some(ExecutionFailure::Ledger(LedgerErrorKind::ClaimExpired)),
     }
 }
 
@@ -1436,6 +1598,7 @@ async fn every_locked_boundary_has_exact_recovery_and_durability_semantics() {
                 _ => ExecutionRefreshReason::ExecutionFailed,
             };
             assert_eq!(refresh.reason(), expected_reason, "fault {fault:?}");
+            assert_eq!(refresh.cause(), expected_cause(fault), "fault {fault:?}");
         }
 
         if fault != Fault::Claim {

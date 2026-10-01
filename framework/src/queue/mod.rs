@@ -2,6 +2,7 @@
 
 pub mod batch;
 pub mod chain;
+pub(crate) mod connections;
 pub mod database;
 pub mod debounce;
 pub mod driver;
@@ -9,6 +10,7 @@ pub mod envelope;
 pub mod errors;
 pub mod events;
 pub mod failed;
+pub(crate) mod failed_console;
 pub mod failover;
 pub mod inspect;
 pub mod job;
@@ -53,15 +55,15 @@ pub use sync::SyncQueueDriver;
 
 use crate::error::FrameworkError;
 use crate::lock;
-use chrono::Utc;
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
 static DRIVER: RwLock<Option<Arc<dyn QueueDriver>>> = RwLock::new(None);
 
-/// Process-wide name for the current queue connection. Carried in queue
-/// lifecycle events so listeners can distinguish driver instances when an
-/// app runs multiple connections at once.
+/// Name of the default queue connection, the one [`Queue::set_driver`]
+/// installs. Carried in queue lifecycle events, and the name a job selects
+/// the default connection by when other connections are registered (see
+/// [`Queue::register_connection`]).
 static CONNECTION_NAME: RwLock<Option<String>> = RwLock::new(None);
 
 /// Cache key for the cross-worker restart signal. Worker checks the
@@ -92,8 +94,10 @@ fn queue_pause_key(connection: &str, queue: &str) -> String {
 pub struct EnvelopeOverrides {
     /// Queue name. Outranks `Queue::route` and `Job::queue()`.
     pub queue: Option<String>,
-    /// Connection name reported on `JobQueueing` / `JobQueued`. Outranks
-    /// `Queue::route` and `Job::connection()`.
+    /// Connection the envelope is pushed to, and the name reported on
+    /// `JobQueueing` / `JobQueued`. Outranks `Queue::route` and
+    /// `Job::connection()`. See [`Queue::register_connection`] for how a
+    /// name selects a driver.
     pub connection: Option<String>,
     /// Per-attempt timeout. Outranks `Job::timeout()`.
     pub timeout: Option<std::time::Duration>,
@@ -124,6 +128,19 @@ pub struct EnvelopeOverrides {
 pub struct Queue;
 
 impl Queue {
+    /// Install the queue fake for the current test. Returns an RAII guard
+    /// that uninstalls it on drop. While the guard is live, every push is
+    /// recorded instead of reaching a driver, and the `assert_*` functions
+    /// in [`testing`] read what was recorded.
+    ///
+    /// The guard holds a process-wide serialization mutex, so parallel
+    /// tests cannot share the fake store. It is the same guard
+    /// [`testing::install_fake`] returns; this is the spelling every other
+    /// facade's fake has.
+    pub fn fake() -> testing::QueueFakeGuard {
+        testing::install_fake()
+    }
+
     /// Route every future dispatch of `J` to a connection and/or queue.
     ///
     /// Mirrors Laravel 13's `Queue::route(...)`. Register in
@@ -148,13 +165,13 @@ impl Queue {
     /// A route overrides [`Job::queue`] / [`Job::connection`]; re-registering
     /// the same job replaces the previous rule.
     ///
-    /// The two dimensions are not equally deep. The **queue** is honored end
-    /// to end: stamped on the envelope, stored by the driver, and filtered by
-    /// `queue:work --queue=...`. The **connection** currently resolves only
-    /// the connection *name* carried on [`events::JobQueueing`] /
-    /// [`events::JobQueued`] - a single process-global driver still receives
-    /// every push, so routing the connection does not yet select a different
-    /// driver.
+    /// The **queue** is stamped on the envelope, stored by the driver, and
+    /// filtered by `queue:work --queue=...`. The **connection** selects the
+    /// driver the envelope is pushed to, among the connections registered
+    /// with [`Queue::register_connection`], and is the name carried on
+    /// [`events::JobQueueing`] / [`events::JobQueued`]. While no connection
+    /// is registered there is one driver, every push reaches it, and the
+    /// connection is a name on those events only.
     ///
     /// Infallible by design to match Laravel's spelling. The registry is
     /// only unavailable if a previous caller panicked while holding its
@@ -237,27 +254,29 @@ impl Queue {
 
     /// [`Queue::forward`], restricted to one connection name.
     ///
-    /// The forward fires only when `connection` equals this process's
-    /// connection name - [`Queue::connection_name`], which is
-    /// [`Queue::set_connection_name`] if it was set and the driver's own name
-    /// otherwise. It is **not** compared against the job's
-    /// [`Job::connection`], against a [`Queue::route`]'s connection, or against
-    /// a per-push [`EnvelopeOverrides::connection`]; those name what the
-    /// lifecycle events report, and a worker has only the process name to gate
-    /// its claim list on. Gating the two halves on different values would let a
+    /// The forward fires only for an envelope pushed to the connection
+    /// `connection`, and for a worker draining it. Both halves compare
+    /// `connection` with the same value: the name of the connection the
+    /// envelope goes to, which is the name the worker on that connection was
+    /// started with. Gating the two halves on different values would let a
     /// forward move the push without moving the claim, which strands work. On
-    /// any other connection name the forward is inert and the queue name passes
+    /// any other connection the forward is inert and the queue name passes
     /// through unchanged.
+    ///
+    /// While no connection is registered with [`Queue::register_connection`],
+    /// every envelope goes to the default connection, so the value compared
+    /// is [`Queue::connection_name`] whatever connection the job, a route or
+    /// a per-push override names. Those then name what the lifecycle events
+    /// report, and the one worker has only the default name to gate its claim
+    /// list on.
     ///
     /// # What this cannot do
     ///
     /// Laravel's `forward($queue, $to, $connection)` can also move a forwarded
-    /// queue onto a *different* connection, because its `QueueManager` resolves
-    /// a driver per connection name. Suprnova has one process-global driver and
-    /// the connection name only labels lifecycle events (see this module's
-    /// docs), so `connection` here is a **gate**, never a destination: it
-    /// decides whether the queue-name redirect applies, and the push still
-    /// reaches the same driver either way.
+    /// queue onto a *different* connection. Here `connection` is a **gate**,
+    /// never a destination: it decides whether the queue-name redirect
+    /// applies, and the push reaches the connection it resolved to either
+    /// way. To move a job to another connection, route the job.
     pub fn forward_on(from: &str, to: &str, connection: &str) {
         Self::log_forward_failure(from, Self::try_forward(from, to, Some(connection)));
     }
@@ -391,7 +410,7 @@ impl Queue {
 
     /// Convenience: push with a delay from `now`.
     pub async fn later<J: Job>(delay: std::time::Duration, job: J) -> Result<(), FrameworkError> {
-        let available_at = Utc::now()
+        let available_at = crate::clock::now()
             + chrono::Duration::from_std(delay)
                 .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
         Self::push_later(job, available_at).await
@@ -417,7 +436,7 @@ impl Queue {
         job: J,
         overrides: EnvelopeOverrides,
     ) -> Result<(), FrameworkError> {
-        let available_at = Utc::now()
+        let available_at = crate::clock::now()
             + chrono::Duration::from_std(delay)
                 .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
         Self::dispatch_push(job, AvailableAt::Fixed(available_at), overrides, None).await
@@ -435,6 +454,13 @@ impl Queue {
     /// events and the driver write. Laravel defers the whole of `enqueueUsing`
     /// for the same reason - a listener that observes `JobQueued` for a job
     /// that a rollback then discarded has been told something untrue.
+    ///
+    /// Two things do not wait for the callback. The
+    /// [`Context`](crate::context::Context) is snapshotted here, because the
+    /// callback runs at the commit on a task that is outside the caller's
+    /// context scope. And the connection is resolved here once, because a
+    /// name that is no connection has to fail while the caller can still
+    /// abandon the transaction, not after the rows are committed.
     async fn dispatch_push<J: Job>(
         job: J,
         when: AvailableAt,
@@ -466,42 +492,55 @@ impl Queue {
             Self::dispatch_fake_queued_events::<J>(id, connection).await;
             return Ok(());
         }
-        if overrides.after_commit.unwrap_or_else(J::after_commit)
+        let context = crate::context::Context::dehydrate();
+        if overrides.after_commit.unwrap_or_else(waits_for_commit::<J>)
             && crate::database::after_commit::in_transaction()
         {
+            let connection = overrides
+                .connection
+                .clone()
+                .unwrap_or_else(connection_of::<J>);
+            connections::target(&connection)?;
             return crate::database::after_commit::register_callback(Box::new(move || {
                 Box::pin(async move {
-                    Self::push_immediately::<J>(job, when, overrides, debounce).await
+                    Self::push_immediately::<J>(job, when, overrides, debounce, context).await
                 })
             }))
             .await;
         }
-        Self::push_immediately::<J>(job, when, overrides, debounce).await
+        Self::push_immediately::<J>(job, when, overrides, debounce, context).await
     }
 
     /// Build the envelope, emit `JobQueueing`, write to the driver, emit
     /// `JobQueued`. Shared by the immediate and deferred paths so a deferred
     /// push is byte-for-byte the push that would have happened, only later.
     ///
-    /// `overrides.connection`, when set, short-circuits
-    /// `routing::resolve_connection` (connection isn't stored on the
-    /// envelope, only reported on the events below).
+    /// `overrides.connection`, when set, short-circuits the resolution of
+    /// the job's own connection. The connection selects the driver and is
+    /// reported on the events below; it is not stored on the envelope.
+    ///
+    /// `context` is the caller's, taken by [`Self::dispatch_push`] before
+    /// any deferral.
     async fn push_immediately<J: Job>(
         job: J,
         when: AvailableAt,
         overrides: EnvelopeOverrides,
         debounce: Option<debounce::DebounceOptions>,
+        context: Option<crate::context::ContextSnapshot>,
     ) -> Result<(), FrameworkError> {
         let connection = overrides
             .connection
             .clone()
-            .unwrap_or_else(|| routing::resolve_connection::<J>(Self::connection_name()));
+            .unwrap_or_else(connection_of::<J>);
         let available_at = when.resolve::<J>()?;
-        let mut env = envelope_for::<J>(&job, available_at)?;
-        // The forward gate is the process connection name; `connection` above is
-        // the resolved name the lifecycle events report, and the two are
-        // deliberately different values.
-        apply_overrides(&mut env, &overrides, &Self::connection_name());
+        // The forward gate is the label of the connection the envelope goes
+        // to, which is what the worker draining it gates its claim list on.
+        // `connection` above is the name the lifecycle events report. The two
+        // differ only while no connection is registered, when every push goes
+        // to the default connection whatever name it carries.
+        let gate = forward_gate(&connection);
+        let mut env = build_envelope_on::<J>(&job, available_at, &gate, context)?;
+        apply_overrides(&mut env, &overrides, &gate);
         // The window is armed here rather than at the entry point so a deferred
         // push arms it at the commit, in the same step that writes the
         // envelope. Arming earlier would let a rolled-back transaction leave an
@@ -534,11 +573,12 @@ impl Queue {
             )
         });
         // Resolving the driver is inside the guarded block, not above it: a
-        // missing driver after the window was armed is the same hazard as a
-        // failed write, and leaving it outside would skip the cleanup.
+        // missing driver, or a connection nobody registered, after the window
+        // was armed is the same hazard as a failed write, and leaving it
+        // outside would skip the cleanup.
         let result = async {
-            let drv = current_driver()?;
-            drv.push(env).await
+            let target = connections::target(&connection)?;
+            target.driver.push(env).await
         }
         .await;
         if let Err(e) = result {
@@ -682,7 +722,7 @@ impl Queue {
         delay: std::time::Duration,
         job: J,
     ) -> Result<bool, FrameworkError> {
-        let available_at = Utc::now()
+        let available_at = crate::clock::now()
             + chrono::Duration::from_std(delay)
                 .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
         Self::push_unique_at::<J>(job, AvailableAt::Fixed(available_at)).await
@@ -719,8 +759,16 @@ impl Queue {
         // that owns the ambient transaction; `commit_on_success_owned` runs the
         // body on this same task, but reading it once keeps that an
         // implementation detail rather than a dependency.
-        let defer = J::after_commit() && crate::database::after_commit::in_transaction();
+        let defer = waits_for_commit::<J>() && crate::database::after_commit::in_transaction();
         let deferred_key = key.clone();
+        // Taken here for the reason `dispatch_push` gives: a deferred push
+        // builds its envelope at the commit, outside the caller's scope.
+        let context = crate::context::Context::dehydrate();
+        if defer {
+            // Before the lock is taken, so a name that is no connection
+            // fails with nothing to release and nothing committed.
+            driver_for_job::<J>()?;
+        }
 
         // `commit_on_success_owned` rather than `commit_on_success`: the owner
         // token of the lock we are holding right now has to reach the envelope,
@@ -743,13 +791,14 @@ impl Queue {
                             id,
                             owner_token,
                             deferred_key,
+                            context,
                         )
                         .await;
                     }
-                    let mut env = envelope_for::<J>(&job, when.resolve::<J>()?)?;
+                    let mut env = envelope_for::<J>(&job, when.resolve::<J>()?, context)?;
                     env.idempotency_key = Some(id);
                     env.unique_lock_owner = owner_token;
-                    let drv = current_driver()?;
+                    let drv = driver_for_job::<J>()?;
                     drv.push(env).await
                 }
             })
@@ -807,6 +856,7 @@ impl Queue {
         unique_id: String,
         owner: Option<String>,
         lock_key: String,
+        context: Option<crate::context::ContextSnapshot>,
     ) -> Result<(), FrameworkError> {
         if let Some(owner) = owner.clone() {
             let key = lock_key.clone();
@@ -820,11 +870,11 @@ impl Queue {
         }
         crate::database::after_commit::register_callback(Box::new(move || {
             Box::pin(async move {
-                let mut env = envelope_for::<J>(&job, when.resolve::<J>()?)?;
+                let mut env = envelope_for::<J>(&job, when.resolve::<J>()?, context)?;
                 env.idempotency_key = Some(unique_id);
                 env.unique_lock_owner = owner.clone();
                 let result = async {
-                    let drv = current_driver()?;
+                    let drv = driver_for_job::<J>()?;
                     drv.push(env).await
                 }
                 .await;
@@ -867,40 +917,46 @@ impl Queue {
     /// Suprnova has nothing to partition.
     pub async fn bulk<J: Job + Clone>(jobs: Vec<J>) -> Result<(), FrameworkError> {
         if testing::is_active() {
-            let available_at = resolve_job_delay::<J>(Utc::now())?;
+            let available_at = resolve_job_delay::<J>(crate::clock::now())?;
             for j in jobs {
                 testing::record::<J>(&j, available_at)?;
             }
             return Ok(());
         }
-        if J::after_commit() && crate::database::after_commit::in_transaction() {
+        // Taken here for the reason `dispatch_push` gives.
+        let context = crate::context::Context::dehydrate();
+        if waits_for_commit::<J>() && crate::database::after_commit::in_transaction() {
+            driver_for_job::<J>()?;
             return crate::database::after_commit::register_callback(Box::new(move || {
-                Box::pin(async move { Self::bulk_immediately::<J>(jobs).await })
+                Box::pin(async move { Self::bulk_immediately::<J>(jobs, context).await })
             }))
             .await;
         }
-        Self::bulk_immediately::<J>(jobs).await
+        Self::bulk_immediately::<J>(jobs, context).await
     }
 
     /// Encode every job and hand the batch to the driver. Split out of
     /// [`Queue::bulk`] so the deferred path resolves `Job::delay` against the
     /// commit rather than against the push, exactly as a single deferred push
     /// does.
-    async fn bulk_immediately<J: Job + Clone>(jobs: Vec<J>) -> Result<(), FrameworkError> {
-        let available_at = resolve_job_delay::<J>(Utc::now())?;
+    async fn bulk_immediately<J: Job + Clone>(
+        jobs: Vec<J>,
+        context: Option<crate::context::ContextSnapshot>,
+    ) -> Result<(), FrameworkError> {
+        let available_at = resolve_job_delay::<J>(crate::clock::now())?;
         let mut envs = Vec::with_capacity(jobs.len());
         for j in jobs {
-            envs.push(envelope_for::<J>(&j, available_at)?);
+            envs.push(envelope_for::<J>(&j, available_at, context.clone())?);
         }
-        let drv = current_driver()?;
+        let drv = driver_for_job::<J>()?;
         drv.bulk_push(envs).await
     }
 
     /// Begin a queued batch builder. Mirrors `Bus::batch([...])`.
     ///
     /// Add jobs with `.add(job)`, register `then`/`catch`/`finally`
-    /// callbacks by name, then `.dispatch()` to push every job through
-    /// the configured driver under one batch id.
+    /// callbacks by name, then `.dispatch()` to push every job, each to
+    /// its own connection, under one batch id.
     pub fn batch() -> PendingBatch {
         PendingBatch::new()
     }
@@ -910,8 +966,11 @@ impl Queue {
         PendingChain::new()
     }
 
-    /// Total envelopes currently held by the driver
+    /// Total envelopes currently held by the default connection
     /// (pending + delayed + reserved).
+    ///
+    /// This and the counts and listings below read the default connection.
+    /// For another one, ask its driver: `Queue::connection(name)?.size()`.
     pub async fn size() -> Result<u64, FrameworkError> {
         current_driver()?.size().await
     }
@@ -955,13 +1014,13 @@ impl Queue {
         current_driver()?.reserved_jobs(queue).await
     }
 
-    /// Drop every envelope on the configured driver. Returns the number
+    /// Drop every envelope on the default connection. Returns the number
     /// of envelopes removed. Mirrors `Queue::clear($queue)`.
     pub async fn clear() -> Result<u64, FrameworkError> {
         current_driver()?.clear().await
     }
 
-    /// Broadcast a restart signal to every worker on this connection.
+    /// Broadcast a restart signal to every worker, on every connection.
     /// Workers poll the cache key once per loop and exit cleanly when
     /// the signal's timestamp is newer than their startup time. Mirrors
     /// Laravel's `php artisan queue:restart`.
@@ -971,7 +1030,7 @@ impl Queue {
     /// milliseconds so tightly-clustered `restart()` calls in tests are
     /// distinguishable.
     pub async fn restart() -> Result<(), FrameworkError> {
-        let now = Utc::now().timestamp_millis();
+        let now = crate::clock::now().timestamp_millis();
         crate::cache::Cache::put(RESTART_SIGNAL_KEY, &now, None).await?;
         Ok(())
     }
@@ -994,10 +1053,15 @@ impl Queue {
     /// [`WorkerConfig`](crate::queue::worker::WorkerConfig) and the
     /// "Pausing queues" section of the queue manual chapter for why an
     /// unfiltered worker cannot apply a per-queue pause.
+    ///
+    /// `connection` is the name of the connection the worker drains: the
+    /// default connection's ([`Queue::connection_name`]) or a registered
+    /// one. A second name for the default connection pauses the default.
     pub async fn pause(connection: &str, queue: &str) -> Result<(), FrameworkError> {
-        crate::cache::Cache::forever(&queue_pause_key(connection, queue), &true).await?;
+        let connection = connections::scoped_label(connection);
+        crate::cache::Cache::forever(&queue_pause_key(&connection, queue), &true).await?;
         let _ = crate::events::EventFacade::dispatch(events::QueuePaused {
-            connection: connection.to_string(),
+            connection,
             queue: queue.to_string(),
         })
         .await;
@@ -1009,9 +1073,10 @@ impl Queue {
     /// resuming a queue that isn't paused is not an error. Dispatches
     /// [`events::QueueResumed`].
     pub async fn resume(connection: &str, queue: &str) -> Result<(), FrameworkError> {
-        crate::cache::Cache::forget(&queue_pause_key(connection, queue)).await?;
+        let connection = connections::scoped_label(connection);
+        crate::cache::Cache::forget(&queue_pause_key(&connection, queue)).await?;
         let _ = crate::events::EventFacade::dispatch(events::QueueResumed {
-            connection: connection.to_string(),
+            connection,
             queue: queue.to_string(),
         })
         .await;
@@ -1052,8 +1117,9 @@ impl Queue {
         if is_globally_paused().await? {
             return Ok(true);
         }
+        let connection = connections::scoped_label(connection);
         Ok(
-            crate::cache::Cache::get::<bool>(&queue_pause_key(connection, queue))
+            crate::cache::Cache::get::<bool>(&queue_pause_key(&connection, queue))
                 .await?
                 .unwrap_or(false),
         )
@@ -1070,9 +1136,10 @@ impl Queue {
         if is_globally_paused().await? {
             return Ok(queues.to_vec());
         }
+        let connection = connections::scoped_label(connection);
         let mut paused = Vec::with_capacity(queues.len());
         for queue in queues {
-            if crate::cache::Cache::get::<bool>(&queue_pause_key(connection, queue))
+            if crate::cache::Cache::get::<bool>(&queue_pause_key(&connection, queue))
                 .await?
                 .unwrap_or(false)
             {
@@ -1098,11 +1165,14 @@ impl Queue {
     /// Re-enqueue a previously dead-lettered job by id. Loads the
     /// envelope from the configured [`FailedJobStore`], resets its
     /// `attempts`, `available_at`, `idempotency_key`, and
-    /// `unique_lock_owner`, pushes it through the configured driver, then
+    /// `unique_lock_owner`, pushes it to the connection it failed on, then
     /// deletes the failed-job record. Mirrors `php artisan queue:retry <id>`.
     ///
     /// Returns `Ok(true)` when the record was retried, `Ok(false)` when
     /// the id had no record in the store.
+    ///
+    /// Under [`Queue::fake`] the envelope is recorded as a push and no
+    /// driver is written to. The record still leaves the store.
     pub async fn retry_failed(id: Uuid) -> Result<bool, FrameworkError> {
         let store = failed::current().ok_or_else(|| {
             FrameworkError::internal(
@@ -1116,11 +1186,19 @@ impl Queue {
         let mut env = Envelope::from_json(&record.envelope_json)
             .map_err(|e| FrameworkError::internal(format!("retry_failed: decode envelope: {e}")))?;
         env.attempts = 0;
-        env.available_at = Utc::now();
+        env.available_at = crate::clock::now();
         env.idempotency_key = None;
         env.unique_lock_owner = None;
-        let drv = current_driver()?;
-        drv.push(env).await?;
+        if testing::is_active() {
+            // A retry is a push like any other: under the fake it is
+            // recorded, and the record leaves the store the same way.
+            testing::record_envelope(&env);
+        } else {
+            // Back to the connection the job failed on, which is the label
+            // of the worker that logged the record.
+            let target = connections::target(&record.connection)?;
+            target.driver.push(env).await?;
+        }
         store.forget(id).await?;
         Ok(true)
     }
@@ -1129,6 +1207,9 @@ impl Queue {
     /// than `before`). Returns the number of records retried. Mirrors
     /// `php artisan queue:retry all` plus `queue:flush` semantics: each
     /// retried envelope is pushed AND removed from the store.
+    ///
+    /// Under [`Queue::fake`] each envelope is recorded as a push and no
+    /// driver is written to. The records still leave the store.
     pub async fn retry_all_failed(
         before: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<u64, FrameworkError> {
@@ -1139,7 +1220,14 @@ impl Queue {
             )
         })?;
         let records = store.all().await?;
-        let drv = current_driver()?;
+        // Under the fake each retry is recorded and there is no driver to
+        // resolve. Otherwise the default driver is resolved before the loop,
+        // so a process with no driver reports it even when there is nothing
+        // to retry.
+        let faked = testing::is_active();
+        if !faked {
+            current_driver()?;
+        }
         let mut count: u64 = 0;
         for record in records {
             if let Some(cutoff) = before
@@ -1151,10 +1239,32 @@ impl Queue {
                 continue;
             };
             env.attempts = 0;
-            env.available_at = Utc::now();
+            env.available_at = crate::clock::now();
             env.idempotency_key = None;
             env.unique_lock_owner = None;
-            drv.push(env).await?;
+            if faked {
+                testing::record_envelope(&env);
+            } else {
+                // Back to the connection the job failed on. A record whose
+                // connection is no longer registered stays in the store,
+                // as a record that does not decode does: stopping here
+                // would leave the records after it unretried for a reason
+                // that is not theirs.
+                let target = match connections::target(&record.connection) {
+                    Ok(target) => target,
+                    Err(e) => {
+                        tracing::warn!(
+                            failed_job = %record.id,
+                            connection = %record.connection,
+                            error = %e,
+                            "queue retry: the failed job's connection cannot be resolved; \
+                             the record is kept"
+                        );
+                        continue;
+                    }
+                };
+                target.driver.push(env).await?;
+            }
             store.forget(record.id).await?;
             count += 1;
         }
@@ -1172,15 +1282,97 @@ impl Queue {
         batch::current_repository()
     }
 
-    /// Set the connection name carried in queue lifecycle events. Defaults
-    /// to the driver's `name()` if not overridden.
+    /// Register `driver` as the queue connection `name`, next to the default
+    /// connection that [`Queue::set_driver`] installs. Registering a name
+    /// twice replaces the earlier driver.
+    ///
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::queue::{MemoryQueueDriver, Queue};
+    /// pub async fn register() {
+    ///     // Reports are slow. They get a queue and workers of their own,
+    ///     // so they never hold up the default connection.
+    ///     Queue::register_connection("reports", Arc::new(MemoryQueueDriver::new()));
+    /// }
+    /// ```
+    ///
+    /// A job selects the connection with [`Job::connection`], a route with
+    /// [`Queue::route`], and one push with
+    /// [`EnvelopeOverrides::connection`]. `queue:work --connection reports`
+    /// drains it.
+    ///
+    /// # What a connection name means
+    ///
+    /// While no connection is registered, there is one driver and every push
+    /// reaches it; a connection name is then only what the lifecycle events
+    /// report. Once one is registered, a name selects a driver: a registered
+    /// connection, or the default connection by its own name
+    /// ([`Queue::connection_name`]). A push to a name that is neither is an
+    /// error, and nothing is pushed.
+    ///
+    /// # What stays on one connection
+    ///
+    /// A chain runs on the connection of its first job, because the worker
+    /// enqueues the next link in the same step that settles the one before
+    /// it. [`PendingChain::dispatch`] refuses a chain whose links resolve to
+    /// different connections. The jobs of a batch may each go to their own.
+    ///
+    /// Infallible by design, as [`Queue::route`] is. A registry left
+    /// unavailable by a panic, or an empty name, is logged and the
+    /// connection is not registered. Use [`Queue::try_register_connection`]
+    /// to handle it.
+    pub fn register_connection(name: &str, driver: Arc<dyn QueueDriver>) {
+        if let Err(e) = Self::try_register_connection(name, driver) {
+            tracing::error!(
+                connection = name,
+                error = %e,
+                "queue connection registration failed; pushes to it will be refused"
+            );
+        }
+    }
+
+    /// Fallible sibling of [`Queue::register_connection`].
+    ///
+    /// Returns `Err` when `name` is empty, or when the connection registry's
+    /// lock is poisoned.
+    pub fn try_register_connection(
+        name: &str,
+        driver: Arc<dyn QueueDriver>,
+    ) -> Result<(), FrameworkError> {
+        connections::try_register(name, driver)
+    }
+
+    /// The driver of the connection `name`: a registered connection, or the
+    /// default connection when `name` is [`Queue::connection_name`]. Use it
+    /// to inspect one connection, for example
+    /// `Queue::connection("durable")?.size().await`.
+    ///
+    /// # Errors
+    ///
+    /// The errors of a push to `name`: see "What a connection name means" on
+    /// [`Queue::register_connection`].
+    pub fn connection(name: &str) -> Result<Arc<dyn QueueDriver>, FrameworkError> {
+        connections::target(name).map(|target| target.driver)
+    }
+
+    /// The names of the connections registered with
+    /// [`Queue::register_connection`], in order. The default connection is
+    /// not among them unless it was registered by name as well.
+    pub fn connection_names() -> Result<Vec<String>, FrameworkError> {
+        connections::names()
+    }
+
+    /// Set the name of the default connection, the one [`Queue::set_driver`]
+    /// installs. It is carried in queue lifecycle events, and it is the name
+    /// a job selects the default connection by. Defaults to the driver's
+    /// `name()` if not overridden.
     pub fn set_connection_name(name: impl Into<String>) {
         if let Ok(mut g) = CONNECTION_NAME.write() {
             *g = Some(name.into());
         }
     }
 
-    /// Resolve the connection name for events: explicit override → driver
+    /// The name of the default connection: explicit override → driver
     /// name → "default".
     pub fn connection_name() -> String {
         if let Ok(g) = CONNECTION_NAME.read()
@@ -1204,7 +1396,7 @@ impl Queue {
         *DRIVER.write().unwrap_or_else(|e| e.into_inner()) = Some(driver);
     }
 
-    /// Return the registered driver's `name()` for observability (admin,
+    /// Return the default connection's driver `name()` for observability (admin,
     /// `queue:work` startup log, debug). Returns the same `FrameworkError`
     /// that [`Queue::push`] would surface when no driver is registered.
     ///
@@ -1218,9 +1410,10 @@ impl Queue {
         Ok(current_driver()?.name())
     }
 
-    /// Return the registered driver as an `Arc<dyn QueueDriver>` so callers
-    /// (workers, admin inspectors) can use it directly. Most app code should
-    /// prefer the [`Queue::push`] facade.
+    /// Return the default connection's driver as an `Arc<dyn QueueDriver>`
+    /// so callers (workers, admin inspectors) can use it directly. Most app
+    /// code should prefer the [`Queue::push`] facade. [`Queue::connection`]
+    /// returns the driver of a connection by name.
     ///
     /// # Errors
     ///
@@ -1265,6 +1458,30 @@ pub(crate) fn pausable_from_env() -> bool {
     )
 }
 
+/// Whether every push waits for the surrounding transaction to commit,
+/// whatever the job declares. Mirrors the `after_commit` option of a Laravel
+/// queue connection. Reads `QUEUE_AFTER_COMMIT` fresh: `"true"` or `"1"`
+/// turns it on, anything else, or unset, leaves it off.
+pub(crate) fn after_commit_from_env() -> bool {
+    matches!(
+        std::env::var("QUEUE_AFTER_COMMIT").as_deref(),
+        Ok("true") | Ok("1")
+    )
+}
+
+/// Whether a push of `J` that names no per-push choice waits for the
+/// surrounding transaction: the job asked for it, or `QUEUE_AFTER_COMMIT`
+/// asks for it on behalf of every job.
+///
+/// The two are joined with "or" because `Job::after_commit` answers `false`
+/// both for a job that never chose and for one that chose `false`, so the
+/// process-wide setting cannot be overruled from the trait. One push can
+/// still go ahead of the commit with
+/// [`EnvelopeOverrides::after_commit`] set to `Some(false)`.
+fn waits_for_commit<J: Job>() -> bool {
+    J::after_commit() || after_commit_from_env()
+}
+
 /// Wire the in-memory queue driver as the default. Idempotent.
 pub async fn bootstrap_default() {
     if lock::read(&DRIVER, "queue driver registry")
@@ -1276,19 +1493,36 @@ pub async fn bootstrap_default() {
     Queue::set_driver(Arc::new(memory::MemoryQueueDriver::new()));
 }
 
-/// Read `QUEUE_DRIVER` env and configure the matching driver. Falls back to the
-/// in-memory default on any unrecognized value or when `QUEUE_DRIVER` is unset.
+/// Read `QUEUE_DRIVER` env and configure the matching driver: `memory`, `sync`,
+/// `null`, `redis`, `database` or `failover`. An unset `QUEUE_DRIVER` is
+/// `memory`.
+///
+/// A value that names no driver is a boot error in production, where falling
+/// back to an in-memory queue would lose every job at the next restart with a
+/// log line as the only sign. Anywhere else it is a warning that lists the
+/// accepted names, and the in-memory driver.
 ///
 /// `QUEUE_DRIVER=failover` additionally reads `QUEUE_FAILOVER_CONNECTIONS` (a
 /// comma-separated, priority-ordered list such as `redis,database`) and wires a
 /// [`FailoverQueueDriver`] over one inner driver per entry - see the "Failover
 /// connections" section of the queue manual chapter.
 ///
+/// `QUEUE_CONNECTIONS` (a comma-separated list such as `redis,database`)
+/// registers one named connection per entry next to the default one, each
+/// named for its driver and configured exactly as it would be were it
+/// `QUEUE_DRIVER` alone. An entry that names the default's driver is a second
+/// name for the default connection, not a second driver on the same storage:
+/// it keeps the default's label, so a pause or a forward reaches the queue
+/// whichever of the two names set it. Any other entry over a queue that is
+/// already in use is refused. See [`Queue::register_connection`] for what a
+/// job does with a connection name.
+///
 /// Unlike [`bootstrap_default`], this call **always replaces** the registered
 /// driver - long-running processes (workers, tests) that re-invoke
 /// `bootstrap_from_env` after `QUEUE_DRIVER` changes (or after an earlier
 /// Redis/database boot) will pick up the new driver instead of being pinned to
-/// the first one installed.
+/// the first one installed. A connection the application registered itself
+/// is left alone unless `QUEUE_CONNECTIONS` names it.
 pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
     let requested = std::env::var("QUEUE_DRIVER").unwrap_or_else(|_| "memory".into());
     let driver = match requested.as_str() {
@@ -1300,14 +1534,132 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
         // existing in two places.
         other => match build_driver_from_env(other).await? {
             Some(driver) => driver,
-            None => {
-                tracing::warn!(driver = %other, "unknown QUEUE_DRIVER, falling back to memory");
-                Arc::new(memory::MemoryQueueDriver::new()) as Arc<dyn QueueDriver>
-            }
+            None => unknown_driver(other, crate::config::Environment::detect().is_production())?,
         },
     };
-    Queue::set_driver(driver);
+    Queue::set_driver(Arc::clone(&driver));
+    register_connections_from_env(&requested, driver).await
+}
+
+/// Register the connections `QUEUE_CONNECTIONS` lists. `default_kind` is the
+/// value of `QUEUE_DRIVER` and `default` the driver it built.
+///
+/// A name this build does not know is an error everywhere, as it is inside
+/// `QUEUE_FAILOVER_CONNECTIONS`: a typo that quietly became an in-memory
+/// connection would send the jobs routed to it to a queue no worker drains.
+///
+/// # One queue, one connection
+///
+/// The environment configures each driver once: one Redis stream, one jobs
+/// table. Two connections built from it over `redis` or `database` would be
+/// two names, with two labels, for one queue, and a pause or a forward set
+/// for one would reach half of the work on it. So an entry is refused when
+/// its queue is already in use by the default connection or by an earlier
+/// entry, a failover's inner connections included. The one exception is an
+/// entry that names `QUEUE_DRIVER` itself: that is the default connection
+/// under a second name, and it keeps the default's label.
+async fn register_connections_from_env(
+    default_kind: &str,
+    default: Arc<dyn QueueDriver>,
+) -> Result<(), FrameworkError> {
+    let Ok(listed) = std::env::var("QUEUE_CONNECTIONS") else {
+        return Ok(());
+    };
+    let failover_inner = std::env::var("QUEUE_FAILOVER_CONNECTIONS").unwrap_or_default();
+    for name in plan_connections(default_kind, &listed, &failover_inner)? {
+        let driver = if name == default_kind {
+            Arc::clone(&default)
+        } else if name == "failover" {
+            build_failover_from_env().await?
+        } else {
+            build_driver_from_env(&name).await?.ok_or_else(|| {
+                FrameworkError::internal(format!(
+                    "QUEUE_CONNECTIONS names `{name}`, which is not a queue driver this \
+                     build knows; accepted values are {QUEUE_DRIVER_NAMES}"
+                ))
+            })?
+        };
+        connections::try_register(&name, driver)?;
+    }
     Ok(())
+}
+
+/// The connections to build for `QUEUE_CONNECTIONS=listed`, in order and
+/// without repeats, or the reason the list is refused. See "One queue, one
+/// connection" on [`register_connections_from_env`]. Nothing is built here,
+/// so a list that is refused leaves no driver behind.
+fn plan_connections(
+    default_kind: &str,
+    listed: &str,
+    failover_inner: &str,
+) -> Result<Vec<String>, FrameworkError> {
+    let mut in_use: Vec<(String, String)> = stored_queues_of(default_kind, failover_inner)
+        .into_iter()
+        .map(|queue| (queue, "the default connection".to_owned()))
+        .collect();
+    let mut planned: Vec<String> = Vec::new();
+    for name in listed.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        if planned.iter().any(|seen| seen == name) {
+            continue;
+        }
+        if name != default_kind {
+            for queue in stored_queues_of(name, failover_inner) {
+                if let Some((_, user)) = in_use.iter().find(|(used, _)| *used == queue) {
+                    return Err(FrameworkError::internal(format!(
+                        "QUEUE_CONNECTIONS names `{name}`, which would be a second \
+                         connection over the `{queue}` queue that {user} already uses. \
+                         One queue has one connection: a pause or a forward set for one \
+                         of two would reach half of the work"
+                    )));
+                }
+                in_use.push((queue, format!("the connection `{name}`")));
+            }
+        }
+        planned.push(name.to_owned());
+    }
+    Ok(planned)
+}
+
+/// The stored queues a driver built from the environment under `kind` reads
+/// and writes: `redis` and `database` name one each, and `failover` names
+/// those of its inner connections, `failover_inner`. The in-memory kinds
+/// name none, because every driver built from one is a queue of its own.
+fn stored_queues_of(kind: &str, failover_inner: &str) -> Vec<String> {
+    match kind {
+        "redis" | "database" => vec![kind.to_owned()],
+        "failover" => failover_inner
+            .split(',')
+            .map(str::trim)
+            .filter(|inner| matches!(*inner, "redis" | "database"))
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Every name `QUEUE_DRIVER` accepts, for the message a wrong one gets.
+const QUEUE_DRIVER_NAMES: &str = "memory, sync, null, redis, database, failover";
+
+/// What a `QUEUE_DRIVER` that names no driver becomes: a boot error in
+/// production, and outside it a warning and the in-memory driver.
+fn unknown_driver(
+    requested: &str,
+    is_production: bool,
+) -> Result<Arc<dyn QueueDriver>, FrameworkError> {
+    if is_production {
+        return Err(FrameworkError::internal(format!(
+            "QUEUE_DRIVER=`{requested}` is not a queue driver this build knows; \
+             accepted values are {QUEUE_DRIVER_NAMES}. Refusing to fall back to the \
+             in-memory driver in production, where it would lose every queued job at \
+             the next restart"
+        )));
+    }
+    tracing::warn!(
+        driver = %requested,
+        accepted = QUEUE_DRIVER_NAMES,
+        "unknown QUEUE_DRIVER, falling back to memory"
+    );
+    Ok(Arc::new(memory::MemoryQueueDriver::new()))
 }
 
 fn redis_consumer_id(configured: Option<String>) -> String {
@@ -1334,6 +1686,11 @@ fn redis_consumer_id(configured: Option<String>) -> String {
 async fn build_driver_from_env(name: &str) -> Result<Option<Arc<dyn QueueDriver>>, FrameworkError> {
     match name {
         "memory" => Ok(Some(Arc::new(memory::MemoryQueueDriver::new()))),
+        // Runs each job inline at push time: the usual development and
+        // test setting.
+        "sync" => Ok(Some(Arc::new(sync::SyncQueueDriver::new()))),
+        // Accepts every job and runs none.
+        "null" => Ok(Some(Arc::new(null::NullQueueDriver::new()))),
         "redis" => {
             let url = std::env::var("QUEUE_REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
@@ -1465,7 +1822,7 @@ enum AvailableAt {
 impl AvailableAt {
     fn resolve<J: Job>(&self) -> Result<chrono::DateTime<chrono::Utc>, FrameworkError> {
         match self {
-            Self::FromJobDelay => resolve_job_delay::<J>(Utc::now()),
+            Self::FromJobDelay => resolve_job_delay::<J>(crate::clock::now()),
             Self::Fixed(at) => Ok(*at),
         }
     }
@@ -1577,31 +1934,34 @@ async fn arm_debounce<J: Job>(
     };
     // `DateTime<Utc>`'s `Add<Duration>` panics near chrono's representable
     // range; house rule 2 says public-surface code returns `Result` instead.
-    let available_at = Utc::now().checked_add_signed(delay).ok_or_else(|| {
-        FrameworkError::internal(
-            "debounce window pushes availability out of the representable date range",
-        )
-    })?;
+    let available_at = crate::clock::now()
+        .checked_add_signed(delay)
+        .ok_or_else(|| {
+            FrameworkError::internal(
+                "debounce window pushes availability out of the representable date range",
+            )
+        })?;
     Ok(Some(available_at))
 }
 
 fn envelope_for<J: Job>(
     job: &J,
     available_at: chrono::DateTime<chrono::Utc>,
+    context: Option<crate::context::ContextSnapshot>,
 ) -> Result<Envelope, FrameworkError> {
-    build_envelope::<J>(job, available_at)
+    build_envelope::<J>(job, available_at, context)
 }
 
 /// Overlay `overrides` onto an already-resolved envelope, after
 /// `envelope_for` - see [`EnvelopeOverrides`]. No schema change: every
 /// touched field already exists on the frozen envelope.
 ///
-/// `connection` is the **process** connection name, not the one this push
-/// resolved to: an explicit queue override replaces the name `build_envelope`
-/// already forwarded, so the override has to be forwarded in its place, and it
-/// has to be gated on the same value every other half of the redirect uses.
-/// Forwarding the already-forwarded envelope instead would make forwards
-/// transitive, which they are not.
+/// `connection` is the label of the connection this push goes to, the value
+/// the envelope was built with: an explicit queue override replaces the name
+/// `build_envelope_on` already forwarded, so the override has to be forwarded
+/// in its place, and it has to be gated on the same value every other half of
+/// the redirect uses. Forwarding the already-forwarded envelope instead would
+/// make forwards transitive, which they are not.
 fn apply_overrides(env: &mut Envelope, overrides: &EnvelopeOverrides, connection: &str) {
     if let Some(queue) = &overrides.queue {
         env.queue = routing::forwarded_queue(Some(queue.as_str()), connection);
@@ -1620,12 +1980,68 @@ fn apply_overrides(env: &mut Envelope, overrides: &EnvelopeOverrides, connection
     }
 }
 
-/// Build an envelope for the typed job. Used by [`Queue::push`] and by
-/// [`PendingBatch::add`] / [`PendingChain::add`]. `pub(crate)` because
-/// external code goes through the facade.
+/// The connection a push of `J` resolves to when the push names none: a
+/// route's, then the job's own, then the default connection.
+pub(crate) fn connection_of<J: Job>() -> String {
+    // The default's name is resolved only when nothing else names one: it
+    // reads two registries, and most jobs that name a connection never need
+    // it.
+    if let Some(connection) = routing::route_for(J::job_name()).and_then(|route| route.connection) {
+        return connection;
+    }
+    J::connection()
+        .map(str::to_owned)
+        .unwrap_or_else(Queue::connection_name)
+}
+
+/// The driver a push of `J` goes to when the push names no connection.
+fn driver_for_job<J: Job>() -> Result<Arc<dyn QueueDriver>, FrameworkError> {
+    connections::target(&connection_of::<J>()).map(|target| target.driver)
+}
+
+/// Build an envelope for the typed job, bound for the connection the job
+/// itself resolves to. Used by the push paths that take no per-push
+/// connection and by [`PendingBatch::add`]. `pub(crate)` because external
+/// code goes through the facade.
+///
+/// `context` is the pusher's [`Context`](crate::context::Context), taken by
+/// the caller. It is an argument and not read here, because a deferred push
+/// builds its envelope at the commit, on a task outside the pusher's scope,
+/// and has to carry the snapshot it took before it was deferred.
 pub(crate) fn build_envelope<J: Job>(
     job: &J,
     available_at: chrono::DateTime<chrono::Utc>,
+    context: Option<crate::context::ContextSnapshot>,
+) -> Result<Envelope, FrameworkError> {
+    // The connection is resolved only when a forward may read it.
+    let gate = if routing::has_forwards() {
+        connections::label_for(&connection_of::<J>())
+    } else {
+        String::new()
+    };
+    build_envelope_on::<J>(job, available_at, &gate, context)
+}
+
+/// The value a push to `connection` gates its forwards on: the label of the
+/// connection. Empty while no forward is registered, because nothing reads
+/// it then, and a deployment that never forwards should not pay for
+/// resolving a label on every push.
+fn forward_gate(connection: &str) -> String {
+    if routing::has_forwards() {
+        connections::label_for(connection)
+    } else {
+        String::new()
+    }
+}
+
+/// Build an envelope for the typed job, bound for the connection labelled
+/// `gate` (see the `connections` module docs for what a label is), carrying
+/// `context` (see [`build_envelope`]).
+pub(crate) fn build_envelope_on<J: Job>(
+    job: &J,
+    available_at: chrono::DateTime<chrono::Utc>,
+    gate: &str,
+    context: Option<crate::context::ContextSnapshot>,
 ) -> Result<Envelope, FrameworkError> {
     let payload = serde_json::to_value(job)
         .map_err(|e| FrameworkError::internal(format!("encode job: {e}")))?;
@@ -1633,16 +2049,15 @@ pub(crate) fn build_envelope<J: Job>(
     // Routing decides the name; the forwards map then redirects it, exactly
     // where Laravel's driver-level `getQueue()` calls `resolveQueue()`.
     //
-    // The gate is the *process* connection name, never the one routing or the
-    // job resolved. The worker has only `Queue::connection_name()` to gate its
-    // claim list on, so any other value here would let `forward_on` move one
-    // half of the pair and strand work on the other. That is sound because the
-    // connection dimension is a label rather than a driver selector (see the
-    // `routing` module docs). Gated on `has_forwards` so a deployment that
-    // never forwards does not pay the lookup on every push.
+    // The gate is the label of the connection the envelope goes to. The
+    // worker draining that connection gates its claim list on the same
+    // label, so `forward_on` moves both halves of the pair or neither; any
+    // other value here would move one and strand work on the other. Gated
+    // on `has_forwards` so a deployment that never forwards does not pay
+    // the lookup on every push.
     let mut queue = routing::resolve_queue::<J>();
     if routing::has_forwards() {
-        queue = routing::forwarded_queue(queue.as_deref(), &Queue::connection_name());
+        queue = routing::forwarded_queue(queue.as_deref(), gate);
     }
     Ok(Envelope {
         schema_version: CURRENT_SCHEMA_VERSION,
@@ -1650,7 +2065,7 @@ pub(crate) fn build_envelope<J: Job>(
         job_name: J::job_name().to_string(),
         queue,
         payload,
-        dispatched_at: Utc::now(),
+        dispatched_at: crate::clock::now(),
         available_at,
         attempts: 0,
         max_tries: J::max_tries(),
@@ -1663,12 +2078,65 @@ pub(crate) fn build_envelope<J: Job>(
         debounce_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
+        context,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::redis_consumer_id;
+    use super::{plan_connections, redis_consumer_id};
+
+    #[test]
+    fn queue_connections_are_planned_in_order_and_without_repeats() {
+        assert_eq!(
+            plan_connections("memory", "redis, database ,redis,", "").unwrap(),
+            ["redis", "database"]
+        );
+        assert!(plan_connections("memory", "", "").unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_entry_that_names_the_default_driver_is_allowed() {
+        // It becomes a second name for the default connection, not a second
+        // driver over the default's queue.
+        assert_eq!(
+            plan_connections("redis", "redis,database", "").unwrap(),
+            ["redis", "database"]
+        );
+        assert_eq!(
+            plan_connections("failover", "failover", "redis,database").unwrap(),
+            ["failover"]
+        );
+    }
+
+    #[test]
+    fn a_second_connection_over_a_queue_in_use_is_refused() {
+        // The default is a failover over the jobs table, and `database`
+        // would be a second connection over the same table.
+        let error = plan_connections("failover", "database", "redis,database").unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("`database` queue"), "{message}");
+        assert!(message.contains("the default connection"), "{message}");
+
+        // The same, the other way round.
+        let error = plan_connections("database", "failover", "memory,database").unwrap_err();
+        assert!(error.to_string().contains("`database` queue"));
+
+        // And between two entries.
+        let error = plan_connections("memory", "redis,failover", "redis,memory").unwrap_err();
+        assert!(
+            error.to_string().contains("the connection `redis`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn in_memory_connections_never_share_a_queue() {
+        assert_eq!(
+            plan_connections("failover", "memory,null,failover", "memory,memory").unwrap(),
+            ["memory", "null", "failover"]
+        );
+    }
 
     #[test]
     fn redis_consumer_id_preserves_an_explicit_override() {

@@ -1283,6 +1283,42 @@ async fn stale_regenerate_wrong_and_valid_proofs_are_indistinguishable() {
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
+async fn a_failed_attempt_that_cannot_be_recorded_is_logged() {
+    let world = factor_world().await;
+    let user_id = registered_user(&world).await;
+    let actor = credential_actor(&world, &user_id).await;
+    world.two_factor.enroll(&actor).await.unwrap();
+    // Refuse exactly the row a rejected confirmation records.
+    world
+        .db
+        .execute_unprepared(
+            "CREATE TRIGGER fail_two_factor_attempt_insert \
+             BEFORE INSERT ON storage_lockouts \
+             WHEN NEW.reason = 'two-factor confirm' \
+             BEGIN \
+                 SELECT RAISE(ABORT, 'injected failed-attempt write failure'); \
+             END",
+        )
+        .await
+        .unwrap();
+
+    let error = world
+        .two_factor
+        .confirm(&actor, "000000")
+        .await
+        .expect_err("a wrong code is rejected whether or not it can be recorded");
+
+    assert!(matches!(error, magnetar::Error::InvalidInput { .. }));
+    assert!(
+        logs_contain(
+            "lockout failed-attempt accounting failed after a rejected two-factor confirmation"
+        ),
+        "the accounting failure is in the log"
+    );
+}
+
+#[tokio::test]
 async fn re_enroll_returns_artifacts_after_lockout_reset_failure() {
     let world = factor_world().await;
     let user_id = registered_user(&world).await;

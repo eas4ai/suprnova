@@ -24,6 +24,7 @@ use syn::Result;
 
 use super::casts;
 use super::parse::{ModelInput, RelationKindAttr};
+use super::relations;
 use super::serialization;
 
 pub fn emit(input: &ModelInput) -> Result<TokenStream> {
@@ -48,14 +49,18 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             .iter()
             .find(|r| r.name == name.as_str())
         {
-            Some(rel) if rel.kind == RelationKindAttr::BelongsTo => {}
+            Some(rel)
+                if matches!(
+                    rel.kind,
+                    RelationKindAttr::BelongsTo | RelationKindAttr::MorphTo
+                ) => {}
             Some(rel) => {
                 return Err(syn::Error::new_spanned(
                     &rel.name,
                     format!(
-                        "`touches = [\"{name}\"]` needs a `BelongsTo` relation - `{name}` is \
-                         declared as {:?}. Only the owning side of a relation can be touched; \
-                         polymorphic (`MorphTo`) owners are not supported yet.",
+                        "`touches = [\"{name}\"]` needs a `BelongsTo` or `MorphTo` relation - \
+                         `{name}` is declared as {:?}. Only the owning side of a relation can \
+                         be touched.",
                         rel.kind,
                     ),
                 ));
@@ -65,7 +70,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     struct_ident,
                     format!(
                         "`touches = [\"{name}\"]` names a relation that isn't declared. Add \
-                         `{name}: BelongsTo<Parent>` to this model's `relations = {{ ... }}`.",
+                         `{name}: BelongsTo<Parent>` (or a `MorphTo`) to this model's \
+                         `relations = {{ ... }}`.",
                     ),
                 ));
             }
@@ -175,6 +181,13 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // through this accessor.
     let field_value_method = serialization::emit_field_value(&field_idents);
 
+    // `__morph_owner(relation, base, attrs)`: resolves the owner row a
+    // `MorphTo` relation of a row points at, for the parent-touch
+    // cascade `Model::__plan_touches` prepares before the statement. Empty
+    // for a model without `MorphTo` relations, which keeps the trait
+    // default.
+    let morph_owner_method = relations::emit_morph_owner_method(input);
+
     // Every Self { ... } constructor that materialises a user struct
     // from a fresh-row source (`From<inner::Model>`, `Default`,
     // `try_from_storage`) must initialise the auto-injected `__eager`
@@ -192,11 +205,13 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // `self` in scope and must preserve relation state. Laravel's
     // `Model::replicate` carries the source's loaded relations onto
     // the replica (`clone $user` preserves `$user->posts`), and our
-    // `EagerLoadCache` docstring explicitly promises the same parity
-    // via its `Clone` impl. The pivot context is a cheap `Arc` clone
-    // and follows the same parity rule.
+    // `EagerLoadCache` docstring explicitly promises the same parity.
+    // The copy leaves out the cache's mark of a multi-row query: the
+    // replica is a model built in the process, which lazy-loading
+    // prevention never refuses. The pivot context is a cheap `Arc`
+    // clone and follows the same parity rule.
     let replicate_relations_init = quote! {
-        __eager: self.__eager.clone(),
+        __eager: self.__eager.__clone_for_replica(),
         __pivot: self.__pivot.clone(),
     };
 
@@ -442,6 +457,22 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         .cast_for_field(&input.updated_at)
         .cloned()
         .unwrap_or_else(|| syn::parse_quote!(::suprnova::AsDateTime));
+    // A timestamp field declared `Option<DateTime<Utc>>` stores "now" as
+    // `Some(now)` through its optional cast; `stamp` writes the value each
+    // timestamp write hands the cast.
+    let created_optional = input.is_optional_datetime(&input.created_at);
+    let updated_optional = input.is_optional_datetime(&input.updated_at);
+    let stamp = |now: TokenStream, optional: bool| {
+        if optional {
+            quote! { &::core::option::Option::Some(#now) }
+        } else {
+            quote! { &#now }
+        }
+    };
+    let updated_now = stamp(quote! { __suprnova_now }, updated_optional);
+    let created_now = stamp(quote! { __suprnova_now }, created_optional);
+    let updated_touch_now = stamp(quote! { now }, updated_optional);
+    let updated_storage_now = stamp(quote! { *now }, updated_optional);
 
     // ---- unique_id PK generation (HasUuids / HasUlids analogue) -------
     //
@@ -492,10 +523,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         quote! {
             // Always bump updated_at - covers create() and
             // update(attrs) in one place.
-            let __suprnova_now = ::suprnova::chrono::Utc::now();
+            let __suprnova_now = ::suprnova::clock::now();
             am.#updated_col_ident = ::suprnova::sea_orm::Set(
                 <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
-                    &__suprnova_now,
+                    #updated_now,
                 )?,
             );
             // Set created_at only on first save (NotSet); update()
@@ -507,9 +538,44 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             ) {
                 am.#created_col_ident = ::suprnova::sea_orm::Set(
                     <#created_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
-                        &__suprnova_now,
+                        #created_now,
                     )?,
                 );
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    // An insert stamps the timestamps its builder left at their default,
+    // as Laravel's insert stamps those the caller did not set: a
+    // replica's (which `replicate` resets) and a factory row's that its
+    // definition does not name. A value the builder set, a backdated
+    // factory row's, stays.
+    let persist_stamp = if timestamps_enabled {
+        let created_value = if created_optional {
+            quote! { ::core::option::Option::Some(__suprnova_now) }
+        } else {
+            quote! { __suprnova_now }
+        };
+        let updated_value = if updated_optional {
+            quote! { ::core::option::Option::Some(__suprnova_now) }
+        } else {
+            quote! { __suprnova_now }
+        };
+        quote! {
+            fn __suprnova_is_default<T>(value: &T) -> bool
+            where
+                T: ::core::default::Default + ::core::cmp::PartialEq,
+            {
+                *value == T::default()
+            }
+            let __suprnova_now = ::suprnova::clock::now();
+            if __suprnova_is_default(&self.#created_col_ident) {
+                self.#created_col_ident = #created_value;
+            }
+            if __suprnova_is_default(&self.#updated_col_ident) {
+                self.#updated_col_ident = #updated_value;
             }
         }
     } else {
@@ -522,15 +588,74 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // already populated updated_at with the in-memory value.
             // Overwrite with NOW so save() bumps the column even when
             // the caller didn't touch it.
-            let __suprnova_now = ::suprnova::chrono::Utc::now();
+            let __suprnova_now = ::suprnova::clock::now();
             am.#updated_col_ident = ::suprnova::sea_orm::Set(
                 <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
-                    &__suprnova_now,
+                    #updated_now,
                 )?,
             );
         }
     } else {
         quote! {}
+    };
+
+    // An owner's `updated_at` is written by the child's touch cascade, not
+    // by the owner's own save, so the owner tells the cascade how its cast
+    // stores the time. Without timestamps the trait default stands: the
+    // cascade skips such an owner before it would ask.
+    let updated_at_storage_impl = if timestamps_enabled {
+        quote! {
+            fn updated_at_storage(
+                now: &::suprnova::chrono::DateTime<::suprnova::chrono::Utc>,
+            ) -> ::core::result::Result<::suprnova::sea_orm::Value, ::suprnova::FrameworkError> {
+                ::core::result::Result::Ok(::suprnova::sea_orm::Value::from(
+                    <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
+                        #updated_storage_now,
+                    )?,
+                ))
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    // Comparisons in a query bind through the column's cast, so a native
+    // date-time column is compared with a native parameter. Casts that
+    // store text or numbers answer `None` and the value binds as it is.
+    let cast_arms: Vec<TokenStream> = input
+        .casts
+        .iter()
+        .filter(|(ident, _)| ident != &input.primary_key)
+        .map(|(ident, ty)| {
+            let name = ident.to_string();
+            quote! {
+                #name => <#ty as ::suprnova::eloquent::casts::Cast>::bind_json(value),
+            }
+        })
+        .collect();
+    let bind_column_impl = if cast_arms.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            fn bind_column(
+                column: &str,
+                value: &::suprnova::serde_json::Value,
+            ) -> ::core::option::Option<::suprnova::sea_orm::Value> {
+                let column = match column.rsplit_once('.') {
+                    ::core::option::Option::Some((prefix, name))
+                        if prefix == <Self as ::suprnova::eloquent::EloquentModel>::TABLE =>
+                    {
+                        name
+                    }
+                    ::core::option::Option::Some(_) => return ::core::option::Option::None,
+                    ::core::option::Option::None => column,
+                };
+                match column {
+                    #(#cast_arms)*
+                    _ => ::core::option::Option::None,
+                }
+            }
+        }
     };
 
     let touchable_impl = if timestamps_enabled {
@@ -551,13 +676,13 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     {
                         return ::core::result::Result::Ok(());
                     }
-                    let now = ::suprnova::chrono::Utc::now();
+                    let now = ::suprnova::clock::now();
                     let mut am = <<#module_name::Entity as ::suprnova::EntityTrait>::ActiveModel
                         as ::core::default::Default>::default();
                     am.#pk_ident = ::suprnova::sea_orm::ActiveValue::Unchanged(self.#pk_ident.clone());
                     am.#updated_col_ident = ::suprnova::sea_orm::Set(
                         <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
-                            &now,
+                            #updated_touch_now,
                         )?,
                     );
                     // Route through `resolve_write` so the timestamp
@@ -595,10 +720,11 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
     // T10 - soft deletes. When `#[model(soft_deletes)]` is set:
     //
-    // - `Model::query()` overrides to auto-apply `filter_null("deleted_at")`
-    //   so default reads skip trashed rows. `with_trashed()` /
-    //   `only_trashed()` construct their own unscoped Builder so they
-    //   don't need to undo the scope.
+    // - `Model::query()` needs no override: the builder it returns folds
+    //   the soft-delete filter in when the query runs, reading the column
+    //   from `SOFT_DELETES_COLUMN`. `with_trashed()` / `only_trashed()`
+    //   start the same builder with the `"soft_deletes"` opt-out set, so
+    //   the registered global scopes still apply to them.
     // - `impl SoftDeletes for #struct` exposes the column name + the
     //   `is_trashed()` accessor.
     // - Inherent `delete(self)` / `restore(self)` / `force_delete(self)`
@@ -610,6 +736,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     //   `delete(&self)` override would silently lose to the trait's
     //   `delete(self)`.
     let soft_deletes_enabled = input.soft_deletes;
+    // Whether a factory insert leaves the primary key for the database.
+    let auto_increment = input.auto_increment;
     let soft_delete_col = &input.soft_deletes_column;
     let soft_delete_col_ident = quote::format_ident!("{}", soft_delete_col);
     let soft_delete_cast = input
@@ -618,27 +746,9 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         .unwrap_or_else(|| syn::parse_quote!(::suprnova::AsOptionalDateTime));
     let key_type = &input.key_type;
 
-    let query_override = if soft_deletes_enabled {
-        quote! {
-            fn query() -> ::suprnova::Builder<Self> {
-                // Auto-apply the soft_deletes scope so default reads
-                // skip trashed rows. with_trashed() / only_trashed()
-                // build their own unscoped Builder directly - they
-                // don't go through query() - so we don't need a
-                // runtime check here. The `"soft_deletes"` tag (set
-                // via `__disable_named_scope`) remains informational
-                // for Phase 10C's typed scope registry.
-                //
-                // Phase 10C T4: also apply registered user-defined
-                // global scopes on top of the soft-delete filter so
-                // both systems compose cleanly.
-                let b = ::suprnova::Builder::<Self>::new().filter_null(#soft_delete_col);
-                ::suprnova::eloquent::scopes::ScopeRegistry::apply_to::<Self>(b)
-            }
-        }
-    } else {
-        quote! {}
-    };
+    // The soft-delete filter is folded in by the builder when the query
+    // runs, so the trait's own `query()` is already right for this model.
+    let query_override = quote! {};
 
     // Trait-level `find` override for soft-delete models. The macro
     // also emits an inherent `find` (for ergonomic concrete-receiver
@@ -675,18 +785,11 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         quote! {}
     };
 
-    // Phase 10C T4 - seed builder used by the global-scope opt-out
-    // helpers. Soft-delete models include the `deleted_at IS NULL`
-    // filter so opt-out doesn't accidentally surface trashed rows;
-    // soft-deletes is a separate path from the typed scope registry.
-    let t4_fresh_builder = if soft_deletes_enabled {
-        quote! {
-            ::suprnova::Builder::<Self>::new().filter_null(#soft_delete_col)
-        }
-    } else {
-        quote! {
-            ::suprnova::Builder::<Self>::new()
-        }
+    // Seed builder for the static entry points below. It folds the
+    // soft-delete filter and the registered global scopes in when the
+    // query runs, honouring whatever opt-out the entry point set.
+    let t4_fresh_builder = quote! {
+        ::suprnova::Builder::<Self>::__scoped()
     };
 
     let soft_deletes_impl = if soft_deletes_enabled {
@@ -716,8 +819,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 /// only care about the tombstone case.
                 pub async fn delete(self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleting(&self, false).await?;
+                    let touch_plan = <Self as ::suprnova::eloquent::Model>::__plan_touches(
+                        ::core::option::Option::Some(&self),
+                        &::suprnova::eloquent::Attrs::new(),
+                    )?;
 
-                    let now = ::core::option::Option::Some(::suprnova::chrono::Utc::now());
+                    let now = ::core::option::Option::Some(::suprnova::clock::now());
                     let deleted_at =
                         <#soft_delete_cast as ::suprnova::eloquent::casts::Cast>::to_storage(&now)?;
                     let table = <Self as ::suprnova::eloquent::EloquentModel>::TABLE;
@@ -761,7 +868,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_trashed(&self).await?;
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleted(&self, false).await?;
-                    <Self as ::suprnova::eloquent::Model>::touch_owners(&self).await?;
+                    <Self as ::suprnova::eloquent::Model>::__touch_planned(&self, &touch_plan).await?;
                     ::core::result::Result::Ok(())
                 }
 
@@ -827,17 +934,18 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     self.#soft_delete_col_ident.is_some()
                 }
 
-                /// View including soft-deleted rows. Builds an
-                /// unscoped Builder directly so we don't have to
-                /// undo the scope `query()` would have applied.
+                /// View including soft-deleted rows. Only the
+                /// soft-delete filter is lifted: every registered
+                /// global scope still applies.
                 pub fn with_trashed() -> ::suprnova::Builder<Self> {
-                    ::suprnova::Builder::<Self>::new()
+                    ::suprnova::Builder::<Self>::__scoped()
                         .__disable_named_scope("soft_deletes")
                 }
 
-                /// View showing only soft-deleted rows.
+                /// View showing only soft-deleted rows. Every
+                /// registered global scope still applies.
                 pub fn only_trashed() -> ::suprnova::Builder<Self> {
-                    ::suprnova::Builder::<Self>::new()
+                    ::suprnova::Builder::<Self>::__scoped()
                         .__disable_named_scope("soft_deletes")
                         .filter_not_null(#soft_delete_col)
                 }
@@ -862,6 +970,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 pub async fn force_delete(self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleting(&self, true).await?;
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_force_deleting(&self).await?;
+                    let touch_plan = <Self as ::suprnova::eloquent::Model>::__plan_touches(
+                        ::core::option::Option::Some(&self),
+                        &::suprnova::eloquent::Attrs::new(),
+                    )?;
 
                     let snapshot = ::core::clone::Clone::clone(&self);
                     let row: <<Self as ::suprnova::eloquent::EloquentModel>::Entity as ::suprnova::sea_orm::EntityTrait>::Model = self.into();
@@ -885,7 +997,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_force_deleted(&snapshot).await?;
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleted(&snapshot, true).await?;
-                    <Self as ::suprnova::eloquent::Model>::touch_owners(&snapshot).await?;
+                    <Self as ::suprnova::eloquent::Model>::__touch_planned(&snapshot, &touch_plan).await?;
                     ::core::result::Result::Ok(())
                 }
 
@@ -975,6 +1087,42 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     } else {
         ""
     };
+    // What a mass soft delete writes: "now" through the column's own cast,
+    // the same value the inherent `delete()` binds.
+    let soft_delete_stamp = if input.soft_deletes {
+        let updated_at_stamp = if timestamps_enabled {
+            quote! {
+                ::core::option::Option::Some(::suprnova::sea_orm::Value::from(
+                    <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
+                        #updated_touch_now,
+                    )?,
+                ))
+            }
+        } else {
+            quote! { ::core::option::Option::None }
+        };
+        quote! {
+            fn __soft_delete_stamp() -> ::core::result::Result<
+                ::core::option::Option<::suprnova::eloquent::SoftDeleteStamp>,
+                ::suprnova::FrameworkError,
+            > {
+                let now = ::suprnova::clock::now();
+                let deleted_at = ::suprnova::sea_orm::Value::from(
+                    <#soft_delete_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
+                        &::core::option::Option::Some(now),
+                    )?,
+                );
+                ::core::result::Result::Ok(::core::option::Option::Some(
+                    ::suprnova::eloquent::SoftDeleteStamp {
+                        deleted_at,
+                        updated_at: #updated_at_stamp,
+                    },
+                ))
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     Ok(quote! {
         impl ::suprnova::eloquent::EloquentModel for #struct_ident {
@@ -1001,6 +1149,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // model's PK and soft-delete column are baked into each
             // relation's inventory entry at link time.
             const SOFT_DELETES_COLUMN: &'static str = #soft_deletes_column_const;
+            #soft_delete_stamp
 
             // Read by `Model::touch_owners`, which is a trait default -
             // so this has to be a trait const, not an inherent one, or
@@ -1012,6 +1161,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // the pair via `touch_column`.
             const HAS_TIMESTAMPS: bool = #timestamps_enabled;
             const UPDATED_AT_COLUMN: &'static str = #updated_at_col;
+            #updated_at_storage_impl
+            #bind_column_impl
 
             // Per-model default connection override. Lives on
             // `EloquentModel` (not the heavier `Model` trait) so
@@ -1068,6 +1219,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
             #field_value_method
 
+            #morph_owner_method
+
             #to_array_override
 
             #append_accessor_dispatch
@@ -1113,6 +1266,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
             fn reset_primary_key(&mut self) {
                 self.#pk_ident = ::core::default::Default::default();
+            }
+
+            // The mark lazy-loading prevention reads lives in the
+            // row's relation cache, which only the macro can name.
+            fn __mark_from_multi_row_query(&mut self) {
+                self.__eager.__mark_from_multi_row_query();
             }
 
             fn active_model_from_attrs(
@@ -1196,31 +1355,14 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         // canonicalised runtime values flow out.
         #[::suprnova::__async_trait::async_trait]
         impl ::suprnova::Persistable for #struct_ident {
-            async fn persist(self) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
-                let inner: #module_name::Model = self.into();
-                // Route through `resolve_write` so factory persists honour
-                // the full write-side precedence chain - tx override →
-                // ambient CURRENT_TX → per-model `#[model(connection = ".")]`
-                // → primary - matching every other write path. The bare
-                // `resolve()` only consults CURRENT_TX, silently ignoring
-                // per-model connection routing.
-                let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
-                    ::core::option::Option::None,
-                    ::core::option::Option::None,
-                    <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
-                )
-                .await?;
-                let inserted = match &exec {
-                    ::suprnova::database::transaction::ExecutorChoice::Tx(t, _) => {
-                        ::suprnova::persist_via_seaorm(inner, t.as_ref()).await?
-                    }
-                    ::suprnova::database::transaction::ExecutorChoice::Pool(c, _) => {
-                        ::suprnova::persist_via_seaorm(inner, c.inner()).await?
-                    }
-                };
-                let result = <Self as ::core::convert::From<#module_name::Model>>::from(inserted);
-                ::suprnova::render_cache::orm::after_model_write(&result).await?;
-                ::core::result::Result::Ok(result)
+            async fn persist(mut self) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
+                #persist_stamp
+                // The same insert `Model::create` runs: `Creating` and
+                // `Saving` before it, `Created` and `Saved` after it, the
+                // write-side connection routing, the render cache's
+                // bookkeeping. A factory's rows reach every observer the
+                // application's rows reach.
+                <Self as ::suprnova::eloquent::Model>::__insert_built(self, #auto_increment).await
             }
         }
 
@@ -1288,19 +1430,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             }
         }
 
-        // Phase 10C T4 - global-scope opt-out static helpers.
-        //
-        // The tricky bit: `Model::query()` applies registered scopes
-        // EAGERLY (so every read path is auto-scoped). Calling
-        // `Model::query().without_global_scopes()` would set the mask
-        // AFTER scopes have already mutated the builder - too late.
-        //
-        // The fix: build a fresh `Builder` directly, stamp the mask
-        // BEFORE running the registry, then dispatch into
-        // `ScopeRegistry::apply_to` which honours the mask. For
-        // soft-delete models we also layer the `deleted_at IS NULL`
-        // filter on top, matching `Model::query()`'s soft-delete
-        // override - opt-out targets user-defined scopes only.
+        // Global-scope opt-out static helpers. Each is the chained
+        // form started from the model: the builder folds scopes in when
+        // the query runs and honours the opt-out set here. The
+        // soft-delete filter is a separate opt-out and stays.
         impl #struct_ident {
             /// Phase 10C T4 - start a query that bypasses one global
             /// scope by type. Other registered scopes still apply.
@@ -1317,9 +1450,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             ///     .await?;
             /// ```
             pub fn without_global_scope<__Scope: 'static>() -> ::suprnova::Builder<Self> {
-                let b = #t4_fresh_builder
-                    .without_global_scope::<__Scope>();
-                ::suprnova::eloquent::scopes::ScopeRegistry::apply_to::<Self>(b)
+                #t4_fresh_builder
+                    .without_global_scope::<__Scope>()
             }
 
             /// Phase 10C T4 - start a query that bypasses every

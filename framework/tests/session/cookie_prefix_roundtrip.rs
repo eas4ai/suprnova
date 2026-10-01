@@ -14,8 +14,10 @@ fn ensure_crypt() {
     INIT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
 }
 
+/// A store of one session, returned for any id. `cookie_name_bound_aad`
+/// drives the middleware with it too.
 #[derive(Default)]
-struct MemoryStore {
+pub(crate) struct MemoryStore {
     session: Mutex<Option<SessionData>>,
 }
 
@@ -63,7 +65,9 @@ fn percent_encode_cookie_value(value: &str) -> String {
     encoded
 }
 
-async fn post_request(cookie: Option<(&str, &str)>) -> suprnova::Request {
+/// A real `Request` for `POST /api/health/live`, carrying `cookie` when
+/// one is given. `cookie_name_bound_aad` builds its requests with it too.
+pub(crate) async fn post_request(cookie: Option<(&str, &str)>) -> suprnova::Request {
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;

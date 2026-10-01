@@ -56,10 +56,12 @@ impl CursorDirection {
 /// ```json
 /// {
 ///   "data": [...],
+///   "path": "/api/users",
 ///   "per_page": 10,
 ///   "next_cursor": "...",
+///   "next_page_url": "/api/users?cursor=...",
 ///   "prev_cursor": null,
-///   "path": "/api/users"
+///   "prev_page_url": null
 /// }
 /// ```
 ///
@@ -67,23 +69,17 @@ impl CursorDirection {
 /// emitted as `null` (not omitted) so client schemas can rely on the
 /// field's presence.
 ///
-/// This shape is **not** identical to Laravel's
-/// `CursorPaginator::toArray()` - Laravel additionally emits
-/// `next_page_url` and `prev_page_url` (absolute URLs derived from
-/// `path` + cursor). Suprnova routes URL generation through the
-/// response-shape constructors that own URL context:
-/// [`Inertia::paginate`](crate::inertia::Inertia::paginate) (cursor
-/// scroll metadata) and
-/// [`Resource::paginated`](crate::resources::Resource::paginated)
-/// (JSON:API `links.{prev,next}` via
-/// [`Paginated`](crate::pagination::Paginated)). The raw `Serialize`
-/// shape stays minimal for explicit-shape consumers.
+/// `next_page_url` and `prev_page_url` are beside the cursors, as they
+/// are in Laravel's `CursorPaginator::toArray()`: the `path` and the
+/// cursor as the parameter `cursor`, or the name
+/// [`Self::with_cursor_name`] gave it. They are `null` where the cursor
+/// is.
 ///
 /// Laravel's `Cursor::encode()` is a base64-JSON plaintext payload;
 /// Suprnova's cursor is AES-256-GCM encrypted via `Crypt` so the
 /// keyset boundary can't be tampered with by the client. See
 /// [`Self::encode_value`] / [`Self::decode_value`].
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct CursorPaginator<T> {
     /// The rows on this page.
     pub data: Vec<T>,
@@ -97,23 +93,59 @@ pub struct CursorPaginator<T> {
     /// Cursor to fetch the previous page, or `None` on the first page
     /// (when the caller passed `cursor: None`).
     pub prev_cursor: Option<String>,
-    /// Optional base URL - clients that build full pagination URLs out
-    /// of `next_cursor` / `prev_cursor` use this as the path prefix.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Optional base URL: the URLs of the next and the previous page
+    /// are this path and the cursor.
     pub path: Option<String>,
-    /// Query-string parameter name the JSON:API link builder uses when
-    /// constructing the `next`/`prev` cursor URLs. `None` resolves to
-    /// `"cursor"` - the key [`Builder::cursor_paginate`] reads. Not
-    /// serialized; parallels [`LengthAwarePaginator::page_name`]
-    /// (clients receive the cursor values and rebuild URLs their side).
+    /// Query-string parameter name of the cursor in the URLs of the
+    /// next and the previous page. `None` resolves to `"cursor"` - the
+    /// key [`Builder::cursor_paginate`] reads. Not serialized by itself;
+    /// parallels [`LengthAwarePaginator::page_name`].
     ///
     /// [`Builder::cursor_paginate`]: crate::eloquent::Builder::cursor_paginate
     /// [`LengthAwarePaginator::page_name`]: crate::pagination::LengthAwarePaginator::page_name
-    #[serde(skip)]
     pub cursor_name: Option<String>,
 }
 
+impl<T: Serialize> Serialize for CursorPaginator<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("data", &self.data)?;
+        if let Some(path) = &self.path {
+            map.serialize_entry("path", path)?;
+        }
+        map.serialize_entry("per_page", &self.per_page)?;
+        map.serialize_entry("next_cursor", &self.next_cursor)?;
+        map.serialize_entry("next_page_url", &self.next_page_url())?;
+        map.serialize_entry("prev_cursor", &self.prev_cursor)?;
+        map.serialize_entry("prev_page_url", &self.previous_page_url())?;
+        map.end()
+    }
+}
+
 impl<T> CursorPaginator<T> {
+    /// The URL of the page behind this one, and `None` at the last page.
+    /// Laravel's `nextPageUrl`.
+    pub fn next_page_url(&self) -> Option<String> {
+        self.next_cursor
+            .as_deref()
+            .map(|cursor| self.url_for(cursor))
+    }
+
+    /// The URL of the page before this one, and `None` at the first
+    /// page. Laravel's `previousPageUrl`.
+    pub fn previous_page_url(&self) -> Option<String> {
+        self.prev_cursor
+            .as_deref()
+            .map(|cursor| self.url_for(cursor))
+    }
+
+    fn url_for(&self, cursor: &str) -> String {
+        let key = self.cursor_name.as_deref().unwrap_or("cursor");
+        crate::pagination::build_query_url(self.path.as_deref(), key, cursor)
+    }
+
     /// Build a cursor paginator from its parts. `per_page` records the
     /// page size the caller asked for; `path` defaults to `None`.
     pub fn new(
@@ -294,9 +326,8 @@ impl<T> CursorPaginator<T> {
                     e
                 }
             })?;
-        let payload: CursorPayload = serde_json::from_str(&json).map_err(|e| {
-            FrameworkError::internal(format!("Cursor payload JSON decode failed: {e}"))
-        })?;
+        let payload: CursorPayload = serde_json::from_str(&json)
+            .map_err(|e| crate::crypto::json_decode_error("Cursor payload", &e))?;
         let value = tagged_json_to_value(&payload.t, payload.v)?;
         let direction = CursorDirection::from_str(&payload.d)?;
         Ok((value, direction))

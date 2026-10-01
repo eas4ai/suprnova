@@ -466,3 +466,182 @@ async fn has_many_through_terminal_get_inside_tx_sees_in_tx_inserts() {
         .unwrap();
     assert_eq!(outside.into_vec().len(), 1);
 }
+
+// ---- The plain eager loads ----------------------------------------------
+//
+// `.with([...])` on a has-many, a has-one and a belongs-to is the eager load
+// applications use most. Each goes through its own dispatcher arm, so each
+// has its own test on the multi-connection pool: an arm that read from the
+// pool instead of the transaction would miss the rows written inside it.
+
+#[model(table = "af1_owners", relations = {
+    pets: HasMany<Af1Pet>,
+    passport: HasOne<Af1Passport>,
+})]
+pub struct Af1Owner {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "af1_pets", relations = {
+    owner: BelongsTo<Af1Owner> { fk = "af1_owner_id" },
+})]
+pub struct Af1Pet {
+    pub id: i64,
+    pub af1_owner_id: i64,
+    pub name: String,
+}
+
+#[model(table = "af1_passports")]
+pub struct Af1Passport {
+    pub id: i64,
+    pub af1_owner_id: i64,
+    pub number: String,
+}
+
+async fn migrate_plain(conn: &DbConnection) {
+    execute_ddl(
+        conn,
+        "CREATE TABLE af1_owners (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+    )
+    .await;
+    execute_ddl(
+        conn,
+        "CREATE TABLE af1_pets (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            af1_owner_id INTEGER NOT NULL, \
+            name TEXT NOT NULL\
+         )",
+    )
+    .await;
+    execute_ddl(
+        conn,
+        "CREATE TABLE af1_passports (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            af1_owner_id INTEGER NOT NULL, \
+            number TEXT NOT NULL\
+         )",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn has_many_with_inside_tx_sees_in_tx_inserts() {
+    let (conn, _guard, _tmp) = fresh_multiconn_sqlite().await;
+    migrate_plain(&conn).await;
+
+    let result: Result<(), FrameworkError> = DB::transaction(move |_tx| {
+        Box::pin(async move {
+            let owner = Af1Owner::create(attrs! { name: "Alice" }).await?;
+            Af1Pet::create(attrs! { af1_owner_id: owner.id, name: "Rex" }).await?;
+            Af1Pet::create(attrs! { af1_owner_id: owner.id, name: "Tom" }).await?;
+
+            let row = Af1Owner::query()
+                .filter("id", owner.id)
+                .with(["pets"])
+                .first()
+                .await?
+                .expect("the owner written in this transaction is readable in it");
+            assert_eq!(
+                row.pets_loaded().len(),
+                2,
+                "the has-many eager arm reads through the transaction"
+            );
+
+            Err(FrameworkError::internal("rollback"))
+        })
+    })
+    .await;
+    assert!(result.is_err());
+    assert_eq!(Af1Pet::query().count().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn has_one_with_inside_tx_sees_in_tx_insert() {
+    let (conn, _guard, _tmp) = fresh_multiconn_sqlite().await;
+    migrate_plain(&conn).await;
+
+    let result: Result<(), FrameworkError> = DB::transaction(move |_tx| {
+        Box::pin(async move {
+            let owner = Af1Owner::create(attrs! { name: "Alice" }).await?;
+            Af1Passport::create(attrs! { af1_owner_id: owner.id, number: "X1" }).await?;
+
+            let row = Af1Owner::query()
+                .filter("id", owner.id)
+                .with(["passport"])
+                .first()
+                .await?
+                .expect("the owner written in this transaction is readable in it");
+            let passport = row
+                .passport_loaded()
+                .expect("the has-one eager arm reads through the transaction");
+            assert_eq!(passport.number, "X1");
+
+            Err(FrameworkError::internal("rollback"))
+        })
+    })
+    .await;
+    assert!(result.is_err());
+    assert_eq!(Af1Passport::query().count().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn belongs_to_with_inside_tx_sees_in_tx_insert() {
+    let (conn, _guard, _tmp) = fresh_multiconn_sqlite().await;
+    migrate_plain(&conn).await;
+
+    let result: Result<(), FrameworkError> = DB::transaction(move |_tx| {
+        Box::pin(async move {
+            let owner = Af1Owner::create(attrs! { name: "Alice" }).await?;
+            let pet = Af1Pet::create(attrs! { af1_owner_id: owner.id, name: "Rex" }).await?;
+
+            let row = Af1Pet::query()
+                .filter("id", pet.id)
+                .with(["owner"])
+                .first()
+                .await?
+                .expect("the pet written in this transaction is readable in it");
+            let loaded = row
+                .owner_loaded()
+                .expect("the belongs-to eager arm reads through the transaction");
+            assert_eq!(loaded.name, "Alice");
+
+            Err(FrameworkError::internal("rollback"))
+        })
+    })
+    .await;
+    assert!(result.is_err());
+    assert_eq!(Af1Owner::query().count().await.unwrap(), 0);
+}
+
+// ---- `Model::load` on one row --------------------------------------------
+//
+// A single row loads through the same path as a collection. Inside a
+// transaction that path has to read through the transaction, or it misses
+// the rows written there.
+
+#[tokio::test]
+async fn model_load_inside_tx_reads_through_the_transaction() {
+    let (conn, _guard, _tmp) = fresh_multiconn_sqlite().await;
+    migrate_plain(&conn).await;
+
+    let result: Result<(), FrameworkError> = DB::transaction(move |_tx| {
+        Box::pin(async move {
+            let mut owner = Af1Owner::create(attrs! { name: "Alice" }).await?;
+            Af1Pet::create(attrs! { af1_owner_id: owner.id, name: "Rex" }).await?;
+            Af1Pet::create(attrs! { af1_owner_id: owner.id, name: "Tom" }).await?;
+
+            owner.load(["pets"]).await?;
+            assert_eq!(
+                owner.pets_loaded().len(),
+                2,
+                "a single row's load reads through the transaction"
+            );
+
+            Err(FrameworkError::internal("rollback"))
+        })
+    })
+    .await;
+    assert!(result.is_err());
+    assert_eq!(Af1Pet::query().count().await.unwrap(), 0);
+}

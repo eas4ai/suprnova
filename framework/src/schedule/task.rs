@@ -197,7 +197,7 @@ impl TaskEntry {
         match self.timezone {
             Some(tz) => self
                 .expression
-                .is_due_at(chrono::Utc::now().with_timezone(&tz)),
+                .is_due_at(crate::clock::now().with_timezone(&tz)),
             None => self.expression.is_due(),
         }
     }
@@ -399,7 +399,7 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
     // executing the same minute-level task multiple times) is closed at
     // this gate; cross-process protection is layered on by Cache::lock
     // inside the `without_overlapping` branch below.
-    let now_minute = chrono::Local::now().timestamp() / 60;
+    let now_minute = crate::clock::now().timestamp() / 60;
     let prev_minute = state
         .last_run_minute
         .fetch_max(now_minute, Ordering::SeqCst);
@@ -422,13 +422,17 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
         return Ok(());
     }
 
+    // Each run of the handler is one unit of work: it runs in a container
+    // scope of its own, so its scoped bindings are built for this run and
+    // dropped when it ends. The election and lock work around it is the
+    // scheduler's and stays outside.
     if !without_overlapping {
-        return handler.handle().await;
+        return crate::container::scope::run_in_new_scope(handler.handle()).await;
     }
     let lock_key = format!("schedule:lock:{name}");
     match crate::cache::Cache::lock(&lock_key, overlap_ttl).await {
         Ok(Some(guard)) => {
-            let result = handler.handle().await;
+            let result = crate::container::scope::run_in_new_scope(handler.handle()).await;
             if let Err(e) = guard.release().await {
                 tracing::warn!(
                     target: "suprnova::schedule",
@@ -462,7 +466,7 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
                 let _guard = InProcessOverlapGuard {
                     flag: &state.in_process_running,
                 };
-                handler.handle().await
+                crate::container::scope::run_in_new_scope(handler.handle()).await
             } else {
                 tracing::info!(
                     target: "suprnova::schedule",

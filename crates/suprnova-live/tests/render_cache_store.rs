@@ -255,3 +255,53 @@ async fn clear_empties_the_store_and_a_publish_after_clear_starts_fresh() {
     );
     assert_eq!(store.inspect().await.expect("inspect").entries, 1);
 }
+
+/// Publishes `/a` then `/b` into a store that holds two entries, reads `/a`
+/// (through `RenderStore::get` when `counted` is true, through `peek`
+/// otherwise), publishes `/c`, and reports which of `/a` and `/b` the
+/// publication evicted.
+async fn evicted_after_reading_a(counted: bool) -> &'static str {
+    let store = MemoryRenderStore::new(MemoryStoreLimits {
+        max_entries: 2,
+        max_bytes: 1024,
+    });
+    let keys = keys();
+    let a = RenderKey::for_test(&keys, "/a");
+    let b = RenderKey::for_test(&keys, "/b");
+    let c = RenderKey::for_test(&keys, "/c");
+    for (key, now) in [(&a, 1), (&b, 2)] {
+        store
+            .publish(key, Bytes::from(vec![1_u8; 10]), fence(1), now, u64::MAX)
+            .await
+            .expect("publish");
+    }
+    let read = if counted {
+        store.get(&a).await.expect("get")
+    } else {
+        store.peek(&a)
+    };
+    assert!(read.is_some(), "the read returns the stored entry");
+    store
+        .publish(&c, Bytes::from(vec![3_u8; 10]), fence(1), 3, u64::MAX)
+        .await
+        .expect("c");
+    if store.peek(&a).is_none() { "a" } else { "b" }
+}
+
+#[tokio::test]
+async fn peek_leaves_the_eviction_order_as_it_was() {
+    assert_eq!(
+        evicted_after_reading_a(false).await,
+        "a",
+        "a peek is not a use, so the oldest entry is still the one evicted"
+    );
+}
+
+#[tokio::test]
+async fn get_counts_as_a_use_and_moves_the_key_to_the_recent_end() {
+    assert_eq!(
+        evicted_after_reading_a(true).await,
+        "b",
+        "a get is a use, so the other entry is the one evicted"
+    );
+}

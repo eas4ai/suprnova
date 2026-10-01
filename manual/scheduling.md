@@ -84,7 +84,7 @@ impl Task for CleanupLogsTask {
 
 ## Defining Schedules
 
-suprnova supports two approaches for defining scheduled tasks:
+suprnova supports three approaches for defining scheduled tasks:
 
 ### 1. Trait-Based Tasks (Recommended)
 
@@ -173,6 +173,49 @@ pub fn register(schedule: &mut Schedule) {
     );
 }
 ```
+
+### 3. Console Commands
+
+To run a [console command](console.md) on a schedule, pass the command line to `Schedule::command`. Write it the way you type it after the name of the console binary:
+
+```rust
+// src/schedule.rs
+use suprnova::Schedule;
+
+pub fn register(schedule: &mut Schedule) {
+    schedule.add(
+        schedule.command("emails:send --force")
+            .daily()
+            .at("06:00"),
+    );
+
+    // A built-in command works the same way. See [Database](database.md#busy-database---dbmonitor-and-dbmonitor) for `db:monitor`.
+    schedule.add(schedule.command("model:prune").daily().at("02:00"));
+
+    // So does `db:monitor`, which dispatches `DatabaseBusy` at 80 connections.
+    schedule.add(schedule.command("db:monitor --max 80").every_minute());
+}
+```
+
+`command` splits the line into words the way a shell does: whitespace separates words, and single quotes, double quotes, and backslashes keep a word together. It runs no variables, globbing, or pipes, because the console runs the line and not a shell. It returns the same `TaskBuilder` as `task` and `call`, so every frequency method, `without_overlapping()`, and `on_one_server()` apply.
+
+The command runs in the scheduler's process, not in a new one. The task is named by its command line, with one space between the words, and it is described by the command's about text. `.name(...)` and `.description(...)` override both.
+
+The command line is checked when the schedule is built, which is at boot. `command` panics, and the boot stops, when no command has the name (the message lists the registered commands), when the arguments do not parse for the command, and when a quote is not closed. A scheduled task runs when nobody is watching, so a typing error stops the boot instead of failing at 3 a.m. A command that is not linked into the binary that runs the scheduler has no name there and stops the boot the same way.
+
+Use `try_command` when the command line comes from configuration and you want the error:
+
+```rust
+use suprnova::{FrameworkError, Schedule};
+
+fn add_from_config(schedule: &mut Schedule, line: &str) -> Result<(), FrameworkError> {
+    // Err(FrameworkError::Internal) on a bad command line
+    schedule.add(schedule.try_command(line)?.hourly());
+    Ok(())
+}
+```
+
+A command that returns an error is a failed task, and the scheduler reports it. The console does not print the error as well.
 
 ## Registering Tasks
 
@@ -647,7 +690,9 @@ computed in the zone the task is evaluated in and then shown in the
 listing's zone. An expression that can never match (`0 0 30 2 *` names a
 date that does not exist) prints `next: never`.
 
-The listing's zone is UTC unless you pass `--timezone`. `cleanup:logs` and
+The listing's zone is UTC unless you pass `--timezone`. The `suprnova` CLI
+passes the flag to your application, which exits with an error when the zone
+name is unknown. `cleanup:logs` and
 `send:reminders` above pinned no zone, so their expressions are printed as
 written - the scheduler reads them against the process's local zone, which
 has no IANA name to convert from - and they carry no zone label.
@@ -857,6 +902,7 @@ the scheduler doesn't always need.
 | Create task | `suprnova make:task TaskName` |
 | Trait-based | Implement `Task` trait, configure schedule during registration |
 | Closure-based | `schedule.call(\|\| async { ... })` |
+| Console command | `schedule.command("emails:send --force")` (panics at boot on a bad line), or `schedule.try_command(line)?` |
 | Register tasks | `schedule.add(schedule.task(...).daily().name("..."))` |
 | Wire into app | `Application::new().schedule(schedule::register)` |
 | Run once | `suprnova schedule:run` |

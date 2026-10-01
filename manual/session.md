@@ -12,8 +12,9 @@ something the URL or a JWT should carry.
 `SessionMiddleware` runs on every request and does five things in order:
 
 1. Reads the session id and last successful activity-touch timestamp from
-   the `suprnova_session` cookie (AES-256-GCM encrypted). Tampered,
-   undecryptable, or malformed cookies are treated as absent.
+   the `suprnova_session` cookie (AES-256-GCM encrypted, bound to the cookie
+   name). Tampered, undecryptable, or malformed cookies are treated as absent,
+   and so is a value that another cookie wrote.
 2. Loads `SessionData` from the store only when a valid cookie names a
    session. Cookieless requests start with a clean in-memory session and do
    not issue a guaranteed database miss. A cookie whose row no longer exists
@@ -91,6 +92,22 @@ started on, so the session has to live in a `task_local!` slot and be
 borrowed through a scope-bound critical section. The `|s|` shape makes
 that boundary explicit and stops you accidentally holding a mutex guard
 across an `.await`.
+
+### When the closure panics
+
+A panic in a `session_mut` closure can leave the session between two of
+its writes. Most panics end the request, and nothing else happens. Some
+boundaries below the middleware catch the panic and let the request go on:
+a Live action, or a listener that runs inside the request.
+
+In that case `session()` and `session_mut()` keep working, so the code that
+answers for the panic can still read the session. The middleware does not
+store the session. It answers `500`, keeps the stored session as it was
+before the request, and logs an error. Cookies that the request queued are
+still sent with the `500`.
+
+Keep the closure free of code that can panic, and do the fallible work
+before you call `session_mut`.
 
 ## Flash data
 
@@ -248,6 +265,11 @@ SESSION_SAME_SITE=Lax        # Lax | Strict | None
 SESSION_COOKIE_PREFIX=       # empty | __Secure- | __Host-
 SESSION_PARTITIONED=false    # CHIPS opt-in
 SESSION_EXPIRE_ON_CLOSE=false # true → omit Max-Age, browser drops on close
+
+# Table the database driver reads and writes (default sessions).
+# Config::init refuses a name that is not 1 to 63 ASCII letters, digits,
+# or underscores starting with a letter or underscore.
+SESSION_TABLE=sessions
 
 # Named DB connection for the session store (optional)
 SESSION_CONNECTION=sessions
@@ -447,8 +469,8 @@ the client can retry, not a fault in the server.
 ## The sessions table
 
 The default driver expects a `sessions` table with this shape (the
-SeaORM entity in `framework/src/session/driver/database.rs` is the
-source of truth):
+`sessions` SeaORM entity in `framework/src/session/driver/database.rs`
+documents it):
 
 | Column | Type | Notes |
 |---|---|---|
@@ -463,8 +485,22 @@ Two indexes ship alongside the table: `idx_sessions_user_id` (for
 
 A scaffolded app includes a `create_sessions_table` migration that
 matches this shape. If you bring your own migrations, mirror the column
-names exactly - SeaORM resolves them positionally and a renamed column
-won't match.
+names exactly - the driver names each column in its queries, so a
+renamed column won't match.
+
+To keep sessions under another name, set `SESSION_TABLE` (for example
+`SESSION_TABLE=app_sessions`) and have the sessions migration create
+the table under that name, with the same columns:
+
+```rust
+Table::create()
+    .table(Alias::new("app_sessions")) // the name SESSION_TABLE holds
+```
+
+The driver never creates the table itself. Code that builds the driver
+directly passes the name to
+`DatabaseSessionDriver::with_table(lifetime, "app_sessions")?`, which
+applies the same naming rule as `Config::init`.
 
 ### Why Suprnova diverges
 

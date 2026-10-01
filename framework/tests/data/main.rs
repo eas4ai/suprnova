@@ -17,3 +17,5 @@ pub mod partial_data_composition;
 pub mod registry;
 pub mod route_params;
 pub mod route_params_lifecycle;
+pub mod serde_names;
+pub mod validation_hooks;

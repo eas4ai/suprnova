@@ -8,14 +8,13 @@
 //! before the normal routing path - neither is reachable through a
 //! bare `chain.execute()`.
 
-use std::collections::HashMap;
+use crate::http_wire::request;
+
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -60,57 +59,6 @@ async fn spawn_server(
     });
 
     addr
-}
-
-/// Send a request and return `(status, lowercased response headers, body)`.
-async fn request(
-    addr: SocketAddr,
-    method: &str,
-    path: &str,
-    headers: &[(&str, &str)],
-) -> (u16, HashMap<String, String>, String) {
-    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let io = TokioIo::new(stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-        .await
-        .unwrap();
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
-
-    let mut builder = hyper::Request::builder()
-        .method(method)
-        .uri(path)
-        .header("Host", "localhost")
-        .header("Content-Length", "0");
-    for (name, value) in headers {
-        builder = builder.header(*name, *value);
-    }
-    let req = builder.body(Full::new(Bytes::new())).unwrap();
-
-    let resp = tokio::time::timeout(Duration::from_secs(5), sender.send_request(req))
-        .await
-        .expect("send_request timeout")
-        .expect("hyper send_request");
-
-    let (parts, body) = resp.into_parts();
-    let status = parts.status.as_u16();
-    let header_map = parts
-        .headers
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_lowercase(),
-                v.to_str().unwrap_or("").to_string(),
-            )
-        })
-        .collect();
-    let bytes = body.collect().await.unwrap().to_bytes();
-    (
-        status,
-        header_map,
-        String::from_utf8_lossy(&bytes).to_string(),
-    )
 }
 
 /// A router whose `/boom` handler panics, `/logs` handler emits a
@@ -262,5 +210,65 @@ async fn default_404_echoes_request_id() {
         headers.get("x-request-id").map(String::as_str),
         Some("notfound-probe-id-7"),
         "the static 404 must echo X-Request-Id"
+    );
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct QueuedByARequest;
+
+#[suprnova::async_trait]
+impl suprnova::Job for QueuedByARequest {
+    fn job_name() -> &'static str {
+        "request_id_e2e::QueuedByARequest"
+    }
+    async fn handle(self) -> Result<(), suprnova::FrameworkError> {
+        Ok(())
+    }
+}
+
+/// A job queued while a request is served carries the request's id, so the
+/// job and the log lines it writes can be traced to the request. The request
+/// middleware puts the id in the `Context`, and the push snapshots the
+/// `Context` into the envelope.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_job_queued_by_a_request_carries_the_requests_id() {
+    use suprnova::queue::{MemoryQueueDriver, Queue, QueueDriver};
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let router: Router = Router::new()
+        .get("/queue", |_req| async {
+            Queue::push(QueuedByARequest).await?;
+            text("queued")
+        })
+        .into();
+    let addr = spawn_server(router, MiddlewareRegistry::new(), 1).await;
+
+    let (status, headers, _body) = request(
+        addr,
+        "GET",
+        "/queue",
+        &[("X-Request-Id", "queued-by-request-0001")],
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        headers.get("x-request-id").map(String::as_str),
+        Some("queued-by-request-0001")
+    );
+    let envelope = driver
+        .pop(Duration::from_secs(5))
+        .await
+        .unwrap()
+        .expect("the handler queued a job")
+        .envelope;
+    let context = envelope
+        .context
+        .expect("a request always has its id to carry");
+    assert_eq!(
+        context.data.get("_request_id"),
+        Some(&serde_json::json!("queued-by-request-0001"))
     );
 }

@@ -2,8 +2,11 @@
 //! Cache-backed [`RateLimiter`] facade. Mirrors
 //! `Illuminate\Routing\Middleware\ThrottleRequests`.
 //!
-//! Construct one of three ways:
+//! Construct one of four ways:
 //!
+//! - [`ThrottleRequestsMiddleware::default`] - 60 requests a minute for
+//!   each signed-in user, and for each client IP when nobody is signed in.
+//!   The limit of the plain `throttle` alias.
 //! - [`ThrottleRequestsMiddleware::by_name`] - resolve a named limiter
 //!   registered via [`RateLimiter::define`]. The named callback receives
 //!   the `&Request` and returns a [`LimitResult`] (single limit, list of
@@ -57,6 +60,63 @@ enum Mode {
         decay_seconds: u64,
     },
     Limits(Vec<Limit>),
+    /// The [`Default`] limit: one bucket for each signed-in user, and one
+    /// for each client IP when nobody is signed in.
+    PerUserOrIp {
+        max_attempts: i64,
+        decay_seconds: u64,
+    },
+}
+
+impl ThrottleRequestsMiddleware {
+    /// Requests the [`Default`] limit allows in one
+    /// [`DEFAULT_DECAY_SECONDS`](Self::DEFAULT_DECAY_SECONDS) window.
+    pub const DEFAULT_MAX_ATTEMPTS: i64 = 60;
+
+    /// Length of the [`Default`] limit's window, in seconds.
+    pub const DEFAULT_DECAY_SECONDS: u64 = 60;
+}
+
+impl Default for ThrottleRequestsMiddleware {
+    /// The limit of the plain `throttle` alias: 60 requests a minute
+    /// ([`DEFAULT_MAX_ATTEMPTS`](Self::DEFAULT_MAX_ATTEMPTS) in
+    /// [`DEFAULT_DECAY_SECONDS`](Self::DEFAULT_DECAY_SECONDS)), counted for
+    /// each signed-in user, and for each client IP when nobody is signed
+    /// in. It is the shape of Laravel's default `api` limiter,
+    /// `Limit::perMinute(60)->by($request->user()?->id ?: $request->ip())`.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::middleware::register_middleware_alias;
+    /// use suprnova::rate_limit::ThrottleRequestsMiddleware;
+    ///
+    /// register_middleware_alias("throttle", ThrottleRequestsMiddleware::default);
+    /// ```
+    ///
+    /// # What the bucket is
+    ///
+    /// The user's bucket follows the user across routes and across
+    /// addresses, and the address's bucket is shared by every route, as
+    /// they are in Laravel. [`ThrottleRequestsMiddleware::with`] differs:
+    /// it counts per address and per path. Use [`Self::prefix`] to give a
+    /// group of routes a budget of its own.
+    ///
+    /// The user is the one the default guard signed in, so the session
+    /// middleware has to run before this one for a signed-in user to be
+    /// counted as a user. The address is [`Request::ip`], which resolves
+    /// through the trusted proxies.
+    ///
+    /// The limit reads who is asking, as `Auth::id()` does. Where the
+    /// render cache stores the route, that read counts as a read of the
+    /// principal.
+    fn default() -> Self {
+        Self {
+            mode: Mode::PerUserOrIp {
+                max_attempts: Self::DEFAULT_MAX_ATTEMPTS,
+                decay_seconds: Self::DEFAULT_DECAY_SECONDS,
+            },
+            prefix: String::new(),
+        }
+    }
 }
 
 impl ThrottleRequestsMiddleware {
@@ -107,6 +167,71 @@ impl ThrottleRequestsMiddleware {
     pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
         self.prefix = prefix.into();
         self
+    }
+
+    /// Build the middleware from the arguments of a `throttle` alias, the
+    /// way Laravel reads `throttle:60,1`. It is the factory to register the
+    /// alias with:
+    ///
+    /// ```rust,no_run
+    /// use suprnova::middleware::register_middleware_alias_with_args;
+    /// use suprnova::rate_limit::ThrottleRequestsMiddleware;
+    ///
+    /// register_middleware_alias_with_args("throttle", ThrottleRequestsMiddleware::from_alias_args);
+    /// ```
+    ///
+    /// | A route writes | It gets |
+    /// |---|---|
+    /// | `throttle` | [`Self::default`] |
+    /// | `throttle:60` | 60 requests a minute, [`Self::with`] |
+    /// | `throttle:60,5` | 60 requests in 5 minutes |
+    /// | `throttle:60,5,uploads` | the same, with the key prefix `uploads` |
+    /// | `throttle:api` | the limiter named `api`, [`Self::by_name`] |
+    ///
+    /// # Errors
+    ///
+    /// A number that does not parse where one is expected, a limit or a
+    /// window of zero, and more than three arguments.
+    pub fn from_alias_args(arguments: &[&str]) -> Result<Self, crate::FrameworkError> {
+        let refused = |what: String| crate::FrameworkError::internal(what);
+        let Some(first) = arguments.first() else {
+            return Ok(Self::default());
+        };
+        if arguments.len() > 3 {
+            return Err(refused(format!(
+                "throttle takes a limit, a window in minutes and a key prefix, \
+                 and was given {} arguments",
+                arguments.len()
+            )));
+        }
+        // A first argument that is no number names a limiter.
+        let Ok(max_attempts) = first.parse::<i64>() else {
+            if arguments.len() > 1 {
+                return Err(refused(format!(
+                    "throttle:{first} names a limiter, which takes no further arguments"
+                )));
+            }
+            return Ok(Self::by_name(*first));
+        };
+        if max_attempts < 1 {
+            return Err(refused(format!(
+                "a throttle limit of {max_attempts} would refuse every request"
+            )));
+        }
+        let decay_minutes = match arguments.get(1) {
+            None => 1,
+            Some(minutes) => minutes
+                .parse::<u64>()
+                .ok()
+                .filter(|m| *m > 0)
+                .ok_or_else(|| {
+                    refused(format!(
+                        "`{minutes}` is not a throttle window: a whole number of minutes, 1 or more"
+                    ))
+                })?,
+        };
+        let prefix = arguments.get(2).copied().unwrap_or_default();
+        Ok(Self::with(max_attempts, decay_minutes, prefix))
     }
 }
 
@@ -238,6 +363,28 @@ fn resolve_limits(mode: &Mode, request: &Request) -> ResolvedLimits {
             ])
         }
         Mode::Limits(limits) => ResolvedLimits::Ok(limits.clone()),
+        Mode::PerUserOrIp {
+            max_attempts,
+            decay_seconds,
+        } => ResolvedLimits::Ok(vec![
+            Limit::new(
+                *max_attempts,
+                std::time::Duration::from_secs(*decay_seconds),
+            )
+            .by(user_or_ip_key(request)),
+        ]),
+    }
+}
+
+/// The bucket of the [`Default`] limit: the signed-in user, else the
+/// client IP. The two are spelled apart, so a user whose id reads like an
+/// address shares no bucket with that address.
+fn user_or_ip_key(request: &Request) -> String {
+    match crate::session::auth_user_id() {
+        Some(user) => format!("user:{user}"),
+        // `unknown` is the key of a request with no peer, which is an
+        // in-process request. See `default_request_key`.
+        None => format!("ip:{}", request.ip().unwrap_or_else(|| "unknown".into())),
     }
 }
 

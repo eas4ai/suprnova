@@ -398,7 +398,8 @@ fn validate_vapid_subject(subject: &str) -> Result<(), WebPushError> {
 }
 
 fn parse_endpoint(endpoint: &str) -> Result<Url, WebPushError> {
-    Url::parse(endpoint).map_err(|e| WebPushError::Internal(format!("endpoint url: {e}")))
+    Url::parse(endpoint)
+        .map_err(|e| WebPushError::InvalidSubscription(format!("endpoint url: {e}")))
 }
 
 /// Reject endpoints that can't plausibly reach a real push service.
@@ -421,7 +422,7 @@ fn parse_endpoint(endpoint: &str) -> Result<Url, WebPushError> {
 /// [`Client`] (custom resolver, etc.).
 fn validate_strict_endpoint(url: &Url) -> Result<(), WebPushError> {
     if url.scheme() != "https" {
-        return Err(WebPushError::Internal(format!(
+        return Err(WebPushError::InvalidSubscription(format!(
             "subscription endpoint must use https (got scheme '{}')",
             url.scheme()
         )));
@@ -433,17 +434,17 @@ fn validate_strict_endpoint(url: &Url) -> Result<(), WebPushError> {
     // that parse alone leaks IPv6-literal hosts past the guard.
     let domain = match url.host() {
         None => {
-            return Err(WebPushError::Internal(
+            return Err(WebPushError::InvalidSubscription(
                 "subscription endpoint has no host".into(),
             ));
         }
         Some(url::Host::Ipv4(addr)) => {
-            return Err(WebPushError::Internal(format!(
+            return Err(WebPushError::InvalidSubscription(format!(
                 "subscription endpoint host '{addr}' is an IP literal; real push services use named hosts"
             )));
         }
         Some(url::Host::Ipv6(addr)) => {
-            return Err(WebPushError::Internal(format!(
+            return Err(WebPushError::InvalidSubscription(format!(
                 "subscription endpoint host '[{addr}]' is an IP literal; real push services use named hosts"
             )));
         }
@@ -473,7 +474,7 @@ fn validate_strict_endpoint(url: &Url) -> Result<(), WebPushError> {
     if BLOCKED_EXACT.contains(&host_trimmed)
         || BLOCKED_SUFFIXES.iter().any(|s| host_trimmed.ends_with(s))
     {
-        return Err(WebPushError::Internal(format!(
+        return Err(WebPushError::InvalidSubscription(format!(
             "subscription endpoint host '{domain}' is not a valid push service host"
         )));
     }
@@ -502,6 +503,39 @@ mod tests {
             msg.contains("https"),
             "non-https must be rejected, got: {msg}"
         );
+    }
+
+    /// A subscription that is refused is a fault of the stored data. It
+    /// must not be reported as a fault of this crate, and a caller must be
+    /// able to tell it from one.
+    #[test]
+    fn a_refused_endpoint_is_an_invalid_subscription_and_not_an_internal_error() {
+        for bad in [
+            "http://fcm.googleapis.com/push/abc",
+            "https://169.254.169.254/latest/meta-data",
+            "https://[::1]/push",
+            "https://metadata.google.internal/computeMetadata/v1/",
+            "https://app.localhost/push",
+        ] {
+            let url = Url::parse(bad).unwrap();
+            let err = validate_strict_endpoint(&url).unwrap_err();
+            assert!(
+                matches!(err, WebPushError::InvalidSubscription(_)),
+                "{bad}: {err:?}"
+            );
+            assert!(!err.is_retryable(), "{bad}: a retry changes nothing");
+            assert!(
+                err.to_string().starts_with("subscription cannot be used: "),
+                "{bad}: the text names the subscription as the fault: {err}"
+            );
+        }
+
+        let err = parse_endpoint("not a url").unwrap_err();
+        assert!(
+            matches!(err, WebPushError::InvalidSubscription(_)),
+            "{err:?}"
+        );
+        assert!(!err.is_retryable());
     }
 
     #[test]

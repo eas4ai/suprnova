@@ -181,6 +181,21 @@ impl MemoryRenderStore {
         Some(hot)
     }
 
+    /// The entry stored under `key`, read without counting as a use.
+    ///
+    /// [`RenderStore::get`] moves the key to the most recently used end of
+    /// the eviction order, because a lookup that serves a request is a use.
+    /// This read leaves the order as it was, so an observer that only looks
+    /// (a test asking whether a page is stored) does not change which entry
+    /// the next publication evicts.
+    #[must_use]
+    pub fn peek(&self, key: &RenderKey) -> Option<StoredEntry> {
+        self.lock_state()
+            .entries
+            .get(key)
+            .map(|(entry, _)| entry.clone())
+    }
+
     /// The publication both entry points share; the trait's `publish`
     /// passes no hot entry, [`Self::publish_hot`] passes one, and every
     /// bound, fence, and eviction rule below applies to both.

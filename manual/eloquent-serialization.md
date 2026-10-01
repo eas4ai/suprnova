@@ -576,9 +576,9 @@ DTO, fill it from `to_array()`, return the DTO".
 |---|---|
 | `Model::to_array` / `to_json` trait defaults | `framework/src/eloquent/model.rs` |
 | `Model::to_array_except` / `to_array_only` | `framework/src/eloquent/model.rs` |
-| `Model::__append_accessor` trait default | `framework/src/eloquent/model.rs` |
+| `appends` accessor dispatch, trait default | `framework/src/eloquent/model.rs` |
 | Macro-emitted `to_array` override (filter pipeline) | `suprnova-macros/src/model/serialization.rs` |
-| Macro-emitted `__append_accessor` dispatcher | `suprnova-macros/src/model/serialization.rs` |
+| `appends` accessor dispatch, macro-emitted | `suprnova-macros/src/model/serialization.rs` |
 | `Collection<M>::to_array` / `to_json` | `framework/src/eloquent/collection.rs` |
 | `EagerLoadCache` (the `__eager` field) | `framework/src/eloquent/relations/eager_cache.rs` |
 | `hidden` / `visible` / `appends` macro parsing | `suprnova-macros/src/model/parse.rs` |

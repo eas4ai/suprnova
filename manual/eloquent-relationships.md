@@ -125,9 +125,9 @@ let dead = user.posts().only_trashed().get().await?;   // trashed only
 
 `with_trashed` / `only_trashed` exist on `HasOne`, `HasMany`,
 `MorphOne`, `MorphMany`, `BelongsToMany`, `MorphToMany`,
-`MorphedByMany`, and `BelongsTo`. They are deliberately absent from
-`HasOneThrough` and `HasManyThrough` - see the [Through soft-delete
-gap](#through-soft-deletes-v1) below.
+`MorphedByMany`, and `BelongsTo`. `HasOneThrough` and `HasManyThrough`
+do not have them: they always leave trashed rows out, as
+[Through soft-deletes](#through-soft-deletes) below describes.
 
 ## One-to-one: `HasOne` and `BelongsTo`
 
@@ -377,26 +377,17 @@ plus the key setters (`first_key` / `second_key` / `local_key` /
 can't chain `.filter(...)` or `.order_by(...)`. If you need to filter
 across the join, fall back to two explicit relation hops.
 
-### Through soft-deletes (v1)
+### Through soft-deletes
 
-Through relations use raw `INNER JOIN` SQL rather than the
-`Builder<C>` pipeline, so the global soft-delete scope that
-`C::query()` would install (`WHERE c.deleted_at IS NULL`) is **not**
-applied. Trashed intermediates and trashed targets both participate
-in the JOIN.
+Through relations filter both the intermediate and the target by their
+soft-delete column when those models declare `#[model(soft_deletes)]`,
+matching Laravel's `hasManyThrough`: trashed rows on either side stay
+out of the join.
 
-This diverges from Laravel, where `hasManyThrough` filters both `B`
-and `C` by `deleted_at IS NULL` when the models declare `SoftDeletes`.
-Until the fix lands, callers needing scoped Through reads should chain
-the two relations explicitly:
-
-```rust
-// Instead of country.posts().get():
-let users = country.users().get().await?;
-let user_ids: Vec<i64> = users.iter().map(|u| u.id).collect();
-let posts = Post::query().filter_in("user_id", user_ids).get().await?;
-// Both User and Post soft-delete scopes apply.
-```
+To include trashed rows, query the two hops yourself: load the
+intermediate models through their own relation, then query the target
+model by their keys, and add `with_trashed()` on the side whose trashed
+rows belong in the result.
 
 ## Polymorphic relations
 
@@ -460,7 +451,7 @@ The macro emits a per-family enum at the declaration site:
 pub enum CommentableMorph {
     Post(Post),
     Video(Video),
-    Unknown(String, i64),     // fallback for unregistered <name>_type
+    Unknown(String, serde_json::Value), // fallback for unregistered <name>_type
 }
 ```
 
@@ -492,18 +483,54 @@ makes the family explicit. The benefits beat the typing cost:
   declaration tells you every type that can sit on the other end. No
   database query required to enumerate them.
 
-### v1 restriction: `MorphTo` is `i64`-only
+### `MorphTo` keys
 
-`MorphTo::morph_id` is hard-coded to `i64`. Polymorphic targets must
-therefore use `i64` primary keys, and the morph table's `<name>_id`
-column must also be `i64`. Models whose PK is `String` or
-`Uuid`-via-string cannot be `MorphTo` targets in v1. v2 will
-parameterise the morph ID type so the full PK lattice (`i64` /
-`String` / `Uuid`) is accepted.
+A `MorphTo` target can use any primary key type the model declares:
+`i64`, `String`, UUID or ULID. The morph table's `<name>_id` column takes
+the same type as its targets' keys.
 
-This is a polymorphic-inverse-only restriction. `MorphOne` /
-`MorphMany` / `MorphToMany` / `MorphedByMany` work fine with any PK
-shape - they read the parent's already-typed `id` directly.
+```rust
+#[model(
+    table = "notes",
+    relations = {
+        subject: MorphTo { targets = [Article, Recipe] },
+    },
+)]
+pub struct Note {
+    pub id: i64,
+    pub subject_id: String,      // the key type of Article and Recipe
+    pub subject_type: String,
+    pub body: String,
+}
+```
+
+Three rules hold:
+
+- All targets of one `MorphTo` relation have one key type. A relation
+  that mixes them does not compile.
+- The child's `<name>_id` field has that key type. A field of another
+  type does not compile.
+- The parent side is not checked. `MorphOne`, `MorphMany`,
+  `MorphToMany` and `MorphedByMany` read the parent's own key, and the
+  framework does not compare it with the child's `<name>_id` field. If
+  several parents own the same child, keep `<name>_id` at the key type
+  of every one of them.
+
+The id in the per-family enum's `Unknown` variant, and the
+`morph_id` field of `MorphTo`, are a `serde_json::Value`: the key as
+JSON. Read it with `as_i64()` or `as_str()`.
+
+The lazy `comment.commentable().get()` finds the target by its key and
+applies no global scope of the target. The eager
+`with(["commentable"])` runs the query of the target and applies its
+global scopes, so a target that a scope hides comes back as `Unknown`.
+
+A nested path goes through `MorphTo`: `with(["commentable.user"])` loads
+`user` on the targets, one query for each target type that is present.
+Every target of the relation must declare `user`. A target that does not
+is an error that names the type and the relation, even when no row of
+that type is loaded. See
+[Eloquent - Polymorphic keys and nested loads](eloquent.md#polymorphic-keys-and-nested-loads).
 
 ### `MorphToMany` and `MorphedByMany`
 
@@ -690,6 +717,10 @@ for u in &users {
 }
 ```
 
+`prevent_lazy_loading(true)` turns that loop into an error, so you find
+it in development. See
+[Eloquent - Preventing lazy loading](eloquent.md#preventing-lazy-loading).
+
 `with(["posts"])` collapses that to two queries total - regardless of
 the parent count:
 
@@ -870,14 +901,20 @@ pub struct Comment {
 }
 ```
 
-Only `BelongsTo` relations can be touched - the touched row has to be
-identifiable from a column on the child, which is exactly what the
+`BelongsTo` and `MorphTo` relations can be touched - the touched row has
+to be identifiable from columns on the child, which is exactly what the
 owning side gives you. The framework resolves the owner through the
 relation registry, so the touch costs one `UPDATE` and no `SELECT`.
 
+For a `MorphTo` name (`touches = ["commentable"]`), the owner is the row
+that `<name>_type` and `<name>_id` point at. The framework finds it
+after the pre-write listeners have run and before the statement. A
+`<name>_type` that names none of the targets makes the write fail with
+nothing written.
+
 Owners that disclaim timestamps (`#[model(timestamps = false)]`), are
-reached through a `NULL` foreign key, or are soft-deleted are skipped
-silently. Suppress the cascade for a block of work with
+reached through a `NULL` foreign key (or a `NULL` `<name>_id`), or are
+soft-deleted are skipped silently. Suppress the cascade for a block of work with
 `without_touching` (all owners) or `without_touching_on::<Post, _, _>`
 (one type). Full semantics in
 [Eloquent - Parent touching](eloquent.md#parent-touching).

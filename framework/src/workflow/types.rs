@@ -109,8 +109,10 @@ impl WorkflowHandle {
     }
 
     /// Wait until the workflow finishes or `timeout` elapses, whichever
-    /// comes first. Returns `Err(FrameworkError::Timeout(...))` when the
-    /// deadline fires while the workflow is still pending or running.
+    /// comes first. Returns [`FrameworkError::Timeout`] when the deadline
+    /// fires while the workflow is still pending or running, so a caller
+    /// can tell that case from a failed status query with
+    /// [`FrameworkError::is_timeout`].
     ///
     /// A timeout error does **not** cancel the workflow - the worker
     /// continues processing it. Re-call `wait*` later, or use
@@ -161,10 +163,10 @@ impl WorkflowHandle {
         match timeout {
             Some(deadline) => match tokio::time::timeout(deadline, fut).await {
                 Ok(result) => result,
-                Err(_) => Err(FrameworkError::internal(format!(
-                    "Timed out after {:?} waiting for workflow {workflow_id} to finish",
-                    deadline
-                ))),
+                Err(_) => Err(FrameworkError::timeout(
+                    deadline,
+                    format!("waiting for workflow {workflow_id} to finish"),
+                )),
             },
             None => fut.await,
         }

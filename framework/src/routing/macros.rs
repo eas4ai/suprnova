@@ -32,6 +32,7 @@
 //! }
 //! ```
 
+use crate::FrameworkError;
 use crate::http::{Request, Response};
 
 /// Const function to validate route paths start with '/'
@@ -49,8 +50,9 @@ pub const fn validate_route_path(path: &'static str) -> &'static str {
     }
     path
 }
-use crate::middleware::{BoxedMiddleware, Middleware, into_boxed};
-use crate::routing::router::{BoxedHandler, Router, register_route_name};
+use crate::middleware::{BoxedMiddleware, Middleware, boxed_as};
+use crate::routing::params::ParamConstraint;
+use crate::routing::router::{ANY_METHODS, BoxedHandler, Router, register_route_name};
 use crate::session::SessionBlock;
 use crate::session::blocking::register_route_block;
 use hyper::Method;
@@ -202,6 +204,7 @@ pub struct RouteDefBuilder<H> {
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
     block: Option<SessionBlock>,
+    constraints: Vec<(String, ParamConstraint)>,
 }
 
 impl<H, Fut> RouteDefBuilder<H>
@@ -218,8 +221,33 @@ where
             name: None,
             middlewares: Vec::new(),
             block: None,
+            constraints: Vec::new(),
         }
     }
+
+    /// Hold a parameter of this route to a constraint. A request whose
+    /// value the constraint refuses gets a 404, and the handler is not run.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{get, Request, Response};
+    /// # async fn show(_req: Request) -> Response { suprnova::http::text("ok") }
+    /// get!("/posts/{id}", show).where_number("id");
+    /// ```
+    ///
+    /// The `where_*` methods are this with the constraint named.
+    ///
+    /// # Panics
+    ///
+    /// Not here. The parameter may be one of the group the route is in,
+    /// so whether the route has it is known when the route is registered.
+    /// A constraint on a parameter the route does not have stops the boot
+    /// there, with the other errors of a route the macros register.
+    pub fn constrain(mut self, param: &str, constraint: ParamConstraint) -> Self {
+        self.constraints.push((param.to_owned(), constraint));
+        self
+    }
+
+    crate::routing::params::where_methods!();
 
     /// Name this route for URL generation
     pub fn name(mut self, name: &'static str) -> Self {
@@ -229,8 +257,31 @@ where
 
     /// Add middleware to this route
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
-        self.middlewares.push(into_boxed(middleware));
+        self.middlewares.push(boxed_as(middleware));
         self
+    }
+
+    /// Add the middleware a name stands for: an alias registered with
+    /// [`register_middleware_alias`](crate::middleware::register_middleware_alias),
+    /// an alias with arguments such as `"throttle:60,1"`, or a group, which
+    /// adds every middleware of the group in order.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not registered, or the alias refuses the
+    /// arguments. That is when the route is registered, which is at boot,
+    /// and never on a request. Use [`Self::try_middleware_named`] to get
+    /// the error instead.
+    pub fn middleware_named(self, name: &str) -> Self {
+        self.try_middleware_named(name)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::middleware_named`].
+    pub fn try_middleware_named(mut self, name: &str) -> Result<Self, FrameworkError> {
+        self.middlewares
+            .extend(crate::middleware::resolve_named_middleware(name)?);
+        Ok(self)
     }
 
     /// Serialize the requests that carry one session on this route
@@ -262,6 +313,12 @@ where
             .middlewares
             .into_iter()
             .fold(builder, |b, m| b.middleware_boxed(m));
+        let builder = self
+            .constraints
+            .into_iter()
+            .fold(builder, |b, (param, constraint)| {
+                b.constrain(&param, constraint)
+            });
         let builder = match self.block {
             Some(block) => builder.block_session(block),
             None => builder,
@@ -589,6 +646,7 @@ pub struct AnyRouteDefBuilder<H> {
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
     block: Option<SessionBlock>,
+    constraints: Vec<(String, ParamConstraint)>,
 }
 
 impl<H, Fut> AnyRouteDefBuilder<H>
@@ -603,8 +661,19 @@ where
             name: None,
             middlewares: Vec::new(),
             block: None,
+            constraints: Vec::new(),
         }
     }
+
+    /// Hold a parameter of this route to a constraint, for every method.
+    /// See [`RouteDefBuilder::constrain`], which says when a constraint
+    /// on a parameter the route does not have is refused.
+    pub fn constrain(mut self, param: &str, constraint: ParamConstraint) -> Self {
+        self.constraints.push((param.to_owned(), constraint));
+        self
+    }
+
+    crate::routing::params::where_methods!();
 
     /// Name this route. Registered once across all seven verbs since
     /// the path is shared.
@@ -616,8 +685,31 @@ where
     /// Attach middleware that runs for every method the `any!` route
     /// was registered against.
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
-        self.middlewares.push(into_boxed(middleware));
+        self.middlewares.push(boxed_as(middleware));
         self
+    }
+
+    /// Add the middleware a name stands for: an alias registered with
+    /// [`register_middleware_alias`](crate::middleware::register_middleware_alias),
+    /// an alias with arguments such as `"throttle:60,1"`, or a group, which
+    /// adds every middleware of the group in order.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not registered, or the alias refuses the
+    /// arguments. That is when the route is registered, which is at boot,
+    /// and never on a request. Use [`Self::try_middleware_named`] to get
+    /// the error instead.
+    pub fn middleware_named(self, name: &str) -> Self {
+        self.try_middleware_named(name)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::middleware_named`].
+    pub fn try_middleware_named(mut self, name: &str) -> Result<Self, FrameworkError> {
+        self.middlewares
+            .extend(crate::middleware::resolve_named_middleware(name)?);
+        Ok(self)
     }
 
     /// Register this `any` route against the router. Drives
@@ -630,6 +722,12 @@ where
             .middlewares
             .into_iter()
             .fold(multi, |b, m| b.middleware_boxed(m));
+        let multi = self
+            .constraints
+            .into_iter()
+            .fold(multi, |b, (param, constraint)| {
+                b.constrain(&param, constraint)
+            });
         let multi = match self.block {
             Some(block) => multi.block_session(block),
             None => multi,
@@ -753,8 +851,31 @@ impl WsRouteDef {
     /// A non-2xx response from any middleware (e.g. `AuthMiddleware`
     /// returning 401) short-circuits the upgrade.
     pub fn middleware<M: Middleware + 'static>(mut self, m: M) -> Self {
-        self.middleware.push(into_boxed(m));
+        self.middleware.push(boxed_as(m));
         self
+    }
+
+    /// Add the middleware a name stands for: an alias registered with
+    /// [`register_middleware_alias`](crate::middleware::register_middleware_alias),
+    /// an alias with arguments such as `"throttle:60,1"`, or a group, which
+    /// adds every middleware of the group in order.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not registered, or the alias refuses the
+    /// arguments. That is when the route is registered, which is at boot,
+    /// and never on a request. Use [`Self::try_middleware_named`] to get
+    /// the error instead.
+    pub fn middleware_named(self, name: &str) -> Self {
+        self.try_middleware_named(name)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::middleware_named`].
+    pub fn try_middleware_named(mut self, name: &str) -> Result<Self, FrameworkError> {
+        self.middleware
+            .extend(crate::middleware::resolve_named_middleware(name)?);
+        Ok(self)
     }
 
     /// Override the default [`WsConfig`] for this route. Use to set
@@ -831,8 +952,31 @@ where
 
     /// Add middleware to this fallback route
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
-        self.middlewares.push(into_boxed(middleware));
+        self.middlewares.push(boxed_as(middleware));
         self
+    }
+
+    /// Add the middleware a name stands for: an alias registered with
+    /// [`register_middleware_alias`](crate::middleware::register_middleware_alias),
+    /// an alias with arguments such as `"throttle:60,1"`, or a group, which
+    /// adds every middleware of the group in order.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not registered, or the alias refuses the
+    /// arguments. That is when the route is registered, which is at boot,
+    /// and never on a request. Use [`Self::try_middleware_named`] to get
+    /// the error instead.
+    pub fn middleware_named(self, name: &str) -> Self {
+        self.try_middleware_named(name)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::middleware_named`].
+    pub fn try_middleware_named(mut self, name: &str) -> Result<Self, FrameworkError> {
+        self.middlewares
+            .extend(crate::middleware::resolve_named_middleware(name)?);
+        Ok(self)
     }
 
     /// Register this fallback definition with a router
@@ -920,6 +1064,7 @@ pub struct GroupRoute {
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
     block: Option<SessionBlock>,
+    constraints: Vec<(String, ParamConstraint)>,
 }
 
 /// A multi-method route (`any!`) stored within a group. Holds a
@@ -933,6 +1078,7 @@ pub struct GroupAnyRoute {
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
     block: Option<SessionBlock>,
+    constraints: Vec<(String, ParamConstraint)>,
 }
 
 /// An item that can be added to a route group - a single-method route,
@@ -982,6 +1128,9 @@ pub trait IntoGroupItem {
 /// ```
 pub struct GroupDef {
     prefix: &'static str,
+    /// What [`GroupDef::name`] put in front of the name of every route in
+    /// the group. Empty when the group names nothing.
+    name_prefix: &'static str,
     items: Vec<GroupItem>,
     group_middlewares: Vec<BoxedMiddleware>,
     group_block: Option<SessionBlock>,
@@ -995,10 +1144,32 @@ impl GroupDef {
     pub fn __new_unchecked(prefix: &'static str) -> Self {
         Self {
             prefix,
+            name_prefix: "",
             items: Vec::new(),
             group_middlewares: Vec::new(),
             group_block: None,
         }
+    }
+
+    /// Put `prefix` in front of the name of every route in this group.
+    /// Mirrors Laravel's `Route::name('admin.')->group(...)`.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{get, group, Request, Response};
+    /// # async fn index(_req: Request) -> Response { suprnova::http::text("ok") }
+    /// # async fn show(_req: Request) -> Response { suprnova::http::text("ok") }
+    /// group!("/admin/users", {
+    ///     get!("/", index).name("index"),        // admin.users.index
+    ///     get!("/{id}", show).name("show"),      // admin.users.show
+    /// }).name("admin.users.");
+    /// ```
+    ///
+    /// The prefix is used as it is written, so end it with the separator
+    /// the names use. A group inside this one adds its own prefix after
+    /// this one, and a route without a name stays without one.
+    pub fn name(mut self, prefix: &'static str) -> Self {
+        self.name_prefix = prefix;
+        self
     }
 
     /// Add an item (route or nested group) to this group
@@ -1049,8 +1220,31 @@ impl GroupDef {
     /// }).middleware(AuthMiddleware).middleware(RateLimitMiddleware);
     /// ```
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
-        self.group_middlewares.push(into_boxed(middleware));
+        self.group_middlewares.push(boxed_as(middleware));
         self
+    }
+
+    /// Add the middleware a name stands for: an alias registered with
+    /// [`register_middleware_alias`](crate::middleware::register_middleware_alias),
+    /// an alias with arguments such as `"throttle:60,1"`, or a group, which
+    /// adds every middleware of the group in order.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not registered, or the alias refuses the
+    /// arguments. That is when the route is registered, which is at boot,
+    /// and never on a request. Use [`Self::try_middleware_named`] to get
+    /// the error instead.
+    pub fn middleware_named(self, name: &str) -> Self {
+        self.try_middleware_named(name)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::middleware_named`].
+    pub fn try_middleware_named(mut self, name: &str) -> Result<Self, FrameworkError> {
+        self.group_middlewares
+            .extend(crate::middleware::resolve_named_middleware(name)?);
+        Ok(self)
     }
 
     /// Serialize the requests that carry one session on every route in
@@ -1081,21 +1275,24 @@ impl GroupDef {
     /// Parent group middleware is applied before child group middleware,
     /// which is applied before route-specific middleware.
     pub fn register(self, mut router: Router) -> Router {
-        self.register_with_inherited(&mut router, "", &[], None);
+        self.register_with_inherited(&mut router, "", "", &[], None);
         router
     }
 
-    /// Internal recursive registration with inherited prefix, middleware
-    /// and session block
+    /// Internal recursive registration with inherited prefix, name prefix,
+    /// middleware and session block
     fn register_with_inherited(
         self,
         router: &mut Router,
         parent_prefix: &str,
+        parent_name_prefix: &str,
         inherited_middleware: &[BoxedMiddleware],
         inherited_block: Option<SessionBlock>,
     ) {
         // The nearest block wins: this group's own, else the parent's.
         let group_block = self.group_block.or(inherited_block);
+        // Name prefixes concatenate outside in: `admin.` then `users.`.
+        let name_prefix = format!("{parent_name_prefix}{}", self.name_prefix);
         // Build the full prefix for this group. join_paths keeps the
         // `/` boundary canonical so a root parent (`group!("/")`) or a
         // trailing-slash prefix can't smuggle `//` into child routes.
@@ -1153,7 +1350,7 @@ impl GroupDef {
 
                     // Register route name if present
                     if let Some(name) = route.name {
-                        register_route_name(name, full_path);
+                        register_route_name(&format!("{name_prefix}{name}"), full_path);
                     }
 
                     // Apply combined middleware (inherited + group), then route-specific.
@@ -1167,6 +1364,14 @@ impl GroupDef {
                     for mw in route.middlewares {
                         router.add_middleware(http_method.clone(), full_path, mw);
                     }
+                    // The full path is known here, so a constraint may name
+                    // a parameter of the group's prefix. One that names no
+                    // parameter stops the boot, as a duplicate route does.
+                    for (param, constraint) in route.constraints {
+                        router
+                            .add_constraint(http_method.clone(), full_path, &param, constraint)
+                            .unwrap_or_else(|e| panic!("{e}"));
+                    }
                     if let Some(block) = route.block.or(group_block) {
                         register_route_block(&http_method, full_path, block);
                     }
@@ -1179,46 +1384,43 @@ impl GroupDef {
                     let full_path = convert_route_params(&raw_full);
                     let full_path: &'static str = Box::leak(full_path.into_boxed_str());
 
-                    // Fan the same Arc<BoxedHandler> across every common
-                    // HTTP method's matchit registry. Order matches
-                    // `ANY_METHODS` in router.rs so tests / logs see the
-                    // same ordering.
-                    router.insert_get(full_path, any_route.handler.clone());
-                    router.insert_post(full_path, any_route.handler.clone());
-                    router.insert_put(full_path, any_route.handler.clone());
-                    router.insert_patch(full_path, any_route.handler.clone());
-                    router.insert_delete(full_path, any_route.handler.clone());
-                    router.insert_head(full_path, any_route.handler.clone());
-                    router.insert_options(full_path, any_route.handler);
+                    // Fan the same Arc<BoxedHandler> across the matchit
+                    // registry of every method in `ANY_METHODS`, in its
+                    // order, so this path and `Router::any` register the
+                    // same verbs in the same sequence.
+                    for method in ANY_METHODS {
+                        router.insert_method(method, full_path, any_route.handler.clone());
+                    }
 
                     // Name is registered once - the path is shared
                     // across all seven verbs so reverse-lookup returns
                     // the same URL no matter which method the caller
                     // is looking up.
                     if let Some(name) = any_route.name {
-                        register_route_name(name, full_path);
+                        register_route_name(&format!("{name_prefix}{name}"), full_path);
                     }
 
                     // Fan combined (inherited + group) middleware AND
-                    // route-local middleware across every (method, path)
-                    // key. Without this, auth / CSRF / rate-limit
-                    // attached to an `any!` route would silently skip
-                    // some verbs.
-                    let all_methods = [
-                        hyper::Method::GET,
-                        hyper::Method::POST,
-                        hyper::Method::PUT,
-                        hyper::Method::PATCH,
-                        hyper::Method::DELETE,
-                        hyper::Method::HEAD,
-                        hyper::Method::OPTIONS,
-                    ];
-                    for method in &all_methods {
+                    // route-local middleware across the (method, path)
+                    // key of every method the handler went to above.
+                    // Without this, auth / CSRF / rate-limit attached to
+                    // an `any!` route would silently skip some verbs.
+                    for method in ANY_METHODS {
                         for mw in &combined_middleware {
                             router.add_middleware(method.clone(), full_path, mw.clone());
                         }
                         for mw in &any_route.middlewares {
                             router.add_middleware(method.clone(), full_path, mw.clone());
+                        }
+                        for (param, constraint) in &any_route.constraints {
+                            router
+                                .add_constraint(
+                                    method.clone(),
+                                    full_path,
+                                    param,
+                                    constraint.clone(),
+                                )
+                                .unwrap_or_else(|e| panic!("{e}"));
                         }
                         if let Some(block) = any_route.block.or(group_block) {
                             register_route_block(method, full_path, block);
@@ -1231,6 +1433,7 @@ impl GroupDef {
                     nested.register_with_inherited(
                         router,
                         &full_prefix,
+                        &name_prefix,
                         &combined_middleware,
                         group_block,
                     );
@@ -1258,6 +1461,7 @@ where
             name: self.name,
             middlewares: self.middlewares,
             block: self.block,
+            constraints: self.constraints,
         }
     }
 }
@@ -1299,6 +1503,7 @@ where
             name: self.name,
             middlewares: self.middlewares,
             block: self.block,
+            constraints: self.constraints,
         }
     }
 }
@@ -1358,11 +1563,58 @@ where
 /// Middleware applied to a parent group is automatically inherited by all nested groups.
 /// The execution order is: parent middleware -> child middleware -> route middleware.
 ///
+/// # Names
+///
+/// `.name("admin.")` on the group puts the prefix in front of the name of
+/// every route in it, and a group inside adds its own after it. See
+/// [`GroupDef::name`].
+///
+/// # A controller for the group
+///
+/// `controller = path::to::module` names the module the handlers of the
+/// group live in. A route in the group then names its handler by function
+/// alone. Mirrors Laravel's `Route::controller(X::class)->group(...)`.
+///
+/// ```rust,no_run
+/// use suprnova::{routes, get, post, group};
+/// # mod controllers {
+/// #     pub mod admin { pub mod users {
+/// #         use suprnova::{Request, Response};
+/// #         pub async fn index(_req: Request) -> Response { suprnova::http::text("ok") }
+/// #         pub async fn store(_req: Request) -> Response { suprnova::http::text("ok") }
+/// #     } }
+/// #     pub mod health {
+/// #         use suprnova::{Request, Response};
+/// #         pub async fn check(_req: Request) -> Response { suprnova::http::text("ok") }
+/// #     }
+/// # }
+///
+/// routes! {
+///     group!("/admin/users", controller = controllers::admin::users, {
+///         get!("/", index).name("index"),    // controllers::admin::users::index
+///         post!("/", store).name("store"),   // controllers::admin::users::store
+///         // A handler written as a path is taken as it is written.
+///         get!("/health", controllers::health::check),
+///     }).name("admin.users."),
+/// }
+/// ```
+///
+/// A group inside a controller group is an item like any other and names
+/// its own controller, or none.
+///
 /// # Compile Error
 ///
 /// Fails to compile if prefix doesn't start with '/'.
 #[macro_export]
 macro_rules! group {
+    ($prefix:expr, controller = $($controller:ident)::+, { $( $items:tt )* }) => {{
+        const _: &str = $crate::validate_route_path($prefix);
+        $crate::__group_controller_items!(
+            $crate::GroupDef::__new_unchecked($prefix),
+            [$($controller)::+],
+            $( $items )*
+        )
+    }};
     ($prefix:expr, { $( $item:expr ),* $(,)? }) => {{
         const _: &str = $crate::validate_route_path($prefix);
         let mut group = $crate::GroupDef::__new_unchecked($prefix);
@@ -1371,6 +1623,47 @@ macro_rules! group {
         )*
         group
     }};
+}
+
+/// Adds the items of a `group!(..., controller = ..., { ... })` to the
+/// group, one at a time. A route macro whose handler is one bare name gets
+/// the controller's path put in front of the name. Every other item is
+/// added as it is written.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __group_controller_items {
+    ($group:expr, [$($controller:tt)+], ) => { $group };
+    (
+        $group:expr, [$($controller:tt)+],
+        $method:ident ! ( $path:expr , $handler:ident )
+        $( . $call:ident ( $( $argument:tt )* ) )*
+        , $( $rest:tt )*
+    ) => {
+        $crate::__group_controller_items!(
+            $group.add(
+                $crate::$method!($path, $($controller)+ :: $handler)
+                $( . $call ( $( $argument )* ) )*
+            ),
+            [$($controller)+],
+            $( $rest )*
+        )
+    };
+    (
+        $group:expr, [$($controller:tt)+],
+        $method:ident ! ( $path:expr , $handler:ident )
+        $( . $call:ident ( $( $argument:tt )* ) )*
+    ) => {
+        $group.add(
+            $crate::$method!($path, $($controller)+ :: $handler)
+            $( . $call ( $( $argument )* ) )*
+        )
+    };
+    ($group:expr, [$($controller:tt)+], $item:expr , $( $rest:tt )*) => {
+        $crate::__group_controller_items!($group.add($item), [$($controller)+], $( $rest )*)
+    };
+    ($group:expr, [$($controller:tt)+], $item:expr) => {
+        $group.add($item)
+    };
 }
 
 /// Define routes with a clean, Laravel-like syntax
@@ -1681,6 +1974,64 @@ mod tests {
             router
                 .match_route(&Method::OPTIONS, "/api/discover")
                 .is_some()
+        );
+    }
+
+    /// An `any!` route inside a group lands on each of the seven methods
+    /// with its handler, the group's middleware and the group's session
+    /// block. Auth, CSRF and rate limiting hang on these registrations, so
+    /// a verb the fan-out skipped would be a verb they never guard.
+    #[test]
+    fn group_any_route_fans_handler_middleware_and_block_across_seven_methods() {
+        use crate::middleware::Next;
+        use async_trait::async_trait;
+        use std::time::Duration;
+
+        #[derive(Clone)]
+        struct NoopMw;
+        #[async_trait]
+        impl Middleware for NoopMw {
+            async fn handle(&self, request: Request, next: Next) -> Response {
+                next(request).await
+            }
+        }
+
+        let block = SessionBlock::new(Duration::from_secs(3), Duration::from_secs(4));
+        let router = GroupDef::__new_unchecked("/any-fanout")
+            .add(super::__any_impl("/every", test_handler))
+            .middleware(NoopMw)
+            .block_session(block)
+            .register(Router::new());
+
+        for m in [
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::HEAD,
+            Method::OPTIONS,
+        ] {
+            assert!(
+                router.match_route(&m, "/any-fanout/every").is_some(),
+                "any! in a group must register the handler for {m}",
+            );
+            assert_eq!(
+                router.get_route_middleware(&m, "/any-fanout/every").len(),
+                1,
+                "any! in a group must carry the group middleware for {m}",
+            );
+            assert_eq!(
+                crate::session::blocking::route_block(&m, "/any-fanout/every"),
+                Some(block),
+                "any! in a group must carry the group session block for {m}",
+            );
+        }
+        // A HEAD request falls back to the GET route, so the loop above
+        // cannot see a HEAD registration that is missing.
+        assert!(
+            router.has_explicit_head("/any-fanout/every"),
+            "any! in a group must register a HEAD handler of its own",
         );
     }
 

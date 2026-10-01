@@ -6,7 +6,7 @@ use crate::workflow::config::WorkflowConfig;
 use crate::workflow::context::WorkflowContext;
 use crate::workflow::entities::{workflow_steps, workflows};
 use crate::workflow::types::{ClaimedWorkflow, StepStatus, WorkflowHandle, WorkflowStatus};
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::Duration as ChronoDuration;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseBackend, DatabaseTransaction, EntityTrait, QueryFilter,
@@ -24,7 +24,7 @@ pub async fn insert_workflow(
     max_attempts: i32,
 ) -> Result<WorkflowHandle, FrameworkError> {
     let db = DB::connection()?;
-    let now = Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
 
     let model = workflows::ActiveModel {
         name: Set(name.to_string()),
@@ -93,7 +93,7 @@ pub async fn mark_running(
     lock_timeout: Duration,
 ) -> Result<ClaimedWorkflow, FrameworkError> {
     let db = DB::connection()?;
-    let now = Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
     let lock_until =
         now + ChronoDuration::seconds(i64::try_from(lock_timeout.as_secs()).unwrap_or(i64::MAX));
 
@@ -320,7 +320,7 @@ pub(crate) async fn refresh_lock_if_owned(
     worker_id: &str,
     attempts: i32,
 ) -> Result<bool, FrameworkError> {
-    let now = Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
     refresh_lock_if_owned_at(id, lock_timeout, worker_id, attempts, now).await
 }
 
@@ -394,7 +394,7 @@ async fn lock_workflow_for_step(
         workflows::Entity::update_many()
             .col_expr(
                 workflows::Column::UpdatedAt,
-                Expr::value(Utc::now().naive_utc()),
+                Expr::value(crate::clock::now().naive_utc()),
             )
             .filter(workflows::Column::Id.eq(workflow_id))
             .filter(workflows::Column::Status.eq(WorkflowStatus::Running.as_str()))
@@ -457,7 +457,7 @@ pub async fn mark_succeeded(
     attempts: i32,
 ) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
-    let now = Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
 
     let result = workflows::Entity::update_many()
         .col_expr(
@@ -515,7 +515,7 @@ pub async fn requeue(
     attempts: i32,
 ) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
-    let now = Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
 
     let result = workflows::Entity::update_many()
         .col_expr(
@@ -568,7 +568,7 @@ pub async fn mark_failed(
     attempts: i32,
 ) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
-    let now = Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
 
     let result = workflows::Entity::update_many()
         .col_expr(
@@ -670,7 +670,7 @@ pub(crate) async fn insert_step_running_owned(
     workflow_attempts: i32,
 ) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
-    let now = Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
 
     let model = workflow_steps::ActiveModel {
         workflow_id: Set(workflow_id),
@@ -725,7 +725,7 @@ pub(crate) async fn update_step_running_owned(
     workflow_attempts: i32,
 ) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
-    let now = Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
 
     let workflow_id = step.workflow_id;
     let attempts = step.attempts + 1;
@@ -778,7 +778,7 @@ pub(crate) async fn mark_step_succeeded_owned(
     workflow_attempts: i32,
 ) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
-    let now = Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
 
     let transaction = db
         .inner()
@@ -836,7 +836,7 @@ pub(crate) async fn mark_step_failed_owned(
     workflow_attempts: i32,
 ) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
-    let now = Utc::now().naive_utc();
+    let now = crate::clock::now().naive_utc();
 
     let transaction = db
         .inner()

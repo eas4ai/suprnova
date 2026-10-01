@@ -15,9 +15,11 @@
 
 mod checkout;
 mod customer;
+mod deadline;
 mod event_map;
 mod payment;
 mod promotions;
+mod sdk_error;
 mod subscription;
 mod webhook;
 
@@ -109,8 +111,15 @@ pub(crate) fn apply_idempotency<T>(
     request: CustomizableStripeRequest<T>,
     key: Option<&str>,
 ) -> PaymentResult<CustomizableStripeRequest<T>> {
+    Ok(with_idempotency_key(request, idempotency_key(key)?))
+}
+
+/// Check the idempotency key of a request; `None` when the caller sent
+/// none. A mutation that reads from Stripe before it writes checks the key
+/// before the read, so a key Stripe would refuse fails before any request.
+pub(crate) fn idempotency_key(key: Option<&str>) -> PaymentResult<Option<IdempotencyKey>> {
     let Some(key) = key else {
-        return Ok(request);
+        return Ok(None);
     };
     if key.trim().is_empty() {
         return Err(PaymentError::Validation(
@@ -119,7 +128,18 @@ pub(crate) fn apply_idempotency<T>(
     }
     let key = IdempotencyKey::new(key)
         .map_err(|error| PaymentError::Validation(format!("invalid idempotency_key: {error}")))?;
-    Ok(request.request_strategy(RequestStrategy::Idempotent(key)))
+    Ok(Some(key))
+}
+
+/// Send `request` under `key`, when there is one.
+pub(crate) fn with_idempotency_key<T>(
+    request: CustomizableStripeRequest<T>,
+    key: Option<IdempotencyKey>,
+) -> CustomizableStripeRequest<T> {
+    match key {
+        Some(key) => request.request_strategy(RequestStrategy::Idempotent(key)),
+        None => request,
+    }
 }
 
 impl StripeProvider {

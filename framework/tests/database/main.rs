@@ -3,9 +3,13 @@
 
 #[path = "../support/env_lock.rs"]
 mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
 pub mod facade;
 pub mod identifier_validation;
+pub mod mariadb_scheme;
 pub mod medium_audit;
+pub mod monitor;
 pub mod multiconnection;
 pub mod observability;
 pub mod pool_liveness;

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
+use sea_orm_migration::{MigrationTrait, SchemaManager};
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use std::time::Duration;
 use suprnova::BackoffSchedule;
 use suprnova::events::{EventFacade, dispatched};
 use suprnova::notifications::channels::database::DatabaseChannel;
+use suprnova::notifications::migrations::CreateNotificationsTable;
 use suprnova::notifications::notify_job::SendNotificationJob;
 use suprnova::notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
@@ -52,24 +54,14 @@ impl Notifiable for User {
     }
 }
 
+/// The framework's own notifications migration, so this schema cannot
+/// drift from the one apps get.
 async fn fresh_db() -> DatabaseConnection {
     let db = Database::connect("sqlite::memory:").await.unwrap();
-    db.execute_unprepared(
-        r"
-        CREATE TABLE notifications (
-            id CHAR(36) PRIMARY KEY,
-            type VARCHAR(255) NOT NULL,
-            notifiable_type VARCHAR(255) NOT NULL,
-            notifiable_id VARCHAR(64) NOT NULL,
-            data TEXT NOT NULL,
-            read_at TIMESTAMP NULL,
-            created_at TIMESTAMP NOT NULL,
-            updated_at TIMESTAMP NOT NULL
-        )
-        ",
-    )
-    .await
-    .unwrap();
+    CreateNotificationsTable
+        .up(&SchemaManager::new(&db))
+        .await
+        .unwrap();
     db
 }
 
@@ -600,5 +592,154 @@ async fn notify_queue_fail_on_timeout_dead_letters_on_the_first_timeout_with_zer
         0,
         "zero retries: a job nacked for retry would still be held by the \
          driver (delayed), not gone"
+    );
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct InvoicePaid {
+    wait_for_commit: bool,
+}
+
+impl Notification for InvoicePaid {
+    fn notification_name() -> &'static str {
+        "InvoicePaid"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["database"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+    fn after_commit(&self) -> bool {
+        self.wait_for_commit
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn a_notification_that_opts_in_is_queued_at_the_commit() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = suprnova::testing::TestDatabase::sqlite_memory()
+        .await
+        .expect("sqlite");
+
+    suprnova::DB::transaction(|_tx| {
+        Box::pin(async {
+            Notify::queue(
+                &User { id: 7 },
+                InvoicePaid {
+                    wait_for_commit: true,
+                },
+            )
+            .await?;
+            assert_eq!(
+                Queue::size().await?,
+                0,
+                "the notification must not reach the queue before the commit"
+            );
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(
+        driver.size().await.unwrap(),
+        1,
+        "it is queued at the commit"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_rollback_discards_a_queued_notification_that_opted_in() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = suprnova::testing::TestDatabase::sqlite_memory()
+        .await
+        .expect("sqlite");
+
+    let result: Result<(), FrameworkError> = suprnova::DB::transaction(|_tx| {
+        Box::pin(async {
+            Notify::queue(
+                &User { id: 7 },
+                InvoicePaid {
+                    wait_for_commit: true,
+                },
+            )
+            .await?;
+            Err(FrameworkError::internal("force rollback"))
+        })
+    })
+    .await;
+
+    assert!(result.is_err(), "the transaction rolled back");
+    assert_eq!(
+        driver.size().await.unwrap(),
+        0,
+        "a notification about work that was rolled back must never be queued"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_notification_that_did_not_opt_in_is_queued_before_the_commit() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = suprnova::testing::TestDatabase::sqlite_memory()
+        .await
+        .expect("sqlite");
+
+    suprnova::DB::transaction(|_tx| {
+        Box::pin(async {
+            Notify::queue(
+                &User { id: 7 },
+                InvoicePaid {
+                    wait_for_commit: false,
+                },
+            )
+            .await?;
+            assert_eq!(Queue::size().await?, 1, "the default is unchanged");
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(driver.size().await.unwrap(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_queued_notification_carries_the_context_of_the_code_that_queued_it() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    suprnova::Context::scope(suprnova::ContextStore::default(), async {
+        suprnova::Context::add("trace_id", "abc");
+        Notify::queue(
+            &User { id: 7 },
+            OrderShipped {
+                tracking: "1Z".into(),
+            },
+        )
+        .await
+        .unwrap();
+    })
+    .await;
+
+    let envelope = driver
+        .pop(Duration::from_secs(5))
+        .await
+        .unwrap()
+        .expect("the queued notification")
+        .envelope;
+    let context = envelope
+        .context
+        .expect("the notification job carries the context");
+    assert_eq!(
+        context.data.get("trace_id"),
+        Some(&serde_json::json!("abc"))
     );
 }

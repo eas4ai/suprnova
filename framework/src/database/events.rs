@@ -201,15 +201,18 @@ impl Event for TransactionRolledBack {
     }
 }
 
-/// Open-connection count crossed a configured threshold. Fired by
-/// external monitoring tooling that observes the connection pool;
-/// not emitted by the framework itself.
+/// The server of a database has as many connections as the application
+/// allows, or more. Dispatched by
+/// [`DB::monitor`](crate::database::DB::monitor) and by the `db:monitor`
+/// console command, once for each such connection and each time the check
+/// runs. Nothing runs the check by itself: put the command on the
+/// schedule.
 #[derive(Debug, Clone)]
 pub struct DatabaseBusy {
     /// Logical connection name being monitored.
     pub connection_name: String,
-    /// Observed open connection count at the time of the threshold
-    /// breach.
+    /// The connections the server had when it was asked, from every
+    /// client of it.
     pub connections: u32,
 }
 

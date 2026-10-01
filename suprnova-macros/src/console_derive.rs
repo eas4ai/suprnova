@@ -12,7 +12,7 @@
 //! fn __suprnova_clap_builder_Greet() -> ::clap::Command {
 //!     <Greet as ::clap::CommandFactory>::command()
 //!         .name("greet")          // overrides whatever clap picked
-//!         .about("Greet someone") // ditto
+//!         .about("Greet someone") // only when `description` is given
 //! }
 //!
 //! fn __suprnova_runner_Greet(matches: &::clap::ArgMatches) -> Pin<Box<...>> {
@@ -31,6 +31,10 @@
 //!     }
 //! }
 //! ```
+//!
+//! `description` is optional. When it is left out the builder does not
+//! call `.about` at all, so the command keeps the about text clap has for
+//! it: the struct's doc comment, or `#[command(about = "...")]`.
 //!
 //! The user provides the `impl TypedCommand` separately.
 
@@ -104,6 +108,13 @@ pub fn derive_command_impl(input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     };
+    // Without a `description` there is no `.about` call. `.about("")` would
+    // replace the about text clap took from the struct's doc comment or from
+    // `#[command(about = "...")]` with an empty line in the help.
+    let about = attrs
+        .description
+        .as_ref()
+        .map(|description| quote! { .about(#description) });
     let description = attrs.description.unwrap_or_default();
 
     let ty = &input.ident;
@@ -116,7 +127,7 @@ pub fn derive_command_impl(input: TokenStream) -> TokenStream {
         fn #builder_ident() -> ::suprnova::__clap::Command {
             <#ty as ::suprnova::__clap::CommandFactory>::command()
                 .name(#name)
-                .about(#description)
+                #about
         }
 
         #[doc(hidden)]

@@ -240,7 +240,7 @@ let title: Option<String> = row.get_optional_string("title")?;
 let score: Option<i64>    = row.get_optional_int("score")?;
 ```
 
-Today the optional family covers `String` and `i64`. For other
+The optional family covers `String` and `i64`. For other
 nullable types, use `get_value` and match on `serde_json::Value::Null`
 yourself, or read the column through `get_as::<Option<T>>` (any
 `T: DeserializeOwned`).

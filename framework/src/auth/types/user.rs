@@ -213,7 +213,7 @@ impl UserBuilder {
     ///
     /// Returns [`FrameworkError`] when no email address was supplied.
     pub fn build(self) -> Result<User, FrameworkError> {
-        let now = Utc::now();
+        let now = crate::clock::now();
         let email = self
             .email
             .ok_or_else(|| FrameworkError::bad_request("an email address is required"))?;

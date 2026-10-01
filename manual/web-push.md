@@ -407,7 +407,9 @@ Suprnova rejects plaintexts larger than 3992 bytes (the cap minus the
 ~85-byte AES128GCM encryption overhead) at encrypt time so the
 failure surfaces in your code, not in a 413 from the push service.
 A `Notification` whose serialized `data()` exceeds that limit
-returns `WebPushError::Encryption` from the channel's `deliver`.
+fails in the channel's `deliver`: the client returns
+`WebPushError::Encryption`, and the channel reports it as an internal
+error.
 
 For anything larger - a long message body, a thumbnail - send a short
 notification carrying a URL the Service Worker fetches on click. That's
@@ -422,15 +424,77 @@ storage. `WebPushChannel` treats this as a non-fatal warn:
 
 ```text
 WARN webpush subscription gone (404/410); caller should remove
-     channel=webpush endpoint=https://fcm.googleapis.com/fcm/send/abc
+     channel=webpush host=fcm.googleapis.com endpoint_sha256=4e9bdab8bbe7189c
 ```
 
 Dispatch returns `Ok(())` because the notification reached a terminal
 state - there's no recipient to retry against. Your application is
-expected to act on the warn: parse `endpoint` from the log (or hook a
-`NotificationFailed` listener that classifies via `WebPushError`) and
-remove the subscription row. Suprnova ships the warn; it does not
-auto-prune the subscriptions table for you.
+expected to act on the warn and remove the subscription row. Suprnova
+ships the warn; it does not auto-prune the subscriptions table for you.
+
+The warning has no `endpoint` field. The path of an endpoint is the token
+that reaches the browser, so the log keeps it out. `host` is the host of
+the endpoint, and `endpoint_sha256` is the first 16 hexadecimal digits of
+the SHA-256 of the endpoint as you stored it. To find the row, compute
+the same digest of each stored endpoint and compare:
+
+```rust
+use sha2::{Digest, Sha256};
+
+fn endpoint_digest(endpoint: &str) -> String {
+    hex::encode(&Sha256::digest(endpoint.as_bytes())[..8])
+}
+```
+
+### Subscriptions that cannot be used
+
+A stored subscription can be unusable before any request leaves your
+server. The client then returns `WebPushError::InvalidSubscription`, and
+nothing is sent. The text of the error names the rule that refused the
+subscription. Two groups of checks raise it:
+
+- The endpoint. It is no URL, or the `Strict` endpoint policy refuses it
+  because it is not `https`, has no host, names an IP address in place of a
+  host, or names a host that is no push service (`localhost`, a cloud
+  metadata host, or a reserved name such as `.local` or `.internal`).
+- The keys. `p256dh` is no base64url, does not decode to 65 bytes, is not
+  in uncompressed form or is no point of the P-256 curve. `auth` is no
+  base64url or does not decode to 16 bytes.
+
+The stored data is wrong, so a retry cannot help. `is_retryable()` returns
+`false`. `WebPushChannel` handles the error as it handles a gone
+subscription: it logs a warning and dispatch returns `Ok(())`, so a queue
+does not send the job again.
+
+```text
+WARN webpush subscription cannot be used; caller should remove
+     channel=webpush host=10.0.0.7 endpoint_sha256=533bb6dc756981d0 reason=subscription endpoint host '10.0.0.7' is an IP literal; real push services use named hosts
+```
+
+The warning carries the reason, the host and the digest of the endpoint,
+as the warning for a gone subscription does, and no `endpoint` field.
+
+A stored route that is no subscription at all gets the same warning:
+text that is no JSON, or JSON without an `endpoint` or without `keys`. The
+reason is the kind of the mistake and its position, such as
+`the value is not JSON (line 1, column 1)`. It never quotes the route,
+which holds the secret of the subscription. This warning has no host and
+no digest, because the route has no endpoint to take them from.
+
+Your application removes the subscription row, as it does for a gone
+subscription. Dispatch succeeds, so no `NotificationFailed` event fires;
+you learn of it from the log. When you call `WebPushClient::send`
+yourself, match on `WebPushError::InvalidSubscription`:
+
+```rust
+match client.send(&sub, payload, ContentEncoding::Aes128Gcm, 60).await {
+    Ok(_) => (),
+    Err(WebPushError::SubscriptionGone | WebPushError::InvalidSubscription(_)) => {
+        // remove the subscription
+    }
+    Err(e) => return Err(e.into()),
+}
+```
 
 ## Retries and Retry-After
 
@@ -459,12 +523,19 @@ match client.send(&sub, payload, ContentEncoding::Aes128Gcm, 60).await {
 The `Retry-After` hint is capped at 24 hours so a hostile server
 can't park a worker on a multi-year sleep.
 
-When using `Notify::queue`, the queue's own retry/backoff applies -
-a `WebPushError` that propagates out of `WebPushChannel::deliver`
-surfaces as a job error and the envelope handles re-queueing per the
-job's backoff policy. The `Retry-After` hint is logged but not (yet)
-fed back into the queue's delay computation; if you need that, hook
-a `NotificationFailed` listener that re-queues with the hinted delay.
+When you use `Notify::queue`, the queue retries the job for you. A
+`PushServiceRejected` that carries a `Retry-After` hint leaves
+`WebPushChannel::deliver` as a `FrameworkError::RateLimited` with that
+hint. The worker then retries the job after the hinted time instead of the
+delay from the job's backoff schedule. A job that the push service refused
+with `429` goes back when the service said it would take it, not earlier and
+not later. The worker caps the wait at 24 hours
+(`queue::retry::RETRY_HINT_CEILING`).
+
+The attempt still counts against `Notification::max_tries`, and the job
+dead-letters when the attempts run out. Every other failure, including a
+rejection that carries no `Retry-After` hint, keeps the delay from
+`Notification::backoff`.
 
 ## Telemetry
 
@@ -477,8 +548,10 @@ your metrics/log pipeline the same way you wire other framework
 events - see [Events](events.md).
 
 A dead subscription emits a structured WARN with `channel="webpush"`,
-the endpoint, and the notification name. That's the signal to scrape
-for an automated subscription cleanup job.
+the host and the digest of the endpoint, and the notification name. A
+subscription that cannot be used emits a WARN with the same fields and
+the reason. Neither has the endpoint. That's the signal to scrape for an
+automated subscription cleanup job.
 
 ### Why Suprnova diverges
 
@@ -561,7 +634,7 @@ mock server, no encryption round-trip.
 - Client: `suprnova::WebPushClient`, `suprnova::EndpointPolicy`,
   `suprnova::PushResponse`, `suprnova::SubscriptionInfo`
 - Error: `suprnova::WebPushError` - `.is_retryable()`, `.retry_after()`,
-  `WebPushError::SubscriptionGone`
+  `WebPushError::SubscriptionGone`, `WebPushError::InvalidSubscription`
 - Encoding: `suprnova::ContentEncoding` (Aes128Gcm; 3992-byte plaintext cap)
 - Channel: `suprnova::WebPushChannel`
 - Facade: `suprnova::Notify`
@@ -578,4 +651,4 @@ mock server, no encryption round-trip.
   on the site
 - [Queues](queues.md) - how `Notify::queue` backs `SendNotificationJob`
 - [Events](events.md) - listening for `NotificationSent` /
-  `NotificationFailed` to drive dead-subscription cleanup
+  `NotificationFailed` to watch deliveries

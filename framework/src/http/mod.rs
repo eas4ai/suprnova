@@ -23,7 +23,7 @@ pub use form_request::FormRequest;
 pub use request::{BodyState, Request, RequestParts};
 pub(crate) use response::NOT_FOUND_BODY;
 pub use response::{HttpResponse, Redirect, RedirectRouteBuilder, Response, ResponseExt};
-pub use trusted_proxies::TrustedProxiesConfig;
+pub use trusted_proxies::{ProxyNetwork, TrustedProxiesConfig};
 
 /// Error type for missing route parameters
 ///

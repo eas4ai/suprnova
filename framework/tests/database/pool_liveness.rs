@@ -14,14 +14,10 @@
 //!   5. builder setters win over the environment;
 //!   6. a pool actually builds with every knob set.
 
-use std::sync::Mutex;
-
 use suprnova::database::DbConnection;
 use suprnova::database::config::DatabaseConfig;
 
-/// Every test in this file reads or writes the same process-wide
-/// environment through `DatabaseConfig::from_env`.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+use crate::env_snapshot::{EnvSnapshot, set_env};
 
 const KEYS: &[&str] = &[
     "DATABASE_URL",
@@ -32,43 +28,6 @@ const KEYS: &[&str] = &[
     "DB_PING_AFTER_IDLE",
 ];
 
-struct EnvSnapshot {
-    keys: Vec<(&'static str, Option<String>)>,
-}
-
-impl EnvSnapshot {
-    fn capture(keys: &[&'static str]) -> Self {
-        Self {
-            keys: keys.iter().map(|k| (*k, std::env::var(k).ok())).collect(),
-        }
-    }
-}
-
-impl Drop for EnvSnapshot {
-    fn drop(&mut self) {
-        for (k, v) in &self.keys {
-            // SAFETY: ENV_LOCK serializes these tests within the suite,
-            // and each integration test file is its own binary.
-            unsafe {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
-    }
-}
-
-fn set_env(key: &str, value: Option<&str>) {
-    // SAFETY: ENV_LOCK held by the caller.
-    unsafe {
-        match value {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
-    }
-}
-
 fn clear_liveness_env() {
     for k in KEYS.iter().skip(1) {
         set_env(k, None);
@@ -78,7 +37,6 @@ fn clear_liveness_env() {
 #[test]
 fn defaults_leave_the_pool_exactly_as_it_is_today() {
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(KEYS);
     clear_liveness_env();
 
@@ -99,7 +57,6 @@ fn defaults_leave_the_pool_exactly_as_it_is_today() {
 #[test]
 fn every_liveness_knob_round_trips_from_the_environment() {
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(KEYS);
     clear_liveness_env();
 
@@ -120,7 +77,6 @@ fn every_liveness_knob_round_trips_from_the_environment() {
 #[test]
 fn zero_on_a_reaping_knob_is_kept_as_the_disable_signal() {
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(KEYS);
     clear_liveness_env();
 
@@ -141,7 +97,6 @@ fn zero_on_a_reaping_knob_is_kept_as_the_disable_signal() {
 #[test]
 fn an_unparseable_value_falls_back_instead_of_failing_the_boot() {
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(KEYS);
     clear_liveness_env();
 
@@ -158,7 +113,7 @@ fn an_unparseable_value_falls_back_instead_of_failing_the_boot() {
 
 #[test]
 fn validate_pool_rejects_a_zero_acquire_timeout() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _env = crate::env_lock::lock_env();
     let cfg = DatabaseConfig::builder()
         .url("sqlite::memory:")
         .acquire_timeout(0)
@@ -175,7 +130,6 @@ fn validate_pool_rejects_a_zero_acquire_timeout() {
 #[test]
 fn builder_setters_win_over_the_environment() {
     let _env = crate::env_lock::lock_env();
-    let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(KEYS);
     clear_liveness_env();
     set_env("DB_IDLE_TIMEOUT", Some("120"));
@@ -199,24 +153,15 @@ async fn a_pool_builds_with_every_liveness_knob_set() {
     // The knobs are wired onto `ConnectOptions` in `connect_as`; this is
     // the test that proves the wiring matches SeaORM's real signatures
     // and that no combination stops the pool from coming up.
-    //
-    // The lock is scoped to the synchronous build only - `from_env()`
-    // (called inside `.build()`) is what needs to be serialized with the
-    // sibling tests' `set_var`/`remove_var` calls, and holding a
-    // std::sync::Mutex guard across an `.await` is a clippy
-    // `await_holding_lock` lint (and a real risk: nothing here awaits
-    // the env-mutating tests, but the pattern generalizes badly).
-    let cfg = {
-        let _guard = ENV_LOCK.lock().unwrap();
-        DatabaseConfig::builder()
-            .url("sqlite::memory:")
-            .idle_timeout(60)
-            .max_lifetime(300)
-            .acquire_timeout(5)
-            .test_before_acquire(true)
-            .ping_after_idle(10)
-            .build()
-    };
+    let _env = crate::env_lock::lock_env_async().await;
+    let cfg = DatabaseConfig::builder()
+        .url("sqlite::memory:")
+        .idle_timeout(60)
+        .max_lifetime(300)
+        .acquire_timeout(5)
+        .test_before_acquire(true)
+        .ping_after_idle(10)
+        .build();
 
     let conn = DbConnection::connect(&cfg)
         .await
@@ -226,16 +171,12 @@ async fn a_pool_builds_with_every_liveness_knob_set() {
 
 #[tokio::test]
 async fn a_pool_builds_with_reaping_disabled() {
-    // See the lock-scoping note on the previous test - the guard must
-    // not be held across the `.await` below.
-    let cfg = {
-        let _guard = ENV_LOCK.lock().unwrap();
-        DatabaseConfig::builder()
-            .url("sqlite::memory:")
-            .idle_timeout(0)
-            .max_lifetime(0)
-            .build()
-    };
+    let _env = crate::env_lock::lock_env_async().await;
+    let cfg = DatabaseConfig::builder()
+        .url("sqlite::memory:")
+        .idle_timeout(0)
+        .max_lifetime(0)
+        .build();
 
     let conn = DbConnection::connect(&cfg)
         .await

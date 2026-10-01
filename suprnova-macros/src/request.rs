@@ -54,6 +54,14 @@ fn parse_form_request_attrs(attrs: &[syn::Attribute]) -> Result<FormRequestAttrs
     })
 }
 
+/// The registration of the struct's input names, so the `FormRequest`
+/// extractor keys validation errors by the names serde reads (see
+/// `suprnova::data::input_names`). Nothing for a generic struct or one
+/// without named fields.
+fn input_names_registration(input: &DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
+    Ok(crate::input_names::lenient_registration(input)?.unwrap_or_default())
+}
+
 /// Emit the body of the generated `impl FormRequest` block, including any
 /// overridden trait methods (currently just `max_body_bytes`).
 fn impl_body(max_body_bytes: Option<proc_macro2::TokenStream>) -> proc_macro2::TokenStream {
@@ -121,11 +129,18 @@ pub fn derive_request_impl(input: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
 
+    // The hand-written impl of `custom_hooks` keys errors through the
+    // trait's own extractor too, so the registration is emitted either way.
+    let registration = match input_names_registration(&input) {
+        Ok(registration) => registration,
+        Err(e) => return e.to_compile_error().into(),
+    };
+
     // Opt-out: the caller is writing `impl FormRequest` by hand to
     // override authorize / after_validation / after_validation_async.
     // Emitting our default impl too would collide.
     if attrs.custom_hooks {
-        return TokenStream::new();
+        return registration.into();
     }
 
     let body = impl_body(attrs.max_body_bytes);
@@ -134,6 +149,8 @@ pub fn derive_request_impl(input: TokenStream) -> TokenStream {
         impl #impl_generics ::suprnova::FormRequest for #name #ty_generics #where_clause {
             #body
         }
+
+        #registration
     };
 
     output.into()
@@ -239,12 +256,23 @@ pub fn request_attr_impl(_attr: TokenStream, input: TokenStream) -> TokenStream 
         }
     };
 
+    let registration = match input_names_registration(&input) {
+        Ok(registration) => registration,
+        Err(e) => return e.to_compile_error().into(),
+    };
+
+    // The derives come first: a `#[serde(...)]` or `#[validate(...)]`
+    // attribute among the user's is a helper of these derives, and Rust
+    // refuses a derive helper placed before the derive that introduces it
+    // (`legacy_derive_helpers`).
     let output = quote! {
-        #(#attrs)*
         #[derive(::suprnova::serde::Deserialize, ::suprnova::validator::Validate)]
+        #(#attrs)*
         #vis struct #name #generics #fields #semi
 
         #form_request_impl
+
+        #registration
     };
 
     output.into()

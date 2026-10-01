@@ -552,6 +552,10 @@ impl MailBuilder {
                 .clone()
                 .or_else(|| mailable.queue().map(str::to_owned)),
             connection: self.connection_override.clone(),
+            // `None`, not `Some(false)`, for a mailable that did not opt in:
+            // `Some(false)` is the per-push "before commit" and would
+            // overrule `QUEUE_AFTER_COMMIT` for every queued mail.
+            after_commit: mailable.after_commit().then_some(true),
             ..Default::default()
         }
     }

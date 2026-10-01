@@ -10,26 +10,26 @@ sibling chapters listed under [Next](#next).
 
 ## Install
 
-The CLI is distributed via `cargo install --git`. Suprnova isn't on
-crates.io yet - see the [Pre-launch note in
-Installation](installation.md#pre-launch-note) for why.
+The CLI is distributed via `cargo install --git`. Suprnova is
+distributed through git tags, not crates.io - see [Distribution
+model](installation.md#distribution-model).
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v2.1.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v3.0.0 suprnova-cli
 suprnova --version
 ```
 
 To upgrade later, pass `--force`:
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v2.1.0 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v3.0.0 suprnova-cli
 ```
 
 ## The two binaries
 
 | Binary | Built from | Used for |
 |---|---|---|
-| `suprnova` | `suprnova-cli/` (this crate) | Scaffolding (`new`), generators (`make:*`), dev runner (`serve`), migrations (`migrate*`, `db:sync`), Docker config (`docker:*`), SSR worker (`ssr:*`), key minting (`key:generate`), type generation (`generate-types`) |
+| `suprnova` | `suprnova-cli/` (this crate) | Scaffolding (`new`), generators (`make:*`), dev runner (`serve`), migrations (`migrate*`, `db:sync`), Docker config (`docker:*`), SSR worker (`ssr:*`), key minting (`key:generate`), type generation (`generate-types`), and forwards to the `console` binary for `db:seed` and `model:prune` |
 | `console` | `src/bin/console.rs` in your project | Runtime commands that link your app's types - built-in `db:seed` and `model:prune` plus every `#[command]` / `#[derive(Command)]` you define |
 
 Worker daemons (`schedule:run`, `schedule:work`, `schedule:list`,
@@ -111,9 +111,14 @@ anything unexpected on stdout fails the command closed.
 | `suprnova migrate:rollback [--step N]` | Roll back the last N migrations (default 1). |
 | `suprnova migrate:fresh [--force]` | Drop every table and re-run all migrations. **Destructive.** In production it needs `--force` plus a typed confirmation on an interactive terminal. |
 | `suprnova db:sync [--skip-migrations] [--regenerate-models]` | Run migrations and regenerate SeaORM entities from the live schema. `--regenerate-models` overwrites custom model files in `src/models/`. |
+| `suprnova db:seed [<seeder>]` | Run every registered seeder, or the one named. `--class=<seeder>` names it as an option; you cannot pass both. |
+| `suprnova model:prune [--model <Name>] [--pretend]` | Delete the rows that `Prunable` and `MassPrunable` models select for removal. `--model` prunes one model, named by its type name; a name that no registered pruner has prints `model:prune: no pruner registered for` the name on the error stream and exits 0. `--pretend` reports the row count and deletes nothing. |
 
-`db:seed` is **not** here - it lives on the per-project `console` binary
-because the seeder registry is compiled into your crate. Run it via
+`db:seed` and `model:prune` run your project's `console` binary
+(`cargo run --quiet --bin console -- <name>`), because the seeder and model
+registries are compiled into your crate. The CLI checks no name: the console
+binary knows which seeders and models exist, and it reports an unknown one.
+You can also run them directly, for example
 `cargo run --bin console -- db:seed` or `./target/debug/console db:seed`.
 See [Console](console.md) for the registration pattern.
 
@@ -125,7 +130,7 @@ See [Migrations chapter](cli-migrations.md) for the full migration workflow.
 |---|---|
 | `suprnova schedule:run` | Run every due task once. The cron-friendly form. |
 | `suprnova schedule:work` | Foreground daemon that checks every minute and runs due tasks. |
-| `suprnova schedule:list` | Print every registered task with its cron expression. |
+| `suprnova schedule:list [--timezone <zone>]` | Print every registered task with its cron expression. `--timezone` names the IANA zone the listing is read in (default UTC). |
 
 Each of these shells into `cargo run --quiet -- <name>` against your
 app/server binary - the same binary that serves HTTP - so registered tasks
@@ -174,7 +179,7 @@ The most common path from "nothing installed" to "running app":
 
 ```bash
 # 1. Install the CLI
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v2.1.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v3.0.0 suprnova-cli
 
 # 2. Scaffold a project (interactive - picks Svelte by default)
 suprnova new my-app
@@ -236,7 +241,7 @@ when reporting a bug or checking whether an install took:
 
 ```bash
 suprnova --version
-# suprnova 2.1.0
+# suprnova 3.0.0
 ```
 
 Both `-v` and `-V` are accepted. Clap's generated flag offers only `-V`;

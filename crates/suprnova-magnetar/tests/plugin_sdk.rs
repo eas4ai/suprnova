@@ -14,8 +14,8 @@ use magnetar::sessions::{
     OpaqueConfig, OpaqueSessionProvider, OpaqueSessionStore, SessionMetadata, StoredSession,
 };
 use magnetar::storage::{
-    AuthTransaction, CeremonyRecord, CeremonyStore, IssueToken, IssuedToken, NewCeremony,
-    PresentedToken, TokenStore,
+    AuthTransaction, CeremonyRecord, CeremonyRef, CeremonyStore, IssueToken, IssuedToken,
+    NewCeremony, PresentedToken, TokenStore, TransitionAndConsume,
 };
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use serde_json::json;
@@ -84,14 +84,18 @@ impl CeremonyStore for NullStorage {
 #[tokio::test]
 async fn ceremony_store_atomic_finalize_default_fails_closed() {
     let error = NullStorage
-        .transition_and_consume(
-            "device-code",
-            "device-authorization",
-            "approved:grant",
-            "issued",
-            "grant",
-            "device-authorization-grant",
-        )
+        .transition_and_consume(TransitionAndConsume {
+            transition: CeremonyRef {
+                selector: "device-code",
+                kind: "device-authorization",
+            },
+            expected: "approved:grant",
+            next: "issued",
+            consume: CeremonyRef {
+                selector: "grant",
+                kind: "device-authorization-grant",
+            },
+        })
         .await
         .unwrap_err();
 

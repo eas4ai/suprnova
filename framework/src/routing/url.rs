@@ -129,7 +129,7 @@ pub fn signed_route(name: &str, params: &[(&str, &str)]) -> Result<String, Frame
 ///
 /// `expires_at_epoch_seconds` is interpreted in absolute terms (a UNIX
 /// timestamp). To express "now + duration", compute
-/// `chrono::Utc::now().timestamp() + duration.as_secs() as i64` at the
+/// `suprnova::clock::now().timestamp() + duration.as_secs() as i64` at the
 /// call site.
 ///
 /// Mirrors Laravel's `URL::temporarySignedRoute($name, $expiration,
@@ -160,7 +160,7 @@ pub fn signed_url(
 /// expired-vs-invalid distinction.
 ///
 /// Mirrors Laravel's `URL::hasValidSignature($request)`. The verifier
-/// uses the current epoch second clock (`chrono::Utc::now`).
+/// reads the current epoch second from [`crate::clock::now`].
 ///
 /// # Errors
 ///
@@ -217,7 +217,7 @@ pub fn signature_verdict(request: &Request) -> Result<SignatureVerdict, Framewor
 
 fn verdict_for_request(request: &Request) -> Result<SignatureVerdict, FrameworkError> {
     let url = current(request);
-    let now = chrono::Utc::now().timestamp();
+    let now = crate::clock::now().timestamp();
     verify_signature(&url, now)
 }
 
@@ -421,7 +421,7 @@ mod tests {
     #[serial_test::serial(crypt_install)]
     fn a_valid_but_expired_signature_has_expired() {
         ensure_key();
-        let long_ago = chrono::Utc::now().timestamp() - 3600;
+        let long_ago = crate::clock::now().timestamp() - 3600;
         let signed =
             crate::routing::signed::sign_url("/promote?user=victim", Some(long_ago)).expect("sign");
         let req = Request::for_test("GET", &signed);
@@ -537,7 +537,7 @@ mod tests {
         // a real handler will use `has_valid_signature`.
         // The URL on the signed string is `/secret/42?signature=...` -
         // we feed exactly that path+query to the verifier.
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::clock::now().timestamp();
         let verdict = crate::routing::signed::verify_signature(&signed, now).expect("verify");
         assert_eq!(verdict, SignatureVerdict::Valid);
     }

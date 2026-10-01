@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: upload-store-write-completion
+Current: laravel-port-requests
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -85,12 +85,11 @@ components in waves, the advanced components last, the datatable closing.
 8. session-request-serialization - DONE 2026-09-15 (built at `36287efb`
    after the race was pinned at `1a6c1dda`; the combined check after the
    kernel change exposed a webkit race in the input OTP's mirror and a
-   PKG-007 lint on LIVE-020, fixed at `fa3e572e` and `ee60c838`; receipts
+   Cairn lint on LIVE-020, fixed at `fa3e572e` and `ee60c838`; receipts
    `04be1af0`, `e5607e60`, `5c561a51`, review `7103d526`) - session
    blocking through the cache lock driver, the session write race the
    live-native review recorded as an open finding and the developer routed
-   here on escalation `form-008` (`sessions.md`,
-   `docs/commitments/session-request-serialization.md`); `SessionBlock`,
+   here on escalation `form-008` (`sessions.md`); `SessionBlock`,
    `SESSION_BLOCK`, `block_session` on every route and group builder, the
    dogfood application blocking on every route.
 9. live-key-vocabulary - DONE 2026-09-16 (built at `159dd219`, the
@@ -99,8 +98,7 @@ components in waves, the advanced components last, the datatable closing.
    `9c4ffc68`) - the runtime reads `live:key`, the attribute the checker
    validates and the manual names, for morph identity, controls and
    preservation scopes, and the library writes the key once; promoted
-   from the backlog on escalation `ovl-006` (`live.md` LIVE-024,
-   `docs/commitments/live-key-vocabulary.md`). The form gallery's
+   from the backlog on escalation `ovl-006` (`live.md` LIVE-024). The form gallery's
    `.prevent` rode along, and its first browser case found a runtime
    defect that refused any Live submit from a form holding an empty
    number input or an unselected select, fixed in the same build.
@@ -113,8 +111,7 @@ components in waves, the advanced components last, the datatable closing.
    one the grammar and the runtime accept, and error feedback may target
    an action; promoted on escalation `live-024` and widened on `live-008`
    after the build found an empty call block hiding 24 errors in the form
-   gallery (`live.md` LIVE-025 to LIVE-027,
-   `docs/commitments/checker-proves-runtime-accepts.md`).
+   gallery (`live.md` LIVE-025 to LIVE-027).
 11. live-protocol-bounds - DONE 2026-09-16 (built at `dc031353`, receipts
    `7b4918d7`, review `46bbc3da`; the browser caps turned out to be
    unspecified and below the server's, so the browser was aligned to 128)
@@ -122,8 +119,7 @@ components in waves, the advanced components last, the datatable closing.
    framework's protocol limits admit, `live:check` refuses a submit form
    one request cannot carry, and a request refused for size fails visibly;
    promoted on escalation `live-027` after the dogfood save form's ten
-   fields never submitted (`live.md` LIVE-028 to LIVE-030,
-   `docs/commitments/live-protocol-bounds.md`).
+   fields never submitted (`live.md` LIVE-028 to LIVE-030).
 
 12. live-library-review-remediation - DONE 2026-09-17 (built between
    `5fc3d651` and `c7c12fdd`, receipts `92e2703b`, review `53309c54`; an
@@ -140,7 +136,7 @@ components in waves, the advanced components last, the datatable closing.
    `component-library-navigation.md` NAV-007, `component-library-overlays.md`
    OVL-007, `component-library-data-display.md` DATA-006,
    `component-library-foundations.md` UI-020 to UI-024, `live.md` LIVE-031
-   to LIVE-036, `docs/commitments/live-library-review-remediation.md`).
+   to LIVE-036).
 
 13. live-model-render-baseline - DONE 2026-09-17 (built at `661e7310`,
    formatted at `3c868f88` after the first check, receipts `3166159b`, review
@@ -150,8 +146,7 @@ components in waves, the advanced components last, the datatable closing.
    the browser sent nothing when the same value was typed again, leaving a
    control and its island out of step with no error; found while proving the
    remediation's reset, promoted on the developer's `ok` to escalation
-   `live-031` (`live.md` LIVE-037,
-   `docs/commitments/live-model-render-baseline.md`).
+   `live-031` (`live.md` LIVE-037).
 
 14. tooltip-dismissal - DONE 2026-09-17 (built at `2c137bf4`, documented
    at `1a706450`, receipts `78803f43`, review `abcbe761`; the Live gate needed
@@ -161,8 +156,7 @@ components in waves, the advanced components last, the datatable closing.
    where it is shown, which WCAG 2.2 success criterion 1.4.13 requires;
    specified 2026-09-17 in the phase between loops, which revised OVL-002
    to admit a dismissal enhancement and agreed OVL-008
-   (`component-library-overlays.md` OVL-002 revised and OVL-008,
-   `docs/commitments/tooltip-dismissal.md`).
+   (`component-library-overlays.md` OVL-002 revised and OVL-008).
 
 15. upload-store-write-completion - DONE 2026-09-17 (fixed at `12a7df56`,
    receipts `b5dcccb0`, review `89c54fd4`; six failures in sixty runs without
@@ -171,8 +165,18 @@ components in waves, the advanced components last, the datatable closing.
    against completed a write while the bytes were still in a tokio file's
    buffer, so the provider's own tests failed about one whole-file run in
    fifteen and four gate runs went red on 2026-09-17; promoted on the
-   developer's ruling answering escalation `live-010` (`live.md` LIVE-038,
-   `docs/commitments/upload-store-write-completion.md`).
+   developer's ruling answering escalation `live-010` (`live.md` LIVE-038).
+
+16. laravel-port-requests - the requests an application team porting a
+   Laravel 13 application filed as issues #125 to #129, and the queue fake
+   gaps found while recording the parity rulings: joins and the remaining
+   `where` helpers on both query builders, file and download responses,
+   `#[authorize]` on handlers, a model's changes after a save,
+   `sync_without_detaching`, `DB::after_commit`, a configurable Inertia
+   page lookup, and the queue fake's `except`, raw pushes and
+   `assert_pushed_without_chain` (`laravel-parity.md` PAR-001 to PAR-009).
+   The developer approved every ruling in the parity map on 2026-10-01;
+   this is the first commitment cut from it.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
@@ -183,4 +187,4 @@ developer writes them in.
 
 Every commitment inherits the Live gate and the repository gate; a
 commitment is Done only when its mechanisms pass on a committed tree and
-the review under `.cairn/reviews/` is recorded.
+its review is recorded (`sudus review`).

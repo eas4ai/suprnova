@@ -1,4 +1,5 @@
 pub mod cargo_meta;
+pub mod console_forward;
 pub mod db_sync;
 pub mod dev_tls;
 pub mod docker_compose;
@@ -25,6 +26,7 @@ pub mod migrate_fresh;
 pub mod migrate_rollback;
 pub mod migrate_status;
 pub mod new;
+pub mod queue_failed;
 pub mod schedule_list;
 pub mod schedule_run;
 pub mod schedule_work;

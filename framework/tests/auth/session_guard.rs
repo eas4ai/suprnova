@@ -786,12 +786,14 @@ async fn drive_middleware_with_session_cookie(
         .expect("seed pre-rotation session row");
 
     // Step 2: encrypt the seed id into the wire format the middleware
-    // will read off the inbound `suprnova_session` cookie.
-    //
-    // Compat-window regression: this intentionally mints a v1,
-    // name-unbound cookie that middleware must continue accepting.
-    let encrypted_cookie = suprnova::Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, seed_id)
-        .expect("encrypt seed session id");
+    // will read off the inbound `suprnova_session` cookie, bound to that
+    // logical cookie name.
+    let encrypted_cookie = suprnova::Crypt::encrypt_string_for(
+        suprnova::CryptPurpose::Cookie,
+        "suprnova_session",
+        seed_id,
+    )
+    .expect("encrypt seed session id");
     // Step 3: build a real `Request` over a duplex pipe - same shape
     // as `framework/tests/remember_me.rs::middleware_hydrates_session_from_remember_cookie`.
     let mut http_bytes = Vec::new();

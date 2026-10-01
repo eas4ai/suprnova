@@ -10,7 +10,7 @@
 //!
 //! The in-memory driver uses `tokio::time::Instant` so `start_paused`
 //! tests can use `tokio::time::advance` to drive the clock. The Redis
-//! driver uses `chrono::Utc::now().timestamp_millis()` with a Lua
+//! driver uses `suprnova::clock::now().timestamp_millis()` with a Lua
 //! script for atomic check-and-record. [`RateLimitMiddleware`] is the
 //! HTTP wrapper around the driver and is what most application code
 //! reaches for to throttle a route.
@@ -32,12 +32,14 @@
 //! limiter / response-callback pattern needs.
 
 pub mod algorithm;
+pub mod connections;
 pub mod laravel;
 pub mod limit;
 pub mod memory;
 pub mod redis;
 pub mod throttle;
 
+pub use connections::ConnectionsPerIp;
 pub use laravel::{NamedLimiterRegistry, RateLimiter};
 pub use limit::{GlobalLimit, Limit, LimitResult, Unlimited};
 pub use throttle::ThrottleRequestsMiddleware;
@@ -580,6 +582,114 @@ where
     pub fn on_backend_error(mut self, policy: BackendErrorPolicy) -> Self {
         self.on_backend_error = policy;
         self
+    }
+}
+
+/// The key function of [`RateLimitMiddleware::ip_based`].
+pub type IpKey = Box<dyn Fn(&Request) -> String + Send + Sync>;
+
+impl RateLimitMiddleware<IpKey> {
+    /// Allow each client IP `max_requests` requests per `window`: the limit
+    /// a login form and a public API need.
+    ///
+    /// ```rust,no_run
+    /// use std::time::Duration;
+    /// use suprnova::rate_limit::RateLimitMiddleware;
+    ///
+    /// let twenty_a_minute = RateLimitMiddleware::ip_based(20, Duration::from_secs(60));
+    /// ```
+    ///
+    /// # The backend
+    ///
+    /// It is the rate limiter the application installed, the one
+    /// `RATE_LIMIT_DRIVER` selects, looked up when a request arrives. The
+    /// middleware can therefore be built where routes are registered,
+    /// before the drivers boot. When none is installed the lookup fails as
+    /// a backend error, and [`on_backend_error`](Self::on_backend_error)
+    /// decides what the request gets.
+    ///
+    /// # The key
+    ///
+    /// The address is [`Request::ip`], which resolves through the trusted
+    /// proxies. The key names the limit as well as the address, so two
+    /// limits with different numbers never share a bucket, where each
+    /// would be counted against the other's numbers. Two with the same
+    /// numbers do share one: the budget is the client's, whichever route
+    /// spends it.
+    ///
+    /// A request with no address to resolve gets a bucket of its own. One
+    /// shared bucket for all of them would let one caller use it up and
+    /// lock the others out. Such a request is an in-process one: every
+    /// request the server accepts has a peer.
+    ///
+    /// [`on_backend_error`](Self::on_backend_error),
+    /// [`only_when`](Self::only_when) and
+    /// [`key_reads_body`](Self::key_reads_body) chain onto it as they do
+    /// onto [`new`](Self::new).
+    pub fn ip_based(max_requests: u32, window: Duration) -> Self {
+        let limit = format!("ip-limit:{max_requests}/{}s", window.as_secs());
+        Self::new(
+            Arc::new(InstalledRateLimiter),
+            SlidingWindowConfig {
+                max_requests,
+                window,
+            },
+            Box::new(move |request: &Request| match request.ip() {
+                Some(address) => format!("{limit}:ip:{address}"),
+                None => format!("{limit}:no-ip:{}", uuid::Uuid::new_v4()),
+            }),
+        )
+    }
+}
+
+impl RateLimitMiddleware<IpKey> {
+    /// Allow each client address `max` open WebSocket connections, and
+    /// refuse the next one with `429 Too Many Requests`. Put it on a
+    /// WebSocket route, where a client that opens sockets and keeps them
+    /// would otherwise hold as many as the server accepts.
+    ///
+    /// On a route that is no WebSocket route it caps the requests of an
+    /// address that are being handled at one time, and it does not cover
+    /// a streamed response. [`ConnectionsPerIp`] says what is counted and
+    /// for how long.
+    ///
+    /// It counts what is open, where [`Self::ip_based`] counts how often a
+    /// client asks. A route that needs both takes both.
+    pub fn connections_per_ip(max: usize) -> ConnectionsPerIp {
+        ConnectionsPerIp::new(max)
+    }
+}
+
+/// The rate limiter the application installed, looked up on every call.
+///
+/// A middleware is built when routes are registered, and the drivers boot
+/// after that. Holding this, not the driver, is what lets
+/// [`RateLimitMiddleware::ip_based`] be built first and still use the
+/// driver `RATE_LIMIT_DRIVER` selects.
+struct InstalledRateLimiter;
+
+impl InstalledRateLimiter {
+    fn installed() -> Result<Arc<dyn RateLimiterDriver>, FrameworkError> {
+        App::resolve_make::<dyn RateLimiterDriver>()
+    }
+}
+
+#[async_trait]
+impl RateLimiterDriver for InstalledRateLimiter {
+    async fn try_acquire(
+        &self,
+        key: &str,
+        config: &SlidingWindowConfig,
+    ) -> Result<bool, FrameworkError> {
+        Self::installed()?.try_acquire(key, config).await
+    }
+
+    async fn retry_after(
+        &self,
+        key: &str,
+        config: &SlidingWindowConfig,
+    ) -> Result<Option<Duration>, FrameworkError> {
+        Self::installed()?.retry_after(key, config).await
     }
 }
 

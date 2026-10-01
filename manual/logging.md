@@ -213,7 +213,7 @@ pub async fn checkout(req: suprnova::Request) -> suprnova::Response {
         update_analytics(order.id).await;
     });
 
-    suprnova::Response::ok().json(&order)
+    Ok(suprnova::HttpResponse::ok().json(&order))
 }
 ```
 

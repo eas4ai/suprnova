@@ -40,13 +40,54 @@ pub struct SubscribeRequest {
     pub metadata: Option<Value>,
 }
 
+/// How a change of the prices of a subscription is billed for the rest of
+/// the current billing period.
+///
+/// The variants are the modes Stripe and Paddle have in common, so a
+/// request means the same thing on either provider. A request with no
+/// mode is billed as [`Self::ProrateAtRenewal`], which is the default of
+/// Stripe.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Proration {
+    /// Charge or credit the prorated difference at once, on an invoice of
+    /// its own. Stripe `always_invoice`, Paddle `prorated_immediately`.
+    ProrateNow,
+    /// Add the prorated difference to the invoice of the next renewal.
+    /// Stripe `create_prorations`, Paddle `prorated_next_billing_period`.
+    ProrateAtRenewal,
+    /// Bill nothing for the change: the new prices are billed from the
+    /// next renewal on. Stripe `none`, Paddle `do_not_bill`.
+    DoNotProrate,
+}
+
 /// Request payload for [`super::super::traits::Subscription::update`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSubscriptionRequest {
     /// Provider subscription identifier to mutate.
     pub provider_subscription_id: String,
     /// Replacement price identifiers, or `None` to keep current lines.
+    ///
+    /// The subscription ends with one item per price in the list. An item
+    /// whose price is in the list keeps its quantity, an item whose price
+    /// is not in the list is removed, and a price the subscription has no
+    /// item for is added. A price that replaces exactly one removed item (a
+    /// swap of one price for another) takes over the quantity of that item;
+    /// in every other case an added price has a quantity of 1. An empty
+    /// list, or a list that names a price twice, is a
+    /// [`PaymentError::Validation`](crate::payments::PaymentError::Validation)
+    /// and reaches no provider.
+    ///
+    /// The adapter reads the subscription and computes the change from that
+    /// read. The change is not atomic: a change made at the provider between
+    /// the read and the write can be undone (Paddle sends the whole list of
+    /// items) or left in place (Stripe changes items one by one). The
+    /// returned [`SubscriptionResult`] shows the outcome.
     pub new_price_refs: Option<Vec<String>>,
+    /// How a change of prices is billed. It is read only when
+    /// `new_price_refs` is `Some`; `None` is [`Proration::ProrateAtRenewal`].
+    pub proration: Option<Proration>,
     /// Set to schedule (`Some(true)`) or rescind (`Some(false)`) a
     /// period-end cancellation; `None` leaves cancellation state alone.
     pub cancel_at_period_end: Option<bool>,

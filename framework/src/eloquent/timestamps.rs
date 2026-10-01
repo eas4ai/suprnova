@@ -1,10 +1,11 @@
 //! Auto-managed timestamps + `touch()`.
 //!
 //! When a `#[suprnova::model]` struct carries both `created_at` and
-//! `updated_at` fields (typed `chrono::DateTime<chrono::Utc>`), the
-//! macro:
+//! `updated_at` fields (typed `chrono::DateTime<chrono::Utc>`, or
+//! `Option<chrono::DateTime<chrono::Utc>>` for columns another
+//! application may leave NULL), the macro:
 //!
-//! - sets BOTH to `Utc::now()` on `create()`
+//! - sets BOTH to `suprnova::clock::now()` on `create()`
 //! - bumps `updated_at` on every `save()` and `update(attrs)`
 //! - emits an `impl Touchable for YourStruct` so callers can write
 //!   `user.touch().await?` to bump `updated_at` without touching any
@@ -160,7 +161,7 @@ pub fn touches_ignored_for(type_id: std::any::TypeId) -> bool {
 /// ```
 #[async_trait::async_trait]
 pub trait Touchable {
-    /// Update `updated_at` to `Utc::now()` for this row. The PK is
+    /// Update `updated_at` to `suprnova::clock::now()` for this row. The PK is
     /// preserved; no other column is touched.
     ///
     /// Errors propagate from the database driver.

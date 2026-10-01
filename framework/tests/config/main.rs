@@ -5,4 +5,7 @@ pub mod debug_gating;
 pub mod env_loading;
 #[path = "../support/env_lock.rs"]
 mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
+pub mod session_table;
 pub mod typed_config;

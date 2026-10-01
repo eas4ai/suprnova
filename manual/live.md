@@ -250,7 +250,8 @@ async fn render(request: Request, mount: &LiveMount<Counter>) -> Response {
 ```
 
 - `LiveMount::public_seed` declares an island any visitor may render; its
-  state is a reusable seed promoted to an instance on the first action.
+  state is a reusable seed promoted to an instance on its first request, an
+  action or a model update.
 - `LiveMount::identity_bound` declares an island that belongs to the current
   session and principal; the document route must authenticate.
 - Mount every island before `bootstrap`, and call `bootstrap` once. The
@@ -287,7 +288,7 @@ global_middleware!(CsrfMiddleware::new());
 Anonymous visitors render public seeds, and they can act on them when the
 guard uses `AuthMiddleware::optional()`: a signed-in principal is recorded, an
 anonymous visitor continues, and the mount kind decides. A public seed then
-promotes for the visitor's own session on the first action, while an
+promotes for the visitor's own session on its first request, while an
 identity-bound island still refuses a request without principal evidence.
 With `AuthMiddleware::new()` the guard answers `401` for every anonymous
 request before any engine work. Identity-bound islands require a session and
@@ -296,6 +297,13 @@ resolver names one, and a resolver that cannot determine the tenant must
 return an error rather than `None`. Every rejection is closed:
 a `409` for a stale or tampered snapshot carries no body, and production
 messages never include snapshots, tokens, cookies, or rendered HTML.
+
+Gated actions, uploads, subscriptions and the principal of an asynchronous
+membership read the session identity (`Auth::id()`), not a guard. A user that
+only a guard of your application knows (see [Authentication](authentication.md))
+can mount a component behind `AuthMiddleware::for_guard(..)`, but the gate
+refuses its actions, uploads and subscriptions, because the session holds no
+identity for it. To use gated Live actions, sign the user in to the session.
 
 ## Uploads
 
@@ -345,6 +353,46 @@ abilities `live:<component>.upload.<field>.<Control>` for `Create`,
 `Reacquire`, `Status`, `Queue`, `BeginTransfer`, `PutChunk`, `Complete`,
 `Accept`, `BeginFinalize`, `CommitFinalize`, `Cancel`, `Reject`, `Expire`,
 and `Fail`.
+
+### Checking a policy
+
+The engine registers a component only when every upload policy in it is
+valid. `UploadPolicy::validate()` returns `Ok(())` for a valid policy. For
+an invalid one it returns the first rule that the policy breaks, as a
+`suprnova::live::UploadPolicyError`. Use it in a test of the policy:
+
+```rust
+use suprnova::live::{UploadPolicy, UploadPolicyError};
+
+#[test]
+fn the_avatar_policy_is_valid() {
+    assert_eq!(avatar_policy().validate(), Ok(()));
+
+    let no_limit = UploadPolicy::builder().maximum_files(1).build();
+    assert_eq!(no_limit.validate(), Err(UploadPolicyError::MaximumFileBytes));
+}
+```
+
+| Variant | The policy breaks this rule |
+|---|---|
+| `MaximumFiles` | `maximum_files` is not set, or is `0` |
+| `MaximumFileBytes` | `maximum_file_bytes` is not set, or is `0` |
+| `AcceptedType { media_type }` | An `accept_application` media type or one of its extensions is not in canonical form. A media type is `type/subtype` in lower case letters, digits and `+ . -`, at most 127 bytes. It has 1 to 16 extensions of lower case letters and digits, each at most 32 bytes |
+| `AcceptedTypes` | More than 16 accepted types, or one media type declared twice |
+| `Dimensions` | A limit of `dimensions` is `0` |
+| `MissingFinalizeAction` | `finalize_action` is not set |
+| `FinalizeAction { name }` | The `finalize_action` name is not a valid action name |
+
+The enum is `#[non_exhaustive]`, so a `match` on it needs a wildcard arm.
+`validate()` does not check that the `finalize_action` names an action of
+your component, because a policy does not know its component. The
+registration checks that.
+
+When you register a component, a refused policy fails the registration and
+logs an error with the field and the rule (`the upload policy of a Live
+field was refused`, with the `field` and `reason` fields). The error that
+the registration returns is the same closed `invalid_component_upload_metadata`
+error for every rule, so no detail of the component reaches a browser.
 
 A browser that lost its transfer grant reacquires it through a route your
 application owns outside the reserved namespace:
@@ -485,7 +533,7 @@ binary and start the application from the directory that holds it, or set
 application refuses to start and names it.
 
 The checker expands the macros, so `live:check` proves a library view like any
-other. The form family today: field, label, input, textarea, number input,
+other. The form family: field, label, input, textarea, number input,
 slider, search input, password input with reveal, checkbox and checkbox group,
 radio group, switch, select, button and link button, button group, fieldset,
 form actions, validation summary, and file input. Library components are named
@@ -756,10 +804,68 @@ body; a missing principal answers `401`.
 - Errors carry closed kinds such as `live_document_context_rejected` and
   `invalid_live_bootstrap`; telemetry labels are closed enumerations.
 
+### Why an operation failed
+
+When a trusted part of the engine fails an operation, the browser gets one
+closed reason and nothing more: the island is told to refresh. The framework
+records why in the log, so you do not have to reproduce the request. It writes
+one `WARN` event for each failed action, and one for each rejected mount.
+
+A failed action writes this event:
+
+| Field | Holds |
+|---|---|
+| message | `Live operation failed and the browser must refresh the island` |
+| `component` | The registered name of the component, such as `app.counter` |
+| `reason` | The coarse reason the browser gets, such as `ExecutionFailed` or `LedgerUnavailable` |
+| `cause` | The closed cause, written in the `Debug` form, such as `Ledger(ProviderUnavailable)` |
+
+A rejected mount writes one of two events. The message is
+`Live public mount was rejected` for a mount that a document asks for, and
+`Live private mount was rejected` for a mount that carries a request of its
+own. Each has these fields:
+
+| Field | Holds |
+|---|---|
+| `kind` | The coarse kind of the mount error, such as `LedgerRejected` |
+| `cause` | The closed cause, or `None` when the kind says everything |
+
+A refresh that is no failure has no cause and writes no warning. A stale
+revision is the usual case: the island refreshes and the log stays quiet. A
+mount refusal with no subsystem error behind it, such as an identity
+collision, has `cause=None`.
+
+The cause names the part that failed and the kind of its error. An action
+cause is one of these groups:
+
+| Group | Look at |
+|---|---|
+| `Action` | The registered action: its lookup, arguments, authorization, dispatch or outcome |
+| `Lifecycle` | The component: a recovery render, a model sync, a parameter change, a lazy completion or a promotion mount. `Panicked` means the component panicked |
+| `Ledger`, `LedgerSuccessorMismatch` | The instance ledger: `ProviderUnavailable` points at the store, `CapacityExceeded` at its limits |
+| `Clock` | The host clock: no time, or a deadline that overflowed |
+| `ContextExpired` | The request context ran out before the new snapshot was signed |
+| `Snapshot`, `Identity` | The signed state: the kind says which check refused it, such as `SignatureInvalid` or `Expired` |
+| `View` | The rendered view: for example `TemplateRenderFailed` or `MissingIslandRoot` |
+| `OutcomeShape` | An outcome that is incomplete |
+| `CompositionOwnerMissing`, `CompositionChildUntracked`, `CompositionChildUnknown`, `CompositionLineage`, `ChildParameters` | The parent and child components of a page: their lineage or their sealed parameters |
+| `Host` | A port of the application: `Begin`, `Commit`, `Rollback`, `Reporting` or `ResponseIntent` names which one |
+| `ResponseIntents`, `ResponseSealing` | The preparation or the sealing of the response |
+
+A mount cause is one of `Clock`, `Registry`, `Snapshot`, `Canonical`,
+`Composition`, `Random`, `Lifecycle`, `View` or `Ledger`. Each names the
+subsystem that refused the mount and carries the kind of its error.
+
+The values are closed. They never hold the text of an error, the identifier of
+an instance or anything of a request. You can copy a log line into a report
+without removing a secret from it.
+
 ## Recovery
 
 - A `409` tells the runtime to fresh-render the island; the operation is not
   replayed.
+- A refresh that follows a failed operation tells the browser only to
+  refresh. The cause is in the log only; see [Why an operation failed](#why-an-operation-failed).
 - A closed asynchronous transport is retired and the runtime reconnects with
   a new transport generation; a stale generation is refused.
 - A session that expires or rotates invalidates identity-bound work; the

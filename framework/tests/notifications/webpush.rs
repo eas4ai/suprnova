@@ -9,8 +9,8 @@
 //!    completion with exactly one HTTP request.
 //! 2. Subscription gone (404): treated as a non-fatal warn - callers are
 //!    expected to remove the dead subscription, but dispatch succeeds.
-//! 3. Malformed subscription JSON: surfaces as a `FrameworkError`
-//!    carrying enough context to identify the decode failure.
+//! 3. A stored route that is no subscription: a non-fatal warn, like a
+//!    subscription that is gone, and nothing of the route in the log.
 //! 4. 5xx from the push service: propagates as a `FrameworkError` whose
 //!    message surfaces the upstream status so operators can triage.
 
@@ -114,6 +114,44 @@ async fn webpush_channel_posts_to_subscription_endpoint() {
     assert_eq!(reqs.len(), 1, "exactly one POST to /push");
 }
 
+/// A stored subscription whose endpoint is no URL. Nothing can be sent
+/// to it and no retry changes that, so the dispatch does not fail, and
+/// the warning says what to remove and why.
+#[tokio::test]
+#[serial]
+#[traced_test]
+async fn webpush_channel_treats_a_subscription_that_cannot_be_used_as_non_fatal() {
+    let channel: Arc<dyn Channel> = build_channel();
+    let dispatcher = NotificationDispatcher::new().register_channel(channel);
+
+    dispatcher
+        .notify(
+            &Subscriber {
+                endpoint: "not a url".to_owned(),
+            },
+            &PingNote,
+        )
+        .await
+        .expect("a subscription that cannot be used must not fail the dispatch");
+
+    assert!(
+        logs_contain("subscription cannot be used"),
+        "expected the warning"
+    );
+    assert!(
+        logs_contain("endpoint url"),
+        "expected the rule that refused the endpoint in the warning"
+    );
+    assert!(
+        !logs_contain("not a url"),
+        "the stored endpoint is not logged"
+    );
+    assert!(
+        !logs_contain("internal"),
+        "a fault of the stored data is not reported as an internal one"
+    );
+}
+
 #[tokio::test]
 #[serial]
 #[traced_test]
@@ -154,9 +192,23 @@ async fn webpush_channel_treats_subscription_gone_as_non_fatal() {
         logs_contain("subscription gone"),
         "expected the subscription-gone warn message"
     );
+    // The path of an endpoint is a token, so the line has the host and a
+    // digest that finds the stored row, and never the endpoint.
     assert!(
-        logs_contain(&endpoint),
-        "expected the structured endpoint field to make it into the warn event"
+        !logs_contain(&endpoint),
+        "the endpoint must not be in the warn event"
+    );
+    let digest = {
+        use sha2::{Digest, Sha256};
+        hex::encode(&Sha256::digest(endpoint.as_bytes())[..8])
+    };
+    assert!(
+        logs_contain(&format!("endpoint_sha256={digest}")),
+        "expected the digest of the endpoint in the warn event"
+    );
+    assert!(
+        logs_contain("host=127.0.0.1"),
+        "expected the host of the endpoint in the warn event"
     );
     assert!(
         logs_contain("PingNote"),
@@ -166,14 +218,16 @@ async fn webpush_channel_treats_subscription_gone_as_non_fatal() {
 
 #[tokio::test]
 #[serial]
-async fn webpush_channel_returns_error_for_malformed_subscription_json() {
+#[traced_test]
+async fn webpush_channel_treats_a_route_that_is_no_subscription_as_non_fatal() {
     // The "route" the Notifiable returns must be valid SubscriptionInfo
-    // JSON. A garbage route surfaces as a contextual decode error -
-    // callers can match on the "subscription JSON decode" substring to
-    // distinguish bad routes from upstream push-service failures.
-    // This test exercises the JSON-decode error path, which fires before
-    // the endpoint policy runs - so the policy choice is moot here, but we
-    // keep AllowAny for consistency with the other tests in this file.
+    // JSON. A route that is none is stored data that cannot be used: the
+    // dispatch succeeds, so a queue does not send the job again, and the
+    // warning says what kind of mistake the route has and where, without
+    // a part of the route.
+    // The decode runs before the endpoint policy - so the policy choice
+    // is moot here, but we keep AllowAny for consistency with the other
+    // tests in this file.
     let channel = WebPushChannel::new(
         Arc::new(
             WebPushClient::new(
@@ -186,19 +240,36 @@ async fn webpush_channel_returns_error_for_malformed_subscription_json() {
         60,
     );
 
-    let err = (&channel as &dyn Channel)
+    (&channel as &dyn Channel)
         .deliver("this is not valid subscription json", &PingNote)
         .await
-        .expect_err("malformed route must surface as Err");
+        .expect("a route that is no subscription must not fail the dispatch");
 
-    let msg = format!("{err}");
     assert!(
-        msg.contains("WebPushChannel"),
-        "expected channel context in error: {msg}"
+        logs_contain("subscription cannot be used"),
+        "expected the warning"
     );
     assert!(
-        msg.contains("subscription JSON decode"),
-        "expected decode-failure context in error: {msg}"
+        logs_contain("the value is not JSON"),
+        "expected the kind of the mistake in the warning"
+    );
+    assert!(
+        !logs_contain("this is not valid"),
+        "the stored route is not logged"
+    );
+
+    // A route that is JSON and no subscription: the secret of the
+    // subscription is in it, and the decoder would quote it.
+    (&channel as &dyn Channel)
+        .deliver(
+            r#"{"endpoint": 7, "keys": {"p256dh": "k", "auth": "the-secret-of-the-subscription"}}"#,
+            &PingNote,
+        )
+        .await
+        .expect("a route of the wrong shape must not fail the dispatch");
+    assert!(
+        !logs_contain("the-secret-of-the-subscription"),
+        "the stored secret is not logged"
     );
 }
 

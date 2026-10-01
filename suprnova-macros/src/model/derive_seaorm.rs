@@ -65,7 +65,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         let field_ty = if !is_pk {
             if let Some(cast_ty) = input.cast_for_field(&ident.to_string()) {
                 let alias = format_ident!("__Suprnova_Cast_Storage_{ident}");
+                // The alias is `pub` because the generated entity names it;
+                // it is plumbing, so it stays out of the model's rustdoc.
                 storage_aliases.push(quote! {
+                    #[doc(hidden)]
                     #[allow(non_camel_case_types)]
                     pub type #alias = <#cast_ty as ::suprnova::eloquent::casts::Cast>::Storage;
                 });
@@ -129,4 +132,32 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
         impl ::suprnova::sea_orm::ActiveModelBehavior for ActiveModel {}
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::parse::ModelInput;
+    use super::emit;
+    use quote::quote;
+
+    #[test]
+    fn a_cast_storage_alias_is_hidden_from_rustdoc() {
+        let input = ModelInput::parse(
+            quote! { casts = { active = AsBool } },
+            quote! { pub struct Flag { pub id: i64, pub active: bool } },
+        )
+        .unwrap();
+
+        let emitted = emit(&input).unwrap().to_string();
+
+        let alias = emitted
+            .find("pub type __Suprnova_Cast_Storage_active")
+            .expect("the cast field gets a storage alias");
+        let attributes = &emitted[..alias];
+        let attributes = &attributes[attributes.len().saturating_sub(80)..];
+        assert!(
+            attributes.contains("# [doc (hidden)]"),
+            "the alias carries #[doc(hidden)]; its attributes are: {attributes}"
+        );
+    }
 }

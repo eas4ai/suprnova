@@ -243,4 +243,16 @@ where
         }
         Ok(out)
     }
+
+    /// [`Self::create`] with the model's lifecycle events muted: no
+    /// `Creating`, `Saving`, `Created` or `Saved` listener runs, so no
+    /// observer sees the row. Mirrors Laravel's `createQuietly`.
+    pub async fn create_quietly(self) -> Result<M, crate::error::FrameworkError> {
+        crate::seed::without_events(self.create()).await
+    }
+
+    /// [`Self::create_many`] with the model's lifecycle events muted.
+    pub async fn create_many_quietly(self) -> Result<Vec<M>, crate::error::FrameworkError> {
+        crate::seed::without_events(self.create_many()).await
+    }
 }

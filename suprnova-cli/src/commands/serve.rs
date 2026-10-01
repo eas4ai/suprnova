@@ -11,7 +11,7 @@ use std::sync::mpsc::channel;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::commands::watcher::{REGEN_QUIET, RegenerationSchedule};
+use crate::commands::watcher::{Debounce, REGEN_QUIET, RegenerationSchedule, watch_trigger};
 use crate::ui;
 
 /// Floor of the respawn backoff: how long to wait before the *first*
@@ -349,6 +349,11 @@ enum DevEvent {
         artifact: TypesArtifact,
         count: u32,
     },
+    /// A file under `src/migrations` changed while the session does not
+    /// run migrations on a restart of the backend (`--migrate start`,
+    /// which is the default, and `--migrate never`). The migrations are
+    /// for `suprnova migrate` to run. One event for one burst of changes.
+    MigrationsChanged { ts: String },
     /// The whole `serve` session is shutting down (`Ctrl+C`, or a crash
     /// under `--no-restart`) and every child is being killed. Emitted
     /// from [`ProcessManager::shutdown_all`], the one chokepoint every
@@ -661,6 +666,18 @@ fn spawn_child_and_stream(
     shutdown: Arc<AtomicBool>,
     mode: OutputMode,
 ) -> Result<Child, String> {
+    spawn_child_with_readers(spec, shutdown, mode).map(|(child, _last_lines)| child)
+}
+
+/// [`spawn_child_and_stream`], and a channel on which each of the two
+/// reader threads sends once, when the stream it reads has ended. A
+/// caller that waits for the process to end reads it to know that the
+/// output of the process has been printed.
+fn spawn_child_with_readers(
+    spec: &ProcessSpec,
+    shutdown: Arc<AtomicBool>,
+    mode: OutputMode,
+) -> Result<(Child, std::sync::mpsc::Receiver<()>), String> {
     let mut cmd = Command::new(&spec.command);
     cmd.args(&spec.args)
         .stdout(Stdio::piped())
@@ -691,6 +708,10 @@ fn spawn_child_and_stream(
     let name_err = spec.name.clone();
     let color = spec.color;
 
+    let (done, last_lines) = channel();
+    let stdout_done = done.clone();
+    let stderr_done = done;
+
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
@@ -714,6 +735,9 @@ fn spawn_child_and_stream(
                 }
             }
         }
+        // Nobody may be listening: the session does not wait for a
+        // process it looks after.
+        let _ = stdout_done.send(());
     });
 
     thread::spawn(move || {
@@ -742,9 +766,10 @@ fn spawn_child_and_stream(
                 }
             }
         }
+        let _ = stderr_done.send(());
     });
 
-    Ok(child)
+    Ok((child, last_lines))
 }
 
 fn print_prefixed(prefix: &str, color: console::Color, line: &str, timestamps: bool) {
@@ -926,6 +951,170 @@ fn ensure_npm_dependencies(json: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// When `suprnova serve` runs the pending migrations.
+///
+/// The backend runs under a file watcher, which starts it again on every
+/// save of a source file. An application that is started with no
+/// subcommand migrates before it serves, so under the watcher every save
+/// is a run of the pending migrations. That is what `Always` is. `Start`
+/// runs them when the session starts and has the watcher start the
+/// backend with `serve --no-migrate`, so a migration that is being
+/// written is not applied by saving it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum MigrateWhen {
+    /// Once, when `serve` starts. A restart of the backend runs none.
+    #[default]
+    Start,
+    /// On every start of the backend, which is on every save.
+    Always,
+    /// Never. `suprnova migrate` runs them.
+    Never,
+}
+
+/// What cargo-watch runs for the backend: the server, which migrates when
+/// it starts, or the server with `--no-migrate`.
+///
+/// `serve --no-migrate` is a flag every release of the framework has, so
+/// a project that is pinned to an older one starts as well.
+fn backend_run_command(package: &str, migrates_itself: bool) -> String {
+    if migrates_itself {
+        format!("run --bin {package}")
+    } else {
+        format!("run --bin {package} -- serve --no-migrate")
+    }
+}
+
+/// The arguments of the cargo run that migrates when `serve` starts.
+fn migrate_at_start_args(package: &str) -> Vec<String> {
+    ["run", "--bin", package, "--", "migrate"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// What is printed when a migration file changes and the session does not
+/// migrate on a restart.
+const MIGRATIONS_CHANGED_NOTICE: &str = "src/migrations changed. The dev server does not run \
+     migrations when the backend restarts: run `suprnova migrate` to apply them, or start \
+     with `suprnova serve --migrate always`.";
+
+/// How the run of the migrations at the start of a session ended.
+#[derive(Debug, PartialEq, Eq)]
+enum StartMigration {
+    /// The migrations ran.
+    Ran,
+    /// They did not: the run failed, with this reason.
+    Failed(String),
+    /// The session is shutting down. The run was stopped, and nothing
+    /// else is to be started.
+    Stopped,
+}
+
+/// How long the output of a process that has exited is waited for. Its
+/// last lines are still with the threads that read them when the exit
+/// is known.
+const LAST_LINES: Duration = Duration::from_secs(2);
+
+/// Run a process to its end, with its output rendered like the output of
+/// every other process of the session.
+///
+/// `tick` runs ten times a second while the process runs, and the run is
+/// stopped when it returns `true`. The session is what the tick is: the
+/// processes that were started before this one are looked after in it,
+/// and the flag that Ctrl+C sets is read in it. A signal that reaches
+/// the CLI alone, from an editor or a program that reads `--json`, must
+/// end the session without waiting for a compile.
+fn run_to_the_end(
+    spec: &ProcessSpec,
+    shutdown: Arc<AtomicBool>,
+    mode: OutputMode,
+    mut tick: impl FnMut() -> bool,
+) -> Result<Option<std::process::ExitStatus>, String> {
+    let (mut child, last_lines) = spawn_child_with_readers(spec, shutdown, mode)?;
+    emit_event(
+        mode,
+        DevEvent::Started {
+            ts: now_ts(),
+            name: spec.name.clone(),
+            pid: child.id(),
+        },
+    );
+    let status = loop {
+        if tick() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Err(e) => return Err(format!("Failed to wait for {}: {}", spec.command, e)),
+        }
+    };
+    // The two readers say when they have printed the last line, so what
+    // is printed next stands behind the output it is about. The wait has
+    // an end: a process that the child left behind can hold the pipe
+    // open.
+    for _ in 0..2 {
+        if last_lines.recv_timeout(LAST_LINES).is_err() {
+            break;
+        }
+    }
+    emit_event(
+        mode,
+        DevEvent::Exited {
+            ts: now_ts(),
+            name: spec.name.clone(),
+            code: status.code(),
+        },
+    );
+    Ok(Some(status))
+}
+
+/// Run the pending migrations once, before the backend starts under the
+/// file watcher.
+fn migrate_at_start(
+    package: &str,
+    envs: &[(&str, String)],
+    manager: &mut ProcessManager,
+) -> StartMigration {
+    let prefix = "[migrate] ";
+    let spec = ProcessSpec {
+        command: "cargo".to_string(),
+        args: migrate_at_start_args(package),
+        cwd: None,
+        envs: envs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect(),
+        prefix: prefix.to_string(),
+        name: bare_name(prefix),
+        color: console::Color::Yellow,
+    };
+    let shutdown = manager.shutdown.clone();
+    let mode = manager.mode;
+    let ended = run_to_the_end(&spec, shutdown.clone(), mode, || {
+        // A crash that ends the session, which is one under
+        // `--no-restart`, ends this run as well.
+        if manager.poll() {
+            shutdown.store(true, Ordering::SeqCst);
+        }
+        shutdown.load(Ordering::SeqCst)
+    });
+    match ended {
+        Ok(None) => StartMigration::Stopped,
+        // Ctrl+C in a terminal reaches the child as well, and the child
+        // may have ended by it before the tick saw the flag.
+        Ok(Some(_)) | Err(_) if shutdown.load(Ordering::SeqCst) => StartMigration::Stopped,
+        Ok(Some(status)) if status.success() => StartMigration::Ran,
+        Ok(Some(status)) => StartMigration::Failed(match status.code() {
+            Some(code) => format!("`migrate` ended with exit code {code}"),
+            None => "`migrate` was ended by a signal".to_string(),
+        }),
+        Err(e) => StartMigration::Failed(e),
+    }
+}
+
 /// Default backend port. Mirrors the framework's
 /// `suprnova::config::providers::server::DEFAULT_SERVER_PORT`; kept in
 /// sync deliberately (the CLI can't depend on the framework crate).
@@ -974,6 +1163,7 @@ pub fn run(
     restart_tries: u32,
     timestamps: bool,
     json: bool,
+    migrate: MigrateWhen,
 ) {
     // Load .env so SERVER_PORT / VITE_PORT can act as the resolution base.
     let _ = dotenvy::dotenv();
@@ -1117,44 +1307,6 @@ pub fn run(
     })
     .expect("Error setting Ctrl-C handler");
 
-    // Start backend with cargo-watch
-    if panes.backend {
-        let package_name = match get_package_name() {
-            Ok(name) => name,
-            Err(e) => {
-                ui::error(&e);
-                std::process::exit(1);
-            }
-        };
-
-        if !json {
-            ui::label_value("Backend", &format!("http://127.0.0.1:{}", backend_port));
-        }
-
-        // SERVER_PORT pins the backend's bind; VITE_PORT lets the
-        // Inertia dev-head inject the correct `<script src=…>` for the
-        // Vite port we actually launched (default or scanned).
-        let backend_env = [
-            ("SERVER_PORT", backend_port.to_string()),
-            ("VITE_PORT", vite_port.to_string()),
-        ];
-
-        let run_cmd = format!("run --bin {}", package_name);
-        let watch_args = backend_watch_args(Path::new("."), &run_cmd);
-        let watch_args: Vec<&str> = watch_args.iter().map(String::as_str).collect();
-        if let Err(e) = manager.spawn_with_prefix(
-            "cargo",
-            &watch_args,
-            None,
-            &backend_env,
-            "[backend] ",
-            console::Color::Magenta,
-        ) {
-            ui::error(&e);
-            std::process::exit(1);
-        }
-    }
-
     // Start frontend with npm/vite
     if panes.frontend {
         if !json {
@@ -1197,6 +1349,101 @@ pub fn run(
             manager.shutdown_all();
             std::process::exit(1);
         }
+    }
+
+    // Start backend with cargo-watch. It starts last: the run of the
+    // migrations in front of it compiles the application, and the
+    // frontend and the other processes must not wait for that.
+    let mut backend_migrates_itself = true;
+    if panes.backend {
+        let package_name = match get_package_name() {
+            Ok(name) => name,
+            Err(e) => {
+                ui::error(&e);
+                manager.shutdown_all();
+                std::process::exit(1);
+            }
+        };
+
+        if !json {
+            ui::label_value("Backend", &format!("http://127.0.0.1:{}", backend_port));
+        }
+
+        // SERVER_PORT pins the backend's bind; VITE_PORT lets the
+        // Inertia dev-head inject the correct `<script src=…>` for the
+        // Vite port we actually launched (default or scanned).
+        let backend_env = [
+            ("SERVER_PORT", backend_port.to_string()),
+            ("VITE_PORT", vite_port.to_string()),
+        ];
+
+        backend_migrates_itself = match migrate {
+            MigrateWhen::Always => true,
+            MigrateWhen::Never => false,
+            MigrateWhen::Start if !Path::new("src/migrations").is_dir() => {
+                // The migrator of the project is somewhere this does not
+                // know. The application is the one that knows it.
+                if !json {
+                    ui::info(
+                        "No src/migrations directory: the backend runs its own migrations \
+                         each time it starts.",
+                    );
+                }
+                true
+            }
+            MigrateWhen::Start => {
+                if !json {
+                    ui::info("Running pending migrations...");
+                }
+                match migrate_at_start(&package_name, &backend_env, &mut manager) {
+                    StartMigration::Ran => false,
+                    StartMigration::Stopped => {
+                        manager.shutdown_all();
+                        if !json {
+                            ui::success("Servers stopped.");
+                        }
+                        return;
+                    }
+                    StartMigration::Failed(reason) => {
+                        // The backend is left to migrate by itself, as an
+                        // application does that is started with no
+                        // subcommand: it does not serve a schema that is
+                        // half migrated, and it tries again when a file
+                        // is saved.
+                        ui::warning(&format!(
+                            "Migrations were not run: {reason}. For this session the backend \
+                             runs them itself each time it starts, and does not serve until \
+                             they pass."
+                        ));
+                        true
+                    }
+                }
+            }
+        };
+
+        let run_cmd = backend_run_command(&package_name, backend_migrates_itself);
+        let watch_args = backend_watch_args(Path::new("."), &run_cmd);
+        let watch_args: Vec<&str> = watch_args.iter().map(String::as_str).collect();
+        if let Err(e) = manager.spawn_with_prefix(
+            "cargo",
+            &watch_args,
+            None,
+            &backend_env,
+            "[backend] ",
+            console::Color::Magenta,
+        ) {
+            ui::error(&e);
+            manager.shutdown_all();
+            std::process::exit(1);
+        }
+    }
+
+    // Say so when a migration changes and nothing will run it.
+    if panes.backend && !backend_migrates_itself && Path::new("src/migrations").is_dir() {
+        let shutdown_watcher = manager.shutdown.clone();
+        thread::spawn(move || {
+            start_migration_watcher(shutdown_watcher, mode);
+        });
     }
 
     // Start file watcher for TypeScript type regeneration
@@ -1352,6 +1599,71 @@ fn backend_watch_args(project: &Path, run_cmd: &str) -> Vec<String> {
     args.push("-x".to_string());
     args.push(run_cmd.to_string());
     args
+}
+
+/// Watches `src/migrations` and says that a migration changed and was not
+/// run. One notice for one burst of changes: an editor that saves a file
+/// writes it more than once.
+///
+/// Without the notice a developer who adds a migration sees the backend
+/// restart and nothing else, and finds the missing table on the first
+/// request that needs it.
+fn start_migration_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
+    let (tx, rx) = channel();
+    let watcher_result = RecommendedWatcher::new(
+        move |res| {
+            if let Ok(event) = res {
+                let _ = tx.send(event);
+            }
+        },
+        Config::default().with_poll_interval(Duration::from_secs(2)),
+    );
+    let mut watcher = match watcher_result {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!(
+                "{} Failed to start the migration watcher: {}",
+                style("[migrate]").yellow(),
+                e
+            );
+            return;
+        }
+    };
+    if let Err(e) = watcher.watch(Path::new("src/migrations"), RecursiveMode::Recursive) {
+        eprintln!(
+            "{} Failed to watch src/migrations: {}",
+            style("[migrate]").yellow(),
+            e
+        );
+        return;
+    }
+
+    let mut changed = Debounce::new(REGEN_QUIET);
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(event) => {
+                if watch_trigger(&event).rust {
+                    changed.on_event(Instant::now());
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        if changed.should_fire(Instant::now()) {
+            if mode.is_json() {
+                emit_event(mode, DevEvent::MigrationsChanged { ts: now_ts() });
+            } else {
+                println!(
+                    "{} {}",
+                    style("[migrate]").yellow(),
+                    MIGRATIONS_CHANGED_NOTICE
+                );
+            }
+        }
+    }
 }
 
 /// File watcher that regenerates TypeScript types when Rust files change,
@@ -1677,6 +1989,134 @@ mod generation_notice_tests {
                 "0 type(s) up to date → frontend/src/types/inertia-props.ts".to_string(),
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod migrate_when_tests {
+    use super::*;
+
+    #[test]
+    fn the_watched_backend_runs_no_migration_unless_it_is_left_to() {
+        assert_eq!(backend_run_command("app", true), "run --bin app");
+        assert_eq!(
+            backend_run_command("app", false),
+            "run --bin app -- serve --no-migrate"
+        );
+    }
+
+    #[test]
+    fn the_default_migrates_when_serve_starts() {
+        assert_eq!(MigrateWhen::default(), MigrateWhen::Start);
+    }
+
+    #[test]
+    fn the_run_at_the_start_is_the_migrate_command_of_the_application() {
+        assert_eq!(
+            migrate_at_start_args("directory"),
+            ["run", "--bin", "directory", "--", "migrate"]
+        );
+    }
+
+    #[test]
+    fn the_watched_command_is_the_last_argument_of_cargo_watch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("src")).expect("create src");
+
+        let run = backend_run_command("app", false);
+        let args = backend_watch_args(dir.path(), &run);
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("run --bin app -- serve --no-migrate")
+        );
+        assert_eq!(args[args.len() - 2], "-x");
+    }
+
+    fn shell(script: &str) -> ProcessSpec {
+        ProcessSpec {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), script.to_string()],
+            cwd: None,
+            envs: Vec::new(),
+            prefix: "[migrate] ".to_string(),
+            name: "migrate".to_string(),
+            color: console::Color::Yellow,
+        }
+    }
+
+    fn never() -> bool {
+        false
+    }
+
+    #[test]
+    fn a_run_to_the_end_returns_the_exit_status() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mode = OutputMode::Json;
+
+        let ok = run_to_the_end(&shell("exit 0"), shutdown.clone(), mode, never)
+            .expect("the shell runs")
+            .expect("the run was not stopped");
+        assert!(ok.success());
+
+        let failed = run_to_the_end(&shell("echo failed >&2; exit 3"), shutdown, mode, never)
+            .expect("the shell runs")
+            .expect("the run was not stopped");
+        assert_eq!(failed.code(), Some(3));
+    }
+
+    #[test]
+    fn a_run_is_stopped_when_the_session_is() {
+        // The process would run for a minute. The session ends on the
+        // first tick, and the run with it.
+        let started = Instant::now();
+        let stopped = run_to_the_end(
+            &shell("exec sleep 60"),
+            Arc::new(AtomicBool::new(false)),
+            OutputMode::Json,
+            || true,
+        )
+        .expect("the shell runs");
+
+        assert!(stopped.is_none(), "a run that was stopped has no status");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the run waited for the process: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn the_session_is_looked_after_while_the_process_runs() {
+        let mut ticks = 0;
+        let status = run_to_the_end(
+            &shell("exit 0"),
+            Arc::new(AtomicBool::new(false)),
+            OutputMode::Json,
+            || {
+                ticks += 1;
+                false
+            },
+        )
+        .expect("the shell runs")
+        .expect("the run was not stopped");
+
+        assert!(status.success());
+        assert!(ticks >= 1, "the tick ran {ticks} times");
+    }
+
+    #[test]
+    fn a_command_that_cannot_be_started_is_an_error_and_no_panic() {
+        let mut spec = shell("exit 0");
+        spec.command = "suprnova-no-such-command".to_string();
+
+        let error = run_to_the_end(
+            &spec,
+            Arc::new(AtomicBool::new(false)),
+            OutputMode::Json,
+            never,
+        )
+        .expect_err("the command does not exist");
+        assert!(error.contains("suprnova-no-such-command"), "{error}");
     }
 }
 
@@ -2193,6 +2633,22 @@ mod dev_event_json_tests {
         assert_eq!(
             serde_json::to_string(&lang_keys).unwrap(),
             r#"{"type":"types_regenerated","ts":"2026-08-18T10:15:23.456-07:00","artifact":"lang_keys","count":12}"#
+        );
+    }
+
+    #[test]
+    fn migrations_changed_carries_nothing_but_a_timestamp() {
+        let event = DevEvent::MigrationsChanged {
+            ts: "2026-09-28T10:00:00.000-04:00".to_string(),
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "migrations_changed",
+                "ts": "2026-09-28T10:00:00.000-04:00",
+            })
         );
     }
 

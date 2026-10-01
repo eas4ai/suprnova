@@ -102,7 +102,7 @@ as Associated Data (AAD):
 
 ```rust
 pub enum CryptPurpose {
-    Cookie,            // suprnova:cookie:v1
+    Cookie,            // bound to the cookie name, see below
     Cursor,            // suprnova:cursor:v1
     TwoFactorSecret,   // suprnova:2fa:secret:v1
     TwoFactorRecovery, // suprnova:2fa:recovery:v1
@@ -115,7 +115,7 @@ authentication tag without including it in the ciphertext, so:
 
 - The on-wire format is unchanged - still
   `base64(nonce || ciphertext || tag)`.
-- A wire produced under `CryptPurpose::Cookie` is **rejected** by
+- A wire produced under one purpose is **rejected** by
   any decrypt call that supplies a different purpose. The GCM tag
   check fails before any post-decrypt parsing runs.
 - Adding a new surface (a future queue payload encryption, an
@@ -125,15 +125,23 @@ authentication tag without including it in the ciphertext, so:
 ```rust
 use suprnova::{Crypt, CryptPurpose};
 
-let wire = Crypt::encrypt_string(CryptPurpose::Cookie, "session-id")?;
+let wire = Crypt::encrypt_string(CryptPurpose::Cast, "ssn-123-45-6789")?;
 
 // Same key, same wire, different purpose - fails.
 let result = Crypt::decrypt_string(CryptPurpose::Cursor, &wire);
 assert!(result.is_err());
 
 // Same purpose - succeeds.
-let plain = Crypt::decrypt_string(CryptPurpose::Cookie, &wire)?;
+let plain = Crypt::decrypt_string(CryptPurpose::Cast, &wire)?;
 ```
+
+`CryptPurpose::Cookie` is the one purpose that has no context-free form. A
+cookie value is always bound to the name of its cookie (see
+[Cookie-name-bound AAD](#cookie-name-bound-aad)). `Crypt::encrypt_string` and
+`Crypt::encrypt` with `CryptPurpose::Cookie` return an error, and so do
+`Crypt::decrypt_string`, `Crypt::decrypt_string_with_origin`, `Crypt::decrypt`
+and `Crypt::decrypt_with_origin`. For a cookie, use `Cookie::encrypted` and
+`Cookie::read_encrypted_for`, or the `_for` functions with the cookie name.
 
 ### Why Suprnova diverges
 
@@ -150,15 +158,14 @@ Cross-surface ciphertext replay is rejected at the GCM tag check,
 before any parsing runs. The cost to the caller is one extra enum
 parameter; the gain is a property the wire format alone cannot break.
 
-The `:v1` suffix on each label is reserved for future per-surface
-rotation: bumping `suprnova:cookie:v1` to `suprnova:cookie:v2`
-invalidates old cookie ciphertext **only** - leaves cursors, 2FA
-secrets, and cast columns alone.
+The version suffix on each label gives every surface its own label. A change
+of the label of one surface invalidates the old ciphertext of that surface
+**only** and leaves cursors, 2FA secrets, and cast columns alone.
 
-## Cookie-name-bound AAD (v2)
+## Cookie-name-bound AAD
 
-Encrypted cookies use a second AAD generation when the caller knows the
-cookie's logical name. `Cookie::encrypted("suprnova_session", value)` binds
+An encrypted cookie is bound to its logical name.
+`Cookie::encrypted("suprnova_session", value)` binds
 `suprnova:cookie:v2:suprnova_session` into the GCM tag, and
 `Cookie::read_encrypted_for("suprnova_session", wire)` supplies the same
 context on the way back:
@@ -180,47 +187,113 @@ wire-name prefix therefore does not change the AAD and does not log users out.
 The prefix is a browser and header concern; the cookie name is the
 cryptographic domain.
 
-### The compatibility window
+### A cookie opens under its own name and in no other way
 
-The wire format is unchanged and version-less: it still carries only the
-nonce, ciphertext, and authentication tag. There is no version byte from which
-the reader can choose a branch. `decrypt_string_for` uses blind trial-decrypt
-with the same shape as key rotation: it tries the contexted v2 AAD across the
-whole key ring, then the un-contexted v1 AAD across the whole ring. This keeps
-cookies written before name binding readable while `APP_KEY` rotation is also
-in flight.
+The wire format has no version byte and no name. The reader supplies the name,
+and the GCM tag check fails when it is not the name the writer used. A value
+from one cookie therefore does not open in another cookie, and a value that was
+written without a cookie name does not open in any cookie. Both fail with the
+same error as a tampered value, and the error quotes neither the plaintext nor
+the ciphertext.
 
-The window preserves the old replay weakness for its whole duration. A v1
-cookie from one cookie slot can still be replayed into another slot while the
-un-contexted fallback exists; the name-binding benefit begins when that
-fallback is removed in 1.4.0. Nothing retires the fallback automatically:
-`Crypt::encrypt_string(CryptPurpose::Cookie, ...)` still mints v1, and the
-un-contexted entry point is superseded with removal scheduled for 1.4.0. Move
-cookie writes to `Cookie::encrypted` and reads to `read_encrypted_for` before
-that deadline.
+Key rotation works for cookies as it does for every other purpose.
+`Cookie::read_encrypted_for` tries the name-bound context across the whole key
+ring, current key first. A cookie that a previous key wrote opens and reports
+`KeyOrigin::Previous`.
 
-There is a measurable cost during the window. A failed cookie decrypt pays two
-trial passes across the ring. The session middleware makes two encrypted reads
-per request when both a session cookie and a remember-me cookie are present, so
-an anonymous request with a stale remember cookie pays
-`2 × (1 + N)` twice, where `N` is the number of previous keys.
+The functions that take no name refuse `CryptPurpose::Cookie` before they touch
+a key:
+
+```rust,no_run
+use suprnova::{Crypt, CryptPurpose};
+
+assert!(Crypt::encrypt_string(CryptPurpose::Cookie, "session-id").is_err());
+assert!(Crypt::decrypt_string(CryptPurpose::Cookie, "any-wire").is_err());
+
+// With the name, a cookie value round-trips.
+let wire = Crypt::encrypt_string_for(CryptPurpose::Cookie, "suprnova_session", "session-id")?;
+let plain = Crypt::decrypt_string_for(CryptPurpose::Cookie, "suprnova_session", &wire)?;
+assert_eq!(plain, "session-id");
+```
+
+The error names the function to use instead.
+
+A cookie that does not open is a request without that cookie. It is never an
+error response:
+
+- The session middleware starts a new session. The user signs in again.
+- The remember-me hydration does not sign the user in and clears the cookie.
+- The maintenance mode treats the request as one without the bypass cookie, so
+  it gets the maintenance response. The operator visits the secret URL again.
+
+A cookie value that was written without a cookie name does not open, so the
+users who hold one sign in again.
 
 ### Reading `DecryptOrigin`
 
-`Crypt::decrypt_string_for_inner` returns a `DecryptOrigin` with two
-independent axes:
+Three functions return the value and a `DecryptOrigin`. Use them when your
+code has to act on where a value came from. They serve the purposes other than
+`CryptPurpose::Cookie`, and the two that take no context return an error for a
+cookie:
+
+| Function | Reads like |
+|---|---|
+| `Crypt::decrypt_string_with_origin(purpose, wire)` | `decrypt_string` |
+| `Crypt::decrypt_string_for_with_origin(purpose, context, wire)` | `decrypt_string_for` |
+| `Crypt::decrypt_with_origin::<T>(purpose, wire)` | `decrypt` |
+
+Each returns `Result<(value, DecryptOrigin), FrameworkError>` and has the
+errors of the function it reads like. None of them logs a rotation warning,
+because you have the origin.
+
+`DecryptOrigin` has two independent axes. `DecryptOrigin`, `KeyOrigin` and
+`AadVersion` are exported from the crate root.
 
 - `origin.key = KeyOrigin::Previous(index)` means the value still depends on
   `APP_KEY_PREVIOUS[index]`. Re-encrypt the value under the current key and
   remove that previous key only after the rotation tail is gone.
-- `origin.aad = AadVersion::Legacy` means the value used the un-contexted v1
-  fallback. For a cookie, issue it again through the name-bound API; the
-  fallback is scheduled for removal in 1.4.0.
+- `origin.aad = AadVersion::Legacy` means a `_for` read opened a value that was
+  written without a context. That read falls back to the additional data
+  without a name for the purposes that store values which do not expire as a
+  cookie does, such as a cast or a cursor. Read the value with
+  `decrypt_string_for_with_origin` and write it again with
+  `encrypt_string_for`. A cookie never reports `Legacy`: it opens under its
+  name or not at all.
 
-Both axes can be stale together. The public reader logs the corresponding
-warnings without including plaintext or ciphertext. Treat the key warning as
-a rotation cleanup task and the AAD warning as a migration task; matching on
-one axis must not hide the other.
+Both axes can be stale together. `origin.needs_reencryption()` returns `true`
+when either axis is stale, so you do not have to check both.
+
+### Re-encrypting a value after a rotation
+
+The job that ends a rotation reads every stored value, writes again the ones
+that need it, and removes the previous key when none is left:
+
+```rust,no_run
+use suprnova::{Crypt, CryptPurpose, FrameworkError};
+
+fn refresh(stored: &str) -> Result<Option<String>, FrameworkError> {
+    let (plain, origin) = Crypt::decrypt_string_with_origin(CryptPurpose::Cast, stored)?;
+    if origin.needs_reencryption() {
+        return Ok(Some(Crypt::encrypt_string(CryptPurpose::Cast, &plain)?));
+    }
+    Ok(None)
+}
+```
+
+Write the value again with the function that pairs with the one you read
+it with:
+
+- A value read with `decrypt_string_for_with_origin` is written by
+  `Crypt::encrypt_string_for` with the same context. That gives it the
+  current key and the current label.
+- `Crypt::encrypt_string` writes the label without a context. Read that value
+  with a context again and it matches the legacy label, so
+  `needs_reencryption()` stays `true` and a job that runs until it is
+  `false` never ends.
+
+The plain `decrypt_string` logs a warning for each stale axis and returns the
+value alone. The warning is for a person who reads the log. A program cannot
+act on it.
 
 ## The two encrypt / decrypt pairs
 
@@ -478,7 +551,7 @@ You don't have to do anything to opt into these - they are wired
 automatically once `APP_KEY` is configured.
 
 - **Encrypted cookies** - `Cookie::encrypted(...)` /
-  `Cookie::read_encrypted(...)` use `CryptPurpose::Cookie`. The
+  `Cookie::read_encrypted_for(...)` use `CryptPurpose::Cookie`. The
   session cookie, the remember-me cookie, and the maintenance-mode
   bypass cookie all ride this. See [responses.md](responses.md) and
   [session.md](session.md).
@@ -529,7 +602,8 @@ compared for equality across calls or runs: every encryption still uses a
 fresh random nonce.
 
 For rotation tests, install a keyring directly and mint historical
-ciphertext with `_test_encrypt_with`:
+ciphertext with `suprnova::crypto::testing::encrypt_string_under`. The
+function is compiled with the `testing` feature:
 
 ```rust
 use suprnova::testing::install_test_encryption_keyring;
@@ -541,24 +615,27 @@ let old = EncryptionKey::generate();
 install_test_encryption_keyring(current, vec![old.clone()]);
 
 // Simulate a value written when `old` was current.
-let legacy_wire = suprnova::crypto::_test_encrypt_with(
+let legacy_wire = suprnova::crypto::testing::encrypt_string_under(
     &old,
     suprnova::CryptPurpose::Cast,
     "legacy",
 ).unwrap();
 
-// The current ring decrypts it via the previous-key fallback,
-// emitting the rotation warn line.
-let plain = suprnova::Crypt::decrypt_string(
+// The current ring decrypts it via the previous-key fallback and
+// reports the origin.
+let (plain, origin) = suprnova::Crypt::decrypt_string_with_origin(
     suprnova::CryptPurpose::Cast,
     &legacy_wire,
 ).unwrap();
 
 assert_eq!(plain, "legacy");
+assert!(origin.needs_reencryption());
 ```
 
-Both helpers are compiled out of production binaries when the
-`testing` feature is disabled (`default-features = false`).
+`encrypt_string_for_under(key, purpose, context, plaintext)` is the same for a
+value that `encrypt_string_for` writes. Both helpers are compiled out of
+production binaries when the `testing` feature is disabled
+(`default-features = false`).
 
 ## Failure modes - what errors look like
 
@@ -580,10 +657,16 @@ behaviour and is the property that lets rotation be safe: a missed
 column would surface immediately, not return plausible-but-wrong
 plaintext.
 
+A decode error names the kind of mistake and its position, for example
+`Crypt JSON decode failed: the value is not JSON (line 1, column 3)`. It
+never quotes the decrypted value, because an error is logged and can reach a
+client.
+
 When a previous key successfully decrypts a wire, the call still
 returns `Ok(...)` - but the `tracing::warn!` line fires alongside,
 so log-driven alerting catches the rotation tail before
-`APP_KEY_PREVIOUS` is removed.
+`APP_KEY_PREVIOUS` is removed. To act on it in code, read the origin with
+[`decrypt_string_with_origin`](#reading-decryptorigin).
 
 ## Next
 

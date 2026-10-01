@@ -319,3 +319,301 @@ pub struct NodeB {
     let b = extract_block(&ts, "NodeB");
     assert!(b.contains("a: NodeA | null"));
 }
+
+// A plain struct reached through a prop is serialized by serde's own derive,
+// so its `#[serde(...)]` attributes decide the keys on the wire. These tests
+// use serde itself as the oracle: `scanned!` declares the items for real and
+// keeps their source text after a props root that reaches them, the generator
+// scans that text, and the keys of the emitted interface are compared with the
+// keys `serde_json` actually sends.
+macro_rules! scanned {
+    (root: $root:literal; $($item:item)*) => {
+        $($item)*
+        const SCANNED_SRC: &str = concat!($root, stringify!($($item)*));
+    };
+}
+
+/// The keys of one emitted interface, each with whether it is optional. A
+/// quoted key is read as one JSON string, so a key holding `: ` stays whole.
+fn declared_keys(ts: &str, name: &str) -> std::collections::BTreeMap<String, bool> {
+    extract_block(ts, name)
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && *line != "}")
+        .map(|line| {
+            let (key, rest) = if line.starts_with('"') {
+                let mut stream = serde_json::Deserializer::from_str(line).into_iter::<String>();
+                let key = stream
+                    .next()
+                    .expect("a quoted key")
+                    .expect("a quoted key is a JSON string");
+                (key, &line[stream.byte_offset()..])
+            } else {
+                let end = line.find(['?', ':']).expect("a key ends at `?` or `:`");
+                (line[..end].to_owned(), &line[end..])
+            };
+            (key, rest.starts_with('?'))
+        })
+        .collect()
+}
+
+/// Every key serde sends is declared, and every key declared as required is
+/// sent.
+fn assert_interface_matches_serde<T: serde::Serialize>(ts: &str, name: &str, value: &T) {
+    let declared = declared_keys(ts, name);
+    let json = serde_json::to_value(value).expect("the value serializes");
+    let sent: std::collections::BTreeSet<String> = json
+        .as_object()
+        .expect("a struct serializes to an object")
+        .keys()
+        .cloned()
+        .collect();
+    for key in &sent {
+        assert!(
+            declared.contains_key(key),
+            "serde sends `{key}` but `{name}` does not declare it: {declared:?}"
+        );
+    }
+    for (key, optional) in &declared {
+        assert!(
+            *optional || sent.contains(key),
+            "`{name}` requires `{key}` but serde does not send it: {sent:?}"
+        );
+    }
+}
+
+#[test]
+fn a_plain_struct_declares_exactly_the_keys_serde_sends() {
+    scanned! {
+        root: "#[derive(suprnova::InertiaProps)] pub struct CardsProps { pub cards: Vec<Card> }";
+        #[derive(serde::Serialize, Default)]
+        #[serde(rename_all = "camelCase")]
+        pub struct Card {
+            pub title: String,
+            #[serde(skip)]
+            pub revision_id: i64,
+            #[serde(skip_serializing)]
+            pub internal_note: String,
+            #[serde(rename = "display-name")]
+            pub display_name: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub badge_count: Option<u32>,
+            #[serde(rename(serialize = "kind", deserialize = "type"))]
+            pub r#type: String,
+            pub r#loop: bool,
+            pub created_at: String,
+            #[serde(rename = "note")]
+            #[serde(default, skip_serializing_if = "String::is_empty", alias = "memo")]
+            pub note_text: String,
+            #[serde(rename(deserialize = "legacy_owner"))]
+            pub owner_id: i64,
+        }
+    }
+    let ts = generate_types_string(ScanInput::Source(SCANNED_SRC));
+
+    // The skipped fields carry data serde must leave out, so the comparison
+    // below is not passing over empty values.
+    let card = Card {
+        revision_id: 918_273_645,
+        internal_note: "draft only".into(),
+        ..Card::default()
+    };
+    let Card {
+        revision_id,
+        internal_note,
+        ..
+    } = &card;
+    let sent = serde_json::to_string(&card).expect("the card serializes");
+    assert!(!sent.contains(&revision_id.to_string()), "sent: {sent}");
+    assert!(!sent.contains(internal_note.as_str()), "sent: {sent}");
+
+    assert_interface_matches_serde(&ts, "Card", &card);
+    assert_interface_matches_serde(
+        &ts,
+        "Card",
+        &Card {
+            badge_count: Some(3),
+            note_text: "pinned".into(),
+            ..Card::default()
+        },
+    );
+
+    let card = extract_block(&ts, "Card");
+    assert!(card.contains("  \"display-name\": string;"), "got: {card}");
+    assert!(
+        card.contains("  badgeCount?: number | null;"),
+        "got: {card}"
+    );
+    assert!(card.contains("  kind: string;"), "got: {card}");
+    assert!(card.contains("  loop: boolean;"), "got: {card}");
+    assert!(card.contains("  note?: string;"), "got: {card}");
+    assert!(card.contains("  ownerId: number;"), "got: {card}");
+    assert!(!card.contains("revision"), "got: {card}");
+    assert!(!card.contains("internal"), "got: {card}");
+}
+
+#[test]
+fn every_rename_all_rule_names_the_keys_serde_sends() {
+    scanned! {
+        root: "#[derive(suprnova::InertiaProps)] pub struct RulesProps { \
+               pub a: Lower, pub b: Upper, pub c: Pascal, pub d: Camel, pub e: Snake, \
+               pub f: ScreamingSnake, pub g: Kebab, pub h: ScreamingKebab, pub i: SerializeOnly }";
+        #[derive(serde::Serialize, Default)]
+        #[serde(rename_all = "lowercase")]
+        pub struct Lower { pub user_id: i64, pub name_2: i64, pub created_by_user: i64 }
+        #[derive(serde::Serialize, Default)]
+        #[serde(rename_all = "UPPERCASE")]
+        pub struct Upper { pub user_id: i64, pub name_2: i64, pub created_by_user: i64 }
+        #[derive(serde::Serialize, Default)]
+        #[serde(rename_all = "PascalCase")]
+        pub struct Pascal { pub user_id: i64, pub name_2: i64, pub created_by_user: i64 }
+        #[derive(serde::Serialize, Default)]
+        #[serde(rename_all = "camelCase")]
+        pub struct Camel { pub user_id: i64, pub name_2: i64, pub created_by_user: i64 }
+        #[derive(serde::Serialize, Default)]
+        #[serde(rename_all = "snake_case")]
+        pub struct Snake { pub user_id: i64, pub name_2: i64, pub created_by_user: i64 }
+        #[derive(serde::Serialize, Default)]
+        #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+        pub struct ScreamingSnake { pub user_id: i64, pub name_2: i64, pub created_by_user: i64 }
+        #[derive(serde::Serialize, Default)]
+        #[serde(rename_all = "kebab-case")]
+        pub struct Kebab { pub user_id: i64, pub name_2: i64, pub created_by_user: i64 }
+        #[derive(serde::Serialize, Default)]
+        #[serde(rename_all = "SCREAMING-KEBAB-CASE")]
+        pub struct ScreamingKebab { pub user_id: i64, pub name_2: i64, pub created_by_user: i64 }
+        #[derive(serde::Serialize, Default)]
+        #[serde(rename_all(serialize = "camelCase", deserialize = "kebab-case"))]
+        pub struct SerializeOnly { pub user_id: i64, pub name_2: i64, pub created_by_user: i64 }
+    }
+    let ts = generate_types_string(ScanInput::Source(SCANNED_SRC));
+
+    assert_interface_matches_serde(&ts, "Lower", &Lower::default());
+    assert_interface_matches_serde(&ts, "Upper", &Upper::default());
+    assert_interface_matches_serde(&ts, "Pascal", &Pascal::default());
+    assert_interface_matches_serde(&ts, "Camel", &Camel::default());
+    assert_interface_matches_serde(&ts, "Snake", &Snake::default());
+    assert_interface_matches_serde(&ts, "ScreamingSnake", &ScreamingSnake::default());
+    assert_interface_matches_serde(&ts, "Kebab", &Kebab::default());
+    assert_interface_matches_serde(&ts, "ScreamingKebab", &ScreamingKebab::default());
+    assert_interface_matches_serde(&ts, "SerializeOnly", &SerializeOnly::default());
+}
+
+/// `InertiaProps` honors serde's renames and skips in the `Serialize` it
+/// writes, and drops a raw identifier's `r#`, as serde does, so a derived
+/// struct's interface declares exactly the keys the derive sends. Checked
+/// against the derive's own output.
+#[test]
+fn an_inertia_props_struct_declares_the_keys_its_derive_sends() {
+    scanned! {
+        root: "";
+        #[derive(suprnova::InertiaProps)]
+        #[serde(rename_all = "camelCase")]
+        pub struct ProfileProps {
+            pub display_name: String,
+            #[serde(skip)]
+            pub revision_id: i64,
+            #[serde(rename = "kind")]
+            pub r#type: String,
+            pub r#match: String,
+        }
+    }
+    let ts = generate_types_string(ScanInput::Source(SCANNED_SRC));
+    let props = ProfileProps {
+        display_name: "Ada".into(),
+        revision_id: 1,
+        r#type: "admin".into(),
+        r#match: "exact".into(),
+    };
+    assert_interface_matches_serde(&ts, "ProfileProps", &props);
+    let declared = declared_keys(&ts, "ProfileProps");
+    assert_eq!(
+        declared.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["displayName", "kind", "match"]
+    );
+    assert_eq!(props.revision_id, 1);
+}
+
+/// A `Data` struct is read as well as written, so its `Input` interface
+/// declares the keys its derive reads: the deserialize names, without the
+/// fields serde skips when deserializing. The derive's keys are pinned
+/// against serde's own derive in `suprnova-macros/tests/serde_names.rs`.
+#[test]
+fn a_data_struct_declares_the_keys_it_writes_and_reads() {
+    const DATA_SRC: &str = r#"
+#[derive(suprnova::Data)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "kebab-case"))]
+pub struct ProfileDto {
+    pub display_name: String,
+    #[serde(rename = "id")]
+    pub profile_id: i64,
+    #[serde(skip_deserializing)]
+    pub computed: String,
+    #[serde(skip_serializing)]
+    pub secret: String,
+}
+"#;
+    let ts = generate_types_string(ScanInput::Source(DATA_SRC));
+    let output = declared_keys(&ts, "ProfileDto");
+    assert_eq!(
+        output.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["computed", "displayName", "id"]
+    );
+    let input = declared_keys(&ts, "ProfileDtoInput");
+    assert_eq!(
+        input.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["display-name", "id", "secret"]
+    );
+}
+
+#[test]
+fn a_plain_struct_whose_fields_serde_all_skips_is_an_empty_interface() {
+    scanned! {
+        root: "#[derive(suprnova::InertiaProps)] pub struct MarkerProps { pub marker: Marker }";
+        #[derive(serde::Serialize, Default)]
+        pub struct Marker {
+            #[serde(skip)]
+            pub cache: Vec<u8>,
+        }
+    }
+    let ts = generate_types_string(ScanInput::Source(SCANNED_SRC));
+
+    let marker = Marker {
+        cache: vec![1, 2, 3],
+    };
+    assert_eq!(marker.cache.len(), 3);
+    assert_interface_matches_serde(&ts, "Marker", &marker);
+    let props = extract_block(&ts, "MarkerProps");
+    assert!(props.contains("  marker: Marker;"), "got: {props}");
+}
+
+/// A Data Object carrying a model's dates: chrono serializes each one as
+/// ISO 8601 text, so each is a `string`, not `unknown`.
+#[test]
+fn chrono_dates_are_strings() {
+    const CHRONO_SRC: &str = r#"
+use chrono::{DateTime, NaiveDate, Utc};
+
+#[derive(suprnova::Data)]
+pub struct EventDto {
+    pub starts_at: DateTime<Utc>,
+    pub ends_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    pub day: NaiveDate,
+    pub local: chrono::NaiveDateTime,
+    pub doors: chrono::NaiveTime,
+}
+"#;
+    let ts = generate_types_string(ScanInput::Source(CHRONO_SRC));
+    let dto = extract_block(&ts, "EventDto");
+    for line in [
+        "  starts_at: string;",
+        "  ends_at: string | null;",
+        "  day: string;",
+        "  local: string;",
+        "  doors: string;",
+    ] {
+        assert!(dto.contains(line), "{line} in {dto}");
+    }
+    assert!(!ts.contains("unknown"), "got: {ts}");
+}

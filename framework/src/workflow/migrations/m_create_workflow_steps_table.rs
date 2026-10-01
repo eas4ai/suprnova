@@ -7,6 +7,8 @@
 
 use sea_orm_migration::prelude::*;
 
+use crate::database::migration_guard::create_index_if_missing;
+
 /// Migration that creates the framework-owned `workflow_steps` table.
 pub struct Migration;
 
@@ -69,29 +71,27 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_workflow_steps_workflow_id")
-                    .table(WorkflowSteps::Table)
-                    .col(WorkflowSteps::WorkflowId)
-                    .to_owned(),
-            )
-            .await?;
+        create_index_if_missing(
+            manager,
+            "workflow_steps",
+            Index::create()
+                .name("idx_workflow_steps_workflow_id")
+                .col(WorkflowSteps::WorkflowId)
+                .to_owned(),
+        )
+        .await?;
 
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_workflow_steps_unique")
-                    .table(WorkflowSteps::Table)
-                    .col(WorkflowSteps::WorkflowId)
-                    .col(WorkflowSteps::StepIndex)
-                    .unique()
-                    .to_owned(),
-            )
-            .await
+        create_index_if_missing(
+            manager,
+            "workflow_steps",
+            Index::create()
+                .name("idx_workflow_steps_unique")
+                .col(WorkflowSteps::WorkflowId)
+                .col(WorkflowSteps::StepIndex)
+                .unique()
+                .to_owned(),
+        )
+        .await
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {

@@ -31,7 +31,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 mod socket;
-pub use socket::WsSocket;
+pub use socket::{WsReceiver, WsSender, WsSocket};
 
 pub mod heartbeat;
 

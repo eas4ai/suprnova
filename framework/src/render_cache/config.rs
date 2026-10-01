@@ -290,7 +290,7 @@ pub struct RenderCacheConfig {
     pub build_id: String,
     /// Test-only clock override; `None` means `install` uses the system
     /// clock. `#[doc(hidden)]`: not part of the public contract, set only
-    /// through `with_clock_for_test`. That method exists only under the
+    /// through `with_clock`. That method exists only under the
     /// `testing` feature, so it is named here rather than linked: a link
     /// breaks every rustdoc build without that feature.
     #[doc(hidden)]
@@ -364,12 +364,37 @@ fn unknown_value(variable: &str, accepted: &str) -> FrameworkError {
 }
 
 impl RenderCacheConfig {
-    /// Test-only: inject the clock the runtime reads instead of the system
-    /// clock. `#[doc(hidden)]`: not part of the public contract.
+    /// Installs `clock` as the time source the runtime reads instead of the
+    /// system clock.
+    ///
+    /// A test that controls the clock controls every freshness decision at
+    /// once: the runtime reads it to stamp a publication and to age an entry
+    /// through its fresh, stale-servable and stale-on-error bands. With a
+    /// clock the test advances by hand, the test steps an entry from fresh
+    /// to stale to dead exactly, in no wall-clock time and with no sleep.
+    /// `from_env` never sets one, so a process that does not call this reads
+    /// the system clock.
+    ///
+    /// Available under the `testing` feature, a default feature.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use std::sync::Arc;
+    ///
+    /// use suprnova::render_cache::RenderCacheConfig;
+    /// use suprnova::live::testing::AdjustableTestClock;
+    ///
+    /// # fn example() -> Result<(), suprnova::FrameworkError> {
+    /// let clock = Arc::new(AdjustableTestClock::new(1_000_000));
+    /// let config = RenderCacheConfig::from_env()?.with_clock(clock);
+    /// # let _ = config;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[cfg(any(test, feature = "testing"))]
-    #[doc(hidden)]
     #[must_use]
-    pub fn with_clock_for_test(mut self, clock: Arc<dyn Clock>) -> Self {
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock_override = Some(clock);
         self
     }

@@ -418,3 +418,159 @@ async fn post_request_bytes(cookie_header: Option<String>) -> suprnova::Request 
     drop(client);
     req_rx.await.expect("request to be captured")
 }
+
+/// Store that counts what reaches it. With `stored`, every id has a
+/// session, as [`FailingStore`] has.
+#[derive(Default)]
+struct CountingStore {
+    stored: bool,
+    writes: AtomicUsize,
+    destroys: AtomicUsize,
+}
+
+#[async_trait]
+impl SessionStore for CountingStore {
+    async fn read(&self, id: &str) -> Result<Option<SessionData>, FrameworkError> {
+        Ok(self
+            .stored
+            .then(|| SessionData::new(id.to_string(), "b".repeat(40))))
+    }
+    async fn write(&self, _session: &SessionData) -> Result<(), FrameworkError> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    async fn destroy(&self, _id: &str) -> Result<(), FrameworkError> {
+        self.destroys.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    async fn destroy_for_user(&self, _user_id: &str) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+    async fn gc(&self) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+}
+
+/// A closure of `session_mut` is code of the application under the lock of
+/// the session. When it panics between two writes and a panic boundary
+/// below the middleware catches the panic, the handler answers as if
+/// nothing had happened. The session it leaves is half of a change, and
+/// the middleware must not store it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_caught_panic_under_the_session_lock_stores_nothing() {
+    use http_body_util::BodyExt;
+    use suprnova::middleware::{Middleware, Next};
+
+    ensure_crypt();
+
+    let next: Next = Arc::new(move |_req| {
+        Box::pin(async move {
+            let caught = std::panic::catch_unwind(|| {
+                suprnova::session::session_mut(|session| {
+                    session.put("step", "the first of two");
+                    panic!("the closure panics before its second write");
+                })
+            });
+            assert!(caught.is_err(), "the boundary caught the panic");
+
+            // The code that answers for the panic still reads the session.
+            let step: Option<String> =
+                suprnova::session::session().and_then(|session| session.get("step"));
+            assert_eq!(step.as_deref(), Some("the first of two"));
+
+            Ok(suprnova::HttpResponse::text("ok"))
+        })
+    });
+
+    let store = Arc::new(CountingStore::default());
+    let middleware = SessionMiddleware::with_store(test_config(), store.clone());
+    let response = middleware.handle(get_request().await, next).await;
+
+    let err = match response {
+        Err(r) => r,
+        Ok(_) => panic!("a session that is half of a change must not be answered with success"),
+    };
+    assert_eq!(err.status_code(), 500);
+    assert!(
+        err.headers()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("set-cookie")),
+        "the request queued no cookie, and a session that was not stored gets none"
+    );
+    let body = err
+        .into_hyper()
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.contains("session state unavailable"),
+        "the 500 must come from the branch for the poisoned session; got body: {body}"
+    );
+    assert_eq!(store.writes.load(Ordering::SeqCst), 0, "nothing is stored");
+    assert_eq!(
+        store.destroys.load(Ordering::SeqCst),
+        0,
+        "nothing is removed"
+    );
+}
+
+/// The branch does not ask whether the session is dirty, and it keeps the
+/// cookies that the request queued. The closure panics before its first
+/// write, so the session is clean, and the cookie of the request is a
+/// legacy one, so a touch of the stored session is due: without the branch
+/// the middleware writes the touched session and answers 200.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_caught_panic_before_any_write_stores_nothing_and_keeps_the_queued_cookies() {
+    use suprnova::middleware::{Middleware, Next};
+
+    ensure_crypt();
+
+    let next: Next = Arc::new(move |_req| {
+        Box::pin(async move {
+            suprnova::Cookie::queue(suprnova::Cookie::new("theme", "dark"));
+            let caught = std::panic::catch_unwind(|| {
+                suprnova::session::session_mut(|_session| {
+                    panic!("the closure panics before it writes");
+                })
+            });
+            assert!(caught.is_err(), "the boundary caught the panic");
+            Ok(suprnova::HttpResponse::text("ok"))
+        })
+    });
+
+    let config = test_config();
+    let session_id = "a".repeat(40);
+    let cookie = suprnova::http::cookie::Cookie::encrypted(&config.cookie_name, &session_id)
+        .expect("encrypt legacy session cookie");
+    let store = Arc::new(CountingStore {
+        stored: true,
+        ..CountingStore::default()
+    });
+    let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+    let response = middleware
+        .handle(
+            post_request_with_cookie(&config.cookie_name, cookie.value()).await,
+            next,
+        )
+        .await;
+
+    let err = match response {
+        Err(r) => r,
+        Ok(_) => panic!("a poisoned session must fail closed when it is clean too"),
+    };
+    assert_eq!(err.status_code(), 500);
+    assert!(
+        err.headers().any(|(name, value)| {
+            name.eq_ignore_ascii_case("set-cookie") && value.starts_with("theme=dark")
+        }),
+        "the cookie that the request queued is on the response"
+    );
+    assert_eq!(store.writes.load(Ordering::SeqCst), 0, "nothing is stored");
+    assert_eq!(
+        store.destroys.load(Ordering::SeqCst),
+        0,
+        "nothing is removed"
+    );
+}

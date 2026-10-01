@@ -471,19 +471,22 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
             }
         },
 
-        // MorphTo: target is `()` placeholder at T1; the per-family
-        // enum lands in T6. The accessor returns the cached unit-typed
-        // value via get_one; in T6 the codegen rewrites this to the
-        // generated `<Name>Morph` enum type. For T1 it suffices to
-        // emit a stub returning `Option<&()>` so the macro compiles
-        // even when `MorphTo` is declared.
-        RelationKindAttr::MorphTo => quote! {
-            #[doc = "Read the eager-loaded `MorphTo` parent. T6 specialises this \
-                     to the per-family `<Name>Morph` enum once the morph emitter lands."]
-            pub fn #loaded_fn(&self) -> ::core::option::Option<&()> {
-                self.__eager.get_one::<()>(#name_str)
+        // MorphTo: the eager loader caches the per-family `<Name>Morph`
+        // enum, so a loaded row reads it back without a query.
+        RelationKindAttr::MorphTo => {
+            let enum_ident = morph_enum_ident(rel);
+            quote! {
+                #[doc = "Read the eager-loaded `MorphTo` parent: the per-family enum \
+                         holding the target row, or `Unknown` when the row points at \
+                         no target."]
+                #[doc = ""]
+                #[doc = "Returns `None` if the relation was not eager-loaded \
+                         (call `.with([\"...\"])` on the query builder)."]
+                pub fn #loaded_fn(&self) -> ::core::option::Option<&#enum_ident> {
+                    self.__eager.get_one::<#enum_ident>(#name_str)
+                }
             }
-        },
+        }
 
         // Collection kinds - read via get_many; panics if not loaded.
         RelationKindAttr::HasMany
@@ -743,6 +746,25 @@ fn emit_relation_inventory(
             )
         },
     };
+    // How the owner's `updated_at` cast stores the time, so the touch
+    // cascade binds what the owner's column takes. A `MorphTo` owner
+    // varies by row and brings its own.
+    let related_bind_column_expr: TokenStream = match rel.kind {
+        RelationKindAttr::MorphTo => {
+            quote! { ::suprnova::eloquent::relations::no_column_binder }
+        }
+        _ => quote! {
+            <#target_ty as ::suprnova::eloquent::EloquentModel>::bind_column
+        },
+    };
+    let related_updated_at_storage_expr: TokenStream = match rel.kind {
+        RelationKindAttr::MorphTo => {
+            quote! { ::suprnova::eloquent::relations::morph_to_touch_storage }
+        }
+        _ => quote! {
+            <#target_ty as ::suprnova::eloquent::EloquentModel>::updated_at_storage
+        },
+    };
 
     // Parent key (PK on the OWNER's side). LK override applies to the
     // has-family relations. BelongsTo's "parent_key" maps to the OWNED
@@ -818,25 +840,27 @@ fn emit_relation_inventory(
             let related_pivot_col = pivot_related_override(rel)
                 .map(str::to_string)
                 .unwrap_or_else(|| default_belongs_to_fk(target_ty));
-            return emit_inventory_token(
+            return emit_inventory_token(&InventoryFields {
                 struct_ident,
                 target_ty,
-                &name_str,
-                &kind_variant,
-                &parent_type_name,
-                &target_type_name,
-                &target_table_expr,
-                "",
-                &parent_key_str,
-                &pivot_table_token,
-                &parent_pivot_col,
-                &related_pivot_col,
-                "",
-                "",
-                &target_primary_key_expr,
-                &related_soft_deletes_column_expr,
-                &related_updated_at_column_expr,
-            );
+                name: &name_str,
+                kind_variant: &kind_variant,
+                parent_type_name: &parent_type_name,
+                target_type_name: &target_type_name,
+                target_table_expr: &target_table_expr,
+                foreign_key: "",
+                parent_key: &parent_key_str,
+                pivot_table_expr: &pivot_table_token,
+                pivot_parent_key: &parent_pivot_col,
+                pivot_related_key: &related_pivot_col,
+                morph_type_column: "",
+                morph_type_value: "",
+                target_primary_key_expr: &target_primary_key_expr,
+                related_soft_deletes_column_expr: &related_soft_deletes_column_expr,
+                related_updated_at_column_expr: &related_updated_at_column_expr,
+                related_updated_at_storage_expr: &related_updated_at_storage_expr,
+                related_bind_column_expr: &related_bind_column_expr,
+            });
         }
         RelationKindAttr::MorphToMany | RelationKindAttr::MorphedByMany => {
             let pivot_table_token: TokenStream = match pivot_table_override(rel) {
@@ -875,25 +899,27 @@ fn emit_relation_inventory(
                 RelationKindAttr::MorphedByMany => (related_col.clone(), morph_col.clone()),
                 _ => (morph_col.clone(), related_col.clone()),
             };
-            return emit_inventory_token(
+            return emit_inventory_token(&InventoryFields {
                 struct_ident,
                 target_ty,
-                &name_str,
-                &kind_variant,
-                &parent_type_name,
-                &target_type_name,
-                &target_table_expr,
-                "",
-                &parent_key_str,
-                &pivot_table_token,
-                &pivot_parent_col,
-                &pivot_related_col,
-                &parent_morph_type_col,
-                &morph_type_value_str,
-                &target_primary_key_expr,
-                &related_soft_deletes_column_expr,
-                &related_updated_at_column_expr,
-            );
+                name: &name_str,
+                kind_variant: &kind_variant,
+                parent_type_name: &parent_type_name,
+                target_type_name: &target_type_name,
+                target_table_expr: &target_table_expr,
+                foreign_key: "",
+                parent_key: &parent_key_str,
+                pivot_table_expr: &pivot_table_token,
+                pivot_parent_key: &pivot_parent_col,
+                pivot_related_key: &pivot_related_col,
+                morph_type_column: &parent_morph_type_col,
+                morph_type_value: &morph_type_value_str,
+                target_primary_key_expr: &target_primary_key_expr,
+                related_soft_deletes_column_expr: &related_soft_deletes_column_expr,
+                related_updated_at_column_expr: &related_updated_at_column_expr,
+                related_updated_at_storage_expr: &related_updated_at_storage_expr,
+                related_bind_column_expr: &related_bind_column_expr,
+            });
         }
         _ => (String::new(), String::new(), String::new()),
     };
@@ -910,50 +936,80 @@ fn emit_relation_inventory(
         _ => (String::new(), String::new()),
     };
 
-    emit_inventory_token(
+    let pivot_table_expr = quote! { #pivot_table_str };
+    emit_inventory_token(&InventoryFields {
         struct_ident,
         target_ty,
-        &name_str,
-        &kind_variant,
-        &parent_type_name,
-        &target_type_name,
-        &target_table_expr,
-        &foreign_key_str,
-        &parent_key_str,
-        &quote! { #pivot_table_str },
-        &pivot_parent_key_str,
-        &pivot_related_key_str,
-        &morph_type_column_str,
-        &morph_type_value_str,
-        &target_primary_key_expr,
-        &related_soft_deletes_column_expr,
-        &related_updated_at_column_expr,
-    )
+        name: &name_str,
+        kind_variant: &kind_variant,
+        parent_type_name: &parent_type_name,
+        target_type_name: &target_type_name,
+        target_table_expr: &target_table_expr,
+        foreign_key: &foreign_key_str,
+        parent_key: &parent_key_str,
+        pivot_table_expr: &pivot_table_expr,
+        pivot_parent_key: &pivot_parent_key_str,
+        pivot_related_key: &pivot_related_key_str,
+        morph_type_column: &morph_type_column_str,
+        morph_type_value: &morph_type_value_str,
+        target_primary_key_expr: &target_primary_key_expr,
+        related_soft_deletes_column_expr: &related_soft_deletes_column_expr,
+        related_updated_at_column_expr: &related_updated_at_column_expr,
+        related_updated_at_storage_expr: &related_updated_at_storage_expr,
+        related_bind_column_expr: &related_bind_column_expr,
+    })
+}
+
+/// One named field per slot of the `RelationEntry` inventory record.
+/// Naming the slots at each call site keeps two same-typed values (the
+/// pivot keys, the morph column and value) from being swapped unnoticed.
+struct InventoryFields<'a> {
+    struct_ident: &'a syn::Ident,
+    target_ty: &'a syn::Type,
+    name: &'a str,
+    kind_variant: &'a TokenStream,
+    parent_type_name: &'a str,
+    target_type_name: &'a str,
+    target_table_expr: &'a TokenStream,
+    foreign_key: &'a str,
+    parent_key: &'a str,
+    pivot_table_expr: &'a TokenStream,
+    pivot_parent_key: &'a str,
+    pivot_related_key: &'a str,
+    morph_type_column: &'a str,
+    morph_type_value: &'a str,
+    target_primary_key_expr: &'a TokenStream,
+    related_soft_deletes_column_expr: &'a TokenStream,
+    related_updated_at_column_expr: &'a TokenStream,
+    related_updated_at_storage_expr: &'a TokenStream,
+    related_bind_column_expr: &'a TokenStream,
 }
 
 /// Single emission point for the inventory token. Keeps the kind-arms
 /// in [`emit_relation_inventory`] readable - every branch tail-calls
 /// here with the per-kind values.
-#[allow(clippy::too_many_arguments)]
-fn emit_inventory_token(
-    struct_ident: &syn::Ident,
-    target_ty: &syn::Type,
-    name_str: &str,
-    kind_variant: &TokenStream,
-    parent_type_name: &str,
-    target_type_name: &str,
-    target_table_expr: &TokenStream,
-    foreign_key: &str,
-    parent_key: &str,
-    pivot_table_expr: &TokenStream,
-    pivot_parent_key: &str,
-    pivot_related_key: &str,
-    morph_type_column: &str,
-    morph_type_value: &str,
-    target_primary_key_expr: &TokenStream,
-    related_soft_deletes_column_expr: &TokenStream,
-    related_updated_at_column_expr: &TokenStream,
-) -> TokenStream {
+fn emit_inventory_token(fields: &InventoryFields<'_>) -> TokenStream {
+    let InventoryFields {
+        struct_ident,
+        target_ty,
+        name: name_str,
+        kind_variant,
+        parent_type_name,
+        target_type_name,
+        target_table_expr,
+        foreign_key,
+        parent_key,
+        pivot_table_expr,
+        pivot_parent_key,
+        pivot_related_key,
+        morph_type_column,
+        morph_type_value,
+        target_primary_key_expr,
+        related_soft_deletes_column_expr,
+        related_updated_at_column_expr,
+        related_updated_at_storage_expr,
+        related_bind_column_expr,
+    } = fields;
     quote! {
         ::suprnova::inventory::submit! {
             ::suprnova::RelationEntry {
@@ -974,6 +1030,8 @@ fn emit_inventory_token(
                 target_primary_key: #target_primary_key_expr,
                 related_soft_deletes_column: #related_soft_deletes_column_expr,
                 related_updated_at_column: #related_updated_at_column_expr,
+                related_updated_at_storage: #related_updated_at_storage_expr,
+                related_bind_column: #related_bind_column_expr,
             }
         }
     }
@@ -1188,6 +1246,131 @@ fn morph_targets(rel: &RelationDecl) -> Option<&[syn::Type]> {
     })
 }
 
+/// The per-family enum a `MorphTo` relation emits: `commentable` →
+/// `CommentableMorph`, `something_polymorphic` →
+/// `SomethingPolymorphicMorph`. The relation method, the loaded
+/// accessor, the eager loader and the nested loader all name it, so the
+/// name is derived in this one place.
+fn morph_enum_ident(rel: &RelationDecl) -> syn::Ident {
+    let s = rel.name.to_string();
+    let mut chars = s.chars();
+    let first = chars
+        .next()
+        .map(|c| c.to_ascii_uppercase().to_string())
+        .unwrap_or_default();
+    // Strip underscores + capitalise each segment so
+    // `something_polymorphic` becomes `SomethingPolymorphicMorph`.
+    let mut camel = String::with_capacity(s.len());
+    camel.push_str(&first);
+    let mut upper_next = false;
+    for c in chars {
+        if c == '_' {
+            upper_next = true;
+        } else if upper_next {
+            camel.push(c.to_ascii_uppercase());
+            upper_next = false;
+        } else {
+            camel.push(c);
+        }
+    }
+    quote::format_ident!("{camel}Morph")
+}
+
+/// The variant of the per-family enum for each target of a `MorphTo`
+/// relation, in declaration order: the target's last path segment
+/// (`MorphPost` from `crate::models::MorphPost`).
+fn morph_variant_idents(targets: &[syn::Type]) -> Vec<syn::Ident> {
+    targets
+        .iter()
+        .map(|ty| quote::format_ident!("{}", last_segment_name(ty)))
+        .collect()
+}
+
+/// The declared type of the named field on the model struct, `None`
+/// when the struct has no field by that name.
+fn field_type<'a>(input: &'a ModelInput, field_name: &str) -> Option<&'a syn::Type> {
+    let syn::Fields::Named(named) = &input.item.fields else {
+        return None;
+    };
+    named
+        .named
+        .iter()
+        .find(|f| f.ident.as_ref().is_some_and(|i| i == field_name))
+        .map(|f| &f.ty)
+}
+
+/// The `T` of an `Option<T>` field type, or the type itself when it is
+/// not an `Option`. A nullable morph declares `<name>_id: Option<K>`,
+/// and it holds the same key `K` as a required one.
+fn strip_option(ty: &syn::Type) -> &syn::Type {
+    if let syn::Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+        && seg.ident == "Option"
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return inner;
+    }
+    ty
+}
+
+/// The compile-time key checks of one `MorphTo` relation, as `const`
+/// items: the child's `<name>_id` field holds the key type of the first
+/// target, and every other target has that key type too. A mismatch is
+/// a compile error whose message names the models (see
+/// `suprnova::eloquent::relations::morph::MorphTargetsShareKey`).
+///
+/// The relation reads its id and type string from the `<name>_id` and
+/// `<name>_type` fields, so a declaration without them is refused here
+/// with a message that says which fields to add.
+fn emit_morph_key_checks(
+    input: &ModelInput,
+    rel: &RelationDecl,
+    targets: &[syn::Type],
+    enum_ident: &syn::Ident,
+) -> Result<TokenStream> {
+    let struct_ident = &input.item.ident;
+    let morph_name = morph_name_or_default(rel);
+    let id_col = format!("{morph_name}_id");
+    let type_col = format!("{morph_name}_type");
+    let (Some(id_ty), Some(_)) = (field_type(input, &id_col), field_type(input, &type_col)) else {
+        return Err(syn::Error::new_spanned(
+            &rel.name,
+            format!(
+                "the `MorphTo` relation `{}` reads the `{id_col}` and `{type_col}` columns; \
+                 declare both fields on `{struct_ident}`",
+                rel.name,
+            ),
+        ));
+    };
+    let Some((first, others)) = targets.split_first() else {
+        // The parser refuses an empty `targets = [...]`.
+        return Ok(TokenStream::new());
+    };
+    let column_ty = strip_option(id_ty);
+    let share_checks = others.iter().map(|other| {
+        quote! {
+            const _: () = ::suprnova::eloquent::relations::morph::assert_morph_targets_share_key::<
+                <#first as ::suprnova::eloquent::EloquentModel>::Key,
+                <#other as ::suprnova::eloquent::EloquentModel>::Key,
+                #first,
+                #other,
+                #enum_ident,
+            >();
+        }
+    });
+    Ok(quote! {
+        const _: () = ::suprnova::eloquent::relations::morph::assert_morph_id_column_holds_key::<
+            #column_ty,
+            <#first as ::suprnova::eloquent::EloquentModel>::Key,
+            #struct_ident,
+            #first,
+            #enum_ident,
+        >();
+        #( #share_checks )*
+    })
+}
+
 /// The morph-type string a model registers under. Read from the
 /// model's `morph_type = "..."` attribute when present; defaults to
 /// `to_snake(struct_name)` otherwise (Laravel convention - `Post`
@@ -1309,6 +1492,22 @@ fn field_is_optional(input: &ModelInput, field_name: &str) -> bool {
     false
 }
 
+/// The lazy-loading check a relation method hands the relation it
+/// builds, over the row's relation cache. The read of every kind
+/// (`get` and `first`, and `get` of a `MorphTo` fetch helper) runs it
+/// before its query, so this one expression is where the macro wires
+/// lazy-loading prevention into every relation method.
+fn emit_lazy_load_guard(parent_name: &str, rel: &RelationDecl) -> TokenStream {
+    let name_str = rel.name.to_string();
+    quote! {
+        ::suprnova::eloquent::lazy_loading::LazyLoadGuard::for_relation(
+            &self.__eager,
+            #parent_name,
+            #name_str,
+        )
+    }
+}
+
 /// Emit the relation method (`fn profile(&self) -> HasOne<Self, Profile>`)
 /// per declared HasOne / BelongsTo. Other kinds will land in T3-T7;
 /// T2 returns an empty stream for them so the macro compiles for
@@ -1321,6 +1520,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
     let pk_ident = quote::format_ident!("{pk_name}");
     let method_ident = &rel.name;
     let target_ty = &rel.target;
+    let lazy_load = emit_lazy_load_guard(&parent_name, rel);
 
     match rel.kind {
         RelationKindAttr::HasOne => {
@@ -1346,6 +1546,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                             ::std::string::String::from(#fk),
                             ::std::string::String::from(#lk),
                         )
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })
@@ -1406,6 +1607,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                             ::std::string::String::from(#fk),
                             ::std::string::String::from(#owner_key),
                         )#with_default_chain
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })
@@ -1434,6 +1636,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                             ::std::string::String::from(#fk),
                             ::std::string::String::from(#lk),
                         )
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })
@@ -1524,6 +1727,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                         #related_key_chain
                         #with_pivot_chain
                         #with_timestamps_chain
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })
@@ -1618,6 +1822,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                         )
                         #local_key_chain
                         #second_local_key_chain
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })
@@ -1671,6 +1876,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                             ::std::string::String::from(#morph_name),
                             ::std::string::String::from(#morph_type_value),
                         )
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })
@@ -1679,18 +1885,25 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             // `MorphTo` is the inverse side - the user declared
             // `commentable: MorphTo { name = "commentable",
             //  targets = [MorphPost, MorphVideo] }` on the morph-table
-            // model (Comment). The macro emits THREE things at this
+            // model (Comment). The macro emits FOUR things at this
             // declaration site:
             //
             // 1. A per-family enum `<Name>Morph` with one variant per
-            //    target + `Unknown(String, i64)` for legacy rows.
+            //    target + `Unknown(String, serde_json::Value)` for rows
+            //    that point at no target.
             // 2. A per-family fetch helper `<Name>MorphFetch` carrying
-            //    the FK + type-string, with a `.get()` method that
-            //    matches the type-string against per-target candidate
-            //    keys and returns the per-family enum.
+            //    the id + type-string, with a `.get()` method that
+            //    matches the type-string against each target's morph
+            //    type and returns the per-family enum. The eager loader
+            //    and the parent-touch cascade pick the target type
+            //    through the same helper, so the three paths cannot
+            //    disagree on which model a row names.
             // 3. An inherent method on the morph-table model that
             //    constructs the fetch helper from the row's
             //    `<name>_id` + `<name>_type` columns.
+            // 4. Compile-time checks that every target has the key type
+            //    of the first one and that the `<name>_id` field holds
+            //    that type.
             //
             // The user's call site reads:
             //
@@ -1703,36 +1916,13 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             // No runtime `MorphTo<C>` instance is built at the call
             // site - `MorphTo<C>` is purely metadata for the relation
             // registry + a re-export users can name in turbofish.
+            let name_str = rel.name.to_string();
             let morph_name = morph_name_or_default(rel);
-            let id_field = quote::format_ident!("{morph_name}_id");
-            let type_field = quote::format_ident!("{morph_name}_type");
+            let id_col = format!("{morph_name}_id");
+            let type_col = format!("{morph_name}_type");
             // Enum + fetch struct names - `commentable` →
             // `CommentableMorph` / `CommentableMorphFetch`.
-            let enum_ident = {
-                let s = rel.name.to_string();
-                let mut chars = s.chars();
-                let first = chars
-                    .next()
-                    .map(|c| c.to_ascii_uppercase().to_string())
-                    .unwrap_or_default();
-                // Strip underscores + capitalise each segment so
-                // `something_polymorphic` becomes
-                // `SomethingPolymorphicMorph`.
-                let mut camel = String::with_capacity(s.len());
-                camel.push_str(&first);
-                let mut upper_next = false;
-                for c in chars {
-                    if c == '_' {
-                        upper_next = true;
-                    } else if upper_next {
-                        camel.push(c.to_ascii_uppercase());
-                        upper_next = false;
-                    } else {
-                        camel.push(c);
-                    }
-                }
-                quote::format_ident!("{camel}Morph")
-            };
+            let enum_ident = morph_enum_ident(rel);
             let fetch_ident = quote::format_ident!("{enum_ident}Fetch");
 
             let targets = morph_targets(rel).ok_or_else(|| {
@@ -1746,31 +1936,16 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             // `MorphPost` from `crate::models::MorphPost`). Mechanically
             // required - enum variants name the user type, not a
             // generic placeholder.
-            let variant_idents: Vec<syn::Ident> = targets
-                .iter()
-                .map(|ty| {
-                    let name = match ty {
-                        syn::Type::Path(p) => p
-                            .path
-                            .segments
-                            .last()
-                            .map(|seg| seg.ident.to_string())
-                            .unwrap_or_else(|| quote::quote!(#ty).to_string()),
-                        _ => quote::quote!(#ty).to_string(),
-                    };
-                    quote::format_ident!("{name}")
-                })
-                .collect();
+            let variant_idents = morph_variant_idents(targets);
+            let key_checks = emit_morph_key_checks(input, rel, targets, &enum_ident)?;
 
-            // Per-target if-branches inside `<Name>MorphFetch::get()`.
+            // Per-target if-branches inside `<Name>MorphFetch::__target()`.
             // Each branch consults the runtime morph registry (T8's
             // `MorphTypeEntry` inventory) for the target's `TypeId`
             // to get the canonical `morph_type` string the parent
             // declared via `#[suprnova::model(morph_type = "...")]`.
-            // On a match, the branch calls `Target::find(id)` through
-            // the standard Eloquent CRUD path. Misses (None) and
-            // unknown type-strings fall through to the `Unknown`
-            // variant.
+            // A match names the target by its position in `targets`;
+            // no match means the row points at no declared target.
             //
             // Registry-first is what makes user-declared custom
             // `morph_type` strings dispatch correctly (e.g. a target
@@ -1788,22 +1963,21 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             // (see `morph_type_of` in this file). Preserves the
             // documented implicit-default contract in
             // `docs/core/eloquent.md#MorphTo`.
-            let mut fetch_arms: Vec<TokenStream> = Vec::with_capacity(targets.len());
-            for (ty, variant) in targets.iter().zip(variant_idents.iter()) {
+            let mut target_arms: Vec<TokenStream> = Vec::with_capacity(targets.len());
+            // `.get()` arms: the JSON id turns back into the target's
+            // typed key, then `Target::find(key)` runs through the
+            // standard Eloquent CRUD path. A missing row falls through
+            // to the `Unknown` variant.
+            let mut get_arms: Vec<TokenStream> = Vec::with_capacity(targets.len());
+            // `__owner_of` arms: where the parent-touch cascade writes.
+            let mut owner_arms: Vec<TokenStream> = Vec::with_capacity(targets.len());
+            for (index, (ty, variant)) in targets.iter().zip(variant_idents.iter()).enumerate() {
                 // The snake-form fallback string for the implicit-
                 // default path. Computed at macro-expansion time from
                 // the target type's last path segment.
-                let target_name = match ty {
-                    syn::Type::Path(p) => p
-                        .path
-                        .segments
-                        .last()
-                        .map(|seg| seg.ident.to_string())
-                        .unwrap_or_else(|| quote::quote!(#ty).to_string()),
-                    _ => quote::quote!(#ty).to_string(),
-                };
-                let snake_fallback = to_snake(&target_name);
-                fetch_arms.push(quote! {
+                let snake_fallback = to_snake(&last_segment_name(ty));
+                let index = proc_macro2::Literal::usize_unsuffixed(index);
+                target_arms.push(quote! {
                     {
                         // Look up the target's registered `morph_type`
                         // string via the T8 inventory. When the target
@@ -1818,40 +1992,71 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                             )
                             .map(|e| e.morph_type);
                         let expected: &str = registered.unwrap_or(#snake_fallback);
-                        if expected == self.morph_type.as_str() {
-                            let row: ::core::option::Option<#ty> =
-                                <#ty as ::suprnova::eloquent::Model>::find(self.morph_id).await?;
-                            return ::core::result::Result::Ok(match row {
-                                ::core::option::Option::Some(r) => {
-                                    #enum_ident::#variant(r)
-                                }
-                                ::core::option::Option::None => {
-                                    #enum_ident::Unknown(self.morph_type, self.morph_id)
-                                }
-                            });
+                        if expected == morph_type {
+                            return ::core::option::Option::Some(#index);
                         }
                     }
+                });
+                get_arms.push(quote! {
+                    ::core::option::Option::Some(#index) => {
+                        // The error names the column and the target
+                        // but never the value, which is user data.
+                        let key: <#ty as ::suprnova::eloquent::EloquentModel>::Key =
+                            ::suprnova::serde_json::from_value(self.morph_id.clone()).map_err(
+                                |_| {
+                                    ::suprnova::FrameworkError::internal(::std::format!(
+                                        "the MorphTo relation `{}` of `{}`: the `{}` column does \
+                                         not hold a key of `{}`",
+                                        #name_str,
+                                        #parent_name,
+                                        #id_col,
+                                        ::std::any::type_name::<#ty>(),
+                                    ))
+                                },
+                            )?;
+                        let row: ::core::option::Option<#ty> =
+                            <#ty as ::suprnova::eloquent::Model>::find(key).await?;
+                        ::core::result::Result::Ok(match row {
+                            ::core::option::Option::Some(r) => #enum_ident::#variant(r),
+                            ::core::option::Option::None => {
+                                #enum_ident::Unknown(self.morph_type, self.morph_id)
+                            }
+                        })
+                    }
+                });
+                owner_arms.push(quote! {
+                    ::core::option::Option::Some(#index) => ::core::result::Result::Ok(
+                        ::core::option::Option::Some(
+                            ::suprnova::eloquent::relations::morph::MorphOwner::of::<#ty>(
+                                morph_id.clone(),
+                            ),
+                        ),
+                    ),
                 });
             }
 
             Ok(quote! {
+                #key_checks
+
                 /// Per-family morph enum generated by the
                 /// `#[suprnova::model(relations = { ...: MorphTo {
                 /// targets = [...] } })]` declaration on the
                 /// morph-table struct. One variant per declared target
-                /// + `Unknown(type_string, id)` for legacy rows whose
-                /// `<name>_type` column doesn't match any registered
-                /// target.
+                /// + `Unknown(type_string, id)` for rows that point at
+                /// no target.
                 #[derive(::std::fmt::Debug, ::core::clone::Clone)]
                 pub enum #enum_ident {
                     #(
                         #variant_idents(#targets),
                     )*
-                    /// Row's `<morph_name>_type` column didn't match any
-                    /// registered target. Carries the unmatched type
-                    /// string + the FK value so callers can log or
-                    /// migrate the stale data.
-                    Unknown(::std::string::String, i64),
+                    /// The row points at no target: its `<morph_name>_type`
+                    /// column didn't match any declared target, the target
+                    /// row is absent, or its `<morph_name>_id` column is
+                    /// null. Carries the type string + the id as the
+                    /// column holds it (a JSON number or string, `Null`
+                    /// for a null column) so callers can log or migrate
+                    /// the stale data.
+                    Unknown(::std::string::String, ::suprnova::serde_json::Value),
                 }
 
                 /// Fetch helper that dispatches into the per-family
@@ -1859,16 +2064,17 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                 /// `<rel>()` method; calling `.get().await?` resolves
                 /// the parent row via the standard Eloquent CRUD path.
                 pub struct #fetch_ident {
-                    morph_id: i64,
+                    morph_id: ::suprnova::serde_json::Value,
                     morph_type: ::std::string::String,
+                    /// The lazy-loading check `get()` runs before its
+                    /// query.
+                    lazy_load: ::suprnova::eloquent::lazy_loading::LazyLoadGuard,
                 }
 
                 impl #fetch_ident {
-                    /// Resolve the polymorphic parent. Returns the
-                    /// per-family enum's `Unknown` variant when the
-                    /// `<name>_type` column doesn't match any declared
-                    /// target OR when the looked-up row is absent
-                    /// (legacy / soft-deleted / renamed model).
+                    /// The position in `targets = [...]` of the target
+                    /// the row's `<name>_type` column names, or `None`
+                    /// when it names none of them.
                     ///
                     /// Each declared target is checked in declaration
                     /// order via the T8 morph registry: the runtime
@@ -1877,14 +2083,93 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                     /// snake-cased type-name fallback for targets that
                     /// didn't declare an explicit `morph_type`. First
                     /// match wins.
+                    fn __target_of(morph_type: &str) -> ::core::option::Option<usize> {
+                        #(#target_arms)*
+                        ::core::option::Option::None
+                    }
+
+                    /// [`Self::__target_of`] for this helper's own
+                    /// `<name>_type` value.
+                    fn __target(&self) -> ::core::option::Option<usize> {
+                        Self::__target_of(self.morph_type.as_str())
+                    }
+
+                    /// The owner row the parent-touch cascade of
+                    /// `#[model(touches = [...])]` writes, for a row
+                    /// whose `<name>_id` and `<name>_type` values are
+                    /// given. `None` when the id is null: the row has no
+                    /// owner. A type that names none of the targets is
+                    /// an error.
+                    ///
+                    /// The cascade calls this before the write, through
+                    /// `Model::__morph_owner`, so the error means that
+                    /// no statement ran and no observer was called. It
+                    /// names the relation, the model and the type
+                    /// string, and never the id.
+                    fn __owner_of(
+                        morph_id: &::suprnova::serde_json::Value,
+                        morph_type: &str,
+                    ) -> ::core::result::Result<
+                        ::core::option::Option<::suprnova::eloquent::relations::morph::MorphOwner>,
+                        ::suprnova::FrameworkError,
+                    > {
+                        if ::suprnova::serde_json::Value::is_null(morph_id) {
+                            return ::core::result::Result::Ok(::core::option::Option::None);
+                        }
+                        match Self::__target_of(morph_type) {
+                            #(#owner_arms)*
+                            _ => ::core::result::Result::Err(
+                                ::suprnova::FrameworkError::internal(::std::format!(
+                                    "the MorphTo relation `{}` of `{}` cannot touch its owner: \
+                                     `{}` is the morph type of none of its targets",
+                                    #name_str,
+                                    #parent_name,
+                                    morph_type,
+                                )),
+                            ),
+                        }
+                    }
+
+                    /// Resolve the polymorphic parent. Returns the
+                    /// per-family enum's `Unknown` variant when the
+                    /// `<name>_type` column doesn't match any declared
+                    /// target, when the looked-up row is absent
+                    /// (legacy / soft-deleted / renamed model), or when
+                    /// the `<name>_id` column is null.
+                    ///
+                    /// The target is chosen as `__target_of` describes;
+                    /// the id is turned into that target's key type before
+                    /// the lookup, so an `i64`, `String`, UUID or ULID
+                    /// key all resolve.
+                    ///
+                    /// The lookup is by key and applies no global scope
+                    /// of the target, so a target hidden by a scope is
+                    /// found (a soft-delete target stays scoped, as its
+                    /// `find` is). The eager load,
+                    /// `with(["<relation>"])`, runs the target's query
+                    /// and applies its global scopes, so the same row
+                    /// comes back as `Unknown` there.
+                    ///
+                    /// Refused without a query when it is a lazy load
+                    /// that lazy-loading prevention catches, whether or
+                    /// not the id is null, as in Laravel.
                     pub async fn get(
                         self,
                     ) -> ::core::result::Result<#enum_ident, ::suprnova::FrameworkError> {
-                        #(#fetch_arms)*
-                        ::core::result::Result::Ok(#enum_ident::Unknown(
-                            self.morph_type,
-                            self.morph_id,
-                        ))
+                        self.lazy_load.check()?;
+                        if ::suprnova::serde_json::Value::is_null(&self.morph_id) {
+                            return ::core::result::Result::Ok(#enum_ident::Unknown(
+                                self.morph_type,
+                                self.morph_id,
+                            ));
+                        }
+                        match self.__target() {
+                            #(#get_arms)*
+                            _ => ::core::result::Result::Ok(#enum_ident::Unknown(
+                                self.morph_type,
+                                self.morph_id,
+                            )),
+                        }
                     }
                 }
 
@@ -1896,9 +2181,26 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                              Awaiting `.get()` returns the per-family enum with \
                              one variant per declared target."]
                     pub fn #method_ident(&self) -> #fetch_ident {
+                        // The id is the column's JSON value - the same
+                        // value `field_value` hands every other
+                        // key-carrying path - so any key type binds as
+                        // it is.
                         #fetch_ident {
-                            morph_id: self.#id_field,
-                            morph_type: self.#type_field.clone(),
+                            morph_id: <Self as ::suprnova::eloquent::Model>::field_value(
+                                self,
+                                #id_col,
+                            )
+                            .unwrap_or(::suprnova::serde_json::Value::Null),
+                            morph_type: match <Self as ::suprnova::eloquent::Model>::field_value(
+                                self,
+                                #type_col,
+                            ) {
+                                ::core::option::Option::Some(
+                                    ::suprnova::serde_json::Value::String(s),
+                                ) => s,
+                                _ => ::std::string::String::new(),
+                            },
+                            lazy_load: #lazy_load,
                         }
                     }
                 }
@@ -1987,6 +2289,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                         #related_key_chain
                         #with_pivot_chain
                         #with_timestamps_chain
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })
@@ -2062,6 +2365,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                         )
                         #local_key_chain
                         #related_key_chain
+                        .__lazy_load(#lazy_load)
                     }
                 }
             })
@@ -3254,28 +3558,139 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 }
             }))
         }
-        // MorphTo: flat eager loading through the orchestrator isn't
-        // supported in v1 - the per-family enum surface erases the
-        // concrete child types, so `with(["commentable"])` has nowhere
-        // to store the polymorphic children. The user-facing fetch
-        // path is the per-relation helper (`comment.<rel>().get()`)
-        // which returns the per-family enum directly. Emitting an
-        // explicit arm here surfaces a clear "use the per-family
-        // helper" error instead of the misleading "no such relation"
-        // the dispatcher catch-all would otherwise return.
-        RelationKindAttr::MorphTo => Ok(Some(quote! {
-            #name_str => {
-                return ::core::result::Result::Err(
-                    ::suprnova::FrameworkError::internal(::std::format!(
-                        "flat eager loading on MorphTo relation `{}` is not supported in v1; \
-                         use the per-family fetch helper (`{}.<rel>().get().await?`) which \
-                         returns a per-family enum instead",
-                        #name_str,
-                        #parent_name,
-                    )),
-                );
-            }
-        })),
+        // MorphTo: every parent's `<name>_type` + `<name>_id` pair is
+        // read once through the relation's fetch helper, the ids are
+        // grouped by the target they name, and each target that is
+        // present loads with ONE IN query on its primary key - one query
+        // per target type, never one per row. The ids are bound as the
+        // JSON values the column holds, so any key type works. The query
+        // runs through `Target::query()`, so the target's global scopes
+        // and soft-delete filter apply, as they do for `BelongsTo`. Each
+        // parent caches the per-family enum: the target row, or
+        // `Unknown` when the type names no target, the row is absent or
+        // the id is null.
+        //
+        // The targets are different models, so there is no single
+        // `Builder<Target>` a `with_where` closure could narrow. A
+        // predicate is refused rather than silently dropped.
+        RelationKindAttr::MorphTo => {
+            let method_ident = &rel.name;
+            let enum_ident = morph_enum_ident(rel);
+            let fetch_ident = quote::format_ident!("{enum_ident}Fetch");
+            let targets = morph_targets(rel).ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "MorphTo requires `targets = [...]` (parser bug if reached)",
+                )
+            })?;
+            let variant_idents = morph_variant_idents(targets);
+            let per_target: Vec<TokenStream> = targets
+                .iter()
+                .zip(variant_idents.iter())
+                .enumerate()
+                .map(|(index, (ty, variant))| {
+                    let index = proc_macro2::Literal::usize_unsuffixed(index);
+                    quote! {
+                        {
+                            // Distinct non-null ids of the rows that name
+                            // this target.
+                            let mut __sn_ids: ::std::vec::Vec<::suprnova::serde_json::Value> =
+                                ::std::vec::Vec::new();
+                            let mut __sn_seen: ::std::collections::HashSet<::std::string::String> =
+                                ::std::collections::HashSet::new();
+                            for (link, target) in __sn_links.iter().zip(__sn_targets.iter()) {
+                                if *target == ::core::option::Option::Some(#index)
+                                    && !::suprnova::serde_json::Value::is_null(&link.morph_id)
+                                    && __sn_seen.insert(link.morph_id.to_string())
+                                {
+                                    __sn_ids.push(link.morph_id.clone());
+                                }
+                            }
+                            if !__sn_ids.is_empty() {
+                                let __sn_key_col: &'static str =
+                                    <#ty as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY;
+                                let rows: ::std::vec::Vec<#ty> =
+                                    <#ty as ::suprnova::eloquent::Model>::query()
+                                        .filter_in(__sn_key_col, __sn_ids)
+                                        .get()
+                                        .await?
+                                        .into_vec();
+                                let mut by_key: ::std::collections::HashMap<::std::string::String, #ty> =
+                                    ::std::collections::HashMap::new();
+                                for r in rows.into_iter() {
+                                    let key = <#ty as ::suprnova::eloquent::Model>::field_value(
+                                        &r,
+                                        __sn_key_col,
+                                    )
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_default();
+                                    by_key.insert(key, r);
+                                }
+                                for ((link, target), loaded) in __sn_links
+                                    .iter()
+                                    .zip(__sn_targets.iter())
+                                    .zip(__sn_loaded.iter_mut())
+                                {
+                                    let hit: ::core::option::Option<&#ty> =
+                                        if *target == ::core::option::Option::Some(#index) {
+                                            by_key.get(&link.morph_id.to_string())
+                                        } else {
+                                            ::core::option::Option::None
+                                        };
+                                    if let ::core::option::Option::Some(row) = hit {
+                                        *loaded = ::core::option::Option::Some(
+                                            #enum_ident::#variant(row.clone()),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                })
+                .collect();
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    if predicate.take().is_some() {
+                        return ::core::result::Result::Err(
+                            ::suprnova::FrameworkError::internal(::std::format!(
+                                "with_where on the MorphTo relation `{}` of `{}` is not \
+                                 supported: its targets are different models, so no one \
+                                 query builder can take the constraint",
+                                #name_str,
+                                #parent_name,
+                            )),
+                        );
+                    }
+                    // What each parent points at, and the position of the
+                    // target its type string names.
+                    let __sn_links: ::std::vec::Vec<#fetch_ident> =
+                        parents.iter().map(|p| p.#method_ident()).collect();
+                    let __sn_targets: ::std::vec::Vec<::core::option::Option<usize>> =
+                        __sn_links.iter().map(|link| link.__target()).collect();
+                    let mut __sn_loaded: ::std::vec::Vec<::core::option::Option<#enum_ident>> =
+                        ::std::vec![::core::option::Option::None; parents.len()];
+                    #( #per_target )*
+                    for ((p, link), loaded) in parents
+                        .iter_mut()
+                        .zip(__sn_links.into_iter())
+                        .zip(__sn_loaded.into_iter())
+                    {
+                        let value: #enum_ident = match loaded {
+                            ::core::option::Option::Some(v) => v,
+                            ::core::option::Option::None => {
+                                #enum_ident::Unknown(link.morph_type, link.morph_id)
+                            }
+                        };
+                        p.__eager.set_one::<#enum_ident>(
+                            #name_str,
+                            ::core::option::Option::Some(value),
+                        );
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
     }
 }
 
@@ -3546,7 +3961,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         // backends, but the saturating cast guards
                         // against pathological drivers without
                         // panicking the dispatcher.
-                        counts.insert(key, n.max(0) as u64);
+                        counts.insert(key, ::core::cmp::Ord::max(n, 0) as u64);
                     }
 
                     for p in parents.iter_mut() {
@@ -3666,7 +4081,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
                         let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
-                        counts.insert(key, n.max(0) as u64);
+                        counts.insert(key, ::core::cmp::Ord::max(n, 0) as u64);
                     }
 
                     for p in parents.iter_mut() {
@@ -3814,7 +4229,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
                         let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
-                        counts.insert(key, n.max(0) as u64);
+                        counts.insert(key, ::core::cmp::Ord::max(n, 0) as u64);
                     }
 
                     for p in parents.iter_mut() {
@@ -3948,7 +4363,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
                         let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
-                        counts.insert(key, n.max(0) as u64);
+                        counts.insert(key, ::core::cmp::Ord::max(n, 0) as u64);
                     }
 
                     for p in parents.iter_mut() {
@@ -4085,7 +4500,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
                         let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
-                        counts.insert(key, n.max(0) as u64);
+                        counts.insert(key, ::core::cmp::Ord::max(n, 0) as u64);
                     }
 
                     for p in parents.iter_mut() {
@@ -4228,7 +4643,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
                         let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
-                        counts.insert(key, n.max(0) as u64);
+                        counts.insert(key, ::core::cmp::Ord::max(n, 0) as u64);
                     }
 
                     for p in parents.iter_mut() {
@@ -4242,20 +4657,21 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 }
             }))
         }
-        // MorphTo: same story as `emit_eager_arm` - the per-family
-        // enum surface erases the concrete child types, so a single
-        // `with_count(["commentable"])` has no canonical SQL shape.
+        // MorphTo: a row points at one owner in one of several tables,
+        // so `with_count(["commentable"])` has no canonical SQL shape.
         // Emit an explicit error rather than falling through to the
-        // dispatcher catch-all ("no relation X").
+        // dispatcher catch-all ("no relation X"); `with(["commentable"])`
+        // is the eager path for this kind.
         RelationKindAttr::MorphTo => Ok(Some(quote! {
             #name_str => {
                 return ::core::result::Result::Err(
                     ::suprnova::FrameworkError::internal(::std::format!(
-                        "flat eager loading on MorphTo relation `{}` is not supported in v1; \
-                         use the per-family fetch helper (`{}.<rel>().get().await?`) which \
-                         returns a per-family enum instead",
+                        "with_count on the MorphTo relation `{}` of `{}` is not supported: \
+                         the relation points at one row in one of several tables; load it \
+                         with `with([\"{}\"])` instead",
                         #name_str,
                         #parent_name,
+                        #name_str,
                     )),
                 );
             }
@@ -5687,20 +6103,20 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                 }
             }))
         }
-        // MorphTo: same story as `emit_eager_arm` / `emit_count_arm` -
-        // the per-family enum surface erases the concrete child types,
-        // so there's no single SQL shape for a polymorphic aggregate.
-        // Emit an explicit error rather than falling through to the
-        // dispatcher catch-all.
+        // MorphTo: same story as `emit_count_arm` - the targets are
+        // different tables, so there's no single SQL shape for a
+        // polymorphic aggregate. Emit an explicit error rather than
+        // falling through to the dispatcher catch-all.
         RelationKindAttr::MorphTo => Ok(Some(quote! {
             #name_str => {
                 return ::core::result::Result::Err(
                     ::suprnova::FrameworkError::internal(::std::format!(
-                        "flat eager loading on MorphTo relation `{}` is not supported in v1; \
-                         use the per-family fetch helper (`{}.<rel>().get().await?`) which \
-                         returns a per-family enum instead",
+                        "with_sum / with_avg / with_min / with_max on the MorphTo relation \
+                         `{}` of `{}` is not supported: its targets are different tables; \
+                         load it with `with([\"{}\"])` instead",
                         #name_str,
                         #parent_name,
+                        #name_str,
                     )),
                 );
             }
@@ -5726,9 +6142,11 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
 /// recurse the same way. `None` means "FK was null, nothing to walk
 /// into" - silently return Ok.
 ///
-/// MorphTo's nested recursion isn't supported in v1 - the per-family
-/// enum type erases the concrete child rows, so the macro emits an
-/// error arm here. Document the restriction in `docs/core/eloquent.md`.
+/// For `MorphTo` the cache holds the per-family enum. The arm matches
+/// the variant, which names the concrete target type, and loads the
+/// rest of the path through that model's own dispatcher. Every target
+/// of the family must declare the next segment (see
+/// [`emit_morph_family_check`]).
 fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<TokenStream>> {
     let name_str = rel.name.to_string();
     let target_ty: &syn::Type = match rel.kind {
@@ -5745,7 +6163,6 @@ fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Tok
         }
         _ => &rel.target,
     };
-    let parent_name = &input.item.ident;
 
     match rel.kind {
         // Collection kinds - `__eager.get_many_mut::<R>(name)` returns
@@ -5865,25 +6282,180 @@ fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Tok
             }
         })),
 
-        // MorphTo: per-family enum, nested recursion not supported in
-        // v1. The macro emits an explicit error so the user gets a
-        // clear message rather than silent success. See
-        // `docs/core/eloquent.md` for the limitation note.
-        RelationKindAttr::MorphTo => Ok(Some(quote! {
-            #name_str => {
-                return ::core::result::Result::Err(
-                    ::suprnova::FrameworkError::internal(::std::format!(
-                        "model `{}` has a MorphTo relation `{}`; nested eager loading \
-                         through MorphTo is not supported in v1 (the per-family enum \
-                         erases the child types). Load each polymorphic target \
-                         separately for now.",
-                        ::core::stringify!(#parent_name),
-                        #name_str,
-                    )),
-                );
-            }
-        })),
+        // MorphTo: the cache holds the per-family enum. The variant
+        // names the concrete target, so the rest of the path runs
+        // through that model's own dispatcher. `Unknown` has nothing to
+        // walk into.
+        RelationKindAttr::MorphTo => {
+            let enum_ident = morph_enum_ident(rel);
+            let targets = morph_targets(rel).ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "MorphTo requires `targets = [...]` (parser bug if reached)",
+                )
+            })?;
+            let variant_idents = morph_variant_idents(targets);
+            let family_check = emit_morph_family_check(input, rel, targets);
+            let arms: Vec<TokenStream> = targets
+                .iter()
+                .zip(variant_idents.iter())
+                .map(|(ty, variant)| {
+                    quote! {
+                        #enum_ident::#variant(row) => {
+                            // `missing_only` skips the bulk-load when the
+                            // row already has the next segment - the same
+                            // contract as the single-value arms.
+                            let already_loaded: bool = missing_only
+                                && <#ty as ::suprnova::EagerLoadDispatch>::has_eager(row, head);
+                            if !already_loaded {
+                                let mut refs: ::std::vec::Vec<&mut #ty> =
+                                    ::std::vec![&mut *row];
+                                <#ty as ::suprnova::EagerLoadDispatch>::eager_load(
+                                    head,
+                                    refs.as_mut_slice(),
+                                    db,
+                                    ::core::option::Option::None,
+                                )
+                                .await?;
+                            }
+                            if let ::core::option::Option::Some(more) = tail {
+                                <#ty as ::suprnova::EagerLoadDispatch>::recurse_eager_load(
+                                    row, head, more, db, missing_only,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                })
+                .collect();
+            Ok(Some(quote! {
+                #name_str => {
+                    let (head, tail) = match rest.split_once('.') {
+                        ::core::option::Option::Some((h, t)) => (h, ::core::option::Option::Some(t)),
+                        ::core::option::Option::None => (rest, ::core::option::Option::None),
+                    };
+                    #family_check
+                    let loaded: ::std::option::Option<&mut #enum_ident> =
+                        self.__eager.get_one_mut::<#enum_ident>(#name_str);
+                    if let ::core::option::Option::Some(value) = loaded {
+                        match value {
+                            #( #arms )*
+                            #enum_ident::Unknown(..) => {}
+                        }
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
     }
+}
+
+/// The `Model::__morph_owner` override for a model that declares
+/// `MorphTo` relations: one arm per relation, each reading the
+/// relation's `<name>_id` and `<name>_type` values and resolving the
+/// owner through the relation's fetch helper, so the parent-touch
+/// cascade picks the owner exactly as `.get()` and the eager loader do.
+/// A value comes from `attrs` when it carries the column and from the
+/// row `base` otherwise. Returns an empty stream for a model without
+/// `MorphTo` relations, which keeps the trait default.
+///
+/// Emitted inside the `impl Model` block by `derive_eloquent`, because
+/// the cascade that calls it is a trait default in the framework.
+pub(super) fn emit_morph_owner_method(input: &ModelInput) -> TokenStream {
+    let mut arms: Vec<TokenStream> = Vec::new();
+    for rel in input
+        .relations
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter(|rel| rel.kind == RelationKindAttr::MorphTo)
+    {
+        let name_str = rel.name.to_string();
+        let morph_name = morph_name_or_default(rel);
+        let id_col = format!("{morph_name}_id");
+        let type_col = format!("{morph_name}_type");
+        let fetch_ident = quote::format_ident!("{}Fetch", morph_enum_ident(rel));
+        arms.push(quote! {
+            #name_str => {
+                let morph_id = column(#id_col).unwrap_or(::suprnova::serde_json::Value::Null);
+                let morph_type = match column(#type_col) {
+                    ::core::option::Option::Some(::suprnova::serde_json::Value::String(s)) => s,
+                    _ => ::std::string::String::new(),
+                };
+                #fetch_ident::__owner_of(&morph_id, &morph_type)
+            }
+        });
+    }
+    if arms.is_empty() {
+        return TokenStream::new();
+    }
+    quote! {
+        fn __morph_owner(
+            relation: &str,
+            base: ::core::option::Option<&Self>,
+            attrs: &::suprnova::eloquent::Attrs,
+        ) -> ::core::result::Result<
+            ::core::option::Option<::suprnova::eloquent::relations::morph::MorphOwner>,
+            ::suprnova::FrameworkError,
+        > {
+            let column = |name: &str| {
+                attrs.get(name).cloned().or_else(|| {
+                    base.and_then(|row| <Self as ::suprnova::eloquent::Model>::field_value(row, name))
+                })
+            };
+            match relation {
+                #(#arms)*
+                other => ::core::result::Result::Err(::suprnova::FrameworkError::internal(
+                    ::std::format!(
+                        "model `{}` has no MorphTo relation `{}`",
+                        ::std::any::type_name::<Self>(),
+                        other,
+                    ),
+                )),
+            }
+        }
+    }
+}
+
+/// The guard every nested load through a `MorphTo` relation runs
+/// first: each declared target must have the relation the path names
+/// next (`head`). It is checked for the whole family, not only for the
+/// targets the loaded rows happen to hold, so a path that loads today
+/// cannot start failing when the first row of another type appears. A
+/// target without the relation is an error that names it - never a
+/// skipped load, since a path that silently stays unloaded is an N+1
+/// that nobody sees.
+///
+/// The emitted code expects `head` and `rest` in scope.
+fn emit_morph_family_check(
+    input: &ModelInput,
+    rel: &RelationDecl,
+    targets: &[syn::Type],
+) -> TokenStream {
+    let struct_ident = &input.item.ident;
+    let name_str = rel.name.to_string();
+    let checks: Vec<TokenStream> = targets
+        .iter()
+        .map(|ty| {
+            quote! {
+                if ::suprnova::find_relation::<#ty>(head).is_none() {
+                    return ::core::result::Result::Err(
+                        ::suprnova::FrameworkError::internal(::std::format!(
+                            "model `{}` cannot eager load `{}.{}`: `{}` is a target of its \
+                             MorphTo relation `{}` and has no relation `{}`",
+                            ::core::stringify!(#struct_ident),
+                            #name_str,
+                            rest,
+                            ::std::any::type_name::<#ty>(),
+                            #name_str,
+                            head,
+                        )),
+                    );
+                }
+            }
+        })
+        .collect();
+    quote! { #( #checks )* }
 }
 
 /// `__recurse_eager_load_batched` arm - the collection-wide form of
@@ -5907,22 +6479,40 @@ fn emit_recurse_batched_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Op
         }
         _ => &rel.target,
     };
-    let parent_name = &input.item.ident;
 
     // Holding `&mut` to children reached through a slice of `&mut Self`
     // across the whole batch defeats the borrow checker (the double
     // indirection can't escape the gather loop). So we TAKE the children
     // out by value (no borrows held across the gather), load + recurse on
     // the owned flat slice, then put them back in original order. MorphTo
-    // erases child types, so nested recursion isn't supported.
+    // takes its per-family enums the same way and splits them by variant
+    // (see its arm below).
     //
     // The load + recurse step over the owned `Vec<#target_ty>` is shared;
     // only the take and the put-back differ by cardinality.
-    let process_owned = quote! {
+    let split_rest = quote! {
         let (head, tail) = match rest.split_once('.') {
             ::core::option::Option::Some((h, t)) => (h, ::core::option::Option::Some(t)),
             ::core::option::Option::None => (rest, ::core::option::Option::None),
         };
+    };
+    // When no parent holds a child, the rest of the path still walks the
+    // target's relations with no rows, so a `MorphTo` further down checks
+    // its whole family as it would with rows.
+    let walk_without_children = quote! {
+        if let ::core::option::Option::Some(more) = tail {
+            let mut none: ::std::vec::Vec<&mut #target_ty> = ::std::vec::Vec::new();
+            <#target_ty as ::suprnova::EagerLoadDispatch>::recurse_eager_load_batched(
+                none.as_mut_slice(),
+                head,
+                more,
+                db,
+                missing_only,
+            )
+            .await?;
+        }
+    };
+    let process_owned = quote! {
         {
             // Bulk-load the next segment ONCE across every gathered child.
             // `missing_only` filters to children still missing `head`.
@@ -5965,6 +6555,7 @@ fn emit_recurse_batched_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Op
         | RelationKindAttr::MorphToMany
         | RelationKindAttr::MorphedByMany => Ok(Some(quote! {
             #name_str => {
+                #split_rest
                 // Take every parent's children out by value, recording the
                 // per-parent counts so they can be restored in order.
                 let mut owned: ::std::vec::Vec<#target_ty> = ::std::vec::Vec::new();
@@ -5979,6 +6570,7 @@ fn emit_recurse_batched_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Op
                     }
                 }
                 if owned.is_empty() {
+                    #walk_without_children
                     return ::core::result::Result::Ok(());
                 }
                 #process_owned
@@ -5999,6 +6591,7 @@ fn emit_recurse_batched_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Op
         | RelationKindAttr::HasOneThrough
         | RelationKindAttr::MorphOne => Ok(Some(quote! {
             #name_str => {
+                #split_rest
                 let mut owned: ::std::vec::Vec<#target_ty> = ::std::vec::Vec::new();
                 let mut takes: ::std::vec::Vec<usize> = ::std::vec::Vec::new();
                 for (i, p) in parents.iter_mut().enumerate() {
@@ -6010,6 +6603,7 @@ fn emit_recurse_batched_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Op
                     }
                 }
                 if owned.is_empty() {
+                    #walk_without_children
                     return ::core::result::Result::Ok(());
                 }
                 #process_owned
@@ -6023,20 +6617,106 @@ fn emit_recurse_batched_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Op
             }
         })),
 
-        RelationKindAttr::MorphTo => Ok(Some(quote! {
-            #name_str => {
-                return ::core::result::Result::Err(
-                    ::suprnova::FrameworkError::internal(::std::format!(
-                        "model `{}` has a MorphTo relation `{}`; nested eager loading \
-                         through MorphTo is not supported in v1 (the per-family enum \
-                         erases the child types). Load each polymorphic target \
-                         separately for now.",
-                        ::core::stringify!(#parent_name),
-                        #name_str,
-                    )),
-                );
-            }
-        })),
+        // MorphTo: take every parent's per-family enum out by value,
+        // then, for each target type present, gather that type's rows
+        // into one slice and run the rest of the path through the
+        // target's own dispatcher: one query per (target type, next
+        // relation), whatever the parent count. `Unknown` values ride
+        // along untouched and go back where they came from.
+        RelationKindAttr::MorphTo => {
+            let enum_ident = morph_enum_ident(rel);
+            let targets = morph_targets(rel).ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "MorphTo requires `targets = [...]` (parser bug if reached)",
+                )
+            })?;
+            let variant_idents = morph_variant_idents(targets);
+            let family_check = emit_morph_family_check(input, rel, targets);
+            let per_target: Vec<TokenStream> = targets
+                .iter()
+                .zip(variant_idents.iter())
+                .map(|(ty, variant)| {
+                    quote! {
+                        {
+                            // Bulk-load the next segment ONCE across every
+                            // row of this target. `missing_only` filters to
+                            // rows still missing `head`.
+                            let mut refs: ::std::vec::Vec<&mut #ty> = owned
+                                .iter_mut()
+                                .filter_map(|v| match v {
+                                    #enum_ident::#variant(row) => ::core::option::Option::Some(row),
+                                    _ => ::core::option::Option::None,
+                                })
+                                .filter(|c| {
+                                    !missing_only
+                                        || !<#ty as ::suprnova::EagerLoadDispatch>::has_eager(c, head)
+                                })
+                                .collect();
+                            if !refs.is_empty() {
+                                <#ty as ::suprnova::EagerLoadDispatch>::eager_load(
+                                    head,
+                                    refs.as_mut_slice(),
+                                    db,
+                                    ::core::option::Option::None,
+                                )
+                                .await?;
+                            }
+                        }
+                        if let ::core::option::Option::Some(more) = tail {
+                            let mut refs: ::std::vec::Vec<&mut #ty> = owned
+                                .iter_mut()
+                                .filter_map(|v| match v {
+                                    #enum_ident::#variant(row) => ::core::option::Option::Some(row),
+                                    _ => ::core::option::Option::None,
+                                })
+                                .collect();
+                            if !refs.is_empty() {
+                                <#ty as ::suprnova::EagerLoadDispatch>::recurse_eager_load_batched(
+                                    refs.as_mut_slice(),
+                                    head,
+                                    more,
+                                    db,
+                                    missing_only,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                })
+                .collect();
+            Ok(Some(quote! {
+                #name_str => {
+                    let (head, tail) = match rest.split_once('.') {
+                        ::core::option::Option::Some((h, t)) => (h, ::core::option::Option::Some(t)),
+                        ::core::option::Option::None => (rest, ::core::option::Option::None),
+                    };
+                    #family_check
+                    let mut owned: ::std::vec::Vec<#enum_ident> = ::std::vec::Vec::new();
+                    let mut takes: ::std::vec::Vec<usize> = ::std::vec::Vec::new();
+                    for (i, p) in parents.iter_mut().enumerate() {
+                        if let ::core::option::Option::Some(value) =
+                            p.__eager.take_one::<#enum_ident>(#name_str)
+                        {
+                            owned.push(value);
+                            takes.push(i);
+                        }
+                    }
+                    if owned.is_empty() {
+                        return ::core::result::Result::Ok(());
+                    }
+                    #( #per_target )*
+                    // Put every value back into the parent it came from.
+                    let mut drained = owned.into_iter();
+                    for i in takes {
+                        if let ::core::option::Option::Some(value) = drained.next() {
+                            parents[i].__eager.set_one(#name_str, ::core::option::Option::Some(value));
+                        }
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
     }
 }
 

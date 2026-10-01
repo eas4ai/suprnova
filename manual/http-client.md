@@ -179,11 +179,13 @@ the web-push sender already applies to attacker-controlled push endpoints.
 ## Retries
 
 `Http` ships exponential-backoff retries with full jitter - the AWS
-recipe, the same one Laravel uses. Both retry modes handle transport
-failures for every HTTP method. They differ in whether a received 5xx
-response may replay `POST` and `PATCH`.
+recipe, the same one Laravel uses. One rule decides every retry, for a
+transport failure and for a received 5xx response alike. The two retry
+modes differ in the methods they retry: `.retry(...)` retries `GET`, `PUT`
+and `DELETE`, and `.retry_non_idempotent(...)` retries `POST` and `PATCH`
+as well.
 
-### `.retry(max_attempts, base_backoff)` - transport retries for every method
+### `.retry(max_attempts, base_backoff)` - retries for idempotent methods
 
 ```rust
 use std::time::Duration;
@@ -201,16 +203,15 @@ capped at 30 seconds. Full jitter, not exponential-backoff-plus-fixed-
 sleep, so many workers retrying the same outage don't synchronize into
 a thundering herd.
 
-`.retry()` retries transport failures for every method. If a response
-arrives, it retries a 5xx status unless the method is `POST` or `PATCH`.
-It returns 4xx and 2xx/3xx responses as-is. After exhausting retries,
-the last response or transport error is returned to the caller.
+`.retry()` retries only idempotent methods (`GET`, `PUT`, `DELETE`): a
+transport failure (connect, timeout, DNS) or a 5xx status triggers another
+attempt. 4xx and 2xx/3xx responses are returned as-is. After exhausting
+retries, the last response or transport error is returned to the caller.
 
-This distinction matters for writes. A `POST` or `PATCH` transport failure
-can mean the server committed the write but the response was lost, yet the
-current contract still retries that failure. A received 5xx response for
-those methods is returned after one attempt unless the caller uses
-`.retry_non_idempotent(...)`.
+`POST` and `PATCH` are sent once, whatever the failure. A transport failure
+on a write can mean the server committed it but the response was lost, so
+retrying could apply it twice. Opt in with `.retry_non_idempotent(...)`
+when the upstream is protected by an idempotency key.
 
 ### `.retry_non_idempotent(...)` - opt-in for POST/PATCH
 
@@ -224,9 +225,10 @@ Http::post("https://api.example.com/charges")
 
 When you've supplied an idempotency key the upstream honors, or you've
 otherwise made the request safe to replay, switch to
-`.retry_non_idempotent(...)`. It preserves the transport-error retries
-for every method and additionally allows 5xx response retries for `POST`
-and `PATCH`. It still returns 4xx and 2xx/3xx responses as-is.
+`.retry_non_idempotent(...)`. It retries `GET`, `PUT` and `DELETE` as
+`.retry()` does, and it also retries `POST` and `PATCH`, after a transport
+failure and after a 5xx response. It still returns 4xx and 2xx/3xx
+responses as-is.
 
 ### Retry-After is honored on 503
 
@@ -254,9 +256,10 @@ policy above would otherwise make. It can veto an otherwise eligible
 retry, but it cannot manufacture one. In particular, it cannot turn a
 2xx, 3xx, or 4xx response into a retry, and it cannot make a received
 5xx response retryable for `POST` or `PATCH` without
-`.retry_non_idempotent(...)`. It is consulted before transport-error
-retries for every method, including `POST` and `PATCH` configured with
-plain `.retry()`. Without a `.retry(...)` or
+`.retry_non_idempotent(...)`. It is consulted for transport-error retries
+and for 5xx retries by the same rule, and only for an attempt that the
+policy would retry: not after the last attempt, and not for a `POST` or
+`PATCH` under plain `.retry()`. Without a `.retry(...)` or
 `.retry_non_idempotent(...)` policy, a lone `retry_when` has nothing to
 veto.
 
@@ -336,9 +339,8 @@ on a fake response - there's no underlying `reqwest::Response` in that
 case. The response-body cap also no longer applies once you take the
 raw response; you own the read from there.
 
-For outgoing multipart uploads today, drop down to `reqwest::Client`
-directly via the same escape route. A future release may add a
-`.multipart(...)` builder when the demand pattern shapes itself.
+For outgoing multipart uploads, drop down to `reqwest::Client`
+directly via the same escape route.
 
 ## Testing with `Http::fake`
 
@@ -574,26 +576,25 @@ why `Http::spawn_with_fake_inheritance` and
 "can't accidentally hit production" guarantee that
 `Http::preventStrayRequests()` does in Laravel, with stricter scoping.
 
-**Received 5xx retries default to refusing POST/PATCH.** Laravel's HTTP
-client retries any method by default. Suprnova's `.retry(...)` still
-retries transport failures for `POST` and `PATCH`, but it does not retry
-a received 5xx response for those methods. Use
-`.retry_non_idempotent(...)` to opt into 5xx response retries only after
-making the write safe to replay, typically with an idempotency key the
-upstream honors.
+**Retries default to refusing POST/PATCH.** Laravel's HTTP client
+retries any method by default. Suprnova's `.retry(...)` sends `POST` and
+`PATCH` once, after a transport failure and after a 5xx response alike.
+Use `.retry_non_idempotent(...)` to opt into retries for those methods
+only after making the write safe to replay, typically with an idempotency
+key the upstream honors.
 
 **`retry_when` can only narrow, never widen.** Laravel's `retry()`
 `$when` callback fully replaces the "should retry" decision, so it can
 retry statuses the framework wouldn't otherwise touch (a 404, say).
 Suprnova's `retry_when` only vetoes a retry `.retry(...)` or
 `.retry_non_idempotent(...)` already decided to make. It is consulted
-for transport-error retries on every method, including `POST` and
-`PATCH`, but cannot turn a 2xx, 3xx, or 4xx response into a retry or
-make a `POST` or `PATCH` 5xx response eligible under plain `.retry()`.
+for every retry the policy would make, but cannot turn a 2xx, 3xx, or
+4xx response into a retry or make a `POST` or `PATCH` eligible under plain
+`.retry()`.
 
 ## Edge cases and small print
 
-- **`Http::*` is closed for v1.** We deliberately don't expose the
+- **`Http::*` is closed.** We deliberately don't expose the
   underlying `reqwest::Client`. To grow the surface, add a method to
   the facade rather than reaching for `reqwest` directly - except via
   the documented `into_inner()` escape hatch on a real response.

@@ -1874,25 +1874,69 @@ async fn a_named_guard_identity_overwritten_by_a_later_default_touch_never_leaks
     );
 }
 
-/// Fix round 6, item 5. The engine no longer rejects `FeatureVersion` at
-/// policy build time (that rejection moved to the host's own
-/// `variance_descriptor`, since "this host has no producer" is a fact
-/// about the host, not the engine); this route's policy therefore builds
-/// successfully, but every request against it must bypass the cache
-/// entirely rather than publish a key that silently omits the declared
-/// dimension.
+/// A request whose key cannot be built goes past the cache: it is
+/// rendered and answered, and nothing is stored for it.
+///
+/// The route varies on the host. The host is the client's to choose, and
+/// a value of a dimension has a bound of 256 bytes, so a longer host is a
+/// request with no key. The same route with a host inside the bound is
+/// the control: it is stored at the first request and served from the
+/// store at the second.
 #[tokio::test]
 #[serial_test::serial]
-async fn a_route_declaring_feature_version_always_bypasses_the_cache() {
+async fn a_request_whose_key_cannot_be_built_goes_past_the_cache() {
     let harness = boot_with_render_cache().await;
-    dispatch_get(&harness, "/feature-version-declared/1", &[]).await;
-    dispatch_get(&harness, "/feature-version-declared/1", &[]).await;
+    let long_host = format!("{}.example.test", "a".repeat(300));
+
+    let first = dispatch_get(&harness, "/host-declared/1", &[("host", &long_host)]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1);
+    let second = dispatch_get(&harness, "/host-declared/1", &[("host", &long_host)]).await;
+    assert_eq!(second.status, StatusCode::OK);
     assert_eq!(
         counting_route::renders(),
         2,
-        "a route declaring a dimension this host cannot produce must bypass the cache \
-         on every request, never publish a key that omits it"
+        "a request with no key is rendered every time and never served from the store"
     );
+    assert_ne!(
+        first.body, second.body,
+        "the second answer is a render of its own, not the first one again"
+    );
+
+    // The control. A host inside the bound has a key.
+    dispatch_get(
+        &harness,
+        "/host-declared/1",
+        &[("host", "app.example.test")],
+    )
+    .await;
+    assert_eq!(
+        counting_route::renders(),
+        3,
+        "the first request of this host"
+    );
+    let stored = dispatch_get(
+        &harness,
+        "/host-declared/1",
+        &[("host", "app.example.test")],
+    )
+    .await;
+    assert_eq!(stored.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        3,
+        "the second request of this host is served from the store, so the requests \
+         with the long host stored nothing under a key this host shares"
+    );
+
+    // Another host is another key.
+    dispatch_get(
+        &harness,
+        "/host-declared/1",
+        &[("host", "other.example.test")],
+    )
+    .await;
+    assert_eq!(counting_route::renders(), 4);
 }
 
 /// Fix round 7, finding 1. `FeatureMiddleware` and `DatabaseEvaluator`, both

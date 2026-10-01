@@ -6,6 +6,8 @@ mod env_lock;
 pub mod error_page;
 pub mod error_page_placement;
 pub mod flash_commit_boundary;
+#[path = "../support/http_wire.rs"]
+mod http_wire;
 pub mod inertia;
 pub mod merge_paths;
 pub mod middleware;

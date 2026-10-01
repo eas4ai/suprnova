@@ -15,6 +15,7 @@ mod channel;
 mod handler;
 mod hub;
 mod protocol;
+mod pusher;
 pub(crate) mod request_socket;
 mod testing;
 
@@ -23,9 +24,14 @@ pub mod fanout;
 
 pub use broadcastable::{BroadcastListener, Broadcastable};
 pub use channel::{
-    BoxedChannel, Channel, ChannelParams, ChannelRegistry, PresenceChannel, PrivateChannel,
+    BoxedChannel, Channel, ChannelParams, ChannelRegistry, ChannelVisibility, PresenceChannel,
+    PrivateChannel,
 };
 pub use handler::{BroadcastingWsHandler, DEFAULT_MAX_SUBSCRIPTIONS_PER_CONNECTION};
 pub use hub::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
 pub use protocol::{ClientFrame, ServerFrame};
+pub use pusher::{
+    PusherAuth, PusherBroadcastHub, PusherConfig, PusherScheme, pusher_channel_auth,
+    pusher_user_auth,
+};
 pub use testing::RecordingBroadcastHub;

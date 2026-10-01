@@ -29,14 +29,19 @@ A rule is a value implementing one of four traits:
 
 Built-in `Rule`s: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
 `NotIn`, `InArray`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`,
-`AlphaDash`, `Url`, `UrlProtocols`, `HttpUrl`, `Uuid`,
+`AlphaDash`, `Url`, `UrlProtocols`, `HttpUrl`, `Uuid`, `Digits`,
+`DateFormat`, [`Accepted`, `Prohibited`, `Missing`](#accepted-prohibited-and-missing),
 [`Password`](#password-strength) (strength checks only). Built-in
-`ValueRule`s: `ArrayKeys`, `Distinct`, `Contains`, `DoesntContain`.
+`ValueRule`s: `ArrayKeys`, `Distinct`, `Contains`, `DoesntContain`, and
+`Accepted`, `Prohibited` and `Missing` again for JSON fields.
 Built-in `ContextualRule`s: `RequiredIf`, `RequiredWith`,
 `RequiredUnless`, `Same`, `Different`, `Confirmed`, `Gt`, `Gte`, `Lt`,
-`Lte`. Built-in `AsyncRule`s: [`Unique`](#the-unique-rule) and
-[`Password`](#password-strength) (strength plus its `uncompromised()` HIBP
-check - the one built-in rule implementing both `Rule` and `AsyncRule`).
+`Lte`, the [date rules](#date-rules) `After`, `AfterOrEqual`, `Before` and
+`BeforeOrEqual`, and [`ExcludeIf` and `ExcludeUnless`](#excluding-a-field).
+Built-in `AsyncRule`s: [`Unique`](#the-unique-rule),
+[`Exists`](#the-exists-rule) and [`Password`](#password-strength) (strength
+plus its `uncompromised()` HIBP check - the one built-in rule implementing
+both `Rule` and `AsyncRule`).
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -333,7 +338,115 @@ finite number under a numeric comparison, a sibling the form never sent, a
 sibling that is not a number, or a non-finite literal such as `f64::NAN`.
 None of those panics, and none of them passes.
 
+### Digits
+
+`Digits(n)` is Laravel's `digits:n`: exactly `n` ASCII digits. It is a
+string rule on purpose - a PIN or a card number keeps its leading zeros
+only as text.
+
+```rust
+use suprnova::{Rule, rules::Digits};
+
+Digits(4).passes("0042")?; // Ok(())
+```
+
+### Date rules
+
+`DateFormat` is Laravel's `date_format`. It takes a list of formats in
+chrono's `strftime` syntax and passes a value that matches one of them.
+Like Laravel's, the check formats the parsed date back and compares it with
+the input, so `2026-9-30` does not match `%Y-%m-%d` and
+`2026-02-31` matches nothing. A partial format such as `%Y-%m` or `%H:%M`
+works too; the parts it leaves out come from 1970-01-01 at midnight, as in
+PHP, so `02-29` does not match `%m-%d`.
+
+`After`, `AfterOrEqual`, `Before` and `BeforeOrEqual` compare a date with a
+`DateBound`: a fixed `Date` or `DateTime`, `Now`, `Today`, `Tomorrow`,
+`Yesterday`, or another field. Build them with `new`, and add
+`.format(...)` when the field is not ISO 8601 - Laravel's
+`date_format:d/m/Y|after:today` pairing, which reads the value and a
+sibling bound with that format.
+
+```rust
+use suprnova::{validate, FormContext, ValidationErrors};
+use suprnova::rules::{After, AfterOrEqual, DateBound, DateFormat};
+
+fn booking_rules(form: &Booking) -> Result<(), ValidationErrors> {
+    let ctx: FormContext = [("starts_on".to_string(), form.starts_on.clone())].into();
+    validate! { form =>
+        // Laravel's date_format:Y-m-d|after_or_equal:today
+        starts_on => DateFormat(&["%Y-%m-%d"]), AfterOrEqual::new(DateBound::Today) => with ctx;
+        // Laravel's date_format:d/m/Y|after:starts_on
+        ends_on => DateFormat(&["%d/%m/%Y"]),
+            After::new(DateBound::Field("starts_on")).format("%d/%m/%Y") => with ctx;
+    }
+}
+```
+
+Without a format, a value is read as RFC 3339, as `YYYY-MM-DD HH:MM[:SS]`
+with a space or a `T` (what a `datetime-local` input sends), or as a bare
+`YYYY-MM-DD`, which stands for its midnight. An offset is converted to UTC;
+a value without one is taken as UTC. Both sides are compared to the second,
+as Laravel compares timestamps. A value, or a sibling, that is not a date
+fails the field; a sibling the form did not send passes it, as in Laravel.
+The relative bounds read the framework clock, so a test moves them with
+`TestClock`.
+
+### Accepted, prohibited, and missing
+
+- `Accepted` - Laravel's `accepted`: `yes`, `on`, `1` or `true`. It also
+  takes a `bool` field (`true` passes), an `Option<bool>` (an absent toggle
+  fails) and a JSON `true` or `1`, so a terms toggle can stay typed on a
+  Data Object.
+- `Prohibited` - Laravel's `prohibited`: the field is empty. Blank text
+  passes, and so do a JSON `null`, empty array and empty object.
+- `Missing` - Laravel's `missing`: the field was not sent. A typed request
+  has every field it declares, so "not sent" is an `Option` field that is
+  `None`. Put `Missing` on a `?:` row: the row skips an absent field, and
+  the rule fails anything that arrived, even an empty value.
+
+```rust
+validate! { self =>
+    terms => Accepted;          // terms: bool
+    honeypot => Prohibited;     // honeypot: String
+    referral_code ?: Missing;   // referral_code: Option<String>
+}
+```
+
+### Excluding a field
+
+`ExcludeIf { other, value }` and `ExcludeUnless { other, value }` are
+Laravel's `exclude_if` and `exclude_unless`. A `validate!` row runs its
+rules in order, and while the exclusion holds, the rules after it do not
+run - an error from a rule before it stands, as in Laravel. Put the
+exclusion first to skip the whole row.
+
+```rust
+let ctx: FormContext = [("payment".to_string(), self.payment.clone())].into();
+validate! { self =>
+    card_number ?=> ExcludeUnless { other: "payment", value: "card" } => with ctx,
+        Required, Digits(16);
+}
+```
+
 ### Why Suprnova diverges
+
+Laravel's `date_format` takes PHP formats (`Y-m-d`); Suprnova's takes
+chrono's (`%Y-%m-%d`), the syntax every other date API in a Rust
+application already speaks. Laravel reads `after:today` in the
+application's time zone; Suprnova has no application time zone, so
+`DateBound::Today` starts at midnight UTC.
+
+Laravel also drops an excluded field from `validated()`, the array a
+controller hands to `Model::create`. A typed request has no such bag: the
+struct still holds whatever the client sent. When a handler must ignore an
+excluded field, it asks the same rule with
+`ExcludeIf { .. }.excludes(&ctx)`.
+
+Laravel's `missing` tests whether a key is in the input array. A typed
+request cannot see keys it does not declare - and a Data Object refuses an
+undeclared key outright - so `Missing` works on a declared `Option` field
+through the `?:` row.
 
 Laravel's `distinct:strict` leans on PHP's coercing `==`. JSON values are
 already typed, so Suprnova's `strict` only changes whether two *numbers*
@@ -480,6 +593,11 @@ Because the async stage runs only after the synchronous stages pass, a
 malformed value (a syntactically invalid email) never reaches the database
 `Unique` query.
 
+A Data Object's derive writes its `FormRequest` impl, so it names its
+hooks instead of overriding them: `#[data(after_validation = "fn")]` and
+`#[data(after_validation_async = "fn")]`. See
+[Data Objects](data.md#validation-rules-and-database-checks).
+
 ## The `Unique` rule
 
 `Unique` checks that a value does not already exist in a table. Build it
@@ -542,6 +660,56 @@ let user = new_user
 `from_unique_violation` returns a 422 `Validation` error when the database
 error is a unique-constraint violation, and passes any other error through
 unchanged (MySQL, Postgres, and SQLite are all recognized).
+
+## The `Exists` rule
+
+`Exists` is Laravel's `exists`: the value must name a row. It shares
+`Unique`'s identifier allowlist and binds every value.
+
+```rust
+use suprnova::{AsyncRule, Exists, ValidationErrors};
+
+let mut errs = ValidationErrors::new();
+
+// A text column, through the AsyncRule path.
+Exists::new("countries", "code")
+    .check_async(&self.country, &mut errs, "country")
+    .await;
+
+// An integer column: check the typed value.
+Exists::new("teams", "id")
+    .check_value(self.team_id, &mut errs, "team_id")
+    .await;
+
+// Laravel's 'tag_ids.*' => 'exists:tags,id', scoped to the team.
+// Each failure lands under tag_ids.<index>.
+Exists::new("tags", "id")
+    .where_eq("team_id", self.team_id)
+    .check_each(&self.tag_ids, &mut errs, "tag_ids")
+    .await;
+```
+
+| Method | Effect |
+|--------|--------|
+| `.where_eq(col, value)` | only rows where `col = value` count; multiple calls AND together |
+| `.check_async(&str, errs, field)` | check a text value (the `AsyncRule` path) |
+| `.check_value(value, errs, field)` | check a typed value, bound as itself |
+| `.check_each(&[T], errs, field)` | check every element, one query per distinct value, errors under `field.<index>` |
+
+Check an integer id with `check_value`, not `check_async`: Postgres does
+not compare a text parameter with an integer column, so the `&str` path
+fails there. Bound an array's length with a synchronous rule
+(`#[validate(length(max = 100))]`), which runs first, so a huge array never
+reaches the database.
+
+When a database rule cannot run - a dead connection, an identifier the
+allowlist refuses, a type the database will not compare - the field fails
+with `validation-unchecked` ("could not be checked"), and the cause goes to
+the log under the `suprnova::validation` target. `Unique` does the same. A
+validation message is rendered into the response, so it never carries the
+database's own words. Like `Unique`, `Exists` reads before the
+write; a foreign key constraint is the guarantee that the row is still
+there when you insert.
 
 ## Async authorization
 
@@ -610,6 +778,8 @@ for error bags, `with_all_errors`, and where the redirect points.
 | Conditionally-required optional | `field ?=> Rule => with ctx;` |
 | Async / DB-backed rule | `after_validation_async` + `AsyncRule::check_async` |
 | Uniqueness | `Unique::new(t, c)` + `UNIQUE` constraint + `from_unique_violation` |
+| Existence | `Exists::new(t, c)` + a foreign key constraint |
+| Hooks on a Data Object | `#[data(after_validation = "fn")]`, `#[data(after_validation_async = "fn")]` |
 | Async authorization | middleware / `Gate::*_async` / `after_validation_async` |
 
 ## Next

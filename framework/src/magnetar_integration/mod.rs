@@ -362,7 +362,7 @@ pub(crate) fn schedule_pending_issued_session_cleanup(
     pending: Arc<Mutex<Vec<crate::session::middleware::PendingOpaqueSession>>>,
     reason: &'static str,
 ) {
-    if pending.lock().unwrap().is_empty() {
+    if crate::lock::recover(&pending).is_empty() {
         return;
     }
     let Some(authority) = authority else {
@@ -374,9 +374,7 @@ pub(crate) fn schedule_pending_issued_session_cleanup(
         );
         return;
     };
-    let session_ids = pending
-        .lock()
-        .unwrap()
+    let session_ids = crate::lock::recover(&pending)
         .iter()
         .map(|candidate| candidate.session_id.clone())
         .collect();

@@ -32,10 +32,14 @@ use std::pin::Pin;
 use std::sync::OnceLock;
 
 pub mod builtins;
+mod io;
 pub mod output;
+pub mod testing;
 mod typed;
 
+pub use io::{ask, confirm, error_line, line};
 pub use output::{DETAIL_WIDTH, two_column_detail};
+pub use testing::{ConsoleRun, ConsoleTest, test};
 pub use typed::TypedCommand;
 
 /// fn-pointer-compatible boxed-future returned by every command
@@ -51,12 +55,33 @@ pub type CommandHandler =
 pub struct CommandEntry {
     /// Subcommand name as it appears in argv (e.g. `make:controller`).
     pub name: &'static str,
-    /// Human-readable description, shown under `--help`.
+    /// The `description` the attribute declared, and empty when it declared
+    /// none. The text `--help` shows is [`Self::about`]: a
+    /// `#[derive(Command)]` struct with no `description` is described by
+    /// its doc comment.
     pub description: &'static str,
     /// Function that builds the clap subcommand definition.
     pub clap_builder: fn() -> clap::Command,
     /// Boxed-future runner invoked when the subcommand is selected.
     pub handler: CommandHandler,
+}
+
+impl CommandEntry {
+    /// The text the console's help shows for this command, and `None`
+    /// when it shows none.
+    ///
+    /// It is read from the clap command this entry builds, so it is what
+    /// `--help` prints, whichever of these it came from: the `description`
+    /// of the attribute, the doc comment of a `#[derive(Command)]` struct,
+    /// or its `#[command(about = "...")]`. A listing of commands that
+    /// read [`Self::description`] would show an empty line for a command
+    /// that is described by its doc comment.
+    pub fn about(&self) -> Option<String> {
+        (self.clap_builder)()
+            .get_about()
+            .map(ToString::to_string)
+            .filter(|about| !about.is_empty())
+    }
 }
 
 inventory::collect!(CommandEntry);
@@ -156,11 +181,16 @@ where
     if let Some((name, sub_matches)) = matches.subcommand() {
         if let Some(entry) = find(name) {
             lazy_init().await;
-            let result = (entry.handler)(sub_matches).await;
+            // One command is one unit of work: it runs in a container scope
+            // of its own, so its scoped bindings are built for it and
+            // dropped when it returns. `lazy_init` registers bindings and
+            // stays outside.
+            let command = (entry.handler)(sub_matches);
+            let result = crate::container::scope::run_in_new_scope(command).await;
             if let Err(ref e) = result
                 && !e.is_silent()
             {
-                eprintln!("error: {}", e.message());
+                io::error_line(format!("error: {}", e.message()));
             }
             return result;
         }
@@ -194,7 +224,18 @@ fn handle_clap_error(err: clap::Error) -> Result<(), FrameworkError> {
     // failures the returned Err carries an empty message; the binary
     // skips its own eprintln and just translates to a non-zero
     // ExitCode.
-    let _ = err.print();
+    if io::is_captured() {
+        // A test reads the text. `render` is the text `print` writes,
+        // and `use_stderr` is the stream `print` writes it to.
+        let text = err.render().to_string();
+        if err.use_stderr() {
+            io::write_errors(&text);
+        } else {
+            io::write_output(&text);
+        }
+    } else {
+        let _ = err.print();
+    }
     match err.kind() {
         ErrorKind::DisplayHelp
         | ErrorKind::DisplayVersion

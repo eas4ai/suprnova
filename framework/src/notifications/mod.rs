@@ -16,6 +16,7 @@ pub mod anonymous;
 pub mod channels;
 pub mod database_read;
 pub mod events;
+pub mod migrations;
 pub mod notify_job;
 pub mod testing;
 
@@ -146,6 +147,21 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Laravel's `#[Backoff(...)]` notification attribute.
     fn backoff(&self) -> BackoffSchedule {
         BackoffSchedule::default()
+    }
+
+    /// Whether `Notify::queue` waits for the surrounding
+    /// [`DB::transaction`](crate::DB::transaction) to commit before it
+    /// pushes this notification's jobs. Default `false`. Mirrors Laravel's
+    /// `ShouldQueueAfterCommit` and `afterCommit()` on a notification.
+    ///
+    /// Turn it on for a notification about rows the transaction writes.
+    /// Without it the envelope reaches the queue before the commit, and a
+    /// worker can notify about a row that is not visible yet, or that a
+    /// rollback then removes. Inside a transaction the jobs are then pushed
+    /// at the commit, and a rollback discards them. Outside one they are
+    /// pushed at once.
+    fn after_commit(&self) -> bool {
+        false
     }
 }
 
@@ -541,10 +557,10 @@ impl Notify {
             fail_on_timeout: Some(notification.fail_on_timeout()),
             max_tries: Some(notification.max_tries()),
             backoff: Some(notification.backoff()),
-            // Left to `SendNotificationJob::after_commit()` (false): there is
-            // no per-notification opt-in on the `Notification` trait yet, and
-            // `None` is what "defer to the job" spells.
-            after_commit: None,
+            // `None`, not `Some(false)`, for a notification that did not opt
+            // in: `Some(false)` is the per-push "before commit" and would
+            // overrule `QUEUE_AFTER_COMMIT` for every queued notification.
+            after_commit: notification.after_commit().then_some(true),
         };
 
         for channel in &channels {

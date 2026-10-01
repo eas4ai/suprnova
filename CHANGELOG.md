@@ -4,6 +4,1308 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 3.0.0 - 2026-09-29
+
+### Added
+
+- **A Pusher-protocol broadcast driver.** `PusherBroadcastHub` publishes
+  broadcasts through the REST API that Pusher Channels, Soketi and Laravel
+  Reverb share, and still delivers them to in-process subscribers, so a
+  `ws!` broadcasting route keeps working. `PusherConfig::from_env()` reads
+  Laravel's `PUSHER_*` variables, and `from_env_prefix("REVERB")` reads
+  Reverb's. `pusher_channel_auth` and `pusher_user_auth` answer Laravel
+  Echo's authorization requests for private, presence and end-to-end
+  encrypted channels. The new `Channel::visibility` picks each channel's
+  Pusher name and defaults to private, so a channel that restricts
+  `authorize` can never leak through a public Pusher channel. A name that
+  would read as another channel's Pusher name, and an encrypted presence
+  channel, are refused rather than published, and an invalid configuration
+  fails when the hub is built. Publishing to an encrypted channel without a
+  master key is an error, never a plaintext send. This landed on main after
+  the `v3.0.0` tag (#130).
+- **`InertiaProps` and `Data` follow serde's field names.** Both derives
+  honor `#[serde(rename_all = "...")]` on the struct, and `rename`, `skip`,
+  `skip_serializing` and `skip_deserializing` on a field, including the
+  split `serialize = .., deserialize = ..` forms; any other serde attribute
+  is a compile error. The names reach everything the client sees: Inertia
+  props and partial reloads, the `?include=` allowlist, JSON:API members,
+  request input, route-parameter injection, and `suprnova generate-types`.
+  Validation errors of a `Data`, `#[derive(FormRequest)]` or `#[request]`
+  struct are keyed by the input names at every nested level, so
+  `Precognition-Validate-Only` matches what the client sent, and a message
+  labels `unitPrice` as "unit price", as Laravel does. A raw identifier
+  such as `r#type` is sent and read as `type`. A plain nested
+  `#[derive(Deserialize, Validate)]` struct registers its names with the
+  new `#[derive(suprnova::InputNames)]`. This landed on main after the
+  `v3.0.0` tag (#124).
+
+  Two consequences for existing code. A `#[serde(...)]` attribute on an
+  `InertiaProps` or `Data` struct used to compile only next to another
+  derive that registers `serde` (such as `schemars`), and did nothing
+  there; it now takes effect, and an attribute the derive does not apply
+  is a compile error. A localized validation message labels every key
+  snake-cased, so a hand-written key `userID` reads "user i d", as in
+  Laravel; snake_case keys read as before. A `#[json_resource]` struct may
+  no longer send an attribute or relationship named `type` or `id`, which
+  JSON:API reserves: a struct with a custom `id_field` and a field named
+  `id`, or a field `r#type` (sent as `r#type` before), is now a compile
+  error that asks for a `#[serde(rename = "...")]`.
+- **The schema builder covers the rest of a Laravel migration.**
+  `unsigned_id()` and `unsigned_foreign_id()` create Laravel's `BIGINT
+  UNSIGNED` keys on MySQL, so a new table can point a foreign key at an
+  existing Laravel table, and a model reads them with `key_type = "u64"`.
+  New columns: `tiny_integer`, the `unsigned_` integers, `medium_text`,
+  `long_text`, `enumeration` (Laravel's `enum`) and `remember_token`. New
+  modifiers: `.unsigned()`, `.index()`, `.primary()`, `.precision(n)`,
+  `.use_current()` and `.after(column)`. `t.primary(&[..])` makes a
+  composite primary key, `t.foreign(column)` a foreign key on a column
+  declared on its own, `.name(..)` names a key, and
+  `drop_constrained_foreign_id` drops a key with its column. The actions have
+  Laravel's shorthands, `cascade_on_delete()` and the rest. Where the
+  databases differ the builder does what Laravel does: `unsigned` and
+  `after` apply on MySQL only, and an enumeration is a string with a `CHECK`
+  off MySQL. This landed on main after the `v3.0.0` tag (#122).
+- **Native date-time columns for models.** `AsNativeDateTime` and
+  `AsOptionalNativeDateTime` store a `DateTime<Utc>` in a column that keeps
+  the zone (`timestamp with time zone` on Postgres, `TIMESTAMP` or
+  `DATETIME` on MySQL); `AsNaiveDateTime` and `AsOptionalNaiveDateTime`
+  store the UTC wall clock in one without a zone, the shape Laravel's
+  `timestamps()` creates on Postgres. The schema builder gains Laravel's
+  `timestamps_tz()`, `soft_deletes_tz()`, `datetimes()` and
+  `soft_deletes_datetime()` to create them. Automatic timestamps, `touch()`,
+  soft deletes and the touch of an owner all store through the declared
+  cast, and query comparisons (`filter`, `where_between`, `where_date`,
+  `update_all`, `where_has`) bind through it, so Postgres gets a native
+  parameter. A model may declare `created_at` and `updated_at` as
+  `Option<DateTime<Utc>>` for a table another application leaves NULL.
+  `suprnova generate-types` now emits chrono's date and time types as
+  `string` instead of `unknown`. This landed on main after the `v3.0.0` tag.
+- **Laravel's `exists`, `accepted`, `digits`, `date_format`, date
+  comparison, `prohibited`, `missing` and `exclude_if` rules.** `Exists`
+  checks that a value names a row, scoped with `where_eq`; `check_value`
+  binds a typed id, which Postgres needs for an integer column, and
+  `check_each` checks every element of an array, one query per distinct
+  value, with each failure under `field.<index>`. `Accepted`, `Digits`,
+  `DateFormat` (chrono's format syntax, checked by a round trip like
+  Laravel's),
+  `After::new`, `AfterOrEqual::new`, `Before::new` and `BeforeOrEqual::new`
+  (against a fixed date, `Now`, `Today`, `Tomorrow`, `Yesterday` or another
+  field, with `.format(..)` for a field that is not ISO 8601), `Prohibited`,
+  `Missing`, `ExcludeIf` and `ExcludeUnless` join the built-in rules.
+  `validate!` now runs a row's rules in order, each expression evaluated
+  once, and stops at an exclusion, as Laravel does. This landed on main
+  after the `v3.0.0` tag.
+- **A Data Object runs `validate!` and database rules.** The derive writes
+  a Data Object's `FormRequest` impl, so it had no place for cross-field
+  rules or for `Unique` and `Exists`. `#[data(after_validation = "fn")]`
+  and `#[data(after_validation_async = "fn")]` name the functions that
+  impl calls, and the impl a `from_route_param` field selects now runs the
+  async stage too. That impl now calls the hooks through the trait, so an
+  inherent `after_validation` method on such a Data Object, which it used
+  to call by accident, no longer runs: name it with the attribute. The
+  derive refuses both attributes on a struct that gets no `FormRequest`
+  impl. This landed on main after the `v3.0.0` tag.
+
+- **`FrameworkError::Timeout` tells a passed deadline from a failure.**
+  `WorkflowHandle::wait_with_timeout` documented a timeout error that did not
+  exist and returned `FrameworkError::Internal`, so a caller could not tell a
+  workflow that is still running from a failed status query. The variant
+  carries the deadline and what was awaited, `FrameworkError::timeout(elapsed,
+  message)` builds one, `is_timeout()` asks for it, and it renders as `504
+  Gateway Timeout`. `wait_with_timeout` and `wait_with_options` return it when
+  the deadline fires.
+- **`Queue::fake()` and `Bus::fake()` install their fakes.** Every other
+  facade had `fake()`; these two had only the free function
+  `testing::install_fake()`. Both return the same guard, and the free
+  functions stay.
+- **Failed-job commands: `queue:failed`, `queue:retry`, `queue:forget`,
+  `queue:flush` and `queue:prune-failed`.** The manual and the code's own docs
+  sent operators to commands that did not exist; the failed-job store could
+  only be reached from code. The application binary now has all five, and the
+  `suprnova` CLI forwards them. `queue:failed` lists id, connection, queue,
+  job, failure time and the first line of the error. `queue:retry` takes one
+  or more ids, or `all`. `queue:flush` deletes every failed job, or with
+  `--hours N` the ones older than that. `queue:prune-failed` is the same with
+  `--hours` defaulting to 24. A command exits non-zero when an id names no
+  failed job.
+- **Queued mail and notifications can wait for the commit.**
+  `Mailable::after_commit(&self)` and `Notification::after_commit(&self)`
+  default to `false`. When one answers `true`, `Mail::queue`, `Mail::later`
+  and `Notify::queue` inside `DB::transaction` push at the commit, and a
+  rollback discards the push, as `Job::after_commit` already does for a job.
+  `QUEUE_AFTER_COMMIT=true` turns the same behavior on for every push in the
+  process, as the `after_commit` option of a Laravel queue connection does;
+  `EnvelopeOverrides { after_commit: Some(false), .. }` still sends one push
+  ahead of the commit.
+- **Queue connections select a driver.** One process-global driver received
+  every push, and a job's connection was only a name on the lifecycle events.
+  `Queue::register_connection(name, driver)` now registers a named connection
+  next to the default one that `Queue::set_driver` installs, and a push goes
+  to the connection it resolves to: a per-push
+  `EnvelopeOverrides::connection`, then a `Queue::route`, then
+  `Job::connection()`, then the default. `Queue::push`, `push_with`, `later`,
+  `bulk` and `push_unique` all resolve it, the jobs of a batch each go to
+  their own connection, and a failed job is retried on the connection it
+  failed on. `queue:work --connection <name>` and
+  `queue::worker::run_worker_on` drain one connection, and the worker carries
+  its name on its events and failed-job records. `queue:pause` and
+  `queue:resume` take `--connection`. `Queue::connection(name)` returns a
+  connection's driver and `Queue::connection_names()` lists the registered
+  ones; `Queue::size()` and the other counts and listings read the default
+  connection. While no connection is registered nothing changes: every push
+  reaches the one driver, and a connection name is a label. Once one is
+  registered, a push to a name that is neither registered nor the default's is
+  an error and pushes nothing, and a push that waits for a commit is refused
+  before the commit. A chain runs on the connection of its first job, because
+  the worker enqueues the next link in the step that settles the one before
+  it; `Queue::chain().dispatch()` refuses a chain whose links resolve to
+  different connections. `QUEUE_CONNECTIONS=redis,database` registers one
+  connection per entry from the environment, each named for its driver. One
+  driver has one label: an entry that names the driver `QUEUE_DRIVER` selects
+  is a second name for the default connection, so a pause or a
+  `Queue::forward_on` set under either name reaches the whole queue, and an
+  entry that would put a second connection over a Redis stream or a jobs table
+  that is already in use is refused at boot.
+- **`Context` travels with queued work.** A value added to `Context` during a
+  request was gone when a queued job, a queued mail or notification, or a
+  queued event listener ran. A push now takes a `ContextSnapshot` of the
+  visible and hidden bags and stores it on the envelope, and the worker runs
+  the job inside a scope restored from it. The snapshot is taken when the push
+  is made, so a push that waits for a commit carries it too. The lifecycle
+  events around the job, such as `JobProcessing`, `JobProcessed` and
+  `JobFailed`, are dispatched in the same scope, so a listener reads what the
+  job read and what the job added. Every link of a chain and every job of a
+  batch gets the snapshot of the code that dispatched it, and a queued
+  listener gets the snapshot of the dispatch. The work runs on a copy, so what
+  a job adds reaches neither the request nor the next job, and every attempt
+  starts from the snapshot. Under the sync driver the copy shadows the
+  caller's context for the length of the job. The query bag does not travel,
+  so a job run inline no longer reads the request's query parameters. A job
+  queued while a request is served carries the request's id as `_request_id`,
+  which the request middleware adds to the context; a push made outside a
+  request with nothing in its context writes the envelope it wrote before.
+  `Context::dehydrating` and `Context::hydrated` register callbacks for the
+  two ends, as Laravel's hooks of those names do, with `Context::dehydrate`,
+  `Context::hydrate` and `Context::restored` as the functions behind them.
+  `Envelope` gains the public field `context`, so code that builds one with a
+  struct literal has to name it; an envelope written before the field existed
+  decodes without context. Hidden values reach the queue store and the
+  failed-job store, because the job needs them. They do not reach a log: the
+  envelope a worker logs when no failed-job store is bound carries no hidden
+  context, and the `Debug` output of `ContextSnapshot` and `ContextStore`
+  names hidden keys only, and that of `FailedJob` gives the size of the
+  envelope and not its text.
+- **`ThrottleRequestsMiddleware::default()`.** The plain `throttle` alias had
+  no limit to register: every constructor asked for a limit, a window and a
+  key prefix, and the manual registered the alias with a `default()` that did
+  not exist. The default is 60 requests a minute, counted for each signed-in
+  user and for each client IP when nobody is signed in, the shape of Laravel's
+  default `api` limiter. The numbers are
+  `ThrottleRequestsMiddleware::DEFAULT_MAX_ATTEMPTS` and
+  `DEFAULT_DECAY_SECONDS`. The user's bucket follows the user across routes,
+  and the address's bucket is shared by every route; `.prefix(...)` gives a
+  group of routes a budget of its own.
+- **`RateLimitMiddleware::ip_based(max_requests, window)`.** The per-IP limit
+  that every login form and public API needs took a backend `Arc`, a
+  `SlidingWindowConfig` and a hand-written key closure, and the manual used an
+  `ip_based` that did not exist. It uses the rate limiter the application
+  installed, the one `RATE_LIMIT_DRIVER` selects, looked up when a request
+  arrives, so the middleware can be built where routes are registered. The key
+  is the address `Request::ip()` resolves through the trusted proxies, and it
+  names the limit as well, so two limits with different numbers share no
+  bucket. A request with no address to resolve gets a bucket of its own.
+  `on_backend_error`, `only_when` and `key_reads_body` chain onto it; when no
+  limiter is installed the backend error policy decides.
+- **Middleware by name on routes.** Aliases and groups could be registered and
+  resolved, but no route took a name: every `.middleware(...)` wanted a type,
+  and nothing parsed `throttle:60,1`. Routes, groups of routes and the macro
+  builders now have `.middleware_named("auth")`, which takes an alias, an
+  alias with arguments, or a group that adds every middleware of the group in
+  order. The name is resolved when the route is registered, so a name that is
+  not registered stops the boot and never a request;
+  `.try_middleware_named(...)` returns the error.
+  `register_middleware_alias_with_args(name, |arguments| ...)` registers an
+  alias that reads the arguments after the colon, and a group may list such an
+  alias. `try_resolve_middleware_alias` says why an alias gave no middleware.
+  `ThrottleRequestsMiddleware::from_alias_args` is the factory for the
+  `throttle` alias: `throttle`, `throttle:60`, `throttle:60,5`,
+  `throttle:60,5,prefix` and `throttle:api` for a named limiter.
+- **Route groups take a name prefix and a controller.** Every route in an
+  `admin.` group had to spell its full name, and every handler its full path.
+  `group!(...).name("admin.users.")` now puts the prefix in front of the name
+  of every route in the group, and a group inside adds its own after it; a
+  route without a name stays without one. `group!("/admin/users", controller =
+  controllers::admin::users, { get!("/", index), post!("/", store) })` names
+  the module the handlers live in, so a route names its handler by function
+  alone. A handler written as a path is taken as it is written, and a group
+  inside names its own controller. The path prefix stays the first argument of
+  the macro.
+- **Optional route parameters and parameter constraints.** `/posts/{id?}` now
+  matches `/posts` and `/posts/42`, and the handler finds no `id` on the short
+  form. Several optional parameters fill from the left, the colon spelling
+  `/posts/:id?` works, and an optional parameter can only be followed by
+  optional ones. The route's middleware and name apply to every form, and
+  `route(...)` leaves an optional segment out when it has no value. A route
+  can hold a parameter to a constraint: `.where_number("id")`, `.where_alpha`,
+  `.where_alpha_numeric`, `.where_uuid`, `.where_ulid`, `.where_in("status",
+  [...])` and `.where_pattern("year", "[0-9]{4}")`, on `Router` routes and on
+  `get!`, `post!` and the other route macros, where a constraint may name a
+  parameter of the group's prefix. A value the constraint refuses is a 404, as
+  if the route had not matched, and neither the route's middleware nor its
+  handler runs. On a `Router` route `.try_constrain(param, ParamConstraint)`
+  returns the error a constraint on a parameter the route does not have gives;
+  `.constrain` and the `where_*` spellings stop the boot on it. A pattern has
+  to match the whole value, and `\d` matches the digits of every script, so
+  write `[0-9]` for ASCII digits. A WebSocket route takes optional parameters
+  as well. A pattern with an optional parameter and an empty segment, and a
+  second route for one form of an optional route, are refused when they are
+  registered.
+- **Console commands can be tested for what they print and ask:
+  `console::test`.** `dispatch_argv` returns a `Result` and nothing else, so a
+  test could tell that a command ran and not what it said, and a command that
+  asks a question waited on the standard input of the test runner.
+  `console::test(["users:purge", "--days", "30"]).expects_question("Delete 12
+  users?", "yes").run().await` runs the command through the dispatcher the
+  console binary uses and returns a `ConsoleRun` with `output()`, `errors()`,
+  `exit_code()`, `error()` and `unasked_questions()`, and with
+  `assert_successful`, `assert_failed`, `assert_output_contains`,
+  `assert_errors_contain` and `assert_every_question_was_asked`. Help, the
+  version, parse errors and the error of a failed command are collected as
+  well. A command prints with `console::line` and `console::error_line` and
+  asks with `console::ask` and `console::confirm`; what it prints with
+  `println!` a test cannot see. Questions have to come in the order the test
+  gave them, and a question with no prepared answer fails the command. The
+  framework's own commands, `db:seed` and `model:prune` among them, print
+  through the console now, and `make:command` generates a command that does.
+- **`Schedule::command("emails:send --force")` puts a console command on the
+  schedule.** The schedule took a `Task` or a closure, so a command of the
+  application, or a builtin such as `model:prune`, could only be scheduled by
+  wrapping it by hand. `command` takes the line the way it is typed behind the
+  name of the console binary, splits it into words the way a shell does, and
+  returns the `TaskBuilder` every other task uses, so `daily()`,
+  `without_overlapping()` and `on_one_server()` apply. The command runs in the
+  scheduler's process. The line is checked when the schedule is built: a name
+  no command has, arguments the command does not take, and a quote that is not
+  closed stop the boot, and `try_command` returns the error. The task is named
+  by its command line and described by the command's about text.
+- **`suprnova db:seed` and `suprnova model:prune`.** The console binary has
+  had both commands, and the manual shows them through the CLI, but the CLI
+  forwarded `migrate` and its siblings and not these two, so the step after
+  `suprnova migrate` was `cargo run --bin console -- db:seed`. `suprnova
+  db:seed` runs every seeder, and `suprnova db:seed UserSeeder` or
+  `--class=UserSeeder` runs one. `suprnova model:prune` takes `--model=<Name>`
+  and `--pretend`. Both run the project's console binary, which checks the
+  names.
+- **`QdrantVectorDriver::from_env()` and `MariaDbVectorDriver::from_env()`.**
+  Only the Pinecone driver read its configuration from the environment, so
+  choosing the vector store by environment needed hand-written `std::env::var`
+  code for the other two. The Qdrant driver reads `QDRANT_URL` and, when it is
+  set, `QDRANT_API_KEY`. The MariaDB driver reads `MARIADB_URL`, and
+  `DATABASE_URL` when that is not set and names a MariaDB or a MySQL database,
+  which is the setup with one engine for rows and vectors. A `DATABASE_URL` of
+  another engine is not taken. A `mysql://` URL is taken as well, because a
+  MariaDB is written that way too. The Qdrant client is built without its
+  version check, which connects and blocks while the application boots. A
+  variable that is missing is named in the error at boot, and the error never
+  shows a URL.
+- **Storage configures an S3 disk from the environment.** Mail, the queue and
+  the rate limiter read their configuration from `.env` when the server boots;
+  storage read no variable, so an S3 or S3-compatible disk (MinIO, RustFS, R2,
+  B2) existed only when the application built an `S3Config` by hand, and the
+  `.env` the Docker guide shows configured nothing. When `S3_BUCKET` is set,
+  the server now registers an S3 disk named `s3` from `S3_BUCKET`,
+  `S3_REGION`, `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` and `S3_ROOT`.
+  With no keys set the driver uses the default credential chain of AWS, and
+  `AWS_REGION` is read when `S3_REGION` is not set. **What to check when you
+  upgrade:** an application that already sets `S3_BUCKET` for a disk of its
+  own gets the `s3` disk as well, and the server does not boot when the
+  variables describe no usable disk: no region, or one key without the other.
+  A disk the application registered under the name `s3` is left as it is, and
+  the variables are not read then. `S3Config::from_env()` returns the same
+  configuration for a disk with a name of your own, and
+  `filesystem::bootstrap_from_env()` is the function the server calls; the
+  console binary boots no driver of the environment, so an application whose
+  commands use the disk calls it in its own bootstrap. There is still no
+  default disk, and `FILESYSTEM_DISK` is not read.
+- **`Storage::url(disk, path)` returns the public URL of a file.** Storage had
+  presigned links that expire, `temporary_url` and `temporary_upload_url`, and
+  nothing for a file that is meant to be public, so applications built those
+  URLs by hand and repeated the base URL of the disk wherever they did. A disk
+  gets its public base URL with `Storage::set_public_url("public",
+  "https://cdn.example.com/files")`, or a path of the application's own host,
+  `/storage`. `Storage::url("public", "avatars/7.png")` joins the two and
+  writes every character of the path that a URL gives a meaning to as `%XX`,
+  so `c++ notes.pdf` is `c%2B%2B%20notes.pdf`. A disk with no public base URL
+  returns an error, so a private disk hands out no link that can be guessed,
+  and a path with a `.` or `..` segment is refused. A base URL is refused when
+  it has a user or a password, a query or a fragment, a backslash, a `.` or
+  `..` segment, or another scheme than `http` and `https`, and the error does
+  not repeat the URL. `S3_PUBLIC_URL` gives the disk of the environment its
+  base. The function takes the name of the disk, because `Storage::disk`
+  returns the `opendal` operator itself, which carries no name.
+- **`DB::monitor(max)` and the `db:monitor` command dispatch `DatabaseBusy`.**
+  The event was public, exported from the crate root and listed with the
+  database events the framework fires, and no code dispatched it: an
+  application that listened for it to alert on a database that runs out of
+  connections waited for an event that never came. `DB::monitor(max)` asks the
+  server of each connection, the default one and every named one, how many
+  connections it has from every client, and dispatches `DatabaseBusy` for a
+  server with `max` or more. PostgreSQL counts `pg_stat_activity`, and MySQL
+  and MariaDB give `threads_connected`, the way Laravel's `db:monitor` asks.
+  SQLite has no server and is never busy. The server does the counting, so the
+  answer is the same from every process, and the check can run on the
+  schedule: `schedule.command("db:monitor --max 80").every_minute()`. Nothing
+  runs it by itself. `DB::connection_counts()` returns the numbers and
+  `DbConnection::server_connections()` the number of one connection.
+  `DbConnection::connections_in_use()` is the other number, the connections of
+  this process's own pool that are out of it now.
+- **`suprnova::fake` is the `fake` crate, for factories written by hand.** The
+  crate root had `Dummy`, `Fake` and `Faker`, and everything else a factory
+  uses, the fakers of `fake::faker` and `rand::Rng` for `fake_with_rng`, was
+  reachable through the hidden `suprnova::__fake` alone, which the factories
+  chapter showed as the supported path. An application that added `fake` to
+  its own dependencies had to keep its version the one of the framework, or
+  the traits did not line up. `use
+  suprnova::fake::faker::internet::en::SafeEmail` and `use
+  suprnova::fake::rand::Rng` now work. `__fake` stays for the code
+  `#[derive(Factory)]` generates. `#[derive(Dummy)]` generates code that names
+  the crate `::fake`, so in an application without `fake` among its
+  dependencies the struct says where the crate is: `#[dummy(crate_name =
+  "suprnova::fake")]`.
+- **`WorkflowWorker::try_with_config(config)` and
+  `workflow::assert_no_duplicates()`.** `WorkflowWorker::new()` refuses to
+  start when two `#[workflow]` functions have one name. `with_config` skipped
+  that check and told the caller to run `registry::assert_no_duplicates`, a
+  function of a module that is hidden from the documentation and was exported
+  nowhere, so a worker with a config of the application's own lost the check
+  without a word. `try_with_config` checks the config and the registry and
+  returns the error where `new()` panics, and `assert_no_duplicates` is
+  exported from `suprnova::workflow`. `with_config` stays the constructor with
+  no check, and says so. `new()` makes its checks through `try_with_config`,
+  so the two cannot come apart.
+- **`Crypt::decrypt_string_with_origin` and its siblings return where a value
+  came from.** `DecryptOrigin`, `KeyOrigin` and `AadVersion` were public, and
+  every function that returned one was hidden, so the two questions of a key
+  rotation, does this value still need a previous key and does it still use
+  the legacy label, were answered in log warnings alone.
+  `Crypt::decrypt_string_with_origin`, `Crypt::decrypt_string_for_with_origin`
+  and `Crypt::decrypt_with_origin` return the value and its `DecryptOrigin`,
+  and `DecryptOrigin::needs_reencryption()` says whether the value is to be
+  written again. With them the job that ends a rotation can be written: read
+  every encrypted value, write again what needs it, and remove the previous
+  key when nothing does. For tests, `crypto::testing::encrypt_string_under`
+  and `encrypt_string_for_under` write a value under a key and a label of the
+  test's choice; they are compiled with the `testing` feature and replace the
+  hidden `_test_encrypt_with` names the manual pointed at. The three types are
+  exported from the crate root. An error for a decrypted value that does not
+  decode as JSON no longer quotes the value: it says which kind of mistake it
+  was and at which line and column. That is the error of `Crypt::decrypt`, of
+  a pagination cursor, and of the casts `AsEncryptedArray`,
+  `AsEncryptedObject` and `AsEncryptedCollection`, whose error is a validation
+  error and was shown to the client with the decrypted value in it.
+- **Metric attributes have types.** `inc_with`, `record_with` and `set_with`
+  took `&[(&'static str, &str)]` and sent every value as a text, so a status
+  `404` matched no filter on a number and no range, and the attributes the
+  semantic conventions type as a number or as yes and no arrived as the wrong
+  type. A value is now anything that becomes an `AttrValue`: a text, a whole
+  number, a number with a fraction, or a `bool`.
+  `counter.inc_with(&[("http.response.status_code", 404)])` sends a number.
+  Values of one type are written as they are, and values of several types are
+  each made an `AttrValue`: `("route", AttrValue::from("/posts")), ("error",
+  AttrValue::from(true))`. Every call that passes texts compiles as before. A
+  `u64` or `usize` that no `i64` holds is sent as the largest `i64`. A text is
+  also a reference to what holds one, `&String`, `&&str`, `&Box<str>`,
+  `&Arc<str>`, `&Rc<str>` and `&Cow<str>`, as it was when the values were
+  `&str`. Two calls have to be written another way: an empty list,
+  `inc_with(&[])`, is `inc()`, and a value that is `.as_ref()` names its type,
+  `.as_str()`. `AttrValue` is `#[non_exhaustive]`.
+- **A WebSocket handler sends from another task: `WsSocket::sender()` and
+  `WsSocket::split()`.** Every method of `WsSocket` takes `&mut self`, so
+  while a handler waited in `recv` nothing could send on the connection, and a
+  broadcast, a timer or a finished job had to go through a `select!` loop and
+  a channel of the handler's own. `sender()` returns a `WsSender`: it clones,
+  its `send_text`, `send_binary` and `close` take `&self`, and every clone
+  sends on the same connection. `split()` takes the socket apart into a
+  `WsSender` and a `WsReceiver`, and the `WsReceiver` is also a `Stream` of
+  the messages. The connection does not wait for its senders: when the handler
+  returns the connection closes, every later send returns an error,
+  `is_closed()` returns `true` and `closed()` completes, so a task that keeps
+  a sender learns when to stop. The receiving half has to be read, because the
+  answer to the heartbeat's ping arrives there.
+- **An upload policy says which rule it breaks: `UploadPolicy::validate()` and
+  `UploadPolicyError`.** A Live upload field whose policy the engine refused
+  failed the registration of its component with one closed error,
+  `invalid_component_upload_metadata`, whichever of the rules was broken: a
+  limit that was not set or was zero, a media type or an extension that was
+  not in canonical form, a media type declared twice, a dimension of zero, a
+  finalize action that was missing or was no name. `UploadPolicy::validate()`
+  returns the rule as an `UploadPolicyError`, and the registration logs it as
+  an error before it fails. The error of the registration is what it was, so
+  nothing of a component reaches a browser through it.
+- **A Live operation that fails inside the engine says why.** The engine
+  answered every failure of one of its own parts with one reason for the
+  browser, `ExecutionFailed` or `LedgerUnavailable`, and threw the error away,
+  so a panic of a component, a clock that gave no time and a ledger that was
+  full read the same in every log. The browser still gets that reason and
+  nothing more. `RefreshRequiredExecution::cause()` returns an
+  `ExecutionFailure`, a closed value that names the part that failed and the
+  kind of its error: the action, the lifecycle, the ledger, the clock, the
+  snapshot, the view, the composition, a port of the host. It is `None` for a
+  refresh that is no failure, such as a stale revision. The framework writes
+  one warning for each operation that ends with a cause, with the component,
+  the reason and the cause. `MountError::cause()` returns a `MountFailure` in
+  the same way for a mount, private or public, and `MountError::ledger_kind()`
+  is the kind of the ledger when the ledger refused. Neither value holds a
+  text, an identifier of an instance or anything of a request.
+- **`load` and `load_missing` on one model.** Both were methods of a
+  collection only, so code with one `Post` in hand wrapped it in a collection
+  of one to load its comments, or ran the query of the relation by hand and
+  lost the cache of the model. `post.load(["comments"]).await?` and
+  `post.load_missing(["comments.user"]).await?` load into the model itself,
+  through the loader of the collections: nested names, the one query for each
+  relation and the transaction of the caller are the same. `load_missing` runs
+  no query for a relation that the model has.
+- **`PaddleProvider::archive_customer` archives a Paddle customer.** Paddle
+  has no endpoint that deletes a customer, so `delete_customer` of the Paddle
+  adapter returns `PaymentError::NotSupported`, and its message named a way
+  that did nothing: an update with `metadata: {"status": "archived"}` writes a
+  key named `status` into the custom data of the customer, and the customer
+  stays active. `archive_customer(provider_customer_id)` sets the status of
+  the customer to `archived` at Paddle. A customer that Paddle does not know
+  is `PaymentError::NotFound`. The message of `delete_customer` names
+  `PaddleProvider::archive_customer`. What you have to change: code that
+  archived a customer through `metadata` calls `archive_customer`, and removes
+  the `status` key from the metadata if it does not want it there.
+- **A supported way to test a cached route:
+  `render_cache::testing::RenderCacheProbe`, `RenderCacheConfig::with_clock`
+  and `database::testing::StatementCounter`.** A test that has to prove that
+  the render cache served a response had the hidden hooks of the framework's
+  own tests and nothing else: `key_for_route_for_test`,
+  `inspect_route_for_test`, `inspect_l1_for_test`, `clear_l0_for_test`,
+  `with_clock_for_test`, `observe_statements_for_test`.
+  `RenderCacheProbe::route(pattern)`, with `.params(..)` and `.at_epoch(..)`,
+  gives the key the route derives (`key()`), the entry of each tier for that
+  key (`l0()`, `l1()`), and `RenderCacheProbe::clear_l0()` empties the first
+  tier and leaves the second as it is. The probe derives the key with the
+  function the middleware uses, so you tell it each dimension the policy of
+  the route varies on: `.login(id)` for `Principal`, `.tenant(id)` for
+  `Tenant`, `.locale(tag)` for `Locale` (the current locale of the process
+  when you leave it out) and `.host(host)` for `Host`; a route that varies on
+  `Host` and a probe with no host is an error that names the dimension. `l0()`
+  reads through `MemoryRenderStore::peek`, which does not count as a use, so a
+  probe between two requests does not change what the first tier evicts next;
+  `RenderCache::inspect` counts as a use. `RenderCacheConfig::with_clock`
+  installs the clock the runtime reads, so a test moves an entry through its
+  freshness bands without a sleep. `StatementCounter::install(&mut
+  connection)` counts the prepared statements run through a connection, so a
+  test shows that a request the cache served ran none; unprepared SQL and
+  transaction control are not counted. All of it is compiled with the
+  `testing` feature, and no function of it panics: an error names the route
+  and never a login, a parameter or a key. What you have to change: a test
+  that called `RenderCacheConfig::with_clock_for_test` calls `with_clock`. The
+  other hooks stay for the framework's own tests, and are compiled with the
+  `testing` feature only.
+- **A binding that lives for one request: `App::scoped`.** The container had
+  bindings for the process and overrides for a test, and nothing between them,
+  so a service that belongs to one request, such as the database handle of the
+  tenant or an API client bound to the request, was global and leaked between
+  requests, or was built by hand in every handler. `App::scoped::<T>(factory)`
+  and `App::bind_scoped` register a binding whose factory runs at most once in
+  a scope, at the first `App::get`, and whose value is dropped when the scope
+  ends. The framework opens a scope for each request, each WebSocket session,
+  each attempt of a queued job, each attempt of a queued listener, each run of
+  a scheduled task, a workflow or a supervisor, and each console command. An
+  after-commit callback, a hook that runs after the response and the body of a
+  streamed response share the scope of the request that registered them.
+  `App::run_scoped(future)` opens a scope of your own,
+  `App::in_current_scope(future)` carries the scope of the caller into a
+  future that you spawn, and `App::spawn_scoped` does both steps. Outside a
+  scope, `App::resolve` returns an error that names the type, and `App::get`
+  logs a warning and returns `None`: a scoped binding never builds a value
+  that lives for the process. A test override wins over a scoped binding. A
+  factory is synchronous and runs once: a second task of the scope that asks
+  for the value while it is built waits for it on its thread, and a cycle of
+  scoped factories, in one task or across tasks, is an error.
+- **The permissions of a user answer the gate: `rbac::register_gate_bridge`.**
+  The roles and permissions of RBAC and the gate did not know each other, so
+  `Gate::allows_async("edit posts", ..)` did not see a permission that the
+  user holds, and an application had two systems of authorization side by
+  side. `suprnova::rbac::register_gate_bridge::<User>()`, called once in the
+  bootstrap, makes every permission that a user holds, directly or through a
+  role, an ability of the gate. An ability that is no permission of the user
+  goes on to the gate definitions and the policies, so the bridge allows and
+  never denies. It reads the permissions of a user once for a request, through
+  `GateBridgeMiddleware`, which the call installs as the first global
+  middleware. A grant or a revocation made before the first check of a request
+  is seen by that check; after it, from the next request on. A check inside
+  `DB::transaction` reads for itself and keeps nothing, so a grant that is
+  rolled back does not answer after the rollback. A unit of work that runs
+  inside a request in a scope of its own, such as a job that the sync queue
+  driver runs inline, reads for itself too. A read that fails is logged and
+  allows nothing. The permissions answer the async forms of the gate,
+  `allows_async`, `authorize_async` and `inspect_async`. The forms without
+  `async` cannot wait for a database and skip them. `Gate::before_async` is
+  the hook the bridge is built on, and an application can register hooks of
+  its own with it. A `Some(false)` from an async hook denies on the async
+  forms only: a hook that must deny on every form belongs in `Gate::before`.
+  Without the call nothing changes.
+- **An application registers guards of its own: `Auth::extend` and
+  `Auth::via_request`.** `Guard` was a public trait, but the manager built
+  guards from two drivers, session and token, so a guard for an API key, a
+  client certificate or a single sign-on could be written and not registered,
+  and `Auth::guard("api_key")` and the middleware that takes a guard name
+  could not use it. `Auth::extend(driver, factory)` registers the factory of a
+  driver, and `GuardConfig::custom(driver, provider)` declares a guard of it.
+  The factory gets the name of the guard and its provider.
+  `Auth::via_request(name, resolver)` is the short form for a guard that reads
+  the request: the resolver gets the request and answers with the user, and
+  the guard is declared with
+  `GuardConfig::custom(AuthManager::via_request_driver(name), provider)`. The
+  middleware for the guard runs the resolver once for a request. Outside that
+  middleware the guard reports no user, as the token guard does. An error of a
+  factory or of a resolver fails the request with 500 and is never a guest. A
+  guard of the application is read-only through the manager:
+  `Auth::stateful_guard` returns an error for it, and so do `Auth::logout`,
+  `Auth::login_id` and `Auth::login_remember` when such a guard is the default
+  guard, before they change anything. A guard of the application has no `:` in
+  its name: resolving such a guard, or registering a resolver for it with
+  `via_request`, is an error. A logout forgets the users that the guards of
+  the application resolved in the request, so the request does not sign itself
+  back in. Declared as the default guard, a guard of the application answers
+  `Auth::user` and the unnamed `AuthMiddleware::new()`. The principal that the
+  middleware attests for Live is `<guard>:<id>` for a guard of the
+  application, so the same id under two guards is two principals; a session
+  user attests its bare id. What you have to change:
+  `AuthManager::via_request` returns a `Result`. `GuardDriver` has the variant
+  `Custom(String)` and is no longer `Copy`, so code that copies a driver
+  borrows it or clones it, and a `match` that names every variant has one more
+  to name.
+- **`suprnova::eloquent::prevent_lazy_loading(true)` refuses a relation read
+  that runs one query for each row of a list.** A template that reads
+  `post.author()` for each of 50 posts runs 51 queries, and nothing said so
+  until the load of production. With the switch on, a relation read on a model
+  that came out of a query that returned more than one row, when the relation
+  was not loaded with `with(..)`, `load(..)` or `load_missing(..)`, runs no
+  query and returns an error that names the model and the relation. A model
+  from `find`, `first`, a `get` that returned one row, or `create` reads its
+  relations as before, as in Laravel. `count()` of a relation is not refused.
+  `handle_lazy_loading_violation(handler)` registers one handler for the
+  process, which gets a `LazyLoadingViolation` with the names of the model and
+  the relation; with a handler the read goes on, so a staging system can log
+  the reads and keep serving. `clear_lazy_loading_violation_handler()` removes
+  it, and `preventing_lazy_loading()` reads the switch. The switch is off by
+  default, and with it off every read behaves as before. Turn it on in the
+  bootstrap of the application outside production.
+- **A test moves the clock the framework reads: `suprnova::clock::now()` and
+  `suprnova::testing::TestClock`.** The framework read the wall clock with
+  `chrono::Utc::now()` in about 170 places, and `tokio::time::pause` moves the
+  timers of Tokio and not those reads, so a test of a signed URL that expires,
+  a session that idles out, a scheduled task that is due, a window of a rate
+  limit or a model that becomes prunable had to sleep. Every such read goes
+  through `suprnova::clock::now()`, and so do the timestamps the `#[model]`
+  macro writes, the due check of a scheduled task without a time zone and its
+  one-run-a-minute gate, and the touched-at stamp of the session. Without the
+  `testing` feature `now()` is `Utc::now()` and nothing else. With it,
+  `TestClock::freeze()` and `TestClock::travel_to(at)` stop the clock of the
+  current thread at a time you move with `advance` and `set`, until the guard
+  is dropped, and `TestClock::scope(at, |clock| future)` holds a time across
+  `.await` and on a multi-thread runtime; `clock.run(future)` carries it into
+  a task you spawn. A clock of one test never reaches another test that runs
+  beside it. Three reads keep the wall clock, because each is compared with a
+  clock a test cannot move: the health endpoint, the retry time of a workflow
+  run (compared with `NOW()` of the database), and the window of the
+  `RateLimiter` facade (its cache key expires in real time). The in-memory
+  driver of `RateLimitMiddleware` measures with `tokio::time::Instant`, which
+  `tokio::time::pause` moves, and the Redis driver reads the clock. What you
+  have to change: code of your own that reads the time for a decision reads
+  `suprnova::clock::now()` when its tests should be able to move it.
+- **`suprnova::schema::Schema` writes a migration without an identifier enum
+  or `ColumnDef` chains.** A migration can build its tables with
+  `Schema::create(manager, "posts", |t| { t.id(); t.string("title");
+  t.timestamps(); })` and `Schema::table`, `Schema::drop`,
+  `Schema::drop_if_exists`, `Schema::rename`, `Schema::has_table` and
+  `Schema::has_column`. The layer builds SeaORM's `Table::create()`,
+  `Table::alter()`, `Index` and `ForeignKey` statements and runs them on the
+  `SchemaManager` the migration is given, so every statement runs on the
+  migration's own connection and transaction, and a SeaORM migration and a
+  `Schema` migration can sit in one `Migrator`. `Blueprint` has `id()` (a
+  `BIGINT` auto-increment primary key), `foreign_id(name).constrained(table)`
+  with `on_delete` and `on_update`, eighteen column types, the modifiers
+  `nullable`, `default`, `unique` and `length`, `index` and `unique` over
+  several columns, and in `Schema::table` also `rename_column`, `drop_column`,
+  `drop_index` and `drop_foreign`. A column is `NOT NULL` unless it is
+  `nullable()`. `timestamps()` and `soft_deletes()` create the `created_at`,
+  `updated_at` and `deleted_at` columns as `VARCHAR(255)`, because
+  `#[suprnova::model]` stores a `DateTime<Utc>` field as RFC 3339 text unless
+  the field declares a cast; `timestamp_tz` with a native cast gives a native
+  column. On SQLite, adding or dropping a foreign key on an existing table is
+  an error that is returned before any statement of the call runs, and every
+  other alteration runs as its own statement. The layer is not re-exported at
+  the crate root, where `suprnova::Schema` is SeaORM's `Schema`.
+  `make:migration` generates SeaORM migrations as before.
+
+### Changed
+
+- **Magnetar's `CeremonyStore` takes a named request for its atomic
+  transition.** `transition_and_consume` and `transition_and_consume_exact`
+  took six and seven positional strings, so a transposed selector or state
+  compiled and acted on the wrong ceremony. Both take a `TransitionAndConsume
+  { transition, expected, next, consume }` whose two ceremonies are
+  `CeremonyRef { selector, kind }`, and the exact form takes the consume id as
+  its second argument. A store that overrides either method changes its
+  signature to match.
+- **`delete_all` on a soft-delete model soft-deletes.** It issued `DELETE` on
+  every model, so `Post::query().filter(...).delete_all()` permanently removed
+  rows that a row-level `delete()` would have trashed. On a model declared
+  with `soft_deletes` it now writes the tombstone, and `updated_at` when the
+  model manages timestamps, and the rows stay readable through
+  `with_trashed()`. `force_delete_all()` is the explicit hard delete.
+  `Builder::without_global_scope::<S>()` and
+  `Builder::without_global_scopes()` are supported chain methods.
+- **`#[scopes]` refuses a scope written in the wrong form.** A method in a
+  `#[scopes]` block that took `&mut Builder<User>`, named the model instead of
+  `Self`, or returned nothing was left an ordinary method, and no scope
+  reached the builder. It is now a compile error on the signature that names
+  the accepted shape, `fn name(query: Builder<Self>, ...) -> Builder<Self>`. A
+  method that handles no builder still passes through unchanged, and
+  `#[not_scope]` marks a helper that does handle one.
+- **`suprnova serve` runs the pending migrations once, when it starts, and no
+  longer on every save.** The backend runs under a file watcher, and an
+  application started with no subcommand migrates before it serves, so every
+  save of a source file ran every pending migration against the developer's
+  database, the draft of a migration saved a moment ago included. A migration
+  that has run is not run again when its file changes, so the database kept
+  the schema of the first draft. `serve` now runs `migrate` once before the
+  backend starts and starts the watched backend with `serve --no-migrate`. The
+  frontend and the processes of `Suprnova.toml` start first and do not wait
+  for it. When a file under `src/migrations` changes after that, `serve` says
+  that it was not run and that `suprnova migrate` runs it; with `--json` that
+  is the new event `{"type":"migrations_changed","ts":...}`, and the run at
+  the start shows as a process named `migrate`. `--migrate always` restores
+  the old behaviour, and `--migrate never` or `--no-migrate` runs no migration
+  at all. When the run at the start fails, the backend is left to migrate by
+  itself for that session, as before: it does not serve until the migrations
+  pass. A project with no `src/migrations` directory is left to migrate by
+  itself as well.
+- **`seed::clear()` is a supported function of the `testing` feature.** It was
+  hidden from the documentation as an internal helper, and it is the only way
+  for the tests of an application to reset the registry of the seeders, which
+  is one for the process and which the guard of the test container does not
+  reset. The manual told readers to call it and said in the same breath that
+  it was hidden. It is documented now and compiled with the `testing` feature
+  alone, which is a default feature, so a test suite needs no change. A build
+  with `default-features = false` and without `testing` no longer has the
+  function.
+- **The paginators serialise to Laravel's JSON shape.** `LengthAwarePaginator`
+  had `data`, the counters and `path`, and no URL of a page and no `links`;
+  the simple paginator had `has_more`, and the cursor paginator had the
+  cursors and no URL. A front end that was written for Laravel's paginator
+  JSON, the pagination components of the Inertia starter kits among them,
+  could not read them. The three now have the fields of Laravel's `toArray()`:
+  `first_page_url`, `last_page_url`, `next_page_url`, `prev_page_url` and
+  `links` on the paginator with a total, `current_page_url`, `first_page_url`,
+  `next_page_url`, `prev_page_url`, `from` and `to` on the simple one, and
+  `next_page_url` and `prev_page_url` on the cursor paginator. `links` has the
+  window of pages and the labels of Laravel. A URL is the `path` and the page
+  parameter, and a `path` with a query string keeps it. Every field that was
+  there is still there, and `path` is still left out when it is not set.
+  `LengthAwarePaginator::links()`, `next_page_url()` and `previous_page_url()`
+  return the same values in Rust, and the other two paginators have their own.
+  A page parameter that the `path` has already is replaced, so the URL of the
+  current request can be given as the `path`, and a fragment of the `path`
+  stays at the end of the URL.
+- **A web push subscription that cannot be used is
+  `WebPushError::InvalidSubscription`.** An endpoint that is no URL, that is
+  not `https`, that names an address in place of a host, or that names a host
+  that is no push service was `WebPushError::Internal`, with the text
+  `internal:` in front. A key that is not what RFC 8291 asks for was
+  `WebPushError::Encryption`: a `p256dh` or an `auth` that is no base64url or
+  has the wrong length, a `p256dh` that is not in uncompressed form or is no
+  point of the P-256 curve. Bad stored data read as a fault of the crate, and
+  no caller could tell the two apart. The new variant says which rule refused
+  the subscription and is not retryable. `WebPushChannel` handles it as it
+  handles a subscription that is gone: it logs a warning and the dispatch
+  succeeds, so a queue does not send the job again, with every channel that
+  delivered before this one. A stored route that is no subscription at all is
+  handled the same way. It was an internal error. No warning of the channel
+  has the endpoint, because the path of an endpoint is the token that reaches
+  the browser: a warning has the host and `endpoint_sha256`, the first 16
+  hexadecimal digits of the SHA-256 of the stored endpoint, which finds the
+  row. The warning for a subscription that is gone had the whole endpoint. The
+  errors of the crate's own headers stay `Internal`, and a payload that is too
+  large and a failure of the encryption stay `Encryption`. A `match` on
+  `WebPushError` that names every variant has one more to name.
+- **A database error on the payment webhook path keeps its type:
+  `PaymentError::Database`.** The webhook route made a text of every database
+  error, `PaymentError::Internal(format!("{e}"))`, in twenty-two places, so
+  the code that decides what to do with a failed webhook could not ask whether
+  the failure was a lost connection, which the next attempt cures, or a
+  violated constraint, which none does. The new variant has the
+  `sea_orm::DbErr` as its source, reachable with `error.source()` and
+  `downcast_ref`, and `From<sea_orm::DbErr>` makes a statement end in `?`. The
+  text of the error is what it was, and the route answers 503 for every
+  database error as it did: the variant is what a later decision can be made
+  on, and none is made yet. `Debug` prints the variant with the text of the
+  database error and not with its `Debug`, which for a violated constraint
+  names the values of the key. A `match` on `PaymentError` that names every
+  variant has one more to name.
+- **`suprnova::payments` names the types it exports.** The module had `pub use
+  dto::*;`, the only glob export of the framework. It exported the modules of
+  `dto` as well as the types, so every type had two public paths,
+  `payments::StartSessionRequest` and
+  `payments::session::StartSessionRequest`, and a type that was added to `dto`
+  was public in `payments` without anybody deciding so. The twenty-five types
+  are named now. The paths through the modules, `payments::session::` and its
+  seven siblings, are gone: the modules are reached as
+  `payments::dto::session`.
+- **`Http::send` decides once whether an attempt is retried.** The loop had
+  the decision twice, for a response with a status of the server and for an
+  attempt that got no response: the same check of the policy, of the method
+  and of the `retry_when` predicate, in two blocks that a change had to keep
+  alike by hand. It is one function now, and the two outcomes are retried by
+  one rule. What is retried and how long the request waits is what it was.
+- **The parser of `#[model]` has no `#[allow(dead_code)]` left.** Sixteen
+  suppressions on `ModelInput` and `RelationDecl` said that a later task would
+  read the field. The tasks are done and the fields are read, so the
+  suppressions hid nothing and would have hidden a field that a later change
+  leaves unread. They are removed with the comments that named the tasks.
+- **The dogfood application's `bootstrap.rs` imports what it uses.** Its
+  import of the framework had a blanket `#[allow(unused_imports)]`, which hid
+  that `singleton` was imported and never used, and would have hidden every
+  later one. The suppression and the import are removed.
+- **The `Data` derive has no module-wide
+  `#![allow(clippy::collapsible_if)]`.** The attribute turned the lint off for
+  the whole file with no reason given. It is removed, and the nested
+  conditions it hid are written as one.
+- **`mail::mailable_registry::render_outgoing` takes its values as a struct.**
+  The function had fourteen arguments in a row, four of them `Vec<Address>`
+  one after the other: the recipients, the copies, the blind copies and the
+  reply addresses. Two of them in the wrong order compile, and the mail goes
+  to the wrong list. It takes `any`, `mailable_name` and a
+  `RenderOutgoingParams` now, whose fields are named. `RenderOutgoingParams`
+  implements `Default`, so a caller names the fields it has. A caller of
+  `render_outgoing` has to build the struct. The framework has one, the job
+  that sends a queued mail.
+- **`OutputFormat::WebP` is lossy and honours `quality`, and
+  `OutputFormat::WebPLossless` is new.** WebP was always written lossless, so
+  `.quality(80).format(OutputFormat::WebP)` gave the same file for every
+  quality, and for a photo a larger file than the JPEG it replaced. `WebP` is
+  lossy now, at the quality of the pipeline, which is 70 when none is set. The
+  built-in driver writes it lossless in two cases, because the lossy form of
+  WebP cannot hold the image: when a pixel is not fully opaque, and when a
+  side is longer than 16383 px. `WebPLossless` is always lossless and ignores
+  the quality. Both have the content type `image/webp` and the extension
+  `webp`. The ImageMagick driver writes `WebP` lossy with its alpha channel,
+  and passes `-define webp:lossless=true` for `WebPLossless`. What you have to
+  change: a `match` on `OutputFormat` that names every variant, as a driver of
+  your own has, needs an arm for `WebPLossless`. Code that needs the pixels of
+  a WebP to be exact asks for `WebPLossless`. A WebP source that is resized
+  and not converted is written as `WebP`, so an opaque one is written lossy.
+- **`Subscription::update` changes the prices of a subscription on Stripe and
+  on Paddle, and the Paddle adapter cancels at once when it is asked to.**
+  `update` with `new_price_refs` returned `PaymentError::NotSupported` on both
+  adapters, so a change of plan was a cancellation and a new subscription. The
+  list is the set of prices the subscription has after the call: an item whose
+  price is in the list keeps its id and its quantity, an item whose price is
+  not in the list is removed, and a price that is new is added with the
+  quantity 1, except in a swap: when the change removes exactly one item and
+  adds exactly one price, the new price takes the quantity of the item it
+  replaces, so ten seats of one plan become ten seats of the other. The
+  adapter computes the change from a read of the subscription, and the change
+  is not atomic: a change made at the provider between the read and the write
+  can be undone (Paddle takes the whole list) or left in place (Stripe changes
+  items one by one), and the returned subscription shows the result. An empty
+  list, and a list that names a price twice, is `PaymentError::Validation`, on
+  both adapters and on the mock. The new field
+  `UpdateSubscriptionRequest::proration` takes a
+  `suprnova::payments::Proration`: `ProrateNow` bills the difference at once,
+  `ProrateAtRenewal` puts it on the next invoice, and `DoNotProrate` charges
+  nothing for the change. `None` is `ProrateAtRenewal`. On Paddle, a change of
+  prices in the same call as `cancel_at_period_end` or with an
+  `idempotency_key` is `NotSupported`. `cancel(id, false)` of the Paddle
+  adapter cancels the subscription at once, and `cancel(id, true)` cancels it
+  at the end of the billing period; it cancelled at the end of the period for
+  both. Every call of the Stripe and the Paddle adapter has a deadline of 30
+  seconds. A read that gets no answer in that time is a
+  `PaymentError::Provider` whose text ends in "timed out". A call that changes
+  something is a `PaymentError::Provider` whose text says that the outcome is
+  unknown: read the state at the provider before you send the call again. The
+  text of an error that the Stripe or the Paddle adapter builds from an error
+  of its SDK holds the operation and the kind and code of the provider's
+  error, and never the provider's message, an id or a URL: a Stripe API error
+  gives its type, its code and the HTTP status, a Paddle API error its type
+  and code, and a transport error comes without the URL of the request. Stripe
+  `void` of a payment that is already captured is a `Validation` error whose
+  text does not name the payment. The `NotFound` errors of
+  `MockPaymentProvider` carry no id. What you have to change: every struct
+  literal of `UpdateSubscriptionRequest` names the new field, `proration:
+  None` to keep the default. Code that called `cancel(id, false)` on Paddle
+  and counted on a cancellation at the end of the period passes `true`. A test
+  that read an id out of a `NotFound` error of the mock reads it from its own
+  request.
+- **A polymorphic relation takes a target with any key, loads nested
+  relations, and can be touched.** Three limits of `MorphTo` are gone. The id
+  of a morph relation was an `i64`, so a model with a `String`, UUID or ULID
+  key could not be the target: the id is the value of the key of the target,
+  and the `<name>_id` column of the child has the type of that key. All
+  targets of one relation have keys of one type, and a relation that mixes
+  them does not compile, nor does a child whose `<name>_id` field has another
+  type. A parent's `MorphMany` or `MorphOne` is not checked against the
+  child's `<name>_id`, so keep that field at the key type of every parent that
+  owns it. The lazy read of a `MorphTo` finds the target by its key and
+  applies no global scope of the target; the eager load runs the query of the
+  target and applies its global scopes. A nested eager load through `MorphTo`,
+  `with(["commentable.user"])`, returned an error: the loader groups the
+  targets by their type and loads the rest of the path once for each type, and
+  a target type that does not have the relation is an error that names the
+  type and the relation, whether or not a row of that type was loaded.
+  `#[model(touches = [...])]` took `BelongsTo` relations only: it takes the
+  name of a `MorphTo` relation, and a save or a delete of the child writes the
+  `updated_at` of its owner, inside the transaction of the write when there is
+  one. An owner without timestamps is skipped, a soft-deleted owner is not
+  touched, and a null `<name>_id` touches nothing. A `<name>_type` that names
+  none of the targets is an error of the write: `create`, `save`, `update`,
+  `delete` and `force_delete` (and their `_with_tx` forms) resolve every
+  `MorphTo` owner of `touches` after the `Creating`, `Saving`, `Updating` and
+  `Deleting` listeners have run and before the statement, from the values the
+  statement writes, so a listener that rewrites `<name>_type` or `<name>_id`
+  decides the owner, and an owner that cannot be resolved returns `Err` with
+  no row written, no later event dispatched and no owner touched. An empty
+  collection checks a dotted path of `Collection::load` and `load_missing`
+  too. What you have to change: `MorphTo::morph_id` and the id in the
+  `Unknown` variant of the generated enum are a `serde_json::Value`, so code
+  that reads the id as an integer calls `as_i64()`. `<relation>_loaded()` of a
+  `MorphTo` returns the generated enum.
+
+### Fixed
+
+- **The notifications table ships as a migration.** The manual said
+  `suprnova migrate` creates it, but the schema was a SQL file only the
+  framework's own tests loaded, so the database channel failed on its
+  first write in a fresh app. Register
+  `suprnova::notifications::migrations::CreateNotificationsTable` in your
+  `Migrator`: it creates the same table and indexes, and running it over a
+  table you created by hand from the old SQL file is safe on every engine.
+  The SQL file is gone. This fix landed on main after the `v3.0.0` tag
+  (#134).
+- **Nullable JSON columns have casts.** `AsJson`, `AsArray`, `AsObject`,
+  `AsCollection` and `AsArrayObject` store a non-null string, so
+  `AsJson<Option<T>>` wrote the text `null` instead of SQL `NULL`, and a
+  row whose column was `NULL` failed to load. `AsOptionalJson`,
+  `AsOptionalArray`, `AsOptionalObject`, `AsOptionalCollection` and
+  `AsOptionalArrayObject` map `None` to `NULL` and back, and store a value
+  exactly as their non-optional cast does. This fix landed on main after
+  the `v3.0.0` tag (#133).
+- **`SESSION_TABLE` names the session table.** `SessionConfig::table_name`
+  was read and then ignored: the database session driver always used
+  `sessions`. The driver now reads and writes the configured table,
+  `DatabaseSessionDriver::with_table` builds one over another table, and
+  `Config::init` refuses a name that is not 1 to 63 ASCII letters, digits
+  or underscores starting with a letter or underscore. What you have to
+  change: an app that already set `SESSION_TABLE` now stores its sessions
+  in that table, which its migration must create, and an empty
+  `SESSION_TABLE` now fails boot. The driver also stops logging a session
+  id when it skips a write, and the content of a stored payload it cannot
+  parse. This fix landed on main after the `v3.0.0` tag (#132).
+- **Re-running a framework migration no longer fails on an existing index.**
+  The workflow and RenderCache migrations relied on `IF NOT EXISTS`, which
+  MySQL and MariaDB drop from `CREATE INDEX`, and the payments, features and
+  RBAC migrations created their indexes without it, so running one over
+  tables that already existed failed with a duplicate index and blocked
+  every migration after it. Each framework migration now creates an index
+  only when it is missing, with the same columns and uniqueness as before.
+  This fix landed on main after the `v3.0.0` tag (#136).
+- **A `Data` object with a route-parameter field answers 422 for a body
+  that does not fit.** Its extractor answered 400 where the default
+  extractor answers 422 for the same malformed or unknown-key body. This
+  fix landed on main after the `v3.0.0` tag.
+- **A `Data` field may be named `key` or `map`.** The generated
+  `Deserialize` named its locals after the fields, so such a field
+  shadowed the visitor's own variables and the struct failed to compile.
+  This fix landed on main after the `v3.0.0` tag.
+- **`has`, `where_has` and `where_relation` work through a `BelongsTo`
+  relation.** The existence query compared the related table's key with
+  the foreign key as if the relation were a `HasMany`, so every existence
+  query through a `BelongsTo` failed with an unknown column. It now joins
+  the related row's owner key to the parent's foreign key. This fix landed
+  on main after the `v3.0.0` tag.
+- **A model declared beside `use sea_orm_migration::prelude::*` compiles.**
+  That prelude brings `ExprTrait` into scope, whose `max` and `is_null`
+  took over calls the `#[model]` macro emitted for relation counts and
+  `MorphTo` relations. The macro now names those methods by path. This fix
+  landed on main after the `v3.0.0` tag.
+- **Persisting a replica stamps its timestamps.** `replicate` resets
+  `created_at` and `updated_at` for the insert to fill, but `persist`
+  wrote them as built: 1970-01-01, or NULL for an optional field. It now
+  stamps a timestamp its builder left unset, as `create` does, and keeps
+  one the builder set, so a factory can still backdate a row. This fix
+  landed on main after the `v3.0.0` tag.
+- **Touching an owner writes the owner's own date-time storage.** The
+  `touches` cascade bound the time as RFC 3339 text whatever the owner's
+  `updated_at` cast stored, which Postgres refuses for a native date-time
+  column. It now stores the time through the owner's cast. This fix landed
+  on main after the `v3.0.0` tag.
+- **The temporal casts' documentation said Postgres accepts RFC 3339 text
+  for a native column.** It refuses a text parameter for `timestamp` and
+  `timestamp with time zone`; the module documentation now says so and
+  points to the native casts. This fix landed on main after the `v3.0.0`
+  tag.
+- **`Unique` and `Exists` keep database errors out of the response.** A
+  database rule that could not run returned the driver's error as its
+  validation message, and a validation message is rendered into the 422
+  body, so a client could read table names, column types and SQL. The rule
+  now logs the cause under the `suprnova::validation` target and fails the
+  field with `validation-unchecked`. This fix landed on main after the
+  `v3.0.0` tag.
+- **Precognition keeps the errors of an array's elements.** A
+  `Precognition-Validate-Only` header naming `tag_ids` dropped the errors
+  reported under `tag_ids.0`, `tag_ids.1` and so on, so a form validating
+  the field saw success for an invalid array. A field now keeps the errors
+  nested under it, and `tag_ids.*` matches the elements as Laravel's rule
+  key does. This fix landed on main after the `v3.0.0` tag.
+- **The date picker, upload, account menu and notification bell follow the
+  theme.** Their stylesheets read `--sn-color-accent` and
+  `--sn-color-on-accent`, which the token stylesheet never defined, so the
+  selected day, the upload progress bar, the avatar and the unread count fell
+  back to inherited colors and ignored every theme. The token stylesheet now
+  defines both, from `--sn-color-primary` and `--sn-color-primary-contrast`,
+  and the Tailwind preset maps them as `accent` and `on-accent`. An
+  application that vendored these components with `live:add` needs no change:
+  the framework serves the corrected stylesheet. This fix landed on main after
+  the `v3.0.0` tag.
+- **A first `live:model` edit on a public seed promotes it.** The browser
+  runtime sends an immediate `live:model` edit on a public-seed island as a
+  model synchronization with no action, and the action endpoint promoted a seed
+  only for an action, so the first keystroke in such an island answered `500`.
+  The endpoint now promotes the seed on that request, applies the proposals as
+  it does on an instance, and runs no action. This fix landed on main after the
+  `v3.0.0` tag.
+- **The date picker's "Pick the parts" toggle no longer looks like a second
+  field.** The base layer draws every `details` as a bordered surface for the
+  collapsible, and the date picker's disclosure inherited it, so an empty box
+  sat under the date input. The disclosure is now a plain toggle; the year,
+  month and day strips keep their borders. Run `suprnova live:add date-picker`
+  to take the fix into an application that vendored the component. This fix
+  landed on main after the `v3.0.0` tag.
+- **`suprnova generate-types` names and omits plain-struct keys the way serde
+  does.** A struct a prop reaches that derives serde's `Serialize` sends the
+  keys its `#[serde(...)]` attributes give it, but the generator declared every
+  field under its Rust name. It now leaves out `skip` and `skip_serializing`
+  fields, declares `skip_serializing_if` fields optional, names keys by
+  `rename` and `rename_all` (and their `serialize = ...` forms), and drops the
+  `r#` of a raw identifier. Other serde attributes, such as `flatten` and
+  `transparent`, are still not read. A key that is not an identifier is now
+  quoted, which also makes a raw identifier on a derived struct valid
+  TypeScript (`"r#type"`, the key its derive sends). `#[derive(Data)]` and
+  `#[derive(InertiaProps)]` structs keep their Rust names: their own
+  `Serialize` never reads `#[serde(...)]`. This fix landed on main after the
+  `v3.0.0` tag.
+- **Magnetar logs a lockout status failure before the sign-in fails closed.**
+  The password plugin answered `503` when the lockout store could not report
+  an identity's status and logged nothing, while the failed-attempt path
+  beside it logged its error. The status path now logs `lockout status
+  unavailable; failing closed` with the store's error; the response is
+  unchanged.
+- **Magnetar logs a failure to record a rejected two-factor attempt.**
+  Re-enrollment, confirmation and recovery-code rotation discarded the error
+  from the lockout store when they recorded a failed attempt, so a store fault
+  during an attack left no trace. Each now logs a warning with the error; the
+  rejection itself is unchanged.
+- **Magnetar's Redis abuse limiter says why Redis failed.** Every client error
+  became `shared abuse-limiter backend failed`, so a refused connection, a
+  timeout and a script error read the same in the log of a limiter that fails
+  sign-in closed. The message now ends with the Redis client's own description
+  of the fault.
+- **A stored session payload that fails to parse is logged.** The database
+  session driver read a damaged payload as an empty session, which signs the
+  visitor out, and logged nothing. It now logs a warning with the parse error
+  and without the session id. A failed delete of an expired session row is
+  logged as well.
+- **A Live request that cannot be prepared says why in the log.** When the
+  Live runtime could not be bound or a request could not be prepared, the
+  server answered `500 Live request preparation failed` and logged nothing. It
+  now logs the error with the route pattern and the stage, on the HTTP path
+  and on the WebSocket upgrade path; the response is unchanged.
+- **The NOWPayments adapter's HTTP failures name their cause.** A failed
+  request, an unreadable response body and a body that is not JSON each became
+  a fixed `PaymentError::Provider` message. Each now ends with the underlying
+  error, down to the refused connection or elapsed deadline for a transport
+  failure, and never includes the request URL, which carries the payment id.
+- **A failed Live upload cleanup run is logged.** The background loop that
+  retires expired uploads discarded the result of every run, so a store that
+  kept failing left the uploads in place with nothing in the log. A failed run
+  now logs a warning, and the loop retries on its next interval as before.
+- **A model's cast storage aliases stay out of its rustdoc.** `#[model]` emits
+  a `pub type __Suprnova_Cast_Storage_<field>` for each cast field, and each
+  one appeared in the documentation of the application's own models. They are
+  hidden now.
+- **A factory insert fires the model's lifecycle events.** `Factory::create`
+  and `create_many` inserted through SeaORM directly, so `creating`, `saving`,
+  `created` and `saved` never fired and no observer saw a factory's rows. They
+  now take the same insert `Model::create` takes: a `creating` observer can
+  change the attributes or cancel the insert, and `created` runs for every
+  row. `create_quietly()` and `create_many_quietly()` insert with the events
+  muted. A model whose key is not auto-increment keeps the key its factory
+  set.
+- **`DATABASE_URL=mariadb://...` connects.** Only `mysql://` was recognised,
+  so the scheme a MariaDB operator naturally writes failed at connect with no
+  supporting driver. `mariadb://` is accepted for the primary connection,
+  named connections and read replicas, the migrator, and
+  `MariaDbVectorDriver::from_url`, and `DB::driver_title()` answers `MariaDB`
+  for it. The vector driver's pool error no longer quotes the connection URL,
+  which carries the password.
+- **`QUEUE_DRIVER=sync` and `QUEUE_DRIVER=null` select their drivers.** Both
+  drivers existed, but the environment bootstrap knew only `memory`, `redis`
+  and `database`, so `sync` became an in-memory queue with a warning. A
+  `QUEUE_DRIVER` that names no driver is now a boot error in production, where
+  an in-memory queue taken by mistake loses every job at the next restart;
+  elsewhere it still falls back to memory, and the warning lists the accepted
+  names.
+- **A chained job's `Job::delay()` applies.** A chain built each link's
+  envelope with `available_at` set to now, so a job that declares a delay ran
+  at once when it was a link of a chain, head or not. `ChainLink` now records
+  the delay at build time, as it records the queue, and the link becomes
+  available that long after it is reified: at dispatch for the head, and when
+  the link before it completes for every other link. `ChainLink` gains the
+  public field `delay_secs`, so code that builds one with a struct literal has
+  to name it. Chain payloads written before the field existed decode as links
+  with no delay.
+- **Batches, chains and failed-job retries go through the queue fake.** Only
+  the `Queue::push` family checked `Queue::fake()`.
+  `Queue::batch().dispatch()` and `Queue::chain().dispatch()` went to the
+  driver, so a faked test failed with "queue driver not initialized" when no
+  driver was installed and pushed real jobs when one was.
+  `Queue::retry_failed` and `Queue::retry_all_failed` did the same. All four
+  record in the fake now and write to no driver. A batch is still stored in
+  the batch repository, so the id the caller receives names a batch.
+  `queue::testing` gains `batched()`, `assert_batched`, `assert_batch_count`,
+  `assert_nothing_batched`, `chained()`, `assert_chained` and
+  `assert_nothing_chained`, with the records `FakedBatch` and `FakedChain`.
+  The jobs of a batch and the head of a chain are recorded as pushes too, so
+  `assert_pushed` sees them.
+- **The queue worker honors a retry hint.** A job that failed with
+  `FrameworkError::RateLimited` carrying a `retry_after` was retried on its
+  own backoff, so a queued web push that a push service refused with `429` and
+  `Retry-After` went back to the service early, or waited far longer than it
+  was asked to. The worker now releases such a job for the hinted time, capped
+  at 24 hours (`queue::retry::RETRY_HINT_CEILING`). Every other failure keeps
+  the job's backoff. `queue::retry::delay_after_failure` is the function the
+  worker calls.
+- **The middleware priority list orders the chain.**
+  `append_middleware_priority` and `prepend_middleware_priority` recorded a
+  list that nothing read, so middleware ran in the order it was registered
+  whatever the list said, and an application that relied on the documented
+  order could run authentication before the session was loaded. A chain is now
+  put in the order of the list when it runs, for a matched route, the
+  fallback, an unrouted request and a WebSocket upgrade alike. A middleware
+  the list names moves in front of any middleware the list places after it.
+  Every other middleware keeps its place, so one registered after
+  `AuthMiddleware` still runs after it. The list orders global, group and
+  route middleware together. It sees the middleware registered by type; a
+  middleware boxed by hand with `into_boxed` and added with
+  `.middleware_boxed(...)` keeps its place. An empty list costs one read per
+  request.
+- **`#[derive(Command)]` without a `description` keeps clap's own about
+  text.** The derive called `.about("")` when `#[console(description =
+  "...")]` was left out, which replaced the about text clap had taken from the
+  struct's doc comment or from `#[command(about = "...")]`. A command
+  described the way clap users describe one showed an empty line in the
+  console's list of commands. The derive now sets the about text only when a
+  `description` is given, and a `description` still overrides the doc comment.
+  `CommandEntry::about()` returns the text the help shows, whichever of the
+  three it came from; `CommandEntry::description` stays the attribute's text
+  and is empty when the attribute has none.
+- **`suprnova schedule:list --timezone=<zone>` is accepted.** The
+  application's own `schedule:list` has taken `--timezone` since the flag
+  shipped, and the manual shows it through the CLI, but the CLI's subcommand
+  took no arguments and ended with `unexpected argument '--timezone'` and exit
+  code 2. The CLI now takes the flag and hands it to the application, which
+  checks the zone name.
+- **The scaffolded `src/tasks/mod.rs` shows a task that compiles.** Its
+  example implemented a `ScheduledTask` trait with `name` and `schedule`
+  methods. The trait is `Task`, its only method is `handle`, and the name and
+  the times a task runs at are set where it is registered. Every new project
+  received the wrong example, and copying it gave an unresolved import. The
+  comment now shows what `make:task` generates, with the registration in
+  `src/schedule.rs`.
+- **A render cache policy that varies on `FeatureVersion`, `ConfigVersion` or
+  `Application(name)` is refused when it is registered.** Nothing gives these
+  three dimensions a value, so a route that declared one could not build its
+  key and every request for it went past the cache, while the route looked
+  cached in the code. `try_render_cache` and `try_render_cache_group` now
+  return an error that names the route or the group and the dimension, for a
+  full policy and for a patch that brings the dimension in, so the application
+  stops at boot. The other six dimensions register as before. This refuses one
+  arrangement that cached before: a group whose policy declared one of the
+  three, with a patch on every route that replaced the dimensions. The group
+  is refused now, and the dimension is to be taken out of its policy.
+- **Telemetry is exported, each signal to its own path, and a signal can have
+  an endpoint of its own.** With the `otel` feature the OTLP exporters had no
+  HTTP client: each one failed to build with `no http client specified`, no
+  trace, metric or log left the process, and the error was logged before a log
+  subscriber existed, so nothing showed it. The exporters have the blocking
+  `reqwest` client now, and an exporter that cannot be built is reported after
+  the subscriber is installed. `init_telemetry` also gave the base
+  `OTEL_EXPORTER_OTLP_ENDPOINT` to the exporter of each signal, and the
+  exporter uses an endpoint it is given in code as it is written, so the URL
+  of every signal was the root of the collector, where a collector has
+  nothing, and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
+  `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` and `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`
+  had no effect. Each signal is now sent to its own path under the base,
+  `/v1/traces`, `/v1/metrics` and `/v1/logs`, and a signal with a variable of
+  its own is sent to that URL as it is written, as the OTLP specification
+  says. Traces can go to one collector and metrics to another. The base
+  endpoint is still what turns telemetry on. `OtelConfig` has the three
+  endpoints as fields, `traces_endpoint`, `metrics_endpoint` and
+  `logs_endpoint`, which `from_env` reads, so code that builds an `OtelConfig`
+  with every field named has three more to name. A signal whose endpoint is no
+  URL is left out and reported, and the other signals are exported; the report
+  never has the endpoint in it, which can carry a password or a token. A base
+  endpoint that was given a path of a signal to make up for the missing one,
+  such as `http://collector:4318/v1/traces`, is to be the base again: the path
+  is added to it. An endpoint is a URL with the scheme `http` or `https` and a
+  host: a blank base endpoint does not turn telemetry on, and a signal whose
+  endpoint is a path alone is left out and reported, where it was built and
+  sent nothing. `OTEL_EXPORTER_OTLP_COMPRESSION=gzip` works; `zstd` is not
+  compiled in and leaves the signals out, with the reason in the log. What the
+  exporters log about their own requests is printed and not exported, so a
+  process at debug level does not send lines about its own sending without
+  end.
+- **The session middleware does not panic on a poisoned lock.** The session,
+  the cookies that wait for the response, the remember tokens that wait to be
+  revoked and the list of the fresh Magnetar sessions were locked with
+  `.lock().unwrap()` in thirty places, which panics when an earlier panic left
+  the lock poisoned. The list of the fresh sessions is shared with the
+  clean-up task that runs after the request, so a panic in one request could
+  end the clean-up of it. The locks are taken with a function that goes on
+  with the value of a poisoned lock. The three lists are changed by code of
+  the framework alone, which cannot panic between two writes, so they are
+  whole after any panic. The session is changed by closures of the
+  application: when a closure of `session_mut` panics and a Live action or a
+  listener catches the panic, the request goes on and can read the session,
+  but the middleware does not store it. It retires a Magnetar session that the
+  request issued, takes back a remember cookie that the promotion of a second
+  factor issued, answers 500, and the stored session stays as it was, which is
+  what such a request did before. The policy of the framework for locks is
+  that a poisoned lock is an error or is recovered, and never a panic.
+- **`generate-routes` finds a form request by every name it is declared
+  with.** The command read the source for `#[derive(FormRequest)]` and for the
+  helper attribute `#[form_request(..)]`. An application writes neither: the
+  crate root exports the derive as `FormRequestDerive`, because `FormRequest`
+  is the trait there, and the short form is the attribute `#[request]`. A
+  struct with one of those was left out of the generated routes, so its
+  request type was missing in the TypeScript, and no message said so. The
+  command reads `#[request]`, `#[derive(FormRequestDerive)]` and
+  `#[derive(FormRequest)]`, each bare or behind `suprnova::`, and the helper
+  attribute. `generate-types` read `InertiaProps` and `Data` in both forms
+  already, and the three detectors ask one function.
+- **`chunk_by_id` and `lazy_by_id` walk a table whose key is no `i64`.** The
+  cursor of the walk was an `i64`, so a model with a `String` key, or with
+  `unique_id = "uuid"`, `"uuid_v4"` or `"ulid"`, got the first batch and then
+  an error. The closure had run on that batch by then, and a table that fits
+  in one batch never gave the error. The cursor is the value of the key as the
+  model has it, so an integer key and a string key both walk, in the order of
+  the key. For a key with no order in time, a UUID v4, a row that is inserted
+  during the walk with a key below the cursor is not seen by that walk. A key
+  that cannot be a cursor is refused before the first query and before the
+  closure sees a row: a composite key, and a key column that is no integer and
+  no text, such as a native `uuid::Uuid`, a timestamp or a decimal. `lazy()`
+  and `cursor()` walk through `lazy_by_id`, so both hold for them. What you
+  have to change: a walk over a model with such a key returned `Ok` when the
+  table fit in one batch, and returns the error now. Use `chunk()` for it.
+
+### Security
+
+- **Global scopes can no longer be bypassed by a trashed view, a chained
+  opt-out, or an `or_where`.** Scopes were applied when `Model::query()` built
+  the builder, which left three holes. `with_trashed()` and `only_trashed()`
+  started from a bare builder and ran with no global scope, so on a model with
+  a tenant scope they returned every tenant's rows. `query().or_where(...)`
+  folded into the scope's own term and read `(tenant_id = ? OR ...)`, and on a
+  soft-delete model `(deleted_at IS NULL OR ...)`. And
+  `query().without_global_scope::<S>()` compiled and did nothing. The
+  soft-delete filter and the registered scopes are now folded in when the
+  query runs: the statement is `<scopes> AND <your terms>` with an `OR` group
+  as one atom, the trashed views lift only the soft-delete filter, and an
+  opt-out lands wherever it is chained. `update_all`, `delete_all` and
+  `increment_each` resolve the same way, so a mass write reaches only the rows
+  a read would return. A scope that reads per-request state reads it when the
+  query runs.
+- **Behind a proxy, `Request::ip()` is the address the proxy saw, and no
+  longer one the client wrote.** A proxy adds the address it saw to the right
+  end of `X-Forwarded-For` and leaves what was there, and `ip()` returned the
+  left end. Behind nginx, Traefik, HAProxy or a cloud load balancer, a client
+  that sent the header itself chose the address the application saw: a new
+  rate-limit bucket with every request, and the address of a payment provider
+  for a webhook that checks `remote_addr`. `ip()` now reads the header from
+  the right and returns the first address that is no trusted proxy. It reads
+  every line of the header as one list, reads an entry with a port
+  (`203.0.113.5:54321`, `[2001:db8::5]:443`) as its address, and ends at an
+  entry it cannot read, where the answer is the proxy that wrote that entry.
+  `X-Real-IP` is read only when the request has no `X-Forwarded-For` at all.
+  **What to check when you upgrade:** every proxy between the client and the
+  application has to be in `APP_TRUSTED_PROXIES`, not the last one alone. A
+  proxy that is not listed is taken for the client, and all of its clients
+  share one address; that includes the address a load balancer adds behind the
+  client's, as the external Application Load Balancer of Google Cloud does.
+  `APP_TRUSTED_PROXIES` takes ranges in CIDR form for that,
+  `10.0.0.5,173.245.48.0/20,2400:cb00::/32`, which is how the edge of a
+  content delivery network is listed; in code it is
+  `TrustedProxiesConfig::and_networks` with `ProxyNetwork`. A range must hold
+  proxies and nothing else, because a client that connects from a trusted
+  address is believed like a proxy, and the range of every address
+  (`0.0.0.0/0`) is refused. A proxy that writes `X-Real-IP` alone has to
+  remove the `X-Forwarded-For` of the client. An IPv4 address that is written
+  as an IPv6 one (`::ffff:10.0.0.5`) is the IPv4 address, in the headers and
+  for the peer. `Request::ips()` still returns the whole chain and is a
+  record, nothing to decide by.
+- **A cap on the WebSocket connections one client address holds open:
+  `RateLimitMiddleware::connections_per_ip(n)`.** The only limit on open
+  connections was the server-wide `SERVER_MAX_CONNECTIONS`, one number for
+  every client together, so a single address that opened WebSockets and kept
+  them could use all of it and lock every other client out of HTTP and
+  WebSocket alike. The broadcasting and WebSocket chapters showed
+  `connections_per_ip` on the `ws!` route; it did not exist. The middleware
+  answers `429 Too Many Requests` when the address already holds `n` sockets.
+  A socket is counted until its session ends, close frame or none, and an
+  upgrade that a later middleware refuses gives its place back at once. The
+  address is the one `Request::ip()` resolves through the trusted proxies; an
+  IPv6 address is counted with its /64 network, because one client holds a
+  whole /64. The counts are kept per process; a clone shares them, so one cap
+  can guard several routes, and `open_for(address)` reads a count. On a route
+  that is no WebSocket route the cap counts the requests being handled at one
+  time and does not cover a streamed response.
+  `Request::hold_for_connection(guard)` is the part other middleware can use:
+  it keeps a guard alive until the socket of an upgrade ends, where a guard
+  the middleware holds itself is dropped at the handshake.
+- **Magnetar does not quote decrypted state in an error.** Four places decrypt
+  the state of a ceremony or of a device session and decode it, and the error
+  for state of another shape was the message of the JSON decoder, which quotes
+  the value it could not read. That state holds challenges, session grants and
+  tokens, and two of the errors are shown to the client. The error has the
+  kind of the mistake and its position now, and nothing of the content. It can
+  happen where a deployment changes the shape of the state while a ceremony is
+  under way.
+- **An encrypted cookie opens under its own name and in no other way.**
+  Release 1.3.0 bound the name of a cookie into its encryption and kept a
+  fallback that still opened a value written without the name, to be removed
+  in 1.4.0, which was never released. While the fallback was there, such a
+  value opened in every cookie, so the binding protected nothing against it.
+  The fallback is removed for cookies. It stays for the other purposes, where
+  it opens stored values that do not expire as a cookie does: read those with
+  `decrypt_string_for_with_origin` and write them again. What you have to
+  change: `Cookie::read_encrypted(wire)` is removed, use
+  `Cookie::read_encrypted_for(name, wire)`. `Crypt::encrypt_string` and
+  `Crypt::encrypt` with `CryptPurpose::Cookie` return an error, use
+  `Cookie::encrypted(name, value)` or `Crypt::encrypt_string_for`.
+  `Crypt::decrypt_string`, `decrypt_string_with_origin`, `decrypt` and
+  `decrypt_with_origin` with `CryptPurpose::Cookie` return an error, use
+  `Cookie::read_encrypted_for` or `Crypt::decrypt_string_for`. A cookie that
+  was written before 1.3.0, or with `encrypt_string`, does not open any more.
+  For the session cookie and the remember cookie the user signs in again, and
+  for the maintenance bypass the operator visits the secret URL again. No
+  request fails for it.
+
 ## 2.1.0 - 2026-09-18
 
 ### Added

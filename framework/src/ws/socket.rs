@@ -5,11 +5,19 @@
 //! and drains an mpsc; the handler-facing send methods push into the mpsc.
 //! This means the framework can also push messages (heartbeat pings, future
 //! broadcaster fanout) without locking the handler's send path.
+//!
+//! The same queue lets application code send from a second task.
+//! [`WsSocket::sender`] hands out a [`WsSender`], which is one more handle
+//! on the queue, and [`WsSocket::split`] takes the socket apart into a
+//! [`WsSender`] and a [`WsReceiver`].
 
 use crate::error::FrameworkError;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, Stream, StreamExt};
+use std::fmt;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -25,16 +33,80 @@ use tokio_tungstenite::tungstenite::{
 /// can't OOM the process.
 const SEND_CHANNEL_CAPACITY: usize = 32;
 
+/// The sending half of a WebSocket connection.
+///
+/// It is a handle on the queue that the connection's forwarder task
+/// drains. A clone is cheap, and every clone sends on the same
+/// connection, in the order in which the queue accepted the frames. The
+/// methods take `&self`, so a task that holds a `WsSender` sends while
+/// the handler waits in `recv`.
+///
+/// Take one from [`WsSocket::sender`] or from [`WsSocket::split`].
+///
+/// # When the connection ends
+///
+/// The connection does not wait for its senders. When the handler
+/// returns, the framework sends the close frame and the forwarder
+/// stops, however many `WsSender` values are still alive. From then on
+/// every send returns an error, [`WsSender::is_closed`] returns `true`
+/// and [`WsSender::closed`] completes. A task that keeps a sender for
+/// longer than the handler runs treats any of the three as its signal
+/// to stop.
+///
+/// That is the connection of a route, which the server closes. A socket
+/// that code built for itself with [`WsSocket::from_stream`] has nobody
+/// to close it: it ends when a close frame is sent, or when the socket
+/// and every sender of it are dropped.
+///
+/// # Backpressure
+///
+/// The queue is bounded. A send waits while the queue is full, so a
+/// peer that reads slowly slows its senders down and the process's
+/// memory does not grow.
+#[derive(Clone)]
+pub struct WsSender {
+    sender: mpsc::Sender<Outbound>,
+}
+
+/// The receiving half of a WebSocket connection.
+///
+/// [`WsReceiver::recv`] and [`WsReceiver::recv_text`] read one message
+/// at a time. The type is also a [`Stream`] of
+/// `Result<Message, FrameworkError>`, for code that combines it with
+/// other streams. The stream gives every message, as `recv` does, and
+/// ends when the connection ends.
+///
+/// Take one from [`WsSocket::split`].
+///
+/// # Keep reading
+///
+/// The peer's answer to the framework's ping arrives on this half, and
+/// the count of unanswered pings returns to zero only when this half
+/// reads the answer. A connection whose receiving half is dropped, or
+/// is never read, is closed with code 1011 after
+/// [`max_missed_pings`](crate::ws::WsConfig::max_missed_pings) pings.
+/// A handler that only sends still reads, and stops when the read
+/// returns `None`.
+pub struct WsReceiver {
+    receiver: ReceiverHalf,
+    missed_pings: Arc<AtomicUsize>,
+}
+
 /// A bidirectional WebSocket connection.
 ///
 /// `send_text` / `send_binary` enqueue onto an internal mpsc that a
 /// dedicated forwarder task drains into the underlying sink. The
-/// receiver half of the stream is owned directly by `WsSocket` - only
-/// the handler reads, so no split is needed there.
+/// receiving half of the stream is read in place, by the code that
+/// holds the socket.
+///
+/// Every method that sends or receives takes `&mut self`, so a handler
+/// that waits in `recv` cannot send on the same value until the wait
+/// ends. When another task has to send, take a [`WsSender`] with
+/// [`WsSocket::sender`] before the wait, or take the two halves with
+/// [`WsSocket::split`].
 pub struct WsSocket {
-    sender: mpsc::Sender<Outbound>,
-    receiver: ReceiverHalf,
-    missed_pings: Arc<AtomicUsize>,
+    sender: WsSender,
+    receiver: WsReceiver,
     /// JoinHandle of the spawned forwarder task. The framework's
     /// upgrade path extracts it via [`WsSocket::take_forwarder_handle`]
     /// before moving the socket into the handler future, so it can
@@ -47,13 +119,13 @@ pub struct WsSocket {
     /// drop because the forwarder is detached and self-terminates when
     /// all `Sender<Outbound>` clones drop.
     forwarder_handle: Option<JoinHandle<()>>,
-    /// Cached bridge sender for [`Self::sender`]. The first call spawns
-    /// the bridge task and stores the `Sender<Message>`; subsequent
+    /// Cached bridge sender for [`Self::message_sender`]. The first call
+    /// spawns the bridge task and stores the `Sender<Message>`; subsequent
     /// calls clone the cached handle so callers that legitimately
     /// share the socket across multiple producers don't multiply the
     /// `SEND_CHANNEL_CAPACITY` buffer (and the spawned task count).
-    /// `OnceLock` keeps `sender(&self)` non-`mut` so the broadcasting
-    /// hub can still use it through `&WsSocket`.
+    /// `OnceLock` keeps `message_sender(&self)` non-`mut` so the
+    /// broadcasting hub can still use it through `&WsSocket`.
     bridge_sender: std::sync::OnceLock<mpsc::Sender<Message>>,
 }
 
@@ -99,10 +171,12 @@ impl WsSocket {
         let (tx, rx) = mpsc::channel(SEND_CHANNEL_CAPACITY);
         let forwarder_handle = tokio::spawn(forwarder_task(sink, rx));
         Self {
-            sender: tx,
+            sender: WsSender { sender: tx },
             bridge_sender: std::sync::OnceLock::new(),
-            receiver: Box::pin(stream),
-            missed_pings,
+            receiver: WsReceiver {
+                receiver: Box::pin(stream),
+                missed_pings,
+            },
             forwarder_handle: Some(forwarder_handle),
         }
     }
@@ -119,6 +193,63 @@ impl WsSocket {
     /// transitively covers the forwarder rather than racing it.
     pub(crate) fn take_forwarder_handle(&mut self) -> Option<JoinHandle<()>> {
         self.forwarder_handle.take()
+    }
+
+    /// A handle that sends on this connection from any task.
+    ///
+    /// The handler keeps the socket and goes on reading. The returned
+    /// [`WsSender`] goes to the code that has something to send while
+    /// the handler waits: a spawned task, a subscription, a timer.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{FrameworkError, ws::WsSocket};
+    /// # async fn example(mut socket: WsSocket) -> Result<(), FrameworkError> {
+    /// let sender = socket.sender();
+    /// let ticker = tokio::spawn(async move {
+    ///     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    ///     loop {
+    ///         interval.tick().await;
+    ///         if sender.send_text("tick").await.is_err() {
+    ///             // The connection has ended.
+    ///             return;
+    ///         }
+    ///     }
+    /// });
+    ///
+    /// while let Some(text) = socket.recv_text().await? {
+    ///     socket.send_text(format!("echo: {text}")).await?;
+    /// }
+    /// ticker.abort();
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn sender(&self) -> WsSender {
+        self.sender.clone()
+    }
+
+    /// Take the socket apart into its sending and its receiving half.
+    ///
+    /// Each half moves into the task that owns that direction. The
+    /// [`WsSender`] clones; the [`WsReceiver`] has one owner.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{FrameworkError, ws::WsSocket};
+    /// # async fn example(socket: WsSocket) -> Result<(), FrameworkError> {
+    /// let (sender, mut receiver) = socket.split();
+    ///
+    /// let announcer = sender.clone();
+    /// tokio::spawn(async move {
+    ///     let _ = announcer.send_text("welcome").await;
+    /// });
+    ///
+    /// while let Some(text) = receiver.recv_text().await? {
+    ///     sender.send_text(format!("echo: {text}")).await?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn split(self) -> (WsSender, WsReceiver) {
+        (self.sender, self.receiver)
     }
 
     /// Clone the outbound channel sender, wrapped to expose `Message`
@@ -166,12 +297,12 @@ impl WsSocket {
     /// the doc invariant "call once per connection" load-bearing for
     /// backpressure correctness - a doc invariant is not enough when
     /// the broadcasting hub or a heartbeat helper might both reach
-    /// for `sender()` on the same socket. Caching makes it safe.
-    pub(crate) fn sender(&self) -> mpsc::Sender<Message> {
+    /// for `message_sender()` on the same socket. Caching makes it safe.
+    pub(crate) fn message_sender(&self) -> mpsc::Sender<Message> {
         self.bridge_sender
             .get_or_init(|| {
                 let (bridge_tx, mut bridge_rx) = mpsc::channel::<Message>(SEND_CHANNEL_CAPACITY);
-                let internal = self.sender.clone();
+                let internal = self.sender.sender.clone();
                 tokio::spawn(async move {
                     while let Some(msg) = bridge_rx.recv().await {
                         let outbound = match msg {
@@ -201,19 +332,12 @@ impl WsSocket {
 
     /// Send a text frame.
     pub async fn send_text(&mut self, text: impl Into<String>) -> Result<(), FrameworkError> {
-        self.sender
-            .send(Outbound::Msg(Message::text(text.into())))
-            .await
-            .map_err(|_| FrameworkError::internal("ws send: connection closed"))
+        self.sender.send_text(text).await
     }
 
     /// Send a binary frame.
     pub async fn send_binary(&mut self, bytes: impl Into<Vec<u8>>) -> Result<(), FrameworkError> {
-        let data: Vec<u8> = bytes.into();
-        self.sender
-            .send(Outbound::Msg(Message::binary(data)))
-            .await
-            .map_err(|_| FrameworkError::internal("ws send: connection closed"))
+        self.sender.send_binary(bytes).await
     }
 
     /// Receive the next text message, skipping non-text frames that
@@ -239,36 +363,12 @@ impl WsSocket {
     /// has been swallowed by `recv_text` it is gone; there is no
     /// retroactive way to see it.
     pub async fn recv_text(&mut self) -> Result<Option<String>, FrameworkError> {
-        loop {
-            match self.receiver.next().await {
-                Some(Ok(Message::Text(t))) => return Ok(Some(t.to_string())),
-                Some(Ok(Message::Binary(_))) => continue,
-                Some(Ok(Message::Pong(_))) => {
-                    // Pong from peer - reset the missed-ping counter.
-                    self.missed_pings.store(0, Ordering::Release);
-                    continue;
-                }
-                Some(Ok(Message::Ping(_))) => continue,
-                Some(Ok(Message::Close(_))) | None => return Ok(None),
-                Some(Ok(Message::Frame(_))) => continue,
-                Some(Err(e)) => return Err(FrameworkError::internal(format!("ws recv: {e}"))),
-            }
-        }
+        self.receiver.recv_text().await
     }
 
     /// Receive the next message of any type.
     pub async fn recv(&mut self) -> Result<Option<Message>, FrameworkError> {
-        match self.receiver.next().await {
-            Some(Ok(msg)) => {
-                if matches!(msg, Message::Pong(_)) {
-                    // Pong from peer - reset the missed-ping counter.
-                    self.missed_pings.store(0, Ordering::Release);
-                }
-                Ok(Some(msg))
-            }
-            Some(Err(e)) => Err(FrameworkError::internal(format!("ws recv: {e}"))),
-            None => Ok(None),
-        }
+        self.receiver.recv().await
     }
 
     /// Send a close frame. Idempotent - subsequent sends will Err
@@ -297,6 +397,42 @@ impl WsSocket {
         code: u16,
         reason: impl Into<String>,
     ) -> Result<(), FrameworkError> {
+        self.sender.close(code, reason).await
+    }
+}
+
+impl WsSender {
+    /// Send a text frame.
+    ///
+    /// Returns an error when the connection has ended.
+    pub async fn send_text(&self, text: impl Into<String>) -> Result<(), FrameworkError> {
+        self.sender
+            .send(Outbound::Msg(Message::text(text.into())))
+            .await
+            .map_err(|_| FrameworkError::internal("ws send: connection closed"))
+    }
+
+    /// Send a binary frame.
+    ///
+    /// Returns an error when the connection has ended.
+    pub async fn send_binary(&self, bytes: impl Into<Vec<u8>>) -> Result<(), FrameworkError> {
+        let data: Vec<u8> = bytes.into();
+        self.sender
+            .send(Outbound::Msg(Message::binary(data)))
+            .await
+            .map_err(|_| FrameworkError::internal("ws send: connection closed"))
+    }
+
+    /// Send a close frame and end the connection for every sender.
+    ///
+    /// The code and the reason follow the rules of [`WsSocket::close`]:
+    /// a code that RFC 6455 does not allow on the wire, or a reason of
+    /// more than 123 bytes, returns an error and sends nothing, and the
+    /// connection stays open.
+    ///
+    /// The forwarder stops at the close frame. A frame that another
+    /// sender queued behind it is not sent.
+    pub async fn close(&self, code: u16, reason: impl Into<String>) -> Result<(), FrameworkError> {
         let close_code = CloseCode::from(code);
         if !close_code.is_allowed() {
             return Err(FrameworkError::internal(format!(
@@ -319,11 +455,123 @@ impl WsSocket {
             .await
             .map_err(|_| FrameworkError::internal("ws close: connection already closed"))
     }
+
+    /// Whether the connection has ended.
+    ///
+    /// `true` once the forwarder has stopped: after a close frame went
+    /// out, after a write to the peer failed, or after the framework
+    /// closed the connection because the handler returned.
+    pub fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+
+    /// Wait until the connection has ended.
+    ///
+    /// A task that sends only now and then has no failed send to tell
+    /// it that the peer is gone. It waits on this beside its own work
+    /// and stops when this completes.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::ws::WsSender;
+    /// # async fn example(sender: WsSender, mut events: tokio::sync::mpsc::Receiver<String>) {
+    /// loop {
+    ///     tokio::select! {
+    ///         _ = sender.closed() => break,
+    ///         event = events.recv() => match event {
+    ///             Some(text) => {
+    ///                 if sender.send_text(text).await.is_err() {
+    ///                     break;
+    ///                 }
+    ///             }
+    ///             None => break,
+    ///         },
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    pub async fn closed(&self) {
+        self.sender.closed().await;
+    }
+}
+
+impl fmt::Debug for WsSender {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WsSender")
+            .field("closed", &self.sender.is_closed())
+            .finish()
+    }
+}
+
+impl WsReceiver {
+    /// Receive the next text message. Returns `Ok(None)` when the peer
+    /// closes or the connection ends.
+    ///
+    /// Frames of every other kind are read and dropped, as
+    /// [`WsSocket::recv_text`] describes. Use [`WsReceiver::recv`] from
+    /// the first read when the handler has to see them.
+    pub async fn recv_text(&mut self) -> Result<Option<String>, FrameworkError> {
+        loop {
+            match self.receiver.next().await {
+                Some(Ok(Message::Text(t))) => return Ok(Some(t.to_string())),
+                Some(Ok(Message::Binary(_))) => continue,
+                Some(Ok(Message::Pong(_))) => {
+                    // Pong from peer - reset the missed-ping counter.
+                    self.missed_pings.store(0, Ordering::Release);
+                    continue;
+                }
+                Some(Ok(Message::Ping(_))) => continue,
+                Some(Ok(Message::Close(_))) | None => return Ok(None),
+                Some(Ok(Message::Frame(_))) => continue,
+                Some(Err(e)) => return Err(FrameworkError::internal(format!("ws recv: {e}"))),
+            }
+        }
+    }
+
+    /// Receive the next message of any type. Returns `Ok(None)` when
+    /// the connection ends.
+    pub async fn recv(&mut self) -> Result<Option<Message>, FrameworkError> {
+        match self.receiver.next().await {
+            Some(Ok(msg)) => Ok(Some(self.seen(msg))),
+            Some(Err(e)) => Err(FrameworkError::internal(format!("ws recv: {e}"))),
+            None => Ok(None),
+        }
+    }
+
+    /// Count a pong as the answer to the framework's ping.
+    fn seen(&self, msg: Message) -> Message {
+        if matches!(msg, Message::Pong(_)) {
+            self.missed_pings.store(0, Ordering::Release);
+        }
+        msg
+    }
+}
+
+impl Stream for WsReceiver {
+    type Item = Result<Message, FrameworkError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.receiver.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(msg))) => Poll::Ready(Some(Ok(self.seen(msg)))),
+            Poll::Ready(Some(Err(e))) => {
+                Poll::Ready(Some(Err(FrameworkError::internal(format!("ws recv: {e}")))))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl fmt::Debug for WsReceiver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WsReceiver")
+            .field("missed_pings", &self.missed_pings.load(Ordering::Acquire))
+            .finish()
+    }
 }
 
 /// RFC 6455 §5.5.1 caps a control frame's payload at 125 bytes. A close
 /// frame uses two of those bytes for the status code, leaving 123 bytes
-/// of UTF-8 reason. We validate up front in [`WsSocket::close`] so
+/// of UTF-8 reason. We validate up front in [`WsSender::close`] so
 /// callers get a clear error instead of a tungstenite-side
 /// `Error::Protocol` surfacing later (or, depending on the version,
 /// being silently truncated).

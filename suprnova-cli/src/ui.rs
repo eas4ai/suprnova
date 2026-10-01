@@ -226,6 +226,11 @@ pub(crate) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("migrate:rollback", "Rollback last migration(s)"),
             ("migrate:fresh", "Drop all tables & re-migrate"),
             ("db:sync", "Sync schema → entity files"),
+            ("db:seed [name]", "Run the seeders, or the one named"),
+            (
+                "model:prune",
+                "Delete the rows prunable models are done with",
+            ),
         ],
     ),
     (
@@ -234,6 +239,22 @@ pub(crate) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("schedule:run", "Run due tasks once"),
             ("schedule:work", "Start scheduler daemon"),
             ("schedule:list", "List registered tasks"),
+        ],
+    ),
+    (
+        "QUEUE",
+        &[
+            ("queue:failed", "List failed jobs"),
+            (
+                "queue:retry <id|all>",
+                "Push failed jobs back onto the queue",
+            ),
+            ("queue:forget <id>", "Delete one failed job"),
+            ("queue:flush", "Delete the failed jobs"),
+            (
+                "queue:prune-failed",
+                "Delete failed jobs older than --hours",
+            ),
         ],
     ),
     (

@@ -200,7 +200,7 @@ impl PublicSeedMountService {
         document.reserve(key.clone())?;
         let now = self.clock.now();
         let result = now
-            .map_err(|_| MountError::new(MountErrorKind::ClockUnavailable))
+            .map_err(|error| MountError::caused_by(MountErrorKind::ClockUnavailable, &error))
             .and_then(|now| {
                 let expires_at = request
                     .seed
@@ -268,7 +268,7 @@ impl PublicSeedMountService {
         let now = self
             .clock
             .now()
-            .map_err(|_| MountError::new(MountErrorKind::ClockUnavailable))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::ClockUnavailable, &error))?;
         if !context.is_current(now) {
             return Err(MountError::new(MountErrorKind::ContextRejected));
         }
@@ -276,17 +276,17 @@ impl PublicSeedMountService {
         let descriptor = self
             .registry
             .require_contract(catalog.component(), catalog.contract_digest())
-            .map_err(|_| MountError::new(MountErrorKind::ComponentRejected))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::ComponentRejected, &error))?;
         let expected = catalog.expected_seed();
         expected
             .schemas()
             .mount()
             .validate(&parameters, StateExposure::PublicSeed)
-            .map_err(|_| MountError::new(MountErrorKind::ParametersRejected))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::ParametersRejected, &error))?;
         descriptor
             .parameter_schema()
             .validate(&parameters, self.snapshot_limits.input())
-            .map_err(|_| MountError::new(MountErrorKind::ParametersRejected))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::ParametersRejected, &error))?;
         let expires_at = now
             .get()
             .checked_add(self.snapshot_limits.max_seed_age_ms())
@@ -298,7 +298,7 @@ impl PublicSeedMountService {
         let lifecycle = ComponentExecutor::new()
             .initial_public_mount(descriptor, &mount_context)
             .await
-            .map_err(|_| MountError::new(MountErrorKind::LifecycleRejected))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::LifecycleRejected, &error))?;
         let (render, state, memo) = lifecycle.into_parts();
         expected
             .schemas()
@@ -310,7 +310,7 @@ impl PublicSeedMountService {
                     .memo()
                     .validate(&memo, StateExposure::PublicSeed)
             })
-            .map_err(|_| MountError::new(MountErrorKind::SnapshotRejected))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::SnapshotRejected, &error))?;
         let extensions = document_path
             .map(MountedDocumentPath::extension)
             .into_iter()
@@ -335,7 +335,7 @@ impl PublicSeedMountService {
             expected.schemas(),
             &self.snapshot_limits,
         )
-        .map_err(|_| MountError::new(MountErrorKind::SnapshotRejected))?;
+        .map_err(|error| MountError::caused_by(MountErrorKind::SnapshotRejected, &error))?;
         // Threads the single clock read and its derived expiry from above,
         // rather than letting `mount_reserved` read the clock again after
         // the awaited component lifecycle: a second, later read would
@@ -369,7 +369,7 @@ impl PublicSeedMountService {
         let descriptor = self
             .registry
             .require_contract(catalog.component(), catalog.contract_digest())
-            .map_err(|_| MountError::new(MountErrorKind::ComponentRejected))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::ComponentRejected, &error))?;
         let expected = catalog.expected_seed();
         if request.seed.component() != expected.component()
             || request.seed.build_id() != expected.build_id()
@@ -381,18 +381,18 @@ impl PublicSeedMountService {
         }
         self.views
             .validate_island_fragment(descriptor.metadata().view().clone(), &request.render)
-            .map_err(|_| MountError::new(MountErrorKind::RenderRejected))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::RenderRejected, &error))?;
         let signed_snapshot = request
             .seed
             .sign(&self.keys, now, &self.snapshot_limits)
-            .map_err(|_| MountError::new(MountErrorKind::SnapshotRejected))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::SnapshotRejected, &error))?;
         let metadata = MountMetadata::new(
             expected.slot().clone(),
             expected.component().name().clone(),
             MountSnapshotKind::PublicSeed,
             Bytes::from(signed_snapshot.clone()),
         )
-        .map_err(|_| MountError::new(MountErrorKind::MetadataTooLarge))?;
+        .map_err(|error| MountError::caused_by(MountErrorKind::MetadataTooLarge, &error))?;
         let revision = Revision::new(0);
         let assembled = assemble_island_root(
             request.render,
@@ -419,11 +419,11 @@ impl PublicSeedMountService {
             },
             self.max_metadata_bytes,
         )
-        .map_err(|_| MountError::new(MountErrorKind::MetadataTooLarge))?;
+        .map_err(|error| MountError::caused_by(MountErrorKind::MetadataTooLarge, &error))?;
         let validated = self
             .views
             .validate_island_output(descriptor.metadata().view().clone(), assembled)
-            .map_err(|_| MountError::new(MountErrorKind::RenderRejected))?;
+            .map_err(|error| MountError::caused_by(MountErrorKind::RenderRejected, &error))?;
         Ok(PublicSeedMountOutput {
             body: String::from_utf8(validated.body.to_vec())
                 .map_err(|_| MountError::new(MountErrorKind::RenderRejected))?,

@@ -127,7 +127,7 @@ order:
    finds the test connection.
 2. If this was the *last* live `TestContainerGuard` in the process,
    the named [`ConnectionRegistry`](database.md#named-connections)
-   is wiped. (A refcount over `FAKE_GUARDS` guarantees an inner
+   is wiped. (A refcount over live guards guarantees an inner
    test's drop cannot erase a connection name a concurrent outer
    test still depends on - the standing trap that prompted the
    refcount.)
@@ -191,14 +191,12 @@ async fn factory_round_trip() {
 
 Two patterns worth knowing:
 
-**Factory inserts bypass model events.** The `Persistable` impl that
-backs `create()` / `create_many()` writes through SeaORM's
-`ActiveModelTrait::insert` directly - it does *not* go through the
-`Model::create` surface that dispatches `Creating` / `Created` /
-`Saving` / `Saved`. A test that asserts "no observer fires while we
-build the fixture" needs nothing special; a test that asserts "the
-`Created` observer DID fire" must drive `Model::create(...)` (or
-`save()`) instead of a factory.
+**Factory inserts fire model events.** For a `#[suprnova::model]`
+struct, `create()` / `create_many()` take the same insert as
+`Model::create`, which dispatches `Creating` / `Saving` / `Created` /
+`Saved`. A test that asserts "the `Created` observer fired" can build its
+fixture with a factory. To build a fixture that no observer sees, use
+`create_quietly()` / `create_many_quietly()`.
 
 **`create_many` does not transact.** Inserts are sequential. If a
 later row fails the prior rows are not rolled back. Wrap the call
@@ -272,7 +270,8 @@ inserts into a `RwLock<IndexMap>` keyed by `S::name()`. A test that
 mutates the registry should call `seed::clear()` at entry, register
 the seeders it needs, run, and `clear()` again at exit - and the
 test itself should be `#[serial_test::serial]` so two parallel tests
-don't fight over the registry. `#[suprnova_test]` does **not** auto-
+don't fight over the registry. `seed::clear()` is compiled with the
+`testing` feature, which is a default feature. `#[suprnova_test]` does **not** auto-
 register seeders; only the explicit `seed::register::<>()` call in
 your own `bootstrap.rs` or in the test body puts them in the
 registry.
@@ -294,9 +293,9 @@ seed::without_events(async {
 
 The mute is **task-scoped** - only the work performed inside the
 future is silenced; concurrent request handlers and queue workers
-continue to fire events normally. Factories (`create_many`) already
-bypass the event path, so `without_events` is unnecessary around
-them.
+continue to fire events normally. Factories fire the same events, so
+`without_events` mutes them as well; `create_quietly()` and
+`create_many_quietly()` are the shorter form for a factory.
 
 See [Seeding](seeding.md) for the seeder authoring surface and
 [Eloquent → Factories](eloquent-factories.md) for the relationship
@@ -441,6 +440,11 @@ skip line so a developer running the suite locally sees the test
 was skipped (not silently passed), and document the env var in the
 test module's leading doc-comment so CI can wire it up.
 
+`MARIADB_URL` is also the variable `MariaDbVectorDriver::from_env()` reads
+(with `DATABASE_URL` as its fallback), and `QDRANT_URL` is the one
+`QdrantVectorDriver::from_env()` reads. A test that builds either driver
+with `from_env` needs no extra wiring. See [Vector](vector.md).
+
 ## A worked example
 
 The full app dogfood pattern, combining everything in this chapter:
@@ -512,7 +516,7 @@ returns that same connection directly.
   vs global lookup, which decides what `DB::connection()` resolves
   to inside a test.
 - [Mocking & Fakes](mocking.md) - `Storage::fake`, `Mail::fake`,
-  `Queue::fake`, `Notification::fake`, and the trait-bind pattern
+  `Queue::fake`, `Notify::fake`, and the trait-bind pattern
   for swapping in fake HTTP clients and other external surfaces.
 - [HTTP Tests](http-tests.md) - driving handlers through the
   routing stack with a `TestDatabase` bound.

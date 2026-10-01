@@ -59,6 +59,7 @@ fn env(name: &str) -> Envelope {
         debounce_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
+        context: None,
     }
 }
 

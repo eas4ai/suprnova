@@ -8,17 +8,18 @@
 //! Post` bridges through the inner Model on insert, running every
 //! cast's `to_storage` along the way.
 
-use suprnova::__fake::rand::Rng;
-use suprnova::__fake::{Dummy, Fake, Faker};
 use suprnova::Factory;
+use suprnova::fake::faker::lorem::en::{Paragraph, Sentence};
+use suprnova::fake::rand::Rng;
+use suprnova::{Dummy, Fake, Faker};
 
 use crate::models::posts::Post;
 
 impl Dummy<Faker> for Post {
     fn dummy_with_rng<R: Rng + ?Sized>(_: &Faker, rng: &mut R) -> Self {
         // Lorem-style fake content.
-        let title: String = suprnova::__fake::faker::lorem::en::Sentence(3..7).fake_with_rng(rng);
-        let body: String = suprnova::__fake::faker::lorem::en::Paragraph(3..6).fake_with_rng(rng);
+        let title: String = Sentence(3..7).fake_with_rng(rng);
+        let body: String = Paragraph(3..6).fake_with_rng(rng);
         // Reference a "user" id in 1..=50 - matches the typical
         // UsersSeeder count.
         let author_id: i64 = (1..=50i64).fake_with_rng(rng);

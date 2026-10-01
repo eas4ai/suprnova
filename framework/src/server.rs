@@ -420,6 +420,11 @@ impl Server {
         // `log` driver when the env var is unset.
         crate::mail::boot::bootstrap_from_env()?;
 
+        // Register the S3 disk the environment describes, when it
+        // describes one (`S3_BUCKET`).
+        #[cfg(feature = "filesystem")]
+        crate::filesystem::bootstrap_from_env()?;
+
         let addr: SocketAddr = self.get_addr()?;
         let listener = TcpListener::bind(addr).await?;
 
@@ -704,6 +709,25 @@ pub async fn handle_request_with_peer(
     req: hyper::Request<hyper::body::Incoming>,
     peer_ip: Option<std::net::IpAddr>,
 ) -> hyper::Response<ServerBody> {
+    // One container scope per request, outermost: the Inertia flash bag,
+    // the SSR flag, the socket id and the auth state below, and the request
+    // id, session and context the middleware installs, all live inside it.
+    // A scoped binding resolved anywhere in the request is built once and
+    // dropped once the response is ready and every streamed body, terminable
+    // hook or after-commit callback of the request, which carry the scope,
+    // has ended.
+    let request = serve_request(router, middleware_registry, req, peer_ip);
+    crate::container::scope::run_in_new_scope(request).await
+}
+
+/// The body of [`handle_request_with_peer`], run inside the request's
+/// container scope.
+async fn serve_request(
+    router: Arc<Router>,
+    middleware_registry: Arc<MiddlewareRegistry>,
+    req: hyper::Request<hyper::body::Incoming>,
+    peer_ip: Option<std::net::IpAddr>,
+) -> hyper::Response<ServerBody> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
@@ -861,15 +885,19 @@ pub async fn handle_request_with_peer(
     // audit logging, metrics flush) runs without blocking the wire.
     // The count check elides the spawn entirely when no hooks are
     // registered, keeping the hot path zero-cost.
+    //
+    // The hooks belong to this request, so they carry its container scope:
+    // they resolve the scoped values the request resolved, and the scope
+    // ends when the last of them ends.
     if crate::middleware::terminable_count() > 0 {
         let snapshot = crate::middleware::TerminationSnapshot {
             method: terminate_method.clone(),
             path: terminate_path.clone(),
             status: response.status().as_u16(),
         };
-        tokio::spawn(async move {
+        tokio::spawn(App::in_current_scope(async move {
             crate::middleware::dispatch_termination(snapshot).await;
-        });
+        }));
     }
 
     response
@@ -943,19 +971,12 @@ async fn handle_request_inner(
             if let Some(metadata) = live_metadata {
                 let runtime = match crate::live::LiveRuntime::bind() {
                     Ok(runtime) => runtime,
-                    Err(_) => {
-                        return HttpResponse::text("Live request preparation failed")
-                            .status(500)
-                            .into_hyper();
+                    Err(error) => {
+                        return live_preparation_failed(&error, &pattern, "bind");
                     }
                 };
-                if runtime
-                    .prepare_request(&mut request, metadata.operation())
-                    .is_err()
-                {
-                    return HttpResponse::text("Live request preparation failed")
-                        .status(500)
-                        .into_hyper();
+                if let Err(error) = runtime.prepare_request(&mut request, metadata.operation()) {
+                    return live_preparation_failed(&error, &pattern, "prepare");
                 }
             }
 
@@ -1018,7 +1039,7 @@ async fn handle_request_inner(
             // request span is still live. Recording here would target the
             // wrong span: this runs after the middleware's `.instrument`
             // scope has already closed.
-            http_response.into_hyper()
+            into_hyper_in_scope(http_response)
         }
         None => {
             // Check for fallback handler
@@ -1055,7 +1076,7 @@ async fn handle_request_inner(
 
                 // 5xx -> OTel error marker is recorded in
                 // `RequestIdMiddleware` (outermost), where the span is live.
-                http_response.into_hyper()
+                into_hyper_in_scope(http_response)
             } else {
                 // No fallback handler registered. Still run the global
                 // middleware chain (RequestId + global) terminating in a
@@ -1093,10 +1114,29 @@ async fn handle_request_inner(
                 if http_response.status_code() >= 500 {
                     tracing::Span::current().record("error", true);
                 }
-                http_response.into_hyper()
+                into_hyper_in_scope(http_response)
             }
         }
     }
+}
+
+/// Convert the response of the middleware chain for hyper.
+///
+/// A streamed body (SSE, `stream_bytes`, `stream_json`) is polled after the
+/// request's future has returned, so it is wrapped to run each poll in the
+/// request's container scope, which it keeps until it ends or is dropped.
+/// A buffered body is complete already and is handed over as it is.
+fn into_hyper_in_scope(response: HttpResponse) -> hyper::Response<ServerBody> {
+    let streaming = response.is_streaming();
+    let response = response.into_hyper();
+    if !streaming {
+        return response;
+    }
+    let Some(scope) = crate::container::scope::ContainerScope::current() else {
+        return response;
+    };
+    let (parts, body) = response.into_parts();
+    hyper::Response::from_parts(parts, BoxBody::new(scope.body(body)))
 }
 
 /// Run `chain.execute(request, handler)` with panic recovery.
@@ -1275,19 +1315,12 @@ async fn handle_ws_upgrade(
     if let Some(metadata) = live_metadata {
         let runtime = match crate::live::LiveRuntime::bind() {
             Ok(runtime) => runtime,
-            Err(_) => {
-                return HttpResponse::text("Live request preparation failed")
-                    .status(500)
-                    .into_hyper();
+            Err(error) => {
+                return live_preparation_failed(&error, &pattern, "bind");
             }
         };
-        if runtime
-            .prepare_request(&mut initial_request, metadata.operation())
-            .is_err()
-        {
-            return HttpResponse::text("Live request preparation failed")
-                .status(500)
-                .into_hyper();
+        if let Err(error) = runtime.prepare_request(&mut initial_request, metadata.operation()) {
+            return live_preparation_failed(&error, &pattern, "prepare");
         }
         initial_request.record_live_security_check_before_chain(
             crate::live::attestation::SecurityCheck::Origin,
@@ -1323,7 +1356,7 @@ async fn handle_ws_upgrade(
     // abort the upgrade rather than re-panicking inside the per-connection
     // task - one poisoned upgrade must not cascade into the accept loop or
     // other in-flight connections.
-    let suprnova_req = {
+    let mut suprnova_req = {
         let captured: Arc<Mutex<Option<Request>>> = Arc::new(Mutex::new(None));
         let captured_for_terminator = captured.clone();
 
@@ -1473,6 +1506,12 @@ async fn handle_ws_upgrade(
         }
     };
 
+    // What middleware asked to keep for the life of the connection, such as
+    // a slot of a per-address connection cap. Taken off the request here and
+    // moved into the session task below: the handler owns the request and
+    // may drop it long before the socket closes.
+    let connection_holds = suprnova_req.take_connection_holds();
+
     // Echo X-Request-Id on the 101 handshake response so the upgrade GET
     // stays correlatable with logs, the same contract as the HTTP path.
     // The id is `is_safe_request_id`-filtered (or a freshly minted UUID),
@@ -1519,7 +1558,7 @@ async fn handle_ws_upgrade(
                 // `outbound`, and we keep `outbound` itself for the
                 // final close frame. When both senders drop, the
                 // bridge task exits and the forwarder closes the sink.
-                let outbound = socket.sender();
+                let outbound = socket.message_sender();
                 let heartbeat_sender = outbound.clone();
 
                 let heartbeat = tokio::spawn(crate::ws::heartbeat::run(
@@ -1633,6 +1672,13 @@ async fn handle_ws_upgrade(
     // carries only the id into spawned work.
     let handler_task = crate::logging::REQUEST_ID.scope(request_id, handler_task);
 
+    // The session is a unit of work of its own, so it gets a container scope
+    // of its own, outermost. It does not share the upgrade request's scope,
+    // which ends with the 101 response, for the reason the `Context` bag
+    // stays behind: the session is not serving the originating GET. Scoped
+    // bindings the handler resolves live as long as the socket.
+    let handler_task = crate::container::scope::run_in_new_scope(handler_task);
+
     // Take the connection-cap permit (when SERVER_MAX_CONNECTIONS is set) out of
     // the connection task's task-local and move it into the WS session task, so
     // the slot is held for the socket's whole lifetime rather than released when
@@ -1644,6 +1690,7 @@ async fn handle_ws_upgrade(
         .flatten();
     let handler_task = async move {
         let _conn_permit = conn_permit;
+        let _connection_holds = connection_holds;
         handler_task.await;
     };
 
@@ -1666,6 +1713,25 @@ async fn handle_ws_upgrade(
     }
 
     convert_response_body(response)
+}
+
+/// A Live request that cannot be prepared ends as a closed 500. The visitor
+/// learns nothing from it; the log names the route, the stage and the error,
+/// so an operator can tell a missing provider from a clock fault.
+fn live_preparation_failed(
+    error: &crate::error::FrameworkError,
+    pattern: &str,
+    stage: &'static str,
+) -> hyper::Response<ServerBody> {
+    tracing::error!(
+        error = %error,
+        route = %pattern,
+        stage,
+        "Live request preparation failed"
+    );
+    HttpResponse::text("Live request preparation failed")
+        .status(500)
+        .into_hyper()
 }
 
 fn bad_request_text(msg: &str) -> hyper::Response<ServerBody> {
@@ -2190,6 +2256,20 @@ mod tests {
     //! `.unwrap()` fails loudly.
     use super::*;
     use crate::routing::Router;
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn a_live_preparation_failure_is_logged_with_its_route_stage_and_cause() {
+        let error = crate::error::FrameworkError::internal("no ledger provider is registered");
+
+        let response = live_preparation_failed(&error, "/orders/{id}", "bind");
+
+        assert_eq!(response.status(), hyper::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(logs_contain("Live request preparation failed"));
+        assert!(logs_contain("no ledger provider is registered"));
+        assert!(logs_contain("/orders/{id}"));
+        assert!(logs_contain("bind"));
+    }
 
     #[test]
     fn invalid_host_returns_typed_error_not_panic() {

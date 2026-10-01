@@ -22,18 +22,40 @@ pub const DEFAULT_IMAGE_QUALITY: u8 = 70;
 
 /// The container an [`Image`](super::Image) pipeline encodes to.
 ///
-/// Deliberately five variants, not six: AVIF is absent rather than present
-/// and always failing, because a variant that never works is a partial
-/// scaffold. It becomes an additive change the day the in-house AV1 encoder
-/// publishes - see the images chapter of the manual.
+/// Deliberately no AVIF variant: AVIF is absent rather than present and
+/// always failing, because a variant that never works is a partial
+/// scaffold. It is added the day the in-house AV1 encoder publishes - see
+/// the images chapter of the manual.
+///
+/// Deliberately not `#[non_exhaustive]`: a custom [`ImageDriver`] that
+/// matches on this enum stops compiling when a format is added, so its
+/// author decides how to encode the new format instead of inheriting a
+/// wildcard arm that guesses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutputFormat {
     /// JPEG. Lossy; honours [`ImagePipeline::quality`].
     Jpeg,
     /// PNG. Lossless; ignores quality, as in Laravel's encoder table.
     Png,
-    /// WebP. Encoded losslessly (VP8L), so quality is a no-op today.
+    /// WebP, lossy (VP8) at [`ImagePipeline::quality`] whenever the image
+    /// allows it.
+    ///
+    /// The built-in `oxideav` driver writes WebP lossless (VP8L), ignoring
+    /// quality, in three cases:
+    ///
+    /// - any pixel is not fully opaque: its lossy encoder has no alpha
+    ///   channel, so a lossy file would drop the transparency;
+    /// - a side is longer than 16383 px, the largest a VP8 frame can be;
+    /// - the format is [`OutputFormat::WebPLossless`].
+    ///
+    /// The `magick` driver draws the line elsewhere - see
+    /// [`MagickCliDriver`](super::MagickCliDriver).
     WebP,
+    /// WebP, always lossless (VP8L). Ignores quality.
+    ///
+    /// Served and saved exactly like [`OutputFormat::WebP`], as `image/webp`
+    /// with the `webp` extension; only the encoding differs.
+    WebPLossless,
     /// GIF. Palette-quantised to at most 256 colours before encoding.
     Gif,
     /// Windows bitmap. Lossless; ignores quality.
@@ -50,7 +72,7 @@ impl OutputFormat {
         match self {
             Self::Jpeg => "image/jpeg",
             Self::Png => "image/png",
-            Self::WebP => "image/webp",
+            Self::WebP | Self::WebPLossless => "image/webp",
             Self::Gif => "image/gif",
             Self::Bmp => "image/bmp",
         }
@@ -61,7 +83,7 @@ impl OutputFormat {
         match self {
             Self::Jpeg => "jpg",
             Self::Png => "png",
-            Self::WebP => "webp",
+            Self::WebP | Self::WebPLossless => "webp",
             Self::Gif => "gif",
             Self::Bmp => "bmp",
         }
@@ -146,9 +168,12 @@ pub struct ImagePipeline {
     pub format: Option<OutputFormat>,
     /// Encode quality, always in `1..=100`.
     ///
-    /// Honoured by JPEG. Ignored by PNG, GIF, and BMP - the same encoder
-    /// table Laravel documents - and currently a no-op for WebP, which the
-    /// built-in driver encodes losslessly.
+    /// Honoured by JPEG, and by [`OutputFormat::WebP`] whenever it encodes
+    /// lossy. Ignored by PNG, GIF, and BMP - the same encoder table Laravel
+    /// documents. The built-in driver also ignores it in the three cases it
+    /// writes WebP lossless: an image with any pixel not fully opaque, an
+    /// image with a side longer than 16383 px, and
+    /// [`OutputFormat::WebPLossless`].
     pub quality: u8,
 }
 

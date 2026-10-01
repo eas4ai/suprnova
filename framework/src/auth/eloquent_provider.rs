@@ -24,8 +24,6 @@ use sea_orm::{EntityTrait, FromQueryResult, IntoActiveModel, PrimaryKeyTrait};
 use serde::Serialize;
 use serde_json::Value;
 
-use chrono::Utc;
-
 use super::authenticatable::Authenticatable;
 use super::must_verify_email::{AuthFlowUser, CanResetPassword, MustVerifyEmail};
 use super::provider::UserProvider;
@@ -269,7 +267,7 @@ where
         // concurrent flow on the same user could clobber a field - acceptable
         // here as both verify/reset paths are token-gated. Absent id → no-op.
         if let Some(mut user) = self.find_by_identifier(id).await? {
-            user.set_email_verified_at(Some(Utc::now()));
+            user.set_email_verified_at(Some(crate::clock::now()));
             <M as Model>::save(&user).await?;
         }
         Ok(())

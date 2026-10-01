@@ -66,6 +66,7 @@ fn bootstrap_env() -> Envelope {
         debounce_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
+        context: None,
     }
 }
 
@@ -127,6 +128,50 @@ async fn bootstrap_from_env_unknown_driver_resets_to_memory() {
     // Cleanup so a later test running in this binary doesn't see the
     // synthetic unknown value lingering in env.
     set_env("QUEUE_DRIVER", None);
+}
+
+/// `sync` and `null` are documented drivers; the environment selects them
+/// like any other.
+#[tokio::test]
+#[serial]
+async fn bootstrap_from_env_installs_the_sync_and_null_drivers() {
+    let _env = crate::env_lock::lock_env_async().await;
+    for name in ["sync", "null"] {
+        Queue::set_driver(Arc::new(BogusDriver));
+        set_env("QUEUE_DRIVER", Some(name));
+        let result = bootstrap_from_env().await;
+        set_env("QUEUE_DRIVER", None);
+
+        result.unwrap_or_else(|e| panic!("QUEUE_DRIVER={name} is a driver: {e}"));
+        assert_eq!(Queue::driver_name().unwrap(), name);
+    }
+}
+
+/// In production a name that is no driver stops the boot: an in-memory queue
+/// taken by mistake loses every job at the next restart.
+#[tokio::test]
+#[serial]
+async fn production_refuses_an_unknown_queue_driver() {
+    let _env = crate::env_lock::lock_env_async().await;
+    Queue::set_driver(Arc::new(BogusDriver));
+    set_env("APP_ENV", Some("production"));
+    set_env("QUEUE_DRIVER", Some("redsi"));
+    let result = bootstrap_from_env().await;
+    set_env("QUEUE_DRIVER", None);
+    set_env("APP_ENV", None);
+
+    let error = result.expect_err("a typo must not become an in-memory queue in production");
+    let message = error.to_string();
+    assert!(message.contains("QUEUE_DRIVER=`redsi`"), "{message}");
+    assert!(
+        message.contains("memory, sync, null, redis, database, failover"),
+        "the message lists what is accepted: {message}"
+    );
+    assert_eq!(
+        Queue::driver_name().unwrap(),
+        "bogus",
+        "a refused boot leaves the installed driver alone"
+    );
 }
 
 /// `QUEUE_DRIVER=database` must bring its failed-jobs store with it.
@@ -272,4 +317,60 @@ async fn failover_rejects_an_unknown_inner_connection_instead_of_falling_back() 
         err.to_string().contains("redsi"),
         "the error must name the offending entry, got {err}"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn queue_connections_registers_one_connection_per_entry() {
+    let _env = crate::env_lock::lock_env_async().await;
+    suprnova::queue::testing::forget_connections();
+    set_env("QUEUE_DRIVER", Some("memory"));
+    set_env("QUEUE_CONNECTIONS", Some("null, memory"));
+    let booted = bootstrap_from_env().await;
+    set_env("QUEUE_CONNECTIONS", None);
+    booted.unwrap();
+
+    assert_eq!(Queue::connection_names().unwrap(), ["memory", "null"]);
+    assert_eq!(Queue::connection("null").unwrap().name(), "null");
+
+    // `memory` is also QUEUE_DRIVER, so the entry is the default connection
+    // under its own name, not a second queue beside it.
+    Queue::connection("memory")
+        .unwrap()
+        .push(bootstrap_env())
+        .await
+        .unwrap();
+    assert_eq!(Queue::size().await.unwrap(), 1);
+    suprnova::queue::testing::forget_connections();
+}
+
+#[tokio::test]
+#[serial]
+async fn queue_connections_refuses_a_name_that_is_no_driver() {
+    let _env = crate::env_lock::lock_env_async().await;
+    suprnova::queue::testing::forget_connections();
+    set_env("QUEUE_DRIVER", Some("memory"));
+    set_env("QUEUE_CONNECTIONS", Some("redsi"));
+    let booted = bootstrap_from_env().await;
+    set_env("QUEUE_CONNECTIONS", None);
+
+    let err = booted.expect_err("a typo must not become a connection");
+    assert!(
+        err.to_string().contains("QUEUE_CONNECTIONS names `redsi`"),
+        "{err}"
+    );
+    assert!(Queue::connection_names().unwrap().is_empty());
+    suprnova::queue::testing::forget_connections();
+}
+
+#[tokio::test]
+#[serial]
+async fn without_queue_connections_no_connection_is_registered() {
+    let _env = crate::env_lock::lock_env_async().await;
+    suprnova::queue::testing::forget_connections();
+    set_env("QUEUE_DRIVER", Some("memory"));
+    set_env("QUEUE_CONNECTIONS", None);
+    bootstrap_from_env().await.unwrap();
+
+    assert!(Queue::connection_names().unwrap().is_empty());
 }

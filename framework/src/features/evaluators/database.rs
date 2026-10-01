@@ -64,7 +64,6 @@ use crate::features::sync::FeatureSync;
 use crate::lock;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use featureflag::{
     context::{Context, ContextRef},
     evaluator::Evaluator,
@@ -346,7 +345,7 @@ impl DatabaseEvaluator {
         // `#[model(timestamps)]` auto-injects the `AsDateTime` cast).
         // Build the ActiveModel by routing through the macro's
         // cast pipeline rather than handing chrono types directly.
-        let now = Utc::now().to_rfc3339();
+        let now = crate::clock::now().to_rfc3339();
         let model = FeatureActive {
             name: Set(name.to_string()),
             scope_key: Set(scope_key.to_string()),
@@ -841,7 +840,7 @@ mod tests {
 
         // Out of band, the way another process flipping a row would be:
         // straight into the table, then a reload.
-        let now = Utc::now().to_rfc3339();
+        let now = crate::clock::now().to_rfc3339();
         FeatureEntity::insert(FeatureActive {
             name: Set("late-override-flag".to_string()),
             scope_key: Set("user:bob".to_string()),
@@ -941,7 +940,7 @@ mod tests {
         let eval = DatabaseEvaluator::new_in_memory().await.unwrap();
         // Seed via a direct insert that bypasses set_flag, so the
         // counter stays at zero and the snapshot stays empty.
-        let now = Utc::now().to_rfc3339();
+        let now = crate::clock::now().to_rfc3339();
         FeatureEntity::insert(FeatureActive {
             name: Set("beta".to_string()),
             scope_key: Set(String::new()),

@@ -5,6 +5,7 @@
 //! - `describe!` and `test!` macros for test organization
 //! - `TestDatabase` for isolated database tests
 //! - `TestContainer` for dependency injection in tests
+//! - `TestClock` to move the time the framework reads
 //!
 //! # Example
 //!
@@ -26,6 +27,8 @@ mod expect;
 mod inertia;
 mod response;
 
+#[cfg(any(test, feature = "testing"))]
+pub use crate::clock::{TestClock, TestClockGuard, TestClockHandle};
 pub use crate::container::testing::{TestContainer, TestContainerGuard};
 pub use crate::database::testing::TestDatabase;
 pub use expect::{Expect, set_current_test_name};
@@ -66,8 +69,9 @@ pub fn install_test_encryption_key() {
 ///
 /// Test binaries that rotate keys at runtime cannot install twice;
 /// they must install the *final* ring once, then use
-/// [`crate::crypto::_test_encrypt_with`] to mint ciphertext under
-/// arbitrary keys (simulating data written when the old key was current).
+/// [`crate::crypto::testing::encrypt_string_under`] to mint ciphertext
+/// under arbitrary keys (simulating data written when the old key was
+/// current).
 ///
 /// **Test-only.** Production code must go through
 /// `Crypt::init_with_keyring` via `Server::from_config`.

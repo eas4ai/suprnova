@@ -1,7 +1,6 @@
 use crate::config::env::{Environment, env, env_strict};
 use crate::error::FrameworkError;
 use crate::http::TrustedProxiesConfig;
-use std::net::IpAddr;
 
 /// Application configuration
 #[derive(Debug, Clone)]
@@ -25,8 +24,9 @@ pub struct AppConfig {
     /// from which the proxy hops can reach the framework.
     ///
     /// Reads `APP_TRUSTED_PROXIES` from the environment as a
-    /// comma-separated list of IP addresses, e.g.
-    /// `APP_TRUSTED_PROXIES=127.0.0.1,10.0.0.1`. An unparseable entry
+    /// comma-separated list of IP addresses and of ranges in CIDR form,
+    /// e.g. `APP_TRUSTED_PROXIES=127.0.0.1,10.0.0.1,173.245.48.0/20`. An
+    /// entry that is neither, and a range that holds every address,
     /// fails boot via [`Self::try_from_env`].
     pub trusted_proxies: TrustedProxiesConfig,
 }
@@ -140,13 +140,14 @@ fn parse_trusted_proxies_lenient() -> TrustedProxiesConfig {
     let Ok(raw) = std::env::var("APP_TRUSTED_PROXIES") else {
         return TrustedProxiesConfig::empty();
     };
-    match parse_ip_list(&raw) {
-        Ok(ips) => TrustedProxiesConfig::with_ips(ips),
-        Err(bad) => {
+    match TrustedProxiesConfig::from_list(&raw) {
+        Ok(trusted) => trusted,
+        Err(refused) => {
             tracing::warn!(
                 env_var = "APP_TRUSTED_PROXIES",
-                bad_entry = %bad,
-                "APP_TRUSTED_PROXIES contains an unparseable IP; falling back to empty allowlist"
+                bad_entry = %refused.entry,
+                reason = %refused.reason,
+                "APP_TRUSTED_PROXIES contains an entry that was refused; falling back to empty allowlist"
             );
             TrustedProxiesConfig::empty()
         }
@@ -159,27 +160,12 @@ fn parse_trusted_proxies_strict() -> Result<TrustedProxiesConfig, FrameworkError
     let Ok(raw) = std::env::var("APP_TRUSTED_PROXIES") else {
         return Ok(TrustedProxiesConfig::empty());
     };
-    let ips = parse_ip_list(&raw).map_err(|bad| {
+    TrustedProxiesConfig::from_list(&raw).map_err(|refused| {
         FrameworkError::internal(format!(
-            "APP_TRUSTED_PROXIES contains an unparseable IP address: {bad:?}"
+            "APP_TRUSTED_PROXIES has an entry that was refused, {:?}: {}",
+            refused.entry, refused.reason
         ))
-    })?;
-    Ok(TrustedProxiesConfig::with_ips(ips))
-}
-
-fn parse_ip_list(raw: &str) -> Result<Vec<IpAddr>, String> {
-    let mut out = Vec::new();
-    for entry in raw.split(',') {
-        let trimmed = entry.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match trimmed.parse::<IpAddr>() {
-            Ok(ip) => out.push(ip),
-            Err(_) => return Err(trimmed.to_string()),
-        }
-    }
-    Ok(out)
+    })
 }
 
 /// Builder for AppConfig
@@ -287,21 +273,28 @@ mod tests {
     }
 
     #[test]
-    fn parse_ip_list_returns_each_address() {
-        let ips = parse_ip_list("127.0.0.1, 10.0.0.1, ::1").expect("parse");
-        assert_eq!(ips.len(), 3);
+    fn the_proxy_list_holds_each_address() {
+        let trusted = TrustedProxiesConfig::from_list("127.0.0.1, 10.0.0.1, ::1").expect("parse");
+        assert_eq!(trusted.proxies().len(), 3);
     }
 
     #[test]
-    fn parse_ip_list_skips_empty_entries() {
-        let ips = parse_ip_list(",,127.0.0.1, , 10.0.0.1,").expect("parse");
-        assert_eq!(ips.len(), 2);
+    fn the_proxy_list_skips_empty_entries() {
+        let trusted = TrustedProxiesConfig::from_list(",,127.0.0.1, , 10.0.0.1,").expect("parse");
+        assert_eq!(trusted.proxies().len(), 2);
     }
 
     #[test]
-    fn parse_ip_list_returns_bad_entry_on_error() {
-        let err = parse_ip_list("127.0.0.1, not-an-ip").expect_err("bad entry");
-        assert_eq!(err, "not-an-ip");
+    fn the_proxy_list_returns_the_bad_entry_on_error() {
+        let err = TrustedProxiesConfig::from_list("127.0.0.1, not-an-ip").expect_err("bad entry");
+        assert_eq!(err.entry, "not-an-ip");
+    }
+
+    #[test]
+    fn the_proxy_list_takes_a_range() {
+        let trusted = TrustedProxiesConfig::from_list("10.0.0.5, 173.245.48.0/20").expect("parse");
+        assert_eq!(trusted.proxies().len(), 1);
+        assert_eq!(trusted.networks().len(), 1);
     }
 
     #[test]

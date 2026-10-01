@@ -14,11 +14,11 @@ experience and Tokio's runtime model. Familiar API surfaces - `Auth::login`,
 async-trait stack designed for long-lived connections, in-process workers,
 and concurrent IO. No request-per-process compromise.
 
-Current `main` requires Rust 1.94.0 or newer. The tagged v2.1.0 release has
+Current `main` requires Rust 1.94.0 or newer. The tagged v3.0.0 release has
 the same Rust 1.94.0 floor.
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v2.1.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v3.0.0 suprnova-cli
 suprnova new myapp --frontend svelte
 cd myapp
 suprnova serve
@@ -99,7 +99,7 @@ The Laravel-13 parity surface plus the Rust-native wins:
 | **Notifications** | Mail / database / broadcast / Web Push channels, anonymous notifications, deferred dispatch |
 | **Mail** | SMTP, Mailgun, Postmark, SendGrid, Resend, SES, log + in-memory transports, Markdown templates via Tera, fake() helper, queued mail |
 | **Broadcasting & WebSocket** | Channels (public / private / presence), `BroadcastHub` trait, sea-streamer fanout adapter, JSON-envelope protocol, supervised heartbeats with auto-restart |
-| **Filesystem** | Local + S3 (R2 / B2 / MinIO compatible) via OpenDAL, path-traversal guard, atomic copy |
+| **Filesystem** | Local + S3 (R2 / B2 / RustFS / MinIO compatible) via OpenDAL, path-traversal guard, atomic copy |
 | **Vector** | Memory, **Qdrant**, **Pinecone**, **MariaDB native `VECTOR(N)`** (HNSW + cosine/euclid/L1/L2) - first-class trait + drivers, no Postgres-only gatekeeping |
 | **Payments** | Generic `Payment` / `Subscription` / `CustomerStore` / `WebhookHandler` traits + DB mirror; **Stripe** and **Paddle** reference adapters; webhook UNIQUE idempotency |
 | **Validation** | `Required`, `Email`, `Min`/`Max`/`Between`, `RequiredIf`/`With`/`WithAll`/`Unless`, `Unique` (async), `Confirmed`, custom rules via traits, `validator` derive integration |
@@ -212,7 +212,7 @@ suprnova workflow:work
 ## Distribution model
 
 Suprnova distributes via git, not crates.io. Generated apps depend on
-`suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v2.1.0" }`;
+`suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0" }`;
 the CLI installs via `cargo install --git`. Adapter crates
 (`suprnova-payments-stripe`, `suprnova-payments-paddle`,
 `suprnova-web-push`) follow the same model. The tag *is* the release:

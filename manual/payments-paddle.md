@@ -10,9 +10,8 @@ direct-capture gateway like Stripe leaves to you.
 That choice changes the mental model. Your domain code does not *own* the
 subscription - Paddle does. You open a checkout, the customer completes it,
 and the `SubscriptionCreated` webhook tells you the subscription now exists.
-You cannot create a subscription via API, and you cannot swap its price set
-after the fact. You can cancel, you can read state, you can update billing
-metadata. The rest is Paddle's.
+You cannot create a subscription via API. You can change its prices, you
+can cancel it, and you can read its state. The rest is Paddle's.
 
 This chapter assumes you've read [Payments](payments.md) for the generic
 five-trait surface. Here we cover what is true *only* for Paddle.
@@ -105,15 +104,13 @@ Paddle (Merchant of Record):
     Paddle owns the subscription state; your DB is the mirror
 ```
 
-In code, the difference shows up at three points:
+In code, the difference shows up at two points:
 
 1. **You cannot create a subscription via API.** Call `Checkout::start_session`
    with a recurring price; the customer completes the Paddle widget; the
    `SubscriptionCreated` webhook hydrates your mirror.
-2. **You cannot swap a subscription's price set via API.** Paddle reserves
-   plan changes for its own dashboard or for migration flows it owns.
-3. **You cannot delete a customer.** Archive via update is the supported
-   workaround.
+2. **You cannot delete a customer.** Archive the customer with
+   `PaddleProvider::archive_customer` instead.
 
 Suprnova surfaces these constraints as `PaymentError::NotSupported` rather
 than papering over them - see the [capability matrix](#capability-matrix)
@@ -217,9 +214,9 @@ before claiming that subscription setup is complete.
 Paddle rejects a supplied `idempotency_key` before network I/O. Save the
 transaction ID as soon as creation succeeds. If the create response is lost,
 reconcile provider state before creating another transaction. Metadata is
-for correlation and does not make repeated creates idempotent. Checkout creation
-and transaction retrieval have a 30-second request deadline. A create timeout
-leaves the provider outcome unknown; it does not prove that no transaction exists.
+for correlation and does not make repeated creates idempotent. A create that
+runs out of time leaves the provider outcome unknown; it does not prove that
+no transaction exists. See [Deadlines and unknown outcomes](#deadlines-and-unknown-outcomes).
 
 ## Subscriptions arrive via webhook
 
@@ -268,24 +265,25 @@ the new subscription. Two patterns cover it:
 ## Capability matrix
 
 Not every method on every trait does what its Stripe equivalent does. The
-table below is the truth. `subscribe()` and `update()` with
-`new_price_refs.is_some()` are the only methods that *always* fail; the
-rest work, with the noted caveats.
+table below is the truth. `subscribe()` and `delete_customer()` are the
+only methods that *always* fail; the rest work, with the noted caveats.
 
 | Trait method | Behavior |
 |---|---|
 | `Checkout::start_session` | Dispatches on price kind; forwards metadata; rejects a supplied idempotency key. |
 | `Checkout::session_status` | Retrieves the transaction and reports collection state. |
 | `Subscription::subscribe` | Always `NotSupported`. Subscriptions are born from checkout completion + webhook. |
-| `Subscription::update(cancel_at_period_end: Some(true), new_price_refs: None)` | Works. Wires to `subscription_cancel` with default `EffectiveFrom::NextBillingPeriod`. |
-| `Subscription::update(new_price_refs: Some(...))` | `NotSupported` in v1. Paddle reserves price-set replacement for its own migration flows. |
+| `Subscription::update(cancel_at_period_end: Some(true), new_price_refs: None)` | Works. Wires to `subscription_cancel` with `effective_from` set to `next_billing_period`. A supplied `idempotency_key` is `NotSupported`. |
+| `Subscription::update(cancel_at_period_end: Some(false), new_price_refs: None)` | `NotSupported`. The adapter cannot rescind a scheduled cancellation. |
+| `Subscription::update(new_price_refs: Some(...))` | Works. Replaces the subscription's items with the new prices, billed as `proration` says. With `cancel_at_period_end` or an `idempotency_key`, `NotSupported`. See [Change the prices of a subscription](#change-the-prices-of-a-subscription). |
 | `Subscription::update` (no-op) | Works. Re-fetches current state via `subscription_get`. |
-| `Subscription::cancel` | Works, but `at_period_end` is **ignored** - always schedules to next billing period. See [below](#cancellation-is-always-scheduled). |
+| `Subscription::cancel(id, true)` | Works. Cancels at the end of the billing period. See [below](#cancel-at-the-period-end-or-at-once). |
+| `Subscription::cancel(id, false)` | Works. Cancels at once. See [below](#cancel-at-the-period-end-or-at-once). |
 | `Subscription::get` | Works. |
 | `CustomerStore::create_customer` | Works. |
 | `CustomerStore::update_customer` | Works. |
 | `CustomerStore::get_customer` | Works. |
-| `CustomerStore::delete_customer` | `NotSupported`. Use `update_customer` with `archived` status if needed. |
+| `CustomerStore::delete_customer` | `NotSupported`. Archive with `PaddleProvider::archive_customer`. |
 | `Payment::*` | Trait is not implemented. `provider.as_payment()` returns `None`. |
 | `WebhookHandler::*` | Works. |
 
@@ -294,40 +292,169 @@ returning `NotSupported`, and webhook signature rejection are pinned by
 always-on tests in `crates/suprnova-payments-paddle/tests/integration.rs`,
 so the matrix above won't drift silently.
 
-### Cancellation is always scheduled
+### Cancel at the period end or at once
 
-`Subscription::cancel(id, at_period_end)` accepts the bool for trait
-compatibility but **always behaves as scheduled cancellation** -
-Paddle's `EffectiveFrom` enum is private in `paddle_rust_sdk` 0.18, so
-immediate cancel is not viable in v1. The user keeps access until the
-current billing period ends, at which point Paddle fires
-`subscription.canceled` and the mirror flips `status` to `Canceled`.
+`Subscription::cancel(id, at_period_end)` follows the flag:
 
-If you want a UX-level "cancel now" that revokes app access immediately
-while letting Paddle wind down billing in the background, gate access on
-your own `subscription.status != Canceled && subscription.cancel_at_period_end == false`
-flag and update the UI right after `cancel()` returns - the next webhook
-will confirm.
-
-### Customer deletion is "archive via update"
-
-`delete_customer` returns `PaymentError::NotSupported` because Paddle's
-public API does not expose a delete endpoint at all. If you need to
-suppress a customer record in Paddle, call `update_customer` with the
-`archived` status. The framework adapter does not wrap this directly -
-the metadata field is the escape hatch:
+- `true` sends `subscription_cancel` with `effective_from` set to
+  `next_billing_period`. The subscription stays `Active` with
+  `cancel_at_period_end == true`, and the user keeps access until the
+  current billing period ends. Then Paddle fires `subscription.canceled`
+  and the mirror flips `status` to `Canceled`.
+- `false` cancels at once. The adapter makes two requests. It reads the
+  subscription with `subscription_get`, then sends `subscription_cancel` with
+  `effective_from` set to `immediately`. If the read fails, the adapter
+  returns the error and cancels nothing. The result has `status == Canceled`,
+  `cancel_at_period_end == false`, and the billing period the subscription
+  was in.
 
 ```rust
-provider.update_customer(UpdateCustomerRequest {
-    provider_customer_id: customer_id,
-    email: None,
-    name: None,
-    metadata: Some(serde_json::json!({ "status": "archived" })),
+let sub = provider.cancel("sub_123", /* at_period_end */ true).await?;
+// sub.status == Active, sub.cancel_at_period_end == true
+
+let sub = provider.cancel("sub_123", /* at_period_end */ false).await?;
+// sub.status == Canceled
+```
+
+`update` with `cancel_at_period_end: Some(true)` sends the same request as
+`cancel(id, true)`.
+
+### Change the prices of a subscription
+
+`Subscription::update` with `new_price_refs` changes the prices of a
+subscription. The list is the set of prices the subscription has after the
+call:
+
+- An item whose price is in the list keeps its quantity.
+- An item whose price is not in the list is removed.
+- A price that has no item is added with a quantity of 1, except in a swap.
+  When the change removes exactly one item and adds exactly one price, the new
+  price takes the quantity of the removed item.
+- An empty list, or a list that names a price twice, is
+  `PaymentError::Validation`, and no request is sent.
+
+```rust
+use suprnova::payments::{Proration, UpdateSubscriptionRequest};
+
+let sub = provider.update(UpdateSubscriptionRequest {
+    provider_subscription_id: "sub_123".into(),
+    new_price_refs: Some(vec!["pri_pro_yearly".into()]),
+    proration: Some(Proration::ProrateAtRenewal),
+    cancel_at_period_end: None,
+    idempotency_key: None, // Paddle rejects a key for a price change.
 }).await?;
 ```
 
-Confirm the exact field path against your Paddle API version when shipping
-this - the SDK does not currently model the `status` enum directly.
+Paddle takes the complete list of items with a quantity for each. So the
+adapter reads the subscription with `subscription_get` first, then sends one
+`subscription_update` request with the items in the order of your list and a
+`proration_billing_mode`. If the read fails, nothing is sent. If the list
+names the prices the subscription already has, the adapter sends no update
+and returns the subscription it read.
+
+The change is computed from that read and is not atomic. Because the adapter
+sends the whole list of items, a change made at Paddle between the read and
+the write can be undone.
+
+`proration` says how the change is billed. It is read only when
+`new_price_refs` is `Some`:
+
+| `proration` | Paddle `proration_billing_mode` |
+|---|---|
+| `None` or `Some(Proration::ProrateAtRenewal)` | `prorated_next_billing_period` |
+| `Some(Proration::ProrateNow)` | `prorated_immediately` |
+| `Some(Proration::DoNotProrate)` | `do_not_bill` |
+
+Two combinations are `PaymentError::NotSupported`, and no request is sent:
+
+- A price change together with `cancel_at_period_end: Some(_)`. Paddle
+  schedules a cancellation through its own endpoint, so the two changes cannot
+  be one request. Send them as two updates.
+- A price change with an `idempotency_key`. The adapter cannot forward the
+  key to Paddle.
+
+An item quantity that Paddle reports outside the range of `u32` is a
+`PaymentError::Provider` error, and nothing is sent.
+
+### Error text
+
+The text of a `PaymentError::Provider` that the adapter builds from an SDK
+error names the operation, such as `paddle customer_get`. It keeps the type
+and the code of a Paddle API error, and a transport error without its URL. It
+carries no id and no URL, so it is safe to log. An error of another kind has a
+fixed text, such as `response body is not the expected JSON`.
+
+### Deadlines and unknown outcomes
+
+Every call of the adapter to Paddle has a deadline of 30 seconds, from the
+request to the whole answer. A call that runs out of time returns
+`PaymentError::Provider`. The text depends on what the call does:
+
+| Call | Error text |
+|---|---|
+| A read (`subscription_get`, `customer_get`, `transaction_get`) | `paddle <operation> timed out` |
+| A call that changes something (`transaction_create`, `subscription_update`, `subscription_cancel`, `customer_create`, `customer_update`) | `paddle <operation> timed out; outcome is unknown, reconcile before retrying` |
+
+After a read times out, you can read again. After a change times out, Paddle
+may have carried out the change, so the outcome is unknown. Read the state at
+Paddle before you send the call again: `Subscription::get` for a
+subscription, `CustomerStore::get_customer` for a customer, `session_status`
+for a transaction.
+
+The adapter has no idempotency key to retry under. It rejects a supplied
+`idempotency_key` on `start_session`, on a price change, and on `update` with
+`cancel_at_period_end: Some(true)`, and `CreateCustomerRequest`, `update_customer`
+and `cancel` have no key field. A retry of a change that timed out can repeat it.
+
+### Customer deletion is "archive"
+
+`delete_customer` returns `PaymentError::NotSupported` because Paddle's
+public API does not expose a delete endpoint at all. Archiving is Paddle's
+only way to take a customer out of use, and the Paddle provider exposes it
+directly:
+
+```rust
+paddle.archive_customer("ctm_123").await?;
+```
+
+`archive_customer(provider_customer_id)` sends the customer's `status` as
+`archived` and nothing else, so the name, email and `custom_data` of the
+customer stay as they are. The customer keeps its history and can't be used
+for new checkouts. A customer that Paddle does not know is
+`PaymentError::NotFound`. Any other Paddle error is `PaymentError::Provider`.
+The call has the deadline of every call of the adapter and is a change: see
+[Deadlines and unknown outcomes](#deadlines-and-unknown-outcomes).
+
+Don't try to archive through `update_customer`'s `metadata`: that field is
+Paddle's `custom_data`, so a `"status"` key there is stored as data and
+changes nothing.
+
+#### Reach the Paddle provider
+
+`archive_customer` is a method of `PaddleProvider`, not of a payments trait,
+so `PaymentProviderRegistry::get("paddle")` cannot give it to you: it returns
+an `Arc<dyn PaymentProvider>`. Keep the concrete provider. Bind the same
+`Arc` in the registry and in the container when you bootstrap:
+
+```rust
+use std::sync::Arc;
+use suprnova::App;
+use suprnova::payments::PaymentProviderRegistry;
+use suprnova_payments_paddle::PaddleProvider;
+
+pub async fn bootstrap() {
+    let paddle = Arc::new(PaddleProvider::from_env().expect("Paddle env vars not set"));
+    PaymentProviderRegistry::bind("paddle", paddle.clone());
+    App::bind::<PaddleProvider>(paddle);
+}
+```
+
+Then resolve it where you archive:
+
+```rust
+let paddle = App::make::<PaddleProvider>().expect("PaddleProvider not bound");
+paddle.archive_customer("ctm_123").await?;
+```
 
 ## Webhook signature verification
 
@@ -338,7 +465,7 @@ like `ts=1716000000,h1=abcdef…`. The adapter delegates verification to
 - Parses the header
 - Recomputes the HMAC using your `PADDLE_WEBHOOK_KEY`
 - Rejects signatures whose timestamp is outside `MaximumVariance::default()`
-  (5 seconds at time of writing - replays older than that are dropped)
+  (5 seconds in paddle-rust-sdk 0.18, the version the adapter pins - replays older than that are dropped)
 
 The framework's `webhook_routes` handler calls `verify` before doing
 anything else; a failure returns `401 invalid-signature` with no body
@@ -435,9 +562,7 @@ Each `NotSupported` error message points at the supported workflow:
 
 - `subscribe`: "use `Checkout::start_session` with `SessionMode::Subscription`
   and await the `SubscriptionCreated` webhook"
-- `update` with `new_price_refs`: "Paddle price-set replacement on existing
-  subscription not in v1"
-- `delete_customer`: "use `UpdateCustomer` with `archived` status"
+- `delete_customer`: "archive with `PaddleProvider::archive_customer`"
 
 Branch on this error explicitly when you're writing provider-agnostic
 domain code:
@@ -446,13 +571,9 @@ domain code:
 match provider.delete_customer(&cus_id).await {
     Ok(()) => { /* Stripe path */ }
     Err(PaymentError::NotSupported(_)) => {
-        // Paddle path - archive via update instead
-        provider.update_customer(UpdateCustomerRequest {
-            provider_customer_id: cus_id,
-            email: None,
-            name: None,
-            metadata: Some(serde_json::json!({ "status": "archived" })),
-        }).await?;
+        // Paddle path - archive instead. `paddle` is the concrete
+        // provider, see "Reach the Paddle provider" above.
+        paddle.archive_customer(&cus_id).await?;
     }
     Err(e) => return Err(e),
 }
@@ -575,11 +696,14 @@ Before flipping `PADDLE_ENVIRONMENT=production`:
 - [ ] Your `success_return_url` and `cancel_return_url` point at HTTPS
   endpoints (Paddle rejects HTTP in production)
 - [ ] You've decided how your app responds when `subscribe()`,
-  `delete_customer()`, or `update(price_refs)` return `NotSupported` -
-  either branch in code or document that those flows are MoR-only
-- [ ] You've stress-tested the cancellation UX: cancellation is always
-  scheduled, so "you cancelled but you still have access until DATE" is
-  the message your UI should show
+  `delete_customer()`, or a price change with `cancel_at_period_end` or an
+  `idempotency_key` return `NotSupported` - either branch in code or document
+  that those flows are MoR-only
+- [ ] You've decided what your app does when a change times out with an
+  unknown outcome: read the state at Paddle before you send the call again
+- [ ] You've stress-tested the cancellation UX: `cancel(id, true)` schedules
+  the cancellation, so "you cancelled but you still have access until DATE"
+  is the message your UI should show for it
 - [ ] You've stress-tested the subscription-arrival webhook: there is a
   window where the customer has paid but the mirror has no row yet
 - [ ] You're aggregating revenue correctly: Paddle amounts are

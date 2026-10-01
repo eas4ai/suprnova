@@ -427,6 +427,36 @@ async fn login_failures_are_indistinguishable_and_recorded() {
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
+async fn lockout_status_failure_is_logged_before_failing_closed() {
+    use sea_orm::ConnectionTrait as _;
+
+    let world = harness_with(
+        Arc::new(WorkSpyDriver::default()),
+        fast_hash_config(),
+        LockoutConfig::default(),
+    )
+    .await;
+    register(&world).await;
+    // The lockout store cannot be read once its table is gone; every other
+    // table the sign-in touches is still in place.
+    world
+        .db
+        .execute_unprepared("ALTER TABLE storage_lockouts RENAME TO storage_lockouts_gone")
+        .await
+        .unwrap();
+
+    let reply = dispatch(&world, login_request(EMAIL, PASSWORD)).await;
+
+    assert_eq!(reply.status, 503);
+    assert!(reply.grant.is_none(), "a closed failure grants no session");
+    assert!(
+        logs_contain("lockout status unavailable; failing closed"),
+        "the failure that closed the sign-in is in the log"
+    );
+}
+
+#[tokio::test]
 async fn failed_attempt_storage_failure_returns_service_unavailable() {
     use sea_orm::{ConnectionTrait as _, EntityTrait as _, PaginatorTrait as _};
 

@@ -89,6 +89,45 @@ fn is_pattern(name: &str) -> bool {
         .any(|s| s.starts_with('{') && s.ends_with('}'))
 }
 
+/// How a channel is named on a Pusher-protocol service.
+///
+/// The in-process hub ignores it (it authorizes in-band through
+/// `authorize`). The Pusher driver uses it to choose the wire name.
+/// `Private` is the default so the driver fails closed: a channel that
+/// restricts `authorize` can never leak through a public Pusher channel.
+/// `Public` means Pusher clients subscribe with no authorization at all
+/// and `authorize` is never consulted. `Encrypted` means end-to-end
+/// encrypted (`private-encrypted-`). A presence channel
+/// (`presence_info()` is `Some`) is always `presence-`, whatever
+/// `visibility` returns.
+///
+/// Every wire name must read back as exactly one channel, so the driver
+/// refuses (publishing fails, authorization answers 403) a name that
+/// would collide with another channel's wire name: a `Public` name
+/// starting with `private-` or `presence-`, and a `Private` name
+/// starting with `encrypted-`. This holds for the concrete name, so a
+/// pattern such as `{slug}.orders` is refused for a slug that starts
+/// with `encrypted-`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelVisibility {
+    /// Pusher clients subscribe with no authorization at all and
+    /// `authorize` is never consulted. Use only for channels whose
+    /// `authorize` accepts every subscriber.
+    Public,
+    /// The default. The driver fails closed: a channel that restricts
+    /// `authorize` can never leak through a public Pusher channel.
+    Private,
+    /// End-to-end encrypted (`private-encrypted-`). Publishing needs a
+    /// configured master key and authorization answers include the
+    /// per-channel shared secret.
+    ///
+    /// Pusher has no encrypted presence channels. A presence channel
+    /// that returns `Encrypted` is refused (publishing fails,
+    /// authorization answers 403) rather than sent as plaintext under
+    /// `presence-`.
+    Encrypted,
+}
+
 /// A named subscription target with auth + presence semantics.
 ///
 /// Channels are registered with [`ChannelRegistry`] at bootstrap;
@@ -173,6 +212,21 @@ pub trait Channel: Send + Sync + 'static {
         _data: &Value,
     ) -> bool {
         false
+    }
+
+    /// How this channel is named on a Pusher-protocol service.
+    ///
+    /// The in-process hub ignores it (it authorizes in-band through
+    /// [`authorize`](Self::authorize)). The Pusher driver uses it to
+    /// choose the wire name. The default is
+    /// [`ChannelVisibility::Private`] so the driver fails closed: a
+    /// channel that restricts `authorize` can never leak through a
+    /// public Pusher channel. Return
+    /// [`ChannelVisibility::Public`] only when Pusher clients may
+    /// subscribe with no authorization at all and `authorize` is never
+    /// consulted.
+    fn visibility(&self) -> ChannelVisibility {
+        ChannelVisibility::Private
     }
 
     /// If this channel carries presence semantics, return `Some(self)`

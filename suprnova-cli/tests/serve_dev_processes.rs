@@ -1067,3 +1067,210 @@ fn frontend_only_on_an_api_project_still_fails_with_an_actionable_message() {
     assert!(output.contains("--frontend-only"), "{output}");
     assert!(output.contains("--api"), "{output}");
 }
+
+// --- When `serve` runs the migrations --------------------------------------
+
+/// A `cargo` that writes every call into `cargo-calls.log` in the project,
+/// one call on a line. `cargo run ...` is the run of the migrations and
+/// does what `on_run` says; `cargo watch ...` is the backend.
+fn recording_cargo(on_run: &str) -> String {
+    format!(
+        r#"printf '%s\n' "$*" >> cargo-calls.log
+if [ "$1" = "watch" ] && [ "$2" = "--version" ]; then
+  exit 0
+fi
+if [ "$1" = "run" ]; then
+  {on_run}
+fi
+trap 'exit 0' TERM INT
+printf 'backend-shim-alive\n'
+sleep 10"#
+    )
+}
+
+/// An API project with a `src/migrations` directory, and the `cargo`
+/// above in front of the real one.
+fn project_with_migrations(on_run: &str) -> Fixture {
+    let fx = Fixture::api_project("shop");
+    fs::create_dir_all(fx.root().join("src/migrations")).expect("mkdir src/migrations");
+    fx.shim("cargo", &recording_cargo(on_run));
+    fx
+}
+
+/// What `cargo` was called with, without the check for cargo-watch.
+fn cargo_calls(fx: &Fixture) -> Vec<String> {
+    fs::read_to_string(fx.root().join("cargo-calls.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|call| *call != "watch --version")
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Wait for the backend to be started, and return every call of `cargo`
+/// up to it.
+fn calls_up_to_the_backend(fx: &Fixture, err_path: &Path) -> Vec<String> {
+    let started = wait_until(Duration::from_secs(10), || {
+        cargo_calls(fx)
+            .iter()
+            .any(|call| call.starts_with("watch "))
+    });
+    assert!(
+        started,
+        "the backend was not started. cargo was called with {:?}; stderr: {}",
+        cargo_calls(fx),
+        fs::read_to_string(err_path).unwrap_or_default()
+    );
+    cargo_calls(fx)
+}
+
+#[test]
+fn serve_runs_the_migrations_when_it_starts_and_the_watched_backend_runs_none() {
+    let fx = project_with_migrations("printf 'migrated\\n'; exit 0");
+
+    let (mut child, _out_path, err_path) = fx.spawn_serve_split_full(&["--json"]);
+    let calls = calls_up_to_the_backend(&fx, &err_path);
+    child.terminate();
+
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0], "run --bin shop -- migrate");
+    assert!(
+        calls[1].ends_with("-x run --bin shop -- serve --no-migrate"),
+        "a restart of the watcher must run no migration: {calls:?}"
+    );
+}
+
+#[test]
+fn the_output_of_the_migrations_comes_before_the_event_that_they_ended() {
+    let fx = project_with_migrations("printf 'migrated\\n'; exit 0");
+
+    let (mut child, out_path, err_path) = fx.spawn_serve_split_full(&["--json"]);
+    calls_up_to_the_backend(&fx, &err_path);
+    child.terminate();
+
+    let events: Vec<Value> = fs::read_to_string(&out_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("line {line:?} is not valid JSON: {e}"))
+        })
+        .collect();
+    let of_migrate: Vec<&str> = events
+        .iter()
+        .filter(|event| event.get("name").and_then(Value::as_str) == Some("migrate"))
+        .filter_map(|event| event.get("type").and_then(Value::as_str))
+        .collect();
+    assert_eq!(
+        of_migrate,
+        ["started", "output", "exited"],
+        "every line of the run stands in front of its end: {events:?}"
+    );
+}
+
+#[test]
+fn a_failed_run_leaves_the_backend_to_migrate_by_itself() {
+    let fx = project_with_migrations("printf 'no such table\\n' >&2; exit 3");
+
+    let (mut child, _out_path, err_path) = fx.spawn_serve_split_full(&["--json"]);
+    let calls = calls_up_to_the_backend(&fx, &err_path);
+    child.terminate();
+
+    assert_eq!(calls[0], "run --bin shop -- migrate");
+    assert!(
+        calls[1].ends_with("-x run --bin shop"),
+        "the backend must migrate itself, and refuse to serve until it can: {calls:?}"
+    );
+    let stderr = fs::read_to_string(&err_path).unwrap_or_default();
+    assert!(
+        stderr.contains("Migrations were not run") && stderr.contains("exit code 3"),
+        "the failure must be said: {stderr}"
+    );
+}
+
+#[test]
+fn migrate_always_is_the_backend_that_migrates_on_every_start() {
+    let fx = project_with_migrations("exit 0");
+
+    let (mut child, _out_path, err_path) =
+        fx.spawn_serve_split_full(&["--json", "--migrate", "always"]);
+    let calls = calls_up_to_the_backend(&fx, &err_path);
+    child.terminate();
+
+    assert_eq!(calls.len(), 1, "no run at the start: {calls:?}");
+    assert!(calls[0].ends_with("-x run --bin shop"), "{calls:?}");
+}
+
+#[test]
+fn no_migrate_runs_no_migration_at_all() {
+    for flags in [vec!["--no-migrate"], vec!["--migrate", "never"]] {
+        let fx = project_with_migrations("exit 0");
+        let mut args = vec!["--json"];
+        args.extend(&flags);
+
+        let (mut child, _out_path, err_path) = fx.spawn_serve_split_full(&args);
+        let calls = calls_up_to_the_backend(&fx, &err_path);
+        child.terminate();
+
+        assert_eq!(calls.len(), 1, "{flags:?}: no run at the start: {calls:?}");
+        assert!(
+            calls[0].ends_with("-x run --bin shop -- serve --no-migrate"),
+            "{flags:?}: {calls:?}"
+        );
+    }
+}
+
+#[test]
+fn a_project_with_no_migrations_directory_is_left_to_migrate_by_itself() {
+    // Its migrator is somewhere the CLI does not know. The application
+    // knows it, and migrates when it starts, as it did before.
+    let fx = Fixture::api_project("shop");
+    fx.shim("cargo", &recording_cargo("exit 0"));
+
+    let (mut child, _out_path, err_path) = fx.spawn_serve_split_full(&["--json"]);
+    let calls = calls_up_to_the_backend(&fx, &err_path);
+    child.terminate();
+
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].ends_with("-x run --bin shop"), "{calls:?}");
+}
+
+#[test]
+fn a_signal_to_serve_alone_ends_the_session_while_the_migrations_run() {
+    // The run would take a minute. The signal goes to the process of
+    // `serve` and to no other, as it does from an editor or a program
+    // that reads `--json`.
+    let fx = project_with_migrations("exec sleep 60");
+
+    let (mut child, out_path, _err_path) = fx.spawn_serve_split_full(&["--json"]);
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            cargo_calls(&fx).iter().any(|call| call.starts_with("run "))
+        }),
+        "the migrations were not started"
+    );
+
+    let pid = i32::try_from(child.id()).expect("child pid fits in pid_t");
+    kill(Pid::from_raw(pid), Signal::SIGINT).expect("send SIGINT");
+
+    assert!(
+        wait_until(Duration::from_secs(5), || !process_is_live(child.id())),
+        "serve must not wait for the migrations to end"
+    );
+    assert!(
+        !cargo_calls(&fx)
+            .iter()
+            .any(|call| call.starts_with("watch ")),
+        "nothing is started in a session that is ending: {:?}",
+        cargo_calls(&fx)
+    );
+    let output = fs::read_to_string(&out_path).unwrap_or_default();
+    let last = output.lines().rfind(|line| !line.is_empty()).unwrap_or("");
+    assert!(
+        last.contains(r#""type":"shutdown""#),
+        "the last event is the shutdown: {output}"
+    );
+
+    child.terminate();
+}

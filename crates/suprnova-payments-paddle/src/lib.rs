@@ -10,15 +10,23 @@
 //! calls `Checkout::start_session` and awaits the `SubscriptionCreated`
 //! webhook for the resulting subscription_id. `Subscription::subscribe`
 //! returns `PaymentError::NotSupported` with a clear migration message.
+//!
+//! Paddle has no customer deletion either: `CustomerStore::delete_customer`
+//! returns `NotSupported`, and `PaddleProvider::archive_customer` archives
+//! the customer instead.
 
 mod checkout;
 mod customer;
+mod deadline;
 mod event_map;
+mod sdk_error;
 mod subscription;
 mod webhook;
 
 #[cfg(test)]
 mod idempotency_tests;
+#[cfg(test)]
+mod mocked_paddle;
 
 pub use event_map::paddle_event_to_neutral;
 

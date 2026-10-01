@@ -167,8 +167,9 @@ ordering, and the global vs per-route distinction.
 
 Scaffold a console command - a `#[derive(clap::Parser, Command)]`
 struct that the per-project `console` binary picks up via `inventory`
-at link time. The default body is a `println!("…: not yet
-implemented")` so the command runs immediately.
+at link time. The default body prints a line with
+`suprnova::console::line` that says the command is not implemented, so the
+command runs immediately and a test can read what it prints.
 
 ```bash
 suprnova make:command CleanCache
@@ -202,7 +203,7 @@ pub struct CleanCache {
 #[async_trait]
 impl TypedCommand for CleanCache {
     async fn run(self) -> Result<(), FrameworkError> {
-        println!("clean-cache: not yet implemented");
+        suprnova::console::line("clean-cache: not yet implemented");
         Ok(())
     }
 }
@@ -471,8 +472,14 @@ suprnova schedule:run    # one-shot - typically called by cron
 suprnova schedule:list   # show every registered task
 ```
 
+A task is a type that implements `Task`, whose only method is `handle`. The
+name of a task and the times it runs at are set where you register it, not on
+the trait. The scaffolded `src/tasks/mod.rs` carries a doc comment that shows
+the same pair: a `Task` in `src/tasks/` and its registration in
+`src/schedule.rs`.
+
 See [Scheduling](scheduling.md) for the full task surface (`hourly`,
-`weekly`, `cron(...)`, `between`, `when`, `without_overlapping`,
+`weekly`, `cron(...)`, `without_overlapping`, `on_one_server`,
 timezone handling) and [CLI Scheduling](cli-scheduling.md) for the
 run-as-cron vs run-as-daemon trade.
 
@@ -572,7 +579,9 @@ The migration name is preserved verbatim and prefixed with a
 `YYYYMMDDHHMMSS_` stamp so files sort chronologically. The generated
 file lands in `migrations/`.
 
-See [Migrations](migrations.md) for the schema-builder surface and
+The generated file uses SeaORM's builder. The
+[schema builder](migrations.md#the-schema-builder) is the alternative you write
+by hand. See [Migrations](migrations.md) for both forms and
 [Database Testing](database-testing.md) for the `TestDatabase::fresh`
 pattern that runs migrations against an isolated database per test.
 

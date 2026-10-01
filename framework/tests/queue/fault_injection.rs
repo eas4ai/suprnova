@@ -307,6 +307,7 @@ fn env(name: &str, payload: serde_json::Value) -> Envelope {
         debounce_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
+        context: None,
     }
 }
 

@@ -29,12 +29,11 @@ use std::time::Duration;
 use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub};
 use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
 use suprnova::queue::worker::register_job;
-#[allow(unused_imports)]
 use suprnova::{
     App, CsrfMiddleware, DB, EloquentUserProvider, EventFacade, FrameworkError, IncludeMiddleware,
     Inertia, InertiaConfig, InertiaRequestExt, InertiaSharedData, LocaleMiddleware, LocaleShare,
-    Prop, S3Config, SessionBlock, SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
-    UserProvider, bind, global_middleware, singleton,
+    Prop, SessionBlock, SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
+    UserProvider, bind, global_middleware,
 };
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
@@ -385,9 +384,10 @@ pub fn register_http_stack() {
 /// Register the application's storage disks.
 ///
 /// `public` is a local-filesystem disk rooted at `./storage/public`, suitable
-/// for development. `uploads` is an S3-backed disk that is only registered
-/// when `S3_BUCKET` is set in the environment - production deployments wire
-/// it via env vars, while local dev and tests skip it.
+/// for development. The S3 disk is the framework's: with `S3_BUCKET` set in
+/// the environment the server registers it under the name `s3` when it
+/// boots, from the `S3_*` variables. Production deployments set them, and
+/// local dev and tests have no such disk.
 ///
 /// Split out of `register()` so test harnesses can re-target the `public`
 /// disk to a tempdir without re-running the rest of bootstrap.
@@ -398,21 +398,6 @@ pub fn register_storage_disks() {
     // freshly-cloned checkout doesn't 500 on a missing parent. opendal's
     // fs service creates files but not intermediate dirs.
     std::fs::create_dir_all("./storage/public/avatars").ok();
-
-    if let Ok(bucket) = std::env::var("S3_BUCKET") {
-        Storage::register_s3(
-            "uploads",
-            S3Config {
-                bucket,
-                region: std::env::var("AWS_REGION").ok(),
-                endpoint: std::env::var("S3_ENDPOINT").ok(),
-                access_key_id: std::env::var("AWS_ACCESS_KEY_ID").ok(),
-                secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").ok(),
-                root: std::env::var("S3_ROOT").ok(),
-            },
-        )
-        .expect("register S3 uploads disk");
-    }
 }
 
 /// Per-request Inertia shared data. Demonstrates the request-aware
