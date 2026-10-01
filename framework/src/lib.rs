@@ -298,9 +298,9 @@ pub use http::upload::{
     upload_tempfiles_spilled_total,
 };
 pub use http::{
-    Cookie, CookieOptions, CookiePrefix, FormRequest, FromParam, FromRequest, HttpResponse,
-    Redirect, RedirectRouteBuilder, Request, Response, ResponseExt, SameSite, abort_if,
-    abort_unless, abort_with, json, text,
+    ContentDisposition, Cookie, CookieOptions, CookiePrefix, FormRequest, FromParam, FromRequest,
+    HttpResponse, Redirect, RedirectRouteBuilder, Request, Response, ResponseExt, SameSite,
+    abort_if, abort_unless, abort_with, json, text,
 };
 pub use http_client::{
     ClientResponse, FailOnRealCallsGuard, Http, RecordedRequest, RequestBuilder, RetryContext,

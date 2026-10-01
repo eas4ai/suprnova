@@ -36,6 +36,7 @@ mod disk;
 mod path_guard;
 mod read_through;
 mod registry;
+mod response;
 pub mod streaming;
 
 #[cfg(any(test, feature = "testing"))]
