@@ -152,8 +152,9 @@ impl HttpResponse {
     ///
     /// The response carries the content type the file's extension implies
     /// (`application/octet-stream` when it implies none; the content is
-    /// never sniffed, so an upload cannot pass itself off as HTML or SVG),
-    /// a `Content-Length`, and `Content-Disposition: inline` with `name`,
+    /// never sniffed, so a file with an unknown extension is never served
+    /// as HTML or SVG), a `Content-Length`, and
+    /// `Content-Disposition: inline` with `name`,
     /// or the file's own name when `name` is `None`. A file above 1 MiB is
     /// streamed in 64 KiB chunks rather than read into memory.
     ///
@@ -164,8 +165,10 @@ impl HttpResponse {
     /// # Errors
     ///
     /// A 404 error when nothing is at `path` or it is not a file; a 500
-    /// error when the file cannot be opened or read. Neither message
-    /// names the path. Convert with `.map_err(HttpResponse::from)` in a
+    /// error when the file cannot be opened or read. The 404 message names
+    /// no path; a 500 renders the generic server-error body, so its path
+    /// reaches the log (and the debug-only `debug_message`), not the
+    /// client. Convert with `.map_err(HttpResponse::from)` in a
     /// handler that returns [`Response`](crate::Response).
     ///
     /// ```rust,no_run

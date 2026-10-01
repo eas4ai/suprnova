@@ -49,8 +49,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use suprnova::sse::{EndSignal, StreamedEvent};
 use suprnova::{

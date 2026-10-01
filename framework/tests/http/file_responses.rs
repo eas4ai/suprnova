@@ -110,7 +110,11 @@ fn parse_disposition(value: &str) -> (String, Vec<(String, String)>) {
         let name = value[i..name_end].to_string();
         assert!(!name.is_empty(), "empty parameter name in {value:?}");
         i = name_end;
-        assert_eq!(bytes.get(i), Some(&b'='), "expected `=` after {name} in {value:?}");
+        assert_eq!(
+            bytes.get(i),
+            Some(&b'='),
+            "expected `=` after {name} in {value:?}"
+        );
         i += 1;
         let mut out = String::new();
         if bytes.get(i) == Some(&b'"') {
@@ -170,7 +174,11 @@ fn assert_disposition(value: &str, kind: &str, fallback: &str, extended: Option<
     }
     assert_eq!(params[0].1, fallback, "ASCII fallback of {value:?}");
     if let Some(extended) = extended {
-        assert_eq!(decode_ext_value(&params[1].1), extended, "filename* of {value:?}");
+        assert_eq!(
+            decode_ext_value(&params[1].1),
+            extended,
+            "filename* of {value:?}"
+        );
     }
 }
 
@@ -259,12 +267,20 @@ fn control_characters_never_reach_the_header() {
 #[test]
 fn a_percent_sign_is_kept_out_of_the_fallback() {
     let value = ContentDisposition::Attachment.header_value("100%25 done.csv");
-    assert_disposition(&value, "attachment", "100_25 done.csv", Some("100%25 done.csv"));
+    assert_disposition(
+        &value,
+        "attachment",
+        "100_25 done.csv",
+        Some("100%25 done.csv"),
+    );
 }
 
 #[test]
 fn an_empty_name_writes_the_disposition_type_alone() {
-    assert_eq!(ContentDisposition::Attachment.header_value(""), "attachment");
+    assert_eq!(
+        ContentDisposition::Attachment.header_value(""),
+        "attachment"
+    );
     assert_eq!(ContentDisposition::Inline.header_value(""), "inline");
 }
 
@@ -349,7 +365,9 @@ async fn the_content_type_comes_from_the_extension_and_is_never_sniffed() {
             path.display()
         );
         assert_eq!(
-            response.header_value("Content-Disposition").map(|v| v.starts_with("inline")),
+            response
+                .header_value("Content-Disposition")
+                .map(|v| v.starts_with("inline")),
             Some(true)
         );
     }
@@ -382,7 +400,10 @@ async fn a_large_file_is_streamed_and_arrives_whole() {
     assert_eq!(header(&headers, "content-type"), "application/zip");
     assert_eq!(header(&headers, "content-length"), len.to_string());
     assert_eq!(body.len(), len);
-    assert!(body[..] == contents[..], "the streamed body must match the file");
+    assert!(
+        body[..] == contents[..],
+        "the streamed body must match the file"
+    );
 }
 
 #[tokio::test]

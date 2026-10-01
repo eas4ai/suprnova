@@ -315,9 +315,69 @@ Both functions return an error in these cases:
   out no link that can be guessed. Use `temporary_url` for those files.
 - The path is empty or has a `.` or `..` segment.
 
-Suprnova does not serve the files. A local disk needs a route or a web
-server in front of its directory. A bucket needs to be public or behind a
-CDN.
+`Storage::url` doesn't serve the files. A local disk needs a route, such as
+one that returns `Storage::response`, or a web server in front of its
+directory. A bucket needs to be public or behind a CDN.
+
+### Serve a file from a disk
+
+`Storage::download(disk, path, name)` and `Storage::response(disk, path,
+name)` return a file on a disk as an HTTP response. They match Laravel's
+`Storage::disk($disk)->download($path, $name)` and
+`Storage::disk($disk)->response($path, $name)`.
+
+```rust
+use suprnova::{HttpResponse, Request, Response, Storage};
+
+// The browser saves the file.
+pub async fn invoice(req: Request) -> Response {
+    let number = req.param("number")?;
+    Storage::download(
+        "local",
+        &format!("invoices/{number}.pdf"),
+        Some("Factura Pérez.pdf"),
+    )
+    .await
+    .map_err(HttpResponse::from)
+}
+
+// The browser shows the file.
+pub async fn logo(_req: Request) -> Response {
+    Storage::response("s3", "brand/logo.png", None)
+        .await
+        .map_err(HttpResponse::from)
+}
+```
+
+Both read the file through the disk, so they work on every driver. A local
+disk keeps its [path-traversal guard](#path-traversal-guard): a path such as
+`../secret` is refused before anything is read. That makes these the forms
+to use when a request names the file. S3, Azure Blob, GCS, and in-memory
+disks have no local path, and they're read the same way.
+
+The response follows the same rules as `HttpResponse::download` and
+`HttpResponse::file`:
+
+- `download` sends `Content-Disposition: attachment` and `response` sends
+  `inline`. The filename is `name`, or the last segment of `path` when
+  `name` is `None`. Non-ASCII names are written per RFC 6266, as described
+  in [Filenames and `Content-Disposition`](responses.md#filenames-and-content-disposition).
+- The `Content-Type` comes from the extension of `path`, or is
+  `application/octet-stream` when the extension is unknown. A content type
+  stored with the object is not used, because whoever uploaded the object
+  chose it.
+- A file of 1 MiB or less is read whole. A larger file is streamed from the
+  disk in 64 KiB chunks. Both carry a `Content-Length`.
+
+The errors map to these status codes:
+
+| Case | Status |
+|---|---|
+| Nothing at `path`, or `path` is a directory | `404` |
+| The disk refuses the path, such as `..` on a local disk | `403` |
+| The disk isn't registered, or the read fails | `500` |
+
+The `404` and `403` messages don't name the path.
 
 ## Cross-disk streaming copy
 
@@ -677,6 +737,8 @@ so production code cannot reach for them.
 | `delete($path)`                       | `disk.delete(path)` (opendal-native)                     |
 | `temporaryUrl($path, $expiry)`        | `disk.temporary_url(path, expire)` (or opendal-native `presign_read`) |
 | `temporaryUploadUrl($path, $expiry)`  | `disk.temporary_upload_url(path, expire)` (or opendal-native `presign_write`) |
+| `download($path, $name)`              | `Storage::download(disk, path, name)`                    |
+| `response($path, $name)`              | `Storage::response(disk, path, name)`                    |
 | `Storage::fake()`                     | `Storage::fake()`                                        |
 | `Storage::disk()->assertExists()`     | `disk.assert_exists(path).await`                         |
 | `FilesystemManager::forgetDisk($n)`   | `Storage::forget(name)`                                  |

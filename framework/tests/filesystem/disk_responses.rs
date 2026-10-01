@@ -213,9 +213,12 @@ async fn a_disk_without_local_paths_is_read_through_the_disk() {
     disk.write("img/logo.png", b"\x89PNG\r\n\x1a\nlogo".to_vec())
         .await
         .unwrap();
-    disk.write("blobs/upload.xyz", b"<svg onload=\"alert(1)\"></svg>".to_vec())
-        .await
-        .unwrap();
+    disk.write(
+        "blobs/upload.xyz",
+        b"<svg onload=\"alert(1)\"></svg>".to_vec(),
+    )
+    .await
+    .unwrap();
 
     let (status, headers, body) = serve("/logo", || async {
         Storage::response("objects", "img/logo.png", None)
@@ -285,6 +288,9 @@ async fn a_large_file_on_a_disk_is_streamed_and_arrives_whole() {
         assert_eq!(header(&headers, "content-type"), "application/zip");
         assert_eq!(header(&headers, "content-length"), len.to_string());
         assert_eq!(body.len(), len, "{disk}");
-        assert!(body[..] == contents[..], "the body from `{disk}` must match");
+        assert!(
+            body[..] == contents[..],
+            "the body from `{disk}` must match"
+        );
     }
 }
