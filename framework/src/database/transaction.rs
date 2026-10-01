@@ -47,9 +47,14 @@
 //!
 //! The queue is the caller that matters: `Job::after_commit()` routes a push
 //! through this registry so the envelope only reaches the driver once the rows
-//! it describes are durable. See `database::after_commit`. Manual transactions
-//! do not participate - they install no `CURRENT_TX`, so there is no drain
-//! point.
+//! it describes are durable. See `database::after_commit`.
+//!
+//! A manual transaction has a registry of its own, drained by
+//! [`Transaction::commit`] and [`Transaction::rollback`], but it installs no
+//! `CURRENT_TX`, so ambient code never finds it: a callback or a push that has
+//! to wait for it registers on the handle, through
+//! [`Transaction::after_commit`] or
+//! [`Queue::push_after_commit_with_tx`](crate::Queue::push_after_commit_with_tx).
 //!
 //! ## Nested `DB::transaction` is rejected at runtime
 //!
@@ -301,8 +306,10 @@ tokio::task_local! {
 pub struct Transaction {
     pub(crate) inner: Arc<DatabaseTransaction>,
     pub(crate) connection_name: Arc<str>,
-    /// The callback registry this handle's savepoints answer to, or `None` for
-    /// the manual [`DB::begin_transaction`] form, which registers nothing.
+    /// The callback registry this handle's savepoints and
+    /// [`Self::after_commit`] answer to: the closure's for the
+    /// [`DB::transaction`] form, and one of the handle's own for the manual
+    /// [`DB::begin_transaction`] form.
     ///
     /// Held on the handle rather than read from `CURRENT_TX`, because a manual
     /// transaction opened *inside* a [`DB::transaction`] closure would find the
@@ -312,8 +319,9 @@ pub struct Transaction {
     /// This is a second path from a live `Transaction` to the
     /// `Arc<DatabaseTransaction>` (`TxState` holds one too), so `DB::transaction`
     /// has to drop the handle before `Arc::try_unwrap` can reach the transaction
-    /// to commit it. It already does; the drop is now load-bearing twice over.
-    pub(crate) registry: Option<Arc<TxState>>,
+    /// to commit it, and a manual [`Self::commit`] has to release its registry
+    /// first for the same reason.
+    pub(crate) registry: Arc<TxState>,
 }
 
 /// Cheap shareable view of a [`Transaction`] used to scope a single
@@ -1006,7 +1014,7 @@ impl Transaction {
         Some(Self {
             inner: state.tx.clone(),
             connection_name: state.connection_name.clone(),
-            registry: Some(state),
+            registry: state,
         })
     }
 
@@ -1069,9 +1077,7 @@ impl Transaction {
         // Marked only once the statement landed: a mark for a savepoint the
         // database never established would discard callbacks whose rows are
         // still there.
-        if let Some(state) = self.registry.as_deref() {
-            super::after_commit::mark_savepoint(state, &validated);
-        }
+        super::after_commit::mark_savepoint(&self.registry, &validated);
         Ok(())
     }
 
@@ -1090,7 +1096,8 @@ impl Transaction {
     /// goes back immediately and a re-dispatch inside the same transaction can
     /// win it. Callbacks registered *before* the savepoint are untouched, and a
     /// savepoint that is never rolled back keeps everything registered inside
-    /// it. Manual transactions have no registry and so unwind nothing.
+    /// it. A manual transaction unwinds its own registry, the one
+    /// [`Self::after_commit`] fills, the same way.
     ///
     /// The compensations run with the transaction still open and `CURRENT_TX`
     /// still installed - unlike the end-of-transaction drain, there is no way to
@@ -1114,21 +1121,64 @@ impl Transaction {
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         // Registry after SQL, never before: a refused `ROLLBACK TO` leaves the
         // rows in place, and callbacks discarded for it could not be recovered.
-        if let Some(state) = self.registry.as_deref() {
-            match super::after_commit::rollback_to_savepoint(state, &validated) {
-                Some(compensations) => {
-                    super::after_commit::run_rollback(compensations).await;
-                }
-                None => tracing::warn!(
-                    target: "suprnova::database",
-                    savepoint = validated,
-                    "rolled back to a savepoint this transaction never issued through \
-                     Transaction::savepoint; after-commit callbacks registered inside it \
-                     are kept, because there is no recorded mark to unwind to",
-                ),
+        match super::after_commit::rollback_to_savepoint(&self.registry, &validated) {
+            Some(compensations) => {
+                super::after_commit::run_rollback(compensations).await;
             }
+            None => tracing::warn!(
+                target: "suprnova::database",
+                savepoint = validated,
+                "rolled back to a savepoint this transaction never issued through \
+                 Transaction::savepoint; after-commit callbacks registered inside it \
+                 are kept, because there is no recorded mark to unwind to",
+            ),
         }
         Ok(())
+    }
+
+    /// Run `callback` once this transaction commits, and never if it rolls
+    /// back. The handle-bound form of [`DB::after_commit`], for a transaction
+    /// started with [`DB::begin_transaction`].
+    ///
+    /// A hand-started transaction is not ambient: code that does not name
+    /// the handle runs outside it, and its writes do not join it either. So
+    /// [`DB::after_commit`] beside a manual transaction runs at once, and a
+    /// callback that has to wait for this transaction registers here.
+    ///
+    /// The callback follows the rules of the [`DB::transaction`] form,
+    /// against this handle: it runs after [`Self::commit`], in registration
+    /// order, outside the transaction. It is discarded by
+    /// [`Self::rollback`], by dropping the handle uncommitted, and by a
+    /// [`Self::rollback_to`] a savepoint taken before it was registered. If
+    /// it fails, `commit` returns the error with the message
+    /// `after-commit callback failed (the transaction itself committed)`; the
+    /// remaining callbacks still run and the commit stands.
+    ///
+    /// Called on the handle a [`DB::transaction`] closure receives, it
+    /// registers on that closure's transaction, exactly as
+    /// [`DB::after_commit`] does there.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// let tx = DB::begin_transaction().await?;
+    /// let order = Order::create_with_tx(&tx, attrs! { total: 30 }).await?;
+    /// let id = order.id;
+    /// tx.after_commit(move || async move { notify_warehouse(id).await });
+    /// tx.commit().await?;
+    /// ```
+    pub fn after_commit<F, Fut>(&self, callback: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), FrameworkError>> + Send + 'static,
+    {
+        self.queue_after_commit(Box::new(move || Box::pin(callback())));
+    }
+
+    /// Queue an already boxed callback on this handle's registry. The queue's
+    /// handle-bound push builds its callback in that shape.
+    pub(crate) fn queue_after_commit(&self, callback: super::after_commit::AfterCommitCallback) {
+        super::after_commit::queue_on(&self.registry, callback);
     }
 
     /// Commit the manual transaction returned by
@@ -1144,47 +1194,97 @@ impl Transaction {
     /// same `TxHandle` would create a race.
     ///
     /// Fires [`TransactionCommitted`](super::events::TransactionCommitted)
-    /// after a successful commit.
+    /// after a successful commit, then runs the callbacks registered with
+    /// [`Self::after_commit`]. When one of them fails, the commit has still
+    /// happened and is durable, but this returns `Err`, as
+    /// [`DB::transaction`] does in the same case. A commit that does not
+    /// happen discards them.
     pub async fn commit(self) -> Result<(), FrameworkError> {
         let conn_name = self.connection_name.to_string();
-        let tx = Arc::try_unwrap(self.inner).map_err(|_| {
-            FrameworkError::internal(
-                "Transaction::commit: TxHandle clones still alive; \
-                 drop them before commit so no further writes can race",
-            )
-        })?;
-        tx.commit()
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let (after_commit, on_rollback) = take_own_callbacks(self.registry);
+        let tx = match Arc::try_unwrap(self.inner) {
+            Ok(tx) => tx,
+            Err(_) => {
+                super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
+                    .compensate()
+                    .await;
+                return Err(FrameworkError::internal(
+                    "Transaction::commit: TxHandle clones still alive; \
+                     drop them before commit so no further writes can race",
+                ));
+            }
+        };
+        if let Err(error) = tx.commit().await {
+            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
+                .compensate()
+                .await;
+            return Err(FrameworkError::database(error.to_string()));
+        }
+        drop(on_rollback);
+        // Armed before any listener runs, as in `finish_transaction`: a
+        // listener panic must not discard a callback of a committed
+        // transaction.
+        let callbacks = super::after_commit::GuardedCallbacks::after_commit(after_commit);
         emit_tx_event(super::events::TransactionCommitted {
             connection_name: conn_name,
         })
         .await;
-        Ok(())
+        callbacks.run_after_commit().await
     }
 
     /// Roll back the manual transaction returned by
     /// [`DB::begin_transaction`]. Same `Arc::try_unwrap` constraint
     /// as [`Self::commit`].
     ///
+    /// Discards the callbacks registered with [`Self::after_commit`].
     /// Fires [`TransactionRolledBack`](super::events::TransactionRolledBack)
     /// after a successful rollback.
     pub async fn rollback(self) -> Result<(), FrameworkError> {
         let conn_name = self.connection_name.to_string();
-        let tx = Arc::try_unwrap(self.inner).map_err(|_| {
-            FrameworkError::internal(
-                "Transaction::rollback: TxHandle clones still alive; \
-                 drop them before rollback so no further writes can race",
-            )
-        })?;
-        tx.rollback()
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let (after_commit, on_rollback) = take_own_callbacks(self.registry);
+        // Whatever happens below, this transaction does not commit.
+        let callbacks =
+            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback);
+        let tx = match Arc::try_unwrap(self.inner) {
+            Ok(tx) => tx,
+            Err(_) => {
+                callbacks.compensate().await;
+                return Err(FrameworkError::internal(
+                    "Transaction::rollback: TxHandle clones still alive; \
+                     drop them before rollback so no further writes can race",
+                ));
+            }
+        };
+        if let Err(error) = tx.rollback().await {
+            callbacks.compensate().await;
+            return Err(FrameworkError::database(error.to_string()));
+        }
         emit_tx_event(super::events::TransactionRolledBack {
             connection_name: conn_name,
         })
         .await;
+        callbacks.compensate().await;
         Ok(())
+    }
+}
+
+/// The callbacks a handle may finish itself, taken out of its registry.
+///
+/// Only a registry the handle owns alone is drained, which is a manual
+/// transaction's. The handle a [`DB::transaction`] closure works with shares
+/// its registry with `CURRENT_TX`, and that transaction's commit or rollback
+/// drains it; taking the callbacks here would run or discard them on the
+/// wrong outcome. Releasing the registry also releases its reference to the
+/// transaction, which `Arc::try_unwrap` in the caller needs.
+fn take_own_callbacks(
+    registry: Arc<TxState>,
+) -> (
+    Vec<super::after_commit::AfterCommitCallback>,
+    Vec<super::after_commit::AfterCommitCallback>,
+) {
+    match Arc::try_unwrap(registry) {
+        Ok(state) => super::after_commit::drain(&state),
+        Err(_shared) => (Vec::new(), Vec::new()),
     }
 }
 
@@ -1393,7 +1493,7 @@ impl DB {
         let transaction = Transaction {
             inner: tx_state.tx.clone(),
             connection_name: tx_state.connection_name.clone(),
-            registry: Some(tx_state.clone()),
+            registry: tx_state.clone(),
         };
         let result = CURRENT_TX.scope(Some(tx_state), make(transaction)).await;
 
@@ -1422,13 +1522,14 @@ impl DB {
     /// operations through the transaction with `Builder::with_tx(&tx)`
     /// or the `Model::*_with_tx(&tx, ...)` shims.
     ///
-    /// One consequence worth knowing before you reach for this form: because
-    /// there is no `CURRENT_TX`, there is no after-commit registry and no drain
-    /// point either, so a [`Job::after_commit`](crate::queue::Job::after_commit)
-    /// push inside a manual transaction happens **immediately** rather than
-    /// waiting for [`Transaction::commit`]. Deferring it would mean queuing a
-    /// callback nothing will ever run. Use [`DB::transaction`] when a dispatch
-    /// has to wait for the commit.
+    /// The same holds for after-commit work: because there is no
+    /// `CURRENT_TX`, [`DB::after_commit`] and a
+    /// [`Job::after_commit`](crate::queue::Job::after_commit) push made without
+    /// the handle run **immediately**, outside this transaction. Register on
+    /// the handle instead: [`Transaction::after_commit`] for a callback and
+    /// [`Queue::push_after_commit_with_tx`](crate::Queue::push_after_commit_with_tx)
+    /// for a job wait for [`Transaction::commit`] and are discarded by a
+    /// rollback or by dropping the handle uncommitted.
     ///
     /// Holding a `Transaction` pins one pool connection for its
     /// entire lifetime. Pre-load any rows you need to read BEFORE
@@ -1446,13 +1547,21 @@ impl DB {
             connection_name: conn_name.to_string(),
         })
         .await;
+        let inner = Arc::new(tx);
+        // The handle's own registry, drained by `Transaction::commit` and
+        // `Transaction::rollback`. It is never installed as `CURRENT_TX`, so
+        // only calls that name the handle reach it.
+        let registry = Arc::new(TxState {
+            tx: inner.clone(),
+            connection_name: conn_name.clone(),
+            after_commit: std::sync::Mutex::new(Vec::new()),
+            on_rollback: std::sync::Mutex::new(Vec::new()),
+            savepoints: std::sync::Mutex::new(Vec::new()),
+        });
         Ok(Transaction {
-            inner: Arc::new(tx),
+            inner,
             connection_name: conn_name,
-            // No `CURRENT_TX` and no drain point, so nothing ever registers
-            // against this transaction and its savepoints have nothing to
-            // unwind. See the module doc on manual transactions.
-            registry: None,
+            registry,
         })
     }
 

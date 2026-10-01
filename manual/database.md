@@ -399,11 +399,11 @@ lifetime; pre-load any rows you need to read BEFORE the
 `begin_transaction()` call, especially on SQLite (single shared
 connection).
 
-Because manual mode installs no task-local, it has no commit for a deferred
-dispatch to hang on either: an
-[after-commit](queues.md#after-commit-dispatch) job pushed inside a manual
-transaction is pushed immediately. Use the closure form when a dispatch has to
-wait for the commit.
+The same holds for after-commit work. Code that doesn't name the handle runs
+outside the manual transaction, so `DB::after_commit` and an
+[after-commit](queues.md#after-commit-dispatch) job pushed that way run at
+once. Register on the handle instead, as described in
+[After-commit callbacks](#after-commit-callbacks).
 
 ### Savepoints
 
@@ -436,8 +436,8 @@ registered inside it.
 
 Repeating a savepoint name is allowed, and the registry follows the database:
 `ROLLBACK TO SAVEPOINT x` unwinds to the most recent `x` and destroys the
-savepoints established after it. Manual transactions have no after-commit
-registry, so their savepoints roll back rows and nothing else.
+savepoints established after it. A manual transaction's savepoints unwind
+the handle's own registry, the one `tx.after_commit` fills, the same way.
 
 Only `Transaction::savepoint` marks the registry. A savepoint you create with
 raw SQL is invisible to it, so `rollback_to` rolls those rows back, logs a
@@ -487,14 +487,37 @@ cache, or HTTP work. It runs as follows:
 Nested `DB::transaction` calls are refused, so the transaction a callback
 waits for is always the outermost one.
 
+Inside a transaction you started with `DB::begin_transaction`, register on
+the handle. That transaction is not ambient: code that doesn't name the
+handle runs outside it, and its writes don't join it either. So
+`DB::after_commit` beside it runs at once, while `tx.after_commit` and
+`Queue::push_after_commit_with_tx` wait for `tx.commit()`:
+
+```rust
+use suprnova::{DB, Queue, attrs};
+
+let tx = DB::begin_transaction().await?;
+let order = Order::create_with_tx(&tx, attrs! { total: 30 }).await?;
+let id = order.id;
+tx.after_commit(move || async move { notify_warehouse(id).await });
+Queue::push_after_commit_with_tx(&tx, OrderPlaced { id }).await?;
+tx.commit().await?;
+```
+
+A callback or push on the handle follows the rules above against that
+handle. It runs after `tx.commit()` and is discarded by `tx.rollback()`, by
+dropping the handle without committing it, and by `tx.rollback_to(name)` to
+a savepoint taken before it. If one fails after the commit, `tx.commit()`
+returns the same `after-commit callback failed (the transaction itself
+committed)` error.
+
 #### Why Suprnova diverges
 
 In Laravel, `DB::afterCommit` inside `DB::beginTransaction()` waits for
-`DB::commit()`. A Suprnova manual transaction from `DB::begin_transaction`
-installs no ambient transaction, so there is no commit for the callback to
-wait for, and it runs at once, as an
-[after-commit](queues.md#after-commit-dispatch) job does there. Use the
-closure form when a callback has to wait for the commit.
+`DB::commit()`, because the connection itself is in the transaction. A
+Suprnova manual transaction is a handle that only the calls naming it use,
+so the after-commit work that waits for it names it too:
+`tx.after_commit(callback)` rather than `DB::after_commit(callback)`.
 
 ## Observability
 
@@ -811,7 +834,7 @@ collide.
 | `DB::table(name)` → `DbTableBuilder` | `DB::table($name)` |
 | `DB::select` / `select_one` / `scalar` / `insert` / `update` / `delete` / `statement` / `affecting_statement` / `unprepared` | `DB::select` / `selectOne` / `scalar` / `insert` / `update` / `delete` / `statement` / `affectingStatement` / `unprepared` |
 | `DB::transaction` / `transaction_with_attempts` / `begin_transaction` | `DB::transaction($cb, $attempts)` / `DB::beginTransaction` |
-| `DB::after_commit(callback)` | `DB::afterCommit` |
+| `DB::after_commit(callback)` / `Transaction::after_commit(callback)` | `DB::afterCommit` |
 | `Transaction::commit` / `rollback` / `savepoint` / `rollback_to` | `DB::commit` / `rollBack` / savepoint helpers |
 | `DB::listen(callback)` | `DB::listen` |
 | `DB::monitor` / `connection_counts` / `DbConnection::server_connections` / `connections_in_use` | `db:monitor` |

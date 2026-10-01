@@ -344,6 +344,13 @@ impl Queue {
     /// transaction wrote.
     ///
     /// Outside a transaction this is exactly [`Queue::push`].
+    ///
+    /// The surrounding transaction is the ambient one a
+    /// [`DB::transaction`](crate::DB::transaction) closure installs. A
+    /// transaction started with
+    /// [`DB::begin_transaction`](crate::DB::begin_transaction) is not ambient,
+    /// so this pushes at once beside it; use
+    /// [`Queue::push_after_commit_with_tx`] to wait for that one.
     pub async fn push_after_commit<J: Job>(job: J) -> Result<(), FrameworkError> {
         Self::push_with(
             job,
@@ -351,6 +358,43 @@ impl Queue {
                 after_commit: Some(true),
                 ..Default::default()
             },
+        )
+        .await
+    }
+
+    /// Push `job` once `tx` commits, and never if it rolls back. The
+    /// handle-bound form of [`Queue::push_after_commit`], for a transaction
+    /// started with [`DB::begin_transaction`](crate::DB::begin_transaction),
+    /// named like the `Model::*_with_tx` methods that write through such a
+    /// handle.
+    ///
+    /// A hand-started transaction installs no ambient transaction, so a push
+    /// that does not name the handle cannot see it and goes out at once. This
+    /// one waits: the push, its `JobQueueing` / `JobQueued` events and
+    /// `available_at` all happen at [`Transaction::commit`](crate::Transaction::commit),
+    /// exactly as a deferred push inside [`DB::transaction`](crate::DB::transaction)
+    /// does. [`Transaction::rollback`](crate::Transaction::rollback), dropping
+    /// the handle uncommitted, or a
+    /// [`Transaction::rollback_to`](crate::Transaction::rollback_to) a
+    /// savepoint taken before the push discards it. A push that fails at the
+    /// commit makes `commit` return the error, after the commit itself.
+    ///
+    /// The connection is checked now, so a name that is no connection fails
+    /// while the transaction can still be abandoned. Under
+    /// [`Queue::fake`] the push is recorded at once, as every faked push is.
+    pub async fn push_after_commit_with_tx<J: Job>(
+        tx: &crate::database::Transaction,
+        job: J,
+    ) -> Result<(), FrameworkError> {
+        Self::dispatch_push_to(
+            job,
+            AvailableAt::FromJobDelay,
+            EnvelopeOverrides {
+                after_commit: Some(true),
+                ..Default::default()
+            },
+            None,
+            Some(tx),
         )
         .await
     }
@@ -467,6 +511,19 @@ impl Queue {
         overrides: EnvelopeOverrides,
         debounce: Option<debounce::DebounceOptions>,
     ) -> Result<(), FrameworkError> {
+        Self::dispatch_push_to(job, when, overrides, debounce, None).await
+    }
+
+    /// [`Self::dispatch_push`] with the transaction a deferred push waits
+    /// for named: `Some(tx)` defers to that handle's commit, `None` to the
+    /// ambient [`DB::transaction`](crate::DB::transaction), if any.
+    async fn dispatch_push_to<J: Job>(
+        job: J,
+        when: AvailableAt,
+        overrides: EnvelopeOverrides,
+        debounce: Option<debounce::DebounceOptions>,
+        tx: Option<&crate::database::Transaction>,
+    ) -> Result<(), FrameworkError> {
         // Above the fake on purpose, unlike the arming below it. Two
         // declarations that cannot both hold is a bug in the job, not a
         // property of the environment, so `Queue::fake()` must surface it
@@ -494,19 +551,26 @@ impl Queue {
         }
         let context = crate::context::Context::dehydrate();
         if overrides.after_commit.unwrap_or_else(waits_for_commit::<J>)
-            && crate::database::after_commit::in_transaction()
+            && (tx.is_some() || crate::database::after_commit::in_transaction())
         {
             let connection = overrides
                 .connection
                 .clone()
                 .unwrap_or_else(connection_of::<J>);
             connections::target(&connection)?;
-            return crate::database::after_commit::register_callback(Box::new(move || {
-                Box::pin(async move {
-                    Self::push_immediately::<J>(job, when, overrides, debounce, context).await
-                })
-            }))
-            .await;
+            let callback: crate::database::after_commit::AfterCommitCallback =
+                Box::new(move || {
+                    Box::pin(async move {
+                        Self::push_immediately::<J>(job, when, overrides, debounce, context).await
+                    })
+                });
+            return match tx {
+                Some(tx) => {
+                    tx.queue_after_commit(callback);
+                    Ok(())
+                }
+                None => crate::database::after_commit::register_callback(callback).await,
+            };
         }
         Self::push_immediately::<J>(job, when, overrides, debounce, context).await
     }

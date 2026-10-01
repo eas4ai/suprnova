@@ -292,7 +292,11 @@ async fn a_handle_callback_waits_for_the_handle_commit() {
 
     tx.commit().await.unwrap();
 
-    assert_eq!(entries(&log), vec!["ran"], "the callback ran once, after the commit");
+    assert_eq!(
+        entries(&log),
+        vec!["ran"],
+        "the callback ran once, after the commit"
+    );
     assert_eq!(
         *seen_rows.lock().unwrap(),
         Some(1),
@@ -374,10 +378,16 @@ async fn a_failing_handle_callback_reports_an_error_but_the_commit_stands() {
     tx.after_commit(|| async { Err(FrameworkError::internal("callback failed")) });
     record_on_handle(&tx, &log, "the next callback");
 
-    let err = tx.commit().await.expect_err("the failing callback surfaces");
+    let err = tx
+        .commit()
+        .await
+        .expect_err("the failing callback surfaces");
 
     let message = err.to_string();
-    assert!(message.contains("the transaction itself committed"), "{message}");
+    assert!(
+        message.contains("the transaction itself committed"),
+        "{message}"
+    );
     assert!(message.contains("callback failed"), "{message}");
     assert_eq!(note_count().await, 1, "the commit is durable");
     assert_eq!(entries(&log), vec!["the next callback"]);
@@ -408,7 +418,11 @@ async fn push_after_commit_with_tx_pushes_only_after_the_handle_commits() {
     Queue::push_after_commit_with_tx(&tx, NoteWritten)
         .await
         .unwrap();
-    assert_eq!(driver.size().await.unwrap(), 0, "nothing is pushed before the commit");
+    assert_eq!(
+        driver.size().await.unwrap(),
+        0,
+        "nothing is pushed before the commit"
+    );
     tx.commit().await.unwrap();
     assert_eq!(driver.size().await.unwrap(), 1, "the commit pushes the job");
 
@@ -417,7 +431,11 @@ async fn push_after_commit_with_tx_pushes_only_after_the_handle_commits() {
         .await
         .unwrap();
     tx.rollback().await.unwrap();
-    assert_eq!(driver.size().await.unwrap(), 1, "a rollback discards the push");
+    assert_eq!(
+        driver.size().await.unwrap(),
+        1,
+        "a rollback discards the push"
+    );
 }
 
 // ---- Live engines -------------------------------------------------------
