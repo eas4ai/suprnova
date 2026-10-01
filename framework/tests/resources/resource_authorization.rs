@@ -30,9 +30,11 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 
 use suprnova::http::text;
+use suprnova::testing::TestContainer;
 use suprnova::{
-    Auth, Authenticatable, Gate, Middleware, MiddlewareRegistry, Next, Request, ResourceController,
-    Response, Router, handle_request,
+    Auth, AuthConfig, AuthManager, AuthMiddleware, Authenticatable, FrameworkError, Gate,
+    GuardConfig, Middleware, MiddlewareRegistry, Next, Request, ResourceController, Response,
+    Router, UserProvider, handle_request,
 };
 
 /// A user with explicit per-ability grants, so a single server can serve
@@ -63,32 +65,71 @@ impl Authenticatable for TestUser {
 #[derive(Default)]
 struct Post;
 
-/// Global middleware that authenticates the request as a user determined by
-/// the `X-Test-User` header (`admin` → all abilities, `viewer` → view only,
-/// absent → leave the request unauthenticated). The authorize middleware then
-/// resolves that user via `Auth::user_as::<TestUser>()`.
+/// The user a header value names: `admin` has every ability, `viewer` may
+/// only view, and anything else is nobody.
+fn user_named(name: &str) -> Option<Arc<dyn Authenticatable>> {
+    match name {
+        "admin" => Some(Arc::new(TestUser {
+            can_view: true,
+            can_create: true,
+            can_update: true,
+            can_delete: true,
+        })),
+        "viewer" => Some(Arc::new(TestUser {
+            can_view: true,
+            can_create: false,
+            can_update: false,
+            can_delete: false,
+        })),
+        _ => None,
+    }
+}
+
+/// Global middleware that authenticates the request on the default guard as
+/// the user the `X-Test-User` header names, or leaves it unauthenticated. The
+/// authorize middleware then resolves that user as a `TestUser`.
 struct LoginAs;
 
 #[async_trait::async_trait]
 impl Middleware for LoginAs {
     async fn handle(&self, request: Request, next: Next) -> Response {
-        match request.header("X-Test-User") {
-            Some("admin") => Auth::set_user(Arc::new(TestUser {
-                can_view: true,
-                can_create: true,
-                can_update: true,
-                can_delete: true,
-            })),
-            Some("viewer") => Auth::set_user(Arc::new(TestUser {
-                can_view: true,
-                can_create: false,
-                can_update: false,
-                can_delete: false,
-            })),
-            _ => { /* unauthenticated */ }
+        if let Some(user) = request.header("X-Test-User").and_then(user_named) {
+            Auth::set_user(user);
         }
         next(request).await
     }
+}
+
+/// A guard other than the default. Its resolver finds the user the
+/// `X-Partner` header names.
+const PARTNER: &str = "partner";
+
+/// The provider the guards are declared with. The guards under test never
+/// ask it for a user.
+struct NoUsers;
+
+#[async_trait::async_trait]
+impl UserProvider for NoUsers {
+    async fn retrieve_by_id(
+        &self,
+        _id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        Ok(None)
+    }
+}
+
+/// Installs a container-scoped manager: the default `web` session guard,
+/// which `LoginAs` signs in, and the `partner` request guard.
+fn install_partner_guard() {
+    let driver = AuthManager::via_request_driver(PARTNER);
+    let config = AuthConfig::new("web").guard(PARTNER, GuardConfig::custom(driver, "users"));
+    TestContainer::singleton(AuthManager::new(config));
+    Auth::register_provider("users", Arc::new(NoUsers)).unwrap();
+    Auth::via_request(PARTNER, |request| {
+        let user = request.header("X-Partner").and_then(user_named);
+        Box::pin(async move { Ok(user) })
+    })
+    .unwrap();
 }
 
 struct PostsCtl;
@@ -129,15 +170,21 @@ fn build_router() -> Router {
 }
 
 async fn spawn_server(accepts: usize) -> SocketAddr {
+    spawn_server_with(accepts, MiddlewareRegistry::new().append(LoginAs)).await
+}
+
+/// Serves the router through `registry` for `accepts` connections. Inside a
+/// `TestContainer::scope`, the server sees that scope's container.
+async fn spawn_server_with(accepts: usize, registry: MiddlewareRegistry) -> SocketAddr {
     let router = Arc::new(build_router());
-    let registry = Arc::new(MiddlewareRegistry::new().append(LoginAs));
+    let registry = Arc::new(registry);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral listener");
     let addr = listener.local_addr().expect("local_addr");
 
-    tokio::spawn(async move {
+    TestContainer::spawn(async move {
         for _ in 0..accepts {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
@@ -145,7 +192,7 @@ async fn spawn_server(accepts: usize) -> SocketAddr {
             let io = TokioIo::new(stream);
             let router = router.clone();
             let registry = registry.clone();
-            tokio::spawn(async move {
+            TestContainer::spawn(async move {
                 let svc = service_fn(move |req: hyper::Request<Incoming>| {
                     let router = router.clone();
                     let registry = registry.clone();
@@ -276,4 +323,36 @@ async fn authorize_resource_fails_closed_when_unauthenticated() {
         status, 200,
         "unauthenticated destroy must fail closed, never 200"
     );
+}
+
+#[tokio::test]
+async fn authorize_resource_checks_the_user_of_the_route_guard() {
+    TestContainer::scope(async {
+        register_gates();
+        install_partner_guard();
+        let guarded = MiddlewareRegistry::new()
+            .append(LoginAs)
+            .append(AuthMiddleware::new().for_guard(PARTNER));
+        let addr = spawn_server_with(2, guarded).await;
+
+        // A user of the route's guard is authorized as usual.
+        let (status, body) = request(addr, "DELETE", "/posts/7", &[("X-Partner", "admin")]).await;
+        assert_eq!((status, body.as_str()), (200, "destroy"));
+
+        // The route's user decides, not the default guard's.
+        let headers = [("X-Test-User", "admin"), ("X-Partner", "viewer")];
+        let (status, body) = request(addr, "DELETE", "/posts/7", &headers).await;
+        assert_eq!(status, 403, "body: {body}");
+
+        // With no user on the route's guard, the default guard's user never
+        // stands in: the request fails closed with the middleware's 403.
+        let optional = MiddlewareRegistry::new()
+            .append(LoginAs)
+            .append(AuthMiddleware::optional().for_guard(PARTNER));
+        let addr = spawn_server_with(1, optional).await;
+        let (status, body) = request(addr, "DELETE", "/posts/7", &[("X-Test-User", "admin")]).await;
+        assert_eq!(status, 403, "body: {body}");
+        assert_ne!(body, "destroy", "the destroy handler must never run");
+    })
+    .await;
 }
