@@ -2674,6 +2674,33 @@ async fn a_raw_sql_read_is_never_stored() {
     }
 }
 
+/// A cache-miss render runs its handler inside the render cache's own
+/// transaction, so a `DB::after_commit` callback the handler registers runs
+/// after that transaction commits. When the callback fails, the render has
+/// still succeeded and its writes are durable: the response is the render,
+/// not a 500, and a debug build does not panic on the way.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_failing_after_commit_callback_still_serves_the_committed_render() {
+    let harness = boot_with_render_cache().await;
+
+    let served = dispatch_get(&harness, "/after-commit-fails", &[]).await;
+
+    assert!(
+        render_cache_middleware_support::after_commit_callback_ran(),
+        "precondition: the deferred callback ran after the render committed"
+    );
+    assert_eq!(
+        served.status,
+        StatusCode::OK,
+        "a callback failing after the commit must not turn the render into an error"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.body),
+        "after-commit render 1"
+    );
+}
+
 /// Final review, F2: `Auth::user()` resolves through `DatabaseUserProvider`,
 /// which reads the `users` table through `DB::table(..).first()`; with the
 /// builder facade observed, a `PrivateCached` render that shows the

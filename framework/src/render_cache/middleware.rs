@@ -3323,7 +3323,20 @@ async fn run_render(
         .await
     };
     match result {
-        Ok(triple) => Ok(triple),
+        Ok((triple, None)) => Ok(triple),
+        Ok((triple, Some(error))) => {
+            // The render committed and a callback the handler deferred with
+            // `DB::after_commit` failed afterwards. The handler succeeded and
+            // its writes are durable, so the render is served (and judged for
+            // publication) like any other; the failure is logged at the
+            // level `DB::transaction` logs each failing callback at.
+            tracing::error!(
+                target: "suprnova::database",
+                error = %error,
+                "after-commit callback of a cached render failed; the committed render is served",
+            );
+            Ok(triple)
+        }
         Err(_) => {
             // The transaction could not even open, so the closure above
             // never ran and the request is still sitting in the slot.
