@@ -104,6 +104,11 @@ impl AuthMiddleware {
     /// guard of `Auth::via_request`, this middleware first runs the resolver
     /// with the request, once per request, and a resolver error fails the
     /// request the same way.
+    ///
+    /// `#[authorize]` on the route's handler asks this guard for the user,
+    /// so it checks the user this middleware authenticated. When several
+    /// `AuthMiddleware` run, the last one that passed the request on names
+    /// the guard.
     pub fn for_guard(mut self, name: impl Into<String>) -> Self {
         self.guard = Some(name.into());
         self
@@ -207,11 +212,15 @@ impl Middleware for AuthMiddleware {
                 );
             }
             // User is authenticated, proceed
+            crate::auth::request_state::set_route_guard(self.guard.clone());
             return next(request).await;
         }
 
         // User is not authenticated
         if self.optional {
+            // The guest passes on under this guard, so `#[authorize]` finds
+            // no user on it rather than asking another guard.
+            crate::auth::request_state::set_route_guard(self.guard.clone());
             return next(request).await;
         }
         match &self.redirect_to {
