@@ -2126,3 +2126,58 @@ async fn find_many_with_a_missing_id_also_observes_the_table() {
         report.observed
     );
 }
+
+/// A `where_has` reads the related table inside its `EXISTS` subquery, so
+/// a write to that table must invalidate a cached page built from it.
+/// `has` through a pivot reads the pivot and the related table both.
+#[tokio::test]
+async fn where_has_observes_the_related_table_and_a_write_to_it_invalidates() {
+    boot().await;
+    let author = Author::create(attrs! { name: "Ada" })
+        .await
+        .expect("create author");
+    Book::create(attrs! { author_id: author.id, title: "Book One" })
+        .await
+        .expect("create book");
+
+    let (observed, epoch) = window_of(async {
+        let books = Book::query()
+            .where_has::<Author, _>("author", |q| q.filter("name", "Ada"))
+            .get()
+            .await
+            .expect("where_has runs");
+        assert_eq!(books.len(), 1);
+    })
+    .await;
+    assert!(
+        !entry_is_invalidated(&observed, epoch).await,
+        "nothing has changed yet"
+    );
+
+    Author::query()
+        .filter("id", author.id)
+        .update_all(attrs! { name: "Grace" })
+        .await
+        .expect("rename the author");
+    assert!(
+        entry_is_invalidated(&observed, epoch).await,
+        "the author the where_has matched on changed"
+    );
+
+    let report = report_of(async {
+        Post::query().has("tags").count().await.expect("has runs");
+        Post::query()
+            .doesnt_have("tags")
+            .count()
+            .await
+            .expect("doesnt_have runs");
+    })
+    .await;
+    for table in ["posts", "post_tags", "tags"] {
+        assert!(
+            report.observed.contains(&DependencyIdentity::table(table)),
+            "{table} was read but not observed: {:?}",
+            report.observed
+        );
+    }
+}

@@ -945,9 +945,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 /// View showing only soft-deleted rows. Every
                 /// registered global scope still applies.
                 pub fn only_trashed() -> ::suprnova::Builder<Self> {
-                    ::suprnova::Builder::<Self>::__scoped()
-                        .__disable_named_scope("soft_deletes")
-                        .filter_not_null(#soft_delete_col)
+                    ::suprnova::Builder::<Self>::__scoped().only_trashed()
                 }
 
                 /// Hard-delete this row, bypassing the soft-delete

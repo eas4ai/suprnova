@@ -160,9 +160,10 @@ pub use data::{
 pub use database::{
     AutoRouteBinding, ConnectionCount, ConnectionEstablished, ConnectionRegistry, DB, Database,
     DatabaseBusy, DatabaseConfig, DatabaseType, DbConnection, DbTableBuilder, DynamicRow,
-    EntityExt, EntityExtMut, PRIMARY_CONNECTION_NAME, QueryExecuted, QueryListener,
-    READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, RouteParam, Transaction,
-    TransactionBeginning, TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource,
+    EntityExt, EntityExtMut, IntoWhereIn, JoinClause, PRIMARY_CONNECTION_NAME, QueryExecuted,
+    QueryListener, READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, RouteParam,
+    Transaction, TransactionBeginning, TransactionCommitted, TransactionRolledBack, TxHandle,
+    UrlSource, WhereIn,
 };
 #[cfg(feature = "magnetar-oauth")]
 pub use magnetar::{
