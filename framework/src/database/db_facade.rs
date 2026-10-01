@@ -1202,23 +1202,33 @@ impl DB {
     /// Re-entrancy: a listener that itself issues a database query
     /// will NOT re-fire `QueryExecuted` for that nested query - the
     /// inner call short-circuits to skip emission.
+    ///
+    /// Inside a test container
+    /// ([`TestContainer::fake`](crate::container::testing::TestContainer::fake) /
+    /// [`TestContainer::scope`](crate::container::testing::TestContainer::scope))
+    /// the listener belongs to that container: it fires for the queries
+    /// run inside it and ends with it, so a test that counts queries
+    /// counts its own even while other tests run in the same process. A
+    /// listener registered outside any test container fires for every
+    /// query of the process.
     pub fn listen<F>(callback: F) -> Result<(), FrameworkError>
     where
         F: Fn(&crate::database::events::QueryExecuted) + Send + Sync + 'static,
     {
-        let mut reg =
-            crate::lock::write(crate::database::events::listeners(), "db event listeners")?;
+        let observation = crate::database::events::current_observation();
+        let mut reg = crate::lock::write(&observation.listeners, "db event listeners")?;
         reg.listeners.push(std::sync::Arc::new(callback));
         Ok(())
     }
 
-    /// Remove every `DB::listen` callback. Does NOT touch
-    /// `EventFacade::listen` listeners - those go through
+    /// Remove every `DB::listen` callback of the current scope: the
+    /// active test container's, or the application's outside one. Does
+    /// NOT touch `EventFacade::listen` listeners - those go through
     /// [`EventFacade::forget`](crate::EventFacade) (the dispatcher's
     /// per-event forget surface).
     pub fn flush_listeners() -> Result<(), FrameworkError> {
-        let mut reg =
-            crate::lock::write(crate::database::events::listeners(), "db event listeners")?;
+        let observation = crate::database::events::current_observation();
+        let mut reg = crate::lock::write(&observation.listeners, "db event listeners")?;
         reg.listeners.clear();
         Ok(())
     }
@@ -1230,10 +1240,14 @@ impl DB {
     /// **The buffer is unbounded**: every captured query grows it.
     /// Use [`Self::flush_query_log`] periodically - or
     /// [`Self::disable_query_log`] when done - to release memory.
+    ///
+    /// Inside a test container the log is that container's, as a
+    /// [`Self::listen`] callback is: it holds the queries run inside the
+    /// container only. Every query-log method reads and changes the log
+    /// of the scope it is called in.
     pub fn enable_query_log() -> Result<(), FrameworkError> {
-        let mut log = crate::database::events::query_log()
-            .lock()
-            .map_err(|e| FrameworkError::internal(format!("query_log lock poisoned: {e}")))?;
+        let observation = crate::database::events::current_observation();
+        let mut log = crate::lock::lock(&observation.log, "query_log")?;
         log.enabled = true;
         Ok(())
     }
@@ -1242,9 +1256,8 @@ impl DB {
     /// retained; call [`Self::flush_query_log`] to drop them. Mirrors
     /// Laravel's `DB::disableQueryLog`.
     pub fn disable_query_log() -> Result<(), FrameworkError> {
-        let mut log = crate::database::events::query_log()
-            .lock()
-            .map_err(|e| FrameworkError::internal(format!("query_log lock poisoned: {e}")))?;
+        let observation = crate::database::events::current_observation();
+        let mut log = crate::lock::lock(&observation.log, "query_log")?;
         log.enabled = false;
         Ok(())
     }
@@ -1252,7 +1265,8 @@ impl DB {
     /// True when the query log is currently active. Mirrors Laravel's
     /// `DB::logging()`.
     pub fn logging() -> bool {
-        crate::database::events::query_log()
+        crate::database::events::current_observation()
+            .log
             .lock()
             .map(|l| l.enabled)
             .unwrap_or(false)
@@ -1263,9 +1277,8 @@ impl DB {
     /// flushed). Does NOT drain the buffer - call
     /// [`Self::flush_query_log`] to clear it.
     pub fn get_query_log() -> Result<Vec<crate::database::events::QueryExecuted>, FrameworkError> {
-        let log = crate::database::events::query_log()
-            .lock()
-            .map_err(|e| FrameworkError::internal(format!("query_log lock poisoned: {e}")))?;
+        let observation = crate::database::events::current_observation();
+        let log = crate::lock::lock(&observation.log, "query_log")?;
         Ok(log.entries.clone())
     }
 
@@ -1273,9 +1286,8 @@ impl DB {
     /// enabled - new queries will still be appended. Mirrors Laravel's
     /// `DB::flushQueryLog`.
     pub fn flush_query_log() -> Result<(), FrameworkError> {
-        let mut log = crate::database::events::query_log()
-            .lock()
-            .map_err(|e| FrameworkError::internal(format!("query_log lock poisoned: {e}")))?;
+        let observation = crate::database::events::current_observation();
+        let mut log = crate::lock::lock(&observation.log, "query_log")?;
         log.entries.clear();
         Ok(())
     }

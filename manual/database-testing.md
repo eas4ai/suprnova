@@ -315,7 +315,9 @@ two reasons:
 
 What you don't have to think about: `DB::connection()`, `App::resolve`,
 factory persistence, model trait writes - these all transparently
-land on the right per-test database.
+land on the right per-test database. `DB::listen` callbacks and the
+query log belong to the test container too, so a test that counts
+queries counts only its own.
 
 What you *do* need to think about:
 
@@ -324,7 +326,6 @@ What you *do* need to think about:
 | `ConnectionRegistry` (`DB::register_named`, `__read_replica__`) | Single `RwLock<HashMap>` shared by the process | `#[serial_test::serial]` for any test that registers or reads named connections |
 | The seeder registry | Single `RwLock<IndexMap>` | `#[serial_test::serial]` + `seed::clear()` at entry and exit |
 | The Eloquent observer / scope registries | Keyed by `TypeId::<M>()` | Each test should use a unique model struct, or be `#[serial]` and call the registry's `clear()` helper |
-| The named query log (`DB::enable_query_log`) | Single process-global ring buffer | `#[serial]` if assertions read the log |
 
 The connection-registry refcount makes this safer than it sounds: a
 test holding a `TestContainerGuard` keeps the registry alive even

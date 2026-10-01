@@ -1608,6 +1608,12 @@ async fn finish_query_event<T>(
 /// 3. The framework-wide [`EventDispatcher`](crate::EventDispatcher)
 ///    so `EventFacade::listen::<QueryExecuted, _>(...)` works.
 ///
+/// The first two are read in the application's scope and in the active
+/// test container's, if any (see
+/// [`QueryObservation`](super::events::QueryObservation)). The scopes
+/// are taken before the first await, on the thread and in the task that
+/// ran the query.
+///
 /// The whole call runs inside
 /// [`with_dispatching_flag`](super::events::with_dispatching_flag) so
 /// any listener that re-queries does not re-fire QueryExecuted.
@@ -1615,6 +1621,7 @@ async fn finish_query_event<T>(
 /// [`dispatch_best_effort`](crate::EventFacade::dispatch_best_effort) -
 /// observation must never fail the query.
 pub(crate) async fn emit_query_executed(event: super::events::QueryExecuted) {
+    let scopes = super::events::reached_observations();
     super::events::with_dispatching_flag(async move {
         // (1) Direct DB::listen callbacks. Cloning the registry's
         // listener Vec keeps the lock window tight; listeners are
@@ -1626,10 +1633,13 @@ pub(crate) async fn emit_query_executed(event: super::events::QueryExecuted) {
         // executor and surface as a "query failed" error to the
         // caller. Mirrors the EventFacade `dispatch_best_effort`
         // contract: observation never fails the query.
-        let callbacks: Vec<super::events::QueryListener> = match super::events::listeners().read() {
-            Ok(reg) => reg.listeners.clone(),
-            Err(_) => Vec::new(),
-        };
+        let callbacks: Vec<super::events::QueryListener> = scopes
+            .iter()
+            .flat_map(|scope| match scope.listeners.read() {
+                Ok(reg) => reg.listeners.clone(),
+                Err(_) => Vec::new(),
+            })
+            .collect();
         for cb in callbacks {
             let event_ref = &event;
             let cb_ref = &cb;
@@ -1651,10 +1661,12 @@ pub(crate) async fn emit_query_executed(event: super::events::QueryExecuted) {
             }
         }
         // (2) Query log.
-        if let Ok(mut log) = super::events::query_log().lock()
-            && log.enabled
-        {
-            log.entries.push(event.clone());
+        for scope in &scopes {
+            if let Ok(mut log) = scope.log.lock()
+                && log.enabled
+            {
+                log.entries.push(event.clone());
+            }
         }
         // (3) EventFacade dispatch. Best-effort - a logging listener
         // returning Err must not fail the query.
