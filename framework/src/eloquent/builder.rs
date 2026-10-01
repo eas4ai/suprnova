@@ -3286,7 +3286,7 @@ impl<M> Builder<M> {
     /// The model's `table` as this query's FROM writes it: quoted when the
     /// query joins another table (see [`JoinedTable`]), and as written
     /// otherwise, as it always has been.
-    fn from_table(&self, backend: DbBackend, table: &str) -> String {
+    fn own_table(&self, backend: DbBackend, table: &str) -> String {
         if self.joins.is_empty() {
             table.to_owned()
         } else {
@@ -3295,7 +3295,7 @@ impl<M> Builder<M> {
     }
 
     /// The model's table as [`JoinedTable`] when this query joins another,
-    /// `from` being what [`Self::from_table`] wrote for it.
+    /// `from` being what [`Self::own_table`] wrote for it.
     fn joined_table<'a>(&self, table: &'a str, from: &'a str) -> Option<JoinedTable<'a>> {
         (!self.joins.is_empty()).then_some(JoinedTable {
             name: table,
@@ -3659,7 +3659,7 @@ impl<M> Builder<M> {
         // A union arm arrives here directly, so it resolves its own scopes.
         let this = self.effective();
         let this = &*this;
-        let from = this.from_table(backend, table);
+        let from = this.own_table(backend, table);
         let joined = this.joined_table(table, &from);
         sql.push_str(&from);
         sql.push_str(&this.render_joins(backend, values, n)?);
@@ -3700,7 +3700,7 @@ impl<M> Builder<M> {
         // A union arm arrives here directly, so it resolves its own scopes.
         let this = self.effective();
         let this = &*this;
-        let from = this.from_table(backend, table);
+        let from = this.own_table(backend, table);
         let joined = this.joined_table(table, &from);
         let mut sql = String::new();
 
