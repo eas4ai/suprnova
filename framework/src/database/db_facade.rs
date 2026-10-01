@@ -19,23 +19,35 @@
 //!
 //! ## Trust boundary on identifiers
 //!
-//! Table names, column names, SQL operators, and ORDER BY directions
-//! are interpolated INTO the SQL string verbatim - they are NOT bound
-//! as parameters (SQL doesn't allow that). Treat every `impl
-//! Into<String>` argument to this builder as a trusted, compile-time
-//! literal: do NOT splice user input into table or column names.
-//! Values (the right-hand side of `filter` / `filter_op`) ARE bound
-//! as parameters and safe to pass through from request data. Explicit
-//! null write attributes are emitted as the constant SQL literal `NULL`
-//! because their original Rust type is no longer available in [`Attrs`].
+//! Table names, column names, aliases, SQL operators, and ORDER BY
+//! directions are written INTO the SQL string - they are NOT bound as
+//! parameters (SQL doesn't allow that). Every one of them is checked
+//! against [`validate_identifier`](crate::database::validate_identifier)
+//! or the operator allowlist before the statement renders, and then
+//! quoted for the backend (backticks on MySQL, double quotes elsewhere).
+//! That is a safety net, not a licence: treat every `impl Into<String>`
+//! identifier argument as a trusted, compile-time literal and do NOT
+//! splice user input into table or column names. The raw fragments
+//! ([`DbTableBuilder::select_raw`], [`DbTableBuilder::where_raw`]) are
+//! written verbatim and are never checked. Values (the right-hand side of
+//! `filter` / `filter_op`, `where_in` lists, join conditions, raw-fragment
+//! bindings) ARE bound as parameters and safe to pass through from request
+//! data. Explicit null write attributes are emitted as the constant SQL
+//! literal `NULL` because their original Rust type is no longer available
+//! in [`Attrs`].
 //!
 //! Backend-aware placeholder generation: `$N` (Postgres) vs `?`
-//! (MySQL + SQLite). The counter is monotonic across the SET clause
-//! and WHERE clause in UPDATE statements so each binding lines up with
-//! its corresponding position.
+//! (MySQL + SQLite). One counter runs through the whole statement - the
+//! SET clause, joined subqueries, join conditions, the WHERE clause and
+//! every subquery inside it - so each binding lines up with its position.
 
 use crate::FrameworkError;
 use crate::database::DB;
+use crate::database::clauses::{
+    Condition, Grouping, IntoWhereIn, JoinClause, JoinKind, JoinTarget, condition_tables, grouped,
+    in_condition, join_tables, push_or, quote_identifier, render_conditions, render_join,
+    render_select_column, validate_condition, validate_join, validate_select_column,
+};
 use crate::database::dynamic_row::DynamicRow;
 use crate::eloquent::Collection;
 use crate::eloquent::attrs::Attrs;
@@ -48,13 +60,55 @@ use sea_orm::{DbBackend, JsonValue, Statement, Value as SeaValue};
 /// `query_one` so QueryExecuted observation works. Returns `None`
 /// when the row doesn't parse as an object - matching the prior
 /// `filter_map` behaviour on `JsonValue`.
-fn query_result_to_dynamic_row(qr: &sea_orm::QueryResult) -> Option<DynamicRow> {
+///
+/// SeaORM's decoder picks each column's Rust type from the type the
+/// driver reports for the column. SQLite reports none for a computed
+/// column - an aggregate, `COALESCE(...)`, any `select_raw` expression -
+/// and SeaORM then drops the column whenever its value is not text. On
+/// SQLite every column the decoder dropped is read again by the value's
+/// own runtime type, so the row carries it.
+fn query_result_to_dynamic_row(
+    backend: DbBackend,
+    qr: &sea_orm::QueryResult,
+) -> Option<DynamicRow> {
     use sea_orm::FromQueryResult;
     let v = JsonValue::from_query_result(qr, "").ok()?;
-    match v {
-        serde_json::Value::Object(map) => Some(DynamicRow::from_map(map)),
-        _ => None,
+    let serde_json::Value::Object(mut map) = v else {
+        return None;
+    };
+    if backend == DbBackend::Sqlite {
+        for column in qr.column_names() {
+            if !map.contains_key(&column)
+                && let Some(value) = sqlite_value_by_runtime_type(qr, &column)
+            {
+                map.insert(column, value);
+            }
+        }
     }
+    Some(DynamicRow::from_map(map))
+}
+
+/// Read `column` as an integer, a real, text or a blob, whichever the
+/// SQLite value is; a `NULL` reads as JSON `null`. The driver checks each
+/// attempt against the value's runtime type, so only the matching one
+/// succeeds. `None` when none does.
+fn sqlite_value_by_runtime_type(
+    qr: &sea_orm::QueryResult,
+    column: &str,
+) -> Option<serde_json::Value> {
+    if let Ok(value) = qr.try_get::<Option<i64>>("", column) {
+        return Some(serde_json::json!(value));
+    }
+    if let Ok(value) = qr.try_get::<Option<f64>>("", column) {
+        return Some(serde_json::json!(value));
+    }
+    if let Ok(value) = qr.try_get::<Option<String>>("", column) {
+        return Some(serde_json::json!(value));
+    }
+    if let Ok(value) = qr.try_get::<Option<Vec<u8>>>("", column) {
+        return Some(serde_json::json!(value));
+    }
+    None
 }
 
 /// True when `sql`, ignoring leading whitespace, starts with `SELECT`
@@ -86,19 +140,15 @@ fn write_value_expression(
     }
 }
 
-/// One WHERE clause captured by [`DbTableBuilder`].
-///
-/// A named struct rather than a `(col, op, val)` tuple because
-/// `where_binary` needs a fourth field and three separate render sites
-/// read it - a fourth tuple position would make each of them count.
-struct DbWhereTerm {
-    column: String,
-    op: String,
-    value: SeaValue,
-    /// `true` for [`DbTableBuilder::where_binary`] /
-    /// [`DbTableBuilder::where_not_binary`]: renders MySQL's
-    /// `col = binary ?`. Every other backend refuses at render time.
-    binary: bool,
+/// One entry in a [`DbTableBuilder`]'s select list.
+#[derive(Debug, Clone)]
+enum SelectItem {
+    /// A column, `table.column`, `*` or `table.*`, optionally `as alias`;
+    /// validated and quoted.
+    Column(String),
+    /// A caller-written expression from [`DbTableBuilder::select_raw`],
+    /// written verbatim.
+    Raw(String),
 }
 
 /// Standalone query builder returned by
@@ -106,19 +156,28 @@ struct DbWhereTerm {
 /// limit / select shape of [`Builder<M>`](crate::eloquent::Builder)
 /// but materialises rows as [`DynamicRow`] instead of a typed model.
 ///
+/// It is also the subquery type of both builders: pass one to
+/// `join_sub`, `where_in` or `where_exists` and it renders inside the
+/// outer statement with its values bound in place.
+///
 /// See the [module docs](self) for the trust boundary on identifiers.
+#[derive(Debug, Clone)]
 pub struct DbTableBuilder {
     table: String,
-    where_terms: Vec<DbWhereTerm>,
+    joins: Vec<JoinClause>,
+    conditions: Vec<Condition>,
+    groups: Vec<String>,
     order: Vec<(String, Direction)>,
     limit_value: Option<u64>,
     offset_value: Option<u64>,
-    select_columns: Vec<String>,
+    select_items: Vec<SelectItem>,
     /// Phase 10C T12 - per-builder connection override. Set via
     /// [`Self::on`] or constructed pre-set via
     /// [`DB::table_on`](crate::DB::table_on). Routes terminal methods
     /// through the named connection in the
     /// [`ConnectionRegistry`](crate::database::ConnectionRegistry).
+    /// A subquery runs on the outer statement's connection, so its own
+    /// override is ignored.
     connection_override: Option<String>,
 }
 
@@ -129,11 +188,13 @@ impl DbTableBuilder {
     pub fn new(table: impl Into<String>) -> Self {
         Self {
             table: table.into(),
-            where_terms: Vec::new(),
+            joins: Vec::new(),
+            conditions: Vec::new(),
+            groups: Vec::new(),
             order: Vec::new(),
             limit_value: None,
             offset_value: None,
-            select_columns: Vec::new(),
+            select_items: Vec::new(),
             connection_override: None,
         }
     }
@@ -147,12 +208,21 @@ impl DbTableBuilder {
         self
     }
 
-    /// Restrict the SELECT to a specific column list. Empty means `*`.
+    /// Restrict the SELECT to a specific column list, replacing any list
+    /// set before. Empty means `*`. Each entry is a column, a
+    /// `table.column`, `*` or `table.*`, optionally followed by
+    /// `as alias` - the shape a join needs to tell two `name` columns
+    /// apart.
     ///
     /// ```rust,no_run
     /// # use suprnova::DB;
     /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// DB::table("audit_log").select(["id", "event"]).get().await?;
+    /// DB::table("posts")
+    ///     .join("users", "users.id", "=", "posts.author_id")
+    ///     .select(["posts.title", "users.name as author"])
+    ///     .get()
+    ///     .await?;
     /// # Ok(()) }
     /// ```
     pub fn select<I, S>(mut self, cols: I) -> Self
@@ -160,19 +230,32 @@ impl DbTableBuilder {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.select_columns = cols.into_iter().map(|s| s.into()).collect();
+        self.select_items = cols
+            .into_iter()
+            .map(|s| SelectItem::Column(s.into()))
+            .collect();
+        self
+    }
+
+    /// Append a raw expression to the SELECT list (`COUNT(*) AS total`,
+    /// `COALESCE(t.total, 0) AS total`), after any columns from
+    /// [`Self::select`]. Like Laravel's `selectRaw`, and unlike the model
+    /// builder's `select_raw`, it adds to the list rather than replacing
+    /// it, so `select(["status_id"]).select_raw("COUNT(*) AS total")`
+    /// selects both.
+    ///
+    /// # Security
+    ///
+    /// `raw` is written into the query verbatim and never checked.
+    /// **Never pass user input here.**
+    pub fn select_raw(mut self, raw: impl Into<String>) -> Self {
+        self.select_items.push(SelectItem::Raw(raw.into()));
         self
     }
 
     /// Add a `WHERE col = ?` clause. Multiple `filter` calls AND together.
-    pub fn filter(mut self, col: impl Into<String>, val: impl Into<SeaValue>) -> Self {
-        self.where_terms.push(DbWhereTerm {
-            column: col.into(),
-            op: "=".into(),
-            value: val.into(),
-            binary: false,
-        });
-        self
+    pub fn filter(self, col: impl Into<String>, val: impl Into<SeaValue>) -> Self {
+        self.filter_op(col, "=", val)
     }
 
     /// Add a `WHERE col <op> ?` clause with an explicit operator
@@ -184,7 +267,7 @@ impl DbTableBuilder {
         op: impl Into<String>,
         val: impl Into<SeaValue>,
     ) -> Self {
-        self.where_terms.push(DbWhereTerm {
+        self.conditions.push(Condition::Compare {
             column: col.into(),
             op: op.into(),
             value: val.into(),
@@ -202,7 +285,7 @@ impl DbTableBuilder {
     /// I/O: a plain `=` fallback would compare under the column's
     /// collation and return rows you asked to exclude.
     pub fn where_binary(mut self, col: impl Into<String>, val: impl Into<String>) -> Self {
-        self.where_terms.push(DbWhereTerm {
+        self.conditions.push(Condition::Compare {
             column: col.into(),
             op: "=".into(),
             value: SeaValue::String(Some(val.into())),
@@ -214,7 +297,7 @@ impl DbTableBuilder {
     /// Add a `WHERE col != binary ?` clause - the negated form of
     /// [`Self::where_binary`]. Same backend split.
     pub fn where_not_binary(mut self, col: impl Into<String>, val: impl Into<String>) -> Self {
-        self.where_terms.push(DbWhereTerm {
+        self.conditions.push(Condition::Compare {
             column: col.into(),
             op: "!=".into(),
             value: SeaValue::String(Some(val.into())),
@@ -222,6 +305,524 @@ impl DbTableBuilder {
         });
         self
     }
+
+    /// Add a `WHERE first = second` clause comparing two columns, with
+    /// no value. Inside a subquery it correlates with the outer query:
+    /// `DB::table("posts").where_column("posts.author_id", "users.id")`
+    /// under `DB::table("users").where_exists(...)`.
+    pub fn where_column(mut self, first: impl Into<String>, second: impl Into<String>) -> Self {
+        self.conditions.push(Condition::Columns {
+            first: first.into(),
+            op: "=".into(),
+            second: second.into(),
+        });
+        self
+    }
+
+    /// Add a `WHERE col IN (...)` clause. `values` is a list of values,
+    /// each bound as a parameter, or a [`DbTableBuilder`] used as a
+    /// subquery whose own values bind in place. An empty list matches no
+    /// row.
+    pub fn where_in(mut self, col: impl Into<String>, values: impl IntoWhereIn<SeaValue>) -> Self {
+        self.conditions
+            .push(in_condition(col.into(), values.into_where_in(), false));
+        self
+    }
+
+    /// Add a `WHERE col NOT IN (...)` clause; see [`Self::where_in`]. An
+    /// empty list excludes no row.
+    pub fn where_not_in(
+        mut self,
+        col: impl Into<String>,
+        values: impl IntoWhereIn<SeaValue>,
+    ) -> Self {
+        self.conditions
+            .push(in_condition(col.into(), values.into_where_in(), true));
+        self
+    }
+
+    /// `OR col IN (...)`, folded into the condition before it; see
+    /// [`Self::where_in`] for what `values` takes.
+    pub fn or_where_in(
+        mut self,
+        col: impl Into<String>,
+        values: impl IntoWhereIn<SeaValue>,
+    ) -> Self {
+        push_or(
+            &mut self.conditions,
+            in_condition(col.into(), values.into_where_in(), false),
+        );
+        self
+    }
+
+    /// `OR col NOT IN (...)`, folded into the condition before it.
+    pub fn or_where_not_in(
+        mut self,
+        col: impl Into<String>,
+        values: impl IntoWhereIn<SeaValue>,
+    ) -> Self {
+        push_or(
+            &mut self.conditions,
+            in_condition(col.into(), values.into_where_in(), true),
+        );
+        self
+    }
+
+    /// Add a `WHERE col IS NULL` clause.
+    pub fn where_null(mut self, col: impl Into<String>) -> Self {
+        self.conditions.push(Condition::Null {
+            column: col.into(),
+            negated: false,
+        });
+        self
+    }
+
+    /// Add a `WHERE col IS NOT NULL` clause.
+    pub fn where_not_null(mut self, col: impl Into<String>) -> Self {
+        self.conditions.push(Condition::Null {
+            column: col.into(),
+            negated: true,
+        });
+        self
+    }
+
+    /// `OR col IS NULL`, folded into the condition before it.
+    pub fn or_where_null(mut self, col: impl Into<String>) -> Self {
+        push_or(
+            &mut self.conditions,
+            Condition::Null {
+                column: col.into(),
+                negated: false,
+            },
+        );
+        self
+    }
+
+    /// `OR col IS NOT NULL`, folded into the condition before it.
+    pub fn or_where_not_null(mut self, col: impl Into<String>) -> Self {
+        push_or(
+            &mut self.conditions,
+            Condition::Null {
+                column: col.into(),
+                negated: true,
+            },
+        );
+        self
+    }
+
+    /// Add a raw `WHERE` fragment. Write each value as a portable `?`
+    /// marker and pass it in `bindings`; on Postgres the markers are
+    /// renumbered to their place in the statement. Use `??` for a
+    /// literal question mark. A marker count that does not match
+    /// `bindings` is an error before any I/O.
+    ///
+    /// The fragment is written as given, without parentheses, the same
+    /// as Laravel's `whereRaw`: wrap a fragment that contains `OR` in
+    /// parentheses yourself.
+    ///
+    /// # Security
+    ///
+    /// `sql` is written into the query verbatim. **Never pass user input
+    /// as the fragment** - put it in `bindings`.
+    pub fn where_raw(mut self, sql: impl Into<String>, bindings: Vec<SeaValue>) -> Self {
+        self.conditions.push(Condition::Raw {
+            sql: sql.into(),
+            bindings,
+        });
+        self
+    }
+
+    /// `OR <sql>`, folded into the condition before it; see
+    /// [`Self::where_raw`].
+    pub fn or_where_raw(mut self, sql: impl Into<String>, bindings: Vec<SeaValue>) -> Self {
+        push_or(
+            &mut self.conditions,
+            Condition::Raw {
+                sql: sql.into(),
+                bindings,
+            },
+        );
+        self
+    }
+
+    fn push_grouped<I, S>(
+        mut self,
+        cols: I,
+        op: impl Into<String>,
+        val: impl Into<SeaValue>,
+        grouping: Grouping,
+        or: bool,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let cols: Vec<String> = cols.into_iter().map(Into::into).collect();
+        let op: String = op.into();
+        let value: SeaValue = val.into();
+        if let Some(condition) = grouped(cols, &op, &value, grouping) {
+            if or {
+                push_or(&mut self.conditions, condition);
+            } else {
+                self.conditions.push(condition);
+            }
+        }
+        self
+    }
+
+    /// Add `WHERE (c1 op ? OR c2 op ? ...)`: one comparison across
+    /// several columns, true when any column matches. The parentheses
+    /// keep the `OR` inside, so `filter("a", 1).where_any(["b", "c"], "=",
+    /// 2)` never returns a row whose `a` is not 1. An empty column list
+    /// adds no condition, as in Laravel.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::DB;
+    /// # async fn ex(search: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// let rows = DB::table("products")
+    ///     .where_any(["code", "description"], "like", format!("%{search}%"))
+    ///     .get()
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn where_any<I, S>(self, cols: I, op: impl Into<String>, val: impl Into<SeaValue>) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.push_grouped(cols, op, val, Grouping::Any, false)
+    }
+
+    /// `OR (c1 op ? OR c2 op ? ...)`, folded into the condition before
+    /// it; see [`Self::where_any`].
+    pub fn or_where_any<I, S>(
+        self,
+        cols: I,
+        op: impl Into<String>,
+        val: impl Into<SeaValue>,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.push_grouped(cols, op, val, Grouping::Any, true)
+    }
+
+    /// Add `WHERE (c1 op ? AND c2 op ? ...)`: true when every column
+    /// matches. An empty column list adds no condition.
+    pub fn where_all<I, S>(self, cols: I, op: impl Into<String>, val: impl Into<SeaValue>) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.push_grouped(cols, op, val, Grouping::All, false)
+    }
+
+    /// `OR (c1 op ? AND c2 op ? ...)`, folded into the condition before
+    /// it.
+    pub fn or_where_all<I, S>(
+        self,
+        cols: I,
+        op: impl Into<String>,
+        val: impl Into<SeaValue>,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.push_grouped(cols, op, val, Grouping::All, true)
+    }
+
+    /// Add `WHERE NOT (c1 op ? OR c2 op ? ...)`: true when no column
+    /// matches. An empty column list adds no condition.
+    pub fn where_none<I, S>(self, cols: I, op: impl Into<String>, val: impl Into<SeaValue>) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.push_grouped(cols, op, val, Grouping::None, false)
+    }
+
+    /// `OR NOT (c1 op ? OR c2 op ? ...)`, folded into the condition
+    /// before it.
+    pub fn or_where_none<I, S>(
+        self,
+        cols: I,
+        op: impl Into<String>,
+        val: impl Into<SeaValue>,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.push_grouped(cols, op, val, Grouping::None, true)
+    }
+
+    /// Add `WHERE EXISTS (<query>)`. The subquery may correlate with this
+    /// one through [`Self::where_column`]; its own values bind in place.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::DB;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// let authors = DB::table("users")
+    ///     .where_exists(
+    ///         DB::table("posts")
+    ///             .select_raw("1")
+    ///             .where_column("posts.author_id", "users.id"),
+    ///     )
+    ///     .get()
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn where_exists(mut self, query: DbTableBuilder) -> Self {
+        self.conditions.push(Condition::Exists {
+            query: Box::new(query),
+            negated: false,
+        });
+        self
+    }
+
+    /// Add `WHERE NOT EXISTS (<query>)`; see [`Self::where_exists`].
+    pub fn where_not_exists(mut self, query: DbTableBuilder) -> Self {
+        self.conditions.push(Condition::Exists {
+            query: Box::new(query),
+            negated: true,
+        });
+        self
+    }
+
+    /// Add a `GROUP BY col` term. Multiple calls chain in order.
+    pub fn group_by(mut self, col: impl Into<String>) -> Self {
+        self.groups.push(col.into());
+        self
+    }
+
+    // ---- Joins ---------------------------------------------------------
+
+    /// `INNER JOIN table ON first op second`. Name the table
+    /// `"users as authors"` to join it under an alias.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::DB;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// let rows = DB::table("posts")
+    ///     .left_join("categories", "categories.id", "=", "posts.category_id")
+    ///     .left_join("users as authors", "authors.id", "=", "posts.author_id")
+    ///     .select(["posts.title", "categories.name as category", "authors.name as author"])
+    ///     .order_by_asc("posts.title")
+    ///     .get()
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn join(
+        mut self,
+        table: impl Into<String>,
+        first: impl Into<String>,
+        op: impl Into<String>,
+        second: impl Into<String>,
+    ) -> Self {
+        self.joins.push(JoinClause::table_on(
+            JoinKind::Inner,
+            table.into(),
+            first.into(),
+            op.into(),
+            second.into(),
+        ));
+        self
+    }
+
+    /// `LEFT JOIN table ON first op second`; see [`Self::join`].
+    pub fn left_join(
+        mut self,
+        table: impl Into<String>,
+        first: impl Into<String>,
+        op: impl Into<String>,
+        second: impl Into<String>,
+    ) -> Self {
+        self.joins.push(JoinClause::table_on(
+            JoinKind::Left,
+            table.into(),
+            first.into(),
+            op.into(),
+            second.into(),
+        ));
+        self
+    }
+
+    /// `RIGHT JOIN table ON first op second`; see [`Self::join`]. SQLite
+    /// supports right joins from version 3.39.
+    pub fn right_join(
+        mut self,
+        table: impl Into<String>,
+        first: impl Into<String>,
+        op: impl Into<String>,
+        second: impl Into<String>,
+    ) -> Self {
+        self.joins.push(JoinClause::table_on(
+            JoinKind::Right,
+            table.into(),
+            first.into(),
+            op.into(),
+            second.into(),
+        ));
+        self
+    }
+
+    /// `CROSS JOIN table`: every row paired with every row of `table`.
+    pub fn cross_join(mut self, table: impl Into<String>) -> Self {
+        self.joins.push(JoinClause::new(
+            JoinKind::Cross,
+            JoinTarget::Table(table.into()),
+        ));
+        self
+    }
+
+    /// `INNER JOIN table ON ...` with the conditions the closure adds to
+    /// the [`JoinClause`] it receives: `on` / `or_on` for two columns,
+    /// `filter` / `db_where` / `or_where` for a column and a bound value.
+    /// A join the closure leaves without a condition is an error when the
+    /// query runs.
+    pub fn join_with(
+        mut self,
+        table: impl Into<String>,
+        build: impl FnOnce(JoinClause) -> JoinClause,
+    ) -> Self {
+        self.joins.push(JoinClause::built_with(
+            JoinKind::Inner,
+            JoinTarget::Table(table.into()),
+            build,
+        ));
+        self
+    }
+
+    /// `LEFT JOIN table ON ...`, conditions from the closure; see
+    /// [`Self::join_with`].
+    pub fn left_join_with(
+        mut self,
+        table: impl Into<String>,
+        build: impl FnOnce(JoinClause) -> JoinClause,
+    ) -> Self {
+        self.joins.push(JoinClause::built_with(
+            JoinKind::Left,
+            JoinTarget::Table(table.into()),
+            build,
+        ));
+        self
+    }
+
+    /// `RIGHT JOIN table ON ...`, conditions from the closure; see
+    /// [`Self::join_with`].
+    pub fn right_join_with(
+        mut self,
+        table: impl Into<String>,
+        build: impl FnOnce(JoinClause) -> JoinClause,
+    ) -> Self {
+        self.joins.push(JoinClause::built_with(
+            JoinKind::Right,
+            JoinTarget::Table(table.into()),
+            build,
+        ));
+        self
+    }
+
+    /// `INNER JOIN (<query>) AS alias ON first op second`: join a
+    /// subquery under an alias. The subquery's values bind in place,
+    /// ahead of the values of the conditions and `WHERE` clauses after it.
+    pub fn join_sub(
+        mut self,
+        query: DbTableBuilder,
+        alias: impl Into<String>,
+        first: impl Into<String>,
+        op: impl Into<String>,
+        second: impl Into<String>,
+    ) -> Self {
+        self.joins.push(JoinClause::query_on(
+            JoinKind::Inner,
+            query,
+            alias.into(),
+            first.into(),
+            op.into(),
+            second.into(),
+        ));
+        self
+    }
+
+    /// `LEFT JOIN (<query>) AS alias ON first op second`; see
+    /// [`Self::join_sub`].
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::DB;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// let totals = DB::table("orders")
+    ///     .select(["status_id"])
+    ///     .select_raw("COUNT(*) AS total")
+    ///     .group_by("status_id");
+    /// let rows = DB::table("statuses")
+    ///     .left_join_sub(totals, "order_totals", "order_totals.status_id", "=", "statuses.id")
+    ///     .select(["statuses.name"])
+    ///     .select_raw("COALESCE(order_totals.total, 0) AS total")
+    ///     .get()
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn left_join_sub(
+        mut self,
+        query: DbTableBuilder,
+        alias: impl Into<String>,
+        first: impl Into<String>,
+        op: impl Into<String>,
+        second: impl Into<String>,
+    ) -> Self {
+        self.joins.push(JoinClause::query_on(
+            JoinKind::Left,
+            query,
+            alias.into(),
+            first.into(),
+            op.into(),
+            second.into(),
+        ));
+        self
+    }
+
+    /// `INNER JOIN (<query>) AS alias ON ...`, conditions from the
+    /// closure; see [`Self::join_with`] and [`Self::join_sub`].
+    pub fn join_sub_with(
+        mut self,
+        query: DbTableBuilder,
+        alias: impl Into<String>,
+        build: impl FnOnce(JoinClause) -> JoinClause,
+    ) -> Self {
+        self.joins.push(JoinClause::built_with(
+            JoinKind::Inner,
+            JoinTarget::Query {
+                query: Box::new(query),
+                alias: alias.into(),
+            },
+            build,
+        ));
+        self
+    }
+
+    /// `LEFT JOIN (<query>) AS alias ON ...`, conditions from the
+    /// closure; see [`Self::join_with`] and [`Self::join_sub`].
+    pub fn left_join_sub_with(
+        mut self,
+        query: DbTableBuilder,
+        alias: impl Into<String>,
+        build: impl FnOnce(JoinClause) -> JoinClause,
+    ) -> Self {
+        self.joins.push(JoinClause::built_with(
+            JoinKind::Left,
+            JoinTarget::Query {
+                query: Box::new(query),
+                alias: alias.into(),
+            },
+            build,
+        ));
+        self
+    }
+
+    // ---- Ordering and windowing --------------------------------------
 
     /// Add an `ORDER BY col DESC` term. Multiple `order_by_*` calls
     /// chain in insertion order.
@@ -233,6 +834,22 @@ impl DbTableBuilder {
     /// Add an `ORDER BY col ASC` term.
     pub fn order_by_asc(mut self, col: impl Into<String>) -> Self {
         self.order.push((col.into(), Direction::Asc));
+        self
+    }
+
+    /// Drop every ordering set so far. Laravel's `reorder()`: use it on
+    /// a base query before reusing it as a subquery, or before ordering
+    /// it another way.
+    pub fn reorder(mut self) -> Self {
+        self.order.clear();
+        self
+    }
+
+    /// Drop every ordering set so far and order by `col` instead.
+    /// Laravel's `reorder($column, $direction)`.
+    pub fn reorder_by(mut self, col: impl Into<String>, direction: Direction) -> Self {
+        self.order.clear();
+        self.order.push((col.into(), direction));
         self
     }
 
@@ -249,22 +866,69 @@ impl DbTableBuilder {
     }
 
     /// Validate every user-supplied identifier and operator captured
-    /// in this builder. Called by every terminal method before the
-    /// SQL is rendered. See [`identifier`](crate::database::identifier)
-    /// for the contract.
-    fn validate_inputs(&self) -> Result<(), FrameworkError> {
+    /// in this builder, its joins and its subqueries. Called by every
+    /// terminal method before the SQL is rendered, and by an outer
+    /// builder for the subqueries it holds. See
+    /// [`identifier`](crate::database::identifier) for the contract.
+    pub(crate) fn validate_inputs(&self) -> Result<(), FrameworkError> {
         crate::database::validate_identifier(&self.table)?;
-        for col in &self.select_columns {
-            crate::database::validate_identifier(col)?;
+        for item in &self.select_items {
+            if let SelectItem::Column(col) = item {
+                validate_select_column(col)?;
+            }
         }
-        for term in &self.where_terms {
-            crate::database::validate_identifier(&term.column)?;
-            crate::database::validate_sql_operator(&term.op)?;
+        for join in &self.joins {
+            validate_join(join)?;
+        }
+        for condition in &self.conditions {
+            validate_condition(condition)?;
+        }
+        for col in &self.groups {
+            crate::database::validate_identifier(col)?;
         }
         for (col, _dir) in &self.order {
             crate::database::validate_identifier(col)?;
         }
         Ok(())
+    }
+
+    /// Every table this query reads: its own, each joined table, and
+    /// every table a subquery reads. The render cache records each one,
+    /// so a write to a joined table invalidates a cached page too.
+    pub(crate) fn collect_tables(&self, out: &mut Vec<String>) {
+        out.push(self.table.clone());
+        for join in &self.joins {
+            join_tables(join, out);
+        }
+        for condition in &self.conditions {
+            condition_tables(condition, out);
+        }
+    }
+
+    /// Record a read of every table [`Self::collect_tables`] names.
+    fn observe_reads(&self) {
+        if !crate::render_cache::collector::is_active() {
+            return;
+        }
+        let mut tables = Vec::new();
+        self.collect_tables(&mut tables);
+        for table in &tables {
+            crate::render_cache::collector::observe_table_read(table);
+        }
+    }
+
+    /// Refuse a write on a builder that carries joins. The `UPDATE` and
+    /// `DELETE` this builder renders name one table and would ignore the
+    /// joins, so they would touch rows the joins were there to exclude.
+    fn refuse_joins(&self, operation: &str) -> Result<(), FrameworkError> {
+        if self.joins.is_empty() {
+            return Ok(());
+        }
+        Err(FrameworkError::database(format!(
+            "DB::table(\"{}\")::{operation} does not support joins: the statement would \
+             ignore them; filter with where_in or where_exists on a subquery instead",
+            self.table
+        )))
     }
 
     /// Execute the SELECT and return every matching row as a
@@ -273,15 +937,17 @@ impl DbTableBuilder {
     /// [`QueryExecuted`](crate::database::events::QueryExecuted) on
     /// every call.
     ///
-    /// Inside a RenderCache render this records a read of the whole table
-    /// (`collector::observe_table_read`), so an ORM or query-builder write to
-    /// that table later invalidates the cached representation. The table is
-    /// known here, which is what makes the observation precise; the raw
-    /// `DB::select` family cannot name its tables and marks the render
-    /// unstorable instead. `first` funnels through this method.
+    /// Inside a RenderCache render this records a read of every table
+    /// the query reads - its own, each joined table and each table a
+    /// subquery reads (`collector::observe_table_read`) - so an ORM or
+    /// query-builder write to any of them later invalidates the cached
+    /// representation. The tables are known here, which is what makes the
+    /// observation precise; the raw `DB::select` family cannot name its
+    /// tables and marks the render unstorable instead. `first` funnels
+    /// through this method.
     pub async fn get(self) -> Result<Collection<DynamicRow>, FrameworkError> {
         self.validate_inputs()?;
-        crate::render_cache::collector::observe_table_read(&self.table);
+        self.observe_reads();
         let exec = crate::database::transaction::ExecutorChoice::resolve_read(
             None,
             self.connection_override.as_deref(),
@@ -299,7 +965,7 @@ impl DbTableBuilder {
 
         let dyn_rows: Vec<DynamicRow> = rows
             .iter()
-            .filter_map(query_result_to_dynamic_row)
+            .filter_map(|qr| query_result_to_dynamic_row(backend, qr))
             .collect();
 
         Ok(Collection::from_vec(dyn_rows))
@@ -313,8 +979,11 @@ impl DbTableBuilder {
     }
 
     /// Execute `SELECT COUNT(*) FROM ... WHERE ...` and return the
-    /// count. Clears `select_columns` / `order` / `limit` / `offset`
-    /// before rendering - count semantics don't care about those.
+    /// count. Ignores `select` / `order` / `limit` / `offset` - count
+    /// semantics don't care about those. A grouped query counts its
+    /// groups: the grouped SELECT runs as a subquery and the outer query
+    /// counts its rows, because `COUNT(*)` beside a `GROUP BY` counts each
+    /// group's rows instead.
     ///
     /// Uses `query_one` + `try_get` directly instead of
     /// `JsonValue::find_by_statement` because aggregate columns
@@ -323,13 +992,9 @@ impl DbTableBuilder {
     /// `FromQueryResult` impl - on SQLite the typed accessor is the
     /// reliable path.
     pub async fn count(self) -> Result<u64, FrameworkError> {
-        // Validate user inputs BEFORE the COUNT(*) override stomps
-        // `select_columns` - the override is framework-controlled
-        // literal SQL and would otherwise fail the identifier
-        // validator on the parenthesised aggregate.
         self.validate_inputs()?;
-        // Same table-known observation as `get`; see its doc.
-        crate::render_cache::collector::observe_table_read(&self.table);
+        // Same observation as `get`; see its doc.
+        self.observe_reads();
         // T11/T12: route through resolve_read.
         let exec = crate::database::transaction::ExecutorChoice::resolve_read(
             None,
@@ -339,11 +1004,20 @@ impl DbTableBuilder {
         .await?;
         let backend = exec.backend();
         let mut copy = self;
-        copy.select_columns = vec!["COUNT(*) as count".into()];
         copy.order.clear();
         copy.limit_value = None;
         copy.offset_value = None;
-        let (sql, values) = copy.render_select(backend)?;
+        let (sql, values) = if copy.groups.is_empty() {
+            copy.select_items = vec![SelectItem::Raw("COUNT(*) AS count".into())];
+            copy.render_select(backend)?
+        } else {
+            copy.select_items = vec![SelectItem::Raw("1 AS __suprnova_group".into())];
+            let (grouped, values) = copy.render_select(backend)?;
+            (
+                format!("SELECT COUNT(*) AS count FROM ({grouped}) AS __suprnova_groups"),
+                values,
+            )
+        };
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
 
         let row = exec
@@ -426,8 +1100,11 @@ impl DbTableBuilder {
 
         let base = format!(
             "INSERT INTO {} ({}) VALUES ({})",
-            self.table,
-            cols.join(", "),
+            quote_identifier(backend, &self.table),
+            cols.iter()
+                .map(|c| quote_identifier(backend, c))
+                .collect::<Vec<_>>()
+                .join(", "),
             placeholders.join(", "),
         );
 
@@ -496,6 +1173,10 @@ impl DbTableBuilder {
     /// supported but rarely-correct operation - callers should add at
     /// least one `filter` unless they really mean "all rows."
     ///
+    /// A builder with a join is refused with an error: the `UPDATE` names
+    /// one table and would ignore the join. Narrow the rows with
+    /// `where_in` or `where_exists` on a subquery instead.
+    ///
     /// Dual-API: this is the Laravel-faithful name; the
     /// `Builder<M>`-style alias is [`Self::update_all`]. Both call into
     /// the same implementation. Prefer the `_all` name when the
@@ -515,6 +1196,7 @@ impl DbTableBuilder {
                 self.table
             )));
         }
+        self.refuse_joins("update")?;
         // Audit HIGH `database` #2 - same validation as insert; the
         // attrs keys land in `SET col = ?` so they must be safe
         // identifiers.
@@ -559,6 +1241,9 @@ impl DbTableBuilder {
     /// removes every row by design - add a `filter` if you don't mean
     /// that.
     ///
+    /// A builder with a join is refused with an error, for the reason
+    /// [`Self::update`] gives.
+    ///
     /// Dual-API: this is the Laravel-faithful name; the
     /// `Builder<M>`-style alias is [`Self::delete_all`]. Both call into
     /// the same implementation. Prefer the `_all` name when the
@@ -569,6 +1254,7 @@ impl DbTableBuilder {
     }
 
     async fn delete_inner(self) -> Result<u64, FrameworkError> {
+        self.refuse_joins("delete")?;
         // Audit HIGH `database` #2 - identifier + operator validation.
         self.validate_inputs()?;
         // T11/T12: route through resolve_write.
@@ -603,9 +1289,9 @@ impl DbTableBuilder {
 
     // ---- SQL rendering ---------------------------------------------------
 
-    /// Render the shared WHERE clause list, including the leading
-    /// ` WHERE `. Returns an empty string when the builder carries no
-    /// filters, so callers push the result unconditionally.
+    /// Render the WHERE clause, including the leading ` WHERE `. Returns
+    /// an empty string when the builder carries no conditions, so callers
+    /// push the result unconditionally.
     ///
     /// Fallible because `where_binary` is a MySQL/MariaDB-only
     /// comparison: on any other backend this returns `Err` before a
@@ -617,45 +1303,67 @@ impl DbTableBuilder {
         values: &mut Vec<SeaValue>,
         counter: &mut usize,
     ) -> Result<String, FrameworkError> {
-        if self.where_terms.is_empty() {
+        if self.conditions.is_empty() {
             return Ok(String::new());
         }
-        let mut clauses: Vec<String> = Vec::with_capacity(self.where_terms.len());
-        for term in &self.where_terms {
-            *counter += 1;
-            values.push(term.value.clone());
-            let placeholder = if backend == DbBackend::Postgres {
-                format!("${counter}")
-            } else {
-                "?".to_owned()
-            };
-            let op = if term.binary {
-                match backend {
-                    DbBackend::MySql => format!("{} binary", term.op),
-                    _ => return Err(crate::database::binary_comparison_unsupported(backend)),
-                }
-            } else {
-                term.op.clone()
-            };
-            clauses.push(format!("{} {} {}", term.column, op, placeholder));
-        }
-        Ok(format!(" WHERE {}", clauses.join(" AND ")))
+        Ok(format!(
+            " WHERE {}",
+            render_conditions(&self.conditions, backend, values, counter)?
+        ))
     }
 
     fn render_select(&self, backend: DbBackend) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         let mut values: Vec<SeaValue> = Vec::new();
         let mut counter = 0usize;
+        let sql = self.render_select_into(backend, &mut values, &mut counter)?;
+        Ok((sql, values))
+    }
+
+    /// Render this SELECT into a statement that may already hold values:
+    /// the top-level query starts the counter at zero, and a subquery
+    /// continues the outer statement's counter, so its placeholders and
+    /// values fall in place. Every part renders in text order - select
+    /// list, joins, `WHERE`, `GROUP BY`, `ORDER BY` - so the values are
+    /// pushed in the order their markers appear.
+    pub(crate) fn render_select_into(
+        &self,
+        backend: DbBackend,
+        values: &mut Vec<SeaValue>,
+        counter: &mut usize,
+    ) -> Result<String, FrameworkError> {
         let mut sql = String::new();
         sql.push_str("SELECT ");
-        if self.select_columns.is_empty() {
+        if self.select_items.is_empty() {
             sql.push('*');
         } else {
-            sql.push_str(&self.select_columns.join(", "));
+            let items = self
+                .select_items
+                .iter()
+                .map(|item| match item {
+                    SelectItem::Column(col) => render_select_column(backend, col),
+                    SelectItem::Raw(raw) => Ok(raw.clone()),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            sql.push_str(&items.join(", "));
         }
         sql.push_str(" FROM ");
-        sql.push_str(&self.table);
+        sql.push_str(&quote_identifier(backend, &self.table));
 
-        sql.push_str(&self.render_where_clauses(backend, &mut values, &mut counter)?);
+        for join in &self.joins {
+            sql.push_str(&render_join(join, backend, values, counter)?);
+        }
+
+        sql.push_str(&self.render_where_clauses(backend, values, counter)?);
+
+        if !self.groups.is_empty() {
+            sql.push_str(" GROUP BY ");
+            let groups: Vec<String> = self
+                .groups
+                .iter()
+                .map(|col| quote_identifier(backend, col))
+                .collect();
+            sql.push_str(&groups.join(", "));
+        }
 
         if !self.order.is_empty() {
             sql.push_str(" ORDER BY ");
@@ -667,7 +1375,7 @@ impl DbTableBuilder {
                         Direction::Asc => "ASC",
                         Direction::Desc => "DESC",
                     };
-                    format!("{col} {dir_sql}")
+                    format!("{} {dir_sql}", quote_identifier(backend, col))
                 })
                 .collect();
             sql.push_str(&order.join(", "));
@@ -680,7 +1388,7 @@ impl DbTableBuilder {
             sql.push_str(&format!(" OFFSET {n}"));
         }
 
-        Ok((sql, values))
+        Ok(sql)
     }
 
     fn render_update(
@@ -691,7 +1399,7 @@ impl DbTableBuilder {
         let mut values: Vec<SeaValue> = Vec::new();
         let mut counter = 0usize;
 
-        let mut sql = format!("UPDATE {} SET ", self.table);
+        let mut sql = format!("UPDATE {} SET ", quote_identifier(backend, &self.table));
         let sets: Vec<String> = attrs
             .keys()
             .map(|col| {
@@ -699,7 +1407,7 @@ impl DbTableBuilder {
                     .get(col)
                     .expect("key present in iter must be present in get");
                 let expression = write_value_expression(backend, v, &mut values, &mut counter);
-                format!("{col} = {expression}")
+                format!("{} = {expression}", quote_identifier(backend, col))
             })
             .collect();
         sql.push_str(&sets.join(", "));
@@ -712,7 +1420,7 @@ impl DbTableBuilder {
     fn render_delete(&self, backend: DbBackend) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         let mut values: Vec<SeaValue> = Vec::new();
         let mut counter = 0usize;
-        let mut sql = format!("DELETE FROM {}", self.table);
+        let mut sql = format!("DELETE FROM {}", quote_identifier(backend, &self.table));
         sql.push_str(&self.render_where_clauses(backend, &mut values, &mut counter)?);
         Ok((sql, values))
     }
@@ -776,7 +1484,7 @@ impl DB {
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(rows
             .into_iter()
-            .filter_map(|qr| query_result_to_dynamic_row(&qr))
+            .filter_map(|qr| query_result_to_dynamic_row(backend, &qr))
             .collect())
     }
 
@@ -798,7 +1506,9 @@ impl DB {
             .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(row.as_ref().and_then(query_result_to_dynamic_row))
+        Ok(row
+            .as_ref()
+            .and_then(|qr| query_result_to_dynamic_row(backend, qr)))
     }
 
     /// [`DB::select_one`] for a statement whose tables the caller knows:
@@ -828,7 +1538,9 @@ impl DB {
             .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(row.as_ref().and_then(query_result_to_dynamic_row))
+        Ok(row
+            .as_ref()
+            .and_then(|qr| query_result_to_dynamic_row(backend, qr)))
     }
 
     /// Run a raw SELECT, return the FIRST column of the FIRST row.
@@ -1114,7 +1826,7 @@ impl DB {
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(rows
             .into_iter()
-            .filter_map(|qr| query_result_to_dynamic_row(&qr))
+            .filter_map(|qr| query_result_to_dynamic_row(backend, &qr))
             .collect())
     }
 
@@ -1409,7 +2121,7 @@ mod where_clause_render_tests {
             .where_binary("email", "Alice@example.com")
             .render_select(DbBackend::MySql)
             .expect("MySQL supports binary comparison");
-        assert_eq!(sql, "SELECT * FROM users WHERE email = binary ?");
+        assert_eq!(sql, "SELECT * FROM `users` WHERE `email` = binary ?");
         assert_eq!(values.len(), 1, "the value stays bound; got: {values:?}");
     }
 
@@ -1419,7 +2131,7 @@ mod where_clause_render_tests {
             .where_not_binary("email", "Alice@example.com")
             .render_select(DbBackend::MySql)
             .expect("MySQL supports binary comparison");
-        assert_eq!(sql, "SELECT * FROM users WHERE email != binary ?");
+        assert_eq!(sql, "SELECT * FROM `users` WHERE `email` != binary ?");
     }
 
     #[test]
@@ -1431,7 +2143,7 @@ mod where_clause_render_tests {
             .expect("MySQL supports binary comparison");
         assert_eq!(
             sql,
-            "SELECT * FROM users WHERE active = ? AND email = binary ?"
+            "SELECT * FROM `users` WHERE `active` = ? AND `email` = binary ?"
         );
         assert_eq!(values.len(), 2, "got: {values:?}");
     }
@@ -1484,7 +2196,7 @@ mod where_clause_render_tests {
             .filter("id", 7i64)
             .render_update(&attrs, DbBackend::Postgres)
             .expect("no binary term, so Postgres renders");
-        assert_eq!(sql, "UPDATE users SET name = $1 WHERE id = $2");
+        assert_eq!(sql, r#"UPDATE "users" SET "name" = $1 WHERE "id" = $2"#);
         assert_eq!(values.len(), 2, "got: {values:?}");
     }
 
@@ -1493,8 +2205,123 @@ mod where_clause_render_tests {
         let (sql, values) = DbTableBuilder::new("users")
             .render_select(DbBackend::Sqlite)
             .expect("no filters, nothing to refuse");
-        assert_eq!(sql, "SELECT * FROM users");
+        assert_eq!(sql, r#"SELECT * FROM "users""#);
         assert!(values.is_empty(), "got: {values:?}");
+    }
+
+    /// Postgres numbers its placeholders, so a subquery's values must
+    /// take the numbers of the positions they hold in the text: a joined
+    /// subquery and the join's own condition come before the outer
+    /// `WHERE`, and a `where_in` or `EXISTS` subquery sits between the
+    /// outer conditions around it.
+    #[test]
+    fn postgres_numbers_subquery_values_in_text_order() {
+        let (sql, values) = DbTableBuilder::new("statuses")
+            .left_join_sub_with(
+                DbTableBuilder::new("orders")
+                    .select(["status_id"])
+                    .filter_op("total", ">=", 15)
+                    .group_by("status_id"),
+                "big",
+                |join| {
+                    join.on("big.status_id", "=", "statuses.id")
+                        .filter("big.region", "eu")
+                },
+            )
+            .filter("statuses.kind", "open")
+            .where_in(
+                "statuses.id",
+                DbTableBuilder::new("flags")
+                    .select(["status_id"])
+                    .filter("flag", "hot"),
+            )
+            .where_exists(DbTableBuilder::new("audits").filter("audits.level", 3))
+            .filter("statuses.region", "us")
+            .render_select(DbBackend::Postgres)
+            .expect("renders for Postgres");
+        assert_eq!(
+            sql,
+            concat!(
+                r#"SELECT * FROM "statuses" LEFT JOIN (SELECT "status_id" FROM "orders" "#,
+                r#"WHERE "total" >= $1 GROUP BY "status_id") AS "big" "#,
+                r#"ON "big"."status_id" = "statuses"."id" AND "big"."region" = $2 "#,
+                r#"WHERE "statuses"."kind" = $3 AND "statuses"."id" IN "#,
+                r#"(SELECT "status_id" FROM "flags" WHERE "flag" = $4) "#,
+                r#"AND EXISTS (SELECT * FROM "audits" WHERE "audits"."level" = $5) "#,
+                r#"AND "statuses"."region" = $6"#,
+            )
+        );
+        assert_eq!(
+            values,
+            vec![
+                SeaValue::from(15),
+                SeaValue::from("eu"),
+                SeaValue::from("open"),
+                SeaValue::from("hot"),
+                SeaValue::from(3),
+                SeaValue::from("us"),
+            ]
+        );
+    }
+
+    #[test]
+    fn grouped_helpers_and_or_forms_render_their_parentheses() {
+        let (sql, values) = DbTableBuilder::new("items")
+            .filter("a", 1)
+            .where_any(["b", "c"], "=", 2)
+            .or_where_null("label")
+            .where_none(["d", "e"], "like", "x%")
+            .or_where_raw("f + g = ?", vec![SeaValue::from(4)])
+            .reorder_by("id", Direction::Desc)
+            .render_select(DbBackend::Postgres)
+            .expect("renders for Postgres");
+        assert_eq!(
+            sql,
+            concat!(
+                r#"SELECT * FROM "items" WHERE "a" = $1 "#,
+                r#"AND ("b" = $2 OR "c" = $3 OR "label" IS NULL) "#,
+                r#"AND (NOT ("d" like $4 OR "e" like $5) OR f + g = $6) "#,
+                r#"ORDER BY "id" DESC"#,
+            )
+        );
+        assert_eq!(values.len(), 6, "got: {values:?}");
+    }
+
+    #[test]
+    fn a_select_list_quotes_columns_and_aliases_and_keeps_raw_entries() {
+        let (sql, _) = DbTableBuilder::new("posts")
+            .join("users as authors", "authors.id", "=", "posts.author_id")
+            .cross_join("tags")
+            .select(["posts.*", "authors.name as author"])
+            .select_raw("COUNT(*) AS total")
+            .group_by("posts.id")
+            .render_select(DbBackend::MySql)
+            .expect("renders for MySQL");
+        assert_eq!(
+            sql,
+            concat!(
+                "SELECT `posts`.*, `authors`.`name` AS `author`, COUNT(*) AS total ",
+                "FROM `posts` INNER JOIN `users` AS `authors` ON `authors`.`id` = `posts`.`author_id` ",
+                "CROSS JOIN `tags` GROUP BY `posts`.`id`",
+            )
+        );
+    }
+
+    #[test]
+    fn every_table_a_query_reads_is_collected() {
+        let builder = DbTableBuilder::new("posts")
+            .join("users as authors", "authors.id", "=", "posts.author_id")
+            .left_join_sub(
+                DbTableBuilder::new("orders").where_exists(DbTableBuilder::new("audits")),
+                "o",
+                "o.id",
+                "=",
+                "posts.id",
+            )
+            .or_where_in("posts.id", DbTableBuilder::new("pins").select(["post_id"]));
+        let mut tables = Vec::new();
+        builder.collect_tables(&mut tables);
+        assert_eq!(tables, vec!["posts", "users", "orders", "audits", "pins"]);
     }
 }
 

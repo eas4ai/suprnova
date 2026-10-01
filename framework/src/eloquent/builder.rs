@@ -59,7 +59,11 @@ use chrono::{NaiveDate, NaiveTime};
 use sea_orm::{DbBackend, FromQueryResult, Statement, TryGetable, Value as SeaValue};
 use serde_json::Value;
 
-use crate::database::DB;
+use crate::database::clauses::{
+    IntoWhereIn, JoinClause, JoinKind, JoinTarget, WhereIn, join_tables, quote_identifier,
+    render_join, validate_join, validate_select_column,
+};
+use crate::database::{DB, DbTableBuilder};
 use crate::eloquent::EloquentModel;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::collection::Collection;
@@ -193,6 +197,13 @@ pub(crate) enum WhereTerm {
     /// any user-supplied inner WHERE terms, the EXISTS/NOT-EXISTS
     /// polarity, and the optional `>= N` count constraint.
     Exists(Box<ExistsSpec>),
+    /// `col IN (<subquery>)`, or `NOT IN` when the flag is `true`, from
+    /// `where_in` and its siblings given a [`DbTableBuilder`]. The
+    /// subquery renders inline and its values bind in place.
+    InQuery(String, Box<DbTableBuilder>, bool),
+    /// `EXISTS (<subquery>)`, or `NOT EXISTS` when the flag is `true`,
+    /// from [`Builder::where_exists`] / [`Builder::where_not_exists`].
+    ExistsQuery(Box<DbTableBuilder>, bool),
 }
 
 /// Spec passed to [`WhereTerm::Exists`]. Built by
@@ -438,6 +449,10 @@ impl std::fmt::Debug for EagerSpec {
 /// user struct (`T5User::filter(...)`, `T5User::where_in(...)`, ...).
 pub struct Builder<M> {
     pub(crate) where_terms: Vec<WhereTerm>,
+    /// Joins, in the order they were added. A model query with a join
+    /// selects `<table>.*` unless it has its own select, so a joined
+    /// table's columns never overwrite the model's.
+    pub(crate) joins: Vec<JoinClause>,
     pub(crate) orders: Vec<OrderTerm>,
     pub(crate) select_cols: Option<Vec<String>>,
     pub(crate) select_raw: Option<String>,
@@ -537,6 +552,7 @@ impl<M> Clone for Builder<M> {
     fn clone(&self) -> Self {
         Self {
             where_terms: self.where_terms.clone(),
+            joins: self.joins.clone(),
             orders: self.orders.clone(),
             select_cols: self.select_cols.clone(),
             select_raw: self.select_raw.clone(),
@@ -696,7 +712,7 @@ fn skip_dollar_quoted_sql(bytes: &[u8], start: usize) -> Option<usize> {
     Some(bytes.len())
 }
 
-fn rewrite_raw_placeholders(
+pub(crate) fn rewrite_raw_placeholders(
     backend: DbBackend,
     sql: &str,
     binding_count: usize,
@@ -764,7 +780,10 @@ fn rewrite_raw_placeholders(
     Ok(rendered)
 }
 
-fn validate_raw_placeholders(sql: &str, binding_count: usize) -> Result<(), FrameworkError> {
+pub(crate) fn validate_raw_placeholders(
+    sql: &str,
+    binding_count: usize,
+) -> Result<(), FrameworkError> {
     if binding_count == 0 {
         return Ok(());
     }
@@ -844,6 +863,11 @@ pub(crate) fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError
                 validate_where_term(t)?;
             }
         }
+        WhereTerm::InQuery(c, query, _) => {
+            validate_identifier(c)?;
+            query.validate_inputs()?;
+        }
+        WhereTerm::ExistsQuery(query, _) => query.validate_inputs()?,
         WhereTerm::Exists(spec) => {
             // The renderer only interpolates spec fields the macro
             // populated from compile-time string literals or fully
@@ -897,6 +921,51 @@ pub(crate) fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError
     Ok(())
 }
 
+/// Every table `term` reads through a subquery, for the render cache: a
+/// [`DbTableBuilder`] subquery's tables, and the related table (and pivot
+/// table) a relation-existence term (`has`, `where_has`, `doesnt_have`,
+/// `where_relation` and their kin) reads in its `EXISTS`, plus whatever
+/// its closure's own terms read.
+fn where_term_tables(term: &WhereTerm, out: &mut Vec<String>) {
+    match term {
+        WhereTerm::InQuery(_, query, _) | WhereTerm::ExistsQuery(query, _) => {
+            query.collect_tables(out);
+        }
+        WhereTerm::Not(inner) => where_term_tables(inner, out),
+        WhereTerm::Or(terms) | WhereTerm::Group(terms) => {
+            for t in terms {
+                where_term_tables(t, out);
+            }
+        }
+        WhereTerm::Exists(spec) => {
+            for table in [&spec.target_table, &spec.pivot_table] {
+                if !table.is_empty() {
+                    out.push(table.clone());
+                }
+            }
+            for t in &spec.inner_terms {
+                where_term_tables(t, out);
+            }
+        }
+        WhereTerm::Eq(..)
+        | WhereTerm::Op(..)
+        | WhereTerm::In(..)
+        | WhereTerm::NotIn(..)
+        | WhereTerm::Between(..)
+        | WhereTerm::NotBetween(..)
+        | WhereTerm::Null(..)
+        | WhereTerm::NotNull(..)
+        | WhereTerm::Like(..)
+        | WhereTerm::NotLike(..)
+        | WhereTerm::Binary(..)
+        | WhereTerm::Column(..)
+        | WhereTerm::Raw(..)
+        | WhereTerm::JsonContains(..)
+        | WhereTerm::JsonLength(..)
+        | WhereTerm::DatePart(..) => {}
+    }
+}
+
 impl<M> Builder<M> {
     /// This builder as it runs: itself when it carries no scope resolver,
     /// and otherwise a copy with the soft-delete filter and the global
@@ -946,8 +1015,11 @@ impl<M> Builder<M> {
 
         if let Some(cols) = &self.select_cols {
             for c in cols {
-                validate_identifier(c)?;
+                validate_select_column(c)?;
             }
+        }
+        for join in &self.joins {
+            validate_join(join)?;
         }
         for c in &self.group_by {
             validate_identifier(c)?;
@@ -980,6 +1052,7 @@ impl<M> Builder<M> {
     pub fn new() -> Self {
         Self {
             where_terms: Vec::new(),
+            joins: Vec::new(),
             orders: Vec::new(),
             select_cols: None,
             select_raw: None,
@@ -1345,50 +1418,83 @@ impl<M> Builder<M> {
 
     // ---- Set membership --------------------------------------------------
 
+    /// The term for `col [NOT] IN <source>`: a value list or a subquery.
+    fn in_term(col: String, source: WhereIn<Value>, negated: bool) -> WhereTerm {
+        match (source, negated) {
+            (WhereIn::Values(v), false) => WhereTerm::In(col, v),
+            (WhereIn::Values(v), true) => WhereTerm::NotIn(col, v),
+            (WhereIn::Query(query), negated) => WhereTerm::InQuery(col, query, negated),
+        }
+    }
+
     /// `WHERE col IN (v1, v2, ...)`. Empty list renders as `1 = 0`
     /// (no rows match) so the SQL stays well-formed.
+    ///
+    /// `vals` may also be a [`DbTableBuilder`], used as a subquery whose
+    /// one column supplies the values; its own values bind in place:
+    ///
+    /// ```ignore
+    /// let booked = Room::query()
+    ///     .where_in("id", DB::table("slots").select(["room_id"]).filter("day", "mon"))
+    ///     .get()
+    ///     .await?;
+    /// ```
     #[doc(alias = "where_in")]
-    pub fn filter_in<V, I>(mut self, col: impl IntoColumn, vals: I) -> Self
-    where
-        I: IntoIterator<Item = V>,
-        V: IntoVal,
-    {
-        let v: Vec<Value> = vals.into_iter().map(|x| x.into_val()).collect();
-        self.where_terms.push(WhereTerm::In(col.col_name(), v));
+    pub fn filter_in(mut self, col: impl IntoColumn, vals: impl IntoWhereIn<Value>) -> Self {
+        self.where_terms
+            .push(Self::in_term(col.col_name(), vals.into_where_in(), false));
         self
     }
 
     /// Laravel-shape alias for [`Self::filter_in`].
     #[doc(alias = "filter_in")]
-    pub fn where_in<V, I>(self, col: impl IntoColumn, vals: I) -> Self
-    where
-        I: IntoIterator<Item = V>,
-        V: IntoVal,
-    {
+    pub fn where_in(self, col: impl IntoColumn, vals: impl IntoWhereIn<Value>) -> Self {
         self.filter_in(col, vals)
     }
 
     /// `WHERE col NOT IN (v1, v2, ...)`. Empty list renders as `1 = 1`
-    /// (every row matches) so the SQL stays well-formed.
+    /// (every row matches) so the SQL stays well-formed. Takes a
+    /// subquery too; see [`Self::filter_in`].
     #[doc(alias = "where_not_in")]
-    pub fn filter_not_in<V, I>(mut self, col: impl IntoColumn, vals: I) -> Self
-    where
-        I: IntoIterator<Item = V>,
-        V: IntoVal,
-    {
-        let v: Vec<Value> = vals.into_iter().map(|x| x.into_val()).collect();
-        self.where_terms.push(WhereTerm::NotIn(col.col_name(), v));
+    pub fn filter_not_in(mut self, col: impl IntoColumn, vals: impl IntoWhereIn<Value>) -> Self {
+        self.where_terms
+            .push(Self::in_term(col.col_name(), vals.into_where_in(), true));
         self
     }
 
     /// Laravel-shape alias for [`Self::filter_not_in`].
     #[doc(alias = "filter_not_in")]
-    pub fn where_not_in<V, I>(self, col: impl IntoColumn, vals: I) -> Self
-    where
-        I: IntoIterator<Item = V>,
-        V: IntoVal,
-    {
+    pub fn where_not_in(self, col: impl IntoColumn, vals: impl IntoWhereIn<Value>) -> Self {
         self.filter_not_in(col, vals)
+    }
+
+    /// `OR col IN (...)`, folded into the previous WHERE clause like
+    /// [`Self::or_filter`]. Takes a list or a subquery; see
+    /// [`Self::filter_in`].
+    #[doc(alias = "or_where_in")]
+    pub fn or_filter_in(self, col: impl IntoColumn, vals: impl IntoWhereIn<Value>) -> Self {
+        let term = Self::in_term(col.col_name(), vals.into_where_in(), false);
+        self.or_push_term(term)
+    }
+
+    /// Laravel-shape alias for [`Self::or_filter_in`].
+    #[doc(alias = "or_filter_in")]
+    pub fn or_where_in(self, col: impl IntoColumn, vals: impl IntoWhereIn<Value>) -> Self {
+        self.or_filter_in(col, vals)
+    }
+
+    /// `OR col NOT IN (...)`, folded into the previous WHERE clause.
+    /// Takes a list or a subquery; see [`Self::filter_in`].
+    #[doc(alias = "or_where_not_in")]
+    pub fn or_filter_not_in(self, col: impl IntoColumn, vals: impl IntoWhereIn<Value>) -> Self {
+        let term = Self::in_term(col.col_name(), vals.into_where_in(), true);
+        self.or_push_term(term)
+    }
+
+    /// Laravel-shape alias for [`Self::or_filter_not_in`].
+    #[doc(alias = "or_filter_not_in")]
+    pub fn or_where_not_in(self, col: impl IntoColumn, vals: impl IntoWhereIn<Value>) -> Self {
+        self.or_filter_not_in(col, vals)
     }
 
     // ---- Range -----------------------------------------------------------
@@ -1472,6 +1578,30 @@ impl<M> Builder<M> {
     #[doc(alias = "filter_not_null")]
     pub fn where_not_null(self, col: impl IntoColumn) -> Self {
         self.filter_not_null(col)
+    }
+
+    /// `OR col IS NULL`, folded into the previous WHERE clause.
+    #[doc(alias = "or_where_null")]
+    pub fn or_filter_null(self, col: impl IntoColumn) -> Self {
+        self.or_push_term(WhereTerm::Null(col.col_name()))
+    }
+
+    /// Laravel-shape alias for [`Self::or_filter_null`].
+    #[doc(alias = "or_filter_null")]
+    pub fn or_where_null(self, col: impl IntoColumn) -> Self {
+        self.or_filter_null(col)
+    }
+
+    /// `OR col IS NOT NULL`, folded into the previous WHERE clause.
+    #[doc(alias = "or_where_not_null")]
+    pub fn or_filter_not_null(self, col: impl IntoColumn) -> Self {
+        self.or_push_term(WhereTerm::NotNull(col.col_name()))
+    }
+
+    /// Laravel-shape alias for [`Self::or_filter_not_null`].
+    #[doc(alias = "or_filter_not_null")]
+    pub fn or_where_not_null(self, col: impl IntoColumn) -> Self {
+        self.or_filter_not_null(col)
     }
 
     // ---- LIKE ------------------------------------------------------------
@@ -1735,6 +1865,469 @@ impl<M> Builder<M> {
         self.filter_raw(sql, bindings)
     }
 
+    /// `OR <sql>` - a raw fragment folded into the previous WHERE clause
+    /// like [`Self::or_filter`]. Same markers and the same trust boundary
+    /// as [`Self::filter_raw`]: only `bindings` is parameterised.
+    #[doc(alias = "or_where_raw")]
+    pub fn or_filter_raw(self, sql: impl Into<String>, bindings: Vec<Value>) -> Self {
+        self.or_push_term(WhereTerm::Raw(sql.into(), bindings))
+    }
+
+    /// Laravel-shape alias for [`Self::or_filter_raw`].
+    #[doc(alias = "or_filter_raw")]
+    pub fn or_where_raw(self, sql: impl Into<String>, bindings: Vec<Value>) -> Self {
+        self.or_filter_raw(sql, bindings)
+    }
+
+    // ---- One comparison across several columns -------------------------
+
+    /// One `col op val` term per column. `None` for an empty list, which
+    /// adds no condition at all, as in Laravel.
+    fn comparisons<I, C>(cols: I, op: &str, val: impl IntoVal) -> Option<Vec<WhereTerm>>
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        let value = val.into_val();
+        let terms: Vec<WhereTerm> = cols
+            .into_iter()
+            .map(|c| WhereTerm::Op(c.col_name(), op.to_string(), value.clone()))
+            .collect();
+        if terms.is_empty() { None } else { Some(terms) }
+    }
+
+    fn push_comparisons(mut self, term: Option<WhereTerm>, or: bool) -> Self {
+        match term {
+            Some(term) if or => self.or_push_term(term),
+            Some(term) => {
+                self.where_terms.push(term);
+                self
+            }
+            None => self,
+        }
+    }
+
+    /// `WHERE (c1 op val OR c2 op val ...)`: one comparison across several
+    /// columns, true when any column matches. Laravel's `whereAny`. The
+    /// parentheses keep the `OR` inside, so `filter("a", 1).filter_any(["b",
+    /// "c"], "=", 2)` never returns a row whose `a` is not 1. An empty
+    /// column list adds no condition.
+    ///
+    /// ```ignore
+    /// let found = Product::query()
+    ///     .filter_any(["code", "description"], "like", format!("%{search}%"))
+    ///     .get()
+    ///     .await?;
+    /// ```
+    #[doc(alias = "where_any")]
+    pub fn filter_any<I, C>(self, cols: I, op: &str, val: impl IntoVal) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        let term = Self::comparisons(cols, op, val).map(WhereTerm::Or);
+        self.push_comparisons(term, false)
+    }
+
+    /// Laravel-shape alias for [`Self::filter_any`].
+    #[doc(alias = "filter_any")]
+    pub fn where_any<I, C>(self, cols: I, op: &str, val: impl IntoVal) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        self.filter_any(cols, op, val)
+    }
+
+    /// `OR (c1 op val OR c2 op val ...)`, folded into the previous WHERE
+    /// clause; see [`Self::filter_any`].
+    #[doc(alias = "or_where_any")]
+    pub fn or_filter_any<I, C>(self, cols: I, op: &str, val: impl IntoVal) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        let term = Self::comparisons(cols, op, val).map(WhereTerm::Or);
+        self.push_comparisons(term, true)
+    }
+
+    /// Laravel-shape alias for [`Self::or_filter_any`].
+    #[doc(alias = "or_filter_any")]
+    pub fn or_where_any<I, C>(self, cols: I, op: &str, val: impl IntoVal) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        self.or_filter_any(cols, op, val)
+    }
+
+    /// `WHERE (c1 op val AND c2 op val ...)`: true when every column
+    /// matches. Laravel's `whereAll`. An empty column list adds no
+    /// condition.
+    #[doc(alias = "where_all")]
+    pub fn filter_all<I, C>(self, cols: I, op: &str, val: impl IntoVal) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        let term = Self::comparisons(cols, op, val).map(WhereTerm::Group);
+        self.push_comparisons(term, false)
+    }
+
+    /// Laravel-shape alias for [`Self::filter_all`].
+    #[doc(alias = "filter_all")]
+    pub fn where_all<I, C>(self, cols: I, op: &str, val: impl IntoVal) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        self.filter_all(cols, op, val)
+    }
+
+    /// `OR (c1 op val AND c2 op val ...)`, folded into the previous WHERE
+    /// clause; see [`Self::filter_all`].
+    #[doc(alias = "or_where_all")]
+    pub fn or_filter_all<I, C>(self, cols: I, op: &str, val: impl IntoVal) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        let term = Self::comparisons(cols, op, val).map(WhereTerm::Group);
+        self.push_comparisons(term, true)
+    }
+
+    /// Laravel-shape alias for [`Self::or_filter_all`].
+    #[doc(alias = "or_filter_all")]
+    pub fn or_where_all<I, C>(self, cols: I, op: &str, val: impl IntoVal) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        self.or_filter_all(cols, op, val)
+    }
+
+    /// `WHERE NOT (c1 op val OR c2 op val ...)`: true when no column
+    /// matches. Laravel's `whereNone`. An empty column list adds no
+    /// condition.
+    #[doc(alias = "where_none")]
+    pub fn filter_none<I, C>(self, cols: I, op: &str, val: impl IntoVal) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        let term = Self::comparisons(cols, op, val)
+            .map(|terms| WhereTerm::Not(Box::new(WhereTerm::Or(terms))));
+        self.push_comparisons(term, false)
+    }
+
+    /// Laravel-shape alias for [`Self::filter_none`].
+    #[doc(alias = "filter_none")]
+    pub fn where_none<I, C>(self, cols: I, op: &str, val: impl IntoVal) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        self.filter_none(cols, op, val)
+    }
+
+    /// `OR NOT (c1 op val OR c2 op val ...)`, folded into the previous
+    /// WHERE clause; see [`Self::filter_none`].
+    #[doc(alias = "or_where_none")]
+    pub fn or_filter_none<I, C>(self, cols: I, op: &str, val: impl IntoVal) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        let term = Self::comparisons(cols, op, val)
+            .map(|terms| WhereTerm::Not(Box::new(WhereTerm::Or(terms))));
+        self.push_comparisons(term, true)
+    }
+
+    /// Laravel-shape alias for [`Self::or_filter_none`].
+    #[doc(alias = "or_filter_none")]
+    pub fn or_where_none<I, C>(self, cols: I, op: &str, val: impl IntoVal) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        self.or_filter_none(cols, op, val)
+    }
+
+    // ---- Subquery existence ---------------------------------------------
+
+    /// `WHERE EXISTS (<query>)` over any [`DbTableBuilder`]. The subquery
+    /// may correlate with this query through `where_column`; its values
+    /// bind in place. For a declared relation, [`Self::has`] and
+    /// [`Self::where_has`] build the subquery for you.
+    ///
+    /// ```ignore
+    /// let authors = User::query()
+    ///     .filter_exists(
+    ///         DB::table("posts")
+    ///             .select_raw("1")
+    ///             .where_column("posts.author_id", "users.id"),
+    ///     )
+    ///     .get()
+    ///     .await?;
+    /// ```
+    #[doc(alias = "where_exists")]
+    pub fn filter_exists(mut self, query: DbTableBuilder) -> Self {
+        self.where_terms
+            .push(WhereTerm::ExistsQuery(Box::new(query), false));
+        self
+    }
+
+    /// Laravel-shape alias for [`Self::filter_exists`].
+    #[doc(alias = "filter_exists")]
+    pub fn where_exists(self, query: DbTableBuilder) -> Self {
+        self.filter_exists(query)
+    }
+
+    /// `WHERE NOT EXISTS (<query>)`; see [`Self::filter_exists`].
+    #[doc(alias = "where_not_exists")]
+    pub fn filter_not_exists(mut self, query: DbTableBuilder) -> Self {
+        self.where_terms
+            .push(WhereTerm::ExistsQuery(Box::new(query), true));
+        self
+    }
+
+    /// Laravel-shape alias for [`Self::filter_not_exists`].
+    #[doc(alias = "filter_not_exists")]
+    pub fn where_not_exists(self, query: DbTableBuilder) -> Self {
+        self.filter_not_exists(query)
+    }
+
+    // ---- Joins --------------------------------------------------------------
+
+    /// `INNER JOIN table ON first op second`. Name the table
+    /// `"users as u"` to join it under an alias. Without a `select`, the
+    /// query selects only this model's columns (`<table>.*`), so the
+    /// joined table's `id` never lands in the model. Qualify columns that
+    /// both tables carry: `filter("users.name", ...)`. The same join
+    /// surface as [`DbTableBuilder::join`].
+    ///
+    /// ```ignore
+    /// let posts = Post::query()
+    ///     .join("users", "users.id", "=", "posts.author_id")
+    ///     .filter("users.active", true)
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn join(
+        mut self,
+        table: impl Into<String>,
+        first: impl Into<String>,
+        op: impl Into<String>,
+        second: impl Into<String>,
+    ) -> Self {
+        self.joins.push(JoinClause::table_on(
+            JoinKind::Inner,
+            table.into(),
+            first.into(),
+            op.into(),
+            second.into(),
+        ));
+        self
+    }
+
+    /// `LEFT JOIN table ON first op second`; see [`Self::join`].
+    pub fn left_join(
+        mut self,
+        table: impl Into<String>,
+        first: impl Into<String>,
+        op: impl Into<String>,
+        second: impl Into<String>,
+    ) -> Self {
+        self.joins.push(JoinClause::table_on(
+            JoinKind::Left,
+            table.into(),
+            first.into(),
+            op.into(),
+            second.into(),
+        ));
+        self
+    }
+
+    /// `RIGHT JOIN table ON first op second`; see [`Self::join`]. A row
+    /// the right join adds has no model row behind it, so the model's
+    /// columns come back `NULL` for it.
+    pub fn right_join(
+        mut self,
+        table: impl Into<String>,
+        first: impl Into<String>,
+        op: impl Into<String>,
+        second: impl Into<String>,
+    ) -> Self {
+        self.joins.push(JoinClause::table_on(
+            JoinKind::Right,
+            table.into(),
+            first.into(),
+            op.into(),
+            second.into(),
+        ));
+        self
+    }
+
+    /// `CROSS JOIN table`; see [`Self::join`].
+    pub fn cross_join(mut self, table: impl Into<String>) -> Self {
+        self.joins.push(JoinClause::new(
+            JoinKind::Cross,
+            JoinTarget::Table(table.into()),
+        ));
+        self
+    }
+
+    /// `INNER JOIN table ON ...` with the conditions the closure adds to
+    /// the [`JoinClause`] it receives; see [`DbTableBuilder::join_with`].
+    pub fn join_with(
+        mut self,
+        table: impl Into<String>,
+        build: impl FnOnce(JoinClause) -> JoinClause,
+    ) -> Self {
+        self.joins.push(JoinClause::built_with(
+            JoinKind::Inner,
+            JoinTarget::Table(table.into()),
+            build,
+        ));
+        self
+    }
+
+    /// `LEFT JOIN table ON ...`, conditions from the closure.
+    pub fn left_join_with(
+        mut self,
+        table: impl Into<String>,
+        build: impl FnOnce(JoinClause) -> JoinClause,
+    ) -> Self {
+        self.joins.push(JoinClause::built_with(
+            JoinKind::Left,
+            JoinTarget::Table(table.into()),
+            build,
+        ));
+        self
+    }
+
+    /// `RIGHT JOIN table ON ...`, conditions from the closure.
+    pub fn right_join_with(
+        mut self,
+        table: impl Into<String>,
+        build: impl FnOnce(JoinClause) -> JoinClause,
+    ) -> Self {
+        self.joins.push(JoinClause::built_with(
+            JoinKind::Right,
+            JoinTarget::Table(table.into()),
+            build,
+        ));
+        self
+    }
+
+    /// `INNER JOIN (<query>) AS alias ON first op second`: join a
+    /// [`DbTableBuilder`] subquery under an alias. Its values bind in
+    /// place, ahead of the values of the `WHERE` clause.
+    pub fn join_sub(
+        mut self,
+        query: DbTableBuilder,
+        alias: impl Into<String>,
+        first: impl Into<String>,
+        op: impl Into<String>,
+        second: impl Into<String>,
+    ) -> Self {
+        self.joins.push(JoinClause::query_on(
+            JoinKind::Inner,
+            query,
+            alias.into(),
+            first.into(),
+            op.into(),
+            second.into(),
+        ));
+        self
+    }
+
+    /// `LEFT JOIN (<query>) AS alias ON first op second`; see
+    /// [`Self::join_sub`].
+    pub fn left_join_sub(
+        mut self,
+        query: DbTableBuilder,
+        alias: impl Into<String>,
+        first: impl Into<String>,
+        op: impl Into<String>,
+        second: impl Into<String>,
+    ) -> Self {
+        self.joins.push(JoinClause::query_on(
+            JoinKind::Left,
+            query,
+            alias.into(),
+            first.into(),
+            op.into(),
+            second.into(),
+        ));
+        self
+    }
+
+    /// `INNER JOIN (<query>) AS alias ON ...`, conditions from the
+    /// closure.
+    pub fn join_sub_with(
+        mut self,
+        query: DbTableBuilder,
+        alias: impl Into<String>,
+        build: impl FnOnce(JoinClause) -> JoinClause,
+    ) -> Self {
+        self.joins.push(JoinClause::built_with(
+            JoinKind::Inner,
+            JoinTarget::Query {
+                query: Box::new(query),
+                alias: alias.into(),
+            },
+            build,
+        ));
+        self
+    }
+
+    /// `LEFT JOIN (<query>) AS alias ON ...`, conditions from the
+    /// closure.
+    pub fn left_join_sub_with(
+        mut self,
+        query: DbTableBuilder,
+        alias: impl Into<String>,
+        build: impl FnOnce(JoinClause) -> JoinClause,
+    ) -> Self {
+        self.joins.push(JoinClause::built_with(
+            JoinKind::Left,
+            JoinTarget::Query {
+                query: Box::new(query),
+                alias: alias.into(),
+            },
+            build,
+        ));
+        self
+    }
+
+    /// Every table this query reads beyond the model's own: each joined
+    /// table and every table a subquery reads, union arms included.
+    pub(crate) fn collect_query_tables(&self, out: &mut Vec<String>) {
+        for join in &self.joins {
+            join_tables(join, out);
+        }
+        for term in &self.where_terms {
+            where_term_tables(term, out);
+        }
+        for (other, _is_all) in &self.unions {
+            other.effective().collect_query_tables(out);
+        }
+    }
+
+    /// Refuse a mass write on a query with a join: the `UPDATE` or
+    /// `DELETE` names the model's table only and would ignore the join,
+    /// touching rows the join was there to exclude.
+    fn refuse_joins(&self, operation: &str) -> Result<(), FrameworkError> {
+        if self.joins.is_empty() {
+            return Ok(());
+        }
+        Err(FrameworkError::database(format!(
+            "{operation} does not support joins: the statement would ignore them; \
+             narrow the rows with where_in or where_exists on a subquery instead"
+        )))
+    }
+
     // ---- Ordering / grouping / limit ------------------------------------
 
     /// `ORDER BY col <dir>`.
@@ -1751,6 +2344,22 @@ impl<M> Builder<M> {
     /// Shortcut for `order_by(col, Direction::Asc)`.
     pub fn order_by_asc(self, col: impl IntoColumn) -> Self {
         self.order_by(col, Direction::Asc)
+    }
+
+    /// Drop every ordering set so far. Laravel's `reorder()`: use it on a
+    /// base query before reusing it as a subquery, or before ordering it
+    /// another way. Orderings a global scope adds when the query runs are
+    /// not dropped, as in Laravel.
+    pub fn reorder(mut self) -> Self {
+        self.orders.clear();
+        self
+    }
+
+    /// Drop every ordering set so far and order by `col` instead.
+    /// Laravel's `reorder($column, $direction)`.
+    pub fn reorder_by(mut self, col: impl IntoColumn, dir: Direction) -> Self {
+        self.orders.clear();
+        self.order_by(col, dir)
     }
 
     /// `ORDER BY <raw>` - pass through arbitrary expressions
@@ -2545,7 +3154,42 @@ pub(crate) fn render_subquery_term(
             }
         }
         WhereTerm::Exists(spec) => render_exists(backend, spec, values, n)?,
+        WhereTerm::InQuery(col, query, negated) => {
+            render_in_query(backend, &q(col), query, *negated, values, n)?
+        }
+        WhereTerm::ExistsQuery(query, negated) => {
+            render_exists_query(backend, query, *negated, values, n)?
+        }
     })
+}
+
+/// Render `col [NOT] IN (<subquery>)`, the subquery continuing the
+/// statement's placeholder counter.
+fn render_in_query(
+    backend: DbBackend,
+    col: &str,
+    query: &DbTableBuilder,
+    negated: bool,
+    values: &mut Vec<SeaValue>,
+    n: &mut usize,
+) -> Result<String, FrameworkError> {
+    let not = if negated { "NOT " } else { "" };
+    let subquery = query.render_select_into(backend, values, n)?;
+    Ok(format!("{col} {not}IN ({subquery})"))
+}
+
+/// Render `[NOT] EXISTS (<subquery>)`, the subquery continuing the
+/// statement's placeholder counter.
+fn render_exists_query(
+    backend: DbBackend,
+    query: &DbTableBuilder,
+    negated: bool,
+    values: &mut Vec<SeaValue>,
+    n: &mut usize,
+) -> Result<String, FrameworkError> {
+    let not = if negated { "NOT " } else { "" };
+    let subquery = query.render_select_into(backend, values, n)?;
+    Ok(format!("{not}EXISTS ({subquery})"))
 }
 
 /// Render a byte-exact comparison.
@@ -2750,7 +3394,29 @@ impl<M> Builder<M> {
                 }
             }
             WhereTerm::Exists(spec) => render_exists(backend, spec, values, n)?,
+            WhereTerm::InQuery(col, query, negated) => {
+                render_in_query(backend, col, query, *negated, values, n)?
+            }
+            WhereTerm::ExistsQuery(query, negated) => {
+                render_exists_query(backend, query, *negated, values, n)?
+            }
         })
+    }
+
+    /// Render ` JOIN ...` for every join, in order, continuing the
+    /// statement's placeholder counter. Called right after `FROM table`,
+    /// so a joined subquery's values bind before the WHERE clause's.
+    fn render_joins(
+        &self,
+        backend: DbBackend,
+        values: &mut Vec<SeaValue>,
+        n: &mut usize,
+    ) -> Result<String, FrameworkError> {
+        let mut sql = String::new();
+        for join in &self.joins {
+            sql.push_str(&render_join(join, backend, values, n)?);
+        }
+        Ok(sql)
     }
 
     /// Render the ORDER BY list.
@@ -2942,6 +3608,7 @@ impl<M> Builder<M> {
         // A union arm arrives here directly, so it resolves its own scopes.
         let this = self.effective();
         let this = &*this;
+        sql.push_str(&this.render_joins(backend, values, n)?);
         if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
             let parts: Vec<String> = this
@@ -2989,18 +3656,28 @@ impl<M> Builder<M> {
             sql.push_str(raw);
         } else if let Some(cols) = &this.select_cols {
             sql.push_str(&cols.join(", "));
+        } else if column_expr == "*" && !this.joins.is_empty() {
+            // A joined table may carry columns of the same name, `id`
+            // first among them. Selecting the model's own table keeps a
+            // joined row's values out of the model.
+            sql.push_str(&quote_identifier(backend, table));
+            sql.push_str(".*");
         } else {
             sql.push_str(column_expr);
         }
         sql.push_str(" FROM ");
         sql.push_str(table);
+        sql.push_str(&this.render_joins(backend, values, n)?);
 
+        // `this`, not `self`: a union arm arrives here with its scope
+        // resolver still set, and its soft-delete filter and global scopes
+        // exist only on the resolved copy.
         if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
-            let parts: Vec<String> = self
+            let parts: Vec<String> = this
                 .where_terms
                 .iter()
-                .map(|t| Self::render_where_term(backend, t, values, n, self.binder))
+                .map(|t| Self::render_where_term(backend, t, values, n, this.binder))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
@@ -3071,6 +3748,23 @@ where
         builder.scope_resolver = Some(crate::eloquent::scopes::resolve_scopes::<M>);
         builder.binder = <M as EloquentModel>::bind_column;
         builder
+    }
+
+    /// Record, for the render cache, every table this query reads: the
+    /// model's own, each joined table and every table a subquery reads,
+    /// so a write to any of them invalidates a cached page built from it.
+    /// Global scopes are folded in first, since a scope may add a
+    /// subquery too.
+    fn observe_reads(&self) {
+        crate::render_cache::collector::observe_table_read(M::TABLE);
+        if !crate::render_cache::collector::is_active() {
+            return;
+        }
+        let mut tables = Vec::new();
+        self.effective().collect_query_tables(&mut tables);
+        for table in &tables {
+            crate::render_cache::collector::observe_table_read(table);
+        }
     }
 
     // ---- Has / where-has existence engine (Laravel parity) ---------------
@@ -3702,6 +4396,7 @@ where
         sql.push_str(M::TABLE);
 
         let this = self.effective();
+        this.refuse_joins("force_delete_all")?;
         if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
             let parts: Vec<String> = this
@@ -3815,7 +4510,7 @@ where
         // Resolved before anything reads the builder, so a scope that adds
         // an eager load or an order is honoured like one that adds a filter.
         let mut this = self.into_effective();
-        crate::render_cache::collector::observe_table_read(M::TABLE);
+        this.observe_reads();
         // Phase 10C T1 - Retrieving fires ONCE per query (not per
         // row) before any SQL runs. Aligns with Laravel's
         // `retrieving` hook, which fires "just before a model is
@@ -3998,7 +4693,7 @@ where
         mut self,
         col: impl IntoColumn,
     ) -> Result<T, FrameworkError> {
-        crate::render_cache::collector::observe_table_read(M::TABLE);
+        self.observe_reads();
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         self.limit = Some(2);
@@ -4113,7 +4808,7 @@ where
         // Observed here, before the COUNT phase, rather than only relying
         // on the page phase's `get()` call: a COUNT that itself fails
         // returns before `get()` ever runs, and the table was still read.
-        crate::render_cache::collector::observe_table_read(M::TABLE);
+        self.observe_reads();
         let page = current_page_from_request(page_param);
         let offset = page.saturating_sub(1).saturating_mul(per_page);
 
@@ -4850,7 +5545,7 @@ where
         self,
         col: impl IntoColumn,
     ) -> Result<Option<T>, FrameworkError> {
-        crate::render_cache::collector::observe_table_read(M::TABLE);
+        self.observe_reads();
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
@@ -4873,7 +5568,7 @@ where
         self,
         col: impl IntoColumn,
     ) -> Result<Vec<T>, FrameworkError> {
-        crate::render_cache::collector::observe_table_read(M::TABLE);
+        self.observe_reads();
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
@@ -4898,7 +5593,7 @@ where
         key_col: impl IntoColumn,
         val_col: impl IntoColumn,
     ) -> Result<HashMap<K, V>, FrameworkError> {
-        crate::render_cache::collector::observe_table_read(M::TABLE);
+        self.observe_reads();
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
@@ -4939,7 +5634,7 @@ where
     /// key that won't decode means the declared `key_type` disagrees
     /// with the column, which is a bug worth surfacing.
     pub async fn model_keys(self) -> Result<Vec<<M as EloquentModel>::Key>, FrameworkError> {
-        crate::render_cache::collector::observe_table_read(M::TABLE);
+        self.observe_reads();
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
@@ -4972,7 +5667,7 @@ where
     }
 
     async fn aggregate_value<T: TryGetable>(self, expr: &str) -> Result<T, FrameworkError> {
-        crate::render_cache::collector::observe_table_read(M::TABLE);
+        self.observe_reads();
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
@@ -4993,7 +5688,7 @@ where
         self,
         expr: &str,
     ) -> Result<Option<T>, FrameworkError> {
-        crate::render_cache::collector::observe_table_read(M::TABLE);
+        self.observe_reads();
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
@@ -5044,6 +5739,7 @@ where
         // A mass write is scoped like a read: the soft-delete filter and
         // the global scopes decide which rows it may touch.
         let this = self.into_effective();
+        this.refuse_joins("update_all")?;
         this.validate_inputs()?;
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
             this.tx_override.as_ref(),
@@ -5108,6 +5804,7 @@ where
             return self.force_delete_all().await;
         };
         let this = self.into_effective();
+        this.refuse_joins("delete_all")?;
         this.validate_inputs()?;
         crate::database::validate_identifier(M::SOFT_DELETES_COLUMN)?;
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
@@ -5213,6 +5910,7 @@ where
             return Ok(0);
         }
         let this = self.into_effective();
+        this.refuse_joins("increment_each")?;
         this.validate_inputs()?;
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
             this.tx_override.as_ref(),
