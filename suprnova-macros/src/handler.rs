@@ -437,4 +437,240 @@ mod tests {
             "Primitive + Request must compile (Primitive is non-consuming); got:\n{out}"
         );
     }
+
+    // ── #[authorize] ─────────────────────────────────────────────────────────
+
+    /// Byte offset of `needle` in `out`, failing the test when it is absent.
+    fn position(out: &str, needle: &str) -> usize {
+        out.find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` missing from expansion:\n{out}"))
+    }
+
+    #[test]
+    fn authorize_param_missing_from_the_signature_is_a_compile_error() {
+        let out = expansion(quote! {
+            #[authorize("update", post)]
+            pub async fn update(id: i64) -> Response { todo!() }
+        });
+        assert!(out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            out.contains("`update` takes no parameter named `post`"),
+            "the message must name the handler and the missing parameter; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn authorize_param_bound_by_a_pattern_is_not_a_parameter_name() {
+        // `RouteParam(post)` binds `post` inside a pattern; the attribute
+        // names a parameter, so it must be written `post: RouteParam<Post>`.
+        let out = expansion(quote! {
+            #[authorize("update", post)]
+            pub async fn update(RouteParam(post): RouteParam<Post>) -> Response { todo!() }
+        });
+        assert!(out.contains("compile_error"), "got:\n{out}");
+        assert!(out.contains("no parameter named `post`"), "got:\n{out}");
+    }
+
+    #[test]
+    fn authorize_param_that_reads_the_body_is_a_compile_error() {
+        let out = expansion(quote! {
+            #[authorize("update", form)]
+            pub async fn update(form: UpdatePost) -> Response { todo!() }
+        });
+        assert!(out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            out.contains("request body"),
+            "the message must say why a body extractor cannot be named; got:\n{out}"
+        );
+
+        let out = expansion(quote! {
+            #[authorize("update", req)]
+            pub async fn update(req: Request) -> Response { todo!() }
+        });
+        assert!(out.contains("compile_error"), "got:\n{out}");
+    }
+
+    #[test]
+    fn authorize_on_a_sync_handler_is_a_compile_error() {
+        let out = expansion(quote! {
+            #[authorize("create", Post)]
+            pub fn store() -> Response { todo!() }
+        });
+        assert!(out.contains("compile_error"), "got:\n{out}");
+        assert!(out.contains("async"), "got:\n{out}");
+    }
+
+    #[test]
+    fn authorize_with_malformed_arguments_is_a_compile_error() {
+        for attr in [
+            quote! { #[authorize(post)] },
+            quote! { #[authorize("update")] },
+            quote! { #[authorize("update", post, extra)] },
+            quote! { #[authorize("", post)] },
+            quote! { #[authorize(update, post)] },
+            quote! { #[authorize] },
+        ] {
+            let out = expansion(quote! {
+                #attr
+                pub async fn update(post: RouteParam<Post>) -> Response { todo!() }
+            });
+            assert!(
+                out.contains("compile_error"),
+                "`{attr}` must be rejected; got:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn authorize_param_form_checks_after_binding_and_before_body_and_form() {
+        // The form comes first in the signature, yet it must be read after
+        // the check: a denied user never sees what the form would reject.
+        let out = expansion(quote! {
+            #[authorize("update", post)]
+            pub async fn update(form: UpdatePost, post: post::Model) -> Response {
+                let _ = "BODY_MARKER";
+                todo!()
+            }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        let binding = position(&out, "from_route_param");
+        let check = position(&out, "__authorize_handler (");
+        let form = position(&out, "from_request");
+        let body = position(&out, "BODY_MARKER");
+        assert!(
+            binding < check && check < form && form < body,
+            "order must be binding, check, form, body; got:\n{out}"
+        );
+        assert!(
+            !out.contains("# [authorize"),
+            "the attribute must not survive into the output; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn authorize_route_param_checks_the_inner_model() {
+        let out = expansion(quote! {
+            #[authorize("update", post)]
+            pub async fn update(post: RouteParam<Post>) -> Response { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            out.contains("Deref :: deref (& post)"),
+            "a RouteParam<M> must be authorized as the M inside it; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn authorize_type_form_checks_the_type() {
+        for (attr, ty) in [
+            (quote! { #[authorize("create", Post)] }, "< Post >"),
+            (
+                quote! { #[authorize("create", post::Model)] },
+                "< post :: Model >",
+            ),
+            (
+                quote! { #[authorize("create", crate::models::Post)] },
+                "< crate :: models :: Post >",
+            ),
+        ] {
+            let out = expansion(quote! {
+                #attr
+                pub async fn store(form: StorePost) -> Response {
+                    let _ = "BODY_MARKER";
+                    todo!()
+                }
+            });
+            assert!(!out.contains("compile_error"), "got:\n{out}");
+            let check = position(&out, "__authorize_handler_type");
+            assert!(out[check..].contains(ty), "`{ty}` missing; got:\n{out}");
+            assert!(
+                check < position(&out, "from_request") && check < position(&out, "BODY_MARKER"),
+                "the check must precede the form and the body; got:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn authorize_on_a_zero_parameter_handler_checks_before_the_body() {
+        let out = expansion(quote! {
+            #[authorize("create", Post)]
+            pub async fn create() -> Response {
+                let _ = "BODY_MARKER";
+                todo!()
+            }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(position(&out, "__authorize_handler_type") < position(&out, "BODY_MARKER"));
+    }
+
+    #[test]
+    fn authorize_attributes_all_apply_in_written_order() {
+        let out = expansion(quote! {
+            #[authorize("view", post)]
+            #[suprnova::authorize("publish", post)]
+            pub async fn publish(post: RouteParam<Post>) -> Response { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            position(&out, "\"view\"") < position(&out, "\"publish\""),
+            "checks must run in the order written; got:\n{out}"
+        );
+        assert!(!out.contains("authorize ("), "got:\n{out}");
+    }
+
+    // ── #[authorize] expanding on its own ────────────────────────────────────
+
+    /// What the standalone attribute expands to.
+    fn authorize_expansion(
+        attr: proc_macro2::TokenStream,
+        item: proc_macro2::TokenStream,
+    ) -> String {
+        crate::authorize::authorize_impl_inner(attr, item).to_string()
+    }
+
+    #[test]
+    fn authorize_above_handler_moves_below_it() {
+        // Written above `#[handler]`, the attribute expands first. It hands
+        // itself back below `#[handler]`, which then applies every check.
+        let out = authorize_expansion(
+            quote! { "view", post },
+            quote! {
+                #[authorize("publish", post)]
+                #[handler]
+                pub async fn publish(post: RouteParam<Post>) -> Response { todo!() }
+            },
+        );
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        let handler = position(&out, "# [handler]");
+        let view = position(&out, "\"view\"");
+        let publish = position(&out, "\"publish\"");
+        assert!(
+            handler < view && view < publish,
+            "`#[handler]` must come first, then the checks in written order; got:\n{out}"
+        );
+        assert_eq!(out.matches("handler").count(), 1, "got:\n{out}");
+    }
+
+    #[test]
+    fn authorize_without_handler_is_a_compile_error() {
+        let out = authorize_expansion(
+            quote! { "update", post },
+            quote! { pub async fn update(post: RouteParam<Post>) -> Response { todo!() } },
+        );
+        assert!(out.contains("compile_error"), "got:\n{out}");
+        assert!(out.contains("#[handler]"), "got:\n{out}");
+
+        let out = authorize_expansion(quote! { "update", Post }, quote! { pub struct Post; });
+        assert!(out.contains("compile_error"), "got:\n{out}");
+    }
+
+    #[test]
+    fn handler_without_authorize_keeps_declaration_order() {
+        // No attribute, no change: extractions stay in signature order.
+        let out = expansion(quote! {
+            pub async fn update(form: UpdatePost, post: post::Model) -> Response { todo!() }
+        });
+        assert!(position(&out, "from_request") < position(&out, "from_route_param"));
+        assert!(!out.contains("__authorize_handler"), "got:\n{out}");
+    }
 }

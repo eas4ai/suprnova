@@ -5,7 +5,6 @@
 mod env_lock;
 #[path = "../support/env_snapshot.rs"]
 mod env_snapshot;
-pub mod after_commit_callback;
 pub mod facade;
 pub mod identifier_validation;
 pub mod mariadb_scheme;
