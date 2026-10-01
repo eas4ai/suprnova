@@ -10,11 +10,11 @@
 //! [`assert_pushed_later`] without leaving the fake surface.
 //!
 //! Every path that writes to the driver records here instead: the
-//! `Queue::push` family, [`PendingBatch::dispatch`], [`PendingChain::dispatch`]
-//! and the failed-job retries. A batch is recorded as a [`FakedBatch`] and a
-//! chain as a [`FakedChain`], and their jobs are recorded as pushes too, so a
-//! test that only cares that a job was queued does not need to know which
-//! path queued it.
+//! `Queue::push` family, [`PendingBatch::dispatch`], [`PendingChain::dispatch`],
+//! the failed-job retries, and the worker's push of a chain's next link. A
+//! batch is recorded as a [`FakedBatch`] and a chain as a [`FakedChain`], and
+//! their jobs are recorded as pushes too, so a test that only cares that a
+//! job was queued does not need to know which path queued it.
 //!
 //! [`QueueFakeGuard::except`] narrows the fake: the job types it names take
 //! the real path to the real queue, and only the rest are recorded.
@@ -177,7 +177,8 @@ pub(crate) fn record_with_overrides<J: Job>(
 }
 
 /// Record a push that reached the facade as a built envelope: a batch
-/// member, the head of a chain, a retried failed job.
+/// member, the head of a chain, the next link a worker dispatches after it,
+/// a retried failed job.
 ///
 /// It lands in the same store a typed push does, so [`pushed`] and
 /// [`assert_pushed`] see it. Laravel's `QueueFake` does the same: a batch
@@ -366,9 +367,11 @@ impl QueueFakeGuard {
     /// names already excepted.
     ///
     /// A batch is still recorded, and only its excepted jobs reach the real
-    /// queue. A chain follows its first job, because the worker that runs
-    /// that job dispatches the rest. A [`Queue::push_raw`] is always
-    /// recorded: a raw payload is not a job type, as in Laravel.
+    /// queue. A chain whose first job is excepted reaches the real queue,
+    /// and the worker that runs it dispatches each later link through the
+    /// fake, so a link is recorded unless `except` names it, as in Laravel.
+    /// A [`Queue::push_raw`] is always recorded: a raw payload is not a job
+    /// type, as in Laravel.
     ///
     /// [`Queue::fake_except`]: crate::queue::Queue::fake_except
     /// [`Queue::push_raw`]: crate::queue::Queue::push_raw

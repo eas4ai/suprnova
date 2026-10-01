@@ -14,12 +14,13 @@ use suprnova::queue::testing::{
     assert_batched, assert_chained, assert_nothing_chained, assert_pushed_without_chain,
     forget_connections, pushed, pushed_raw, raw_pushes,
 };
-use suprnova::queue::worker::register_job;
+use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
 use suprnova::queue::{
     CURRENT_SCHEMA_VERSION, FailedJobStore, MemoryFailedJobStore, MemoryQueueDriver, QueueDriver,
     SyncQueueDriver,
 };
 use suprnova::{ChainLink, EnvelopeOverrides, FrameworkError, Job, Queue, async_trait};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Greet {
@@ -303,9 +304,12 @@ async fn a_batch_under_except_dispatches_the_excepted_jobs_and_records_the_rest(
 
 #[tokio::test]
 #[serial]
-async fn a_chain_under_except_follows_its_first_job() {
+async fn a_chain_under_except_sends_each_link_where_except_sends_it() {
+    register_job::<Farewell>();
+    register_job::<Counted>();
     let driver = real_driver();
-    let _guard = Queue::fake_except(&["Farewell"]);
+    let _guard = Queue::fake_except(&["Farewell", "FakeParityCounted"]);
+    let before = COUNTED_RUNS.load(Ordering::SeqCst);
 
     // The head is excepted, so the chain goes to the real queue.
     Queue::chain()
@@ -313,26 +317,47 @@ async fn a_chain_under_except_follows_its_first_job() {
             name: "Grace".into(),
         })
         .unwrap()
+        .add(Counted)
+        .unwrap()
         .add(Greet { name: "Ada".into() })
         .unwrap()
         .dispatch()
         .await
         .unwrap();
-    let reserved = driver
-        .pop(Duration::from_secs(5))
-        .await
-        .unwrap()
-        .expect("the excepted head is on the real queue");
-    assert_eq!(reserved.envelope.job_name, "Farewell");
-    let rest: Vec<&str> = reserved
-        .envelope
-        .chain_remaining
-        .iter()
-        .map(|link| link.job_name.as_str())
-        .collect();
-    assert_eq!(rest, ["Greet"], "the rest of the chain travels with it");
     assert_nothing_chained();
-    assert!(pushed::<Greet>().is_empty());
+    assert!(pushed::<Farewell>().is_empty());
+
+    // The worker dispatches each later link through the fake, as Laravel
+    // dispatches the next job of a chain through the queue facade: the
+    // excepted link runs, and the one `except` does not name is recorded.
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(5),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(2),
+        queues: Vec::new(),
+    };
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        run_worker(driver.clone(), cfg, CancellationToken::new()),
+    )
+    .await
+    .expect("the worker runs the head and the excepted link");
+    assert_eq!(
+        COUNTED_RUNS.load(Ordering::SeqCst),
+        before + 1,
+        "the excepted later link runs on the real queue"
+    );
+    let greeted: Vec<String> = pushed::<Greet>().into_iter().map(|job| job.name).collect();
+    assert_eq!(
+        greeted,
+        ["Ada"],
+        "the later link except does not name is recorded"
+    );
+    assert_eq!(
+        driver.size().await.unwrap(),
+        0,
+        "and it does not reach the real queue"
+    );
 
     // The head is faked, so the chain is recorded.
     Queue::chain()
@@ -344,7 +369,7 @@ async fn a_chain_under_except_follows_its_first_job() {
         .await
         .unwrap();
     assert_chained(&["Greet", "Farewell"]);
-    assert_eq!(driver.size().await.unwrap(), 1, "nothing more reached it");
+    assert_eq!(driver.size().await.unwrap(), 0, "nothing more reached it");
 }
 
 #[tokio::test]

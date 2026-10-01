@@ -278,10 +278,12 @@ impl PendingChain {
     /// [`assert_chained`](crate::queue::testing::assert_chained), and its
     /// head for [`assert_pushed`](crate::queue::testing::assert_pushed).
     ///
-    /// A chain follows its first job: when the fake excepts that job
+    /// When the fake excepts the first job
     /// ([`QueueFakeGuard::except`](crate::queue::testing::QueueFakeGuard::except)),
-    /// the chain is pushed as it is without the fake and is not recorded,
-    /// because the worker that runs the head dispatches the rest.
+    /// the chain is pushed as it is without the fake and is not recorded.
+    /// The worker that runs the head then dispatches each later link through
+    /// the fake, as Laravel does: a link `except` names reaches the real
+    /// queue, and any other link is recorded as a push and does not run.
     ///
     /// # One connection
     ///
@@ -300,7 +302,8 @@ impl PendingChain {
         // that has must not be written to. It reads the labels without
         // asking whether each connection has a driver, for the same reason,
         // and still refuses the chain production would refuse. The head
-        // decides for the whole chain, see the docs above.
+        // decides where the chain is dispatched; the worker decides for each
+        // later link, see the docs above.
         let faked = links
             .first()
             .is_some_and(|head| crate::queue::testing::fakes(&head.job_name));

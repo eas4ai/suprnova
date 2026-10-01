@@ -30,7 +30,6 @@ use crate::events::EventFacade;
 use crate::lock;
 use crate::queue::Job;
 use crate::queue::batch::resolve_callback;
-use crate::queue::chain::ChainLink;
 use crate::queue::driver::{QueueDriver, Settled};
 use crate::queue::envelope::Envelope;
 use crate::queue::events as queue_events;
@@ -1141,6 +1140,29 @@ impl SettlementDeps {
     }
 }
 
+/// The envelope for the link that runs after `env` completes, on the chain's
+/// connection labelled `connection`. `None` when `env` ends its chain.
+///
+/// The worker and [`SyncQueueDriver`](crate::queue::SyncQueueDriver) both
+/// continue a chain through this, so a link gets the same id, batch and
+/// context on either path.
+pub(crate) fn chain_successor(env: &Envelope, connection: &str) -> Option<Envelope> {
+    let (next, tail) = env.chain_remaining.split_first()?;
+    // Derived from this envelope's id, not random: on the non-atomic path
+    // this push happens before the ack, so a crash in that window
+    // redelivers `env` and runs the push again. A random id made the second
+    // push indistinguishable from a legitimate new step. See
+    // `ChainLink::to_envelope_after`.
+    let mut next_env = next.to_envelope_after_on(env.id, connection);
+    next_env.chain_remaining = tail.to_vec();
+    next_env.batch_id = env.batch_id.clone();
+    // The context of the code that dispatched the chain, not of the job
+    // that just ran: this runs outside that job's scope, and what one
+    // link adds to its own copy is not the next link's to inherit.
+    next_env.context = env.context.clone();
+    Some(next_env)
+}
+
 /// Settle a successful run: batch accounting first, then the chain successor
 /// and the acknowledgement together via [`QueueDriver::settle`].
 ///
@@ -1181,23 +1203,20 @@ async fn handle_completed(
     // and would silently land the next link on the wrong queue. A chain runs
     // on one connection for this reason, and `PendingChain::dispatch` refuses
     // one that would not.
+    //
+    // Under the queue fake the next link is a push like any other: the fake
+    // records it unless `except` names it, as Laravel dispatches the next job
+    // of a chain through the faked queue. Without this, a chain whose head
+    // the fake excepts would send every later link to the real queue,
+    // whatever `except` says about it.
     let mut follow_ups: Vec<Envelope> = Vec::new();
-    if !env.chain_remaining.is_empty() {
-        let mut tail = env.chain_remaining.clone();
-        let next: ChainLink = tail.remove(0);
-        // Derived from this envelope's id, not random: on the non-atomic path
-        // this push happens before the ack, so a crash in that window
-        // redelivers `env` and runs the push again. A random id made the second
-        // push indistinguishable from a legitimate new step. See
-        // `ChainLink::to_envelope_after`.
-        let mut next_env = next.to_envelope_after_on(env.id, connection);
-        next_env.chain_remaining = tail;
-        next_env.batch_id = env.batch_id.clone();
-        // The context of the code that dispatched the chain, not of the job
-        // that just ran: this runs outside that job's scope, and what one
-        // link adds to its own copy is not the next link's to inherit.
-        next_env.context = env.context.clone();
-        follow_ups.push(next_env);
+    let mut faked_successor: Option<Envelope> = None;
+    if let Some(next_env) = chain_successor(env, connection) {
+        if crate::queue::testing::fakes(&next_env.job_name) {
+            faked_successor = Some(next_env);
+        } else {
+            follow_ups.push(next_env);
+        }
     }
 
     // 2. Persist batch accounting before settlement. A rejected or uncertain
@@ -1231,9 +1250,13 @@ async fn handle_completed(
     }
 
     // 3. Enqueue the successor and drop the reservation - in one transaction
-    // where the driver can, push-then-ack where it cannot.
+    // where the driver can, push-then-ack where it cannot. A successor the
+    // fake records is recorded only where a real one would be enqueued.
     match driver.settle(token, &follow_ups).await {
         Ok(Settled::Atomically) => {
+            if let Some(next) = &faked_successor {
+                crate::queue::testing::record_envelope(next);
+            }
             tracing::debug!(job = %env.job_name, id = %env.id, "queue job ok");
         }
         Ok(Settled::Stale) => {
@@ -1248,6 +1271,9 @@ async fn handle_completed(
             );
         }
         Ok(Settled::Unsupported) => {
+            if let Some(next) = &faked_successor {
+                crate::queue::testing::record_envelope(next);
+            }
             fallback_settle(driver, token, env, follow_ups).await;
         }
         Err(e) => {
@@ -1744,6 +1770,7 @@ mod tests {
         Batch, BatchCallback, BatchOptions, BatchRepository, MemoryBatchRepository,
         TerminalCallbackClaim, UpdatedBatchJobCounts, register_callback,
     };
+    use crate::queue::chain::ChainLink;
     use crate::queue::driver::{Reservation, ReservationToken};
     use crate::queue::failed::{FailedJob, FailedJobStore};
     use async_trait::async_trait;
