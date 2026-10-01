@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: upload-store-write-completion
+Current: laravel-port-requests
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -166,6 +166,17 @@ components in waves, the advanced components last, the datatable closing.
    buffer, so the provider's own tests failed about one whole-file run in
    fifteen and four gate runs went red on 2026-09-17; promoted on the
    developer's ruling answering escalation `live-010` (`live.md` LIVE-038).
+
+16. laravel-port-requests - the requests an application team porting a
+   Laravel 13 application filed as issues #125 to #129, and the queue fake
+   gaps found while recording the parity rulings: joins and the remaining
+   `where` helpers on both query builders, file and download responses,
+   `#[authorize]` on handlers, a model's changes after a save,
+   `sync_without_detaching`, `DB::after_commit`, a configurable Inertia
+   page lookup, and the queue fake's `except`, raw pushes and
+   `assert_pushed_without_chain` (`laravel-parity.md` PAR-001 to PAR-009).
+   The developer approved every ruling in the parity map on 2026-10-01;
+   this is the first commitment cut from it.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
