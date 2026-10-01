@@ -1,0 +1,11 @@
+{#
+  suprnova.validation-summary - the form-level error list for one action,
+  announced politely; each entry links to its field so the summary focuses
+  the correction without repeating every field message.
+#}
+{% macro validation_summary(action, title="Please correct the following") %}
+<section class="sn-validation-summary" aria-labelledby="{{ action }}-summary-title" live:error.live.polite="{{ action }}">
+<h2 class="sn-validation-summary-title" id="{{ action }}-summary-title">{{ title }}</h2>
+{{ caller() }}
+</section>
+{% endmacro %}

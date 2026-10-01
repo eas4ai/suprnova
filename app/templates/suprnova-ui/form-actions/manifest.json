@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.form-actions",
+  "version": 1,
+  "root": "suprnova-ui/form-actions",
+  "files": [
+    "form-actions.html",
+    "form-actions.css"
+  ],
+  "elements": []
+}

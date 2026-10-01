@@ -1,0 +1,772 @@
+# Database
+
+Suprnova's database layer wraps SeaORM with a Laravel-shaped `DB` facade:
+raw query escapes, a model-less query builder, transactions with
+savepoints and retry-on-deadlock, connection registry for read replicas
+and shards, and a full observability surface that mirrors Laravel 13's
+`DB::listen` / `QueryExecuted` / query log API.
+
+The Eloquent ORM (`use suprnova::eloquent::*`) builds on top of this
+layer and lives in [eloquent.md](eloquent.md). When you want a typed
+model, go there; when you want a raw query against an unmodeled table
+or want to observe every query the framework runs, this is the page.
+
+## Configuration
+
+```rust
+use suprnova::{Config, DB, DatabaseConfig};
+
+// In bootstrap.rs
+Config::register(DatabaseConfig::from_env());
+DB::init().await.expect("DB::init failed");
+```
+
+`DatabaseConfig::from_env` reads `DATABASE_URL` and (optionally) the
+pool tunables `DB_MAX_CONNECTIONS`, `DB_MIN_CONNECTIONS`,
+`DB_CONNECT_TIMEOUT`, `DB_LOGGING`. When `DATABASE_URL` is unset the
+config falls back to `sqlite://./database.db` - convenient for
+zero-setup development; production boots refuse the fallback via
+`validate_for_environment` so you can't accidentally ship a SQLite
+file in `APP_ENV=production`.
+
+URL → driver detection:
+
+```text
+postgres://user:pass@host/db       → DatabaseType::Postgres
+postgresql://user:pass@host/db     → DatabaseType::Postgres
+mysql://user:pass@host/db          → DatabaseType::Mysql
+mariadb://user:pass@host/db        → DatabaseType::Mysql
+sqlite://./file.db                 → DatabaseType::Sqlite
+sqlite::memory:                    → DatabaseType::Sqlite
+```
+
+A `mariadb://` URL selects the MySQL driver, because MariaDB speaks the
+MySQL protocol. Wherever a URL reaches the driver, the framework hands it
+over with the `mariadb` scheme written as `mysql`: the primary connection,
+each named connection and read replica, the migrator, and
+`MariaDbVectorDriver::from_url`. Only the scheme changes. `DB::driver_title()`
+answers `MariaDB` for a `mariadb://` URL and `MySQL` for a `mysql://` one,
+so a MariaDB server reached through `mysql://` reports as MySQL.
+
+### Pool liveness
+
+A NAT gateway, a load balancer, or a firewall will silently drop a TCP
+connection that has been idle too long. The pool does not find out. The
+next query on that connection fails, and it fails on a request that had
+nothing to do with the outage.
+
+Laravel answers this with libpq's `keepalives`, `keepalives_idle`,
+`keepalives_interval` and `keepalives_count` DSN options, which keep the
+socket warm. **Those are not reachable from Suprnova.** sqlx 0.9 parses
+only `sslmode`, `application_name`, `options` and the statement-cache
+size out of a Postgres URL, and carries no TCP keepalive setter at any
+layer, so there is nowhere to forward them to.
+
+What Suprnova gives you instead is the pool-side answer: stop trusting
+old connections.
+
+```bash
+# Close a connection that has been idle for two minutes.
+DB_IDLE_TIMEOUT=120
+# Recycle every connection after fifteen minutes regardless.
+DB_MAX_LIFETIME=900
+# Ping a connection before handing it out, but only once it has been
+# idle for thirty seconds. Hot connections skip the round trip.
+DB_PING_AFTER_IDLE=30
+```
+
+Or programmatically:
+
+```rust
+Config::register(
+    DatabaseConfig::builder()
+        .url(std::env::var("DATABASE_URL")?)
+        .idle_timeout(120)
+        .max_lifetime(900)
+        .ping_after_idle(30)
+        .build(),
+);
+```
+
+Every knob is unset by default, which means the pool keeps sqlx's own
+defaults: connections close after 600 idle seconds, recycle after 1800
+seconds, and are pinged before every checkout. Set
+`DB_IDLE_TIMEOUT=0` or `DB_MAX_LIFETIME=0` to turn off that form of
+reaping entirely.
+
+`DB_PING_AFTER_IDLE` and `DB_TEST_BEFORE_ACQUIRE` are alternatives, not
+a pair: setting a threshold turns the per-checkout ping off, because
+running both would ping on every acquire and make the threshold
+meaningless.
+
+### Why Suprnova diverges
+
+Keepalives and pool recycling solve the same failure from opposite
+ends. Keepalives keep a middlebox from expiring the connection;
+recycling accepts that it will and makes sure the pool never hands out
+a connection old enough to have been expired. The second is what the
+driver stack exposes, and it also covers failures keepalives do not -
+a failed-over replica, a rotated credential, a server-side idle
+disconnect. If you need the libpq options specifically, that is a
+change to sqlx, not to Suprnova.
+
+## Raw queries
+
+The `DB` facade ships the full Laravel 13 raw escape surface. Every
+helper goes through the same instrumented executor - every call fires
+`QueryExecuted` (see [Observability](#observability)).
+
+Bindings are `sea_orm::Value` - one of the few sea_orm types the
+framework intentionally does NOT re-mask, because every value that hits
+the wire goes through it. `Value::from(...)` works for every primitive
+the database understands.
+
+```rust
+use suprnova::DB;
+use sea_orm::Value;
+
+// SELECT - all rows as DynamicRow.
+let users = DB::select(
+    "SELECT * FROM users WHERE active = ?",
+    vec![Value::from(true)],
+).await?;
+
+// SELECT - first row only.
+let alice = DB::select_one(
+    "SELECT * FROM users WHERE name = ?",
+    vec![Value::from("alice")],
+).await?;
+
+// SELECT - first column of first row as a typed value.
+let count: i64 = DB::scalar(
+    "SELECT COUNT(*) FROM users",
+    vec![],
+).await?;
+
+// INSERT - returns bool (true when at least one row was affected).
+DB::insert(
+    "INSERT INTO users (name, active) VALUES (?, ?)",
+    vec![Value::from("bob"), Value::from(true)],
+).await?;
+
+// UPDATE / DELETE - return the rows-affected count.
+let updated = DB::update(
+    "UPDATE users SET active = ? WHERE id = ?",
+    vec![Value::from(false), Value::from(1)],
+).await?;
+let deleted = DB::delete(
+    "DELETE FROM users WHERE active = ?",
+    vec![Value::from(false)],
+).await?;
+
+// Any prepared statement with bindings.
+DB::statement(
+    "UPDATE users SET votes = votes + ? WHERE id = ?",
+    vec![Value::from(1), Value::from(42)],
+).await?;
+
+// DDL with no bindings - `unprepared` mirrors Laravel's
+// `DB::unprepared` for statements (CREATE INDEX, ALTER TABLE, VACUUM)
+// that reject placeholder binding.
+DB::unprepared("CREATE INDEX idx_users_name ON users(name)").await?;
+
+// affecting_statement is the explicit form used by update/delete
+// internally - drop to it directly for ops that don't fit either name
+// (e.g. INSERT...ON CONFLICT DO UPDATE).
+let affected = DB::affecting_statement(
+    "INSERT INTO users (id, name) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+    vec![Value::from(1), Value::from("alice")],
+).await?;
+```
+
+### Placeholder syntax
+
+`?` for SQLite + MySQL. `$1`, `$2`, ... for Postgres. The active
+backend is auto-detected from `DatabaseConfig::url`.
+
+### DynamicRow
+
+Untyped rows materialise as `DynamicRow` - a `serde_json::Map` newtype
+with typed accessors:
+
+```rust
+for row in users {
+    let id: i64 = row.get_int("id")?;
+    let name: String = row.get_string("name")?;
+    let nickname: Option<String> = row.get_optional_string("nickname")?;
+    let score: Option<i64> = row.get_optional_int("score")?;
+    // Deserialise an arbitrary T (chrono::DateTime, your own struct, etc.):
+    let prefs: UserPrefs = row.get_as("prefs")?;
+}
+```
+
+`get_*` errors when the column is absent OR null. `get_optional_*`
+errors only when absent and returns `Ok(None)` for SQL NULL. The full
+accessor list is `get_int` / `get_string` / `get_bool` / `get_float` /
+`get_value` / `get_as<T>` plus `get_optional_string` /
+`get_optional_int`; for nullable types without a dedicated
+`get_optional_*` reach for `get_value` + a `serde_json::Value` match,
+or `get_as::<Option<T>>`.
+
+## Model-less query builder - `DB::table`
+
+For ad-hoc queries against tables you haven't bothered to model with
+`#[suprnova::model]`, `DB::table(...)` returns a chainable builder
+shaped like the Eloquent `Builder<M>` but materialising rows as
+`DynamicRow`:
+
+```rust
+use suprnova::{DB, attrs};
+
+let rows = DB::table("audit_log")
+    .select(["id", "event", "actor_id"])
+    .filter("actor_id", 42i64)
+    .filter_op("created_at", ">=", "2025-01-01")
+    .order_by_desc("id")
+    .limit(50)
+    .get()
+    .await?;
+
+let first = DB::table("audit_log")
+    .filter("event", "user.deleted")
+    .first()
+    .await?;
+
+let count = DB::table("audit_log")
+    .filter("actor_id", 42i64)
+    .count()
+    .await?;
+
+let id = DB::table("audit_log")
+    .insert(attrs! { event: "user.created", actor_id: 42 })
+    .await?;
+
+let updated = DB::table("audit_log")
+    .filter("id", id)
+    .update(attrs! { event: "user.created.v2" })
+    .await?;
+
+let deleted = DB::table("audit_log")
+    .filter("actor_id", 42i64)
+    .delete()
+    .await?;
+```
+
+### Trust boundary on identifiers
+
+Table names, column names, ORDER BY directions, and SQL operators are
+interpolated INTO the SQL string verbatim - they are NOT bound as
+parameters (SQL doesn't allow placeholder-bound identifiers). Treat
+every `impl Into<String>` argument as a TRUSTED literal:
+
+```rust
+// Safe - the column name is a constant.
+DB::table("users").filter("email", request.email()).get().await?;
+
+// UNSAFE - never splice user input into a column name.
+DB::table("users").filter(&request.column_name(), value).get().await?;
+```
+
+Values (the right-hand side of `filter` / `filter_op`) ARE bound as
+parameters and safe for user input.
+
+The framework enforces a strict allowlist on identifiers
+(`[A-Za-z_][A-Za-z0-9_]*` with one optional `schema.` prefix) and
+operators (`=`, `<>`, `<`, `<=`, `>`, `>=`, `LIKE`, `NOT LIKE`,
+`ILIKE`, `NOT ILIKE`, `IS`, `IS NOT`). Violations error at the I/O
+boundary before the SQL string is rendered.
+
+## Transactions
+
+Three entry points, each with the `QueryExecuted` /
+`TransactionBeginning` / `TransactionCommitted` /
+`TransactionRolledBack` observation hooks wired in.
+
+### Closure form
+
+```rust
+use suprnova::DB;
+
+DB::transaction(|_tx| {
+    Box::pin(async move {
+        let mut alice = User::query().filter("name", "alice").first_or_fail().await?;
+        alice.balance -= 30;
+        alice.save().await?;
+
+        let mut bob = User::query().filter("name", "bob").first_or_fail().await?;
+        bob.balance += 30;
+        bob.save().await?;
+        Ok::<(), suprnova::FrameworkError>(())
+    })
+}).await?;
+```
+
+Commit on `Ok(_)`. Rollback + propagate the error on `Err(_)`.
+
+An `Err` is not always a rollback. If an
+[after-commit](queues.md#after-commit-dispatch) callback fails, the commit has
+already landed and is durable; `DB::transaction` still returns `Err`, and the
+message reads `after-commit callback failed (the transaction itself
+committed): <the callback's error>`. The closure's return value is lost, its
+writes are not, and only a deferred dispatch failed. Every registered callback
+still runs and the first error is the one you get.
+`DB::transaction_with_attempts` never retries that error, however
+deadlock-shaped it reads: re-running a closure whose writes are already durable
+would apply them twice.
+
+Operations inside the closure automatically pick up the active
+transaction via a `tokio::task_local` - you do NOT have to thread a
+`&tx` handle through every model call. Nested `DB::transaction`
+returns a database error; use `tx.savepoint(...)` for nested-rollback
+behaviour.
+
+The closure form is also the only form that can defer work to the commit. A
+job whose type declares `Job::after_commit()` (or a dispatch made with
+`Queue::push_after_commit`) waits inside this closure and only reaches the
+queue driver once the commit succeeds; a rollback discards it. See
+[After-commit dispatch](queues.md#after-commit-dispatch).
+
+For typed aggregate or custom SQL that must execute on the same pinned
+connection, use the transaction handle directly:
+
+```rust
+use sea_orm::{DbBackend, Statement};
+
+DB::transaction(|tx| {
+    Box::pin(async move {
+        let backend = tx.backend();
+        let rows = tx.query_all(Statement::from_string(
+            backend,
+            "SELECT CAST(COUNT(*) AS BIGINT) AS total FROM orders".to_owned(),
+        )).await?;
+        let total = rows[0].try_get::<i64>("", "total")?;
+        Ok::<_, suprnova::FrameworkError>(total)
+    })
+}).await?;
+```
+
+`query_all` emits normal `QueryExecuted` observations and returns typed
+SeaORM `QueryResult` rows. Use bound `Statement::from_sql_and_values` for
+dynamic values; do not interpolate untrusted input.
+
+### Retry on deadlock
+
+```rust
+DB::transaction_with_attempts(5, |_tx| {
+    Box::pin(async move {
+        // Same closure body as above. Re-runs from scratch on
+        // SQLSTATE 40001 / 40P01 / any error containing "deadlock"
+        // (case-insensitive).
+        Ok::<(), suprnova::FrameworkError>(())
+    })
+}).await?;
+```
+
+### Manual form
+
+```rust
+use suprnova::{DB, attrs};
+
+let tx = DB::begin_transaction().await?;
+
+// Per-model: the `*_with_tx` shims pin one CRUD op to the manual tx.
+User::create_with_tx(&tx, attrs! { name: "alice" }).await?;
+Order::create_with_tx(&tx, attrs! { user_id: 1, total: 30 }).await?;
+
+// Per-query: `Builder::with_tx(&tx)` pins a builder chain.
+let stale = Order::query()
+    .filter("status", "pending")
+    .with_tx(&tx)
+    .get()
+    .await?;
+
+if some_condition() {
+    tx.rollback().await?;
+} else {
+    tx.commit().await?;
+}
+```
+
+Manual mode does NOT install the task-local - every operation that
+should run inside the transaction has to opt in, either via
+`Builder::with_tx(&tx)` on a chained query or one of the
+`Model::*_with_tx` shims (`create_with_tx`, `save_with_tx`,
+`delete_with_tx`, etc.). Operations that forget to opt in run against
+the global pool and are NOT part of the transaction.
+
+Holding a `Transaction` handle pins one pool connection for its
+lifetime; pre-load any rows you need to read BEFORE the
+`begin_transaction()` call, especially on SQLite (single shared
+connection).
+
+Because manual mode installs no task-local, it has no commit for a deferred
+dispatch to hang on either: an
+[after-commit](queues.md#after-commit-dispatch) job pushed inside a manual
+transaction is pushed immediately. Use the closure form when a dispatch has to
+wait for the commit.
+
+### Savepoints
+
+```rust
+DB::transaction(|tx| {
+    Box::pin(async move {
+        Order::create(/* ... */).await?;
+
+        tx.savepoint("after_order").await?;
+        if let Err(e) = Payment::charge().await {
+            // Drop the payment attempt but keep the order.
+            tx.rollback_to("after_order").await?;
+        }
+        Ok::<(), suprnova::FrameworkError>(())
+    })
+}).await?;
+```
+
+All three first-class backends support `SAVEPOINT` / `ROLLBACK TO
+SAVEPOINT` - SQLite included.
+
+A savepoint rollback also unwinds the
+[after-commit registry](queues.md#after-commit-dispatch). A queue push deferred
+to the commit inside the savepoint is discarded along with the rows it
+described, and the compensation registered with it runs immediately, so a
+deferred `push_unique`'s dedupe lock goes back and a re-dispatch inside the same
+transaction can win it. Anything registered before the savepoint is untouched,
+and a savepoint you release or simply never roll back keeps everything
+registered inside it.
+
+Repeating a savepoint name is allowed, and the registry follows the database:
+`ROLLBACK TO SAVEPOINT x` unwinds to the most recent `x` and destroys the
+savepoints established after it. Manual transactions have no after-commit
+registry, so their savepoints roll back rows and nothing else.
+
+Only `Transaction::savepoint` marks the registry. A savepoint you create with
+raw SQL is invisible to it, so `rollback_to` rolls those rows back, logs a
+warning, and leaves every deferred dispatch registered inside it in place -
+discarding one on a guess would be the worse failure. Use
+`Transaction::savepoint` when the deferred dispatches are meant to unwind with
+the rows.
+
+## Observability
+
+Laravel 13's `DB::listen` / `QueryExecuted` / query log surface, ported
+to Rust through Suprnova's event dispatcher.
+
+### `DB::listen` - direct callback
+
+```rust
+use suprnova::{DB, QueryExecuted};
+
+// In bootstrap.rs (or a service provider).
+DB::listen(|event: &QueryExecuted| {
+    tracing::debug!(
+        sql = %event.sql,
+        bindings = ?event.bindings,
+        time_ms = event.time.as_millis(),
+        connection = %event.connection_name,
+        "query executed",
+    );
+})?;
+```
+
+Listeners run **synchronously inside the executor helper**. A slow
+listener slows the query - keep direct callbacks light. For anything
+that can fail, prefer the `EventFacade` path below; it runs through
+`dispatch_best_effort` and tolerates errors.
+
+### `EventFacade` dispatch path
+
+`QueryExecuted` is a real `suprnova::Event` - listen through the
+dispatcher to get queued, fakeable, fail-tolerant delivery:
+
+```rust
+use suprnova::{EventFacade, Listener, QueryExecuted, FrameworkError};
+use std::sync::Arc;
+
+struct LogToDatabase;
+
+#[suprnova::async_trait]
+impl Listener<QueryExecuted> for LogToDatabase {
+    async fn handle(&self, event: &QueryExecuted) -> Result<(), FrameworkError> {
+        // Even if THIS listener queries the database, the re-entrancy
+        // guard prevents infinite recursion.
+        DB::statement(
+            "INSERT INTO query_log (sql, time_ms) VALUES (?, ?)",
+            vec![event.sql.clone().into(), (event.time.as_millis() as i64).into()],
+        ).await?;
+        Ok(())
+    }
+}
+
+// In bootstrap.rs.
+EventFacade::listen::<QueryExecuted, _>(Arc::new(LogToDatabase)).await;
+```
+
+Listeners on this path:
+
+- Run through `dispatch_best_effort` - a failing listener does NOT
+  fail the query.
+- Are short-circuited when they themselves issue a query (re-entrancy
+  guard).
+- Can use `Event::fake()` in tests to assert dispatch without
+  actually running listeners.
+
+### In-memory query log
+
+```rust
+DB::enable_query_log()?;
+
+User::query().filter("active", true).get().await?;
+Order::query().count().await?;
+
+let log = DB::get_query_log()?;
+for query in &log {
+    println!("{} ({}ms)", query.sql, query.time.as_millis());
+}
+
+DB::flush_query_log()?;     // drop entries, keep enabled
+DB::disable_query_log()?;   // stop capturing
+let still_capturing = DB::logging();
+```
+
+The log is **unbounded** - every captured query grows it until the
+process exits, `flush_query_log()` runs, or `disable_query_log()` is
+called. Use it for development, not as a long-running production
+profiler.
+
+### Transaction lifecycle events
+
+`TransactionBeginning`, `TransactionCommitted`, and
+`TransactionRolledBack` are real `suprnova::Event` types - listen for
+them through `EventFacade::listen` to drive auditing, distributed
+locks, or compensation logic.
+
+```rust
+EventFacade::listen::<TransactionCommitted, _>(Arc::new(AuditCommit)).await;
+EventFacade::listen::<TransactionRolledBack, _>(Arc::new(MetricRollback)).await;
+```
+
+All three transaction entry points
+(`DB::transaction` / `DB::transaction_with_attempts` /
+`DB::begin_transaction` + `Transaction::commit`/`rollback`) fire the
+events. A leaked manual `Transaction` handle that gets dropped without
+explicit commit/rollback emits no event - SeaORM's `Drop` impl is
+synchronous and can't reach the async dispatcher.
+
+### Busy database - `DB::monitor` and `db:monitor`
+
+`DatabaseBusy` is a real `suprnova::Event`. It reports that the database
+server has as many connections as you allow, or more. Its fields are
+`connection_name` and `connections`. Nothing dispatches it by itself.
+Two calls dispatch it:
+
+- `DB::monitor(max)` asks the server of every connection the application
+  has, the default one and each named one. It dispatches `DatabaseBusy`
+  for each server with `max` connections or more, and returns the events
+  it dispatched. `max` must be at least 1.
+- The `db:monitor --max <n>` console command does the same and prints the
+  count for each connection. Without `--max` it prints the counts and
+  dispatches nothing.
+
+The server does the counting, from every client of it, so the answer is
+the same from every process. That lets you run the check from the
+scheduler, which is a process of its own:
+
+```rust
+use suprnova::Schedule;
+
+pub fn register(schedule: &mut Schedule) {
+    schedule.add(schedule.command("db:monitor --max 80").every_minute());
+}
+```
+
+A listener decides what a busy database means: a page, a metric, a log
+line.
+
+```rust
+use std::sync::Arc;
+use suprnova::{DatabaseBusy, EventFacade, FrameworkError, Listener};
+
+struct PageOnCall;
+
+#[suprnova::async_trait]
+impl Listener<DatabaseBusy> for PageOnCall {
+    async fn handle(&self, event: &DatabaseBusy) -> Result<(), FrameworkError> {
+        tracing::error!(
+            connection = %event.connection_name,
+            connections = event.connections,
+            "the database is busy"
+        );
+        Ok(())
+    }
+}
+
+// In bootstrap.rs.
+EventFacade::listen::<DatabaseBusy, _>(Arc::new(PageOnCall)).await;
+```
+
+A listener that fails does not stop the check. The count comes from the
+server:
+
+| Engine | Count |
+|---|---|
+| PostgreSQL | The rows of `pg_stat_activity`, which include the server's own workers |
+| MySQL and MariaDB | `threads_connected` |
+| SQLite | None. SQLite has no server, so it is never busy. |
+
+`DB::connection_counts()` returns the counts as a `Vec<ConnectionCount>`,
+each with a `connection_name` and `connections: Option<u32>`, and
+`DbConnection::server_connections()` returns the count of one connection.
+`DbConnection::connections_in_use()` is a different number: the
+connections of this process's own pool that are out of the pool now. It
+says nothing about another process.
+
+### `QueryExecuted` payload
+
+```rust
+pub struct QueryExecuted {
+    pub sql: String,
+    pub bindings: Vec<String>,         // debug-rendered (`{:?}`)
+    pub time: std::time::Duration,
+    pub connection_name: String,
+    pub read_write_type: Option<ReadWriteType>,
+    pub result: Result<(), String>,    // Err on driver error
+}
+```
+
+`to_raw_sql()` substitutes the captured bindings into the SQL for
+display:
+
+```rust
+let query = /* captured from a listener */;
+println!("{}", query.to_raw_sql());
+// SELECT * FROM users WHERE id = 42 AND active = true
+```
+
+The substitution is **debug-format** (not SQL-safe escaping) and is
+intended for log output only. Never feed the result back into a query.
+
+### Coverage scope
+
+`QueryExecuted` fires for every query:
+
+- Every raw helper on `DB` (`select` / `select_one` / `scalar` /
+  `insert` / `update` / `delete` / `statement` / `affecting_statement` /
+  `unprepared`).
+- Every terminal method on `DbTableBuilder` (the model-less builder).
+- `DB::transaction` / `DB::begin_transaction` BEGIN / COMMIT / ROLLBACK
+  fire transaction events.
+- `DbConnection::connect` fires `ConnectionEstablished`.
+- Every Eloquent read and write: `Builder<M>::get` / `first` /
+  `count` / pagination / chunking, `Model::find` / `all`, and model
+  CRUD, including the `IN (...)` queries behind eager loading.
+
+## Connection metadata
+
+```rust
+let name = DB::database_name()?;        // "myapp" for postgres://.../myapp
+let driver = DB::driver_name()?;        // "postgres" | "mysql" | "sqlite"
+let title = DB::driver_title()?;        // "Postgres" | "MySQL" | "MariaDB" | "SQLite"
+let version = DB::server_version().await?;  // "15.5" | "8.0.36" | "3.42.0"
+```
+
+`server_version` issues a backend-specific introspection query
+(`SELECT VERSION()` for Postgres + MySQL, `SELECT sqlite_version()`
+for SQLite). Cache the result if you call it often - every call is a
+round trip.
+
+## Named connections
+
+For read replicas, sharded shards, or per-model warehouse pools:
+
+```rust
+// In bootstrap.rs
+DB::register_named("__read_replica__", read_config).await?;
+DB::register_named("warehouse", warehouse_config).await?;
+
+// Per-query routing:
+let rows = User::query().on("__read_replica__").get().await?;
+let warehouse_rows = DB::table("audit_log").on("warehouse").get().await?;
+let raw = DB::select_on("warehouse", "SELECT ...", vec![]).await?;
+```
+
+The `__read_replica__` name is well-known: when registered, every
+read-shape terminal method auto-routes through it. Writes ignore the
+replica and target the primary. Use `Builder::on_write_connection`
+(per query) or `#[model(connection = "...")]` (per model default) to
+opt back to the primary for specific operations.
+
+Reserved names:
+
+- `__primary__` - the default pool. Cannot be registered (it's the
+  return value of `DB::connection()`).
+- `__read_replica__` - well-known read replica. ANY connection
+  registered under this name takes over read routing.
+
+See [eloquent.md → Multi-connection routing](eloquent.md#multi-connection-routing) for the
+full precedence chain (builder tx override → ambient tx → builder
+`on(name)` → model default → `__read_replica__` → primary).
+
+## Testing
+
+`TestDatabase` builds an in-memory SQLite database, registers it in
+the test container so `DB::connection()` resolves to it, and runs your
+migrations:
+
+```rust
+use suprnova::testing::TestDatabase;
+use crate::migrations::Migrator;
+
+#[tokio::test]
+async fn test_user_creation() {
+    let db = TestDatabase::fresh::<Migrator>().await.unwrap();
+    // Any code calling DB::connection() now gets this in-memory DB.
+    let _ = CreateUser::run("alice@example.com").await.unwrap();
+}
+
+// `test_database!()` is the macro shortcut.
+let db = test_database!();
+```
+
+For tests that build their own ad-hoc schema:
+
+```rust
+let db = TestDatabase::sqlite_memory().await.unwrap();
+db.execute_unprepared("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").await.unwrap();
+```
+
+When a `TestDatabase` is dropped, the test container is cleared and
+the connection registry is wiped - no cross-test leakage. Tests that
+mutate process-wide state (the registry, the listener registry, the
+query log) should be annotated `#[serial_test::serial]` so they don't
+collide.
+
+## Next
+
+- [Eloquent](eloquent.md) - the typed `#[suprnova::model]` ORM that
+  sits on top of this layer
+- [Migrations](migrations.md) - `Migrator`, `make:migration`, and the
+  `db:sync` workflow
+- [Database Testing](database-testing.md) - `TestDatabase`, fixture
+  loading, and serial-test annotations
+- [Events](events.md) - the dispatcher behind `QueryExecuted` /
+  `TransactionCommitted` listeners
+- [Configuration](configuration.md) - registering `DatabaseConfig`
+  alongside the rest of your typed config
+
+## Surface index
+
+| Surface | Laravel analogue |
+| --- | --- |
+| `DB::init` / `DB::init_with` / `DB::connection` / `DB::is_connected` / `DB::get` | `DB::connection()` |
+| `DB::table(name)` → `DbTableBuilder` | `DB::table($name)` |
+| `DB::select` / `select_one` / `scalar` / `insert` / `update` / `delete` / `statement` / `affecting_statement` / `unprepared` | `DB::select` / `selectOne` / `scalar` / `insert` / `update` / `delete` / `statement` / `affectingStatement` / `unprepared` |
+| `DB::transaction` / `transaction_with_attempts` / `begin_transaction` | `DB::transaction($cb, $attempts)` / `DB::beginTransaction` |
+| `Transaction::commit` / `rollback` / `savepoint` / `rollback_to` | `DB::commit` / `rollBack` / savepoint helpers |
+| `DB::listen(callback)` | `DB::listen` |
+| `DB::monitor` / `connection_counts` / `DbConnection::server_connections` / `connections_in_use` | `db:monitor` |
+| `DB::enable_query_log` / `disable_query_log` / `get_query_log` / `flush_query_log` / `logging` | `DB::enableQueryLog` / `disableQueryLog` / `getQueryLog` / `flushQueryLog` / `logging` |
+| `DB::database_name` / `driver_name` / `driver_title` / `server_version` | `getDatabaseName` / `getDriverName` / `getDriverTitle` / `getServerVersion` |
+| `DB::register_named` / `named` / `select_on` / `table_on` / `statement_on` / `affecting_statement_on` | multi-connection `DB::connection($name)` |
+| `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` / `TransactionRolledBack` / `ConnectionEstablished` / `DatabaseBusy` | `Illuminate\Database\Events\*` |
+| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` / `idle_timeout` / `max_lifetime` / `acquire_timeout` / `test_before_acquire` / `ping_after_idle` | `config/database.php` |
+| `TestDatabase::fresh::<M>` / `sqlite_memory` / `execute_unprepared` / `fetch_one` / `fetch_all` | `RefreshDatabase` testing trait |

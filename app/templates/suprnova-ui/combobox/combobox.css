@@ -1,0 +1,51 @@
+@layer suprnova-ui {
+  .sn-combobox {
+    position: relative;
+    display: grid;
+    gap: var(--sn-space-2);
+  }
+
+  .sn-combobox-label {
+    font-weight: var(--sn-font-weight-medium);
+  }
+
+  .sn-combobox-listbox {
+    position: absolute;
+    inset-block-start: 100%;
+    inset-inline: 0;
+    z-index: 2;
+    max-block-size: var(--sn-space-measure);
+    margin: var(--sn-space-1) 0 0;
+    padding: var(--sn-space-1);
+    overflow: auto;
+    list-style: none;
+    border: var(--sn-state-border-width) solid var(--sn-color-border);
+    border-radius: var(--sn-radius-md);
+    background: var(--sn-color-surface-raised);
+    box-shadow: var(--sn-shadow-md);
+  }
+
+  .sn-combobox-listbox[hidden] {
+    display: none;
+  }
+
+  .sn-combobox-option {
+    padding: var(--sn-space-2) var(--sn-space-3);
+    border-radius: var(--sn-radius-sm);
+    cursor: pointer;
+  }
+
+  .sn-combobox-option[hidden] {
+    display: none;
+  }
+
+  .sn-combobox-option[aria-selected="true"],
+  .sn-combobox-option:hover {
+    background: var(--sn-color-surface-sunken);
+  }
+
+  .sn-combobox-option[data-sn-active] {
+    outline: var(--sn-state-outline-width) solid var(--sn-color-focus-ring);
+    outline-offset: calc(-1 * var(--sn-state-outline-width));
+  }
+}
