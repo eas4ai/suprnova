@@ -364,12 +364,13 @@ impl PageLookup {
         }
     }
 
-    /// The first candidate that exists under `crate_dir`.
+    /// The first candidate that is a file under `crate_dir`. A directory at
+    /// the resolved path is not a page, so it does not count.
     pub(crate) fn find(&self, crate_dir: &Path, component: &str) -> Option<PathBuf> {
         self.candidates(component)
             .into_iter()
             .map(|candidate| crate_dir.join(candidate))
-            .find(|path| path.exists())
+            .find(|path| path.is_file())
     }
 
     /// What exists under the pages directory, for the not-found message:
@@ -1003,6 +1004,21 @@ page_file = "{dir}/{name|lower}.page.ts"
         assert_eq!(lookup.find(dir.path(), "Tramits/BaixaMatricula/Edit"), None);
         // The starter location no longer counts once a lookup is set.
         assert_eq!(lookup.find(dir.path(), "Home"), None);
+    }
+
+    #[test]
+    fn find_does_not_accept_a_directory_at_the_resolved_path() {
+        // `{dir}/{name}` resolves `Users` to `resources/pages/Users`, which is
+        // a directory of pages here, not a page file.
+        let dir = crate_dir(&["resources/pages/Users/Index"]);
+        let lookup = lookup(&with_table(
+            "pages_dir = \"resources/pages\"\npage_file = \"{dir}/{name}\"",
+        ));
+        assert_eq!(
+            lookup.find(dir.path(), "Users/Index"),
+            Some(dir.path().join("resources/pages/Users/Index"))
+        );
+        assert_eq!(lookup.find(dir.path(), "Users"), None);
     }
 
     #[test]
