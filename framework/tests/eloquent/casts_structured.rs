@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize};
 use suprnova::testing::TestDatabase;
 use suprnova::{
     AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsEnum, AsInt, AsJson,
-    AsObject, Collection, Model, attrs, model,
+    AsObject, AsOptionalArray, AsOptionalArrayObject, AsOptionalCollection, AsOptionalJson,
+    AsOptionalObject, Cast, Collection, Model, attrs, model,
 };
 
 // ---- Test fixtures hoisted to module scope ------------------------------
@@ -97,6 +98,37 @@ pub struct JsonModel {
 pub struct AoModel {
     pub id: i64,
     pub labels: IndexMap<String, String>,
+}
+
+// #133: the nullable siblings of the JSON casts, over nullable columns.
+#[model(
+    table = "t133_meta",
+    timestamps = false,
+    fillable = ["metadata"],
+    casts = { metadata = AsOptionalJson<serde_json::Value> }
+)]
+pub struct OptionalJsonModel {
+    pub id: i64,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[model(
+    table = "t133_structured",
+    timestamps = false,
+    fillable = ["tags", "prefs", "items", "labels"],
+    casts = {
+        tags = AsOptionalArray<String>,
+        prefs = AsOptionalObject<Prefs>,
+        items = AsOptionalCollection<String>,
+        labels = AsOptionalArrayObject<String>
+    }
+)]
+pub struct OptionalStructuredModel {
+    pub id: i64,
+    pub tags: Option<Vec<String>>,
+    pub prefs: Option<Prefs>,
+    pub items: Option<Collection<String>>,
+    pub labels: Option<IndexMap<String, String>>,
 }
 
 #[model(
@@ -341,4 +373,258 @@ async fn with_casts_pipeline_actually_runs_proven_by_parse_failure() {
         msg.contains("date") || msg.contains("parse"),
         "expected date/parse mention in error, got: {msg}"
     );
+}
+
+// ---- #133: nullable JSON casts --------------------------------------------
+
+async fn optional_json_table() -> TestDatabase {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t133_meta (id INTEGER PRIMARY KEY AUTOINCREMENT, metadata TEXT NULL)",
+    )
+    .await
+    .unwrap();
+    db
+}
+
+/// `1` when the row's `metadata` is SQL `NULL`. The text `null` would read
+/// as `0`, which is the defect `AsJson<Option<T>>` has.
+async fn metadata_is_sql_null(db: &TestDatabase, id: i64) -> i64 {
+    db.fetch_one(
+        "SELECT metadata IS NULL AS is_null FROM t133_meta WHERE id = ?",
+        vec![id.into()],
+    )
+    .await
+    .unwrap()
+    .try_get("", "is_null")
+    .unwrap()
+}
+
+#[tokio::test]
+async fn as_optional_json_round_trips_some_and_stores_none_as_sql_null() {
+    let db = optional_json_table().await;
+    let value = serde_json::json!({ "count": 42, "nested": { "ok": true } });
+
+    let made = OptionalJsonModel::create(attrs! { metadata: value.clone() })
+        .await
+        .unwrap();
+    let read = OptionalJsonModel::find(made.id).await.unwrap().unwrap();
+    assert_eq!(read.metadata, Some(value.clone()));
+    assert_eq!(metadata_is_sql_null(&db, made.id).await, 0);
+
+    // `update` decodes the JSON `null` into `None`.
+    let updated = read
+        .update(attrs! { metadata: serde_json::Value::Null })
+        .await
+        .unwrap();
+    assert_eq!(updated.metadata, None);
+    assert_eq!(
+        OptionalJsonModel::find(made.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .metadata,
+        None
+    );
+    assert_eq!(
+        metadata_is_sql_null(&db, made.id).await,
+        1,
+        "None must store SQL NULL, not the text `null`"
+    );
+
+    // `save` writes the field through the same cast.
+    let mut restored = OptionalJsonModel::find(made.id).await.unwrap().unwrap();
+    restored.metadata = Some(value.clone());
+    restored.save().await.unwrap();
+    assert_eq!(
+        OptionalJsonModel::find(made.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .metadata,
+        Some(value)
+    );
+    let mut cleared = OptionalJsonModel::find(made.id).await.unwrap().unwrap();
+    cleared.metadata = None;
+    cleared.save().await.unwrap();
+    assert_eq!(metadata_is_sql_null(&db, made.id).await, 1);
+}
+
+#[tokio::test]
+async fn as_optional_json_reads_a_pre_existing_null_row_as_none() {
+    let db = optional_json_table().await;
+    db.execute_unprepared("INSERT INTO t133_meta (id, metadata) VALUES (7, NULL)")
+        .await
+        .unwrap();
+
+    let read = OptionalJsonModel::find(7_i64).await.unwrap().unwrap();
+    assert_eq!(read.metadata, None);
+}
+
+#[tokio::test]
+async fn as_optional_json_returns_the_as_json_error_on_malformed_json() {
+    let db = optional_json_table().await;
+    db.execute_unprepared("INSERT INTO t133_meta (id, metadata) VALUES (9, '{not json')")
+        .await
+        .unwrap();
+
+    let cast_error = <AsJson<serde_json::Value> as Cast>::from_storage(&"{not json".to_string())
+        .expect_err("AsJson rejects malformed JSON")
+        .to_string();
+    let error = OptionalJsonModel::find(9_i64)
+        .await
+        .expect_err("a malformed non-null row is a cast error, not a value")
+        .to_string();
+    assert!(
+        error.contains(&cast_error),
+        "the optional cast reports AsJson's error ({cast_error}); got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn the_other_optional_structured_casts_round_trip_some_and_none() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t133_structured (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         tags TEXT NULL, prefs TEXT NULL, items TEXT NULL, labels TEXT NULL)",
+    )
+    .await
+    .unwrap();
+
+    let full = OptionalStructuredModel::create(attrs! {
+        tags: ["rust", "web"],
+        prefs: serde_json::json!({ "theme": "dark", "notifications": true }),
+        items: ["a", "b"],
+        labels: serde_json::json!({ "color": "blue", "size": "large" }),
+    })
+    .await
+    .unwrap();
+    let read = OptionalStructuredModel::find(full.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.tags, Some(vec!["rust".to_string(), "web".to_string()]));
+    assert_eq!(
+        read.prefs,
+        Some(Prefs {
+            theme: "dark".into(),
+            notifications: true
+        })
+    );
+    let items = read.items.expect("items present");
+    assert_eq!(items.len(), 2);
+    assert_eq!(&items[0], "a");
+    let labels = read.labels.expect("labels present");
+    assert_eq!(
+        labels.keys().collect::<Vec<_>>(),
+        vec!["color", "size"],
+        "AsOptionalArrayObject keeps key order"
+    );
+
+    let empty = OptionalStructuredModel::create(attrs! {
+        tags: serde_json::Value::Null,
+        prefs: serde_json::Value::Null,
+        items: serde_json::Value::Null,
+        labels: serde_json::Value::Null,
+    })
+    .await
+    .unwrap();
+    let read = OptionalStructuredModel::find(empty.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.tags, None);
+    assert_eq!(read.prefs, None);
+    assert!(read.items.is_none());
+    assert_eq!(read.labels, None);
+
+    let nulls: i64 = db
+        .fetch_one(
+            "SELECT (tags IS NULL) + (prefs IS NULL) + (items IS NULL) + (labels IS NULL) AS n \
+             FROM t133_structured WHERE id = ?",
+            vec![empty.id.into()],
+        )
+        .await
+        .unwrap()
+        .try_get("", "n")
+        .unwrap();
+    assert_eq!(nulls, 4, "every None is stored as SQL NULL");
+}
+
+/// The same round trip on Postgres, whose `TEXT` column and parameter
+/// types are stricter than SQLite's.
+///
+/// ```text
+/// PG_TEST_URL=postgres://... cargo test -p suprnova --test eloquent -- \
+///   --ignored --test-threads=1 casts_structured::postgres_
+/// ```
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_as_optional_json_round_trips_some_and_none() {
+    use sea_orm::{ConnectOptions, ConnectionTrait, Database, Statement};
+    use suprnova::DbConnection;
+    use suprnova::testing::TestContainer;
+
+    let url = std::env::var("PG_TEST_URL").expect("set PG_TEST_URL to a disposable Postgres");
+    let mut options = ConnectOptions::new(url);
+    options
+        .max_connections(2)
+        .min_connections(0)
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .acquire_timeout(std::time::Duration::from_secs(2));
+    let conn = Database::connect(options)
+        .await
+        .expect("Postgres test database must be reachable");
+    let backend = conn.get_database_backend();
+    for sql in [
+        "DROP TABLE IF EXISTS t133_meta",
+        "CREATE TABLE t133_meta (id BIGSERIAL PRIMARY KEY, metadata TEXT NULL)",
+        "INSERT INTO t133_meta (metadata) VALUES (NULL)",
+    ] {
+        conn.execute_raw(Statement::from_string(backend, sql.to_owned()))
+            .await
+            .unwrap();
+    }
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(conn.clone()));
+
+    let pre_existing = OptionalJsonModel::query().first().await.unwrap().unwrap();
+    assert_eq!(pre_existing.metadata, None);
+
+    let value = serde_json::json!({ "count": 42 });
+    let made = OptionalJsonModel::create(attrs! { metadata: value.clone() })
+        .await
+        .unwrap();
+    assert_eq!(
+        OptionalJsonModel::find(made.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .metadata,
+        Some(value)
+    );
+    let cleared = made
+        .update(attrs! { metadata: serde_json::Value::Null })
+        .await
+        .unwrap();
+    assert_eq!(cleared.metadata, None);
+    let row = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            backend,
+            "SELECT metadata IS NULL AS is_null FROM t133_meta WHERE id = $1",
+            [cleared.id.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    let is_null: bool = row.try_get("", "is_null").unwrap();
+    assert!(is_null, "None must store SQL NULL on Postgres");
+
+    conn.execute_raw(Statement::from_string(
+        backend,
+        "DROP TABLE t133_meta".to_owned(),
+    ))
+    .await
+    .unwrap();
 }

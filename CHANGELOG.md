@@ -864,6 +864,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Nullable JSON columns have casts.** `AsJson`, `AsArray`, `AsObject`,
+  `AsCollection` and `AsArrayObject` store a non-null string, so
+  `AsJson<Option<T>>` wrote the text `null` instead of SQL `NULL`, and a
+  row whose column was `NULL` failed to load. `AsOptionalJson`,
+  `AsOptionalArray`, `AsOptionalObject`, `AsOptionalCollection` and
+  `AsOptionalArrayObject` map `None` to `NULL` and back, and store a value
+  exactly as their non-optional cast does. This fix landed on main after
+  the `v3.0.0` tag (#133).
 - **`SESSION_TABLE` names the session table.** `SessionConfig::table_name`
   was read and then ignored: the database session driver always used
   `sessions`. The driver now reads and writes the configured table,

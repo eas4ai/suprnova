@@ -24,6 +24,14 @@
 //! A pass-through cast for any `T: Serialize + DeserializeOwned`.
 //! Useful when the field is a `serde_json::Value` or a user-defined
 //! struct that's already fully describable in serde terms.
+//!
+//! ## Nullable columns
+//!
+//! The five casts above store non-null text. Each has a nullable form
+//! for an `Option<_>` field over a nullable column: [`AsOptionalArray`],
+//! [`AsOptionalObject`], [`AsOptionalCollection`], [`AsOptionalJson`]
+//! and [`AsOptionalArrayObject`]. `None` stores SQL `NULL` and a `NULL`
+//! column reads as `None`; a value is stored and read by the sibling.
 
 use std::marker::PhantomData;
 
@@ -358,5 +366,359 @@ where
 {
     fn into_dyn() -> Box<dyn DynCast> {
         Box::new(AsArrayObjectDyn::<T>(PhantomData))
+    }
+}
+
+// ---- Nullable siblings ----------------------------------------------------
+//
+// Each cast above stores a non-null `String`, so it cannot serve a nullable
+// column: `AsJson<Option<T>>` writes the text `null`, and a `NULL` column
+// fails to decode. The `AsOptional*` forms store `Option<String>`, which
+// makes the column nullable, map `None` to SQL `NULL` and back, and hand
+// every value to the sibling so a value is stored and read exactly as the
+// sibling does it, errors included.
+
+/// `None` stores `NULL`; `Some` stores what the sibling cast `C` stores.
+fn optional_to_storage<C>(value: &Option<C::Runtime>) -> Result<Option<String>, FrameworkError>
+where
+    C: Cast<Storage = String>,
+{
+    value.as_ref().map(C::to_storage).transpose()
+}
+
+/// `NULL` reads as `None`; text reads as the sibling cast `C` reads it.
+fn optional_from_storage<C>(stored: &Option<String>) -> Result<Option<C::Runtime>, FrameworkError>
+where
+    C: Cast<Storage = String>,
+{
+    stored.as_ref().map(C::from_storage).transpose()
+}
+
+/// The erased form of the `AsOptional*` casts: `null` stays `null` in
+/// both directions, and any other value goes through the sibling's erased
+/// cast unchanged.
+struct OptionalStructuredDyn(Box<dyn DynCast>);
+
+impl DynCast for OptionalStructuredDyn {
+    fn from_storage_json(
+        &self,
+        v: &serde_json::Value,
+    ) -> Result<serde_json::Value, FrameworkError> {
+        match v {
+            serde_json::Value::Null => Ok(serde_json::Value::Null),
+            other => self.0.from_storage_json(other),
+        }
+    }
+
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
+        match v {
+            serde_json::Value::Null => Ok(serde_json::Value::Null),
+            other => self.0.to_storage_json(other),
+        }
+    }
+}
+
+/// The nullable form of [`AsArray`]: `Option<Vec<T>>` ↔ a nullable
+/// JSON-encoded `TEXT` column. `None` is SQL `NULL`.
+pub struct AsOptionalArray<T>(PhantomData<T>);
+
+impl<T> Cast for AsOptionalArray<T>
+where
+    T: Serialize + DeserializeOwned + Send + Sync,
+{
+    type Runtime = Option<Vec<T>>;
+    type Storage = Option<String>;
+
+    fn to_storage(v: &Option<Vec<T>>) -> Result<Option<String>, FrameworkError> {
+        optional_to_storage::<AsArray<T>>(v)
+    }
+
+    fn from_storage(s: &Option<String>) -> Result<Option<Vec<T>>, FrameworkError> {
+        optional_from_storage::<AsArray<T>>(s)
+    }
+}
+
+impl<T> IntoDynCast for AsOptionalArray<T>
+where
+    T: Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    fn into_dyn() -> Box<dyn DynCast> {
+        Box::new(OptionalStructuredDyn(AsArray::<T>::into_dyn()))
+    }
+}
+
+/// The nullable form of [`AsObject`]: `Option<T>` ↔ a nullable
+/// JSON-encoded `TEXT` column. `None` is SQL `NULL`.
+pub struct AsOptionalObject<T>(PhantomData<T>);
+
+impl<T> Cast for AsOptionalObject<T>
+where
+    T: Serialize + DeserializeOwned + Send + Sync,
+{
+    type Runtime = Option<T>;
+    type Storage = Option<String>;
+
+    fn to_storage(v: &Option<T>) -> Result<Option<String>, FrameworkError> {
+        optional_to_storage::<AsObject<T>>(v)
+    }
+
+    fn from_storage(s: &Option<String>) -> Result<Option<T>, FrameworkError> {
+        optional_from_storage::<AsObject<T>>(s)
+    }
+}
+
+impl<T> IntoDynCast for AsOptionalObject<T>
+where
+    T: Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    fn into_dyn() -> Box<dyn DynCast> {
+        Box::new(OptionalStructuredDyn(AsObject::<T>::into_dyn()))
+    }
+}
+
+/// The nullable form of [`AsCollection`]: an optional [`Collection<T>`]
+/// ↔ a nullable JSON-encoded `TEXT` column. `None` is SQL `NULL`.
+///
+/// [`Collection<T>`]: crate::eloquent::Collection
+pub struct AsOptionalCollection<T>(PhantomData<T>);
+
+impl<T> Cast for AsOptionalCollection<T>
+where
+    T: Serialize + DeserializeOwned + Send + Sync + Clone,
+{
+    type Runtime = Option<crate::eloquent::Collection<T>>;
+    type Storage = Option<String>;
+
+    fn to_storage(
+        v: &Option<crate::eloquent::Collection<T>>,
+    ) -> Result<Option<String>, FrameworkError> {
+        optional_to_storage::<AsCollection<T>>(v)
+    }
+
+    fn from_storage(
+        s: &Option<String>,
+    ) -> Result<Option<crate::eloquent::Collection<T>>, FrameworkError> {
+        optional_from_storage::<AsCollection<T>>(s)
+    }
+}
+
+impl<T> IntoDynCast for AsOptionalCollection<T>
+where
+    T: Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
+{
+    fn into_dyn() -> Box<dyn DynCast> {
+        Box::new(OptionalStructuredDyn(AsCollection::<T>::into_dyn()))
+    }
+}
+
+/// The nullable form of [`AsJson`]: `Option<T>` ↔ a nullable
+/// JSON-encoded `TEXT` column. `None` is SQL `NULL`, where
+/// `AsJson<Option<T>>` would store the text `null`.
+pub struct AsOptionalJson<T>(PhantomData<T>);
+
+impl<T> Cast for AsOptionalJson<T>
+where
+    T: Serialize + DeserializeOwned + Send + Sync,
+{
+    type Runtime = Option<T>;
+    type Storage = Option<String>;
+
+    fn to_storage(v: &Option<T>) -> Result<Option<String>, FrameworkError> {
+        optional_to_storage::<AsJson<T>>(v)
+    }
+
+    fn from_storage(s: &Option<String>) -> Result<Option<T>, FrameworkError> {
+        optional_from_storage::<AsJson<T>>(s)
+    }
+}
+
+impl<T> IntoDynCast for AsOptionalJson<T>
+where
+    T: Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    fn into_dyn() -> Box<dyn DynCast> {
+        Box::new(OptionalStructuredDyn(AsJson::<T>::into_dyn()))
+    }
+}
+
+/// The nullable form of [`AsArrayObject`]: `Option<IndexMap<String, T>>`
+/// ↔ a nullable JSON-encoded `TEXT` column. `None` is SQL `NULL`.
+pub struct AsOptionalArrayObject<T>(PhantomData<T>);
+
+impl<T> Cast for AsOptionalArrayObject<T>
+where
+    T: Serialize + DeserializeOwned + Send + Sync,
+{
+    type Runtime = Option<indexmap::IndexMap<String, T>>;
+    type Storage = Option<String>;
+
+    fn to_storage(
+        v: &Option<indexmap::IndexMap<String, T>>,
+    ) -> Result<Option<String>, FrameworkError> {
+        optional_to_storage::<AsArrayObject<T>>(v)
+    }
+
+    fn from_storage(
+        s: &Option<String>,
+    ) -> Result<Option<indexmap::IndexMap<String, T>>, FrameworkError> {
+        optional_from_storage::<AsArrayObject<T>>(s)
+    }
+}
+
+impl<T> IntoDynCast for AsOptionalArrayObject<T>
+where
+    T: Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    fn into_dyn() -> Box<dyn DynCast> {
+        Box::new(OptionalStructuredDyn(AsArrayObject::<T>::into_dyn()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AsArray, AsArrayObject, AsCollection, AsJson, AsObject, AsOptionalArray,
+        AsOptionalArrayObject, AsOptionalCollection, AsOptionalJson, AsOptionalObject, Cast,
+        IntoDynCast,
+    };
+    use serde::{Deserialize, Serialize};
+    use serde_json::json;
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct Prefs {
+        theme: String,
+    }
+
+    /// A cast name, its optional erased cast, the non-optional sibling's
+    /// erased cast, and a stored JSON text the pair accepts.
+    type Twin = (
+        &'static str,
+        Box<dyn super::DynCast>,
+        Box<dyn super::DynCast>,
+        &'static str,
+    );
+
+    /// Each optional twin next to its non-optional sibling.
+    fn twins() -> Vec<Twin> {
+        vec![
+            (
+                "AsOptionalArray",
+                AsOptionalArray::<String>::into_dyn(),
+                AsArray::<String>::into_dyn(),
+                r#"["a","b"]"#,
+            ),
+            (
+                "AsOptionalObject",
+                AsOptionalObject::<Prefs>::into_dyn(),
+                AsObject::<Prefs>::into_dyn(),
+                r#"{"theme":"dark"}"#,
+            ),
+            (
+                "AsOptionalCollection",
+                AsOptionalCollection::<String>::into_dyn(),
+                AsCollection::<String>::into_dyn(),
+                r#"["a","b"]"#,
+            ),
+            (
+                "AsOptionalJson",
+                AsOptionalJson::<serde_json::Value>::into_dyn(),
+                AsJson::<serde_json::Value>::into_dyn(),
+                r#"{"count":42}"#,
+            ),
+            (
+                "AsOptionalArrayObject",
+                AsOptionalArrayObject::<String>::into_dyn(),
+                AsArrayObject::<String>::into_dyn(),
+                r#"{"z":"last","a":"first"}"#,
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_optional_dyn_casts_keep_null_as_null_in_both_directions() {
+        for (name, optional, _, _) in twins() {
+            assert_eq!(
+                optional.from_storage_json(&json!(null)).unwrap(),
+                json!(null),
+                "{name} reads NULL as null"
+            );
+            assert_eq!(
+                optional.to_storage_json(&json!(null)).unwrap(),
+                json!(null),
+                "{name} writes null as NULL, not as the text `null`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_optional_dyn_casts_match_their_sibling_for_non_null_values() {
+        for (name, optional, plain, stored) in twins() {
+            let stored = json!(stored);
+            let read = optional.from_storage_json(&stored).unwrap();
+            assert_eq!(
+                read,
+                plain.from_storage_json(&stored).unwrap(),
+                "{name} reads like its sibling"
+            );
+            assert_eq!(
+                optional.to_storage_json(&read).unwrap(),
+                plain.to_storage_json(&read).unwrap(),
+                "{name} writes like its sibling"
+            );
+            for bad in [json!(1), json!("{not json")] {
+                assert_eq!(
+                    optional.from_storage_json(&bad).unwrap_err().to_string(),
+                    plain.from_storage_json(&bad).unwrap_err().to_string(),
+                    "{name} fails like its sibling on {bad}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_optional_casts_store_none_as_null_and_delegate_some() {
+        assert_eq!(
+            AsOptionalJson::<serde_json::Value>::to_storage(&None).unwrap(),
+            None
+        );
+        assert_eq!(
+            AsOptionalJson::<serde_json::Value>::from_storage(&None).unwrap(),
+            None
+        );
+        let value = json!({ "count": 42 });
+        let stored = AsOptionalJson::<serde_json::Value>::to_storage(&Some(value.clone()))
+            .unwrap()
+            .expect("Some stores text");
+        assert_eq!(
+            stored,
+            AsJson::<serde_json::Value>::to_storage(&value).unwrap()
+        );
+        assert_eq!(
+            AsOptionalJson::<serde_json::Value>::from_storage(&Some(stored)).unwrap(),
+            Some(value)
+        );
+        assert_eq!(
+            AsOptionalJson::<serde_json::Value>::from_storage(&Some("{not json".into()))
+                .unwrap_err()
+                .to_string(),
+            AsJson::<serde_json::Value>::from_storage(&"{not json".into())
+                .unwrap_err()
+                .to_string(),
+        );
+
+        assert_eq!(AsOptionalArray::<String>::to_storage(&None).unwrap(), None);
+        assert_eq!(
+            AsOptionalObject::<Prefs>::from_storage(&None).unwrap(),
+            None
+        );
+        assert!(
+            AsOptionalCollection::<String>::from_storage(&None)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            AsOptionalArrayObject::<String>::to_storage(&None).unwrap(),
+            None
+        );
     }
 }

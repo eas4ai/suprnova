@@ -345,6 +345,28 @@ when the field is a `serde_json::Value` or a user-defined struct
 that's already fully describable in serde terms but doesn't fit the
 fixed-shape `AsObject` pattern (e.g. enum payloads, untyped maps).
 
+### Nullable JSON columns
+
+The structured casts store non-null text, so they can't serve a
+nullable column: `AsJson<Option<T>>` writes the text `null` instead
+of SQL `NULL`, and a `NULL` row fails to decode. Each one has an
+optional form for that case - `AsOptionalArray<T>`,
+`AsOptionalObject<T>`, `AsOptionalCollection<T>`, `AsOptionalJson<T>`
+and `AsOptionalArrayObject<T>`. The field is an `Option` of the plain
+cast's type. `None` stores SQL `NULL` and a `NULL` column reads as
+`None`. A value is stored and read exactly as the plain cast does it,
+with the same error on malformed JSON.
+
+```rust
+use suprnova::AsOptionalJson;
+
+#[model(table = "events", casts = { metadata = AsOptionalJson<serde_json::Value> })]
+pub struct Event {
+    pub id: i64,
+    pub metadata: Option<serde_json::Value>,
+}
+```
+
 ### `AsArrayObject<T>`
 
 `IndexMap<String, T>` ↔ JSON-encoded `TEXT`. Use when the runtime
