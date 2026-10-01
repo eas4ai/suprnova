@@ -1,7 +1,7 @@
 {
  "build_time_env": {
   "CARGO_MANIFEST_DIR": [
-   "suprnova-macros/src/inertia.rs:229",
+   "suprnova-macros/src/inertia.rs:255",
    "suprnova-macros/src/redirect.rs:59"
   ],
   "CARGO_PKG_NAME": [
@@ -42,6 +42,22 @@
   "suprnova_test": "the attribute recognising itself"
  },
  "not_env_vars": {
+  "APP_CLUSTER": [
+   "framework/src/broadcasting/pusher/config.rs:243"
+  ],
+  "APP_ID": [
+   "framework/src/broadcasting/pusher/config.rs:213"
+  ],
+  "ENCRYPTION_MASTER_KEY_BASE64": [
+   "framework/src/broadcasting/pusher/config.rs:246"
+  ],
+  "SCREAMING_SNAKE_CASE": [
+   "suprnova-cli/src/commands/generate_types.rs:316",
+   "suprnova-macros/src/serde_attrs.rs:33"
+  ],
+  "TIMEOUT_SECS": [
+   "framework/src/broadcasting/pusher/config.rs:253"
+  ],
   "VEC_DISTANCE_COSINE": [
    "framework/src/vector/mariadb.rs:152"
   ],
@@ -54,6 +70,6 @@
   "methods of external trait impls (Debug, Clone, Serialize, ...); the traits themselves are listed in each type's implements_external",
   "demo application code (app/), test-support crates and fixtures"
  ],
- "sibling_reexports_folded_into_aliases": 297,
- "source_rev": "c0fa5afb"
+ "sibling_reexports_folded_into_aliases": 298,
+ "source_rev": "11fcda40"
 }

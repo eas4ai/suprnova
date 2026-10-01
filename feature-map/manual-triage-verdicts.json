@@ -9,6 +9,14 @@
    "class": "noise",
    "evidence": "clap's own `#[command(about = \"...\")]` derive attribute, named in console.md as the about text clap keeps when `#[console(description)]` is absent (suprnova-macros/src/console_derive.rs:36-37, :111-112); not a Suprnova macro argument."
   },
+  "#[data(after_validation)]": {
+   "class": "verified",
+   "evidence": "A real Data derive struct attribute: suprnova-macros/src/data.rs:206 parses `after_validation = \"path\"` and data.rs:148-153 document it; the name check misses it because the attribute takes a value, not a flag."
+  },
+  "#[data(after_validation_async)]": {
+   "class": "verified",
+   "evidence": "A real Data derive struct attribute: suprnova-macros/src/data.rs:209 parses `after_validation_async = \"path\"` and data.rs:154 documents it."
+  },
   "#[global_scope]": {
    "class": "noise",
    "evidence": "The manual states these do NOT exist, which is correct."
@@ -257,6 +265,14 @@
    "class": "noise",
    "evidence": "The reader's own env-var convention for their tests (database-testing.md); correct as written."
   },
+  "PUSHER_ENCRYPTION_MASTER_KEY_BASE64": {
+   "class": "verified",
+   "evidence": "Read by PusherConfig::from_env as `{prefix}_ENCRYPTION_MASTER_KEY_BASE64` (framework/src/broadcasting/pusher/config.rs:169, :246); the env scan cannot see a name built from the prefix."
+  },
+  "PUSHER_TIMEOUT_SECS": {
+   "class": "verified",
+   "evidence": "Read by PusherConfig::from_env as `{prefix}_TIMEOUT_SECS` (framework/src/broadcasting/pusher/config.rs:170, :253); the env scan cannot see a name built from the prefix."
+  },
   "Paddle::unmarshal": {
    "class": "noise",
    "evidence": "A third-party type used as documented; `paddle-rust-sdk 0.18 Paddle::unmarshal, called at crates/suprnova-payments-paddle/src/webhook.rs:318`. Not a Suprnova API."
@@ -332,6 +348,10 @@
   "Runs `npm install` in `frontend/` if `node_modules` doesn't exist yet.": {
    "class": "noise",
    "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "SCREAMING_SNAKE_CASE": {
+   "class": "noise",
+   "evidence": "A serde `rename_all` rule value listed among serde's rules (manual/data.md:73); serde owns it, and the derive accepts it (suprnova-macros/src/data.rs, serde naming)."
   },
   "SUM over an INTEGER column lands in the cache as `f64`.": {
    "class": "noise",
@@ -476,6 +496,14 @@
   "UserFactor::admn()": {
    "class": "noise",
    "evidence": "A deliberate typo illustrating that a misspelled factory state method is a compile error."
+  },
+  "VITE_PUSHER_HOST": {
+   "class": "noise",
+   "evidence": "The application's own Vite variable in the Laravel Echo client example (manual/broadcasting.md:928); the browser bundle reads it, not the framework."
+  },
+  "VITE_PUSHER_PORT": {
+   "class": "noise",
+   "evidence": "The application's own Vite variable in the Laravel Echo client example (manual/broadcasting.md:928); the browser bundle reads it, not the framework."
   },
   "When `MAIL_FILE_PATH` is unset, mail lands in `storage_path(\"mail\")` - the same path family every other `storage/` consumer uses, so the directory stays inside the application base even when a service manager starts the process from somewhere else.": {
    "class": "noise",
