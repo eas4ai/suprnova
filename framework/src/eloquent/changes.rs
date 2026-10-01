@@ -17,13 +17,21 @@
 //! the caller changed: the record says what the database holds now that it
 //! did not hold before.
 //!
+//! The one exception is a column whose cast stores a new value on every
+//! write, such as an encrypted column, whose ciphertext changes with each
+//! save. Its stored values always differ, so it is compared by its decoded
+//! value instead, as Laravel's `originalIsEquivalent` decrypts before it
+//! compares.
+//!
 //! The lifecycle follows Laravel's `Model::save`. Right after the write,
 //! [`record_save`] does what `syncChanges` does: it stores the save's
 //! changes, unless the save changed nothing, in which case the previous
 //! changes stay. Until the save returns, the original stays the row the save
 //! started from, so the `updated` and `saved` observers read the values
 //! loaded before it. [`finish_save`] then does what `finishSave` does with
-//! `syncOriginal`: the original becomes the saved row.
+//! `syncOriginal`: the original becomes the saved row. An insert has
+//! nothing loaded before it, so [`begin_insert`] leaves it without an
+//! original until [`finish_save`] runs.
 //!
 //! The kept row lives in the model's
 //! [`EagerLoadCache`](crate::EagerLoadCache), the per-instance runtime state
@@ -70,6 +78,14 @@ where
         self
     }
 }
+
+/// Whether `column` holds the same value in two stored rows of one model
+/// once decoded, asked only for a column whose stored values differ. It is
+/// the model's `Model::__decoded_values_equal`, which the
+/// `#[suprnova::model]` macro emits because only the macro can name the row
+/// type and the casts.
+pub(crate) type DecodedEqual =
+    fn(&str, &(dyn Any + Send + Sync), &(dyn Any + Send + Sync)) -> Result<bool, FrameworkError>;
 
 /// A save between its write and its return.
 #[derive(Clone)]
@@ -159,9 +175,12 @@ impl Clone for RowState {
 /// it: after the write, before the `updated` event.
 ///
 /// A column is changed when its stored value after the write differs from
-/// the value the instance held before it. When the instance was never read
-/// from the database there is nothing to compare with, and every column
-/// counts as changed, as in Laravel, where an attribute missing from
+/// the value the instance held before it, unless `decoded_equal` finds the
+/// two stored values decode to the same value: that is how a column whose
+/// cast stores a new value on every write, an encrypted one, counts as
+/// changed only when its decoded value changed. When the instance was never
+/// read from the database there is nothing to compare with, and every
+/// column counts as changed, as in Laravel, where an attribute missing from
 /// `$original` is dirty. A save that changed nothing keeps `before`'s
 /// changes: Laravel skips such a save's `syncChanges`.
 ///
@@ -173,6 +192,7 @@ impl Clone for RowState {
 pub(crate) fn record_save(
     before: Option<&RowState>,
     after: Option<&RowState>,
+    decoded_equal: DecodedEqual,
 ) -> Result<(), FrameworkError> {
     let Some(after) = after else {
         return Ok(());
@@ -187,10 +207,19 @@ pub(crate) fn record_save(
     let before_json = before_row.as_ref().map(|row| row.to_json()).transpose()?;
     let mut changes = Attrs::new();
     for (column, value) in after_json {
-        let unchanged = before_json
-            .as_ref()
-            .and_then(|before| before.get(&column))
-            .is_some_and(|old| *old == value);
+        let unchanged = match (&before_row, before_json.as_ref()) {
+            (Some(before_row), Some(before_json)) => match before_json.get(&column) {
+                Some(old) if *old == value => true,
+                Some(_) => same_decoded_value(
+                    decoded_equal,
+                    &column,
+                    before_row.as_any(),
+                    after_row.as_any(),
+                ),
+                None => false,
+            },
+            _ => false,
+        };
         if !unchanged {
             changes.insert(column, value);
         }
@@ -207,6 +236,49 @@ pub(crate) fn record_save(
         changes,
     });
     Ok(())
+}
+
+/// Start an insert's record on `state`, the state of the model hydrated
+/// from the row the insert returned. Nothing was read before an insert, so
+/// until [`finish_save`] runs the model has no original: Laravel's model has
+/// none until `finishSave` runs `syncOriginal`, after the `created` and
+/// `saved` events. An insert records no changes, as Laravel's
+/// `performInsert` runs no `syncChanges`.
+pub(crate) fn begin_insert(state: Option<&RowState>) {
+    let Some(state) = state else {
+        return;
+    };
+    let mut history = state.read();
+    history.in_progress = Some(SaveInProgress { before: None });
+    state.write(history);
+}
+
+/// Whether `column`, whose stored value differs between the two rows,
+/// decodes to the same value in both.
+///
+/// A value that no longer decodes counts as changed, which is what the
+/// stored rows say. The save's write has already landed by now, so failing
+/// the save over its change record would report a write that happened as
+/// one that did not. The failure is logged, because a row that decoded when
+/// it was read and no longer does is a defect to find.
+fn same_decoded_value(
+    decoded_equal: DecodedEqual,
+    column: &str,
+    before: &(dyn Any + Send + Sync),
+    after: &(dyn Any + Send + Sync),
+) -> bool {
+    match decoded_equal(column, before, after) {
+        Ok(same) => same,
+        Err(error) => {
+            tracing::warn!(
+                target: "suprnova::eloquent",
+                column,
+                error = %error,
+                "could not compare a column's decoded values after a save; it is recorded as changed",
+            );
+            false
+        }
+    }
 }
 
 /// End the save in progress on `state`: its original becomes the saved row.
@@ -291,6 +363,16 @@ mod tests {
         flag: i64,
     }
 
+    /// A model whose casts all store deterministically: differing stored
+    /// values are a change.
+    fn stored_only(
+        _column: &str,
+        _before: &(dyn Any + Send + Sync),
+        _after: &(dyn Any + Send + Sync),
+    ) -> Result<bool, FrameworkError> {
+        Ok(false)
+    }
+
     fn row(name: &str, flag: i64) -> Row {
         Row {
             id: 1,
@@ -303,7 +385,7 @@ mod tests {
     fn a_save_records_only_the_columns_whose_stored_value_differs() {
         let before = RowState::loaded(row("a", 0));
         let after = RowState::loaded(row("a", 1));
-        record_save(Some(&before), Some(&after)).unwrap();
+        record_save(Some(&before), Some(&after), stored_only).unwrap();
 
         assert!(was_changed_any(Some(&after), &["flag"]));
         assert!(!was_changed_any(Some(&after), &["name", "id"]));
@@ -317,7 +399,7 @@ mod tests {
     fn the_original_is_the_row_before_the_save_until_the_save_finishes() {
         let before = RowState::loaded(row("a", 0));
         let after = RowState::loaded(row("a", 1));
-        record_save(Some(&before), Some(&after)).unwrap();
+        record_save(Some(&before), Some(&after), stored_only).unwrap();
         assert_eq!(raw_original(Some(&after), "flag"), Some(json!(0)));
 
         finish_save(Some(&after));
@@ -332,11 +414,11 @@ mod tests {
     fn a_save_that_changes_nothing_keeps_the_previous_changes() {
         let loaded = RowState::loaded(row("a", 0));
         let first = RowState::loaded(row("a", 1));
-        record_save(Some(&loaded), Some(&first)).unwrap();
+        record_save(Some(&loaded), Some(&first), stored_only).unwrap();
         finish_save(Some(&first));
 
         let second = RowState::loaded(row("a", 1));
-        record_save(Some(&first), Some(&second)).unwrap();
+        record_save(Some(&first), Some(&second), stored_only).unwrap();
         finish_save(Some(&second));
 
         assert!(was_changed_any(Some(&second), &["flag"]));
@@ -346,7 +428,7 @@ mod tests {
     #[test]
     fn without_a_loaded_row_every_column_is_changed() {
         let after = RowState::loaded(row("a", 1));
-        record_save(Some(&RowState::default()), Some(&after)).unwrap();
+        record_save(Some(&RowState::default()), Some(&after), stored_only).unwrap();
 
         assert_eq!(changes(Some(&after)).len(), 3);
         assert_eq!(raw_original(Some(&after), "flag"), None);
@@ -368,7 +450,7 @@ mod tests {
         let source = RowState::loaded(row("a", 0));
         let copy = source.clone();
         let after = RowState::loaded(row("b", 0));
-        record_save(Some(&source), Some(&after)).unwrap();
+        record_save(Some(&source), Some(&after), stored_only).unwrap();
         source.adopt(&after);
 
         assert!(was_changed_any(Some(&source), &["name"]));

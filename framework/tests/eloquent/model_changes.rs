@@ -5,7 +5,8 @@
 //! save changes something. While the save's `updated` and `saved` observers
 //! run, `get_original` (cast) and `get_raw_original` (stored) return the
 //! values loaded before the save; once the save returns they return the
-//! saved values. An insert reports no changes. Laravel's
+//! saved values. An insert reports no changes, and has no original until
+//! it returns. Laravel's
 //! `HasAttributes::wasChanged`, `getChanges`, `getOriginal`,
 //! `getRawOriginal`, `syncChanges` and `syncOriginal`, as `Model::save`,
 //! `performUpdate` and `finishSave` call them.
@@ -34,7 +35,7 @@ use serde_json::{Value, json};
 use suprnova::database::{DatabaseConfig, DbConnection};
 use suprnova::eloquent::observers::Observer;
 use suprnova::testing::{TestClock, TestContainer, TestContainerGuard, TestDatabase};
-use suprnova::{AsBool, Attrs, DB, FrameworkError, Model, attrs, model};
+use suprnova::{AsBool, AsEncrypted, Attrs, DB, FrameworkError, Model, attrs, model};
 
 // ---- Models -------------------------------------------------------------
 
@@ -75,6 +76,21 @@ pub struct ChangePost {
     pub body: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// A model with an encrypted column. `AsEncrypted` writes a new ciphertext
+/// on every save, so the stored value of `secret` differs after any save;
+/// only a change to the secret itself is a change.
+#[model(
+    table = "par_secret_users",
+    timestamps = false,
+    fillable = ["secret", "is_admin"],
+    casts = { secret = AsEncrypted, is_admin = AsBool }
+)]
+pub struct SecretUser {
+    pub id: i64,
+    pub secret: String,
+    pub is_admin: bool,
 }
 
 /// The observer scenario's model for the live-engine variants. Separate
@@ -161,6 +177,12 @@ struct AuditObserver;
 
 #[async_trait]
 impl Observer<ChangeUser> for AuditObserver {
+    async fn created(&self, model: &ChangeUser) -> Result<(), FrameworkError> {
+        let seen = see("created", &model.email, model)?;
+        SEEN.lock().unwrap().push(seen);
+        Ok(())
+    }
+
     async fn updated(
         &self,
         _previous: &ChangeUser,
@@ -307,6 +329,34 @@ async fn observers_see_what_update_changed() {
     user.update(attrs! { is_admin: true }).await.unwrap();
 
     assert_observers_saw_only_the_flip("observer-update@example.com");
+}
+
+#[tokio::test]
+async fn an_insert_has_no_original_while_its_observers_run() {
+    let _db = sqlite().await;
+    ChangeUser::observe(AuditObserver).await;
+    let email = "observer-insert@example.com";
+    let created = ChangeUser::create(attrs! { name: "Ada", email: email, is_admin: true })
+        .await
+        .unwrap();
+
+    for event in ["created", "saved"] {
+        let records = seen_for(event, email);
+        assert!(!records.is_empty(), "the {event} observer ran");
+        for record in &records {
+            assert_eq!(
+                record.raw_original_is_admin, None,
+                "{event}: nothing was loaded before the insert: {record:?}"
+            );
+            assert_eq!(record.original_is_admin, None, "{event}: {record:?}");
+            assert!(!record.anything_changed, "{event}: {record:?}");
+        }
+    }
+    assert_eq!(
+        created.get_raw_original("is_admin"),
+        Some(json!(1)),
+        "once the insert returns, the original is the inserted row"
+    );
 }
 
 // ---- On the caller's model ----------------------------------------------
@@ -489,6 +539,46 @@ async fn a_save_with_timestamps_also_reports_updated_at() {
     assert_eq!(keys, vec!["title".to_string(), "updated_at".to_string()]);
     assert!(post.was_changed("updated_at"));
     assert!(!post.was_changed("created_at"));
+}
+
+#[tokio::test]
+async fn an_encrypted_column_is_changed_only_when_its_value_changes() {
+    suprnova::testing::install_test_encryption_key();
+    let db = sqlite().await;
+    db.execute_unprepared(
+        "CREATE TABLE par_secret_users (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            secret TEXT NOT NULL, \
+            is_admin INTEGER NOT NULL)",
+    )
+    .await
+    .unwrap();
+    let created = SecretUser::create(attrs! { secret: "first secret", is_admin: false })
+        .await
+        .unwrap();
+    let mut user = SecretUser::find_or_fail(created.id).await.unwrap();
+
+    user.is_admin = true;
+    user.save().await.unwrap();
+    assert!(
+        !user.was_changed("secret"),
+        "the save stored a new ciphertext of the same secret: {:?}",
+        sorted_changes(&user.get_changes())
+    );
+    assert_eq!(
+        sorted_changes(&user.get_changes()),
+        vec![("is_admin".to_string(), json!(1))]
+    );
+
+    user.secret = "second secret".into();
+    user.save().await.unwrap();
+    assert!(user.was_changed("secret"), "a new secret is a change");
+    assert!(!user.was_changed("is_admin"));
+    let keys: Vec<String> = sorted_changes(&user.get_changes())
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    assert_eq!(keys, vec!["secret".to_string()]);
 }
 
 #[tokio::test]

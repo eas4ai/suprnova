@@ -372,6 +372,63 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         .zip(field_strs.iter())
         .map(|(ident, name)| casts::try_to_storage_arm(ident, input.cast_for_field(name)));
 
+    // `Model::__decoded_values_equal`: a save compares stored rows to tell
+    // what it changed, and a column whose cast stores a new value on every
+    // write, an encrypted one, would always differ. Such a column is
+    // compared by its decoded value instead. Each cast's own
+    // `DETERMINISTIC_STORAGE` says which casts those are, so the arm of a
+    // deterministic cast is never taken. A model without casts keeps the
+    // trait default.
+    let decoded_equal_arms: Vec<TokenStream> = field_idents
+        .iter()
+        .zip(field_strs.iter())
+        .filter_map(|(ident, name)| {
+            let cast_ty = input.cast_for_field(name)?;
+            Some(quote! {
+                #name if !<#cast_ty as ::suprnova::eloquent::casts::Cast>::DETERMINISTIC_STORAGE => {
+                    let __before_value =
+                        <#cast_ty as ::suprnova::eloquent::casts::Cast>::from_storage(&before.#ident)?;
+                    let __after_value =
+                        <#cast_ty as ::suprnova::eloquent::casts::Cast>::from_storage(&after.#ident)?;
+                    let __encode = |__value| {
+                        ::suprnova::serde_json::to_value(__value).map_err(|__error| {
+                            ::suprnova::FrameworkError::internal(::std::format!(
+                                "could not compare the values of `{}` after a save: {}",
+                                #name,
+                                __error,
+                            ))
+                        })
+                    };
+                    ::core::result::Result::Ok(
+                        __encode(&__before_value)? == __encode(&__after_value)?,
+                    )
+                }
+            })
+        })
+        .collect();
+    let decoded_equal_method = if decoded_equal_arms.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            fn __decoded_values_equal(
+                column: &str,
+                before: &(dyn ::std::any::Any + ::core::marker::Send + ::core::marker::Sync),
+                after: &(dyn ::std::any::Any + ::core::marker::Send + ::core::marker::Sync),
+            ) -> ::core::result::Result<bool, ::suprnova::FrameworkError> {
+                let (::core::option::Option::Some(before), ::core::option::Option::Some(after)) = (
+                    before.downcast_ref::<#module_name::Model>(),
+                    after.downcast_ref::<#module_name::Model>(),
+                ) else {
+                    return ::core::result::Result::Ok(false);
+                };
+                match column {
+                    #(#decoded_equal_arms)*
+                    _ => ::core::result::Result::Ok(false),
+                }
+            }
+        }
+    };
+
     // Phase 10C T6 - emit the `to_array` + `__append_accessor`
     // overrides on the `Model` trait when the model declares any of
     // `hidden = [...]` / `visible = [...]` / `appends = [...]`. When
@@ -1308,6 +1365,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     )
                 })
             }
+
+            #decoded_equal_method
 
             fn active_model_from_attrs(
                 attrs: ::suprnova::eloquent::Attrs,

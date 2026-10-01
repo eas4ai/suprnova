@@ -54,6 +54,18 @@ pub trait Cast: Send + Sync {
     fn bind_json(_value: &serde_json::Value) -> Option<sea_orm::Value> {
         None
     }
+
+    /// Whether [`Self::to_storage`] gives the same stored value every time
+    /// it stores the same runtime value. `true` by default.
+    ///
+    /// A save tells which attributes it changed by comparing the stored row
+    /// before the write with the row after it, which only works when an
+    /// unchanged value stores the same way again. A cast that stores a new
+    /// value on every write, as the encrypting casts do with a random
+    /// nonce, sets this to `false`, and a save compares its column by the
+    /// decoded value instead, as Laravel's `originalIsEquivalent` decrypts
+    /// an encrypted attribute before it compares it.
+    const DETERMINISTIC_STORAGE: bool = true;
 }
 
 /// Type-erased cast for `Builder::with_casts(...)` runtime override.

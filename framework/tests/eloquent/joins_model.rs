@@ -36,6 +36,18 @@ pub struct JmPost {
     pub deleted_at: Option<String>,
 }
 
+/// A model whose table name has capitals. Postgres folds an unquoted name
+/// to lower case, so a joined query has to quote this name the same way
+/// everywhere it writes it, or one reference names a different table.
+#[model(table = "JmAuthors", soft_deletes, relations = {
+    posts: HasMany<JmPost> { fk = "author_id" },
+})]
+pub struct JmAuthor {
+    pub id: i64,
+    pub name: String,
+    pub deleted_at: Option<String>,
+}
+
 /// User ids are 1 to 3 and post ids start at 101, so a post that carries
 /// a user's id is easy to spot. Grace and post 105 are trashed.
 async fn seed(fx: &Fixture) {
@@ -377,6 +389,66 @@ async fn only_trashed_names_the_models_table_when_the_query_joins() {
     assert_eq!(
         everything.iter().map(|p| p.id).collect::<Vec<_>>(),
         vec![101, 102, 103, 104, 105]
+    );
+}
+
+/// The joined query quotes the model's table in its default select, so it
+/// has to quote it in the FROM, in the soft-delete filter, in a `where_has`
+/// correlation and in the key `model_keys` selects too.
+#[tokio::test]
+async fn a_joined_model_query_quotes_every_reference_to_its_mixed_case_table() {
+    // Every shape is checked before the test fails, so a failure names all
+    // the statements that write the table unquoted.
+    let mut unquoted: Vec<String> = Vec::new();
+    let mut assert_all_quoted = |shape: &str, sql: &str| {
+        if !sql.contains(r#"FROM "JmAuthors""#)
+            || sql.matches("JmAuthors").count() != sql.matches(r#""JmAuthors""#).count()
+        {
+            unquoted.push(format!("{shape}: {sql}"));
+        }
+    };
+
+    let joined = || JmAuthor::query().join("jm_posts", "jm_posts.author_id", "=", "JmAuthors.id");
+    for backend in [DatabaseBackend::Sqlite, DatabaseBackend::Postgres] {
+        for (shape, query) in [
+            ("default", joined()),
+            ("only_trashed", joined().only_trashed()),
+            (
+                "where_has",
+                joined().where_has::<JmPost, _>("posts", |posts| posts),
+            ),
+        ] {
+            let (sql, _) = query
+                .try_to_sql_with_bindings_for(backend)
+                .expect("the query renders");
+            assert_all_quoted(&format!("{shape} on {backend:?}"), &sql);
+        }
+    }
+
+    // `model_keys` renders and runs in one call, so read its SQL off the
+    // query log. SQLite ignores case, so the query runs either way.
+    let fx = seeded_sqlite().await;
+    fx.exec(
+        r#"CREATE TEMPORARY TABLE "JmAuthors" (id BIGINT PRIMARY KEY, name VARCHAR(100) NOT NULL, deleted_at VARCHAR(30) NULL)"#,
+    )
+    .await;
+    DB::enable_query_log().expect("the query log turns on");
+    joined().model_keys().await.expect("model_keys runs");
+    let logged: Vec<String> = DB::get_query_log()
+        .expect("the query log reads")
+        .into_iter()
+        .map(|query| query.sql)
+        .filter(|sql| sql.contains("JmAuthors"))
+        .collect();
+    assert!(!logged.is_empty(), "model_keys ran no logged query");
+    for sql in &logged {
+        assert_all_quoted("model_keys", sql);
+    }
+
+    assert!(
+        unquoted.is_empty(),
+        "a reference to the table is not quoted:\n{}",
+        unquoted.join("\n")
     );
 }
 

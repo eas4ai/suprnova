@@ -44,6 +44,9 @@ impl Cast for AsEncrypted {
     type Runtime = String;
     type Storage = String;
 
+    // A fresh nonce per write, so a save compares the decrypted values.
+    const DETERMINISTIC_STORAGE: bool = false;
+
     fn to_storage(v: &String) -> Result<String, FrameworkError> {
         Crypt::encrypt_string(CryptPurpose::Cast, v)
             .map_err(|e| FrameworkError::internal(format!("AsEncrypted: {e}")))
@@ -112,6 +115,8 @@ where
 {
     type Runtime = Vec<T>;
     type Storage = String;
+
+    const DETERMINISTIC_STORAGE: bool = false;
 
     fn to_storage(v: &Vec<T>) -> Result<String, FrameworkError> {
         let json = serde_json::to_string(v).map_err(|e| {
@@ -193,6 +198,8 @@ where
 {
     type Runtime = T;
     type Storage = String;
+
+    const DETERMINISTIC_STORAGE: bool = false;
 
     fn to_storage(v: &T) -> Result<String, FrameworkError> {
         let json = serde_json::to_string(v).map_err(|e| {
@@ -276,6 +283,8 @@ where
 {
     type Runtime = crate::eloquent::Collection<T>;
     type Storage = String;
+
+    const DETERMINISTIC_STORAGE: bool = false;
 
     fn to_storage(v: &crate::eloquent::Collection<T>) -> Result<String, FrameworkError> {
         // Borrow the inner slice and clone into a Vec - the slice itself
