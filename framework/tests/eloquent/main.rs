@@ -25,6 +25,7 @@ pub mod factory_events;
 pub mod factory_persist;
 pub mod fillable;
 pub mod has;
+mod key_ring;
 pub mod laravel_parity;
 pub mod lazy_loading;
 pub mod locking;
