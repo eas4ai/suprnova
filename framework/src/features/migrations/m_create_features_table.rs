@@ -23,6 +23,8 @@
 
 use sea_orm_migration::prelude::*;
 
+use crate::database::migration_guard::create_index_if_missing;
+
 /// Migration that creates the framework-owned `features` table.
 ///
 /// Re-exported as `CreateFeaturesTable` from the parent migrations module
@@ -94,17 +96,17 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_features_name_scope_key")
-                    .table(Features::Table)
-                    .col(Features::Name)
-                    .col(Features::ScopeKey)
-                    .unique()
-                    .to_owned(),
-            )
-            .await
+        create_index_if_missing(
+            manager,
+            "features",
+            Index::create()
+                .name("idx_features_name_scope_key")
+                .col(Features::Name)
+                .col(Features::ScopeKey)
+                .unique()
+                .to_owned(),
+        )
+        .await
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {

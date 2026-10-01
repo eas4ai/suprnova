@@ -69,7 +69,9 @@ pub struct SessionConfig {
     /// in the HTTP sense). Defaults to `false`. Mirrors Laravel's
     /// `session.expire_on_close`.
     pub expire_on_close: bool,
-    /// Database table name for sessions
+    /// Database table the database session driver reads and writes.
+    /// Defaults to `sessions`. Mirrors Laravel's `session.table`; the
+    /// app's migration has to create the table under this name.
     pub table_name: String,
     /// Optional named database connection for the session store.
     /// Defaults to `None` (uses the framework's default `DB::connection()`).
@@ -141,6 +143,9 @@ impl SessionConfig {
     /// - `SESSION_COOKIE_PREFIX`: `__Host-` / `__Secure-` / unset (default: unset)
     /// - `SESSION_EXPIRE_ON_CLOSE`: Drop `Max-Age` so the browser
     ///   forgets the cookie on close (default: `false`)
+    /// - `SESSION_TABLE`: Table the database driver uses (default:
+    ///   `sessions`; `Config::init` rejects a name that is not a plain
+    ///   identifier)
     /// - `SESSION_CONNECTION`: Named DB connection for the session
     ///   store (default: unset)
     /// - `REMEMBER_LIFETIME`: Remember-me token/cookie lifetime in
@@ -223,7 +228,10 @@ impl SessionConfig {
             cookie_partitioned,
             cookie_prefix,
             expire_on_close,
-            table_name: "sessions".to_string(),
+            // An invalid name passes through here for the same reason as
+            // the cookie prefix above: Config::init rejects it at boot.
+            table_name: crate::env_optional("SESSION_TABLE")
+                .unwrap_or_else(|| "sessions".to_string()),
             connection: crate::env_optional("SESSION_CONNECTION"),
             // Same clamp as `lifetime` above: the remember row TTL feeds
             // the same `i64` deadline arithmetic.

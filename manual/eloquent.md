@@ -2758,11 +2758,20 @@ pub struct User { /* ... */ }
 | `decimal:N` | `AsDecimal<N>` | `rust_decimal::Decimal` |
 | `string` | `AsString` | `String` |
 | `array` | `AsArray<T>` | `Vec<T>` (JSON-encoded) |
+| `array` (nullable column) | `AsOptionalArray<T>` | `Option<Vec<T>>` (`None` is SQL `NULL`) |
 | `object` | `AsObject<T>` | `T: Serialize + DeserializeOwned` |
+| `object` (nullable column) | `AsOptionalObject<T>` | `Option<T>` |
 | `collection` | `AsCollection<T>` | `Collection<T>` |
+| `collection` (nullable column) | `AsOptionalCollection<T>` | `Option<Collection<T>>` |
 | `json` | `AsJson<T>` | `T` (raw JSON column) |
+| `json` (nullable column) | `AsOptionalJson<T>` | `Option<T>` |
 | `date`, `date:format` | `AsDate` | `chrono::NaiveDate` |
 | `datetime`, `datetime:format` | `AsDateTime` | `chrono::DateTime<Utc>` |
+| `datetime` (nullable column) | `AsOptionalDateTime` | `Option<chrono::DateTime<Utc>>` |
+| `datetime` (native column with a zone) | `AsNativeDateTime` | `chrono::DateTime<Utc>` |
+| `datetime` (nullable native column with a zone) | `AsOptionalNativeDateTime` | `Option<chrono::DateTime<Utc>>` |
+| `datetime` (native column without a zone) | `AsNaiveDateTime` | `chrono::DateTime<Utc>` (stored as the UTC wall clock) |
+| `datetime` (nullable native column without a zone) | `AsOptionalNaiveDateTime` | `Option<chrono::DateTime<Utc>>` |
 | `immutable_date` | `AsImmutableDate` | `chrono::NaiveDate` |
 | `immutable_datetime` | `AsImmutableDateTime` | `chrono::DateTime<Utc>` |
 | `timestamp` | `AsTimestamp` | `i64` (unix epoch) |
@@ -2772,9 +2781,13 @@ pub struct User { /* ... */ }
 | `encrypted:collection` | `AsEncryptedCollection<T>` | `Collection<T>` |
 | `EnumClass::class` | `AsEnum<E>` | `E: EnumString + AsRefStr` |
 | `AsArrayObject::class` | `AsArrayObject<T>` | `IndexMap<String, T>` |
+| `AsArrayObject::class` (nullable column) | `AsOptionalArrayObject<T>` | `Option<IndexMap<String, T>>` |
 | `hashed` | `AsHashed` | `String` (`Hash::make` on write; never decrypts) |
 
-22 casts total. Most map one-to-one with Laravel; the
+31 casts total. Most map one-to-one with Laravel. A Laravel cast passes
+`null` through on any column; in Rust the field type says whether a
+value can be missing, so the five JSON casts and three of the
+date-time casts have `AsOptional*` forms for nullable columns. The
 `AsOptionalDateTime` (used by `soft_deletes`) is auto-injected by
 the macro when the soft-delete column is `Option<DateTime<Utc>>`.
 
@@ -4340,7 +4353,7 @@ Scopes nest, and both are `tokio::task_local`-backed.
   `Collection<T>` surface, the generic-vs-model split, and
   `LazyCollection<M>` streaming
 - [Eloquent Casts, Accessors & Mutators](eloquent-mutators.md) - the
-  22 built-in casts plus the `casts!` runtime override
+  31 built-in casts plus the `casts!` runtime override
 - [Eloquent Serialization](eloquent-serialization.md) - `to_array`,
   `to_json`, hidden / visible / appends, filtered terminals
 - [Eloquent Factories](eloquent-factories.md) - randomized model

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
+use sea_orm_migration::{MigrationTrait, SchemaManager};
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use std::time::Duration;
 use suprnova::BackoffSchedule;
 use suprnova::events::{EventFacade, dispatched};
 use suprnova::notifications::channels::database::DatabaseChannel;
+use suprnova::notifications::migrations::CreateNotificationsTable;
 use suprnova::notifications::notify_job::SendNotificationJob;
 use suprnova::notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
@@ -52,24 +54,14 @@ impl Notifiable for User {
     }
 }
 
+/// The framework's own notifications migration, so this schema cannot
+/// drift from the one apps get.
 async fn fresh_db() -> DatabaseConnection {
     let db = Database::connect("sqlite::memory:").await.unwrap();
-    db.execute_unprepared(
-        r"
-        CREATE TABLE notifications (
-            id CHAR(36) PRIMARY KEY,
-            type VARCHAR(255) NOT NULL,
-            notifiable_type VARCHAR(255) NOT NULL,
-            notifiable_id VARCHAR(64) NOT NULL,
-            data TEXT NOT NULL,
-            read_at TIMESTAMP NULL,
-            created_at TIMESTAMP NOT NULL,
-            updated_at TIMESTAMP NOT NULL
-        )
-        ",
-    )
-    .await
-    .unwrap();
+    CreateNotificationsTable
+        .up(&SchemaManager::new(&db))
+        .await
+        .unwrap();
     db
 }
 

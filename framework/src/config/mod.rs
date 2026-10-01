@@ -60,8 +60,9 @@ impl Config {
     /// Returns [`crate::error::FrameworkError`] when a discovered
     /// `.env` file cannot be read or parsed, or when a typed
     /// framework knob (e.g. `SERVER_PORT`, `APP_DEBUG`) is set to a
-    /// value that fails to parse. Missing `.env` files are not an
-    /// error.
+    /// value that fails to parse, or when a session setting checked at
+    /// boot (`SESSION_COOKIE_PREFIX`, `SESSION_TABLE`) is invalid.
+    /// Missing `.env` files are not an error.
     ///
     /// # Example
     ///
@@ -102,6 +103,18 @@ impl Config {
                      XSRF-TOKEN's sake, it still blocks __Host- on the session cookie."
                 )));
             }
+        }
+        // The session table name, checked here for the same reason: the
+        // database session driver is built per process by the infallible
+        // SessionMiddleware::new, so a bad name would otherwise surface
+        // only as a failed query on the first request.
+        if let Some(table) = env::env_optional::<String>("SESSION_TABLE")
+            && !crate::session::driver::database::valid_session_table(&table)
+        {
+            return Err(crate::error::FrameworkError::internal(format!(
+                "SESSION_TABLE={table:?} is not a valid table name; {}",
+                crate::session::driver::database::SESSION_TABLE_RULE
+            )));
         }
 
         Ok(env)

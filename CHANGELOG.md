@@ -879,6 +879,42 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **The notifications table ships as a migration.** The manual said
+  `suprnova migrate` creates it, but the schema was a SQL file only the
+  framework's own tests loaded, so the database channel failed on its
+  first write in a fresh app. Register
+  `suprnova::notifications::migrations::CreateNotificationsTable` in your
+  `Migrator`: it creates the same table and indexes, and running it over a
+  table you created by hand from the old SQL file is safe on every engine.
+  The SQL file is gone. This fix landed on main after the `v3.0.0` tag
+  (#134).
+- **Nullable JSON columns have casts.** `AsJson`, `AsArray`, `AsObject`,
+  `AsCollection` and `AsArrayObject` store a non-null string, so
+  `AsJson<Option<T>>` wrote the text `null` instead of SQL `NULL`, and a
+  row whose column was `NULL` failed to load. `AsOptionalJson`,
+  `AsOptionalArray`, `AsOptionalObject`, `AsOptionalCollection` and
+  `AsOptionalArrayObject` map `None` to `NULL` and back, and store a value
+  exactly as their non-optional cast does. This fix landed on main after
+  the `v3.0.0` tag (#133).
+- **`SESSION_TABLE` names the session table.** `SessionConfig::table_name`
+  was read and then ignored: the database session driver always used
+  `sessions`. The driver now reads and writes the configured table,
+  `DatabaseSessionDriver::with_table` builds one over another table, and
+  `Config::init` refuses a name that is not 1 to 63 ASCII letters, digits
+  or underscores starting with a letter or underscore. What you have to
+  change: an app that already set `SESSION_TABLE` now stores its sessions
+  in that table, which its migration must create, and an empty
+  `SESSION_TABLE` now fails boot. The driver also stops logging a session
+  id when it skips a write, and the content of a stored payload it cannot
+  parse. This fix landed on main after the `v3.0.0` tag (#132).
+- **Re-running a framework migration no longer fails on an existing index.**
+  The workflow and RenderCache migrations relied on `IF NOT EXISTS`, which
+  MySQL and MariaDB drop from `CREATE INDEX`, and the payments, features and
+  RBAC migrations created their indexes without it, so running one over
+  tables that already existed failed with a duplicate index and blocked
+  every migration after it. Each framework migration now creates an index
+  only when it is missing, with the same columns and uniqueness as before.
+  This fix landed on main after the `v3.0.0` tag (#136).
 - **A `Data` object with a route-parameter field answers 422 for a body
   that does not fit.** Its extractor answered 400 where the default
   extractor answers 422 for the same malformed or unknown-key body. This

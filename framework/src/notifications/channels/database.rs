@@ -1,7 +1,8 @@
 //! Database notification channel - writes one row per notification.
 //!
-//! Persists notifications to the `notifications` table created by the
-//! `20260516_create_notifications_table.sql` migration. Each delivery is
+//! Persists notifications to the `notifications` table created by
+//! [`CreateNotificationsTable`](crate::notifications::migrations::CreateNotificationsTable),
+//! which the app registers in its `Migrator`. Each delivery is
 //! one `INSERT`: a fresh UUID id, the notification name as `type`, the
 //! `notifiable_type` registered at construction (the model's table /
 //! class name, e.g. `"users"`), the recipient route as `notifiable_id`,

@@ -58,6 +58,9 @@ pub mod db_facade;
 pub mod dynamic_row;
 pub mod events;
 pub mod identifier;
+// Internal: the framework's own migrations create their indexes through
+// here, so `up` can run over a schema that already exists on every backend.
+pub(crate) mod migration_guard;
 pub mod model;
 pub mod monitor;
 // Internal: hand-written SQL in the queue / notification stores renders its

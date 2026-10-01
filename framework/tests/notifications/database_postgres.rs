@@ -17,30 +17,17 @@
 //! ```
 
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection};
+use sea_orm_migration::{MigrationTrait, SchemaManager};
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::Arc;
 use std::time::Duration;
 use suprnova::notifications::channels::database::DatabaseChannel;
+use suprnova::notifications::migrations::CreateNotificationsTable;
 use suprnova::notifications::{
     Channel, Notifiable, Notification, NotificationDispatcher, all_for, delete_for,
     mark_all_as_read, mark_as_read, mark_as_unread, read_for, unread_for,
 };
-
-/// The shipped migration, applied verbatim - the point of the exercise is
-/// that the framework's own SQL works against the schema it ships.
-const NOTIFICATIONS_MIGRATION: &str =
-    include_str!("../../migrations/20260516_create_notifications_table.sql");
-
-fn strip_sql_line_comments(src: &str) -> String {
-    src.lines()
-        .map(|line| match line.find("--") {
-            Some(idx) => &line[..idx],
-            None => line,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
 
 async fn connect_postgres() -> DatabaseConnection {
     let url = std::env::var("PG_TEST_URL").expect("set PG_TEST_URL to a disposable Postgres");
@@ -57,20 +44,21 @@ async fn connect_postgres() -> DatabaseConnection {
 
 /// The table name is fixed by the migration, so every test in this binary
 /// shares it - hence `#[serial]` plus a drop-and-recreate per test.
+///
+/// The shipped migration runs through `MigrationTrait::up` rather than a
+/// `Migrator`: a `Migrator` records what it applied in `seaql_migrations`,
+/// so after the first test it would skip the table this one just dropped,
+/// and the gate's Postgres database is shared with other test binaries
+/// whose own migrators record there too.
 async fn fresh_db() -> DatabaseConnection {
     let db = connect_postgres().await;
     db.execute_unprepared("DROP TABLE IF EXISTS notifications")
         .await
         .expect("drop notifications");
-    for stmt in strip_sql_line_comments(NOTIFICATIONS_MIGRATION).split(';') {
-        let trimmed = stmt.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        db.execute_unprepared(trimmed)
-            .await
-            .expect("apply notifications migration");
-    }
+    CreateNotificationsTable
+        .up(&SchemaManager::new(&db))
+        .await
+        .expect("apply notifications migration");
     db
 }
 
@@ -185,4 +173,22 @@ async fn postgres_mark_all_as_read_and_delete_for_report_row_counts() {
     assert_eq!(deleted, 4);
     assert_eq!(all_for(&db, "users", "3").await.unwrap().len(), 0);
     assert_eq!(all_for(&db, "users", "4").await.unwrap().len(), 2);
+}
+
+/// #134 review: `CreateNotificationsTable` run over a table and indexes an
+/// app created by hand leaves them, and their rows, alone.
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_up_over_a_hand_made_table_and_indexes_succeeds() {
+    let db = connect_postgres().await;
+    db.execute_unprepared("DROP TABLE IF EXISTS notifications")
+        .await
+        .expect("drop notifications");
+
+    crate::migration::up_over_the_hand_made_schema_keeps_it(&db).await;
+
+    db.execute_unprepared("DROP TABLE notifications")
+        .await
+        .expect("drop notifications");
 }

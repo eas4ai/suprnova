@@ -103,7 +103,10 @@ pub use encrypted::{
 };
 pub use enum_cast::AsEnum;
 pub use primitive::{AsBool, AsDecimal, AsFloat, AsInt, AsString};
-pub use structured::{AsArray, AsArrayObject, AsCollection, AsJson, AsObject};
+pub use structured::{
+    AsArray, AsArrayObject, AsCollection, AsJson, AsObject, AsOptionalArray, AsOptionalArrayObject,
+    AsOptionalCollection, AsOptionalJson, AsOptionalObject,
+};
 pub use temporal::{
     AsDate, AsDateTime, AsImmutableDate, AsImmutableDateTime, AsNaiveDateTime, AsNativeDateTime,
     AsOptionalDateTime, AsOptionalNaiveDateTime, AsOptionalNativeDateTime, AsTimestamp,

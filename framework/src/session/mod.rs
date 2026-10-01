@@ -83,12 +83,17 @@ pub use store::{SessionData, SessionMigrationError, SessionStore, is_valid_sessi
 /// The `DatabaseSessionDriver` construction below only fires when
 /// nothing is registered - e.g. a test or embedder that drives session
 /// state without ever constructing a `SessionMiddleware` - preserving
-/// the original default-driver behaviour for that case.
+/// the original default-driver behaviour for that case. It revokes in
+/// the table `SESSION_TABLE` names, the one `SessionMiddleware` would
+/// have used.
 pub async fn destroy_all_for_user(user_id: &str) -> Result<u64, crate::error::FrameworkError> {
     let destroyed = match crate::container::App::make::<dyn SessionStore>() {
         Some(store) => store.destroy_for_user(user_id).await?,
         None => {
-            let driver = driver::DatabaseSessionDriver::new(std::time::Duration::from_secs(0));
+            let driver = driver::DatabaseSessionDriver::with_configured_table(
+                std::time::Duration::from_secs(0),
+                SessionConfig::from_env().table_name,
+            );
             driver.destroy_for_user(user_id).await?
         }
     };

@@ -16,6 +16,7 @@ pub mod anonymous;
 pub mod channels;
 pub mod database_read;
 pub mod events;
+pub mod migrations;
 pub mod notify_job;
 pub mod testing;
 

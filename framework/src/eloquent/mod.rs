@@ -34,7 +34,8 @@ pub use casts::{
     AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal, AsEncrypted,
     AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat, AsHashed,
     AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsNaiveDateTime, AsNativeDateTime,
-    AsObject, AsOptionalDateTime, AsOptionalNaiveDateTime, AsOptionalNativeDateTime, AsString,
+    AsObject, AsOptionalArray, AsOptionalArrayObject, AsOptionalCollection, AsOptionalDateTime,
+    AsOptionalJson, AsOptionalNaiveDateTime, AsOptionalNativeDateTime, AsOptionalObject, AsString,
     AsTimestamp, Cast, DynCast, IntoDynCast,
 };
 pub use collection::Collection;
