@@ -1623,6 +1623,10 @@ The first envelope is pushed at dispatch; the rest travel on its
 worker pops the next entry and dispatches it. A failure breaks the
 chain - subsequent links are never enqueued.
 
+The [`sync` driver](#drivers) has no worker, so it runs the whole chain
+inline inside `dispatch()`, link by link. A link whose handler fails returns
+its error from `dispatch()`, and the links after it do not run.
+
 Each link applies its job's own `Job::delay()`, as a direct push does. A
 delay of 30 seconds on the head makes the head available 30 seconds after
 `dispatch()`. A delay on any later link makes that link available that long
@@ -2022,10 +2026,12 @@ assert_pushed::<SendWelcomeEmail>(|j| j.user_id == 42);
 An excepted job takes the real path from end to end: it resolves its
 connection, reaches the driver, emits `JobQueueing` and `JobQueued`, and fails
 where a real push fails. A batch is still recorded with all of its jobs, and
-only its excepted jobs reach the real queue. A chain follows its first job,
-because the worker that runs that job dispatches the rest. A raw push is
-always recorded, whatever `except` names, because a raw payload is not a job
-type.
+only its excepted jobs reach the real queue. A chain whose first job is
+excepted reaches the real queue, and the worker that runs that job dispatches
+each later link through the fake, as Laravel does: a link `except` names
+reaches the real queue, and any other link is recorded and does not run. A
+raw push is always recorded, whatever `except` names, because a raw payload is
+not a job type.
 
 ### Raw pushes under the fake
 

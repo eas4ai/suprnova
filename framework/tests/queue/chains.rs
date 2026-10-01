@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use suprnova::error::FrameworkError;
 use suprnova::queue::{
-    Job, MemoryQueueDriver, Queue, QueueDriver,
+    Job, MemoryQueueDriver, Queue, QueueDriver, SyncQueueDriver,
     worker::{WorkerConfig, register_job, run_worker},
 };
 use tokio_util::sync::CancellationToken;
@@ -131,6 +131,77 @@ async fn chain_stops_after_a_failing_link() {
         pending + reserved + delayed,
         0,
         "no further chain envelopes after the failure"
+    );
+}
+
+static SYNC_ORDER: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+#[derive(Serialize, Deserialize, Clone)]
+struct SyncStep {
+    label: u32,
+    fails: bool,
+}
+
+#[async_trait]
+impl Job for SyncStep {
+    fn job_name() -> &'static str {
+        "queue_chains::SyncStep"
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        SYNC_ORDER.lock().unwrap().push(self.label);
+        if self.fails {
+            Err(FrameworkError::internal("this link fails"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn sync_step(label: u32, fails: bool) -> SyncStep {
+    SyncStep { label, fails }
+}
+
+#[tokio::test]
+#[serial]
+async fn the_sync_driver_runs_every_link_of_a_chain_and_stops_at_a_failing_one() {
+    register_job::<SyncStep>();
+    Queue::set_driver(Arc::new(SyncQueueDriver::new()));
+    SYNC_ORDER.lock().unwrap().clear();
+
+    Queue::chain()
+        .add(sync_step(1, false))
+        .unwrap()
+        .add(sync_step(2, false))
+        .unwrap()
+        .add(sync_step(3, false))
+        .unwrap()
+        .dispatch()
+        .await
+        .unwrap();
+    assert_eq!(
+        *SYNC_ORDER.lock().unwrap(),
+        [1, 2, 3],
+        "every link runs, in order"
+    );
+
+    SYNC_ORDER.lock().unwrap().clear();
+    let failed = Queue::chain()
+        .add(sync_step(4, false))
+        .unwrap()
+        .add(sync_step(5, true))
+        .unwrap()
+        .add(sync_step(6, false))
+        .unwrap()
+        .dispatch()
+        .await;
+    assert!(
+        failed.is_err(),
+        "the failing link's error reaches the caller, as a sync push's does"
+    );
+    assert_eq!(
+        *SYNC_ORDER.lock().unwrap(),
+        [4, 5],
+        "a failing link stops the rest of the chain"
     );
 }
 
