@@ -921,9 +921,11 @@ pub(crate) fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError
     Ok(())
 }
 
-/// Every table `term` reads through a [`DbTableBuilder`] subquery, for
-/// the render cache. A relation-existence term (`has`, `where_has`) is
-/// walked only for the subqueries inside its closure's terms.
+/// Every table `term` reads through a subquery, for the render cache: a
+/// [`DbTableBuilder`] subquery's tables, and the related table (and pivot
+/// table) a relation-existence term (`has`, `where_has`, `doesnt_have`,
+/// `where_relation` and their kin) reads in its `EXISTS`, plus whatever
+/// its closure's own terms read.
 fn where_term_tables(term: &WhereTerm, out: &mut Vec<String>) {
     match term {
         WhereTerm::InQuery(_, query, _) | WhereTerm::ExistsQuery(query, _) => {
@@ -936,6 +938,11 @@ fn where_term_tables(term: &WhereTerm, out: &mut Vec<String>) {
             }
         }
         WhereTerm::Exists(spec) => {
+            for table in [&spec.target_table, &spec.pivot_table] {
+                if !table.is_empty() {
+                    out.push(table.clone());
+                }
+            }
             for t in &spec.inner_terms {
                 where_term_tables(t, out);
             }
