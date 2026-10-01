@@ -44,9 +44,10 @@
 use crate::FrameworkError;
 use crate::database::DB;
 use crate::database::clauses::{
-    Condition, Grouping, IntoWhereIn, JoinClause, JoinKind, JoinTarget, condition_tables, grouped,
-    in_condition, join_tables, push_or, quote_identifier, render_conditions, render_join,
-    render_select_column, validate_condition, validate_join, validate_select_column,
+    Condition, Grouping, IntoWhereIn, JoinClause, JoinKind, JoinTarget, ReadSet, condition_tables,
+    grouped, in_condition, join_tables, push_or, quote_identifier, raw_select_may_read,
+    render_conditions, render_join, render_select_column, validate_condition, validate_join,
+    validate_select_column,
 };
 use crate::database::dynamic_row::DynamicRow;
 use crate::eloquent::Collection;
@@ -893,10 +894,19 @@ impl DbTableBuilder {
     }
 
     /// Every table this query reads: its own, each joined table, and
-    /// every table a subquery reads. The render cache records each one,
-    /// so a write to a joined table invalidates a cached page too.
-    pub(crate) fn collect_tables(&self, out: &mut Vec<String>) {
-        out.push(self.table.clone());
+    /// every table a subquery reads, plus whether a `select_raw`,
+    /// `where_raw` or `or_where_raw` fragment may read more. The render
+    /// cache records each table, so a write to a joined table invalidates a
+    /// cached page too; see [`ReadSet`] for what a raw fragment does.
+    pub(crate) fn collect_tables(&self, out: &mut ReadSet) {
+        out.tables.push(self.table.clone());
+        if self
+            .select_items
+            .iter()
+            .any(|item| matches!(item, SelectItem::Raw(raw) if raw_select_may_read(raw)))
+        {
+            out.raw_fragment = true;
+        }
         for join in &self.joins {
             join_tables(join, out);
         }
@@ -905,16 +915,15 @@ impl DbTableBuilder {
         }
     }
 
-    /// Record a read of every table [`Self::collect_tables`] names.
+    /// Record what [`Self::collect_tables`] finds on the render-cache
+    /// collector.
     fn observe_reads(&self) {
         if !crate::render_cache::collector::is_active() {
             return;
         }
-        let mut tables = Vec::new();
-        self.collect_tables(&mut tables);
-        for table in &tables {
-            crate::render_cache::collector::observe_table_read(table);
-        }
+        let mut reads = ReadSet::default();
+        self.collect_tables(&mut reads);
+        reads.observe();
     }
 
     /// Refuse a write on a builder that carries joins. The `UPDATE` and
@@ -943,8 +952,13 @@ impl DbTableBuilder {
     /// query-builder write to any of them later invalidates the cached
     /// representation. The tables are known here, which is what makes the
     /// observation precise; the raw `DB::select` family cannot name its
-    /// tables and marks the render unstorable instead. `first` funnels
-    /// through this method.
+    /// tables and marks the render unstorable instead. So does a query
+    /// carrying a [`Self::select_raw`], [`Self::where_raw`] or
+    /// [`Self::or_where_raw`] fragment, anywhere in it, subqueries included:
+    /// the fragment may read a table the builder does not name. A
+    /// `select_raw` that is a bare integer, as in `select_raw("1")`, reads
+    /// nothing and is the one exception. `first` funnels through this
+    /// method.
     pub async fn get(self) -> Result<Collection<DynamicRow>, FrameworkError> {
         self.validate_inputs()?;
         self.observe_reads();
@@ -2319,9 +2333,13 @@ mod where_clause_render_tests {
                 "posts.id",
             )
             .or_where_in("posts.id", DbTableBuilder::new("pins").select(["post_id"]));
-        let mut tables = Vec::new();
-        builder.collect_tables(&mut tables);
-        assert_eq!(tables, vec!["posts", "users", "orders", "audits", "pins"]);
+        let mut reads = ReadSet::default();
+        builder.collect_tables(&mut reads);
+        assert_eq!(
+            reads.tables,
+            vec!["posts", "users", "orders", "audits", "pins"]
+        );
+        assert!(!reads.raw_fragment);
     }
 }
 

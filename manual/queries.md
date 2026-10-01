@@ -293,10 +293,15 @@ The subquery's values bind ahead of the values of the conditions and
 `WHERE` clauses after it, so the order you call the methods in doesn't
 matter.
 
-`get` and `count` record a read of every table the query touches,
-including joined tables and the tables a subquery reads, so a cached
-page that ran the query is invalidated when any of them changes. See
-[Render cache](render-cache.md).
+`get` and `count` record a read of every table the query names,
+including joined tables and the tables a subquery names, so a cached
+page that ran the query is invalidated when any of them changes. A
+`select_raw`, `where_raw`, or `or_where_raw` fragment can read a table
+the builder doesn't name, so a query that carries one anywhere, subqueries
+included, keeps the page out of the cache: the response is still served,
+but it is never stored. A `select_raw` that is a bare number, such as the
+`select_raw("1")` in an `EXISTS` subquery, reads nothing and doesn't
+count. See [Render cache](render-cache.md).
 
 ### Ordering and windowing
 

@@ -2701,6 +2701,49 @@ async fn a_failing_after_commit_callback_still_serves_the_committed_render() {
     );
 }
 
+/// A builder query that carries a raw fragment can read tables the builder
+/// does not name: here a `where_raw` subquery on `posts` inside a query on
+/// `users`. Recording only `users` would store the page on an incomplete
+/// dependency set and serve it stale after a write to `posts`. One key per
+/// builder: `DB::table` and the model builder.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_raw_fragment_read_of_another_table_is_never_served_stale() {
+    let harness = boot_with_render_cache().await;
+    create_user(&harness, "alice").await;
+    create_user(&harness, "bob").await;
+
+    let mut posts = 0;
+    let mut stale = Vec::new();
+    for kind in ["table", "model"] {
+        let path = format!("/raw-fragment-read/{kind}");
+        let before = dispatch_get(&harness, &path, &[]).await;
+        assert_eq!(
+            before.status,
+            StatusCode::OK,
+            "{kind}: the read itself works"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&before.body),
+            format!("{kind} counts {posts} users"),
+            "{kind}: precondition"
+        );
+
+        advance_posts(&harness).await;
+        posts += 1;
+
+        let after = dispatch_get(&harness, &path, &[]).await;
+        let body = String::from_utf8_lossy(&after.body).into_owned();
+        if body != format!("{kind} counts {posts} users") {
+            stale.push(format!("{kind}: {body:?}"));
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "a write to posts, which only the raw fragment reads, left these pages stale: {stale:?}"
+    );
+}
+
 /// Final review, F2: `Auth::user()` resolves through `DatabaseUserProvider`,
 /// which reads the `users` table through `DB::table(..).first()`; with the
 /// builder facade observed, a `PrivateCached` render that shows the
