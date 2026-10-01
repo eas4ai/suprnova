@@ -1363,6 +1363,12 @@ impl PendingBatch {
     /// the id it was handed finds the batch. No job runs, so that batch
     /// stays pending.
     ///
+    /// A job the fake excepts
+    /// ([`QueueFakeGuard::except`](crate::queue::testing::QueueFakeGuard::except))
+    /// is pushed to its connection as it is without the fake, and is not
+    /// recorded as a push. The batch is recorded all the same, with every
+    /// job it was built with.
+    ///
     /// [`SkipIfBatchCancelled`]: crate::queue::SkipIfBatchCancelled
     pub async fn dispatch(self) -> Result<String, FrameworkError> {
         if !self.debounce_rejected.is_empty() {
@@ -1379,19 +1385,23 @@ impl PendingBatch {
                 self.build_errors.join("; ")
             )));
         }
-        // Every job's connection is resolved before anything is stored or
-        // pushed, so a connection nobody registered rejects the whole batch
-        // and leaves no batch behind. Not under the fake, which resolves no
-        // driver.
-        let faked = crate::queue::testing::is_active();
-        let drivers = if faked {
-            Vec::new()
-        } else {
-            self.connections
-                .iter()
-                .map(|name| crate::queue::connections::target(name).map(|target| target.driver))
-                .collect::<Result<Vec<_>, _>>()?
-        };
+        // Every job that goes to a real queue has its connection resolved
+        // before anything is stored or pushed, so a connection nobody
+        // registered rejects the whole batch and leaves no batch behind. A
+        // job the fake records resolves no driver, so it gets `None`.
+        let recorded = crate::queue::testing::is_active();
+        let drivers = self
+            .envelopes
+            .iter()
+            .zip(&self.connections)
+            .map(|(env, name)| {
+                if crate::queue::testing::fakes(&env.job_name) {
+                    Ok(None)
+                } else {
+                    crate::queue::connections::target(name).map(|target| Some(target.driver))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         ensure_default_repository();
         let repo = current_repository()
             .ok_or_else(|| FrameworkError::internal("batch repository not initialized"))?;
@@ -1412,26 +1422,28 @@ impl PendingBatch {
         };
         repo.store(batch).await?;
 
-        // The fake comes before the driver lookup, as it does in the
-        // `Queue::push` funnel: a faked test has no driver to find, and one
-        // that has must not be written to.
-        if faked {
-            let envelopes: Vec<Envelope> = self
-                .envelopes
-                .into_iter()
-                .map(|mut env| {
-                    env.batch_id = Some(id.clone());
-                    env
-                })
-                .collect();
+        let envelopes: Vec<Envelope> = self
+            .envelopes
+            .into_iter()
+            .map(|mut env| {
+                env.batch_id = Some(id.clone());
+                env
+            })
+            .collect();
+        if recorded {
             crate::queue::testing::record_batch(&id, &self.name, &envelopes);
-            return Ok(id);
         }
 
-        let mut remaining = self.envelopes.into_iter().zip(drivers);
+        let mut remaining = envelopes.into_iter().zip(drivers);
         let mut pushed = 0usize;
-        while let Some((mut env, driver)) = remaining.next() {
-            env.batch_id = Some(id.clone());
+        while let Some((env, driver)) = remaining.next() {
+            // A job the fake records is recorded in place of its push, as it
+            // is in the `Queue::push` funnel: a faked test has no driver to
+            // find, and one that has must not be written to.
+            let Some(driver) = driver else {
+                crate::queue::testing::record_envelope(&env);
+                continue;
+            };
             let undispatched = env.id;
             if let Err(e) = driver.push(env).await {
                 // Everything from here on never reached the queue, starting

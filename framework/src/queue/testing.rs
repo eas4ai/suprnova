@@ -16,14 +16,20 @@
 //! test that only cares that a job was queued does not need to know which
 //! path queued it.
 //!
+//! [`QueueFakeGuard::except`] narrows the fake: the job types it names take
+//! the real path to the real queue, and only the rest are recorded.
+//! [`Queue::push_raw`] payloads are kept apart from typed pushes and read back
+//! with [`raw_pushes`] / [`pushed_raw`].
+//!
 //! [`PendingBatch::dispatch`]: crate::queue::PendingBatch::dispatch
 //! [`PendingChain::dispatch`]: crate::queue::PendingChain::dispatch
+//! [`Queue::push_raw`]: crate::queue::Queue::push_raw
 
 use crate::error::FrameworkError;
-use crate::queue::{Envelope, EnvelopeOverrides, InspectedJob, Job};
+use crate::queue::{Envelope, EnvelopeError, EnvelopeOverrides, InspectedJob, Job};
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
@@ -59,6 +65,10 @@ struct FakePush {
     /// (`push`, `push_later`, `bulk`, `push_unique`, …), none of which
     /// take one.
     overrides: EnvelopeOverrides,
+    /// The job name of every link chained after this push, in order. Empty
+    /// for every push except the head of a chain of two or more jobs, which
+    /// is what [`assert_pushed_without_chain`] reads.
+    chained: Vec<String>,
 }
 
 impl FakePush {
@@ -90,6 +100,14 @@ struct FakeStore {
     pushed: HashMap<String, Vec<FakePush>>,
     batches: Vec<FakedBatch>,
     chains: Vec<FakedChain>,
+    /// Payloads handed to [`Queue::push_raw`](crate::queue::Queue::push_raw),
+    /// in push order. Kept apart from `pushed` because a raw push names no
+    /// job type, as Laravel's `QueueFake::$rawPushes` is kept apart from its
+    /// `$jobs`.
+    raw: Vec<RawPush>,
+    /// `Job::job_name()`s that [`QueueFakeGuard::except`] sends to the real
+    /// queue instead of recording.
+    except: HashSet<String>,
 }
 
 /// Process-wide serializer: only one test may hold the fake at a time.
@@ -100,8 +118,21 @@ fn lock_fake() -> std::sync::MutexGuard<'static, Option<FakeStore>> {
     FAKE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Whether the fake is installed at all, whatever it excepts. The paths that
+/// name no job type ask this: a raw push, and the driver lookup a retry of
+/// every failed job does up front.
 pub(crate) fn is_active() -> bool {
     lock_fake().is_some()
+}
+
+/// Whether the fake records a push of the job named `job_name`: it is
+/// installed, and [`QueueFakeGuard::except`] does not name the job. Every
+/// path that pushes a job asks this rather than [`is_active`], so an excepted
+/// job takes the same real path it would take without the fake.
+pub(crate) fn fakes(job_name: &str) -> bool {
+    lock_fake()
+        .as_ref()
+        .is_some_and(|store| !store.except.contains(job_name))
 }
 
 pub(crate) fn record<J: Job>(job: &J, available_at: DateTime<Utc>) -> Result<Uuid, FrameworkError> {
@@ -139,6 +170,7 @@ pub(crate) fn record_with_overrides<J: Job>(
                 payload,
                 available_at,
                 overrides,
+                chained: Vec::new(),
             });
     }
     Ok(id)
@@ -165,16 +197,33 @@ pub(crate) fn record_envelope(env: &Envelope) {
                 payload: env.payload.clone(),
                 available_at: env.available_at,
                 overrides: EnvelopeOverrides::default(),
+                chained: env
+                    .chain_remaining
+                    .iter()
+                    .map(|link| link.job_name.clone())
+                    .collect(),
             });
     }
 }
 
-/// Record a batch in place of dispatching it. Each envelope is recorded as
-/// a push as well, see [`record_envelope`].
-pub(crate) fn record_batch(id: &str, name: &str, envelopes: &[Envelope]) {
-    for env in envelopes {
-        record_envelope(env);
+/// Record a raw push in place of writing it to the driver. `payload` and
+/// `queue` are kept exactly as the caller passed them, as Laravel's
+/// `QueueFake::pushRaw` keeps them.
+pub(crate) fn record_raw(payload: &str, queue: Option<&str>) {
+    let mut g = lock_fake();
+    if let Some(store) = g.as_mut() {
+        store.raw.push(RawPush {
+            payload: payload.to_owned(),
+            queue: queue.map(str::to_owned),
+        });
     }
+}
+
+/// Record a batch in place of dispatching it. Only the batch is recorded
+/// here: the dispatch records each job the fake records as a push itself
+/// (see [`record_envelope`]), because a job that
+/// [`QueueFakeGuard::except`] names goes to the real queue instead.
+pub(crate) fn record_batch(id: &str, name: &str, envelopes: &[Envelope]) {
     let mut g = lock_fake();
     if let Some(store) = g.as_mut() {
         store.batches.push(FakedBatch {
@@ -257,6 +306,27 @@ impl FakedChain {
     }
 }
 
+/// A payload the queue fake recorded in place of a
+/// [`Queue::push_raw`](crate::queue::Queue::push_raw). Mirrors one entry of
+/// Laravel's `QueueFake::rawPushes()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawPush {
+    /// The payload exactly as it was passed: the JSON wire form of an
+    /// [`Envelope`].
+    pub payload: String,
+    /// The queue the push named, `None` when it named none.
+    pub queue: Option<String>,
+}
+
+impl RawPush {
+    /// Decode the payload, so a test can match on the job name or the job's
+    /// data rather than on the JSON text. `push_raw` refuses a payload that
+    /// does not decode, so a recorded one always does.
+    pub fn envelope(&self) -> Result<Envelope, EnvelopeError> {
+        Envelope::from_json(&self.payload)
+    }
+}
+
 /// Install the queue fake for the current test.
 ///
 /// The returned `QueueFakeGuard` holds a process-wide serialization lock,
@@ -282,6 +352,36 @@ pub fn forget_connections() {
 /// serialization lock and clears the fake store on drop.
 pub struct QueueFakeGuard {
     _serial: MutexGuard<'static, ()>,
+}
+
+impl QueueFakeGuard {
+    /// Send the jobs named in `job_names` to the real queue and record every
+    /// other job. Each entry is a `Job::job_name()`. Mirrors Laravel's
+    /// `Queue::fake()->except($jobs)`; [`Queue::fake_except`] is the
+    /// one-call spelling.
+    ///
+    /// An excepted job takes the path it takes without the fake: it resolves
+    /// its connection, reaches the driver, emits its lifecycle events, and
+    /// fails where a real push fails. Calling `except` again adds to the
+    /// names already excepted.
+    ///
+    /// A batch is still recorded, and only its excepted jobs reach the real
+    /// queue. A chain follows its first job, because the worker that runs
+    /// that job dispatches the rest. A [`Queue::push_raw`] is always
+    /// recorded: a raw payload is not a job type, as in Laravel.
+    ///
+    /// [`Queue::fake_except`]: crate::queue::Queue::fake_except
+    /// [`Queue::push_raw`]: crate::queue::Queue::push_raw
+    pub fn except(self, job_names: &[&str]) -> Self {
+        let mut g = lock_fake();
+        if let Some(store) = g.as_mut() {
+            store
+                .except
+                .extend(job_names.iter().map(|name| (*name).to_owned()));
+        }
+        drop(g);
+        self
+    }
 }
 
 impl Drop for QueueFakeGuard {
@@ -592,4 +692,57 @@ pub fn assert_nothing_chained() {
         chains.len(),
         chains.iter().map(FakedChain::job_names).collect::<Vec<_>>()
     );
+}
+
+/// Assert at least one captured push of `J` carried no chain. Mirrors
+/// Laravel's `Queue::assertPushedWithoutChain`.
+///
+/// A job pushed on its own has no chain, and so do a batch member, a retried
+/// job without a chain and a chain of one job. The head of a chain of two or
+/// more jobs carries the rest of the chain, so a push of `J` that is only
+/// ever such a head fails this. Panics when `J` was not pushed at all, and
+/// when every push of it carried a chain, naming the chains it carried.
+///
+/// Use [`assert_chained`] to assert on the chain itself.
+pub fn assert_pushed_without_chain<J: Job>() {
+    let chains: Vec<Vec<String>> = {
+        let g = lock_fake();
+        let store = g.as_ref().expect("Queue::fake() must be active");
+        store
+            .pushed
+            .get(J::job_name())
+            .map(|pushes| pushes.iter().map(|push| push.chained.clone()).collect())
+            .unwrap_or_default()
+    };
+    assert!(
+        !chains.is_empty(),
+        "expected at least one pushed {}",
+        J::job_name()
+    );
+    assert!(
+        chains.iter().any(Vec::is_empty),
+        "expected a pushed {} without a chain; every push of it carried one: {:?}",
+        J::job_name(),
+        chains
+    );
+}
+
+/// Every [`Queue::push_raw`](crate::queue::Queue::push_raw) recorded so far,
+/// in push order. Mirrors Laravel's `Queue::rawPushes()`.
+///
+/// Raw pushes are kept apart from typed pushes: [`pushed`] and
+/// [`assert_pushed`] never see them, and these never see a typed push.
+pub fn raw_pushes() -> Vec<RawPush> {
+    let g = lock_fake();
+    let store = g.as_ref().expect("Queue::fake() must be active");
+    store.raw.clone()
+}
+
+/// The recorded raw pushes `pred` accepts, in push order. Mirrors Laravel's
+/// `Queue::pushedRaw($callback)`; pass `|_| true` for all of them.
+///
+/// [`RawPush::envelope`] decodes the payload when the predicate needs the
+/// job name or the job's data.
+pub fn pushed_raw(pred: impl Fn(&RawPush) -> bool) -> Vec<RawPush> {
+    raw_pushes().into_iter().filter(|raw| pred(raw)).collect()
 }

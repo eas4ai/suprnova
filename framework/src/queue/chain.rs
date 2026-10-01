@@ -278,6 +278,11 @@ impl PendingChain {
     /// [`assert_chained`](crate::queue::testing::assert_chained), and its
     /// head for [`assert_pushed`](crate::queue::testing::assert_pushed).
     ///
+    /// A chain follows its first job: when the fake excepts that job
+    /// ([`QueueFakeGuard::except`](crate::queue::testing::QueueFakeGuard::except)),
+    /// the chain is pushed as it is without the fake and is not recorded,
+    /// because the worker that runs the head dispatches the rest.
+    ///
     /// # One connection
     ///
     /// A chain runs on the connection of its first job. The worker enqueues
@@ -294,8 +299,11 @@ impl PendingChain {
         // `Queue::push` funnel: a faked test has no driver to find, and one
         // that has must not be written to. It reads the labels without
         // asking whether each connection has a driver, for the same reason,
-        // and still refuses the chain production would refuse.
-        let faked = crate::queue::testing::is_active();
+        // and still refuses the chain production would refuse. The head
+        // decides for the whole chain, see the docs above.
+        let faked = links
+            .first()
+            .is_some_and(|head| crate::queue::testing::fakes(&head.job_name));
         let label_of = |connection: &str| -> Result<String, FrameworkError> {
             if faked {
                 Ok(crate::queue::connections::label_for(connection))

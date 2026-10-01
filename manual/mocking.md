@@ -287,6 +287,7 @@ async fn order_placed_enqueues_charge() {
 | `assert_nothing_batched()`                     | no batch was recorded                                          |
 | `assert_chained(&["JobA", "JobB"])`            | a recorded chain is made of exactly these `Job::job_name()`s, head first |
 | `assert_nothing_chained()`                     | no chain was recorded                                          |
+| `assert_pushed_without_chain::<J>()`           | at least one push of `J` carried no chain                      |
 
 The data side returns the typed jobs themselves:
 
@@ -301,12 +302,17 @@ The data side returns the typed jobs themselves:
 - `chained() -> Vec<FakedChain>` - every recorded chain, in dispatch order.
   A `FakedChain` has `links`, `job_names()` and `link::<J>(index)`, which
   decodes the link at `index`.
+- `raw_pushes() -> Vec<RawPush>` - every `Queue::push_raw`, in push order.
+  A `RawPush` has the `payload` and `queue` as they were passed, and
+  `envelope()` decodes the payload.
+- `pushed_raw(|raw| pred) -> Vec<RawPush>` - the raw pushes `pred` accepts.
 
 Every `Queue::push`, `Queue::push_later`, `Queue::later`,
 `Queue::push_unique*`, `Queue::batch().dispatch()`,
 `Queue::chain().dispatch()`, `Queue::retry_failed` and
 `Queue::retry_all_failed` funnel into the same recorder, and none of them
-writes to a driver. No driver has to be installed. A batch, a chain and a
+writes to a driver. No driver has to be installed. `Queue::push_raw` is
+recorded as well, apart from the typed pushes. A batch, a chain and a
 retried job also record as pushes, so `assert_pushed` sees the jobs of a
 batch, the head of a chain and every retried job. A chain records only its
 head as a push, because the links after it have no envelope until the link
@@ -328,6 +334,21 @@ a route or a job-level default in production shows up here with no
 override at all. Reach for `pushed_with_overrides` directly to assert
 anything else the overlay carries - `timeout`, `fail_on_timeout`,
 `max_tries`, `backoff`.
+
+One variant lets some jobs through:
+
+```rust,ignore
+// Fake every job EXCEPT these - they reach the real queue.
+let _guard = Queue::fake_except(&["ProvisionAccount"]);
+
+// The same, on the guard. A second `except` adds to the list.
+let _guard = Queue::fake().except(&["ProvisionAccount"]);
+```
+
+An excepted job is pushed exactly as it is without the fake, so install the
+driver it should reach first, for example `SyncQueueDriver` to run it inline.
+See [Queues](queues.md#letting-some-jobs-through) for how batches, chains and
+raw pushes behave under `except`.
 
 ## Bus - `Bus::fake()`
 
