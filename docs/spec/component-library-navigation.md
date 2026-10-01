@@ -24,14 +24,14 @@ the capabilities remain specified there for the separate project.
 anchors with real route URLs. A navigation component MUST NOT render an
 action as a link for style.
 Falsifier: a shipped navigation item performs a Live action from an anchor, or navigates from a button.
-Mechanism: `.cairn/mechanisms/ui-live-check` and a grep over shipped views for `live:click` on anchors.
+Mechanism: `ui-live-check` and a grep over shipped views for `live:click` on anchors.
 Status: Agreed 2026-09-14
 
 [NAV-002] The tabs component MUST require an explicit mode: local panels
 with tablist semantics and local signals, or route tabs as anchors with
 current-page semantics.
 Falsifier: a tabs instance renders without a declared mode, or a local tab makes a server request on change.
-Mechanism: `.cairn/mechanisms/ui-live-check`; a browserless harness case asserting no request on a local tab change.
+Mechanism: `ui-live-check`; a browserless harness case asserting no request on a local tab change.
 Status: Agreed 2026-09-14
 
 [NAV-003] The pagination component MUST render canonical page URLs in
@@ -69,6 +69,6 @@ Status: Agreed 2026-09-14
 [NAV-007] A local tabs instance MUST select only its own tabs and panels,
 whether another tabs instance is nested inside it or around it.
 Falsifier: clicking a tab of local tabs nested in a panel of another local tabs instance hides that outer panel.
-Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Mechanism: `live-library-review-remediation`.
 Rationale: Evidence: `crates/suprnova-live/components/tabs/tabs.js` selects every descendant tab and handles the events that bubble from a nested instance. Refines: NAV-002. Agreed by promotion `the-review-of-live-and-the-component-library-is-remediated-in-one-commitment`.
 Status: Agreed 2026-09-17

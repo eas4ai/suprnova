@@ -140,7 +140,7 @@ CACHE-010, as one set on 2026-09-13.
 asynchronous event to an existing membership. The framework MUST retire
 a membership whose authorization no longer holds.
 Falsifier: a subscriber whose stream Gate is redefined to deny still receives an event published after the denial (ASTRA-01).
-Mechanism: `.cairn/mechanisms/live-async-revocation`.
+Mechanism: `live-async-revocation`.
 Rationale: Refines: Live spec 14, admission "rechecks ... registry and revocation state" at the consumption boundary.
 Status: Agreed 2026-09-13
 
@@ -150,7 +150,7 @@ its ORM writes join. The framework MUST roll that transaction back when a
 later stage of the action fails. Until the framework can do both, the
 registry MUST refuse a component whose action declares the policy.
 Falsifier: an action with two writes whose second stage fails leaves the first write durable (ASTRA-05).
-Mechanism: `.cairn/mechanisms/live-action-transaction`.
+Mechanism: `live-action-transaction`.
 Rationale: Refines: the `transaction` policy in `crates/suprnova-live/docs/specs/suprnova-live/04-actions-and-validation.md`.
 Status: Agreed 2026-09-13
 
@@ -158,7 +158,7 @@ Status: Agreed 2026-09-13
 per-scope limit before awaiting external authorization. The framework
 MUST release that slot on every error path.
 Falsifier: 513 concurrent issuances for one scope against a delayed authorizer all succeed (ASTRA-07).
-Mechanism: `.cairn/mechanisms/live-async-issuance-cap`.
+Mechanism: `live-async-issuance-cap`.
 Rationale: Refines: Live spec 14, bounded per-scope issuance.
 Status: Agreed 2026-09-13
 
@@ -168,7 +168,7 @@ event published afterwards is appended: session invalidation, session id
 regeneration, and `destroy_for_user` each revoke the memberships that
 carry the destroyed session's fingerprint or the affected principal.
 Falsifier: a subscriber logs out with `Auth::logout_and_invalidate` and still receives an event published after the logout (the open clause of LIVE-016).
-Mechanism: `.cairn/mechanisms/live-session-revocation`.
+Mechanism: `live-session-revocation`.
 Rationale: Refines: Live spec 14, admission "rechecks ... registry and revocation state"; LIVE-016 session and revocation-state clauses.
 Status: Agreed 2026-09-13
 
@@ -178,7 +178,7 @@ ten seconds. The framework MUST retire a membership whose session the
 store no longer holds, so a session destroyed on another node stops
 receiving events within that interval.
 Falsifier: a session row is removed from the store directly, the clock advances past ten seconds, and a publish still reaches the membership.
-Mechanism: `.cairn/mechanisms/live-session-reverification`.
+Mechanism: `live-session-reverification`.
 Rationale: Refines: Live spec 14, admission "rechecks ... registry and revocation state"; LIVE-016 session and revocation-state clauses.
 Status: Agreed 2026-09-13
 
@@ -187,7 +187,7 @@ session opened for its default-guard user when that session loses that
 user on the same node, before any event published afterwards is appended,
 whether or not the session row itself is destroyed.
 Falsifier: a subscriber logs out with plain `Auth::logout`, which keeps the session row, and still receives an event published after the logout.
-Mechanism: `.cairn/mechanisms/live-session-deauthentication`.
+Mechanism: `live-session-deauthentication`.
 Rationale: Refines: LIVE-019, for the logout that clears the user without destroying the session; the developer's answer on escalation `live-019`.
 Status: Agreed 2026-09-14
 
@@ -196,15 +196,15 @@ per-scope limit with a subscription whose transport credential the
 connect step accepts, when the concurrent issuances of one scope produce
 identical descriptors.
 Falsifier: 512 concurrent issuances for one scope and one SSE document instance, released together from a delayed authorizer, answer any request 403 with `async_authority_invalid` (the observation captured in the backlog on 2026-09-13 from the LIVE-018 probe: 39 of 512).
-Mechanism: `.cairn/mechanisms/live-issuance-credentials`.
+Mechanism: `live-issuance-credentials`.
 Rationale: Refines: Live spec 14, issuance and connect; LIVE-018, whose probe observed it.
 Status: Agreed 2026-09-14
 
 [LIVE-023] The framework MUST construct the envelope context of each
 issuance it admits from that issuance's own claims, when issuances of one
 scope run concurrently.
-Falsifier: the LIVE-022 probe answers an admitted request 503 with `async_unavailable` (the baseline receipt `.cairn/evidence/LIVE-022/20260914T132842262Z`: 1 of 512), because the claims of one issuance were read back while another's had replaced them.
-Mechanism: `.cairn/mechanisms/live-issuance-credentials`.
+Falsifier: the LIVE-022 probe answers an admitted request 503 with `async_unavailable` (the 2026-09-14 13:28 UTC baseline receipt: 1 of 512), because the claims of one issuance were read back while another's had replaced them.
+Mechanism: `live-issuance-credentials`.
 Rationale: Refines: LIVE-022, whose probe exposed it; the developer's answer on escalation `live-022`.
 Status: Agreed 2026-09-14
 
@@ -218,7 +218,7 @@ engine renders, and an element that carries both attributes with
 different values MUST fail morph validation instead of morphing under
 either.
 Falsifier: a template writes `live:key` alone on a `live:preserve.self` disclosure and a compatible morph replaces it or drops its open state; or an element carrying both attributes with different values morphs without a diagnostic.
-Mechanism: `.cairn/mechanisms/live-key-vocabulary` (declared with the commitment `live-key-vocabulary`).
+Mechanism: `live-key-vocabulary` (declared with the commitment `live-key-vocabulary`).
 Rationale: Evidence: the defect, recorded from OVL-006 on 2026-09-15: the checker validates `live:key` (`crates/suprnova-live/src/checker/html.rs`, `validate_keys`) while `crates/suprnova-live/browser/src/morph/keys.ts`, `controls.ts` and `preserve.ts` read only `data-suprnova-live-key`, so every library component writes both attributes. Refines: Live spec 12, keyed identity; spec 09, the directive set; OVL-006, whose stable key scope this vocabulary names.
 Status: Agreed 2026-09-15
 
@@ -229,7 +229,7 @@ splices `caller()` as empty caller content. The checker MUST fail a
 component whose view renders no branch, so a component is proved only when
 every element its view renders was checked.
 Falsifier: a view calls such a macro with an empty call block and then names an action the component does not declare, and the checker reports clean; or a view that renders no branch reports proved.
-Mechanism: `.cairn/mechanisms/checker-soundness`.
+Mechanism: `checker-soundness`.
 Rationale: Evidence: the defect, found 2026-09-16 building this commitment: `crates/suprnova-live/src/checker/branch.rs` built an empty caller as zero branches, and splicing zero branches dropped every branch after the call, so the dogfood form gallery proved clean while hiding 24 errors. Refines: LIVE-008, whose falsifier the defect satisfied; UI-009.
 Status: Agreed 2026-09-16
 
@@ -240,7 +240,7 @@ duration. The `BindingTiming::debounce` constructor MUST return an error
 for any other duration, so every declared debounce has a template modifier
 the checker and the browser runtime both accept.
 Falsifier: a component declaring `#[model(debounce = 300)]` compiles, or `BindingTiming::debounce(300)` succeeds.
-Mechanism: `.cairn/mechanisms/checker-soundness`.
+Mechanism: `checker-soundness`.
 Rationale: Evidence: `suprnova-macros/src/live/attrs.rs` and `crates/suprnova-live/src/state/timing.rs` accepted 1 to 60000 ms while `crates/suprnova-live/fixtures/v4/directive-grammar.json` lists three debounce modifiers; the dogfood form gallery and live-native gallery declared 300 ms, a timing no template could bind. Refines: Live spec 03, binding timing; spec 11, model update timing.
 Status: Agreed 2026-09-16
 
@@ -249,7 +249,7 @@ field the component declares or an action the component or one of its
 ancestors declares, the targets the browser runtime resolves for error
 feedback.
 Falsifier: a validation summary writing `live:error.live.polite="save"` on a component that declares the action `save` fails the checker.
-Mechanism: `.cairn/mechanisms/checker-soundness`.
+Mechanism: `checker-soundness`.
 Rationale: Evidence: `crates/suprnova-live/src/checker/directive.rs` validated `live:error` as a field only, while `crates/suprnova-live/browser/src/feedback/targets.ts` (`scopeFor`) resolves a field, the island, or an action. Refines: Live spec 11, feedback targets; FORM-003.
 Status: Agreed 2026-09-16
 
@@ -260,7 +260,7 @@ message counts the framework's protocol limits admit: 128 model
 proposals, operations, arguments, validation entries, events, effects, and
 extensions per message.
 Falsifier: the browser refuses a request carrying nine model proposals, or a response carrying seventeen validation entries or nine events.
-Mechanism: `.cairn/mechanisms/live-protocol-bounds`.
+Mechanism: `live-protocol-bounds`.
 Rationale: Evidence: `crates/suprnova-live/browser/src/protocol.ts` refused more than 8 proposals, operations, events, effects, and extensions and more than 16 arguments and validation entries, while `framework/src/live/runtime.rs` configures `ProtocolLimits` at 128 for each and the browser scheduler admits 128 proposals; no Live specification sets the lower counts. The dogfood form gallery's ten-field save form never submitted. Refines: Live spec 06, bounded envelopes; LIVE-027's promotion.
 Status: Agreed 2026-09-16
 
@@ -268,7 +268,7 @@ Status: Agreed 2026-09-16
 model controls name more distinct fields than one Live request carries,
 127: the 128 operations less the invoked action.
 Falsifier: a view whose `live:submit` form holds 128 distinct model fields proves.
-Mechanism: `.cairn/mechanisms/live-protocol-bounds`.
+Mechanism: `live-protocol-bounds`.
 Rationale: Evidence: a submit proposes every model control associated with its form (`crates/suprnova-live/browser/src/models/forms.ts`, `prepareAction`), and the checker proved the ten-field form the browser refused. Refines: LIVE-025, UI-009.
 Status: Agreed 2026-09-16
 
@@ -277,7 +277,7 @@ with the detail `resource_exhausted` when it refuses to build a request
 that exceeds a protocol bound. The runtime MUST finish that action as
 rejected, so the action's error feedback shows.
 Falsifier: a refused oversized request records `transport_failed` with `network_failure`, or its action never reaches the error state.
-Mechanism: `.cairn/mechanisms/live-protocol-bounds`.
+Mechanism: `live-protocol-bounds`.
 Rationale: Evidence: the island transport caught the request builder's `ProtocolValidationError` as a network failure (`crates/suprnova-live/browser/src/transport/fetch.ts`, `#run`). Refines: Live spec 11, feedback states; spec 06.
 Status: Agreed 2026-09-16
 
@@ -285,28 +285,28 @@ Status: Agreed 2026-09-16
 decode with a validation error on that field. The framework MUST NOT run
 the requested action after such a proposal.
 Falsifier: a proposal of null for a u64 model field, or of a boolean for a list field, returns an accepted outcome with no validation entry, or the action runs.
-Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Mechanism: `live-library-review-remediation`.
 Rationale: Evidence: `suprnova-macros/src/live/component.rs` discards each proposal's application result and `framework/src/live/action.rs` never reads the batch's binding issues; the dogfood form gallery's Save answered accepted with empty validation for quantity null and topics false. Refines: Live spec 03, invalid conversions produce field-level binding errors. Agreed by promotion `the-review-of-live-and-the-component-library-is-remediated-in-one-commitment`.
 Status: Agreed 2026-09-17
 
 [LIVE-032] The browser runtime MUST propose the list of checked values
 for a model field that more than one checkbox binds.
 Falsifier: checking two boxes of the dogfood form gallery's topic group proposes a boolean.
-Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Mechanism: `live-library-review-remediation`.
 Rationale: Evidence: `crates/suprnova-live/browser/src/models/control.ts` reads each checkbox as its checked state, and a group whose boxes disagree reads as `control_unsupported`. Refines: Live spec 03, HTML control semantics map predictably to Rust values. Agreed by promotion `the-review-of-live-and-the-component-library-is-remediated-in-one-commitment`.
 Status: Agreed 2026-09-17
 
 [LIVE-033] The checker, the `live_key` filter, and the browser runtime
 MUST accept the same stable-key alphabet.
 Falsifier: a key the checker and the filter accept, such as "-1" or "_draft", makes the runtime refuse the island's morph.
-Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Mechanism: `live-library-review-remediation`.
 Rationale: Evidence: `crates/suprnova-live/src/checker/html.rs` and `crates/suprnova-live/src/view/live_key.rs` accept a leading underscore, hyphen, dot, or colon, which `SAFE_KEY` in `crates/suprnova-live/browser/src/morph/keys.ts` refuses. Refines: LIVE-024, LIVE-025. Agreed by promotion `the-review-of-live-and-the-component-library-is-remediated-in-one-commitment`.
 Status: Agreed 2026-09-17
 
 [LIVE-034] The checker and the browser runtime MUST agree on the element
 ids an island may hold.
 Falsifier: a view whose island holds the id "_top" or "user[email]" passes `live:check` and its first morph fails.
-Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Mechanism: `live-library-review-remediation`.
 Rationale: Evidence: `keys.ts` validates every id inside an island with `SAFE_KEY`, and the checker only records ids for teleport targets. Refines: LIVE-025. Agreed by promotion `the-review-of-live-and-the-component-library-is-remediated-in-one-commitment`.
 Status: Agreed 2026-09-17
 
@@ -315,7 +315,7 @@ into a stable key the checker and the browser runtime accept, one value
 always yielding the same key. The manual MUST say that a loop key the
 `live_key` filter refuses fails its island's render.
 Falsifier: no shipped filter can key a datatable row by an email address, or the manual omits the render failure.
-Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Mechanism: `live-library-review-remediation`.
 Rationale: Evidence: the `live_key` filter returns an error for any byte outside its alphabet, so one row keyed by an address containing @ fails the island for every viewer. Refines: LIVE-024; DATA-005. Agreed by promotion `the-review-of-live-and-the-component-library-is-remediated-in-one-commitment`.
 Status: Agreed 2026-09-17
 
@@ -323,7 +323,7 @@ Status: Agreed 2026-09-17
 inside a macro body as that binding, not as a macro parameter of the same
 name.
 Falsifier: a macro with a parameter `name` whose body writes `live:model` from `name` inside `for name in names`, called with a literal argument, is proved.
-Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Mechanism: `live-library-review-remediation`.
 Rationale: Evidence: `crates/suprnova-live/src/checker/branch.rs` keeps a call's argument bindings inside loop bodies (`expand_loop`), while Askama renders the loop's own values. Refines: LIVE-025. Agreed by promotion `the-review-of-live-and-the-component-library-is-remediated-in-one-commitment`.
 Status: Agreed 2026-09-17
 
@@ -332,7 +332,7 @@ value differs from the value its control held after the island's last
 applied render, even when that value equals the value the browser last
 proposed.
 Falsifier: on the dogfood form gallery, clearing the seat count, pressing Reset, and clearing the count again sends no model update for the seat count.
-Mechanism: `.cairn/mechanisms/live-model-render-baseline`.
+Mechanism: `live-model-render-baseline`.
 Rationale: Evidence: `ModelState.propose` in `crates/suprnova-live/browser/src/models/state.ts` compares an edit with `browserProposal`, which only an edit sets, and `ModelState.reconcile` has no caller in the runtime; `crates/suprnova-live/browser/e2e/app-dogfood-forms.spec.ts` makes a valid edit before the second empty one to avoid it. Refines: Live spec 11, dirty state compares the current browser proposal to the last accepted server-authoritative value, and a response updates accepted server state without overwriting a newer unsent local edit. Agreed by promotion `a-render-that-changes-a-bound-control-becomes-the-baseline-its-next-edit-is-compared-with`.
 Status: Agreed 2026-09-17
 
@@ -340,6 +340,6 @@ Status: Agreed 2026-09-17
 complete a write operation only once the written bytes have reached the
 object, so a read the provider issues afterwards observes them.
 Falsifier: sixty consecutive whole-file runs of `crates/suprnova-live/tests/upload_file_provider.rs` report a checksum mismatch or an incomplete transfer in any run.
-Mechanism: `.cairn/mechanisms/live-upload-store-flush`.
+Mechanism: `live-upload-store-flush`.
 Rationale: Evidence: `write_all_fragmented` in `crates/suprnova-live/crates/suprnova-live-test-support/src/file_quarantine_store.rs` wrote through a tokio file and never flushed it, so a write the provider had awaited could still be in that file's buffer; six of sixty runs failed on an idle machine, and four Live gate runs on 2026-09-17 were red. Refines: LIVE-010, the Live gate proves the engine's upload behavior. Agreed by promotion `the-quarantine-store-the-live-gate-runs-completes-a-write-only-when-the-bytes-have-reached-the-file`.
 Status: Agreed 2026-09-17

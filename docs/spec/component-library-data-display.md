@@ -27,14 +27,14 @@ with one manual example.
 visual reflow. A layout primitive MUST accept semantic elements rather
 than emitting anonymous wrapper depth by default.
 Falsifier: a shipped layout primitive reorders reading or focus order at a breakpoint, or wraps content in an unlabeled generic element by default.
-Mechanism: `.cairn/mechanisms/ui-live-check`; one Playwright case asserting tab order across breakpoints.
+Mechanism: `ui-live-check`; one Playwright case asserting tab order across breakpoints.
 Status: Agreed 2026-09-15
 
 [DATA-002] Badge, avatar, and stat components MUST carry text or a
 programmatic label for every status. A badge, avatar, or stat component
 MUST NOT convey status by color or image alone.
 Falsifier: a shipped status variant has no text and no `aria-label`.
-Mechanism: `.cairn/mechanisms/ui-live-check`.
+Mechanism: `ui-live-check`.
 Status: Agreed 2026-09-15
 
 [DATA-003] Repeated items in a list, feed, or table MUST carry stable
@@ -58,12 +58,12 @@ Status: Agreed 2026-09-15
 MUST expose sort, filter, and page state through `#[url]` fields as
 shareable URLs. The datatable MUST mount as one island per table.
 Falsifier: a table renders as generic elements, a sort is not reflected in the URL, or a row mounts its own island.
-Mechanism: an `app/tests/` end-to-end case through `handle_request`; `.cairn/mechanisms/ui-live-check`.
+Mechanism: an `app/tests/` end-to-end case through `handle_request`; `ui-live-check`.
 Status: Agreed 2026-09-15
 
 [DATA-006] The chart renderer MUST return an error instead of panicking
 for any series of finite values.
 Falsifier: a call to `render_chart` with a value of 1e12 panics.
-Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Mechanism: `live-library-review-remediation`.
 Rationale: Evidence: charts-rs 1.0.0 overflows in `src/charts/util.rs` for values from 1e12, and `crates/suprnova-live/src/view/charts.rs` checks only that each value is finite. Refines: DATA-004; the house rule that public-surface code returns a Result and does not panic. Agreed by promotion `the-review-of-live-and-the-component-library-is-remediated-in-one-commitment`.
 Status: Agreed 2026-09-17

@@ -35,14 +35,14 @@ wrapper with an absolute bubble on `:hover` and `:focus-visible`,
 associated through `aria-describedby`. A custom-element enhancement MAY
 add dismissal to that bubble.
 Falsifier: the tooltip needs script to show its bubble, the bubble is not referenced by `aria-describedby`, or the bubble stays hidden in a document the enhancement never reaches.
-Mechanism: `.cairn/mechanisms/ui-overlays`; `.cairn/mechanisms/ui-live-check`.
-Rationale: Revised 2026-09-17: the first text read "The tooltip MUST be CSS only: a relative wrapper with an absolute bubble on `:hover` and `:focus-visible`, associated through `aria-describedby`", and its falsifier refused script outright. That left a pointer user no way to dismiss a bubble that covers content, which WCAG 2.2 success criterion 1.4.13 requires, so OVL-007's hoverable half shipped while the dismissible half waited in `.cairn/next-iteration/`. The developer chose the script enhancement in conversation on 2026-09-17 at 17:51 EDT, answering "1" to the three ways the item recorded, over waiting for a native hint popover the qualified engines do not all support and over a placement that never obscures content.
+Mechanism: `ui-overlays`; `ui-live-check`.
+Rationale: Revised 2026-09-17: the first text read "The tooltip MUST be CSS only: a relative wrapper with an absolute bubble on `:hover` and `:focus-visible`, associated through `aria-describedby`", and its falsifier refused script outright. That left a pointer user no way to dismiss a bubble that covers content, which WCAG 2.2 success criterion 1.4.13 requires, so OVL-007's hoverable half shipped while the dismissible half waited for the next specification phase. The developer chose the script enhancement in conversation on 2026-09-17 at 17:51 EDT, answering "1" to the three ways the item recorded, over waiting for a native hint popover the qualified engines do not all support and over a placement that never obscures content.
 Status: Agreed 2026-09-17
 
 [OVL-003] The dropdown menu MUST be single level, with real anchors for
 navigation items and buttons or registered actions for action items.
 Falsifier: a shipped menu nests a submenu, or an action item is an anchor.
-Mechanism: `.cairn/mechanisms/ui-live-check` and a grep over shipped views.
+Mechanism: `ui-live-check` and a grep over shipped views.
 Status: Agreed 2026-09-14
 
 ## Behavioral tier
@@ -68,7 +68,7 @@ Status: Agreed 2026-09-14
 [OVL-007] The tooltip MUST keep its bubble visible while the pointer
 moves from the trigger onto the bubble.
 Falsifier: the bubble hides once the pointer moves from the trigger onto it.
-Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Mechanism: `live-library-review-remediation`.
 Rationale: Evidence: `crates/suprnova-live/components/tooltip/tooltip.css` sets `pointer-events: none` on the bubble. Refines: OVL-002; Live spec 23, tooltips; WCAG 2.2 success criterion 1.4.13. Reading: dismissing the bubble without moving the pointer or focus needs script, which OVL-002 excludes; that change waits in next-iteration. Agreed by promotion `the-review-of-live-and-the-component-library-is-remediated-in-one-commitment`.
 Status: Agreed 2026-09-17
 
@@ -78,6 +78,6 @@ inside the trigger, with neither the pointer nor focus moved. The tooltip
 MUST show that bubble again the next time the user hovers or focuses its
 trigger.
 Falsifier: Escape leaves the bubble visible while the pointer rests on the trigger, or a dismissed bubble stays hidden when the pointer leaves the trigger and hovers it again.
-Mechanism: `.cairn/mechanisms/ui-tooltip-dismissal`.
+Mechanism: `ui-tooltip-dismissal`.
 Rationale: Refines: OVL-002; OVL-007; Live spec 23, tooltips are dismissible; WCAG 2.2 success criterion 1.4.13. Reading: the enhancement OVL-002 now admits carries the family's only custom element, and UI-020 binds it like every other.
 Status: Agreed 2026-09-17

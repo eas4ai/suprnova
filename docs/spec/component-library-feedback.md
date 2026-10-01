@@ -20,7 +20,7 @@ this family.
 [FDB-001] Every alert variant MUST carry a semantic role chosen by
 urgency. An alert variant MUST NOT signal severity by color alone.
 Falsifier: a shipped alert variant differs from its siblings only in color tokens.
-Mechanism: `.cairn/mechanisms/ui-live-check` (role and text presence) and the token stylesheet check for a non-color cue per variant.
+Mechanism: `ui-live-check` (role and text presence) and the token stylesheet check for a non-color cue per variant.
 Status: Agreed 2026-09-14
 
 [FDB-002] Loading presentation MUST represent real queued or loading work.
@@ -46,7 +46,7 @@ Status: Agreed 2026-09-14
 MUST present a critical error in a persistent owning surface as well as
 any toast.
 Falsifier: a critical error is presented only as a toast, or a toast moves focus.
-Mechanism: a browserless harness case; `.cairn/mechanisms/ui-live-check` for the live-region attributes.
+Mechanism: a browserless harness case; `ui-live-check` for the live-region attributes.
 Status: Agreed 2026-09-14
 
 [FDB-005] The live feed and notification bell MUST render a degraded
@@ -61,12 +61,12 @@ indeterminate work. The progress component MUST carry a visible or
 accessible text label. The progress component MUST NOT signal completion
 by color alone.
 Falsifier: a shipped progress view draws its bar from a width value on an element other than `progress`, an indeterminate instance carries a `value`, or an instance renders without a label.
-Mechanism: the feedback tool over the shipped views; `.cairn/mechanisms/ui-live-check`.
+Mechanism: the feedback tool over the shipped views; `ui-live-check`.
 Status: Agreed 2026-09-14
 
 [FDB-007] The toast region MUST hold a toast's timer while the pointer is
 over any part of that toast or focus is inside it.
 Falsifier: the pointer moves from a toast's text to its padding and the toast times out while the pointer stays over it, or the toast hides while its dismiss button has focus.
-Mechanism: `.cairn/mechanisms/live-library-review-remediation`.
+Mechanism: `live-library-review-remediation`.
 Rationale: Evidence: `crates/suprnova-live/components/toast/toast.js` resumes the timers on a pointerleave captured from any descendant of the region. Refines: FDB-004; Live spec 24, toasts. Agreed by promotion `the-review-of-live-and-the-component-library-is-remediated-in-one-commitment`.
 Status: Agreed 2026-09-17

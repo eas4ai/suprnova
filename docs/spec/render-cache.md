@@ -20,7 +20,7 @@ over the engine in `crates/suprnova-live/src/render_cache/`.
 carries `no-store`. The framework MUST NOT replace a handler's `no-store`
 with the route policy's directives.
 Falsifier: a public cached route answering `Cache-Control: no-store` renders once and the second request replays it with `public, max-age=60, s-maxage=60` (ASTRA-02).
-Mechanism: `.cairn/mechanisms/cache-no-store`.
+Mechanism: `cache-no-store`.
 Rationale: Refines: Live spec 15, "Cache-Control, Vary, surrogate directives, age, and private/public markers agree with variance and coherence policy".
 Status: Agreed 2026-09-13
 
@@ -29,7 +29,7 @@ before publication. The framework MUST decline storage when `Vary` names
 a field that is not a declared, normalized key dimension, or when it is
 `*`.
 Falsifier: a handler answering the request's `X-Flavor` with `Vary: X-Flavor` serves the `vanilla` body to a `chocolate` request from storage, with no `Vary` header (ASTRA-09).
-Mechanism: `.cairn/mechanisms/cache-vary`.
+Mechanism: `cache-vary`.
 Rationale: Refines: Live spec 16, "Vary headers and server-side key dimensions remain consistent" and "the key, the Vary header, and the stored representation SHALL agree".
 Status: Agreed 2026-09-13
 
@@ -39,7 +39,7 @@ Status: Agreed 2026-09-13
 `Permissions-Policy`, or `X-Frame-Options` unless it replays that header
 byte for byte.
 Falsifier: an HTML response with `Content-Disposition: attachment` is served from storage without it, so the same bytes render inline (ASTRA-11).
-Mechanism: `.cairn/mechanisms/cache-security-headers`.
+Mechanism: `cache-security-headers`.
 Rationale: Refines: Live spec 15, "unsafe per-request headers are never replayed from storage" and the entry-codec rule at its 2026-09-06 revision.
 Status: Agreed 2026-09-13
 
@@ -48,21 +48,21 @@ that carries a nonce source from a complete entry. The framework MUST
 either decline storage of such a response or issue a fresh nonce in the
 header and every matching body occurrence on each hit.
 Falsifier: a route minting a nonce per render serves the same `script-src 'nonce-...'` and body nonce on a cache hit (ASTRA-12).
-Mechanism: `.cairn/mechanisms/cache-csp-nonce`.
+Mechanism: `cache-csp-nonce`.
 Rationale: Refines: Live spec 16, "Per-response CSP nonces, CSRF data, and other request-specific metadata are generated at assembly time where required".
 Status: Agreed 2026-09-13
 
 [CACHE-005] The framework MUST store a response's content coding with its
 body. The framework MUST replay `Content-Encoding` on every hit.
 Falsifier: a gzip-encoded response replays its encoded bytes without `Content-Encoding` (ASTRA-04).
-Mechanism: `.cairn/mechanisms/cache-content-encoding`.
+Mechanism: `cache-content-encoding`.
 Rationale: Refines: Live spec 16, Media and Encoding negotiation.
 Status: Agreed 2026-09-13
 
 [CACHE-006] The framework MUST NOT publish a representation under the GET
 key from a HEAD render unless the handler rendered the complete GET body.
 Falsifier: a cold HEAD on a route that renders an empty body for HEAD leaves later GET requests answering zero bytes (ASTRA-03).
-Mechanism: `.cairn/mechanisms/cache-head-first`.
+Mechanism: `cache-head-first`.
 Rationale: Refines: Live spec 15, replayable representation = body bytes and metadata of the represented variant.
 Status: Agreed 2026-09-13
 
@@ -71,7 +71,7 @@ by revalidating or rendering fresh. The framework MUST honor a request's
 `Cache-Control: no-store` by bypassing lookup and publication for that
 request.
 Falsifier: a `no-cache` request is answered from storage with `Age`, and a cold `no-store` request populates the cache for the next request (ASTRA-13).
-Mechanism: `.cairn/mechanisms/cache-request-directives`.
+Mechanism: `cache-request-directives`.
 Rationale: Refines: Live spec 15, HTTP cache metadata so browsers and proxies "can participate".
 Status: Agreed 2026-09-13
 
@@ -81,7 +81,7 @@ Status: Agreed 2026-09-13
 connection each query selects. The framework MUST decline publication
 when a render's query selects a connection other than the snapshot's.
 Falsifier: `DB::table_on("audit_aux", ...)` returns the auxiliary row uncached and the primary row under a cached route (ASTRA-06).
-Mechanism: `.cairn/mechanisms/cache-named-connection`.
+Mechanism: `cache-named-connection`.
 Rationale: Refines: Live spec 18, rebuild data and generations share one consistent read view.
 Status: Agreed 2026-09-13
 
@@ -91,7 +91,7 @@ builder, and raw writes alike. When the two cannot share a transaction,
 the framework MUST stop serving affected entries until advancement is
 confirmed.
 Falsifier: after the generation log table is removed, a raw `UPDATE` commits, the API returns an error, and the next cached GET serves the pre-write body (ASTRA-10).
-Mechanism: `.cairn/mechanisms/cache-write-atomicity`.
+Mechanism: `cache-write-atomicity`.
 Rationale: Refines: Live spec 17, "generation events are written as part of the successful data transaction and become observable only after commit".
 Status: Agreed 2026-09-13
 
@@ -99,6 +99,6 @@ Status: Agreed 2026-09-13
 render, it MUST serve that render uncacheable and release the rebuild
 lease.
 Falsifier: a render whose `begin` failed is published after its fallback generation reread agrees (ASTRA-08).
-Mechanism: `.cairn/mechanisms/cache-snapshot-failure`.
+Mechanism: `cache-snapshot-failure`.
 Rationale: Refines: Live spec 18, "failed rebuild preserves the prior atomic entry and releases/times out its singleflight ownership safely".
 Status: Agreed 2026-09-13

@@ -176,4 +176,4 @@ developer writes them in.
 
 Every commitment inherits the Live gate and the repository gate; a
 commitment is Done only when its mechanisms pass on a committed tree and
-the review under `.cairn/reviews/` is recorded.
+its review is recorded (`sudus review`).
