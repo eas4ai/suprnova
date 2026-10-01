@@ -476,9 +476,11 @@ async fn join_values_never_reach_the_sql_text(fx: &Fixture) {
             json!({"title": "Beta", "category": "Rust"}),
         ]
     );
+    // Other tests may run on other threads and log their own joins; only
+    // this statement joins a subquery under the alias `cats`.
     let entry = log
         .iter()
-        .find(|q| q.sql.contains("pj_posts") && q.sql.contains("JOIN"))
+        .find(|q| q.sql.contains("pj_posts") && q.sql.contains("cats"))
         .expect("the join statement is in the query log");
     for value in ["Linus", "Empty", "paid"] {
         assert!(

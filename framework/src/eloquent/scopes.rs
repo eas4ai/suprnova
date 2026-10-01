@@ -224,7 +224,16 @@ where
     if !M::SOFT_DELETES_COLUMN.is_empty()
         && !builder.global_scopes_disabled.contains(&"soft_deletes")
     {
-        builder = builder.filter_null(M::SOFT_DELETES_COLUMN);
+        // A joined table often soft-deletes too, and a bare `deleted_at`
+        // would then be ambiguous, so a query with a join names the
+        // model's table. Without one the column stays bare, as it
+        // always has.
+        let column = if builder.joins.is_empty() {
+            M::SOFT_DELETES_COLUMN.to_string()
+        } else {
+            format!("{}.{}", M::TABLE, M::SOFT_DELETES_COLUMN)
+        };
+        builder = builder.filter_null(column);
     }
     let mut builder = ScopeRegistry::apply_to::<M>(builder);
     builder.where_terms.extend(callers_terms);
