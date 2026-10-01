@@ -7687,7 +7687,6 @@ dependencies = [
  "serde_json",
  "suprnova",
  "syn 2.0.117",
- "tempfile",
  "trybuild",
  "validator",
 ]

@@ -18,7 +18,6 @@ mod domain_error;
 mod factory;
 mod handler;
 mod inertia;
-mod inertia_pages;
 mod injectable;
 mod input_names;
 mod live;
