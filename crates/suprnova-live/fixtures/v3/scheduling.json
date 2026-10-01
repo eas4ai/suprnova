@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "policies": ["latest", "serial", "parallel"],
+  "commands": ["local", "model", "action", "submit", "params_changed", "lazy_complete", "fresh_render"],
+  "feedback_states": ["idle", "dirty", "queued", "loading", "validating", "success", "interrupted", "offline", "retrying", "error"],
+  "defaults": {"policy": "latest", "max_queued_per_island": 16, "max_parallel_per_island": 1},
+  "identity": {"correlation_bits": 128, "idempotency_bits": 128, "promotion_nonce_bits": 128, "source": "web_crypto"}
+}

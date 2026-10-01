@@ -1,0 +1,783 @@
+# Mail
+
+Suprnova's mail subsystem mirrors Laravel's `Mail::to(...)->send(...)` API on Tokio. One `Mail` facade, nine transports (log, in-memory, and `.eml`-file previews for dev/tests, SMTP, and five HTTP providers - Postmark, SES, SendGrid, Mailgun, Resend), Tera-rendered templates with the Mailable's serialized fields as the context, queue + delayed delivery on the durable at-least-once envelope, and a `Mail::fake()` test guard cut from the same cloth as `Bus::fake()` and `Cache::fake()`.
+
+## Quick Start
+
+```rust
+use serde::{Deserialize, Serialize};
+use suprnova::async_trait;
+use suprnova::mail::{Address, Mail, Mailable};
+
+#[derive(Serialize, Deserialize)]
+struct Welcome {
+    name: String,
+}
+
+#[async_trait]
+impl Mailable for Welcome {
+    fn mailable_name() -> &'static str { "Welcome" }
+    fn subject(&self) -> String { format!("Welcome, {}", self.name) }
+    fn text_template_source(&self) -> Option<String> {
+        Some("Hi {{ name }}, welcome aboard.".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some(Address::new("hello@example.com").with_name("Suprnova"))
+    }
+}
+
+async fn greet(name: String) -> Result<(), suprnova::FrameworkError> {
+    Mail::to("alice@example.org")
+        .send(Welcome { name })
+        .await
+}
+```
+
+The Mailable serializes to JSON, which becomes the Tera context for the template; every `pub` field is reachable as `{{ field_name }}`.
+
+## Configuration
+
+`Server::run` calls `suprnova::mail::boot::bootstrap_from_env()` once at startup. It reads `MAIL_DRIVER` and binds the matching transport. Defaults to the `log` driver when unset.
+
+| `MAIL_DRIVER` | Behavior |
+|---------------|----------|
+| `log`         | Emit a `tracing::info!` per send - envelope and full bodies, as Laravel does - and discard. Default outside production. |
+| `memory`      | Capture every message in-process. See `suprnova::mail::boot::captured_in_memory()`. |
+| `file`        | Write one RFC 5322 `.eml` per send to `MAIL_FILE_PATH` (default `storage/mail`), then discard. Open the file in a mail client to check rendering, headers, and attachments. |
+| `smtp`        | Connect to an SMTP server (STARTTLS when credentials are set, plain TCP otherwise). |
+| `postmark`    | POST JSON to Postmark's `/email` endpoint. |
+| `ses`         | POST SigV4-signed requests to Amazon SES `SendEmail`. |
+| `sendgrid`    | POST JSON to SendGrid's `/v3/mail/send`. |
+| `mailgun`     | POST `application/x-www-form-urlencoded` (or `multipart/form-data` when attachments are present) to Mailgun's `/v3/{domain}/messages`. |
+| `resend`      | POST JSON to Resend's `/emails`. |
+
+### Production fails closed on a driver that discards mail
+
+`log`, `memory`, and `file` render a message and drop it. Under `APP_ENV=production`, boot **refuses** to start on any of them - and equally on an unset `MAIL_DRIVER` or a value the build doesn't recognise, because both land on that same `log` transport:
+
+```
+refusing to boot in production: MAIL_DRIVER is unset, which defaults to the `log`
+transport. Password resets and email verifications would report success while
+nothing is delivered. Set MAIL_DRIVER to a delivering driver (smtp | postmark |
+ses | sendgrid | mailgun | resend), or set
+MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true to acknowledge that outgoing mail is
+intentionally discarded.
+```
+
+The failure this prevents is a silent one: with the old default, a deploy that forgot `MAIL_DRIVER` - or wrote `MAIL_DRIVER=SMTP` in the wrong case - reported every password reset as sent while nothing ever left the process, and nobody found out until a user was locked out.
+
+If a production deployment genuinely wants no outgoing mail (a read-only mirror, a dark launch), acknowledge it explicitly:
+
+```env
+MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true
+```
+
+Only `1`, `true`, `yes`, or `on` count as consent - `=false` or a typo leaves the guard armed. With the override set, every boot warns that outgoing mail will not be delivered.
+
+Nothing changes outside production: `local`, `development`, `testing`, and `staging` keep the `log` default and keep the warn-and-fall-back behaviour for unknown drivers.
+
+### Production fails closed on an unencrypted SMTP connection
+
+The same rule, applied to how the connection is protected rather than to
+whether it delivers. `MAIL_DRIVER=smtp` in production must resolve to an
+encrypted transport, or boot fails.
+
+`MAIL_SMTP_ENCRYPTION` takes `starttls`, `tls`, or `none` (`ssl` and
+`null` are accepted as Laravel-compatible aliases). Left unset it derives
+from the credentials:
+
+| `MAIL_SMTP_USER` / `MAIL_SMTP_PASS` | Resolves to | Because |
+|---|---|---|
+| both set | `starttls` | Credentials imply a real relay on the submission port. |
+| neither set | `none` | The local-catcher path. Mailpit, MailHog and maildev listen unauthenticated on 1025 and speak no TLS. |
+
+So a fresh scaffold keeps working with zero configuration, and a
+production deploy that never wired the credentials stops instead of
+quietly sending in the clear. Set `MAIL_SMTP_ENCRYPTION=tls` for a relay
+that expects implicit TLS on 465 - a mode the transport has always
+supported but which no combination of environment variables could reach
+before.
+
+An unrecognised value fails boot in *every* environment, not just
+production. `MAIL_SMTP_ENCRYPTION=tsl` is a transposition of a mode that
+encrypts, so silently treating it as "no encryption" would be the exact
+failure the variable exists to prevent - better to fail on the
+developer's machine than in the deploy.
+
+The escape hatch mirrors the one above:
+
+```env
+MAIL_ALLOW_INSECURE_SMTP_IN_PRODUCTION=true
+```
+
+Only defensible when the relay is reachable solely over a private
+network - a sidecar, or a Postfix inside the VPC. On anything else,
+cleartext SMTP puts the credentials and every password-reset link on the
+wire, and it stays there for whoever is listening on the path.
+
+### The `log` driver logs the whole message
+
+Same as Laravel's `log` mailer: envelope *and* rendered bodies.
+
+```
+mail (log driver): would send from=noreply@app.test to=["alice@example.org"]
+  subject=Reset your password
+  text=Reset your password: https://app.test/password/reset?token=9f3a…&signature=…
+  html=<a href="https://app.test/password/reset?token=9f3a…&signature=…">Reset</a>
+```
+
+That link is the point. In development the console is where you read the verification or password-reset link the app just "sent", and a driver that hides it is a driver nobody can use.
+
+It is safe here because the driver cannot reach production - boot refuses to start on `MAIL_DRIVER=log` under `APP_ENV=production` (see above). The bodies only ever exist on a developer's machine.
+
+If you set `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true` to run the `log` driver in a deployed environment, you are choosing to put single-use bearer links in your logs. Anyone who can read those files - operators, the log shipper, the retention bucket, the aggregator - can use them, and link expiry doesn't help because log shipping is faster than a person reading their inbox. Size your retention and access policy for that, or use a driver that doesn't print:
+
+```env
+# In-process capture - suprnova::mail::boot::captured_in_memory(), or Mail::fake() in tests
+MAIL_DRIVER=memory
+
+# Or write one .eml per send instead of a log line - see "Previewing mail as
+# .eml files" below for the access-control trade this makes
+MAIL_DRIVER=file
+MAIL_FILE_PATH=storage/mail
+
+# Or a local catcher (mailpit / maildev / mailhog), which renders the real mail in a UI
+MAIL_DRIVER=smtp
+MAIL_SMTP_HOST=127.0.0.1
+MAIL_SMTP_PORT=1025
+```
+
+### Per-driver environment
+
+```env
+# SMTP
+MAIL_DRIVER=smtp
+MAIL_SMTP_HOST=smtp.mailtrap.io
+MAIL_SMTP_PORT=587
+MAIL_SMTP_USER=...
+MAIL_SMTP_PASS=...
+MAIL_SMTP_ENCRYPTION=starttls   # or `tls` for implicit TLS on 465, or `none`
+
+# Postmark
+MAIL_DRIVER=postmark
+MAIL_POSTMARK_TOKEN=...
+
+# Amazon SES
+MAIL_DRIVER=ses
+MAIL_SES_ACCESS_KEY=...
+MAIL_SES_SECRET_KEY=...
+MAIL_SES_REGION=us-east-1
+
+# SendGrid
+MAIL_DRIVER=sendgrid
+MAIL_SENDGRID_API_KEY=...
+
+# Mailgun
+MAIL_DRIVER=mailgun
+MAIL_MAILGUN_API_KEY=...
+MAIL_MAILGUN_DOMAIN=mg.example.com
+
+# Resend
+MAIL_DRIVER=resend
+MAIL_RESEND_API_KEY=...
+```
+
+Each HTTP provider also honors a corresponding `MAIL_<PROVIDER>_ENDPOINT` override that points at a regional URL or a mock server (useful for integration tests against `wiremock`).
+
+### Auth-flow sender: `MAIL_FROM` and `MAIL_FROM_NAME`
+
+The built-in auth-flow mailables - email verification, password reset, and the
+password-changed notice - resolve their envelope `From` from the environment
+rather than a hard-coded `from()`:
+
+```env
+MAIL_FROM=no-reply@example.com        # bare address (required by the auth flows; fails closed if unset)
+MAIL_FROM_NAME=Acme Support           # optional display name (since 0.5.9)
+```
+
+- `MAIL_FROM` **must be a bare address.** It is lifted straight into the
+  message's `From`, so a `"Name <addr>"` value would be treated as the entire
+  address and rejected by the transport.
+- `MAIL_FROM_NAME` (optional, added in **0.5.9**) attaches a display name, so the
+  header renders as `Acme Support <no-reply@example.com>`. Unset or blank keeps
+  the previous bare-address behavior. It is read at send time, so it applies to
+  queued auth-flow mail too.
+
+These two variables only affect the framework's own auth-flow mailables. Your
+own `Mailable`s set their sender through `from()` (or the global `always_from`
+default) - see below.
+
+## Previewing mail as `.eml` files
+
+`MAIL_DRIVER=log` puts the rendered bodies in your console, which works for a plain-text message and
+poorly for anything else. The `file` driver writes the bytes SMTP would have put on the wire:
+
+```
+MAIL_DRIVER=file
+MAIL_FILE_PATH=storage/mail
+```
+
+Each send produces one `<millis>-<seq>.eml` in that directory. Open it with any mail client (Thunderbird,
+Apple Mail, `mutt -f`) to see the message as a recipient sees it - both alternative bodies, every
+attachment, and the full header set including `X-Priority`, `X-Tag`, `X-Metadata-*`, and `Return-Path`.
+
+The directory is created on first send. When `MAIL_FILE_PATH` is unset, mail lands in
+`storage_path("mail")` - the same path family every other `storage/` consumer uses, so the
+directory stays inside the application base even when a service manager starts the process
+from somewhere else. An absolute `MAIL_FILE_PATH` is used as given; a relative one anchors
+at the application base directory (`base_path`, overridable with `APP_BASE_PATH`).
+
+### Why Suprnova diverges
+
+Laravel has no file mailer; its `log` mailer writes the raw MIME into the log channel, which means
+grepping a log file for a MIME boundary to reconstruct an attachment. Writing a real `.eml` per message
+makes the artifact openable instead of reconstructable. The trade is that mail accumulates on disk -
+this driver never prunes, so treat `MAIL_FILE_PATH` as scratch space.
+
+### Each `.eml` file is a working credential, and none of them expire on their own
+
+Password-reset and email-verification mail carry single-use bearer links, and the `file` driver writes
+them out exactly as SMTP would have sent them - readable by anyone who can open the file. Unlike the
+`log` driver's stream, this is durable storage: nothing prunes `MAIL_FILE_PATH`, so a token written on
+day one is still sitting there, still valid until it expires, on day one hundred. Give the directory the
+same access treatment you would give a log file holding reset links - keep it out of version control,
+restrict who can read the deploy filesystem, and clear it on a schedule if `file` runs anywhere near
+real traffic.
+
+## The Mailable Trait
+
+Mailables are serializable structs that know how to render themselves. The trait defaults render with `tera::Tera::one_off` against the mailable's serialized fields:
+
+```rust
+use suprnova::async_trait;
+use suprnova::mail::{Address, Attachment, Mailable};
+
+#[async_trait]
+impl Mailable for OrderShipped {
+    fn mailable_name() -> &'static str { "OrderShipped" }
+    fn subject(&self) -> String {
+        format!("Order #{} shipped", self.order_id)
+    }
+    fn html_template_source(&self) -> Option<String> {
+        Some("<p>Tracking: <code>{{ tracking }}</code></p>".into())
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("Tracking: {{ tracking }}".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some(Address::new("orders@example.com").with_name("Acme Orders"))
+    }
+    fn attachments(&self) -> Vec<Attachment> {
+        vec![Attachment::new("invoice.pdf", self.invoice_bytes.clone(), "application/pdf")]
+    }
+}
+```
+
+| Method | Required? | Purpose |
+|--------|-----------|---------|
+| `mailable_name()` | yes | Stable name persisted in the queue envelope - renaming breaks in-flight queued mail. |
+| `subject(&self)` | yes | Computed subject. Used verbatim when `subject_template_source` returns `None`. |
+| `subject_template_source(&self)` | optional | Tera template for the subject - when `Some`, takes precedence over `subject()` and renders with `self` as the context. Same semantics as the body template sources. |
+| `html_template_source(&self)` | optional | HTML body Tera template. Return `None` to skip HTML. |
+| `text_template_source(&self)` | optional | Plain-text body Tera template. Return `None` to skip text. |
+| `from(&self)` | optional | Override the global default `noreply@localhost`. |
+| `queue(&self)` | optional | Default queue for `Mail::queue` / `Mail::later`. See [Queueing](#queueing). |
+| `after_commit(&self)` | optional | `true` makes `Mail::queue` / `Mail::later` inside `DB::transaction` wait for the commit. Default `false`. See [Queueing](#queueing). |
+| `attachments(&self)` | optional | Files to attach. Each is `name + bytes + mime`. |
+| `render_subject(&self)` / `render_html(&self)` / `render_text(&self)` | optional | Override if you want to bypass Tera (Markdown → HTML, pre-rendered content, custom subject logic, etc.). |
+
+At least one of `html_template_source` or `text_template_source` must return `Some` (or `render_html`/`render_text` must produce content). An empty-body mailable is refused both at dispatch (`Mail::send`) and at enqueue (`Mail::queue`).
+
+### Tera autoescape
+
+Autoescape is **OFF** because mail bodies are typically hand-authored HTML where Tera's `<>&` escaping would over-escape. If your literal body contains `{{` for non-template reasons (e.g., marketing copy quoting Mustache syntax), escape it: `{% raw %}{{ literal }}{% endraw %}`.
+
+## Building Messages
+
+The `Mail::to(...)` builder threads recipients, CC/BCC, reply-to, and a per-message sender override into the dispatch:
+
+```rust
+Mail::to("alice@example.org")
+    .cc("manager@example.com")
+    .bcc("audit@example.com")
+    .reply_to("support@example.com")
+    .from(("Operations", "ops@example.com"))   // (display name, email)
+    .send(OrderShipped { order_id: 42, /* ... */ })
+    .await?;
+```
+
+`Address` accepts `&str`, `String`, and `(name, email)` tuples; `Mail::to(...)` accepts anything `Into<Address>`.
+
+## Attachments
+
+```rust
+use suprnova::mail::Attachment;
+
+let attachment = Attachment::new(
+    "report.csv",
+    csv_bytes,
+    "text/csv",
+);
+```
+
+Attachments ride through the `Mailable::attachments` method. All five HTTP providers handle them - Postmark/SendGrid/Resend over JSON (base64-encoded), SES via Raw MIME (since `Content.Simple` does not support attachments), and Mailgun via `multipart/form-data` (the form-encoded path is used when there are no attachments).
+
+## Queueing
+
+`Mail::queue(...)` builds a `SendMailJob` and pushes it onto the framework queue. The worker rebuilds the mailable from the registered factory and dispatches through the bound transport:
+
+```rust
+// One-time: register every Mailable type the worker will see.
+suprnova::mail::register_mailable_factory::<Welcome>()?;
+
+// At send time:
+Mail::to("alice@example.org").queue(Welcome { name: "Alice".into() }).await?;
+
+// Delayed:
+use std::time::Duration;
+Mail::to("alice@example.org")
+    .later(Duration::from_secs(60), Welcome { name: "Alice".into() })
+    .await?;
+```
+
+Route a queued dispatch to a specific queue or connection with `.on_queue(...)` / `.on_connection(...)`, or give the `Mailable` itself a default via `Mailable::queue(&self)`:
+
+```rust
+Mail::to("alice@example.org")
+    .on_queue("emails")
+    .queue(Welcome { name: "Alice".into() })
+    .await?;
+```
+
+`.on_queue(...)` outranks both `Mailable::queue()` and any `Queue::route` registered for the mail-dispatch job - the same "per-push override wins" rule `Queue::push_with` applies everywhere. See [Queues](queues.md#queue-routing).
+
+The same empty-body guard runs on the queue path, so a misconfigured Mailable is rejected at push-time before any envelope is created.
+
+### Queued mail inside a transaction
+
+A mail queued inside a `DB::transaction` races that transaction. A worker can pop the job before the commit and render mail about a row the transaction has not committed, or about a row that a rollback then removes. Return `true` from `Mailable::after_commit` for mail about rows the transaction writes:
+
+```rust
+impl Mailable for OrderShipped {
+    fn mailable_name() -> &'static str { "OrderShipped" }
+    fn subject(&self) -> String { format!("Order #{} shipped", self.order_id) }
+    fn after_commit(&self) -> bool { true }
+    // ...
+}
+
+DB::transaction(|_tx| {
+    Box::pin(async move {
+        let order = Order::create(suprnova::attrs! { total: 4999i64 }).await?;
+        // Nothing reaches the queue here.
+        Mail::to("alice@example.org").queue(OrderShipped { order_id: order.id }).await?;
+        Ok::<(), FrameworkError>(())
+    })
+})
+.await?;
+// The job is on the queue now, and only now.
+```
+
+Inside a transaction, `Mail::queue` and `Mail::later` then push at the commit, and a rollback discards the push. Outside a transaction they push at once. `after_commit` takes `&self` for the reason `queue` does: every queued mailable rides one job type, `SendMailJob`, so the job's own `Job::after_commit` cannot answer for one mailable.
+
+A mailable that returns `false` defers to the process-wide `QUEUE_AFTER_COMMIT` setting, which makes every push wait for the commit. See [After-commit dispatch](queues.md#after-commit-dispatch).
+
+## Telemetry
+
+Every send routes through `suprnova::mail::dispatch_with_telemetry`, which opens a `mail.send` `tracing::info_span!` carrying:
+
+- `transport` - driver name (`"postmark"`, `"smtp"`, `"in-memory"`, …)
+- `to_count`, `cc_count`, `bcc_count` - recipient counts
+- `has_html`, `has_text` - body shape
+- `attachment_count` - number of attachments
+- `tag_count`, `metadata_count` - provider-hint counts
+- `priority` - `1..=5`, or `0` when unset
+
+On completion the span emits `mail sent` (info) or `mail send failed` (warn) with `duration_ms`. The same wrapper covers `Mail::send`, the `SendMailJob` queue worker, and the notification `MailChannel`, so the span schema is identical regardless of how the message was produced.
+
+## Testing with `Mail::fake()`
+
+`Mail::fake()` installs an in-memory capture transport for the duration of the returned RAII guard. Mirrors `Bus::fake()` / `Queue::fake()` / `Cache::fake()`:
+
+```rust
+use suprnova::mail::Mail;
+
+#[tokio::test]
+async fn welcome_mail_is_sent_on_signup() {
+    let fake = Mail::fake();
+
+    sign_up("alice@example.org").await.unwrap();
+
+    fake.assert_sent_count(1);
+    fake.assert_sent(|m| m.to.iter().any(|a| a.email == "alice@example.org"));
+    fake.assert_sent(|m| m.subject.starts_with("Welcome"));
+    fake.assert_not_sent(|m| m.subject.contains("Password reset"));
+}
+```
+
+When the guard drops, the previously-bound transport (if any) is restored. Tests that intermix `Mail::fake()` with explicit transport binding do not leak state.
+
+`Mail::fake()` is `Send + Sync`; share it across awaits or threads as needed.
+
+## Custom Transports
+
+The `MailTransport` trait is the integration point:
+
+```rust
+use suprnova::async_trait;
+use suprnova::mail::{MailTransport, OutgoingMessage};
+use suprnova::FrameworkError;
+
+pub struct StdoutTransport;
+
+#[async_trait]
+impl MailTransport for StdoutTransport {
+    async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
+        println!("--- mail ---\n{}\n--- end ---", msg.subject);
+        Ok(())
+    }
+    fn name(&self) -> &'static str { "stdout" }
+}
+
+// At boot:
+use std::sync::Arc;
+suprnova::mail::Mail::set_transport(Arc::new(StdoutTransport))?;
+```
+
+Transports run on Tokio's runtime - async IO, connection pooling, and concurrent send are first-class. There is no per-request fork penalty.
+
+### Why Suprnova diverges
+
+Laravel's Mailable layer is built on Symfony Mailer, which runs synchronously inside the request lifecycle. Suprnova's `MailTransport` is `async fn send(&self, msg: &OutgoingMessage)` end-to-end: the HTTP providers use `reqwest`, the SMTP path uses an async lettre adapter, and `dispatch_with_telemetry` wraps every send in a Tokio `tracing` span. Long-haul providers don't block the handler thread, connection pools survive across requests, and concurrent sends in one handler are trivial - `tokio::try_join!(Mail::to(a).send(m), Mail::to(b).send(n))` does what you'd expect.
+
+The other divergence is event cancellation. Laravel models a `MessageSending` listener that can return `false` and suppress the send (`events->until()`). Suprnova's dispatcher does not expose a short-circuit return channel - `MessageSending` is observation-only. To gate a send, refuse at the Mailable layer (override `render_html` / `render_text` to return an error) or wrap the `MailBuilder::send` call with your own guard. The trade is real: we lose one Laravel hook to keep the dispatcher's contract simple.
+
+One smaller divergence is deliberate hardening. Laravel is content to leave `MAIL_MAILER=log` running in production; Suprnova refuses to boot there without an explicit acknowledgement, because a mail subsystem that reports success and delivers nothing is the kind of outage nobody notices for weeks. The `log` driver itself behaves exactly as Laravel's does - full message, bodies and links included - which is what makes it useful in development, and the production refusal is what keeps that safe (see [The `log` driver logs the whole message](#the-log-driver-logs-the-whole-message)).
+
+## Best Practices
+
+### Register factories at boot, not per-request
+
+`Mail::queue` and `Mail::later` push a `SendMailJob` carrying the mailable's name and JSON payload - the worker rebuilds the concrete type via `mailable_registry`. Register every queueable `Mailable` once at `Server::run` time:
+
+```rust
+// bootstrap.rs
+pub fn register() -> Result<(), suprnova::FrameworkError> {
+    suprnova::mail::register_mailable_factory::<WelcomeEmail>()?;
+    suprnova::mail::register_mailable_factory::<PasswordReset>()?;
+    suprnova::mail::register_mailable_factory::<InvoiceShipped>()?;
+    Ok(())
+}
+```
+
+A `Mail::queue` for an unregistered mailable lands on the queue, runs once, hits "unknown mailable", retries per the envelope's backoff policy, and dead-letters - costing observability time you would not have spent if the factory was bound at boot.
+
+### Queue mail for any slow or unreliable render
+
+Sending mail in a request handler couples the user's response latency to your SMTP server (or whichever provider's HTTP API). Use `Mail::queue` for anything beyond a synchronous local-dev render, and `Mail::later` when you want the dispatch deferred - onboarding follow-ups, reminder emails, scheduled digests.
+
+```rust
+// Bad: ties response time to the mail provider
+Mail::to(&user.email).send(Welcome { ... }).await?;
+return json_response!({ "ok": true });
+
+// Good: 200 OK returns immediately; the worker delivers the mail.
+Mail::to(&user.email).queue(Welcome { ... }).await?;
+return json_response!({ "ok": true });
+```
+
+### Always set `from` on a Mailable
+
+The framework's default sender is `noreply@localhost` - useful for catching missing senders in development, not a sender any provider will accept in production. Override `Mailable::from(&self)` (or set `from = "..."` in the `#[mail(...)]` attribute on a `NotificationMailable`) so every dispatched message has a real sender identity:
+
+```rust
+fn from(&self) -> Option<Address> {
+    Some(Address::new("orders@example.com").with_name("Acme Orders"))
+}
+```
+
+The per-message override on `MailBuilder` (`.from(("Operations", "ops@example.com"))`) takes precedence over the mailable's default - useful for one-off transactional sends.
+
+### Use the queue for at-least-once delivery, not the direct path
+
+`MailBuilder::send` is at-most-once: if the transport fails halfway through dispatching to two providers, you cannot retry without risking a duplicate send. `MailBuilder::queue` uses durable at-least-once delivery and exposes queue and connection routing, but it does not accept an idempotency key. A redelivered mail job can send twice. If a message must be deduplicated, put an application-level idempotency guard or provider-supported idempotency mechanism in a custom queued job rather than claiming `MailBuilder` accepts a key.
+
+## One-off Messages: `Mail::raw` and `Mail::html`
+
+When the mail is a single transactional ping that doesn't justify a full `Mailable` struct, two shortcuts skip the boilerplate:
+
+```rust
+use suprnova::mail::Mail;
+
+// Plain text
+Mail::raw("Your code is 12345", |b| {
+    b.to("alice@example.org")
+        .subject("Verification code")
+        .from("auth@example.com")
+}).await?;
+
+// HTML
+Mail::html("<p>Hello, <b>world</b></p>", |b| {
+    b.to("alice@example.org")
+        .subject("Hi")
+        .from("hello@example.com")
+}).await?;
+```
+
+The closure receives a [`MailBuilder`] preloaded with the body and lets you layer recipients, subject, sender, tags, metadata, priority, and any other [`MailBuilder`] fluent method on top. These paths bypass the `Mailable` trait entirely - useful for one-shot test pings and short transactional notes.
+
+## Global Defaults: `always_from`, `always_reply_to`, `always_to`, `always_return_path`
+
+Mirroring Laravel's `Mailer::alwaysFrom` / `alwaysReplyTo` / `alwaysTo` / `alwaysReturnPath`, the Mail facade exposes four global setters:
+
+```rust
+use suprnova::mail::{Address, Mail};
+
+// At boot:
+Mail::always_from(Address::new("noreply@example.com").with_name("Acme"))?;
+Mail::always_reply_to(Address::new("support@example.com"))?;
+Mail::always_return_path(Address::new("bounce@example.com"))?;
+
+// Local-dev "single inbox" - route ALL mail to one address, drop CC/BCC:
+Mail::always_to(Address::new("dev-inbox@example.com"))?;
+
+// Roll everything back (tests typically call this at teardown):
+Mail::forget_always()?;
+```
+
+Precedence is conservative - defaults only apply when the dispatched message lacks an explicit value:
+
+| Field | Default applies when |
+|-------|---------------------|
+| `always_from` | Message `from` is the framework default `noreply@localhost` |
+| `always_reply_to` | Message has no explicit `reply_to` |
+| `always_to` | Always - routes every message to this address, clears CC/BCC |
+| `always_return_path` | Message has no explicit `return_path` |
+
+The same precedence applies on the queue path: queued mailables go through `apply_always_defaults` at worker dispatch time, so direct sends and queued sends converge on identical envelope shapes.
+
+## Tags, Metadata, Priority, Headers, Return-Path
+
+Every dispatched message can carry Laravel-style provider hints - tags, metadata key/values, RFC-2076 priority, custom MIME headers, and a Sender / bounce-to address. They forward to the HTTP providers' native fields (Postmark `Tag` / `Metadata` / `Headers`, SES `EmailTags` plus `Content.Simple.Headers`, SendGrid `categories` / `custom_args` / `headers`, Mailgun `o:tag` / `v:` / `h:`, Resend `tags` / `headers`) and to SMTP as RFC 5322 headers.
+
+On SES specifically, headers ride whichever content shape the message uses:
+`Content.Simple.Headers` for a plain message, real MIME header lines for a
+message with attachments (which SES only accepts as raw MIME). A header name
+is validated the same way regardless of which shape the message ends up
+using - CR, LF, and NUL are rejected (that is how a caller-supplied string
+turns into a second header), and so is an empty name, a name over 76 bytes,
+a non-ASCII byte, or a `:` or space in the name, matching what the raw MIME
+builder itself requires. A header name repeated more than once keeps every
+value on the plain-message path but only the last value on the attachment
+path - the same limit SMTP has.
+
+Two ways to attach them - at the Mailable level for per-type defaults, or per-message on the builder:
+
+```rust
+use suprnova::async_trait;
+use suprnova::mail::{Mailable, PRIORITY_HIGH};
+use std::collections::BTreeMap;
+
+#[async_trait]
+impl Mailable for OrderShipped {
+    fn mailable_name() -> &'static str { "OrderShipped" }
+    fn subject(&self) -> String { format!("Order #{} shipped", self.order_id) }
+    fn text_template_source(&self) -> Option<String> { Some("...".into()) }
+
+    fn tags(&self) -> Vec<String> { vec!["transactional".into(), "order".into()] }
+    fn metadata(&self) -> BTreeMap<String, String> {
+        let mut m = BTreeMap::new();
+        m.insert("order_id".into(), self.order_id.to_string());
+        m
+    }
+    fn priority(&self) -> Option<u8> { Some(PRIORITY_HIGH) }
+    fn headers(&self) -> Vec<(String, String)> {
+        vec![("X-Origin".into(), "warehouse".into())]
+    }
+}
+```
+
+```rust
+// Per-message on the builder. Builder wins on metadata-key collisions; tags + headers union.
+Mail::to(&user.email)
+    .tag("campaign-spring")
+    .metadata("ab_variant", "B")
+    .priority(1)
+    .header("X-Source", "promo-feed")
+    .return_path("bounce@example.com")
+    .send(WelcomeEmail { name: user.name.clone() })
+    .await?;
+```
+
+Constants for the five priority levels live at `suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW, PRIORITY_LOWEST}` - same `1..=5` integer scale Laravel uses.
+
+### SES send options
+
+Amazon SES v2's `SendEmail` takes three options beyond the message
+itself. Pin them on the transport, or override per message with a
+header:
+
+```rust
+use suprnova::mail::ses::SesMailTransport;
+
+let transport = SesMailTransport::new(key, secret, "us-east-1")
+    .tenant_name("acme")                                  // TenantName
+    .configuration_set_name("transactional")              // ConfigurationSetName
+    .list_management("newsletter", Some("weekly"));       // ListManagementOptions
+```
+
+| Header on the message | SES field | Shape |
+|---|---|---|
+| `X-SES-TENANT-NAME` | `TenantName` | the tenant name |
+| `X-SES-CONFIGURATION-SET` | `ConfigurationSetName` | the configuration set name |
+| `X-SES-LIST-MANAGEMENT-OPTIONS` | `ListManagementOptions` | `my-list`, `contactListName=my-list`, or `my-list; topicName=weekly` |
+
+A header always beats the transport default, so one multi-tenant
+transport plus a per-message header covers the common case:
+
+```rust
+Mail::to(&user.email)
+    .header("X-SES-TENANT-NAME", &tenant.slug)
+    .send(WelcomeMail { name: user.name.clone() })
+    .await?;
+```
+
+These headers are transport directives, not message content: they are
+consumed when the request is built and never rendered into the MIME
+that reaches the recipient.
+
+### Why Suprnova diverges
+
+Laravel reads `X-SES-TENANT-NAME` and `X-SES-LIST-MANAGEMENT-OPTIONS`
+off the message, but exposes `ConfigurationSetName` only through the
+transport's options array - so switching configuration sets per message
+means a second transport. Suprnova gives all three the same two sources,
+adding an `X-SES-CONFIGURATION-SET` header. Header-beats-transport
+precedence matches Laravel's, where message-derived options are merged
+over the configured ones.
+
+## Inspecting Captured Messages
+
+`OutgoingMessage` carries Laravel-style inspection helpers - useful for both test assertions and runtime audit logging:
+
+```rust
+fn audit_outgoing(m: &suprnova::mail::OutgoingMessage) {
+    if m.has_tag("transactional") && m.has_to("alice@example.org") { /* ... */ }
+    if m.has_metadata("order_id") { /* ... */ }
+    if m.has_subject("Welcome") { /* ... */ }
+    if m.has_attachment("invoice.pdf") { /* ... */ }
+    if m.has_header("X-Source", "promo-feed") { /* ... */ }
+}
+```
+
+Recipient checks are case-insensitive on email; metadata, tag, subject, and attachment-filename checks are exact.
+
+## Test Fake: Expanded Surface
+
+`Mail::fake()` covers BOTH the sent and queued tracks. Sent mail (via `MailBuilder::send`) lands in the in-memory transport; queued mail (via `.queue` / `.later`) lands in the fake's queue buffer.
+
+```rust
+use suprnova::mail::Mail;
+
+#[tokio::test]
+async fn boot_dispatches_welcome() {
+    let fake = Mail::fake();
+
+    onboard_user("alice@example.org").await.unwrap();
+
+    // Sent-side
+    fake.assert_sent_count(1);
+    fake.assert_sent(|m| m.has_to("alice@example.org") && m.subject.starts_with("Welcome"));
+    fake.assert_sent_to("alice@example.org");
+    fake.assert_not_sent(|m| m.subject.contains("Password reset"));
+
+    // Queued-side (for delayed mails)
+    fake.assert_queued("WelcomeFollowup");
+    fake.assert_queued_to("alice@example.org");
+    fake.assert_queued_count(1);
+
+    // Composite
+    fake.assert_outgoing_count(2);   // sent + queued
+    fake.assert_not_outgoing("PasswordReset");
+}
+```
+
+Additional helpers:
+
+| Helper | Purpose |
+|--------|---------|
+| `fake.captured()` | All sent messages |
+| `fake.count()` | Sent count |
+| `fake.queued()` | All queued `QueuedSnapshot`s |
+| `fake.queued_count()` | Queued count |
+| `fake.outgoing_count()` | Sent + queued |
+| `fake.sent(predicate)` | Filter sent by predicate |
+| `fake.sent_to(email)` | Filter sent by recipient |
+| `fake.queued_named(name)` | Queued mailables of a given name |
+| `fake.queued_to(email)` | Queued mailables to recipient |
+| `fake.assert_sent_count(n)` | Exact sent count |
+| `fake.assert_queued_count(n)` | Exact queued count |
+| `fake.assert_outgoing_count(n)` | Exact total |
+| `fake.assert_nothing_sent()` | Empty sent buffer |
+| `fake.assert_nothing_queued()` | Empty queued buffer |
+| `fake.assert_nothing_outgoing()` | Both empty |
+| `fake.assert_sent_to(email)` | At least one sent to recipient |
+| `fake.assert_not_sent_to(email)` | None sent to recipient |
+| `fake.assert_queued(name)` | At least one queued of name |
+| `fake.assert_queued_with(name, fn)` | At least one queued of name matching predicate |
+| `fake.assert_queued_to(email)` | At least one queued to recipient |
+| `fake.assert_not_queued(name)` | None queued of name |
+
+`QueuedSnapshot::decode::<M>()` deserializes the payload back into the concrete `M`, so type-checked predicates work without bespoke decode boilerplate.
+
+## Events: `MessageSending` and `MessageSent`
+
+Every successful dispatch fires two framework events:
+
+- `MessageSending` - immediately BEFORE the transport call. Listeners observe the message shape (recipients, subject, tags, body-shape flags).
+- `MessageSent` - immediately AFTER a successful transport call. Listeners observe the same shape; failed sends do not emit this event.
+
+```rust
+use std::sync::Arc;
+use suprnova::events::EventFacade;
+use suprnova::mail::MessageSent;
+
+EventFacade::listen::<MessageSent, _>(Arc::new(MyAuditListener)).await;
+```
+
+Both events are observation-only - the dispatcher does not model a Laravel-style cancellation channel. See [Why Suprnova diverges](#why-suprnova-diverges) above for the gating workaround.
+
+## Multi-recipient Convenience: `Mail::cc` and `Mail::bcc`
+
+The Mail facade exposes three entry points - `to`, `cc`, `bcc` - that all return a fresh `MailBuilder`. Use whichever matches the dominant routing intent:
+
+```rust
+// Start with a cc / bcc when the message is primarily an audit copy.
+Mail::cc("manager@example.com")
+    .to("alice@example.org")
+    .send(OrderShipped { /* ... */ })
+    .await?;
+```
+
+The same fluent surface applies regardless of which entry point you start with.
+
+### Test against `Mail::fake()`, not against the bound transport
+
+`Mail::fake()` installs a process-local capture transport for the duration of the RAII guard and restores whatever was bound before. Tests using it do not need to clear globals on every entry/exit - drop semantics handle that. Combine `#[serial_test::serial]` with `Mail::fake()` for tests that mutate the transport global; concurrent tests would clobber each other otherwise.
+
+## Next
+
+- [Notifications](notifications.md) - `Notify::send` fans out across mail, database, and webpush channels; `#[derive(NotificationMailable)]` is the macro-driven shortcut over the `Mailable` trait
+- [Queues](queues.md) - the durable envelope `Mail::queue` and `Mail::later` ride on
+- [Events](events.md) - listening for `MessageSending` / `MessageSent` plus the wider dispatcher model
+- [Testing](testing.md) - `Mail::fake()` alongside the other `*::fake()` guards
+- [Configuration](configuration.md) - typed config registration for service credentials
+
+## Reference
+
+- Trait: `suprnova::mail::Mailable`
+- Facade: `suprnova::mail::Mail`
+- Bootstrap: `suprnova::mail::boot::bootstrap_from_env()`
+- Transports: `LogMailTransport`, `InMemoryMailTransport`, `FileMailTransport`, `SmtpMailTransport`, `PostmarkMailTransport`, `SesMailTransport`, `SendGridMailTransport`, `MailgunMailTransport`, `ResendMailTransport`
+- Queue job: `suprnova::mail::SendMailJob`
+- Test guard: `suprnova::mail::MailFake`
+- Telemetry helper: `suprnova::mail::dispatch_with_telemetry`

@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://suprnova.dev/schemas/live/snapshot-budget-v1.json",
+  "title": "Suprnova Live A8/16 snapshot budget result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "workload",
+    "state_bytes",
+    "html_bytes",
+    "control_overhead_bytes",
+    "snapshot_overhead_bytes",
+    "warmup_iterations",
+    "measured_samples",
+    "batch_iterations",
+    "p50_microseconds",
+    "p95_microseconds",
+    "stages",
+    "profile",
+    "fixture_sha256",
+    "measured_at_unix_ms",
+    "environment"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "workload": { "const": "A8/16" },
+    "state_bytes": { "const": 8192 },
+    "html_bytes": { "const": 16384 },
+    "control_overhead_bytes": { "type": "integer", "maximum": 1024 },
+    "snapshot_overhead_bytes": { "type": "integer", "maximum": 768 },
+    "warmup_iterations": { "type": "integer", "minimum": 1 },
+    "measured_samples": { "type": "integer", "minimum": 30 },
+    "batch_iterations": { "type": "integer", "minimum": 1 },
+    "p50_microseconds": { "type": "number", "minimum": 0 },
+    "p95_microseconds": { "type": "number", "minimum": 0, "maximum": 500 },
+    "stages": {
+      "const": ["verify", "hydrate", "dehydrate", "canonicalize", "sign"]
+    },
+    "profile": { "const": "release" },
+    "fixture_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "measured_at_unix_ms": { "type": "integer", "minimum": 1 },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "classification",
+        "operating_system",
+        "architecture",
+        "cpu_model",
+        "selected_cpu_affinity",
+        "selected_cpu_count",
+        "memory_bytes",
+        "kernel",
+        "cpu_governor",
+        "rustc",
+        "database",
+        "provider_versions",
+        "dedicated_vcpus_attested",
+        "warm_filesystem_cache",
+        "loopback_providers",
+        "s1_requirements_met"
+      ],
+      "properties": {
+        "classification": {
+          "enum": ["validated_s1", "local_exploratory"]
+        },
+        "operating_system": { "type": "string" },
+        "architecture": { "type": "string" },
+        "cpu_model": { "type": "string" },
+        "selected_cpu_affinity": { "type": "string" },
+        "selected_cpu_count": { "type": "integer", "minimum": 1 },
+        "memory_bytes": { "type": "integer", "minimum": 1 },
+        "kernel": { "type": "string" },
+        "cpu_governor": { "type": "string" },
+        "rustc": { "type": "string" },
+        "database": { "type": "string" },
+        "provider_versions": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "dedicated_vcpus_attested": { "type": "boolean" },
+        "warm_filesystem_cache": { "const": true },
+        "loopback_providers": { "const": true },
+        "s1_requirements_met": { "type": "boolean" }
+      }
+    }
+  }
+}

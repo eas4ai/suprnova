@@ -1,0 +1,13 @@
+{
+  "name": "suprnova.dialog",
+  "version": 1,
+  "root": "suprnova-ui/dialog",
+  "files": [
+    "dialog.html",
+    "dialog.css",
+    "dialog.js"
+  ],
+  "elements": [
+    "sn-dialog"
+  ]
+}

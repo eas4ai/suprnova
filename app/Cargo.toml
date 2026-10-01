@@ -1,0 +1,67 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "app"
+path = "cmd/main.rs"
+
+# Per-project console binary - runtime command dispatch (`db:seed`,
+# user-defined commands via `#[command]`, etc.) Same crate as the
+# server, different `fn main` because console commands exit when
+# their handler returns whereas the server loops forever.
+[[bin]]
+name = "console"
+path = "src/bin/console.rs"
+
+[dependencies]
+# Production build shape: default features off, the nine non-`testing`
+# defaults listed explicitly, so the binaries below never carry a test
+# seam. See manual/deployment.md, "Production build shape".
+suprnova = { path = "../framework", default-features = false, features = [
+    "filesystem", "database-sqlite", "database-postgres", "database-mysql",
+    "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
+] }
+tokio = { version = "1", features = ["full"] }
+sea-orm-migration = { version = "2.0", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-postgres", "runtime-tokio-rustls"] }
+sea-orm = { version = "2.0", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-postgres", "runtime-tokio-rustls", "macros", "postgres-use-serial-pk"] }
+serde = { version = "1.0", features = ["derive"] }
+validator = { version = "0.20", features = ["derive"] }
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+# Adapts tokio channels into futures::Stream values for the SSE
+# dogfood handler (broadcast → BroadcastStream → HttpResponse::sse).
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+url = "2.5.8"
+tokio-util = "0.7.18"
+
+[dev-dependencies]
+# Turns `testing` back on for `cargo test -p app` and every `--tests`
+# build only; it never reaches the `app` or `console` binaries built
+# from [dependencies] alone. See manual/deployment.md, "Production
+# build shape".
+suprnova = { path = "../framework", features = ["testing"] }
+# End-to-end tests against a one-shot server using the framework's
+# public `handle_request` adapter need hyper for the client + transport.
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+bytes = "1"
+serde_json = "1"
+# Per-test tempdir for the `public` Storage disk so parallel avatar-upload
+# e2e tests do not collide on the same on-disk path.
+tempfile = "3"
+serial_test = "=2.0.0"
+# Live dogfood tests decode island snapshots, checksum upload chunks, and
+# open the asynchronous WebSocket transport.
+base64 = "0.22"
+sha2 = "0.11"
+hex = "0.4.3"
+tokio-tungstenite = "0.29.0"
+futures-util = "0.3.32"

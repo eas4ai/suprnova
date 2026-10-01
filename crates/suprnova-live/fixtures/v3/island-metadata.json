@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "root_attribute": "data-suprnova-live-island",
+  "required_attributes": [
+    "data-suprnova-live-component",
+    "data-suprnova-live-contract",
+    "data-suprnova-live-document-key",
+    "data-suprnova-live-lazy-complete",
+    "data-suprnova-live-protocol-min",
+    "data-suprnova-live-revision",
+    "data-suprnova-live-root",
+    "data-suprnova-live-slot",
+    "data-suprnova-live-snapshot-kind",
+    "data-suprnova-live-snapshot"
+  ],
+  "conditional_attributes": {
+    "instance": ["data-suprnova-live-instance"],
+    "seed": []
+  },
+  "connection_statuses": ["connected", "disconnected", "incompatible", "invalid"],
+  "snapshot_kinds": ["instance", "seed"],
+  "inert_identity_extension": "x_suprnova_live_document_key_v1",
+  "ownership": {"nested_islands": "nearest_root", "keyed_scopes": "nearest_key", "seed_authority": "none_until_promotion"},
+  "limits": {"metadata_bytes": 131072, "nesting_depth": 64, "islands_per_document": 10000}
+}

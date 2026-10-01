@@ -1,0 +1,17 @@
+{#
+  suprnova.avatar - a person's image or their initials (DATA-002).
+  An image avatar names the person in alt; the initials fallback is an
+  img role with the name as its label, so the identity survives a missing
+  image. A group is a labeled list of avatars.
+#}
+{% macro avatar(name, initials, src="", size="md") %}
+{% if src != "" %}<img class="sn-avatar" src="{{ src }}" alt="{{ name }}" data-sn-size="{{ size }}" loading="lazy" decoding="async">{% else %}<span class="sn-avatar" role="img" aria-label="{{ name }}" data-sn-size="{{ size }}">{{ initials }}</span>{% endif %}
+{% endmacro %}
+
+{% macro avatar_group(label) %}
+<ul class="sn-avatar-group" role="list" aria-label="{{ label }}">{{ caller() }}</ul>
+{% endmacro %}
+
+{% macro avatar_member(name, initials, src="", size="md") %}
+<li class="sn-avatar-member">{% if src != "" %}<img class="sn-avatar" src="{{ src }}" alt="{{ name }}" data-sn-size="{{ size }}" loading="lazy" decoding="async">{% else %}<span class="sn-avatar" role="img" aria-label="{{ name }}" data-sn-size="{{ size }}">{{ initials }}</span>{% endif %}</li>
+{% endmacro %}

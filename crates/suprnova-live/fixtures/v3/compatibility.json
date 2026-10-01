@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "runtime_contract": 1,
+  "protocol": {"minimum": 1, "maximum": 2},
+  "snapshot": {"supported": [1]},
+  "browser_floors": {"chrome": "111", "edge": "111", "firefox": "128", "safari": "16.4"},
+  "qualification_states": ["qualified", "failed", "unqualified"]
+}

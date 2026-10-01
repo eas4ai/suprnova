@@ -1,0 +1,2146 @@
+//! Scaffold templates must stay consistent with the framework they target.
+//!
+//! Template drift is silent by construction: `scaffold_snapshot` rewrites
+//! the `suprnova` dependency to a local path before compiling, so a stale
+//! git tag never reaches a compiler, and no test reads the `.env` template
+//! at all. Both defects shipped through v0.7.2. These assertions are the
+//! mechanical guard that was missing.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn cli_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn read(rel: &str) -> String {
+    let path = cli_root().join(rel);
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// Read a path relative to the workspace root, for the few assertions that
+/// tie a template to a sibling crate's behaviour rather than to the CLI's
+/// own files.
+fn read_from_repo(rel: &str) -> String {
+    let path = cli_root()
+        .parent()
+        .expect("suprnova-cli sits inside the workspace")
+        .join(rel);
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+fn manifest_value(source: &str, path: &[&str]) -> String {
+    let table: toml::Table = source.parse().expect("manifest parses");
+    let (first, rest) = path.split_first().expect("manifest path cannot be empty");
+    let mut current = table
+        .get(*first)
+        .unwrap_or_else(|| panic!("missing {first}"));
+    for key in rest {
+        current = current.get(*key).unwrap_or_else(|| panic!("missing {key}"));
+    }
+    current
+        .as_str()
+        .or_else(|| current.get("version").and_then(toml::Value::as_str))
+        .expect("contract value is a string")
+        .to_owned()
+}
+
+#[test]
+fn rendered_manifests_match_workspace_database_contract() {
+    let workspace = read_from_repo("Cargo.toml");
+    let framework = read_from_repo("framework/Cargo.toml");
+    let workspace_rust_version =
+        manifest_value(&workspace, &["workspace", "package", "rust-version"]);
+    let framework_sea_orm_version = manifest_value(&framework, &["dependencies", "sea-orm"]);
+    let framework_sea_orm_migration_version =
+        manifest_value(&framework, &["dependencies", "sea-orm-migration"]);
+
+    for (kind, rendered) in [
+        (
+            "backend",
+            suprnova_cli::templates::cargo_toml("my_app", "A test app", ""),
+        ),
+        (
+            "api",
+            suprnova_cli::templates::api::cargo_toml("my_api", "my-api"),
+        ),
+    ] {
+        assert_eq!(
+            manifest_value(&rendered, &["package", "rust-version"]),
+            workspace_rust_version,
+            "{kind} Cargo.toml must follow the workspace rust-version; rendered:\n{rendered}",
+        );
+        assert_eq!(
+            manifest_value(&rendered, &["dependencies", "sea-orm"]),
+            framework_sea_orm_version,
+            "{kind} Cargo.toml must follow the framework sea-orm version; rendered:\n{rendered}",
+        );
+        assert_eq!(
+            manifest_value(&rendered, &["dependencies", "sea-orm-migration"]),
+            framework_sea_orm_migration_version,
+            "{kind} Cargo.toml must follow the framework sea-orm-migration version; rendered:\n{rendered}",
+        );
+    }
+}
+
+#[test]
+fn dockerfiles_pin_the_workspace_rust_version() {
+    let workspace = read_from_repo("Cargo.toml");
+    let expected = manifest_value(&workspace, &["workspace", "package", "rust-version"]);
+    let expected_line = format!("FROM rust:{expected}-slim-bookworm AS backend-builder");
+
+    for (kind, path) in [
+        ("backend", "src/templates/files/docker/Dockerfile.tpl"),
+        ("api", "src/templates/files/docker/Dockerfile.api.tpl"),
+    ] {
+        let dockerfile = read(path);
+        assert!(
+            dockerfile.contains(&expected_line),
+            "{kind} Dockerfile must pin {expected_line}; rendered:\n{dockerfile}"
+        );
+    }
+}
+
+/// The tag both scaffolds must pin, derived the same way the scaffolder
+/// derives it. `suprnova-cli` inherits `version.workspace = true` and
+/// `release.sh` tags `v<workspace version>`.
+fn expected_tag() -> String {
+    format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
+#[test]
+fn backend_cargo_template_has_no_hardcoded_tag() {
+    let tpl = read("src/templates/files/backend/Cargo.toml.tpl");
+    assert!(
+        tpl.contains(r#"tag = "{framework_tag}""#),
+        "backend Cargo.toml.tpl must template its tag, not hardcode one; got:\n{tpl}"
+    );
+}
+
+#[test]
+fn api_cargo_template_has_no_hardcoded_tag() {
+    let tpl = read("src/templates/files/api/Cargo.toml.tpl");
+    assert!(
+        tpl.contains(r#"tag = "{framework_tag}""#),
+        "api Cargo.toml.tpl must template its tag, not hardcode one; got:\n{tpl}"
+    );
+}
+
+#[test]
+fn api_bootstrap_initializes_crypt_before_magnetar() {
+    let bootstrap = read("src/templates/files/api/src/bootstrap.rs.tpl");
+    let crypt = bootstrap
+        .find("initialize_crypt_or_exit()")
+        .expect("API bootstrap must initialize Crypt");
+    let magnetar = bootstrap
+        .find("init_magnetar(magnetar)")
+        .expect("API bootstrap must initialize Magnetar");
+
+    assert!(
+        crypt < magnetar,
+        "API bootstrap must initialize Crypt before Magnetar; template:\n{bootstrap}"
+    );
+}
+
+#[test]
+fn no_scaffold_template_pins_a_literal_version_tag() {
+    // Catches the general case: any template that hardcodes `tag = "vX.Y.Z"`
+    // will be stale the moment the next release ships.
+    let templates = cli_root().join("src/templates/files");
+    let mut offenders = Vec::new();
+    let mut seen = 0usize;
+    visit(&templates, &mut |path, body| {
+        seen += 1;
+        for line in body.lines() {
+            if line.contains("tag = \"v") && !line.contains("{framework_tag}") {
+                offenders.push(format!("{}: {}", path.display(), line.trim()));
+            }
+        }
+    });
+    assert!(
+        seen > 0,
+        "walked zero template files - did src/templates/files move? \
+         This test passes vacuously when the tree is not found."
+    );
+    assert!(
+        offenders.is_empty(),
+        "templates must derive the framework tag, not hardcode it:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Walk every file under `dir`, handing each readable one to `f`.
+fn visit(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            visit(&path, f);
+        } else if let Ok(body) = fs::read_to_string(&path) {
+            f(&path, &body);
+        }
+    }
+}
+
+#[test]
+fn rendered_backend_cargo_toml_pins_the_running_version() {
+    let rendered = suprnova_cli::templates::cargo_toml("my_app", "A test app", "");
+    let expected = format!("tag = \"{}\"", expected_tag());
+    assert!(
+        rendered.contains(&expected),
+        "backend Cargo.toml must pin {expected}; rendered:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("{framework_tag}"),
+        "placeholder left unsubstituted - check the format! argument name"
+    );
+}
+
+#[test]
+fn rendered_api_cargo_toml_pins_the_running_version() {
+    let rendered = suprnova_cli::templates::api::cargo_toml("my_api", "my-api");
+    let expected = format!("tag = \"{}\"", expected_tag());
+    assert!(
+        rendered.contains(&expected),
+        "api Cargo.toml must pin {expected}; rendered:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("{framework_tag}"),
+        "placeholder left unsubstituted - check the .replace() call"
+    );
+}
+
+/// The API starter must not create a table Torii already owns.
+///
+/// Torii's own migration creates `users` with `.if_not_exists()`, a
+/// string primary key, and name/password_hash/email_verified_at columns.
+/// The starter shipped its own `users` migration with an autoincrement
+/// bigint id and three columns, against the SAME connection. Whichever
+/// ran first won and the other silently skipped, so Torii's columns never
+/// existed and `POST /api/auth/register` died on `no such column:
+/// users.name`. The two schemas can never be one table.
+#[test]
+fn api_starter_does_not_claim_the_torii_users_table() {
+    let migration = read("src/templates/files/api/src/migrations/create_users_table.rs.tpl");
+    // Check the enum *declaration*, not a bare `Users::Table` substring:
+    // the fix renames the enum to `AppUsers`, and `AppUsers::Table`
+    // itself contains the substring `Users::Table`, which would make a
+    // naive `.contains("Users::Table")` check false-fail forever after a
+    // correct fix.
+    assert!(
+        !migration.contains("\"users\"") && !migration.contains("enum Users {"),
+        "the api starter must not create a table named `users` - Torii owns \
+         that name and creates it with an incompatible schema; migration was:\n{migration}"
+    );
+
+    let model = read("src/templates/files/api/src/models/user.rs.tpl");
+    assert!(
+        !model.contains(r#"table_name = "users""#),
+        "the api starter's User model must not map to `users`; model was:\n{model}"
+    );
+    assert!(
+        model.contains(r#"table_name = "app_users""#),
+        "the api starter's User model must map to `app_users`; model was:\n{model}"
+    );
+}
+
+/// `SessionToken`'s `Display`/`to_string()` deliberately prints the
+/// literal string `[REDACTED]` (torii-core `session/mod.rs`) so a secret
+/// never leaks into logs. The login handler must call `expose_secret()`
+/// instead - the accessor Torii documents for "transmission to client" -
+/// or the API starter's login endpoint hands every client the literal
+/// string `[REDACTED]` as its bearer token, which can never authenticate
+/// anything. Caught by curling a running scaffold: `POST /api/auth/login`
+/// returned `{"token":"[REDACTED]"}` verbatim.
+#[test]
+fn api_starter_login_exposes_the_real_token() {
+    let tpl = read("src/templates/files/api/src/controllers/users.rs.tpl");
+    assert!(
+        !tpl.contains("token.to_string()"),
+        "login must not call SessionToken::to_string() - Display redacts \
+         the value to \"[REDACTED]\" by design; template was:\n{tpl}"
+    );
+    assert!(
+        tpl.contains("token.expose_secret()"),
+        "login must call SessionToken::expose_secret() to hand the real \
+         token to the client; template was:\n{tpl}"
+    );
+}
+
+#[test]
+fn api_user_routes_are_behind_an_auth_gate() {
+    // `BearerTokenMiddleware` populates the authenticated user when a valid
+    // token is present and *never* rejects - it documents this at
+    // torii_integration/middleware.rs:18-19. So a route that carries no
+    // explicit gate is anonymous, and `UserResource` serializes `email`.
+    // Through v0.7.2 a stock `suprnova new x --api` served every user's
+    // email address to unauthenticated callers.
+    let tpl = read("src/templates/files/api/src/routes.rs.tpl");
+
+    assert!(
+        tpl.contains("AuthMiddleware::new()"),
+        "api routes template must gate the user routes with \
+         AuthMiddleware::new(); got:\n{tpl}"
+    );
+
+    // Slice the group's BALANCED body, not "everything after `group!`".
+    // A to-end-of-file slice passes even when the routes sit outside the
+    // group entirely - a false pass on the test guarding a security fix.
+    let after = tpl
+        .split_once("group!")
+        .expect("template must contain a group!")
+        .1;
+    let open = after.find('{').expect("group! must have a body");
+    let mut depth = 0usize;
+    let mut end = None;
+    for (i, ch) in after[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body = &after[open..=end.expect("group! body must be balanced")];
+
+    assert!(
+        body.contains("list_users") && body.contains("show_user"),
+        "both list_users and show_user must sit INSIDE the gated group body; \
+         body was:\n{body}"
+    );
+}
+
+#[test]
+fn api_auth_routes_stay_public() {
+    // Register and login must NOT be gated - gating them would make the
+    // starter impossible to bootstrap.
+    let tpl = read("src/templates/files/api/src/routes.rs.tpl");
+    let public = tpl
+        .split("group!")
+        .next()
+        .expect("template has content before the first group!");
+    assert!(
+        public.contains("controllers::users::register")
+            && public.contains("controllers::users::login"),
+        "register and login must remain outside the gated group; \
+         ungated section was:\n{public}"
+    );
+}
+
+/// Every `MAIL_*` key the scaffold's `.env` advertises must be one the
+/// framework actually reads.
+///
+/// Through v0.7.2, five of the seven were dead: the scaffold shipped
+/// Laravel-style names (`MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`,
+/// `MAIL_PASSWORD`, `MAIL_FROM_ADDRESS`) while the transport reads
+/// `MAIL_SMTP_*` and the auth flows read `MAIL_FROM`. An operator who
+/// filled the file in exactly as instructed got unauthenticated cleartext
+/// SMTP to 127.0.0.1 with `MAIL_HOST` ignored, and every password-reset
+/// send failed outright because `require_mail_from` hard-errors on an
+/// unset `MAIL_FROM`. Nothing caught it because no test read this file.
+///
+/// This originally read only `env.tpl`, which is why the fix landed on
+/// half the problem: `.env.example` kept all five dead keys for another
+/// release. It now checks both, because the committed example is the file
+/// a teammate actually copies.
+#[test]
+fn every_scaffold_mail_key_is_read_by_the_framework() {
+    let framework_src = cli_root().join("../framework/src");
+    let mut framework_body = String::new();
+    visit(&framework_src, &mut |_, body| framework_body.push_str(body));
+    assert!(
+        !framework_body.is_empty(),
+        "could not read framework/src - check the relative path"
+    );
+
+    for template in ["env.tpl", "env.example.tpl"] {
+        let env_tpl = read(&format!("src/templates/files/root/{template}"));
+
+        let mut dead = Vec::new();
+        let mut checked = 0usize;
+        for line in env_tpl.lines() {
+            let line = line.trim();
+            if line.starts_with('#') || !line.starts_with("MAIL_") {
+                continue;
+            }
+            if let Some(key) = line.split('=').next() {
+                let key = key.trim();
+                checked += 1;
+                if !framework_body.contains(&format!("var(\"{key}\")")) {
+                    dead.push(key.to_string());
+                }
+            }
+        }
+
+        assert!(
+            checked >= 5,
+            "{template} yielded only {checked} MAIL_* keys - the scan is \
+             broken and this assertion would pass vacuously"
+        );
+        assert!(
+            dead.is_empty(),
+            "these MAIL_* keys are advertised in {template} but never read \
+             by the framework, so setting them does nothing: {dead:?}"
+        );
+    }
+}
+
+/// `auth_flows::require_mail_from` returns `Err` when `MAIL_FROM` is unset,
+/// so a scaffold that omits it ships broken password reset on day one.
+#[test]
+fn scaffold_env_ships_the_required_mail_from_key() {
+    let env_tpl = read("src/templates/files/root/env.tpl");
+    assert!(
+        env_tpl.lines().any(|l| l.trim().starts_with("MAIL_FROM=")),
+        "env.tpl must ship MAIL_FROM - auth_flows/mod.rs:83-90 returns Err when \
+         it is unset, breaking password reset and email verification"
+    );
+}
+
+// ============================================================================
+// Generated Docker Compose - exposure and credentials
+// ============================================================================
+
+/// Collect every `ports:` publish line across the compose templates.
+///
+/// Reads the raw templates rather than the rendered output so a service
+/// that is off by default (mailpit, minio) is still covered - the point
+/// is that no template can reintroduce a wide bind, including one nobody
+/// enables in the default scaffold.
+fn compose_publish_lines() -> Vec<(String, String)> {
+    let mut lines = Vec::new();
+    for name in [
+        "docker-compose.yml.tpl",
+        "mailpit.service.tpl",
+        "minio.service.tpl",
+    ] {
+        let body = read(&format!("src/templates/files/docker/{name}"));
+        for line in body.lines() {
+            let trimmed = line.trim();
+            // A publish entry is a list item whose value contains a colon
+            // inside quotes: `- "127.0.0.1:5432:5432"`.
+            if trimmed.starts_with("- \"") && trimmed.contains(':') {
+                lines.push((name.to_string(), trimmed.to_string()));
+            }
+        }
+    }
+    assert!(
+        !lines.is_empty(),
+        "found no publish lines at all - did the compose templates move? \
+         This test passes vacuously when it cannot find them."
+    );
+    lines
+}
+
+/// `ports: - "5432:5432"` binds 0.0.0.0 on the Docker host. On a laptop
+/// on a shared network, or any cloud VM without a firewall, `suprnova new`
+/// followed by `docker compose up` then publishes a development database,
+/// an unauthenticated Redis, an open SMTP relay (Mailpit accepts any
+/// credentials), and MinIO - to the internet.
+#[test]
+fn compose_publishes_every_port_on_loopback() {
+    for (file, line) in compose_publish_lines() {
+        assert!(
+            line.contains("127.0.0.1") || line.contains("HOST_BIND"),
+            "{file}: publish line binds every interface - prefix it with a \
+             loopback bind: {line}"
+        );
+        assert!(
+            !line.contains("0.0.0.0"),
+            "{file}: publish line binds 0.0.0.0 explicitly: {line}"
+        );
+    }
+}
+
+/// The compose templates shipped `suprnova_secret` and `minioadmin/minioadmin`
+/// as literal defaults. A known password is only a development convenience
+/// while the port is closed; combined with a wide bind it is a public
+/// database. Passwords are now minted per project by
+/// `generate_service_password`, so no literal may come back.
+#[test]
+fn compose_templates_carry_no_literal_credentials() {
+    for name in ["docker-compose.yml.tpl", "minio.service.tpl"] {
+        let body = read(&format!("src/templates/files/docker/{name}"));
+        for literal in ["suprnova_secret", "minioadmin"] {
+            assert!(
+                !body.contains(literal),
+                "{name} still ships the literal credential `{literal}`; \
+                 generate it per project instead"
+            );
+        }
+    }
+    // And the placeholder the generator substitutes must still be there -
+    // otherwise the previous assertion passes simply because the field was
+    // deleted.
+    let compose = read("src/templates/files/docker/docker-compose.yml.tpl");
+    assert!(
+        compose.contains("{db_password}"),
+        "docker-compose.yml.tpl must carry the {{db_password}} placeholder"
+    );
+    let minio = read("src/templates/files/docker/minio.service.tpl");
+    assert!(
+        minio.contains("{minio_password}"),
+        "minio.service.tpl must carry the {{minio_password}} placeholder"
+    );
+}
+
+// ============================================================================
+// REL-01b - a scaffolded project must be runnable and buildable
+// ============================================================================
+
+/// Cargo refuses `cargo run` on a multi-binary package with no
+/// `default-run`, and does NOT fall back to the binary named after the
+/// package. Verified directly against cargo before this test was written:
+///
+/// ```text
+/// error: `cargo run` could not determine which binary to run.
+/// Use the `--bin` option to specify a binary, or the `default-run` manifest key.
+/// available binaries: console, twobin
+/// ```
+///
+/// Ten CLI wrappers shell out to `cargo run` inside the user's project, so
+/// without this key `suprnova migrate` - and every sibling - failed on a
+/// fresh scaffold before doing any work. `scaffold_snapshot` never caught
+/// it because `cargo check` does not resolve a default binary.
+#[test]
+fn multi_binary_templates_declare_a_default_run() {
+    for rel in [
+        "src/templates/files/backend/Cargo.toml.tpl",
+        "src/templates/files/api/Cargo.toml.tpl",
+    ] {
+        let tpl = read(rel);
+        let bins = tpl.matches("[[bin]]").count();
+        assert!(
+            bins >= 2,
+            "{rel}: expected the two-binary shape this test guards, found {bins}"
+        );
+        assert!(
+            tpl.contains(r#"default-run = "{package_name}""#),
+            "{rel} declares {bins} binaries but no `default-run`, so `cargo run` \
+             in a generated project refuses to pick one"
+        );
+    }
+}
+
+/// The Docker dependency-cache stage stubs a `main` for each binary so the
+/// manifest resolves. It stubbed only `cmd/main.rs` while the manifest also
+/// declared `console` at `src/bin/console.rs`, so `cargo build` failed in
+/// that stage - a hard build failure, not a missed cache.
+#[test]
+fn docker_cache_stage_stubs_every_declared_binary() {
+    let dockerfile = read("src/templates/files/docker/Dockerfile.tpl");
+    let manifest = read("src/templates/files/backend/Cargo.toml.tpl");
+
+    // Comment lines are stripped before searching. Without this the test
+    // passes on prose: the comment above the stub names
+    // `src/bin/console.rs` to explain why it is there, which satisfied a
+    // naive `contains` even with the stub itself deleted. Caught by
+    // teeth-checking this test rather than by reading it.
+    let instructions: String = dockerfile
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Every `path = "..."` in the manifest's [[bin]] entries must be stubbed.
+    let mut checked = 0usize;
+    for line in manifest.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("path = \"") else {
+            continue;
+        };
+        let Some(path) = rest.strip_suffix('"') else {
+            continue;
+        };
+        checked += 1;
+        assert!(
+            instructions.contains(path),
+            "the Docker cache stage never creates `{path}`, which the manifest \
+             declares as a binary - `cargo build` fails there on the missing target"
+        );
+    }
+    assert!(
+        checked >= 2,
+        "found {checked} [[bin]] paths in the manifest template; this test is \
+         guarding the multi-binary case and passes vacuously below two"
+    );
+}
+
+/// `npm ci` requires a lockfile and errors without one. The COPY globs the
+/// lock as optional, so on a fresh scaffold - which ships no lock - the
+/// unconditional `npm ci` failed every image build.
+#[test]
+fn docker_frontend_install_tolerates_a_missing_lockfile() {
+    let dockerfile = read("src/templates/files/docker/Dockerfile.tpl");
+    let copies_lock_optionally = dockerfile.contains("frontend/package-lock.json*");
+    let uses_ci = dockerfile.contains("npm ci");
+    if uses_ci && copies_lock_optionally {
+        assert!(
+            dockerfile.contains("if [ -f package-lock.json ]"),
+            "the Dockerfile treats package-lock.json as optional in its COPY but \
+             runs `npm ci`, which requires one - a fresh scaffold cannot build"
+        );
+    }
+}
+
+/// Same shape for the Rust lockfile: a bare `COPY … Cargo.lock` fails the
+/// build outright when the file does not exist.
+#[test]
+fn docker_copies_the_rust_lockfile_optionally() {
+    let dockerfile = read("src/templates/files/docker/Dockerfile.tpl");
+    assert!(
+        !dockerfile.contains("COPY Cargo.toml Cargo.lock ."),
+        "a bare `COPY Cargo.toml Cargo.lock ./` fails when the project has no \
+         lockfile; glob it as `Cargo.lock*`"
+    );
+}
+
+/// `Cargo.lock` was in the scaffold's .gitignore. The generated project is
+/// an application, and Cargo's guidance is that applications commit their
+/// lockfile - otherwise CI and the production image resolve a different
+/// dependency graph than the developer tested.
+#[test]
+fn scaffold_gitignore_does_not_exclude_the_lockfile() {
+    let gitignore = read("src/templates/files/root/gitignore.tpl");
+    for line in gitignore.lines() {
+        let bare = line.trim();
+        assert!(
+            bare != "Cargo.lock" && bare != "/Cargo.lock",
+            "the scaffold ignores Cargo.lock; a generated app should commit it"
+        );
+    }
+}
+
+/// The printed `docker run` must publish the port the image actually
+/// exposes. It said 8080 while the Dockerfile set SERVER_PORT=8765 and
+/// EXPOSED 8765, so following the printed command gave a container that
+/// looked dead.
+#[test]
+fn printed_docker_run_port_matches_the_dockerfile() {
+    let dockerfile = read("src/templates/files/docker/Dockerfile.tpl");
+    let docker_init = read("src/commands/docker_init.rs");
+
+    let exposed = dockerfile
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("EXPOSE ").map(str::trim))
+        .expect("the Dockerfile must EXPOSE a port");
+
+    assert!(
+        docker_init.contains(&format!("docker run -p {exposed}:{exposed}")),
+        "docker_init prints a `docker run -p` that does not match the image's \
+         EXPOSE {exposed}"
+    );
+}
+
+/// The Dockerfile must copy the frontend build from where vite actually
+/// writes it. Every scaffolded `vite.config.ts` sets
+/// `build.outDir: '../public/assets'`; the Dockerfile copied from
+/// `/app/frontend/dist`, which vite never creates, so the image build
+/// failed at that COPY *after* `npm run build` had reported success.
+///
+/// Asserting the two against each other rather than pinning a literal
+/// keeps them from drifting apart again in either direction.
+#[test]
+fn docker_copies_the_frontend_build_from_the_vite_output_dir() {
+    let dockerfile = read("src/templates/files/docker/Dockerfile.tpl");
+
+    let mut out_dirs = Vec::new();
+    for frontend in ["react", "svelte", "vue"] {
+        let config = read(&format!(
+            "src/templates/files/frontend/{frontend}/vite.config.ts.tpl"
+        ));
+        // T31: vite.config.ts.tpl now declares two outDirs - the SSR
+        // build's (`bootstrap/ssr`, under the `isSsrBuild` branch) and
+        // the client build's (`../public/assets`, what the Docker copy
+        // step below actually depends on). Only the latter is relative
+        // to the frontend dir with a `../` prefix, so filter on that
+        // rather than taking the first `outDir:` line, which the SSR
+        // branch now precedes in file order.
+        let out_dir = config
+            .lines()
+            .find_map(|l| {
+                let l = l.trim();
+                let rest = l.strip_prefix("outDir:")?;
+                let value = rest
+                    .trim()
+                    .trim_matches(|c| c == '\'' || c == '"' || c == ',')
+                    .to_string();
+                if value.starts_with("../") {
+                    Some(value)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                panic!("{frontend}/vite.config.ts.tpl declares no client-build outDir")
+            });
+        out_dirs.push((frontend, out_dir));
+    }
+
+    let first = &out_dirs[0].1;
+    for (frontend, dir) in &out_dirs {
+        assert_eq!(
+            dir, first,
+            "{frontend} writes its build to `{dir}` while another frontend uses \
+             `{first}` - the single Dockerfile cannot copy from both"
+        );
+    }
+
+    // `../public/assets` from the frontend stage's WORKDIR (/app/frontend)
+    // is /app/public/assets.
+    let relative = first.strip_prefix("../").unwrap_or_else(|| {
+        panic!("expected an outDir relative to the frontend dir, got `{first}`")
+    });
+    let expected_source = format!("/app/{relative}");
+
+    let copy_line = dockerfile
+        .lines()
+        .find(|l| l.contains("--from=frontend-builder"))
+        .expect("the Dockerfile must copy the frontend build out of its stage");
+    assert!(
+        copy_line.contains(&expected_source),
+        "the Dockerfile copies the frontend build from a path vite does not \
+         write. vite outDir is `{first}` (→ `{expected_source}`), but the \
+         Dockerfile says:\n  {copy_line}"
+    );
+}
+
+/// The Rust build stage must have the frontend page sources, because
+/// `inertia_response!` resolves them at COMPILE time: it looks for
+/// `frontend/src/pages/<component>.{svelte,tsx,jsx,vue}` under
+/// `CARGO_MANIFEST_DIR` and fails the build when the file is absent.
+///
+/// The Dockerfile copied only `cmd/` and `src/` into the backend stage,
+/// so through v0.7.2 every scaffolded app died there with "Inertia
+/// component 'Home' not found" - the four generated controllers all
+/// render a page. Building the frontend in stage 1 does not help; this is
+/// a dependency of the *Rust* compile.
+///
+/// Anchored on the macro's own search path so moving the pages directory
+/// has to move both sides together.
+#[test]
+fn docker_backend_stage_has_the_pages_the_inertia_macro_resolves() {
+    let macro_src = read_from_repo("suprnova-macros/src/inertia.rs");
+
+    // The macro builds the directory as `.join("frontend").join("src").join("pages")`.
+    assert!(
+        macro_src.contains(r#".join("frontend").join("src").join("pages")"#),
+        "validate_component_exists no longer resolves frontend/src/pages the \
+         way this test assumes - re-derive the expected COPY from its new path"
+    );
+    let pages_dir = "frontend/src/pages";
+
+    let dockerfile = read("src/templates/files/docker/Dockerfile.tpl");
+    let backend_stage = dockerfile
+        .split_once("AS backend-builder")
+        .expect("the Dockerfile must have a backend-builder stage")
+        .1;
+
+    let copies_pages = backend_stage
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .filter(|l| l.starts_with("COPY ") && !l.contains("--from="))
+        .any(|l| l.contains(pages_dir));
+
+    assert!(
+        copies_pages,
+        "the backend-builder stage never copies `{pages_dir}` into the build \
+         context, so `inertia_response!` cannot resolve any page component and \
+         the image build fails on a stock scaffold"
+    );
+
+    // `.dockerignore` must not take back what the COPY asks for.
+    let dockerignore = read("src/templates/files/docker/dockerignore.tpl");
+    for line in dockerignore.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            continue;
+        }
+        let pattern = line.trim_end_matches('/');
+        assert!(
+            !pages_dir.starts_with(pattern),
+            ".dockerignore excludes `{line}`, which removes `{pages_dir}` from \
+             the build context that the backend stage must COPY"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CI-03 - assertions against a real scaffold on disk, before any rewriting
+// ---------------------------------------------------------------------------
+//
+// Everything above reads template files or calls a `templates::*` render
+// function directly. Both stop short of the thing a user actually gets:
+// `scaffold_snapshot` scaffolds for real but immediately rewrites the
+// `suprnova` dependency to a local path before it compiles anything, so the
+// tag that ships has never been asserted on disk - which is precisely how
+// REL-01a shipped a stale pin.
+//
+// These scaffold a project and assert against the bytes on disk, with no
+// rewriting in between.
+
+/// Scaffold a real project into a temp dir and hand back its path.
+fn scaffold_to_disk(tmp: &tempfile::TempDir, name: &str, extra: &[&str]) -> PathBuf {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_suprnova"));
+    cmd.arg("new")
+        .arg(name)
+        .arg("--no-interaction")
+        .arg("--no-git")
+        .args(extra)
+        .current_dir(tmp.path());
+    let out = cmd.output().expect("`suprnova new` should run");
+    assert!(
+        out.status.success(),
+        "`suprnova new {name} {extra:?}` failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    tmp.path().join(name)
+}
+
+/// No `{placeholder}` may survive into a generated project.
+///
+/// The substitution is `str::replace` against a hand-maintained list of
+/// keys, so adding a placeholder to a template without teaching the writer
+/// about it emits the literal `{package_name}` into the user's source. That
+/// is a compile error at best and a silently wrong value at worst, and
+/// nothing checked for it - the render-function tests only assert the two
+/// placeholders they already know about.
+///
+/// Scanning the whole tree catches the ones nobody thought to name.
+#[test]
+fn a_scaffolded_project_contains_no_unsubstituted_placeholders() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    for (name, extra) in [("phfull", &[][..]), ("phapi", &["--api"][..])] {
+        let project = scaffold_to_disk(&tmp, name, extra);
+
+        let mut offenders = Vec::new();
+        let mut scanned = 0usize;
+        visit(&project, &mut |path, body| {
+            // node_modules is not ours and is not generated from templates.
+            if path.components().any(|c| c.as_os_str() == "node_modules") {
+                return;
+            }
+            scanned += 1;
+            for (n, line) in body.lines().enumerate() {
+                // A surviving placeholder looks like `{lower_snake_case}`.
+                // Real code uses braces constantly, so match the shape the
+                // templates actually use rather than any brace at all.
+                for cap in line.match_indices('{') {
+                    let rest = &line[cap.0 + 1..];
+                    let Some(end) = rest.find('}') else { continue };
+                    let inner = &rest[..end];
+                    if !inner.is_empty()
+                        && inner
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
+                        && KNOWN_TEMPLATE_KEYS.contains(&inner)
+                    {
+                        offenders.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                    }
+                }
+            }
+        });
+
+        assert!(
+            scanned > 0,
+            "scanned zero files in the {name} scaffold - the walk found \
+             nothing, so this test would pass vacuously"
+        );
+        assert!(
+            offenders.is_empty(),
+            "the {name} scaffold shipped unsubstituted template placeholders:\n{}",
+            offenders.join("\n")
+        );
+    }
+}
+
+/// Every placeholder the templates use. A surviving one of these in
+/// generated output is unambiguously a substitution bug, where a bare
+/// `{name}` in a Rust format string is not.
+const KNOWN_TEMPLATE_KEYS: &[&str] = &[
+    "package_name",
+    "project_name",
+    "framework_tag",
+    "description",
+    "db_password",
+    "minio_password",
+    "app_key",
+    "frontend",
+    "frontend_variant",
+];
+
+/// The tag in a scaffold on disk must be the tag this build would release.
+///
+/// `rendered_backend_cargo_toml_pins_the_running_version` asserts the same
+/// thing about `templates::cargo_toml(...)`, but that calls the render
+/// function directly and so cannot see anything the writer does afterwards.
+/// This reads the file the user gets.
+#[test]
+fn a_scaffolded_manifest_on_disk_pins_the_running_tag() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let expected = format!("tag = \"{}\"", expected_tag());
+
+    for (name, extra) in [("tagfull", &[][..]), ("tagapi", &["--api"][..])] {
+        let project = scaffold_to_disk(&tmp, name, extra);
+        let manifest = fs::read_to_string(project.join("Cargo.toml"))
+            .unwrap_or_else(|e| panic!("read {name}/Cargo.toml: {e}"));
+        assert!(
+            manifest.contains(&expected),
+            "the {name} scaffold's Cargo.toml on disk must pin {expected}; got:\n{manifest}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Env templates must name variables the code actually reads.
+// ---------------------------------------------------------------------
+
+/// Walk a directory for `.rs` files, skipping the template tree - a
+/// template must not be allowed to vouch for itself.
+fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("directory entry").path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "templates") {
+                continue;
+            }
+            rust_sources(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// Every `SCREAMING_SNAKE` string literal appearing in framework or CLI
+/// source, outside comments.
+///
+/// Deliberately loose. The precise question - "does something read this
+/// variable?" - has no cheap syntactic answer, because the reads go
+/// through at least five different call shapes (`std::env::var`, `env`,
+/// `env_optional`, `env_strict`, `bool_env`) plus `envy`, which derives
+/// names from struct fields and leaves no literal at all. A scanner tight
+/// enough to model that would be wrong more often than the thing it
+/// checks.
+///
+/// Looseness is safe *in this direction*: it can only make the assertion
+/// weaker, never wrong. A name that appears nowhere in any source file is
+/// unambiguously dead, and that is exactly the defect this catches.
+/// Comment lines are stripped so prose mentioning a variable cannot vouch
+/// for it - the dead keys below were all named in doc comments.
+fn env_names_mentioned_in_source() -> std::collections::BTreeSet<String> {
+    let root = cli_root()
+        .parent()
+        .expect("suprnova-cli sits inside the workspace")
+        .to_path_buf();
+
+    let mut files = Vec::new();
+    rust_sources(&root.join("framework").join("src"), &mut files);
+    rust_sources(&root.join("suprnova-cli").join("src"), &mut files);
+    assert!(
+        files.len() > 50,
+        "expected to scan the framework and CLI sources, found only {} files - \
+         the walk is broken and this test would pass vacuously",
+        files.len()
+    );
+
+    let mut names = std::collections::BTreeSet::new();
+    for file in files {
+        let src = fs::read_to_string(&file).unwrap_or_else(|e| panic!("read {file:?}: {e}"));
+        for line in src.lines() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for literal in line.split('"').skip(1).step_by(2) {
+                if literal.len() > 3
+                    && literal
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                    && literal.starts_with(|c: char| c.is_ascii_uppercase())
+                {
+                    names.insert(literal.to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Variables a scaffolded `.env` assigns, in template order.
+fn env_keys_assigned(template: &str) -> Vec<String> {
+    template
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, _)| key.trim().to_string())
+        .filter(|key| {
+            !key.is_empty()
+                && key.starts_with(|c: char| c.is_ascii_uppercase())
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        })
+        .collect()
+}
+
+/// A scaffolded `.env` that names variables nothing reads is worse than an
+/// empty one: the developer configures it, believes it took effect, and
+/// discovers otherwise through behaviour rather than an error.
+///
+/// This shipped twice. First in the `.env` template, fixed in `a56a1a9e`
+/// ("scaffold .env advertised mail keys the framework never reads"). Then
+/// it turned out **`.env.example` still carried the same dead keys** -
+/// `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD` and
+/// `MAIL_FROM_ADDRESS`, against a transport that reads `MAIL_SMTP_HOST`,
+/// `MAIL_SMTP_PORT`, `MAIL_SMTP_USER`, `MAIL_SMTP_PASS` and `MAIL_FROM`.
+///
+/// That was the worse half to miss. `.env` is gitignored; `.env.example`
+/// is committed, so it is the file a teammate copies and the file CI
+/// reads. And `MAIL_FROM` is not cosmetic - the auth flows refuse to send
+/// without it, so a developer following `.env.example` got password reset
+/// failing with "MAIL_FROM environment variable is not set" while their
+/// `.env.example` plainly showed a from-address configured.
+///
+/// One fixed file and one missed file is exactly what a per-file review
+/// misses and a mechanical sweep does not.
+#[test]
+fn env_templates_only_name_variables_the_code_reads() {
+    let known = env_names_mentioned_in_source();
+
+    for template in ["env.tpl", "env.example.tpl"] {
+        let src = read(&format!("src/templates/files/root/{template}"));
+        let keys = env_keys_assigned(&src);
+        assert!(
+            keys.len() > 5,
+            "{template} parsed to only {} assignments - the parser is broken \
+             and this test would pass vacuously",
+            keys.len()
+        );
+
+        let dead: Vec<&String> = keys.iter().filter(|k| !known.contains(*k)).collect();
+        assert!(
+            dead.is_empty(),
+            "{template} assigns {dead:?}, which appear nowhere in the framework \
+             or CLI sources. Either the variable was renamed and the template \
+             was not updated, or the template is advertising a knob that does \
+             not exist. Both leave a developer configuring something that \
+             silently does nothing."
+        );
+    }
+}
+
+/// Variables that are live (substituted per-project) in `env.tpl` but can
+/// only ever be a comment in `env.example.tpl`.
+///
+/// `templates::env_example()` returns `env.example.tpl` verbatim - no
+/// substitution runs over it - so a variable whose useful value is chosen
+/// per-project at scaffold time (as opposed to a fixed default like
+/// `APP_LOCALE=en`) cannot be shown there as a live assignment without
+/// misstating it for every project that doesn't match. `SUPRNOVA_FRONTEND`
+/// is documented there as `# SUPRNOVA_FRONTEND=svelte` instead; the
+/// assertion below confirms that comment actually exists, so this list
+/// can't silently rot into "documented nowhere."
+const LIVE_ONLY_DOCUMENTED_AS_COMMENT_IN_EXAMPLE: &[&str] = &["SUPRNOVA_FRONTEND"];
+
+/// The two env templates are copies of one another with different values,
+/// so a variable added to one and forgotten in the other is the specific
+/// mistake that produced the defect above. Compare the key *sets*, modulo
+/// the small allowlist of variables that are deliberately live in one and
+/// commented documentation in the other.
+#[test]
+fn the_two_env_templates_agree_on_which_variables_exist() {
+    let env_tpl = read("src/templates/files/root/env.tpl");
+    let example_tpl = read("src/templates/files/root/env.example.tpl");
+
+    let live: std::collections::BTreeSet<String> =
+        env_keys_assigned(&env_tpl).into_iter().collect();
+    let example: std::collections::BTreeSet<String> =
+        env_keys_assigned(&example_tpl).into_iter().collect();
+
+    let missing_from_example: Vec<&String> = live
+        .difference(&example)
+        .filter(|key| !LIVE_ONLY_DOCUMENTED_AS_COMMENT_IN_EXAMPLE.contains(&key.as_str()))
+        .collect();
+    let missing_from_live: Vec<&String> = example.difference(&live).collect();
+
+    assert!(
+        missing_from_example.is_empty() && missing_from_live.is_empty(),
+        "env.tpl and env.example.tpl must document the same variables.\n  \
+         in env.tpl but not env.example.tpl: {missing_from_example:?}\n  \
+         in env.example.tpl but not env.tpl: {missing_from_live:?}\n\
+         `.env` is gitignored and `.env.example` is committed, so a variable \
+         present in only one of them is a variable half the team never sees."
+    );
+
+    for key in LIVE_ONLY_DOCUMENTED_AS_COMMENT_IN_EXAMPLE {
+        assert!(
+            example_tpl
+                .lines()
+                .any(|line| line.trim_start().starts_with(&format!("# {key}="))),
+            "{key} is live in env.tpl but env.example.tpl has no commented \
+             `# {key}=...` documentation line for it"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// The API Dockerfile must not reference a full-stack project's layout.
+// ---------------------------------------------------------------------
+
+/// `docker:init` emitted one Dockerfile for every project shape, and it
+/// was the full-stack one. On a project scaffolded with `--api` its very
+/// first instruction - `COPY frontend/package.json` - failed outright,
+/// so `suprnova new --api` + `docker:init` + `docker build` could not
+/// succeed. The API scaffold has no `frontend/`, no `cmd/`, and produces
+/// no `public/assets`.
+///
+/// Asserted against the *paths the API scaffold actually creates* rather
+/// than a hardcoded list, so adding a directory to that scaffold cannot
+/// silently make this test wrong.
+#[test]
+fn the_api_dockerfile_references_no_path_the_api_scaffold_lacks() {
+    let tpl = read("src/templates/files/docker/Dockerfile.api.tpl");
+
+    let instructions: Vec<&str> = tpl
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .collect();
+    assert!(
+        instructions.len() > 10,
+        "parsed only {} instructions out of the API Dockerfile - the \
+         comment filter is broken and this test would pass vacuously",
+        instructions.len()
+    );
+
+    let body = instructions.join("\n");
+
+    // These three are exactly what the full-stack template copies and the
+    // API scaffold does not have. Each one is a hard build failure.
+    for absent in ["frontend/", "cmd/", "public/assets"] {
+        assert!(
+            !body.contains(absent),
+            "the API Dockerfile references `{absent}`, which a \
+             `suprnova new --api` project does not contain - the build \
+             fails on that instruction. Full template:\n{tpl}"
+        );
+    }
+
+    // And it must still build the thing the API scaffold *does* have.
+    assert!(
+        body.contains("COPY src/ ./src/"),
+        "the API Dockerfile must copy `src/`, where its server binary lives"
+    );
+    assert!(
+        body.contains("{package_name}"),
+        "the API Dockerfile must template the package name, not hardcode one"
+    );
+}
+
+/// The stub-out step exists so `cargo build --release` can resolve every
+/// declared target for dependency caching. The API manifest declares its
+/// server at `src/main.rs` and a `console` at `src/bin/console.rs`; a
+/// stub missing either one fails the cache stage outright rather than
+/// merely missing the cache.
+#[test]
+fn the_api_dockerfile_stubs_every_binary_its_manifest_declares() {
+    let tpl = read("src/templates/files/docker/Dockerfile.api.tpl");
+    let manifest = read("src/templates/files/api/Cargo.toml.tpl");
+
+    let declared: Vec<&str> = manifest
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("path = "))
+        .map(|p| p.trim_matches('"'))
+        .collect();
+    assert_eq!(
+        declared.len(),
+        2,
+        "expected the API manifest to declare two binaries, found {declared:?} \
+         - if that changed, the Dockerfile's stub step needs changing too"
+    );
+
+    for path in declared {
+        assert!(
+            tpl.contains(path),
+            "the API Dockerfile never stubs `{path}`, which the API manifest \
+             declares as a [[bin]]. `cargo build` resolves all targets, so \
+             the dependency-cache stage fails outright without it"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SEC-06 - entry points must load `.env` before the runtime exists
+// ---------------------------------------------------------------------------
+
+/// Strip line comments so an assertion cannot match prose that *explains*
+/// the very thing it forbids.
+///
+/// This is not hypothetical caution: the API Dockerfile test failed on a
+/// correct file for exactly this reason, matching its own header comment.
+/// Both replacement console templates mention `dotenvy::dotenv()` while
+/// describing what they no longer do.
+fn code_only(src: &str) -> String {
+    src.lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every binary entry point a user receives, template and dogfood alike.
+///
+/// The dogfood is included because `app/` is the worked example people
+/// copy; a fix that lands in the templates and not there just relocates
+/// the bad pattern to the more-read file.
+fn entry_points() -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "backend server",
+            read("src/templates/files/backend/cmd/main.rs.tpl"),
+        ),
+        (
+            "backend console",
+            read("src/templates/files/backend/src/bin/console.rs.tpl"),
+        ),
+        (
+            "api server",
+            read("src/templates/files/api/src/main.rs.tpl"),
+        ),
+        (
+            "api console",
+            read("src/templates/files/api/src/bin/console.rs.tpl"),
+        ),
+        ("dogfood server", read_from_repo("app/cmd/main.rs")),
+        ("dogfood console", read_from_repo("app/src/bin/console.rs")),
+    ]
+}
+
+/// `#[tokio::main]` builds the runtime around the whole of `main`, so
+/// every worker thread exists before the first statement runs. Loading
+/// `.env` from there writes to the process environment while other
+/// threads may be reading it - unsound, and silent when it goes wrong.
+#[test]
+fn every_entry_point_uses_the_suprnova_main_attribute() {
+    for (what, src) in entry_points() {
+        let code = code_only(&src);
+        assert!(
+            code.contains("#[suprnova::main"),
+            "the {what} entry point must use #[suprnova::main] so `.env` is \
+             loaded before the Tokio runtime is built"
+        );
+        assert!(
+            !code.contains("#[tokio::main"),
+            "the {what} entry point still uses #[tokio::main], which cannot \
+             load `.env` before the runtime exists (SEC-06)"
+        );
+    }
+}
+
+/// The console binaries called `dotenvy::dotenv()` as their first
+/// statement - inside the runtime `#[tokio::main]` had already built.
+/// That is the same defect as the server's, reached by a different path,
+/// and it survived the server-side fix once already.
+#[test]
+fn no_entry_point_loads_dotenv_itself() {
+    for (what, src) in entry_points() {
+        assert!(
+            !code_only(&src).contains("dotenvy::"),
+            "the {what} entry point loads dotenv itself; `#[suprnova::main]` \
+             owns that, and doing it in the body puts the mutation back \
+             inside the runtime (SEC-06)"
+        );
+    }
+}
+
+/// A dependency the scaffold no longer uses is noise in a file every user
+/// reads and edits.
+#[test]
+fn scaffold_manifests_drop_the_now_unused_dotenv_dependency() {
+    for manifest in [
+        "src/templates/files/backend/Cargo.toml.tpl",
+        "src/templates/files/api/Cargo.toml.tpl",
+    ] {
+        assert!(
+            !read(manifest).contains("dotenvy"),
+            "{manifest} still declares dotenvy, which no scaffold file uses"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The scaffold must wire the Inertia protocol layer
+// ---------------------------------------------------------------------------
+//
+// `Inertia::install` registers four middlewares: the headers middleware
+// (`Vary: X-Inertia` on every response, and an empty `200` on an Inertia visit
+// substituted with a `303` back), the version middleware (409 +
+// X-Inertia-Location on an asset-version mismatch), the 303 middleware
+// (302 -> 303 on non-GET Inertia redirects), and the validation-redirect
+// middleware (a `422` carrying an `errors` object becomes the redirect-back
+// the Inertia client expects). Without them a generated app is
+// silently wrong in ways that only show up in production: a shared cache can
+// serve one representation of a URL to the other, stale clients never reload
+// after a deploy, and a form POST that redirects can be replayed with its
+// original verb. `scaffold_snapshot` proves the scaffold COMPILES; nothing
+// proves it wires this.
+
+#[test]
+fn every_frontend_scaffold_installs_the_inertia_middlewares() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    for frontend in ["svelte", "react", "vue"] {
+        let name = format!("inertia_{frontend}");
+        let project = scaffold_to_disk(&tmp, &name, &["--frontend", frontend]);
+        let bootstrap = fs::read_to_string(project.join("src/bootstrap.rs"))
+            .unwrap_or_else(|e| panic!("read {name}/src/bootstrap.rs: {e}"));
+
+        assert!(
+            bootstrap.contains("Inertia::install("),
+            "the {frontend} scaffold's bootstrap.rs never calls Inertia::install, \
+             so the generated app has no InertiaHeadersMiddleware, no \
+             InertiaVersionMiddleware, no Inertia303Middleware and no \
+             InertiaValidationRedirectMiddleware:\n{bootstrap}"
+        );
+        // `InertiaConfig::default()` already hashes the Vite build manifest
+        // for the asset version (`VersionResolver::Manifest`), so a scaffold
+        // that pins a static `.version(...)` would ship a version that never
+        // moves on its own - the exact staleness problem the manifest
+        // default exists to close. The contract now is the absence of a
+        // pin, not the presence of a named constant.
+        assert!(
+            !bootstrap.contains(".version("),
+            "the {frontend} scaffold pins a static Inertia asset version; the \
+             manifest-hash default should be left alone so a frontend build \
+             changes the version automatically:\n{bootstrap}"
+        );
+
+        // The frontend has to be pinned on the config, not left to
+        // SUPRNOVA_FRONTEND. `InertiaConfig::default()` falls back to
+        // Svelte, so a react project would render `src/main.ts` and skip
+        // the React refresh preamble - a blank page with no error in it.
+        let variant = match frontend {
+            "react" => "React",
+            "vue" => "Vue",
+            _ => "Svelte",
+        };
+        assert!(
+            bootstrap.contains(&format!(".frontend(Frontend::{variant})")),
+            "the {frontend} scaffold must pin .frontend(Frontend::{variant}) on \
+             the config it installs; without it the shell renders whatever \
+             SUPRNOVA_FRONTEND says, defaulting to Svelte:\n{bootstrap}"
+        );
+
+        // Belt and braces: manual/env-vars.md documents SUPRNOVA_FRONTEND
+        // as the contract, and the suprnova CLI's own generators read it.
+        let env = fs::read_to_string(project.join(".env"))
+            .unwrap_or_else(|e| panic!("read {name}/.env: {e}"));
+        assert!(
+            env.contains(&format!("SUPRNOVA_FRONTEND={frontend}")),
+            "the {frontend} scaffold's .env must set SUPRNOVA_FRONTEND={frontend}; \
+             it is the documented env contract and what the suprnova CLI's own \
+             generators read:\n{env}"
+        );
+
+        // Ordering is load-bearing, not cosmetic, and the scaffold has to
+        // match the dogfood app's chain (`app/src/bootstrap.rs`): session,
+        // then locale, then the Inertia layer. The version middleware
+        // re-flashes the session before bouncing a stale client, which it can
+        // only do inside a session scope, so registering it ahead of
+        // SessionMiddleware would make the 409 eat the flash.
+        //
+        // Locale moved ahead of the Inertia layer in 1.3.6, when
+        // `error_page` gave that layer a middleware that renders a page on
+        // the way OUT - after everything registered inside it has returned
+        // and popped its scope. With locale inside, every error page
+        // rendered in the default locale. See
+        // `locale_detection_is_registered_outside_the_inertia_layer` below,
+        // and the `locale` module in
+        // `framework/tests/inertia_error_page.rs` for the behaviour in both
+        // directions.
+        let session_at = bootstrap
+            .find("SessionMiddleware::new")
+            .expect("the scaffold registers SessionMiddleware");
+        let inertia_at = bootstrap.find("Inertia::install(").expect("checked above");
+        let locale_at = bootstrap
+            .find("LocaleMiddleware::from_env")
+            .expect("the scaffold registers LocaleMiddleware");
+        assert!(
+            session_at < inertia_at,
+            "the {frontend} scaffold installs Inertia before SessionMiddleware; \
+             the version middleware re-flashes the session before its 409 and \
+             needs a session scope to do it"
+        );
+        assert!(
+            session_at < locale_at,
+            "the {frontend} scaffold registers LocaleMiddleware before \
+             SessionMiddleware; locale detection reads the session first"
+        );
+        assert!(
+            locale_at < inertia_at,
+            "the {frontend} scaffold installs Inertia before LocaleMiddleware; \
+             the error-page middleware renders after the locale scope is popped, \
+             so every error page would come back in the default locale"
+        );
+
+        // CSRF goes BELOW the install, and the comment block above
+        // `Inertia::install` tells the reader so. A middleware that answers
+        // without calling `next` hands its response to nothing registered
+        // inside it, so a `CsrfMiddleware` above this line would answer a
+        // lapsed-session form post with `419 {"message":"CSRF token
+        // mismatch."}` that never reaches the error-page middleware - the
+        // Inertia crash modal, on the one flow a user is most likely to
+        // hit. An app that genuinely needs the page further out registers
+        // `InertiaErrorPageMiddleware` itself; the scaffold does not have
+        // to, because it puts CSRF here.
+        let csrf_at = bootstrap
+            .find("CsrfMiddleware::new")
+            .expect("the scaffold registers CsrfMiddleware");
+        assert!(
+            inertia_at < csrf_at,
+            "the {frontend} scaffold registers CsrfMiddleware before \
+             Inertia::install, so its 419 never reaches the error-page \
+             middleware and the client shows the crash modal instead of the \
+             Error page"
+        );
+    }
+}
+
+#[test]
+fn the_api_scaffold_does_not_install_inertia() {
+    // `--api` is the no-SPA starter (manual/cli-new.md: "no Inertia, no SPA").
+    // Installing the protocol middlewares there would register three
+    // middlewares that can never fire, on a project with no frontend build to
+    // version.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let project = scaffold_to_disk(&tmp, "inertia_api", &["--api"]);
+    let bootstrap = fs::read_to_string(project.join("src/bootstrap.rs"))
+        .expect("read inertia_api/src/bootstrap.rs");
+    assert!(
+        !bootstrap.contains("Inertia"),
+        "the --api scaffold must stay Inertia-free:\n{bootstrap}"
+    );
+}
+
+#[test]
+fn every_frontend_ships_an_ssr_entry_that_calls_create_server() {
+    for (frontend, tpl, package) in [
+        (
+            "react",
+            "src/templates/files/frontend/react/src/ssr.tsx.tpl",
+            "@inertiajs/react",
+        ),
+        (
+            "svelte",
+            "src/templates/files/frontend/svelte/src/ssr.ts.tpl",
+            "@inertiajs/svelte",
+        ),
+        (
+            "vue",
+            "src/templates/files/frontend/vue/src/ssr.ts.tpl",
+            "@inertiajs/vue3",
+        ),
+    ] {
+        let body = read(tpl);
+        assert!(
+            body.contains("createServer"),
+            "{frontend}'s ssr entry must call createServer() from {package}/server; got:\n{body}"
+        );
+        assert!(
+            body.contains(&format!("{package}/server")),
+            "{frontend}'s ssr entry must import createServer from its own @inertiajs package"
+        );
+    }
+}
+
+#[test]
+fn every_frontend_package_json_declares_build_ssr() {
+    for (frontend, tpl) in [
+        (
+            "react",
+            "src/templates/files/frontend/react/package.json.tpl",
+        ),
+        (
+            "svelte",
+            "src/templates/files/frontend/svelte/package.json.tpl",
+        ),
+        ("vue", "src/templates/files/frontend/vue/package.json.tpl"),
+    ] {
+        let body = read(tpl);
+        assert!(
+            body.contains(r#""build:ssr": "vite build --ssr"#),
+            "{frontend}'s package.json must declare a build:ssr script; got:\n{body}"
+        );
+    }
+}
+
+#[test]
+fn every_frontend_vite_config_gives_the_ssr_build_its_own_outdir() {
+    for (frontend, tpl) in [
+        (
+            "react",
+            "src/templates/files/frontend/react/vite.config.ts.tpl",
+        ),
+        (
+            "svelte",
+            "src/templates/files/frontend/svelte/vite.config.ts.tpl",
+        ),
+        ("vue", "src/templates/files/frontend/vue/vite.config.ts.tpl"),
+    ] {
+        let body = read(tpl);
+        assert!(
+            body.contains("isSsrBuild"),
+            "{frontend}'s vite.config.ts must branch on isSsrBuild so the SSR \
+             bundle doesn't land in public/assets alongside the client build; got:\n{body}"
+        );
+        assert!(
+            body.contains("bootstrap/ssr"),
+            "{frontend}'s vite.config.ts SSR outDir must match ssr_start.rs's \
+             default bundle path (frontend/bootstrap/ssr/ssr.js); got:\n{body}"
+        );
+    }
+}
+
+/// Every controller `suprnova new` writes into `src/controllers/`, by file
+/// name, so a test can render the set the scaffolder actually ships rather
+/// than a hand-picked subset that silently falls behind it.
+fn scaffold_controllers() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("home.rs", suprnova_cli::templates::home_controller()),
+        ("auth.rs", suprnova_cli::templates::auth_controller()),
+        (
+            "dashboard.rs",
+            suprnova_cli::templates::dashboard_controller(),
+        ),
+        (
+            "email_verification.rs",
+            suprnova_cli::templates::email_verification_controller(),
+        ),
+        (
+            "password_reset.rs",
+            suprnova_cli::templates::password_reset_controller(),
+        ),
+    ]
+}
+
+/// Every `pub mod` the scaffold's `controllers/mod.rs` declares has a
+/// controller template behind it, and every controller template is
+/// declared - one list, checked in both directions.
+#[test]
+fn the_controllers_module_declares_exactly_the_scaffolded_controllers() {
+    let declared: std::collections::BTreeSet<String> = suprnova_cli::templates::controllers_mod()
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("pub mod ")
+                .and_then(|rest| rest.strip_suffix(';'))
+        })
+        .map(str::to_owned)
+        .collect();
+    let shipped: std::collections::BTreeSet<String> = scaffold_controllers()
+        .into_iter()
+        .map(|(file, _)| file.trim_end_matches(".rs").to_owned())
+        .collect();
+    assert_eq!(
+        declared, shipped,
+        "controllers/mod.rs.tpl and the controller templates `suprnova new` \
+         writes have drifted apart"
+    );
+}
+
+/// Write the scaffold's controllers into `<dir>/src/controllers/` and scan
+/// them the way `suprnova generate-types` would.
+fn scan_scaffold_controllers(
+    dir: &Path,
+) -> Vec<suprnova_cli::commands::generate_types::InertiaPropsStruct> {
+    let controllers = dir.join("src/controllers");
+    fs::create_dir_all(&controllers).expect("create src/controllers");
+    for (name, body) in scaffold_controllers() {
+        fs::write(controllers.join(name), body).unwrap_or_else(|e| panic!("write {name}: {e}"));
+    }
+    suprnova_cli::commands::generate_types::scan_inertia_props(dir)
+}
+
+/// A fresh scaffold must generate its TypeScript types without a single
+/// "isn't a struct this project defines" warning.
+///
+/// `LoginProps`/`RegisterProps` once carried `Option<serde_json::Value>`,
+/// which the generator degraded to `unknown` and warned about twice on every
+/// regeneration - advising the user to "mirror it as a local struct", which
+/// is not what you do with a JSON document. Rendering the controllers the
+/// scaffolder actually writes is the only way to catch that from here.
+#[test]
+fn scaffolded_controllers_generate_types_without_unresolved_props() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let structs = scan_scaffold_controllers(dir.path());
+    assert!(
+        !structs.is_empty(),
+        "the scaffolded controllers do define InertiaProps structs"
+    );
+
+    let unresolved: Vec<String> =
+        suprnova_cli::commands::generate_types::collect_unresolved_refs(&structs)
+            .into_iter()
+            .map(|r| format!("{}.{}: {}", r.struct_name, r.field_name, r.type_name))
+            .collect();
+    assert!(
+        unresolved.is_empty(),
+        "a fresh scaffold must not warn about any prop type: {unresolved:?}"
+    );
+}
+
+/// The scaffolded backend opts into the error page, and every starter
+/// ships the component it names.
+///
+/// These two halves are only useful together. `error_page("Error")`
+/// without an `Error.*` component resolves to nothing and the Inertia
+/// client fails the visit; an `Error.*` component nobody enabled is dead
+/// code. One test, so neither half can be removed on its own.
+#[test]
+fn every_frontend_ships_the_error_page_the_backend_enables() {
+    let bootstrap = read("src/templates/files/backend/bootstrap.rs.tpl");
+    assert!(
+        bootstrap.contains(r#".error_page("Error")"#),
+        "the scaffolded bootstrap must enable the error page, or a 403 / 404 / 500 \
+         reaches the Inertia client as a plain JSON body and it shows its error \
+         modal; got:\n{bootstrap}"
+    );
+
+    for (frontend, tpl) in [
+        (
+            "react",
+            "src/templates/files/frontend/react/src/pages/Error.tsx.tpl",
+        ),
+        (
+            "svelte",
+            "src/templates/files/frontend/svelte/src/pages/Error.svelte.tpl",
+        ),
+        (
+            "vue",
+            "src/templates/files/frontend/vue/src/pages/Error.vue.tpl",
+        ),
+    ] {
+        let body = read(tpl);
+        for prop in ["status", "message", "request_id"] {
+            assert!(
+                body.contains(prop),
+                "{frontend}'s Error page must render the `{prop}` prop the \
+                 error-page middleware sends; got:\n{body}"
+            );
+        }
+        assert!(
+            body.contains("t('error-reference')") && body.contains("t('error-go-home')"),
+            "{frontend}'s Error page must route its chrome through the starter's \
+             t() helper like every other page; got:\n{body}"
+        );
+        assert!(
+            !body.contains("from '../types/inertia-props'"),
+            "{frontend}'s Error page must declare its own props: \
+             `suprnova generate-types` rewrites types/inertia-props.ts from the \
+             project's #[derive(InertiaProps)] structs, so an import from there \
+             would vanish on the next regeneration; got:\n{body}"
+        );
+    }
+}
+
+/// Scaffolding writes the `Error` page next to `Home`, under whichever
+/// extension the chosen frontend uses.
+#[test]
+fn scaffolding_writes_the_error_page_for_every_frontend() {
+    for (frontend, ext) in [
+        (suprnova_cli::templates::Frontend::React, "tsx"),
+        (suprnova_cli::templates::Frontend::Svelte, "svelte"),
+        (suprnova_cli::templates::Frontend::Vue, "vue"),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        suprnova_cli::templates::scaffold_frontend(dir.path(), "my_app", "My App", frontend)
+            .expect("scaffold frontend");
+        let page = dir
+            .path()
+            .join("frontend/src/pages")
+            .join(format!("Error.{ext}"));
+        assert!(
+            page.is_file(),
+            "{frontend:?} must scaffold {}",
+            page.display()
+        );
+    }
+}
+
+/// The scaffold must register `LocaleMiddleware` before `Inertia::install`,
+/// and the dogfood app must agree with it.
+///
+/// An error page is built by a middleware on the way *out*, after every
+/// middleware registered inside it has returned and popped whatever
+/// request scope it opened. Registered the other way round, the locale
+/// scope is gone by the time the page renders and every error page - and
+/// only error pages - comes back in the app's default locale instead of
+/// the visitor's. That is invisible in every other test, because every
+/// other page renders from a handler, deep inside the chain where the
+/// scope is still live. The behaviour behind this is pinned in both
+/// directions by `framework/tests/inertia_error_page.rs`'s `locale`
+/// module.
+#[test]
+fn locale_detection_is_registered_outside_the_inertia_layer() {
+    for (what, source) in [
+        (
+            "the scaffolded bootstrap",
+            read("src/templates/files/backend/bootstrap.rs.tpl"),
+        ),
+        ("the dogfood app", read_from_repo("app/src/bootstrap.rs")),
+    ] {
+        let locale = source
+            .find("global_middleware!(\n        LocaleMiddleware::from_env()")
+            .or_else(|| source.find("LocaleMiddleware::from_env()"))
+            .unwrap_or_else(|| panic!("{what} must register LocaleMiddleware:\n{source}"));
+        let install = source
+            .find("Inertia::install(")
+            .unwrap_or_else(|| panic!("{what} must call Inertia::install:\n{source}"));
+        assert!(
+            locale < install,
+            "{what} registers LocaleMiddleware after Inertia::install, so the \
+             error-page middleware renders once the locale scope has been popped \
+             and every error page comes back in the default locale"
+        );
+
+        // Session still has to be outside locale: the detection chain
+        // reads the session first.
+        let session = source
+            .find("SessionMiddleware::")
+            .unwrap_or_else(|| panic!("{what} must register SessionMiddleware:\n{source}"));
+        assert!(
+            session < locale,
+            "{what} must keep SessionMiddleware outside LocaleMiddleware - the \
+             detection chain reads the session before the cookie and the header"
+        );
+    }
+}
+
+/// The starter `lang-keys.ts` must be byte-for-byte what
+/// `generate-types` would emit from the starter catalog.
+///
+/// It ships pre-generated so `t(key)` type-checks before a user has ever
+/// run the generator, which only works while the two agree - otherwise a
+/// fresh project's first `suprnova generate-types` silently rewrites a
+/// file the user never edited, and any key the union is missing is a
+/// compile error in a page the scaffold itself wrote.
+#[test]
+fn the_starter_lang_keys_match_the_starter_catalog() {
+    use suprnova_cli::commands::generate_types::{extract_message_ids, render_lang_keys};
+
+    let ids = extract_message_ids(suprnova_cli::templates::lang_app_ftl());
+    let expected_union = render_lang_keys(&ids);
+    let shipped = suprnova_cli::templates::lang_keys_starter();
+
+    assert!(
+        shipped.ends_with(&expected_union),
+        "lang-keys.ts.tpl has drifted from lang/en/app.ftl.tpl.\nexpected union:\n{expected_union}\nshipped:\n{shipped}"
+    );
+    for id in ["error-go-home", "error-reference", "welcome"] {
+        assert!(
+            ids.iter().any(|found| found == id),
+            "the starter catalog must define `{id}`; got {ids:?}"
+        );
+    }
+}
+
+/// The starter's `inertia-props.ts` is, byte for byte, what
+/// `suprnova generate-types` emits for the starter's own controllers.
+///
+/// `suprnova serve` regenerates the file on the first `.rs` save, so a
+/// template that differs from the generator's output becomes a diff on a
+/// file the user never edited. Through v2.0.0 it did differ: the template
+/// declared an `errors` shape the controllers never send, and the types
+/// went stale the moment the generator first ran. The three frontends
+/// share one file because the generator does not know which frontend it
+/// serves.
+#[test]
+fn the_starter_inertia_props_match_the_starter_controllers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let structs = scan_scaffold_controllers(dir.path());
+    let expected = suprnova_cli::commands::generate_types::generate_typescript(&structs);
+
+    for (frontend, shipped) in [
+        (
+            "react",
+            suprnova_cli::templates::react::inertia_props_types(),
+        ),
+        (
+            "svelte",
+            suprnova_cli::templates::svelte::inertia_props_types(),
+        ),
+        ("vue", suprnova_cli::templates::vue::inertia_props_types()),
+    ] {
+        assert_eq!(
+            shipped, expected,
+            "{frontend}'s inertia-props.ts.tpl has drifted from what `suprnova \
+             generate-types` emits for the scaffold's controllers. Regenerate it \
+             from the controller templates.\nexpected:\n{expected}\nshipped:\n{shipped}"
+        );
+    }
+}
+
+/// Validation errors reach a scaffolded auth page through `useForm().errors`,
+/// never through a page prop.
+///
+/// The framework seeds `errors` on every Inertia page from the
+/// session-flashed validation bag. Through v2.0.0 the auth controller
+/// declared an `errors` prop of its own and sent it as `None`, which the
+/// page object serialised as `errors: null` over the seeded bag - so invalid
+/// credentials returned to a form that displayed nothing. The controller
+/// must not name the key, and the pages must read the form's copy of it.
+#[test]
+fn scaffold_auth_pages_take_validation_errors_from_the_form_not_from_props() {
+    let auth = suprnova_cli::templates::auth_controller();
+    assert!(
+        !auth.contains("pub errors"),
+        "the auth controller must not declare an `errors` prop - an explicit \
+         prop replaces the session-flashed bag the framework seeds; got:\n{auth}"
+    );
+
+    for (frontend, page, body, reads_form_errors) in [
+        (
+            "react",
+            "Login",
+            suprnova_cli::templates::react::login_page(),
+            "errors } = useForm(",
+        ),
+        (
+            "react",
+            "Register",
+            suprnova_cli::templates::react::register_page(),
+            "errors } = useForm(",
+        ),
+        (
+            "svelte",
+            "Login",
+            suprnova_cli::templates::svelte::login_page(),
+            "form.errors.",
+        ),
+        (
+            "svelte",
+            "Register",
+            suprnova_cli::templates::svelte::register_page(),
+            "form.errors.",
+        ),
+        (
+            "vue",
+            "Login",
+            suprnova_cli::templates::vue::login_page(),
+            "form.errors.",
+        ),
+        (
+            "vue",
+            "Register",
+            suprnova_cli::templates::vue::register_page(),
+            "form.errors.",
+        ),
+    ] {
+        assert!(
+            body.contains(reads_form_errors),
+            "{frontend}'s {page} page must read validation errors from the form \
+             (`{reads_form_errors}`); got:\n{body}"
+        );
+        for props_read in ["props.errors", "{ errors }", "errors?."] {
+            assert!(
+                !body.contains(props_read),
+                "{frontend}'s {page} page reads `errors` from its props \
+                 (`{props_read}`), which the controller no longer sends; got:\n{body}"
+            );
+        }
+    }
+}
+
+/// The scaffold serves `public/` through the framework's static-file
+/// fallback.
+///
+/// `npm run build` writes the hashed bundle to `public/assets/` and the
+/// production image copies that directory next to the binary, but through
+/// v2.0.0 nothing served it: the HTML shell referenced `/assets/*` URLs that
+/// answered with the router's `404` the moment Vite's dev server was not
+/// running. `StaticFiles` documents `fallback!` registration as its
+/// integration, and the Inertia error-page middleware recognises the
+/// fallback's `404` body, so an unknown URL still renders the `Error` page.
+/// The behaviour itself is exercised by `scaffold_account_flows.rs`.
+#[test]
+fn the_scaffold_serves_public_files_through_the_static_fallback() {
+    let routes = read("src/templates/files/backend/routes.rs.tpl");
+    assert!(
+        routes.contains("fallback!(StaticFiles::public().handler())"),
+        "routes.rs.tpl must register the static-file fallback, or a production \
+         server answers every `/assets/*` URL with 404; got:\n{routes}"
+    );
+    let imports = routes
+        .lines()
+        .find(|line| line.starts_with("use suprnova::"))
+        .expect("routes.rs.tpl imports from suprnova");
+    for name in ["StaticFiles", "fallback"] {
+        assert!(
+            imports.contains(name),
+            "routes.rs.tpl must import `{name}`; got: {imports}"
+        );
+    }
+
+    // The template names framework items by their public paths; keep the
+    // two in step so a rename surfaces here rather than in a user's build.
+    let lib = read_from_repo("framework/src/lib.rs");
+    assert!(
+        lib.contains("pub use static_files::StaticFiles;"),
+        "`suprnova::StaticFiles` is no longer exported under that name"
+    );
+    let macros = read_from_repo("framework/src/routing/macros.rs");
+    assert!(
+        macros.contains("macro_rules! fallback {"),
+        "`suprnova::fallback!` is no longer defined under that name"
+    );
+}
+
+/// Every component name a scaffolded controller hands to
+/// `inertia_response!` is a page `suprnova new` writes, for every
+/// frontend.
+///
+/// The macro checks the page exists when the *user's* project compiles,
+/// so a controller template naming a page nobody scaffolded is a build
+/// error on a stock scaffold, and the scaffolder itself never compiles a
+/// project. Reading the names out of the controller templates means a
+/// page added to one controller has to be added to all three frontends,
+/// and a page the frontends ship has to be one some controller renders.
+#[test]
+fn every_page_the_scaffold_controllers_render_is_scaffolded_for_every_frontend() {
+    let mut components = std::collections::BTreeSet::new();
+    for (file, body) in scaffold_controllers() {
+        for (index, _) in body.match_indices("inertia_response!(") {
+            let rest = &body[index..];
+            let quoted = rest
+                .split_once('"')
+                .and_then(|(_, after)| after.split_once('"'))
+                .map(|(name, _)| name.to_owned())
+                .unwrap_or_else(|| panic!("{file}: inertia_response! without a component name"));
+            components.insert(quoted);
+        }
+    }
+    assert!(
+        components.contains("auth/VerifyEmail")
+            && components.contains("auth/ForgotPassword")
+            && components.contains("auth/ResetPassword"),
+        "the scaffold's controllers must render the account-flow pages; got {components:?}"
+    );
+
+    for (frontend, ext) in [
+        (suprnova_cli::templates::Frontend::React, "tsx"),
+        (suprnova_cli::templates::Frontend::Svelte, "svelte"),
+        (suprnova_cli::templates::Frontend::Vue, "vue"),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        suprnova_cli::templates::scaffold_frontend(dir.path(), "my_app", "My App", frontend)
+            .expect("scaffold frontend");
+        let pages = dir.path().join("frontend/src/pages");
+        for component in &components {
+            let page = pages.join(format!("{component}.{ext}"));
+            assert!(
+                page.is_file(),
+                "{frontend:?} must scaffold {} for the `{component}` page a controller renders",
+                page.display()
+            );
+        }
+        // And the other way round: a page under auth/ that no controller
+        // renders is dead weight nobody will notice going stale.
+        for entry in fs::read_dir(pages.join("auth")).expect("read auth pages") {
+            let name = entry.expect("dir entry").file_name();
+            let name = name.to_string_lossy();
+            let component = format!("auth/{}", name.trim_end_matches(&format!(".{ext}")));
+            assert!(
+                components.contains(&component),
+                "{frontend:?} scaffolds auth/{name}, which no controller renders"
+            );
+        }
+    }
+}
+
+/// The scaffold wires the account flows: registration mails a
+/// verification link, the reset routes are reachable to a signed-out
+/// visitor, and the verification routes require the session the framework
+/// binds each token to.
+#[test]
+fn the_scaffold_wires_email_verification_and_password_reset() {
+    let auth = suprnova_cli::templates::auth_controller();
+    assert!(
+        auth.contains("EmailVerification::send_link(&user, ")
+            && auth.contains("redirect!(\"/verify-email\")"),
+        "registration must mail a verification link and continue to the \
+         notice; got:\n{auth}"
+    );
+
+    let routes = read("src/templates/files/backend/routes.rs.tpl");
+    let guest_end = routes
+        .find(".middleware(middleware::authenticate::guest())")
+        .expect("routes.rs.tpl has a guest group");
+    let auth_end = routes
+        .find(".middleware(middleware::authenticate::auth())")
+        .expect("routes.rs.tpl has an auth group");
+    assert!(guest_end < auth_end, "the guest group comes first");
+    let guest_group = &routes[..guest_end];
+    let auth_group = &routes[guest_end..auth_end];
+
+    for route in [
+        "get!(\"/forgot-password\", controllers::password_reset::forgot)",
+        "post!(\"/forgot-password\", controllers::password_reset::send_link)",
+        "get!(\"/reset-password\", controllers::password_reset::reset_form)",
+        "post!(\"/reset-password\", controllers::password_reset::reset)",
+    ] {
+        assert!(
+            guest_group.contains(route),
+            "`{route}` must sit in the guest group (someone resetting a password \
+             cannot sign in); got:\n{routes}"
+        );
+    }
+    for route in [
+        "get!(\"/verify-email\", controllers::email_verification::notice)",
+        "post!(\"/email/verification-notification\", controllers::email_verification::resend)",
+        "get!(\"/verify-email/verify\", controllers::email_verification::verify)",
+    ] {
+        assert!(
+            auth_group.contains(route),
+            "`{route}` must sit in the auth group (`EmailVerification::verify` is \
+             actor-bound); got:\n{routes}"
+        );
+    }
+
+    // The mailed links must land on the routes above.
+    let verification = suprnova_cli::templates::email_verification_controller();
+    assert!(
+        verification.contains("const VERIFY_PATH: &str = \"/verify-email/verify\";"),
+        "the verification link must land on the verify route; got:\n{verification}"
+    );
+    let reset = suprnova_cli::templates::password_reset_controller();
+    assert!(
+        reset.contains("const RESET_PATH: &str = \"/reset-password\";"),
+        "the reset link must land on the reset form; got:\n{reset}"
+    );
+}
+
+/// The names a comment imports from the crate root of `suprnova`, one
+/// `(line number, name)` for each.
+///
+/// Only a name that starts with an uppercase letter is returned: a type or
+/// a trait, which the crate root names in a `pub use`. A lowercase name is
+/// a module, a function or a macro, and a `#[macro_export]` macro is at the
+/// crate root without the crate root naming it. A path with a module in
+/// front, `suprnova::http::Request`, is not an import from the crate root.
+fn crate_root_names_imported_in_comments(template: &str) -> Vec<(usize, String)> {
+    let mut found = Vec::new();
+    for (index, line) in template.lines().enumerate() {
+        let line = line.trim();
+        if !line.starts_with("//") {
+            continue;
+        }
+        let Some((_, imported)) = line.split_once("use suprnova::") else {
+            continue;
+        };
+        let imported = imported.trim_end().trim_end_matches(';');
+        let names: Vec<&str> = match imported.strip_prefix('{') {
+            Some(group) => group.trim_end_matches('}').split(',').collect(),
+            None => vec![imported],
+        };
+        for name in names {
+            let name = name.trim();
+            let is_a_type = name.starts_with(|c: char| c.is_ascii_uppercase())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if is_a_type {
+                found.push((index + 1, name.to_owned()));
+            }
+        }
+    }
+    found
+}
+
+/// Whether the framework's crate root names `name` outside a comment.
+fn crate_root_names(crate_root: &str, name: &str) -> bool {
+    code_only(crate_root)
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|word| word == name)
+}
+
+/// A name that a template's comment imports from `suprnova` is a name the
+/// crate root has.
+///
+/// `scaffold_snapshot` compiles what a template's code imports. It does
+/// not compile a comment, and a comment is where a scaffold teaches: the
+/// `tasks/mod.rs` every new project received showed `impl ScheduledTask`,
+/// with `name` and `schedule` methods, for a trait that is named `Task` and
+/// has neither. A developer who copied the example from their own project
+/// got an unresolved import.
+#[test]
+fn every_name_a_template_comment_imports_is_at_the_crate_root() {
+    let crate_root = read_from_repo("framework/src/lib.rs");
+    let mut checked = 0;
+    let mut unknown = Vec::new();
+
+    visit(
+        &cli_root().join("src/templates/files"),
+        &mut |path, body| {
+            for (line, name) in crate_root_names_imported_in_comments(body) {
+                checked += 1;
+                if !crate_root_names(&crate_root, &name) {
+                    unknown.push(format!("{}:{line}: {name}", path.display()));
+                }
+            }
+        },
+    );
+
+    assert!(
+        checked > 0,
+        "no template comment imports from `suprnova`, so this test checks \
+         nothing; the walk or the parser is broken"
+    );
+    assert!(
+        unknown.is_empty(),
+        "template comments import names the crate root of `suprnova` does \
+         not have:\n{}",
+        unknown.join("\n")
+    );
+}
+
+/// The parser behind the test above finds what it is there to find.
+#[test]
+fn the_comment_import_parser_reads_groups_and_single_names() {
+    let template = "\
+//! use suprnova::{ScheduledTask, CronExpression, FrameworkError};
+/// use suprnova::Task;
+// use suprnova::http::Request;
+//! use suprnova::{routes, get};
+use suprnova::Schedule;
+";
+    let names: Vec<(usize, String)> = crate_root_names_imported_in_comments(template);
+    assert_eq!(
+        names,
+        [
+            (1, "ScheduledTask".to_owned()),
+            (1, "CronExpression".to_owned()),
+            (1, "FrameworkError".to_owned()),
+            (2, "Task".to_owned()),
+        ],
+        "a module path, a lowercase name and an import in code are not \
+         crate-root type names in a comment"
+    );
+
+    let crate_root = "// ScheduledTask was the old name\npub use schedule::{Task, TaskResult};\n";
+    assert!(crate_root_names(crate_root, "Task"));
+    assert!(
+        !crate_root_names(crate_root, "ScheduledTask"),
+        "a name in a comment of the crate root is not an export"
+    );
+    assert!(
+        !crate_root_names(crate_root, "Tas"),
+        "a part of a name is not the name"
+    );
+}
