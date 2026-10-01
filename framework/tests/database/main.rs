@@ -1,11 +1,11 @@
 //! Integration tests for the `database` module: one binary per module,
 //! one former top-level test file per submodule (folded 2026-09-05).
 
+pub mod after_commit_callback;
 #[path = "../support/env_lock.rs"]
 mod env_lock;
 #[path = "../support/env_snapshot.rs"]
 mod env_snapshot;
-pub mod after_commit_callback;
 pub mod facade;
 pub mod identifier_validation;
 pub mod mariadb_scheme;

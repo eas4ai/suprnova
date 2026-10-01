@@ -446,6 +446,56 @@ discarding one on a guess would be the worse failure. Use
 `Transaction::savepoint` when the deferred dispatches are meant to unwind with
 the rows.
 
+### After-commit callbacks
+
+`DB::after_commit` runs a callback once the transaction around it commits,
+like Laravel's `DB::afterCommit`. Use it for work that must wait until the
+rows it describes are durable, such as a webhook or a message to another
+service:
+
+```rust
+use suprnova::{DB, FrameworkError, attrs};
+
+DB::transaction(|_tx| {
+    Box::pin(async move {
+        let order = Order::create(attrs! { total: 30 }).await?;
+        let id = order.id;
+        DB::after_commit(move || async move { notify_warehouse(id).await }).await?;
+        Ok::<(), FrameworkError>(())
+    })
+}).await?;
+```
+
+The callback is an async closure that returns `Result<(), FrameworkError>`,
+the shape the after-commit queue already runs, so it can await database,
+cache, or HTTP work. It runs as follows:
+
+- Inside `DB::transaction`, it runs after the commit, outside the
+  transaction, in the order the callbacks were registered. It never runs if
+  the transaction rolls back.
+- With no transaction open, it runs at once, and `DB::after_commit` returns
+  its result.
+- `tx.rollback_to(name)` drops the callbacks registered since that
+  savepoint, the same unwinding [Savepoints](#savepoints) describes for a
+  deferred queue push. Callbacks registered before the savepoint, after the
+  rollback, or inside a savepoint you keep still run at the commit.
+- If it fails after the commit, `DB::transaction` returns the
+  `after-commit callback failed (the transaction itself committed)` error
+  that [Closure form](#closure-form) describes. The other callbacks still
+  run, and the commit stands.
+
+Nested `DB::transaction` calls are refused, so the transaction a callback
+waits for is always the outermost one.
+
+#### Why Suprnova diverges
+
+In Laravel, `DB::afterCommit` inside `DB::beginTransaction()` waits for
+`DB::commit()`. A Suprnova manual transaction from `DB::begin_transaction`
+installs no ambient transaction, so there is no commit for the callback to
+wait for, and it runs at once, as an
+[after-commit](queues.md#after-commit-dispatch) job does there. Use the
+closure form when a callback has to wait for the commit.
+
 ## Observability
 
 Laravel 13's `DB::listen` / `QueryExecuted` / query log surface, ported
@@ -761,6 +811,7 @@ collide.
 | `DB::table(name)` → `DbTableBuilder` | `DB::table($name)` |
 | `DB::select` / `select_one` / `scalar` / `insert` / `update` / `delete` / `statement` / `affecting_statement` / `unprepared` | `DB::select` / `selectOne` / `scalar` / `insert` / `update` / `delete` / `statement` / `affectingStatement` / `unprepared` |
 | `DB::transaction` / `transaction_with_attempts` / `begin_transaction` | `DB::transaction($cb, $attempts)` / `DB::beginTransaction` |
+| `DB::after_commit(callback)` | `DB::afterCommit` |
 | `Transaction::commit` / `rollback` / `savepoint` / `rollback_to` | `DB::commit` / `rollBack` / savepoint helpers |
 | `DB::listen(callback)` | `DB::listen` |
 | `DB::monitor` / `connection_counts` / `DbConnection::server_connections` / `connections_in_use` | `db:monitor` |

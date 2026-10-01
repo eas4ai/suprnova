@@ -345,7 +345,10 @@ async fn morph_to_many_attaches_the_missing_id_and_leaves_existing_rows_untouche
         .await
         .unwrap();
 
-    assert_eq!(tag_ids(&post).await, vec![tags[0].id, tags[1].id, tags[2].id]);
+    assert_eq!(
+        tag_ids(&post).await,
+        vec![tags[0].id, tags[1].id, tags[2].id]
+    );
     let after = taggable_rows().await;
     assert_eq!(after.len(), 4);
     assert_eq!(

@@ -113,7 +113,11 @@ async fn inside_a_transaction_the_callback_waits_for_the_commit() {
     .await
     .unwrap();
 
-    assert_eq!(entries(&log), vec!["ran"], "the callback ran once, after the commit");
+    assert_eq!(
+        entries(&log),
+        vec!["ran"],
+        "the callback ran once, after the commit"
+    );
     assert_eq!(
         *seen_rows.lock().unwrap(),
         Some(1),
@@ -157,7 +161,10 @@ async fn a_transaction_that_rolls_back_never_runs_the_callback() {
     .await;
 
     assert!(result.is_err());
-    assert!(entries(&log).is_empty(), "a rolled-back transaction runs no callback");
+    assert!(
+        entries(&log).is_empty(),
+        "a rolled-back transaction runs no callback"
+    );
     assert_eq!(note_count().await, 0);
 }
 
@@ -202,8 +209,7 @@ async fn a_failing_callback_reports_an_error_but_the_commit_stands() {
     let err = DB::transaction(|_tx| {
         Box::pin(async move {
             AcNote::create(attrs! { body: "committed" }).await?;
-            DB::after_commit(|| async { Err(FrameworkError::internal("callback failed")) })
-                .await?;
+            DB::after_commit(|| async { Err(FrameworkError::internal("callback failed")) }).await?;
             record_after_commit(&in_tx, "the next callback").await?;
             Ok::<(), FrameworkError>(())
         })
@@ -212,7 +218,10 @@ async fn a_failing_callback_reports_an_error_but_the_commit_stands() {
     .expect_err("the failing callback surfaces");
 
     let message = err.to_string();
-    assert!(message.contains("the transaction itself committed"), "{message}");
+    assert!(
+        message.contains("the transaction itself committed"),
+        "{message}"
+    );
     assert!(message.contains("callback failed"), "{message}");
     assert_eq!(note_count().await, 1, "the commit is durable");
     assert_eq!(

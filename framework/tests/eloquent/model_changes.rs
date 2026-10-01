@@ -116,9 +116,9 @@ fn sorted_changes(changes: &Attrs) -> Vec<(String, Value)> {
     pairs
 }
 
-fn see<M: Model>(email: &str, current: &M) -> Result<Seen, FrameworkError>
+fn see<M>(email: &str, current: &M) -> Result<Seen, FrameworkError>
 where
-    M: From<<M::Entity as sea_orm::EntityTrait>::Model>,
+    M: Model + From<<M::Entity as sea_orm::EntityTrait>::Model>,
     <M::Entity as sea_orm::EntityTrait>::Model: From<M>
         + sea_orm::IntoActiveModel<<M::Entity as sea_orm::EntityTrait>::ActiveModel>
         + serde::Serialize
@@ -157,7 +157,11 @@ struct AuditObserver;
 
 #[async_trait]
 impl Observer<ChangeUser> for AuditObserver {
-    async fn updated(&self, _previous: &ChangeUser, current: &ChangeUser) -> Result<(), FrameworkError> {
+    async fn updated(
+        &self,
+        _previous: &ChangeUser,
+        current: &ChangeUser,
+    ) -> Result<(), FrameworkError> {
         let seen = see(&current.email, current)?;
         SEEN.lock().unwrap().push(seen);
         Ok(())
@@ -318,10 +322,7 @@ async fn save_leaves_the_change_record_on_the_saved_model() {
 async fn update_returns_a_model_that_reports_the_change() {
     let _db = sqlite().await;
     let user = plain("Ada", "update@example.com").await;
-    let updated = user
-        .update(attrs! { name: "Ada Lovelace" })
-        .await
-        .unwrap();
+    let updated = user.update(attrs! { name: "Ada Lovelace" }).await.unwrap();
 
     assert!(updated.was_changed("name"));
     assert!(!updated.was_changed("is_admin"));
@@ -513,7 +514,10 @@ async fn a_failed_save_keeps_the_record_of_the_last_successful_one() {
 
     assert!(user.was_changed("name"), "the earlier save's record stands");
     assert!(!user.was_changed("email"));
-    assert_eq!(user.get_original("email").unwrap(), Some(json!("mine@example.com")));
+    assert_eq!(
+        user.get_original("email").unwrap(),
+        Some(json!("mine@example.com"))
+    );
 }
 
 #[tokio::test]
@@ -572,9 +576,10 @@ async fn live_save_reports_its_changes(env: &str) {
     LiveChangeUser::observe(LiveAuditObserver).await;
     let email = format!("{}-live@example.com", env.to_lowercase());
 
-    let created = LiveChangeUser::create(attrs! { name: "Ada", email: email.clone(), is_admin: false })
-        .await
-        .unwrap();
+    let created =
+        LiveChangeUser::create(attrs! { name: "Ada", email: email.clone(), is_admin: false })
+            .await
+            .unwrap();
     let mut user = LiveChangeUser::find_or_fail(created.id).await.unwrap();
     user.is_admin = true;
     user.save().await.unwrap();
@@ -589,10 +594,7 @@ async fn live_save_reports_its_changes(env: &str) {
         vec![("is_admin".to_string(), json!(1))]
     );
 
-    let user = user
-        .update(attrs! { name: "Ada Lovelace" })
-        .await
-        .unwrap();
+    let user = user.update(attrs! { name: "Ada Lovelace" }).await.unwrap();
     assert_eq!(
         sorted_changes(&user.get_changes()),
         vec![("name".to_string(), json!("Ada Lovelace"))]
