@@ -66,6 +66,7 @@ reference/
 # not part of the published framework surface
 CLAUDE.md
 AGENTS.md
+AGENTS.local.md
 assets/
 
 # Local dev tooling + stray artifacts - kept locally, not published
