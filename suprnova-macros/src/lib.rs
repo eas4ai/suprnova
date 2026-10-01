@@ -196,6 +196,22 @@ pub fn derive_input_names(input: TokenStream) -> TokenStream {
 /// It accepts `.svelte`, `.tsx`, `.jsx`, and `.vue` extensions in
 /// `frontend/src/pages/`. If no matching file exists, you'll get a compile
 /// error with suggestions.
+///
+/// An application whose pages live elsewhere sets the lookup in its own
+/// `Cargo.toml`, because that is the one file the macro can read for the
+/// crate it expands in:
+///
+/// ```toml
+/// [package.metadata.suprnova.inertia]
+/// pages_dir = "resources/angular/pages"     # relative to the crate
+/// page_file = "{dir}/{name|lower}.page.ts"  # `{dir}`, `{name}`, `|lower`, `|kebab`, `|snake`
+/// ```
+///
+/// With that table, `"Tramits/BaixaMatricula/Create"` must exist as
+/// `resources/angular/pages/Tramits/BaixaMatricula/create.page.ts`. Either key
+/// may be left out: `pages_dir` alone keeps the four extensions, `page_file`
+/// alone keeps `frontend/src/pages`. A malformed table is a compile error that
+/// names the key.
 #[proc_macro]
 pub fn inertia_response(input: TokenStream) -> TokenStream {
     inertia::inertia_response_impl(input)

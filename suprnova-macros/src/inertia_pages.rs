@@ -1,4 +1,561 @@
 //! Where `inertia_response!` looks for a page component at compile time.
+//!
+//! A `suprnova new` project keeps its pages at
+//! `frontend/src/pages/{Component}.{svelte,tsx,jsx,vue}`, and without
+//! configuration that is the only place the macro looks. An application
+//! whose frontend lays pages out another way describes the layout in its
+//! own `Cargo.toml`:
+//!
+//! ```toml
+//! [package.metadata.suprnova.inertia]
+//! pages_dir = "resources/angular/pages"
+//! page_file = "{dir}/{name|lower}.page.ts"
+//! ```
+//!
+//! The manifest is the one file every build of the crate already has, and it
+//! sits at `CARGO_MANIFEST_DIR`, the base every page path resolves against.
+//! A separate config file would need its own discovery rules for no gain.
+
+use std::path::{Path, PathBuf};
+
+use crate::utils::levenshtein_distance;
+
+/// The table the lookup is read from, as error messages name it.
+pub(crate) const LOOKUP_TABLE: &str = "[package.metadata.suprnova.inertia]";
+
+/// Where a `suprnova new` project keeps its pages, relative to the crate.
+const STARTER_PAGES_DIR: &str = "frontend/src/pages";
+
+/// Page-component file extensions the macro accepts when no `page_file`
+/// pattern names the file.
+///
+/// Ordered so that Svelte (Suprnova's default) wins ties first. The macro
+/// accepts whichever extension exists, which frees the framework from
+/// requiring a build-time `SUPRNOVA_FRONTEND` env var in every workspace
+/// setup.
+const PAGE_EXTENSIONS: &[&str] = &["svelte", "tsx", "jsx", "vue"];
+
+/// How a component name maps to the file the macro requires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PageLookup {
+    /// Relative to the crate directory, without a trailing separator.
+    pages_dir: String,
+    file: PageFile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PageFile {
+    /// `{Component}.{ext}` for each of [`PAGE_EXTENSIONS`].
+    Extensions,
+    /// The one file a `page_file` pattern names.
+    Pattern(PagePattern),
+}
+
+/// A parsed `page_file` value such as `{dir}/{name|lower}.page.ts`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PagePattern {
+    parts: Vec<Part>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Part {
+    Literal(String),
+    Placeholder {
+        field: Field,
+        filter: Option<CaseFilter>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    /// The component name up to its last `/`, empty for a top-level page.
+    Dir,
+    /// The component name's last segment.
+    Name,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaseFilter {
+    Lower,
+    Kebab,
+    Snake,
+}
+
+impl PagePattern {
+    /// Parses a `page_file` value. The error names the key and the problem,
+    /// because it surfaces as a compile error far from the manifest.
+    pub(crate) fn parse(text: &str) -> Result<Self, String> {
+        if text.is_empty() {
+            return Err("`page_file` must not be empty".to_string());
+        }
+        if is_rooted(text) {
+            return Err(format!(
+                "`page_file` must be relative to `pages_dir`, got `{text}`"
+            ));
+        }
+
+        let mut parts = Vec::new();
+        let mut literal = String::new();
+        let mut rest = text;
+        while let Some(index) = rest.find(['{', '}']) {
+            let (before, after) = rest.split_at(index);
+            literal.push_str(before);
+            if after.starts_with('}') {
+                return Err(format!(
+                    "`page_file` has a `}}` with no opening `{{` in `{text}`"
+                ));
+            }
+            let body = &after[1..];
+            let close = match body.find(['{', '}']) {
+                Some(close) if body[close..].starts_with('}') => close,
+                _ => {
+                    return Err(format!("`page_file` has an unclosed `{{` in `{text}`"));
+                }
+            };
+            if !literal.is_empty() {
+                parts.push(Part::Literal(std::mem::take(&mut literal)));
+            }
+            parts.push(Self::placeholder(&body[..close])?);
+            rest = &body[close + 1..];
+        }
+        literal.push_str(rest);
+        if !literal.is_empty() {
+            parts.push(Part::Literal(literal));
+        }
+
+        let names_the_page = parts.iter().any(|part| {
+            matches!(
+                part,
+                Part::Placeholder {
+                    field: Field::Name,
+                    ..
+                }
+            )
+        });
+        if !names_the_page {
+            return Err(format!(
+                "`page_file` must contain `{{name}}`, or every component in a \
+                 directory names the same file, in `{text}`"
+            ));
+        }
+        Ok(Self { parts })
+    }
+
+    fn placeholder(body: &str) -> Result<Part, String> {
+        let whole = format!("{{{body}}}");
+        if body.is_empty() {
+            return Err("`page_file` has an empty placeholder `{}`".to_string());
+        }
+        let mut pieces = body.split('|');
+        let field = match pieces.next() {
+            Some("dir") => Field::Dir,
+            Some("name") => Field::Name,
+            _ => {
+                return Err(format!(
+                    "`page_file` uses the unknown placeholder `{whole}`; the \
+                     placeholders are `{{dir}}` and `{{name}}`"
+                ));
+            }
+        };
+        let filter = match pieces.next() {
+            None => None,
+            Some("") => {
+                return Err(format!("`page_file` has an empty filter in `{whole}`"));
+            }
+            Some("lower") => Some(CaseFilter::Lower),
+            Some("kebab") => Some(CaseFilter::Kebab),
+            Some("snake") => Some(CaseFilter::Snake),
+            Some(other) => {
+                return Err(format!(
+                    "`page_file` uses the unknown filter `{other}` in `{whole}`; \
+                     the filters are `lower`, `kebab` and `snake`"
+                ));
+            }
+        };
+        if pieces.next().is_some() {
+            return Err(format!(
+                "`page_file` allows one filter per placeholder, got `{whole}`"
+            ));
+        }
+        Ok(Part::Placeholder { field, filter })
+    }
+
+    /// The page's path relative to `pages_dir`. Empty segments are dropped,
+    /// so `{dir}/` leaves no leading `/` for a top-level component.
+    pub(crate) fn render(&self, component: &str) -> String {
+        let (dir, name) = component.rsplit_once('/').unwrap_or(("", component));
+        let mut path = String::new();
+        for part in &self.parts {
+            match part {
+                Part::Literal(text) => path.push_str(text),
+                Part::Placeholder { field, filter } => {
+                    let value = match field {
+                        Field::Dir => dir,
+                        Field::Name => name,
+                    };
+                    match filter {
+                        None => path.push_str(value),
+                        Some(filter) => {
+                            let segments: Vec<String> =
+                                value.split('/').map(|segment| filter.apply(segment)).collect();
+                            path.push_str(&segments.join("/"));
+                        }
+                    }
+                }
+            }
+        }
+        path.split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// The literal text after the last placeholder, which every page file
+    /// the pattern can name ends with.
+    fn suffix(&self) -> &str {
+        match self.parts.last() {
+            Some(Part::Literal(text)) => text,
+            _ => "",
+        }
+    }
+}
+
+impl CaseFilter {
+    fn apply(self, segment: &str) -> String {
+        match self {
+            Self::Lower => segment.to_lowercase(),
+            Self::Kebab => words(segment).join("-"),
+            Self::Snake => words(segment).join("_"),
+        }
+    }
+}
+
+/// Splits `BaixaMatricula` into `baixa` and `matricula`.
+///
+/// A word starts at an uppercase letter that follows a lowercase letter or a
+/// digit, and at the last capital of an acronym followed by a lowercase
+/// letter (`HTMLReport` is `html` and `report`). `-`, `_` and whitespace
+/// separate words too.
+fn words(segment: &str) -> Vec<String> {
+    let chars: Vec<char> = segment.chars().collect();
+    let mut words = Vec::new();
+    let mut current = String::new();
+    for (index, &c) in chars.iter().enumerate() {
+        if c == '-' || c == '_' || c.is_whitespace() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        if c.is_uppercase() && !current.is_empty() && index > 0 {
+            let previous = chars[index - 1];
+            let next_is_lower = chars.get(index + 1).is_some_and(|next| next.is_lowercase());
+            if previous.is_lowercase()
+                || previous.is_numeric()
+                || (previous.is_uppercase() && next_is_lower)
+            {
+                words.push(std::mem::take(&mut current));
+            }
+        }
+        current.extend(c.to_lowercase());
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn is_rooted(path: &str) -> bool {
+    path.starts_with('/')
+        || path.starts_with('\\')
+        || Path::new(path).has_root()
+        || Path::new(path).is_absolute()
+}
+
+impl PageLookup {
+    /// The lookup of a `suprnova new` project, used when the manifest sets none.
+    pub(crate) fn starter() -> Self {
+        Self {
+            pages_dir: STARTER_PAGES_DIR.to_string(),
+            file: PageFile::Extensions,
+        }
+    }
+
+    /// Reads the lookup from a `Cargo.toml` body: `Ok(None)` when the table
+    /// is absent, an error naming the key when it is malformed.
+    pub(crate) fn from_manifest(manifest: &str) -> Result<Option<Self>, String> {
+        let document: toml::Table = manifest
+            .parse()
+            .map_err(|error| format!("could not parse the manifest: {error}"))?;
+        let Some(metadata) = document
+            .get("package")
+            .and_then(|package| package.get("metadata"))
+        else {
+            return Ok(None);
+        };
+        let Some(suprnova) = metadata.get("suprnova") else {
+            return Ok(None);
+        };
+        let Some(suprnova) = suprnova.as_table() else {
+            return Err("`package.metadata.suprnova` must be a table".to_string());
+        };
+        let Some(inertia) = suprnova.get("inertia") else {
+            return Ok(None);
+        };
+        let Some(inertia) = inertia.as_table() else {
+            return Err("`package.metadata.suprnova.inertia` must be a table".to_string());
+        };
+
+        if let Some(key) = inertia
+            .keys()
+            .find(|key| *key != "pages_dir" && *key != "page_file")
+        {
+            return Err(format!(
+                "unknown key `{key}`; the keys are `pages_dir` and `page_file`"
+            ));
+        }
+
+        let pages_dir = match inertia.get("pages_dir") {
+            None => STARTER_PAGES_DIR.to_string(),
+            Some(value) => {
+                let Some(text) = value.as_str() else {
+                    return Err("`pages_dir` must be a string".to_string());
+                };
+                if text.is_empty() {
+                    return Err(
+                        "`pages_dir` must not be empty; use \".\" for the crate directory"
+                            .to_string(),
+                    );
+                }
+                if is_rooted(text) {
+                    return Err(format!(
+                        "`pages_dir` must be relative to the crate directory, got `{text}`"
+                    ));
+                }
+                text.trim_end_matches(['/', '\\']).to_string()
+            }
+        };
+
+        let file = match inertia.get("page_file") {
+            None => PageFile::Extensions,
+            Some(value) => {
+                let Some(text) = value.as_str() else {
+                    return Err("`page_file` must be a string".to_string());
+                };
+                PageFile::Pattern(PagePattern::parse(text)?)
+            }
+        };
+
+        Ok(Some(Self { pages_dir, file }))
+    }
+
+    /// The paths, relative to the crate directory, that satisfy `component`.
+    pub(crate) fn candidates(&self, component: &str) -> Vec<String> {
+        match &self.file {
+            PageFile::Extensions => PAGE_EXTENSIONS
+                .iter()
+                .map(|ext| format!("{}/{component}.{ext}", self.pages_dir))
+                .collect(),
+            PageFile::Pattern(pattern) => {
+                vec![format!("{}/{}", self.pages_dir, pattern.render(component))]
+            }
+        }
+    }
+
+    /// The first candidate that exists under `crate_dir`.
+    pub(crate) fn find(&self, crate_dir: &Path, component: &str) -> Option<PathBuf> {
+        self.candidates(component)
+            .into_iter()
+            .map(|candidate| crate_dir.join(candidate))
+            .find(|path| path.exists())
+    }
+
+    /// What exists under the pages directory, for the not-found message:
+    /// component names for the extension lookup, file paths for a pattern
+    /// (whose filters cannot be undone to recover a component name).
+    pub(crate) fn available(&self, crate_dir: &Path) -> Vec<String> {
+        let base = crate_dir.join(&self.pages_dir);
+        let mut files = Vec::new();
+        collect_files(&base, &base, &mut files);
+
+        let mut names: Vec<String> = match &self.file {
+            PageFile::Extensions => files
+                .iter()
+                .filter(|file| {
+                    file.extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| PAGE_EXTENSIONS.contains(&ext))
+                })
+                .filter_map(|file| file.with_extension("").to_str().map(forward_slashes))
+                .collect(),
+            PageFile::Pattern(pattern) => files
+                .iter()
+                .filter_map(|file| file.to_str().map(forward_slashes))
+                .filter(|file| file.ends_with(pattern.suffix()))
+                .collect(),
+        };
+        names.sort();
+        names
+    }
+
+    /// The compile error for a component with no page under a configured
+    /// lookup. It names every path the macro tried, since the mapping from
+    /// component to file is the application's own.
+    pub(crate) fn not_found_message(&self, component: &str, available: &[String]) -> String {
+        let mut message = format!(
+            "Inertia component '{component}' not found.\nLooked for: {}\n\
+             The page lookup comes from {LOOKUP_TABLE} in Cargo.toml.",
+            self.candidates(component).join(", ")
+        );
+        if available.is_empty() {
+            message.push_str(&format!(
+                "\n\nNo page files found under {}/.",
+                self.pages_dir
+            ));
+            return message;
+        }
+
+        let (heading, target) = match &self.file {
+            PageFile::Extensions => ("Available components:".to_string(), component.to_string()),
+            PageFile::Pattern(pattern) => (
+                format!("Page files under {}/:", self.pages_dir),
+                pattern.render(component),
+            ),
+        };
+        message.push_str("\n\n");
+        message.push_str(&heading);
+        for name in available {
+            message.push_str("\n  - ");
+            message.push_str(name);
+        }
+        if let Some(suggestion) = find_similar(&target, available) {
+            message.push_str(&format!("\n\nDid you mean '{suggestion}'?"));
+        }
+        message
+    }
+}
+
+/// The compile error for a missing page when the manifest sets no lookup,
+/// worded as it was before the lookup became configurable.
+pub(crate) fn starter_not_found_message(component: &str, available: &[String]) -> String {
+    let mut message = format!(
+        "Inertia component '{}' not found.\nLooked in: frontend/src/pages/\nTried extensions: {}",
+        component,
+        PAGE_EXTENSIONS
+            .iter()
+            .map(|e| format!(".{}", e))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    if !available.is_empty() {
+        message.push_str("\n\nAvailable components:");
+        for comp in available {
+            message.push_str(&format!("\n  - {}", comp));
+        }
+
+        if let Some(suggestion) = find_similar(component, available) {
+            message.push_str(&format!("\n\nDid you mean '{}'?", suggestion));
+        }
+    } else {
+        message.push_str(
+            "\n\nNo components found in frontend/src/pages/.\nMake sure your frontend directory structure is set up correctly.",
+        );
+    }
+    message
+}
+
+/// Reads the lookup from the crate's `Cargo.toml`. A crate without a
+/// manifest (some build systems set `CARGO_MANIFEST_DIR` without one) keeps
+/// the starter lookup.
+pub(crate) fn read_lookup(crate_dir: &Path) -> Result<Option<PageLookup>, String> {
+    let manifest_path = crate_dir.join("Cargo.toml");
+    let manifest = match std::fs::read_to_string(&manifest_path) {
+        Ok(manifest) => manifest,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "{LOOKUP_TABLE}: could not read {}: {error}",
+                manifest_path.display()
+            ));
+        }
+    };
+    PageLookup::from_manifest(&manifest)
+        .map_err(|problem| format!("{LOOKUP_TABLE} in Cargo.toml: {problem}"))
+}
+
+/// Checks that `component` names an existing page under the crate's lookup.
+///
+/// On success it returns the files the check read - the manifest and the
+/// page - so the expansion can make rustc track them: cargo re-runs the
+/// check only when a file in the crate's dep-info changes, and a proc macro
+/// that reads files on its own leaves them out of it.
+pub(crate) fn check_component(crate_dir: &Path, component: &str) -> Result<Vec<PathBuf>, String> {
+    let configured = read_lookup(crate_dir)?;
+    let lookup = configured.clone().unwrap_or_else(PageLookup::starter);
+
+    let Some(page) = lookup.find(crate_dir, component) else {
+        let available = lookup.available(crate_dir);
+        return Err(match configured {
+            Some(lookup) => lookup.not_found_message(component, &available),
+            None => starter_not_found_message(component, &available),
+        });
+    };
+
+    let manifest = crate_dir.join("Cargo.toml");
+    Ok([manifest, page]
+        .into_iter()
+        .filter(|path| path.is_file())
+        .collect())
+}
+
+fn collect_files(base_dir: &Path, current_dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(current_dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(base_dir, &path, files);
+            continue;
+        }
+        if let Ok(relative) = path.strip_prefix(base_dir) {
+            files.push(relative.to_path_buf());
+        }
+    }
+}
+
+/// Normalizes Windows-style separators so a listed name matches what
+/// `inertia_response!` is called with on any platform.
+fn forward_slashes(path: &str) -> String {
+    path.replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+fn find_similar(target: &str, available: &[String]) -> Option<String> {
+    let target_lower = target.to_lowercase();
+
+    for comp in available {
+        if comp.to_lowercase() == target_lower {
+            return Some(comp.clone());
+        }
+    }
+
+    let mut best_match: Option<(String, usize)> = None;
+    for comp in available {
+        let distance = levenshtein_distance(&target_lower, &comp.to_lowercase());
+        let threshold = std::cmp::max(2, target.len() / 3);
+        if distance <= threshold
+            && best_match
+                .as_ref()
+                .map(|(_, d)| distance < *d)
+                .unwrap_or(true)
+        {
+            best_match = Some((comp.clone(), distance));
+        }
+    }
+
+    best_match.map(|(name, _)| name)
+}
 
 #[cfg(test)]
 mod tests {

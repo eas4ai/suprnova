@@ -7688,6 +7688,7 @@ dependencies = [
  "suprnova",
  "syn 2.0.117",
  "tempfile",
+ "toml",
  "trybuild",
  "validator",
 ]
