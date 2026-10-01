@@ -171,7 +171,10 @@ fn inertia_response_inner(input: InertiaResponseInput) -> proc_macro2::TokenStre
 /// until some Rust file changes. Naming the files in `include_bytes!` puts
 /// them in the dep-info. The constants are unnamed and unused, so nothing
 /// reaches the binary.
-fn track_inputs(expansion: proc_macro2::TokenStream, files: &[PathBuf]) -> proc_macro2::TokenStream {
+fn track_inputs(
+    expansion: proc_macro2::TokenStream,
+    files: &[PathBuf],
+) -> proc_macro2::TokenStream {
     let paths: Vec<LitStr> = files
         .iter()
         .filter_map(|file| file.to_str())

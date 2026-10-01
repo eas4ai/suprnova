@@ -52,11 +52,8 @@ fn workspace(name: &str) -> PathBuf {
 
     // Starting from the repository's lockfile keeps the fixture on the
     // dependency versions the framework is tested with.
-    fs::copy(
-        macros_dir().join("../Cargo.lock"),
-        dir.join("Cargo.lock"),
-    )
-    .expect("seed the fixture lockfile");
+    fs::copy(macros_dir().join("../Cargo.lock"), dir.join("Cargo.lock"))
+        .expect("seed the fixture lockfile");
     dir
 }
 

@@ -196,8 +196,10 @@ impl PagePattern {
                     match filter {
                         None => path.push_str(value),
                         Some(filter) => {
-                            let segments: Vec<String> =
-                                value.split('/').map(|segment| filter.apply(segment)).collect();
+                            let segments: Vec<String> = value
+                                .split('/')
+                                .map(|segment| filter.apply(segment))
+                                .collect();
                             path.push_str(&segments.join("/"));
                         }
                     }
@@ -688,13 +690,25 @@ page_file = "{dir}/{name|lower}.page.ts"
             ("{dir}/{name.page.ts", &["unclosed `{`"]),
             ("{dir}/name}.page.ts", &["`}`", "no opening `{`"]),
             ("{}/{name}.ts", &["empty placeholder `{}`"]),
-            ("{file}.ts", &["unknown placeholder `{file}`", "`{dir}`", "`{name}`"]),
+            (
+                "{file}.ts",
+                &["unknown placeholder `{file}`", "`{dir}`", "`{name}`"],
+            ),
             (
                 "{name|upper}.ts",
-                &["unknown filter `upper`", "`{name|upper}`", "lower", "kebab", "snake"],
+                &[
+                    "unknown filter `upper`",
+                    "`{name|upper}`",
+                    "lower",
+                    "kebab",
+                    "snake",
+                ],
             ),
             ("{name|}.ts", &["empty filter", "`{name|}`"]),
-            ("{name|lower|kebab}.ts", &["one filter", "`{name|lower|kebab}`"]),
+            (
+                "{name|lower|kebab}.ts",
+                &["one filter", "`{name|lower|kebab}`"],
+            ),
             ("{dir}/index.page.ts", &["must contain `{name}`"]),
             ("/{name}.ts", &["relative"]),
         ];
@@ -795,7 +809,8 @@ page_file = "{dir}/{name|lower}.page.ts"
 
     #[test]
     fn malformed_tables_name_the_key_and_the_problem() {
-        let cases: Vec<(String, &[&str])> = vec![
+        let cases: Vec<(String, &[&str])> =
+            vec![
             (
                 with_table("pagesdir = \"x\""),
                 &["unknown key `pagesdir`", "`pages_dir`", "`page_file`"],
@@ -930,7 +945,10 @@ page_file = "{dir}/{name|lower}.page.ts"
             message.contains("Available components:\n  - Admin/Dashboard"),
             "{message}"
         );
-        assert!(message.contains("Did you mean 'Admin/Dashboard'?"), "{message}");
+        assert!(
+            message.contains("Did you mean 'Admin/Dashboard'?"),
+            "{message}"
+        );
     }
 
     // ---- the filesystem ----
@@ -977,7 +995,10 @@ page_file = "{dir}/{name|lower}.page.ts"
         );
         assert_eq!(
             lookup.find(dir.path(), "Tramits/Index"),
-            Some(dir.path().join("resources/angular/pages/Tramits/index.page.ts"))
+            Some(
+                dir.path()
+                    .join("resources/angular/pages/Tramits/index.page.ts")
+            )
         );
         assert_eq!(lookup.find(dir.path(), "Tramits/BaixaMatricula/Edit"), None);
         // The starter location no longer counts once a lookup is set.
@@ -986,7 +1007,10 @@ page_file = "{dir}/{name|lower}.page.ts"
 
     #[test]
     fn starter_find_accepts_any_of_the_four_extensions() {
-        let dir = crate_dir(&["frontend/src/pages/Home.vue", "frontend/src/pages/Users/Index.tsx"]);
+        let dir = crate_dir(&[
+            "frontend/src/pages/Home.vue",
+            "frontend/src/pages/Users/Index.tsx",
+        ]);
         let lookup = PageLookup::starter();
         assert_eq!(
             lookup.find(dir.path(), "Home"),

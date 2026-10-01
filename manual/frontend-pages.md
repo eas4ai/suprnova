@@ -45,7 +45,8 @@ deleted page fails `cargo check` instead of 500-ing in production.
 Whichever framework you picked, pages live under `frontend/src/pages/` and
 the component name in `inertia_response!` is the file path relative to that
 directory, without the extension. Forward slashes work the same on all
-platforms.
+platforms. A project with a different layout can
+[point the check elsewhere](#another-page-layout).
 
 ```
 frontend/src/pages/
@@ -67,6 +68,75 @@ The convention is `Index` for collection pages, `Show` / `Edit` / `Create` for
 single-item pages, and a lowercase subdirectory like `auth/` for grouped
 feature pages. Capitalisation in the component name must match the file name
 exactly - Vite's `import.meta.glob` is case-sensitive.
+
+### Another page layout
+
+The compile-time check looks in `frontend/src/pages/` because that is where
+`suprnova new` puts pages. A frontend that lays its pages out another way,
+such as an Angular app on a community Inertia adapter, sets its own lookup in
+the application crate's `Cargo.toml`:
+
+```toml
+[package.metadata.suprnova.inertia]
+pages_dir = "resources/angular/pages"
+page_file = "{dir}/{name|lower}.page.ts"
+```
+
+`pages_dir` is the pages directory, relative to the crate directory.
+`page_file` is the page's path inside it, built from the component name:
+
+| Placeholder | `Tramits/BaixaMatricula/Create` | `Home` |
+|---|---|---|
+| `{dir}` | `Tramits/BaixaMatricula` | empty |
+| `{name}` | `Create` | `Home` |
+
+With the lookup above, the macro requires these files:
+
+| Component | File |
+|---|---|
+| `Tramits/Index` | `resources/angular/pages/Tramits/index.page.ts` |
+| `Tramits/BaixaMatricula/Create` | `resources/angular/pages/Tramits/BaixaMatricula/create.page.ts` |
+| `Home` | `resources/angular/pages/home.page.ts` |
+
+An empty `{dir}` leaves no stray `/` behind, so a top-level page sits directly
+in `pages_dir`.
+
+A filter after `|` changes the case of a placeholder. On `{dir}`, it applies to
+each directory name.
+
+| Filter | `BaixaMatricula` becomes |
+|---|---|
+| `lower` | `baixamatricula` |
+| `kebab` | `baixa-matricula` |
+| `snake` | `baixa_matricula` |
+
+`kebab` and `snake` start a new word at each capital letter that follows a
+lowercase letter or a digit, and at the last capital of an acronym followed by
+a lowercase letter, so `HTMLReport` becomes `html-report`. A `-`, `_`, or space
+already in the name also separates words.
+
+Both keys are optional. With `pages_dir` alone, the macro looks for
+`{Component}.svelte`, `.tsx`, `.jsx`, or `.vue` under that directory. With
+`page_file` alone, it resolves the pattern under `frontend/src/pages/`. Without
+the table, the macro uses the starter lookup.
+
+A misspelled key, an unknown filter, or an unbalanced `{` is a compile error
+that names the key and the problem. A missing page names the path the macro
+looked for:
+
+```text
+error: Inertia component 'Tramits/BaixaMatricula/Edit' not found.
+       Looked for: resources/angular/pages/Tramits/BaixaMatricula/edit.page.ts
+       The page lookup comes from [package.metadata.suprnova.inertia] in Cargo.toml.
+```
+
+Deleting a page or editing the table re-runs the check on the next build, even
+when no Rust file changed.
+
+The table moves only the compile-time check. Your frontend's own resolver,
+such as the `resolve` callback passed to `createInertiaApp`, must map the same
+component names to the same files. `suprnova make:inertia` still writes pages
+in the starter layout.
 
 ## Generating a page
 
@@ -538,6 +608,14 @@ becomes a production error. Suprnova's `inertia_response!` macro walks
 "Did you mean 'Dashboard'?" suggestion. The full TypeScript type story
 (generated from `#[derive(InertiaProps)]` on the Rust struct) means the
 component's props are typed end-to-end too.
+
+inertia-laravel can check that a page exists when it renders, against the page
+paths and extensions in `config/inertia.php`, and leaves that check off by
+default. Suprnova's check always runs, at compile time, so its
+lookup lives in `Cargo.toml`, the one configuration a macro can read during
+the build. Because `page_file` is a pattern rather than a list of extensions,
+it also covers layouts where the file name is not the component name plus an
+extension.
 
 ## Next
 
