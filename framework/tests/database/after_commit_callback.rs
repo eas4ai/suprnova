@@ -9,15 +9,26 @@
 //! callbacks of a nested transaction that rolls back and runs the rest when
 //! the root commits. Outside any transaction the callback runs at once.
 //!
+//! A transaction started by hand with [`DB::begin_transaction`] is not
+//! ambient: code that does not name the handle runs outside it, writes
+//! included. So `DB::after_commit` runs at once beside it, and a callback or
+//! a job that has to wait for that transaction registers on the handle, with
+//! [`Transaction::after_commit`] and [`Queue::push_after_commit_with_tx`].
+//! Those follow the same rules against the handle's own commit, rollback,
+//! drop and savepoints.
+//!
 //! The `postgres_` and `mysql_` variants run the commit, rollback and
 //! savepoint scenario against a disposable server and are ignored by
 //! default.
 
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
+use serial_test::serial;
 use suprnova::database::{DatabaseConfig, DbConnection};
+use suprnova::queue::{MemoryQueueDriver, QueueDriver};
 use suprnova::testing::{TestContainer, TestContainerGuard, TestDatabase};
-use suprnova::{DB, FrameworkError, Model, attrs, model};
+use suprnova::{DB, FrameworkError, Job, Model, Queue, Transaction, async_trait, attrs, model};
 
 #[model(table = "ac_notes", timestamps = false, fillable = ["body"])]
 pub struct AcNote {
@@ -44,6 +55,16 @@ async fn record_after_commit(log: &Log, entry: &str) -> Result<(), FrameworkErro
         Ok(())
     })
     .await
+}
+
+/// Register on the handle a callback that appends `entry` to `log`.
+fn record_on_handle(tx: &Transaction, log: &Log, entry: &str) {
+    let log = log.clone();
+    let entry = entry.to_string();
+    tx.after_commit(move || async move {
+        log.lock().unwrap().push(entry);
+        Ok(())
+    });
 }
 
 async fn sqlite() -> TestDatabase {
@@ -232,16 +253,171 @@ async fn a_failing_callback_reports_an_error_but_the_commit_stands() {
 }
 
 #[tokio::test]
-async fn inside_a_manual_transaction_the_callback_runs_at_once() {
+async fn db_after_commit_runs_at_once_beside_a_manual_transaction_because_ambient_code_is_outside_it()
+ {
     let _db = sqlite().await;
     let log = new_log();
 
-    // A manual transaction installs no ambient transaction, so there is no
-    // commit for the callback to wait for.
+    // A hand-started transaction is not ambient: code that does not name the
+    // handle runs outside it, so there is no commit for this callback to wait
+    // for. Registering on the handle is what waits; see the tests below.
     let tx = DB::begin_transaction().await.unwrap();
     record_after_commit(&log, "ran").await.unwrap();
     assert_eq!(entries(&log), vec!["ran"]);
     tx.rollback().await.unwrap();
+}
+
+// ---- On a manual transaction handle -------------------------------------
+
+#[tokio::test]
+async fn a_handle_callback_waits_for_the_handle_commit() {
+    let _db = sqlite().await;
+    let log = new_log();
+    let seen_rows = Arc::new(Mutex::new(None));
+
+    let tx = DB::begin_transaction().await.unwrap();
+    AcNote::create_with_tx(&tx, attrs! { body: "written through the handle" })
+        .await
+        .unwrap();
+    let rows = seen_rows.clone();
+    tx.after_commit(move || async move {
+        // A read outside the transaction: the row is there only if the
+        // commit already happened.
+        let count = note_count().await;
+        *rows.lock().unwrap() = Some(count);
+        Ok(())
+    });
+    record_on_handle(&tx, &log, "ran");
+    assert!(entries(&log).is_empty(), "nothing runs before the commit");
+
+    tx.commit().await.unwrap();
+
+    assert_eq!(entries(&log), vec!["ran"], "the callback ran once, after the commit");
+    assert_eq!(
+        *seen_rows.lock().unwrap(),
+        Some(1),
+        "the callback saw the committed row"
+    );
+}
+
+#[tokio::test]
+async fn a_handle_rollback_never_runs_the_callback() {
+    let _db = sqlite().await;
+    let log = new_log();
+
+    let tx = DB::begin_transaction().await.unwrap();
+    AcNote::create_with_tx(&tx, attrs! { body: "rolled back" })
+        .await
+        .unwrap();
+    record_on_handle(&tx, &log, "ran");
+    tx.rollback().await.unwrap();
+
+    assert!(entries(&log).is_empty());
+    assert_eq!(note_count().await, 0);
+}
+
+#[tokio::test]
+async fn a_handle_dropped_without_commit_never_runs_the_callback() {
+    let _db = sqlite().await;
+    let log = new_log();
+
+    let tx = DB::begin_transaction().await.unwrap();
+    AcNote::create_with_tx(&tx, attrs! { body: "dropped" })
+        .await
+        .unwrap();
+    record_on_handle(&tx, &log, "ran");
+    drop(tx);
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(entries(&log).is_empty());
+    assert_eq!(note_count().await, 0, "the dropped transaction rolled back");
+}
+
+#[tokio::test]
+async fn a_handle_savepoint_rollback_drops_only_the_callbacks_registered_after_it() {
+    let _db = sqlite().await;
+    let log = new_log();
+
+    let tx = DB::begin_transaction().await.unwrap();
+    record_on_handle(&tx, &log, "before the savepoint");
+    tx.savepoint("inner").await.unwrap();
+    record_on_handle(&tx, &log, "inside the rolled-back savepoint");
+    tx.rollback_to("inner").await.unwrap();
+    record_on_handle(&tx, &log, "after the rollback");
+    tx.savepoint("kept").await.unwrap();
+    record_on_handle(&tx, &log, "inside a kept savepoint");
+    assert!(entries(&log).is_empty());
+
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        entries(&log),
+        vec![
+            "before the savepoint",
+            "after the rollback",
+            "inside a kept savepoint",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_failing_handle_callback_reports_an_error_but_the_commit_stands() {
+    let _db = sqlite().await;
+    let log = new_log();
+
+    let tx = DB::begin_transaction().await.unwrap();
+    AcNote::create_with_tx(&tx, attrs! { body: "committed" })
+        .await
+        .unwrap();
+    tx.after_commit(|| async { Err(FrameworkError::internal("callback failed")) });
+    record_on_handle(&tx, &log, "the next callback");
+
+    let err = tx.commit().await.expect_err("the failing callback surfaces");
+
+    let message = err.to_string();
+    assert!(message.contains("the transaction itself committed"), "{message}");
+    assert!(message.contains("callback failed"), "{message}");
+    assert_eq!(note_count().await, 1, "the commit is durable");
+    assert_eq!(entries(&log), vec!["the next callback"]);
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct NoteWritten;
+
+#[async_trait]
+impl Job for NoteWritten {
+    fn job_name() -> &'static str {
+        "par-007-note-written"
+    }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn push_after_commit_with_tx_pushes_only_after_the_handle_commits() {
+    let _db = sqlite().await;
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let tx = DB::begin_transaction().await.unwrap();
+    Queue::push_after_commit_with_tx(&tx, NoteWritten)
+        .await
+        .unwrap();
+    assert_eq!(driver.size().await.unwrap(), 0, "nothing is pushed before the commit");
+    tx.commit().await.unwrap();
+    assert_eq!(driver.size().await.unwrap(), 1, "the commit pushes the job");
+
+    let tx = DB::begin_transaction().await.unwrap();
+    Queue::push_after_commit_with_tx(&tx, NoteWritten)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(driver.size().await.unwrap(), 1, "a rollback discards the push");
 }
 
 // ---- Live engines -------------------------------------------------------
@@ -318,6 +494,30 @@ async fn live_after_commit(env: &str) {
 
     assert_eq!(entries(&log), vec!["before the savepoint"]);
     assert_eq!(*seen_rows.lock().unwrap(), Some(1));
+
+    // On a manual transaction handle: rollback runs nothing, and a commit runs
+    // only what no rolled-back savepoint discarded.
+    let handle_log = new_log();
+    let tx = DB::begin_transaction().await.unwrap();
+    AcNote::create_with_tx(&tx, attrs! { body: "handle rolled back" })
+        .await
+        .unwrap();
+    record_on_handle(&tx, &handle_log, "rolled back");
+    tx.rollback().await.unwrap();
+    assert!(entries(&handle_log).is_empty());
+
+    let tx = DB::begin_transaction().await.unwrap();
+    AcNote::create_with_tx(&tx, attrs! { body: "handle committed" })
+        .await
+        .unwrap();
+    record_on_handle(&tx, &handle_log, "before the savepoint");
+    tx.savepoint("inner").await.unwrap();
+    record_on_handle(&tx, &handle_log, "inside the rolled-back savepoint");
+    tx.rollback_to("inner").await.unwrap();
+    assert!(entries(&handle_log).is_empty());
+    tx.commit().await.unwrap();
+    assert_eq!(entries(&handle_log), vec!["before the savepoint"]);
+    assert_eq!(note_count().await, 2);
 
     drop(guard);
     database.inner().clone().close().await.unwrap();
