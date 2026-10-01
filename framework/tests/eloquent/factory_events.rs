@@ -1,11 +1,15 @@
 //! A factory insert fires the lifecycle events `Model::create` fires, so an
 //! observer sees a factory's rows exactly as it sees the application's.
 //!
-//! The observer registry is process-wide. Under nextest each test is its
-//! own process; the counters are still read as differences so the tests
-//! also hold in one shared process.
+//! The observer registry is process-wide, so the observer below runs for
+//! the widgets of every test. Its counters are per thread: a
+//! `#[tokio::test]` runs its body, and the observers its inserts fire, on
+//! its own thread, so a test counts its own rows even while another test
+//! inserts widgets beside it in one process under plain `cargo test`. The
+//! counters are still read as differences, so the tests hold however
+//! tests are given threads.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 use async_trait::async_trait;
 use suprnova::eloquent::attrs::Attrs;
@@ -36,8 +40,10 @@ impl Factory for FeWidgetFactory {
     }
 }
 
-static CREATED: AtomicUsize = AtomicUsize::new(0);
-static SAVED: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static CREATED: Cell<usize> = const { Cell::new(0) };
+    static SAVED: Cell<usize> = const { Cell::new(0) };
+}
 
 pub struct FeWidgetObserver;
 
@@ -59,12 +65,12 @@ impl Observer<FeWidget> for FeWidgetObserver {
     }
 
     async fn created(&self, _widget: &FeWidget) -> Result<(), FrameworkError> {
-        CREATED.fetch_add(1, Ordering::SeqCst);
+        CREATED.set(CREATED.get() + 1);
         Ok(())
     }
 
     async fn saved(&self, _widget: &FeWidget) -> Result<(), FrameworkError> {
-        SAVED.fetch_add(1, Ordering::SeqCst);
+        SAVED.set(SAVED.get() + 1);
         Ok(())
     }
 }
@@ -89,7 +95,7 @@ async fn widgets() -> TestDatabase {
 #[tokio::test]
 async fn a_factory_insert_fires_the_events_create_fires() {
     let _db = widgets().await;
-    let (created, saved) = (CREATED.load(Ordering::SeqCst), SAVED.load(Ordering::SeqCst));
+    let (created, saved) = (CREATED.get(), SAVED.get());
 
     let rows = FeWidgetFactory::new()
         .count(3)
@@ -99,8 +105,8 @@ async fn a_factory_insert_fires_the_events_create_fires() {
         .unwrap();
 
     assert_eq!(rows.len(), 3);
-    assert_eq!(CREATED.load(Ordering::SeqCst) - created, 3);
-    assert_eq!(SAVED.load(Ordering::SeqCst) - saved, 3);
+    assert_eq!(CREATED.get() - created, 3);
+    assert_eq!(SAVED.get() - saved, 3);
     for row in &rows {
         assert_eq!(
             row.slug, "blue-widget",
@@ -116,7 +122,7 @@ async fn a_factory_insert_fires_the_events_create_fires() {
 #[tokio::test]
 async fn a_creating_observer_that_cancels_aborts_the_factory_insert() {
     let _db = widgets().await;
-    let created = CREATED.load(Ordering::SeqCst);
+    let created = CREATED.get();
 
     let refused = FeWidgetFactory::new()
         .with(|widget| widget.name = "forbidden".into())
@@ -127,14 +133,14 @@ async fn a_creating_observer_that_cancels_aborts_the_factory_insert() {
         refused.is_err(),
         "the insert is refused as create refuses it"
     );
-    assert_eq!(CREATED.load(Ordering::SeqCst), created);
+    assert_eq!(CREATED.get(), created);
     assert_eq!(FeWidget::query().count().await.unwrap(), 0);
 }
 
 #[tokio::test]
 async fn create_quietly_inserts_without_any_observer() {
     let _db = widgets().await;
-    let (created, saved) = (CREATED.load(Ordering::SeqCst), SAVED.load(Ordering::SeqCst));
+    let (created, saved) = (CREATED.get(), SAVED.get());
 
     let row = FeWidgetFactory::new()
         .with(|widget| widget.name = "forbidden".into())
@@ -143,7 +149,7 @@ async fn create_quietly_inserts_without_any_observer() {
         .expect("no observer runs, so nothing refuses the name");
 
     assert_eq!(row.slug, "", "no observer derived a slug");
-    assert_eq!(CREATED.load(Ordering::SeqCst), created);
-    assert_eq!(SAVED.load(Ordering::SeqCst), saved);
+    assert_eq!(CREATED.get(), created);
+    assert_eq!(SAVED.get(), saved);
     assert_eq!(FeWidget::query().count().await.unwrap(), 1);
 }

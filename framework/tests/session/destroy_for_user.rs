@@ -480,8 +480,22 @@ async fn destroy_for_user_returns_zero_when_no_matching_rows() {
     assert_eq!(deleted, 0);
 }
 
+/// With no store registered, revocation falls back to a driver over the
+/// default table. Runs alone in a child process (see `own_process`): any
+/// other test of this binary that builds a middleware registers its store
+/// in the process container, and revocation would go there instead.
+#[test]
+fn module_helper_destroy_all_for_user_delegates_to_driver() {
+    crate::own_process::run_alone(
+        "destroy_for_user::module_helper_destroy_all_for_user_delegates_to_driver_child",
+    );
+}
+
 #[tokio::test]
-async fn module_helper_destroy_all_for_user_delegates_to_driver() {
+async fn module_helper_destroy_all_for_user_delegates_to_driver_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     // The fallback driver reads SESSION_TABLE, which the test below sets.
     let _env = crate::env_lock::lock_env_async().await;
     let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
@@ -500,9 +514,20 @@ async fn module_helper_destroy_all_for_user_delegates_to_driver() {
 
 /// #132: with no store registered and no middleware built, revocation
 /// falls back to a driver over the table `SESSION_TABLE` names - the
-/// table `SessionMiddleware::new` would have used.
+/// table `SessionMiddleware::new` would have used. Runs alone in a child
+/// process, for the reason the test above does.
+#[test]
+fn module_helper_falls_back_to_the_table_session_table_names() {
+    crate::own_process::run_alone(
+        "destroy_for_user::module_helper_falls_back_to_the_table_session_table_names_child",
+    );
+}
+
 #[tokio::test]
-async fn module_helper_falls_back_to_the_table_session_table_names() {
+async fn module_helper_falls_back_to_the_table_session_table_names_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     let _env = crate::env_lock::lock_env_async().await;
     let _restore = EnvSnapshot::capture(&["SESSION_TABLE"]);
     set_env("SESSION_TABLE", Some("app_sessions"));

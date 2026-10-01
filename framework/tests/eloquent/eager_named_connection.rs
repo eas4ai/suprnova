@@ -18,7 +18,7 @@
 use serial_test::serial;
 use suprnova::DbConnection;
 use suprnova::database::ConnectionRegistry;
-use suprnova::testing::TestContainer;
+use suprnova::testing::{TestContainer, TestContainerGuard};
 use suprnova::{Model, attrs, model};
 
 #[model(table = "een_users", connection = "named_only", relations = {
@@ -36,12 +36,15 @@ pub struct EenPost {
     pub title: String,
 }
 
-async fn fresh_named_connection_without_default_pool() -> DbConnection {
+async fn fresh_named_connection_without_default_pool() -> (TestContainerGuard, DbConnection) {
     // Empty container - NO default pool registered. `DB::connection()`
     // will error if anything reaches it. This mirrors the production
     // configuration that surfaced the bug: only named pools, no
-    // primary.
-    let _ = TestContainer::fake();
+    // primary. The guard is held for the whole test: the last live
+    // `TestContainerGuard` of the process clears the named-connection
+    // registry when it drops, which would take `named_only` away while
+    // this test runs beside others under plain `cargo test`.
+    let container = TestContainer::fake();
     ConnectionRegistry::clear();
 
     let conn = sea_orm::Database::connect("sqlite::memory:?mode=rwc")
@@ -71,7 +74,7 @@ async fn fresh_named_connection_without_default_pool() -> DbConnection {
     ConnectionRegistry::register_existing("named_only", db.clone())
         .await
         .unwrap();
-    db
+    (container, db)
 }
 
 #[tokio::test]
@@ -82,7 +85,7 @@ async fn eager_load_works_when_only_named_connection_registered() {
     // default pool registered that lookup failed and the eager spec
     // never ran, even though every leaf would have routed through the
     // named connection just fine.
-    let _db = fresh_named_connection_without_default_pool().await;
+    let (_container, _db) = fresh_named_connection_without_default_pool().await;
 
     // Use unguarded so the `id` field is not stripped by the default
     // primary-key guard (we want to assert against deterministic ids).

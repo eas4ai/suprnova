@@ -250,19 +250,14 @@ pub(crate) fn is_dispatching() -> bool {
 
 // ---- Cumulative query log ------------------------------------------------
 
-/// Per-connection in-memory query log. Captures every dispatched
-/// [`QueryExecuted`] when [`DB::enable_query_log`](crate::DB::enable_query_log)
-/// is active. Drained via [`DB::get_query_log`](crate::DB::get_query_log).
+/// In-memory query log. Captures every dispatched [`QueryExecuted`]
+/// when [`DB::enable_query_log`](crate::DB::enable_query_log) is active.
+/// Drained via [`DB::get_query_log`](crate::DB::get_query_log). Each
+/// [`QueryObservation`] has its own.
 #[derive(Debug, Default)]
 pub(crate) struct QueryLog {
     pub(crate) enabled: bool,
     pub(crate) entries: Vec<QueryExecuted>,
-}
-
-static QUERY_LOG: std::sync::OnceLock<std::sync::Mutex<QueryLog>> = std::sync::OnceLock::new();
-
-pub(crate) fn query_log() -> &'static std::sync::Mutex<QueryLog> {
-    QUERY_LOG.get_or_init(|| std::sync::Mutex::new(QueryLog::default()))
 }
 
 // ---- DB::listen direct callback registry --------------------------------
@@ -277,30 +272,74 @@ pub(crate) struct ListenerRegistry {
     pub(crate) listeners: Vec<QueryListener>,
 }
 
-static LISTENERS: std::sync::OnceLock<std::sync::RwLock<ListenerRegistry>> =
+// ---- Scopes of observation -----------------------------------------------
+
+/// The `DB::listen` callbacks and the query log of one scope.
+///
+/// The application has one for the whole process. Every test container
+/// ([`TestContainer::fake`](crate::container::testing::TestContainer::fake),
+/// [`TestContainer::scope`](crate::container::testing::TestContainer::scope))
+/// carries its own, and inside one, `DB::listen` and the query log use
+/// it. Under plain `cargo test` the tests of a binary are threads of one
+/// process: a test that counted the queries of the process would also
+/// count the queries of every test running beside it.
+#[derive(Default)]
+pub(crate) struct QueryObservation {
+    pub(crate) listeners: std::sync::RwLock<ListenerRegistry>,
+    pub(crate) log: std::sync::Mutex<QueryLog>,
+}
+
+impl QueryObservation {
+    /// Whether a query run here has to be emitted for this scope: a
+    /// callback is registered, or the log is on. A poisoned lock reads
+    /// as nothing to emit; observation never fails a query.
+    fn observing(&self) -> bool {
+        let listening = self
+            .listeners
+            .read()
+            .map(|reg| !reg.listeners.is_empty())
+            .unwrap_or(false);
+        listening || self.log.lock().map(|log| log.enabled).unwrap_or(false)
+    }
+}
+
+static APPLICATION_OBSERVATION: std::sync::OnceLock<Arc<QueryObservation>> =
     std::sync::OnceLock::new();
 
-pub(crate) fn listeners() -> &'static std::sync::RwLock<ListenerRegistry> {
-    LISTENERS.get_or_init(|| std::sync::RwLock::new(ListenerRegistry::default()))
+/// The application's scope: the one `DB::listen` and the query log use
+/// outside any test container, as they do in production.
+fn application_observation() -> &'static Arc<QueryObservation> {
+    APPLICATION_OBSERVATION.get_or_init(Default::default)
+}
+
+/// The scope `DB::listen`, `DB::flush_listeners` and the query log
+/// register with and read from: the active test container's when there
+/// is one, the application's otherwise.
+pub(crate) fn current_observation() -> Arc<QueryObservation> {
+    crate::container::test_query_observation()
+        .unwrap_or_else(|| Arc::clone(application_observation()))
+}
+
+/// Every scope a query run here is emitted to: the application's, then
+/// the active test container's. A callback registered outside any test
+/// container keeps seeing every query of the process, inside test
+/// containers too.
+pub(crate) fn reached_observations() -> Vec<Arc<QueryObservation>> {
+    let mut scopes = vec![Arc::clone(application_observation())];
+    scopes.extend(crate::container::test_query_observation());
+    scopes
 }
 
 /// True when at least one source of [`QueryExecuted`] observation is
-/// active: a direct `DB::listen` callback, an `EventFacade::listen`
-/// listener, OR the query log is enabled. The executor helpers consult
-/// this on every call - when nobody is listening the entire emission
-/// path short-circuits and pays zero overhead.
+/// active: a direct `DB::listen` callback or the query log in a scope a
+/// query run here reaches, or an `EventFacade::listen` listener. The
+/// executor helpers consult this on every call - when nobody is
+/// listening the entire emission path short-circuits and pays zero
+/// overhead.
 pub(crate) fn query_observation_active() -> bool {
-    if let Ok(reg) = listeners().read()
-        && !reg.listeners.is_empty()
-    {
-        return true;
-    }
-    if let Ok(log) = query_log().lock()
-        && log.enabled
-    {
-        return true;
-    }
-    crate::EventFacade::has_listeners::<QueryExecuted>()
+    application_observation().observing()
+        || crate::container::test_query_observation().is_some_and(|scope| scope.observing())
+        || crate::EventFacade::has_listeners::<QueryExecuted>()
 }
 
 #[cfg(test)]

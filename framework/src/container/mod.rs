@@ -195,6 +195,12 @@ pub struct Container {
     /// Inertia shared-data registry. One per Container instance - scoped
     /// to either the global app or a `TestContainer::fake()` test override.
     inertia: Arc<crate::inertia::InertiaRegistry>,
+    /// `DB::listen` callbacks and query log of a test container, so a
+    /// test that observes queries observes only the ones it runs. The
+    /// global container leaves its own unused: the application's live in
+    /// `database::events`, off the container lock every query would
+    /// otherwise take.
+    queries: Arc<crate::database::events::QueryObservation>,
 }
 
 impl Container {
@@ -203,6 +209,7 @@ impl Container {
         Self {
             bindings: HashMap::new(),
             inertia: Arc::new(crate::inertia::InertiaRegistry::new()),
+            queries: Arc::default(),
         }
     }
 
@@ -444,6 +451,23 @@ impl Default for Container {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The query observation of the active test container: the task-local
+/// one of [`testing::TestContainer::scope`] first, then the thread-local
+/// one of [`testing::TestContainer::fake`], the order [`App::get`] reads
+/// them in. `None` outside both, which is every call in production.
+pub(crate) fn test_query_observation() -> Option<Arc<crate::database::events::QueryObservation>> {
+    if let Ok(queries) = TASK_CONTAINER
+        .try_with(|c| Arc::clone(&c.read().unwrap_or_else(|e| e.into_inner()).queries))
+    {
+        return Some(queries);
+    }
+    TEST_CONTAINER.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|container| Arc::clone(&container.queries))
+    })
 }
 
 /// Application container facade

@@ -808,3 +808,108 @@ async fn db_listen_panic_does_not_block_subsequent_callbacks() {
         "second listener must fire even when the first panicked",
     );
 }
+
+// ---- Observation scoped to a test container (#135) ----------------------
+
+/// What one test heard: the SQL its `DB::listen` callback received, and
+/// the SQL its query log held.
+type Heard = (Vec<String>, Vec<String>);
+
+/// One test, run the way plain `cargo test` runs it: a thread of this
+/// process with its own runtime and its own `TestDatabase` (and so its
+/// own test container). It listens, turns the query log on, and runs one
+/// SELECT on `table` once every test passed to `in_step` is listening;
+/// it reads what it heard once every one of them has run its SELECT.
+fn a_test_on_its_own_thread(
+    table: &'static str,
+    in_step: Arc<tokio::sync::Barrier>,
+) -> std::thread::JoinHandle<Heard> {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime for the test thread");
+        runtime.block_on(async move {
+            let step = || {
+                let in_step = in_step.clone();
+                async move {
+                    tokio::time::timeout(std::time::Duration::from_secs(10), in_step.wait())
+                        .await
+                        .expect("the other test reached the same step");
+                }
+            };
+            let db = TestDatabase::sqlite_memory().await.unwrap();
+            db.execute_unprepared(&format!("CREATE TABLE {table} (id INTEGER PRIMARY KEY)"))
+                .await
+                .unwrap();
+            let heard = Arc::new(Mutex::new(Vec::new()));
+            let sink = heard.clone();
+            DB::listen(move |event: &QueryExecuted| {
+                sink.lock().unwrap().push(event.sql.clone());
+            })
+            .unwrap();
+            DB::enable_query_log().unwrap();
+
+            step().await;
+            DB::table(table).get().await.unwrap();
+            step().await;
+
+            let logged = DB::get_query_log()
+                .unwrap()
+                .into_iter()
+                .map(|query| query.sql)
+                .collect();
+            let heard = heard.lock().unwrap().clone();
+            (heard, logged)
+        })
+    })
+}
+
+/// #135: a `DB::listen` callback and the query log inside a test
+/// container hear the queries run in that container and no others, while
+/// a callback registered outside every test container hears them all.
+/// Two tests that count queries in one process each count their own.
+#[test]
+#[serial]
+fn listeners_and_the_query_log_inside_a_test_container_hear_only_its_queries() {
+    let everywhere = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = everywhere.clone();
+    DB::listen(move |event: &QueryExecuted| {
+        sink.lock().unwrap().push(event.sql.clone());
+    })
+    .unwrap();
+
+    let in_step = Arc::new(tokio::sync::Barrier::new(2));
+    let first = a_test_on_its_own_thread("scoped_first", in_step.clone());
+    let second = a_test_on_its_own_thread("scoped_second", in_step);
+    let first = first.join().expect("the first test finished");
+    let second = second.join().expect("the second test finished");
+    // This thread is in no test container: this removes the callback
+    // registered above, from the application's scope.
+    DB::flush_listeners().unwrap();
+
+    for ((heard, logged), own, other) in [
+        (first, "scoped_first", "scoped_second"),
+        (second, "scoped_second", "scoped_first"),
+    ] {
+        for (what, sql) in [("listener", &heard), ("query log", &logged)] {
+            assert_eq!(
+                sql.len(),
+                1,
+                "the {what} of the {own} test heard one query, its own: {sql:?}"
+            );
+            assert!(
+                sql[0].contains(own) && !sql[0].contains(other),
+                "the {what} of the {own} test heard {:?}",
+                sql[0]
+            );
+        }
+    }
+    let everywhere = everywhere.lock().unwrap();
+    for table in ["scoped_first", "scoped_second"] {
+        assert!(
+            everywhere.iter().any(|sql| sql.contains(table)),
+            "a listener outside every test container hears the query on {table}: {everywhere:?}"
+        );
+    }
+}
