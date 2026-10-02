@@ -327,10 +327,24 @@ impl InvokedProcess {
                 }),
             },
             #[cfg(any(test, feature = "testing"))]
-            Inner::Fake(_) => {
-                let _ = signal;
+            Inner::Fake(fake) => {
+                fake.signal(signal);
                 Ok(())
             }
+        }
+    }
+
+    /// Whether a faked process was sent `signal`, for a test to assert on.
+    /// A real process always answers `false`: the signal went to the
+    /// operating system.
+    pub fn has_received_signal(&self, signal: Signal) -> bool {
+        match &self.inner {
+            Inner::Real(_) => {
+                let _ = signal;
+                false
+            }
+            #[cfg(any(test, feature = "testing"))]
+            Inner::Fake(fake) => fake.has_received_signal(signal),
         }
     }
 

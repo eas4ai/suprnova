@@ -82,7 +82,7 @@ Every option takes the builder and returns it:
 | `forever()` | no timeout |
 | `idle_timeout(duration)` | the longest it may go without writing output |
 | `quietly()` | captures no output and calls no output callback |
-| `tty()` | hands the program this terminal, for a program that talks to the user; nothing is captured |
+| `tty()` | hands the program this terminal, for a program that talks to the user; nothing is captured. `Process::supports_tty()` says whether there is one |
 
 `run_with(callback)` calls the callback with each chunk of output as it
 arrives, marked `OutputKind::Out` or `OutputKind::Err`:
@@ -233,9 +233,15 @@ fake.when(
 );
 ```
 
-`Process::sequence([...])` answers its results in turn, one a run. A run
-after the last is `ProcessError::FakeExhausted`, unless
-`.dont_fail_when_empty()` makes it an empty success.
+`.id(n)` sets the process id a described process reports, and
+`.replace_output(text)` and `.replace_error_output(text)` set all of its
+lines at once. A faked started process records the signals sent to it, for
+`has_received_signal(Signal::Term)`.
+
+`Process::sequence([...])` answers its results in turn, one a run, and
+`.push(result)` adds one at the end. A run after the last is
+`ProcessError::FakeExhausted`, unless `.dont_fail_when_empty()` makes it
+an empty success or `.when_empty(result)` gives the result to answer.
 
 The assertions are `assert_ran`, `assert_ran_with(|process| ...)`,
 `assert_ran_times`, `assert_ran_in_order`, `assert_not_ran` (and

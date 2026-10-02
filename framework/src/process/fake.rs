@@ -2,10 +2,10 @@
 //! recorded for the assertions.
 
 use super::invoked::OutputCallback;
-use super::{OutputKind, PendingProcess, ProcessError, ProcessResult};
-use std::cell::Cell;
+use super::{OutputKind, PendingProcess, ProcessError, ProcessResult, Signal};
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 /// Serializes the tests that take a fake: the fake is process-global.
@@ -283,6 +283,7 @@ impl FakeResult {
 /// at each.
 #[derive(Debug, Clone, Default)]
 pub struct FakeDescription {
+    id: Option<u32>,
     output: Vec<String>,
     error_output: Vec<String>,
     exit_code: i32,
@@ -290,6 +291,24 @@ pub struct FakeDescription {
 }
 
 impl FakeDescription {
+    /// The process id the started process reports.
+    pub fn id(mut self, id: u32) -> Self {
+        self.id = Some(id);
+        self
+    }
+
+    /// Replace the standard output with the lines of `output`.
+    pub fn replace_output(mut self, output: &str) -> Self {
+        self.output = output.lines().map(str::to_owned).collect();
+        self
+    }
+
+    /// Replace the standard error with the lines of `output`.
+    pub fn replace_error_output(mut self, output: &str) -> Self {
+        self.error_output = output.lines().map(str::to_owned).collect();
+        self
+    }
+
     /// Add a line of standard output.
     pub fn output(mut self, line: impl Into<String>) -> Self {
         self.output.push(line.into());
@@ -324,6 +343,7 @@ impl FakeDescription {
 pub struct FakeSequence {
     items: Arc<Mutex<VecDeque<FakeHandler>>>,
     fail_when_empty: bool,
+    when_empty: Option<Box<FakeHandler>>,
 }
 
 impl FakeSequence {
@@ -335,7 +355,26 @@ impl FakeSequence {
         Self {
             items: Arc::new(Mutex::new(results.into_iter().map(Into::into).collect())),
             fail_when_empty: true,
+            when_empty: None,
         }
+    }
+
+    /// Add a result after the others.
+    pub fn push(self, result: impl Into<FakeHandler>) -> Self {
+        lock(&self.items).push_back(result.into());
+        self
+    }
+
+    /// Answer `result` once the sequence runs out, instead of an error.
+    pub fn when_empty(mut self, result: impl Into<FakeHandler>) -> Self {
+        self.fail_when_empty = false;
+        self.when_empty = Some(Box::new(result.into()));
+        self
+    }
+
+    /// Whether every result has been answered.
+    pub fn is_empty(&self) -> bool {
+        lock(&self.items).is_empty()
     }
 
     /// Answer an empty successful result once the sequence runs out.
@@ -348,6 +387,7 @@ impl FakeSequence {
 /// What a faked process does, whatever handler gave it.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Canned {
+    id: Option<u32>,
     output: String,
     error_output: String,
     output_lines: Vec<String>,
@@ -375,6 +415,7 @@ impl FakeHandler {
     fn answer(&self, command: &str) -> Result<Canned, ProcessError> {
         match self {
             FakeHandler::Result(result) => Ok(Canned {
+                id: None,
                 output: result.output.clone(),
                 error_output: result.error_output.clone(),
                 output_lines: vec![result.output.clone()],
@@ -382,6 +423,7 @@ impl FakeHandler {
                 iterations: 0,
             }),
             FakeHandler::Describe(description) => Ok(Canned {
+                id: description.id,
                 output: lines(&description.output),
                 error_output: lines(&description.error_output),
                 output_lines: description
@@ -399,7 +441,10 @@ impl FakeHandler {
                     None if sequence.fail_when_empty => Err(ProcessError::FakeExhausted {
                         command: command.to_owned(),
                     }),
-                    None => Ok(Canned::default()),
+                    None => match &sequence.when_empty {
+                        Some(handler) => handler.answer(command),
+                        None => Ok(Canned::default()),
+                    },
                 }
             }
         }
@@ -466,9 +511,10 @@ pub(crate) struct FakeInvoked {
     stopped: bool,
     /// How many lines of output `running` has shown.
     shown: usize,
-    out_read: Cell<usize>,
-    err_read: Cell<usize>,
-    callback: Option<OutputCallback>,
+    out_read: AtomicUsize,
+    err_read: AtomicUsize,
+    callback: Mutex<Option<OutputCallback>>,
+    signals: Mutex<Vec<Signal>>,
 }
 
 impl FakeInvoked {
@@ -478,14 +524,23 @@ impl FakeInvoked {
             canned,
             stopped: false,
             shown: 0,
-            out_read: Cell::new(0),
-            err_read: Cell::new(0),
-            callback,
+            out_read: AtomicUsize::new(0),
+            err_read: AtomicUsize::new(0),
+            callback: Mutex::new(callback),
+            signals: Mutex::new(Vec::new()),
         }
     }
 
     pub(crate) fn id(&self) -> u32 {
-        0
+        self.canned.id.unwrap_or(0)
+    }
+
+    pub(crate) fn signal(&self, signal: Signal) {
+        lock(&self.signals).push(signal);
+    }
+
+    pub(crate) fn has_received_signal(&self, signal: Signal) -> bool {
+        lock(&self.signals).contains(&signal)
     }
 
     /// Show the next line of output, if any is left.
@@ -494,7 +549,7 @@ impl FakeInvoked {
             return false;
         };
         self.shown += 1;
-        if let Some(callback) = self.callback.as_mut() {
+        if let Some(callback) = lock(&self.callback).as_mut() {
             callback(OutputKind::Out, &line);
         }
         true
@@ -502,7 +557,7 @@ impl FakeInvoked {
 
     fn show_all(&mut self) {
         while self.show_next() {}
-        if let Some(callback) = self.callback.as_mut()
+        if let Some(callback) = lock(&self.callback).as_mut()
             && !self.canned.error_output.is_empty()
         {
             callback(OutputKind::Err, &self.canned.error_output);
@@ -534,8 +589,7 @@ impl FakeInvoked {
             OutputKind::Out => &self.out_read,
             OutputKind::Err => &self.err_read,
         };
-        let from = read.get().min(text.len());
-        read.set(text.len());
+        let from = read.swap(text.len(), Ordering::Relaxed).min(text.len());
         text[from..].to_owned()
     }
 

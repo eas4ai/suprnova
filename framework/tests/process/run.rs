@@ -200,3 +200,8 @@ async fn a_shell_line_sees_the_environment_and_the_working_directory() {
         .unwrap();
     assert_eq!(result.output(), "expanded a.log b.log\n");
 }
+
+#[test]
+fn supports_tty_answers_without_running_anything() {
+    let _ = Process::supports_tty();
+}

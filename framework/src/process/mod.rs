@@ -90,6 +90,13 @@ impl Process {
         PendingProcess::new(Command::Shell(line.into()))
     }
 
+    /// Whether this process has a terminal on standard input and standard
+    /// output, so [`PendingProcess::tty`] can hand it on.
+    pub fn supports_tty() -> bool {
+        use std::io::IsTerminal;
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+    }
+
     /// A pool of processes run side by side. See [`Pool`].
     pub fn pool() -> Pool {
         Pool::new()
@@ -545,6 +552,20 @@ fn describe_exit(code: Option<i32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn the_public_types_cross_threads() {
+        send_sync::<PendingProcess>();
+        send_sync::<InvokedProcess>();
+        send_sync::<ProcessResult>();
+        send_sync::<ProcessError>();
+        send_sync::<Pool>();
+        send_sync::<InvokedPool>();
+        send_sync::<PoolResults>();
+        send_sync::<Pipe>();
+    }
 
     #[test]
     fn durations_read_as_people_write_them() {
