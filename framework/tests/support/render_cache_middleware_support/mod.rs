@@ -22,7 +22,7 @@ use suprnova::auth::{Authenticatable, Guard, SessionGuard, UserProvider};
 use suprnova::render_cache::config::RenderCacheConfig;
 use suprnova::render_cache::registry::GroupPolicy;
 use suprnova::render_cache::{
-    FreshnessPolicy, NegotiatedPolicy, QueryPolicy, RenderCache, RenderCachePolicy,
+    FailurePolicy, FreshnessPolicy, NegotiatedPolicy, QueryPolicy, RenderCache, RenderCachePolicy,
     RepresentationClass, VarianceDimension,
 };
 use suprnova::testing::TestContainer;
@@ -44,13 +44,13 @@ use suprnova::{
 use suprnova::{Lang, Locale, scope_locale};
 use suprnova_live::clock::{Clock, ClockError};
 use suprnova_live::identity::UnixMillis;
-use suprnova_live::render_cache::RenderCacheError;
 use suprnova_live::render_cache::key::RenderKey;
 use suprnova_live::render_cache::singleflight::{
     LocalCoordinatorLimits, LocalRebuildCoordinator, RebuildAdmission, RebuildCoordinator,
     RebuildLease,
 };
 use suprnova_live::render_cache::store::PublicationFence;
+use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
 
 mod probe;
 // `pub`, unlike `probe`: Task 7 added two names here
@@ -398,6 +398,9 @@ struct WaiterTrackingCoordinator {
     /// `waiting`: race-free "enable-then-check" (see [`counting_route::wait_until_rendering_count`]'s
     /// own doc for why the capture-then-check order matters).
     released_notify: tokio::sync::Notify,
+    /// Set by [`fail_next_admission`]: the next `admit` fails the way an
+    /// unreachable coordinator does, before any handler has run.
+    fail_next_admission: AtomicBool,
 }
 
 impl WaiterTrackingCoordinator {
@@ -408,8 +411,19 @@ impl WaiterTrackingCoordinator {
             waiting_notify: tokio::sync::Notify::new(),
             released: AtomicU64::new(0),
             released_notify: tokio::sync::Notify::new(),
+            fail_next_admission: AtomicBool::new(false),
         }
     }
+}
+
+/// Makes the coordinator's next admission fail as a provider outage does:
+/// the request that meets it has a provider failure before its handler
+/// runs, which the route's `FailurePolicy` then decides.
+pub fn fail_next_admission(harness: &Harness) {
+    harness
+        .waiting
+        .fail_next_admission
+        .store(true, Ordering::SeqCst);
 }
 
 #[async_trait]
@@ -420,6 +434,11 @@ impl RebuildCoordinator for WaiterTrackingCoordinator {
         epoch: u64,
         now_ms: u64,
     ) -> Result<RebuildAdmission, RenderCacheError> {
+        if self.fail_next_admission.swap(false, Ordering::SeqCst) {
+            return Err(RenderCacheError::new(
+                RenderCacheErrorKind::ProviderUnavailable,
+            ));
+        }
         let admission = self.inner.admit(key, epoch, now_ms).await?;
         if matches!(admission, RebuildAdmission::Wait(_)) {
             self.waiting.fetch_add(1, Ordering::SeqCst);
@@ -943,6 +962,13 @@ async fn boot(
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("after commit fails policy");
+    // A public route that refuses, rather than renders uncached, when a
+    // provider fails before its handler runs.
+    let fail_closed_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .failure(FailurePolicy::Closed)
+        .build()
+        .expect("fail closed policy");
     // A public route whose handler writes a row the database refuses only
     // at the render transaction's COMMIT.
     let commit_refused_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
@@ -1240,6 +1266,7 @@ async fn boot(
         .get("/after-commit-fails", after_commit_fails_handler)
         .into();
     let router: Router = router.get("/commit-refused", commit_refused_handler).into();
+    let router: Router = router.get("/fail-closed", fail_closed_handler).into();
     let router: Router = router
         .get("/shows-auth-user", shows_auth_user_handler)
         .into();
@@ -1470,6 +1497,8 @@ async fn boot(
         .expect("attach after commit fails policy")
         .try_render_cache("/commit-refused", GroupPolicy::from(commit_refused_policy))
         .expect("attach commit refused policy")
+        .try_render_cache("/fail-closed", GroupPolicy::from(fail_closed_policy))
+        .expect("attach fail closed policy")
         .try_render_cache(
             "/shows-auth-user",
             GroupPolicy::from(shows_auth_user_policy),
@@ -2349,6 +2378,13 @@ pub async fn commit_refused_rows(_harness: &Harness) -> u64 {
 /// Writes a child row whose parent does not exist. The INSERT succeeds
 /// inside the render transaction, and that transaction's COMMIT then fails
 /// on the deferred foreign key (see [`create_commit_refused_tables`]).
+/// `/fail-closed`: the route refuses when a provider fails before this
+/// runs, so a test that arms [`fail_next_admission`] never reaches it.
+async fn fail_closed_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    Ok(HttpResponse::html("fail closed render"))
+}
+
 async fn commit_refused_handler(_request: Request) -> Response {
     counting_route::on_render_start().await;
     DB::insert(
@@ -3152,9 +3188,18 @@ pub struct TestResponse {
     /// stores header values as `String`, so UTF-8 is the right lens.
     headers: std::collections::HashMap<String, Vec<u8>>,
     pub body: Bytes,
+    /// The error report `handle_request`'s response carried, read on the
+    /// server side before the response crossed the wire, which never
+    /// carries it.
+    report: Option<suprnova::ErrorReport>,
 }
 
 impl TestResponse {
+    /// The error report the framework attached to the response, if any.
+    pub fn error_report(&self) -> Option<&suprnova::ErrorReport> {
+        self.report.as_ref()
+    }
+
     /// The first value of a response header, case-insensitively, as UTF-8.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(&name.to_ascii_lowercase()).map(|value| {
@@ -3201,6 +3246,8 @@ async fn dispatch_recording(
     let address = listener.local_addr().expect("test listener address");
     let router = Arc::clone(&harness.router);
     let middleware = Arc::clone(&harness.middleware);
+    let report_slot: Arc<Mutex<Option<suprnova::ErrorReport>>> = Arc::default();
+    let server_report_slot = Arc::clone(&report_slot);
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept test request");
         let service = service_fn(move |request| {
@@ -3208,6 +3255,7 @@ async fn dispatch_recording(
             let middleware = Arc::clone(&middleware);
             let frames = frames.clone();
             let server_timings = server_timings.clone();
+            let report_slot = Arc::clone(&server_report_slot);
             async move {
                 // Task 7: the server side of one request, from the moment
                 // hyper hands the parsed request over to the moment the
@@ -3217,6 +3265,12 @@ async fn dispatch_recording(
                 // other dispatch does exactly what it did before.
                 let started = std::time::Instant::now();
                 let response = handle_request(router, middleware, request).await;
+                *report_slot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = response
+                    .extensions()
+                    .get::<suprnova::ErrorReport>()
+                    .cloned();
                 if let Some(timings) = &server_timings {
                     timings
                         .lock()
@@ -3265,10 +3319,15 @@ async fn dispatch_recording(
         .await
         .expect("collect response body")
         .to_bytes();
+    let report = report_slot
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
     TestResponse {
         status,
         headers,
         body,
+        report,
     }
 }
 

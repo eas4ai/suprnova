@@ -235,16 +235,25 @@ const MAX_WAIT_REBUILD_DEPTH: u32 = 8;
 /// middleware always serves it rather than manufacturing a closed
 /// response for a caching problem the visible response has nothing to do
 /// with.
-struct ProviderFailure(Box<(Request, Next)>);
+///
+/// It also carries what failed, so the `503` a `Closed` policy answers with
+/// reports the provider's error in process; see
+/// [`HttpResponse::error_report`].
+struct ProviderFailure(Box<(Request, Next, crate::FrameworkError)>);
 
 impl ProviderFailure {
-    /// Boxes the request and `next` so only the failure path, not every
-    /// successful return, pays for carrying them.
-    fn new(request: Request, next: Next) -> Self {
-        Self(Box::new((request, next)))
+    /// Boxes the request, `next` and the error so only the failure path,
+    /// not every successful return, pays for carrying them. `stage` names
+    /// what the middleware was doing when the provider failed.
+    fn new(request: Request, next: Next, stage: &str, error: RenderCacheError) -> Self {
+        let error = crate::FrameworkError::from_external_with(
+            format!("render cache: {stage} failed before the handler ran"),
+            error,
+        );
+        Self(Box::new((request, next, error)))
     }
 
-    fn into_parts(self) -> (Request, Next) {
+    fn into_parts(self) -> (Request, Next, crate::FrameworkError) {
         *self.0
     }
 }
@@ -268,8 +277,11 @@ impl ProviderFailure {
 /// a transaction that never opened finding the slot empty, so that a
 /// violation is a controlled 500 rather than a panic unwinding through the
 /// request task and the mutex that holds the slot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RenderRequestLost;
+///
+/// It carries the error that lost the request - the database's refusal of
+/// the COMMIT, most often - which the controlled 500 reports in process.
+#[derive(Debug)]
+struct RenderRequestLost(crate::FrameworkError);
 
 /// The RenderCache middleware: one global layer that serves proven
 /// Complete representations. See the module documentation for the request
@@ -767,13 +779,15 @@ impl Middleware for RenderCacheMiddleware {
         };
         match self.serve(&runtime, request, next, &pattern, &policy).await {
             Ok(response) => response,
-            Err(failure) => match policy.failure() {
-                FailurePolicy::Open => {
-                    let (request, next) = failure.into_parts();
-                    next(request).await
+            Err(failure) => {
+                let (request, next, error) = failure.into_parts();
+                match policy.failure() {
+                    FailurePolicy::Open => next(request).await,
+                    FailurePolicy::Closed => Ok(HttpResponse::text("")
+                        .status(503)
+                        .with_error_report_from(&error)),
                 }
-                FailurePolicy::Closed => Ok(HttpResponse::text("").status(503)),
-            },
+            }
         }
     }
 }
@@ -803,7 +817,14 @@ impl RenderCacheMiddleware {
                     }
                     epoch
                 }
-                Err(_) => return Err(ProviderFailure::new(request, next)),
+                Err(error) => {
+                    return Err(ProviderFailure::new(
+                        request,
+                        next,
+                        "reading the authority epoch",
+                        error,
+                    ));
+                }
             },
         };
         // Test-only race seam (R72/R83): fires right after the epoch this
@@ -846,7 +867,14 @@ impl RenderCacheMiddleware {
         } else {
             match lookup(runtime, policy, job.key()).await {
                 Ok(hit) => hit,
-                Err(()) => return Err(ProviderFailure::new(request, next)),
+                Err(error) => {
+                    return Err(ProviderFailure::new(
+                        request,
+                        next,
+                        "reading the stored entry",
+                        error,
+                    ));
+                }
             }
         };
         let Some(found) = hit else {
@@ -856,7 +884,14 @@ impl RenderCacheMiddleware {
 
         let coherence = match coherence(runtime, job.key(), policy, found.header()).await {
             Ok(coherence) => coherence,
-            Err(()) => return Err(ProviderFailure::new(request, next)),
+            Err(error) => {
+                return Err(ProviderFailure::new(
+                    request,
+                    next,
+                    "checking the stored entry against the authority",
+                    error,
+                ));
+            }
         };
         let now = runtime.now_ms();
         let state = freshness_state(
@@ -1430,7 +1465,7 @@ async fn lookup(
     runtime: &RenderCacheRuntime,
     policy: &RenderCachePolicy,
     key: &RenderKey,
-) -> Result<Option<FoundEntry>, ()> {
+) -> Result<Option<FoundEntry>, RenderCacheError> {
     // CACHE-009: while an advancement that could not share its row write's
     // transaction is unconfirmed, nothing stored is trusted.
     if super::write_side::serving_suspended() {
@@ -1446,7 +1481,7 @@ async fn lookup(
         // same nothing.
         let _ = runtime.l0.evict(key).await;
     }
-    let l0_stored = runtime.l0.get(key).await.map_err(|_| ())?;
+    let l0_stored = runtime.l0.get(key).await?;
     if let Some(stored) = l0_stored {
         match decode(&stored.bytes, &runtime.keys, &runtime.limits) {
             Ok(entry) if entry.header().key == *key => {
@@ -1464,7 +1499,7 @@ async fn lookup(
         }
     }
     if let Some(l1) = &runtime.l1 {
-        let l1_stored = l1.get(key).await.map_err(|_| ())?;
+        let l1_stored = l1.get(key).await?;
         if let Some(stored) = l1_stored {
             match decode(&stored.bytes, &runtime.keys, &runtime.limits) {
                 Ok(entry) if entry.header().key == *key => {
@@ -1558,7 +1593,7 @@ async fn coherence(
     key: &RenderKey,
     policy: &RenderCachePolicy,
     header: &EntryHeader,
-) -> Result<Coherence, ()> {
+) -> Result<Coherence, RenderCacheError> {
     if let CoherenceMode::Lease { max_age_ms } = policy.coherence() {
         let now = runtime.now_ms();
         let leased = runtime.leases.valid_at(key, now);
@@ -1643,17 +1678,13 @@ async fn coherence(
 async fn authority_coherence(
     runtime: &RenderCacheRuntime,
     header: &EntryHeader,
-) -> Result<Coherence, ()> {
+) -> Result<Coherence, RenderCacheError> {
     let digests = header.observed.digests();
     // One statement, not two: the generation set and the authority epoch are
     // read together (see
     // [`GenerationLedger::current_with_epoch`]), so a hit that has to consult
     // the authority costs one round trip rather than two.
-    let (current, epoch) = runtime
-        .ledger
-        .current_with_epoch(&digests)
-        .await
-        .map_err(|_| ())?;
+    let (current, epoch) = runtime.ledger.current_with_epoch(&digests).await?;
     // The one authority read a hit may make also renews the epoch lease, so
     // no request ever reads the epoch on its own (task 5b). Done before the
     // comparison, not after: this is the value the comparison judges by. A
@@ -2107,7 +2138,14 @@ async fn render_and_publish(
     let now = runtime.now_ms();
     let admission = match runtime.coordinator.admit(job.key(), job.epoch(), now).await {
         Ok(admission) => admission,
-        Err(_) => return Err(ProviderFailure::new(request, next)),
+        Err(error) => {
+            return Err(ProviderFailure::new(
+                request,
+                next,
+                "admitting the rebuild",
+                error,
+            ));
+        }
     };
     match admission {
         RebuildAdmission::Lead(lease) => {
@@ -2129,7 +2167,14 @@ async fn render_and_publish(
                     let coherence_result =
                         match coherence(runtime, job.key(), policy, found.header()).await {
                             Ok(coherence) => coherence,
-                            Err(()) => return Err(ProviderFailure::new(request, next)),
+                            Err(error) => {
+                                return Err(ProviderFailure::new(
+                                    request,
+                                    next,
+                                    "checking the awaited entry against the authority",
+                                    error,
+                                ));
+                            }
                         };
                     let now = runtime.now_ms();
                     let state = freshness_state(
@@ -2206,7 +2251,14 @@ async fn render_and_publish(
                                             runtime.on_epoch_rewind(leased).await;
                                         }
                                     }
-                                    Err(_) => return Err(ProviderFailure::new(request, next)),
+                                    Err(error) => {
+                                        return Err(ProviderFailure::new(
+                                            request,
+                                            next,
+                                            "rereading the authority epoch",
+                                            error,
+                                        ));
+                                    }
                                 }
                             }
                             if job.restamp(runtime).is_err() {
@@ -2295,15 +2347,20 @@ async fn lead_render(
         policy.class() == RepresentationClass::PublicShellStitched,
     )
     .await;
-    let Ok((response, report, observed)) = rendered else {
-        // `RenderRequestLost`: there is no request left to hand to `next`,
-        // so this is the one failure in this module that cannot degrade to
-        // an uncached render. Release the lease so the route is not left
-        // fenced, and answer with a controlled 500 rather than panicking
-        // inside the request task.
-        let _ = runtime.coordinator.release(lease).await;
-        LookupOutcome::Declined(LookupDeclineReason::UnreasonedPrivateClass).record();
-        return Ok(HttpResponse::text("").status(500));
+    let (response, report, observed) = match rendered {
+        Ok(rendered) => rendered,
+        Err(RenderRequestLost(error)) => {
+            // There is no request left to hand to `next`, so this is the
+            // one failure in this module that cannot degrade to an uncached
+            // render. Release the lease so the route is not left fenced, and
+            // answer with a controlled 500 rather than panicking inside the
+            // request task. The 500 reports the error that lost the request.
+            let _ = runtime.coordinator.release(lease).await;
+            LookupOutcome::Declined(LookupDeclineReason::UnreasonedPrivateClass).record();
+            return Ok(HttpResponse::text("")
+                .status(500)
+                .with_error_report_from(&error));
+        }
     };
     // Test-only race seam (R72/R83): fires the instant the read view has
     // closed and the observed generation set is fixed, before anything
@@ -3360,7 +3417,7 @@ async fn run_render(
                 "the transaction around a cached render failed after it opened; \
                  the render is not served",
             );
-            Err(RenderRequestLost)
+            Err(RenderRequestLost(error))
         }
         Err(_) => {
             // CACHE-010: the transaction could not even open, so the closure
@@ -3379,7 +3436,10 @@ async fn run_render(
                     false,
                     "a DB::transaction that never opened never invoked its closure"
                 );
-                return Err(RenderRequestLost);
+                return Err(RenderRequestLost(crate::FrameworkError::internal(
+                    "render cache: the render request was gone after a transaction \
+                     that never opened",
+                )));
             };
             // CACHE-010 (audit finding ASTRA-08): a render with no read view
             // can interleave with a concurrent multi-row write and pass the
