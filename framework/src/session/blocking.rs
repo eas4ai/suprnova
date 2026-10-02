@@ -152,7 +152,8 @@ pub(crate) async fn acquire(
                 return Err(crate::http::HttpResponse::text(
                     "Internal Server Error: session blocking needs a reachable cache store",
                 )
-                .status(500));
+                .status(500)
+                .with_error_report_from(&error));
             }
         }
     }

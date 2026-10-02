@@ -142,13 +142,22 @@ impl Middleware for TimeoutMiddleware {
 
         match tokio::time::timeout(self.duration, next(request)).await {
             Ok(response) => response,
-            Err(_elapsed) => {
+            Err(elapsed) => {
+                let timeout_ms = self.duration.as_millis() as u64;
                 tracing::warn!(
                     route = %path,
-                    timeout_ms = self.duration.as_millis() as u64,
+                    timeout_ms,
                     "request exceeded its timeout; returning 503 Service Unavailable"
                 );
-                Err(HttpResponse::text("Service Unavailable: request timed out").status(503))
+                let failure = crate::FrameworkError::from_external_with(
+                    format!(
+                        "the request to {path} did not finish within its {timeout_ms} ms timeout"
+                    ),
+                    elapsed,
+                );
+                Err(HttpResponse::text("Service Unavailable: request timed out")
+                    .status(503)
+                    .with_error_report_from(&failure))
             }
         }
     }

@@ -189,7 +189,7 @@ pub(crate) async fn handle(request: Request) -> Response {
     };
     let runtime = match super::runtime::LiveRuntime::bind() {
         Ok(runtime) => runtime,
-        Err(_) => return error_response(EndpointErrorKind::KernelUnavailable),
+        Err(error) => return failure_response(EndpointErrorKind::KernelUnavailable, &error),
     };
     let mut request = match request
         .buffer_body(runtime.config().max_request_bytes())
@@ -199,7 +199,7 @@ pub(crate) async fn handle(request: Request) -> Response {
         Err(error) if error.status_code() == 413 => {
             return error_response(EndpointErrorKind::RequestTooLarge);
         }
-        Err(_) => return error_response(EndpointErrorKind::KernelUnavailable),
+        Err(error) => return failure_response(EndpointErrorKind::KernelUnavailable, &error),
     };
     // An owned copy: the request is mutated below to close the identity
     // absences its mount permits, after the body has named that mount.
@@ -210,7 +210,7 @@ pub(crate) async fn handle(request: Request) -> Response {
     );
     let selection = match runtime.inspect_mount(&body, media) {
         Ok(selection) => selection,
-        Err(error) => return error_response(error.kind()),
+        Err(error) => return failure_response(error.kind(), &error),
     };
     let upload_context = match runtime.validate_upload_action_context(&request, &selection) {
         Ok(context) => context,
@@ -234,7 +234,7 @@ pub(crate) async fn handle(request: Request) -> Response {
         RequestCachePolicy::Bypass,
     ) {
         Ok(request) => request,
-        Err(error) => return error_response(error.kind()),
+        Err(error) => return failure_response(error.kind(), &error),
     };
     let (service, completion) = runtime.endpoint_service(upload_context);
     let response = service.handle(endpoint_request).await;
@@ -243,8 +243,8 @@ pub(crate) async fn handle(request: Request) -> Response {
     if !completed || projected.is_err() {
         return projected;
     }
-    if completion.commit().is_err() {
-        return error_response(EndpointErrorKind::KernelUnavailable);
+    if let Err(error) = completion.commit() {
+        return failure_response(EndpointErrorKind::KernelUnavailable, &error);
     }
     projected
 }
@@ -261,6 +261,16 @@ fn normalize_media(request: &Request) -> Result<ParsedLiveMediaType, EndpointErr
 
 fn error_response(kind: EndpointErrorKind) -> Response {
     project_response(LiveEndpointResponse::from_error_kind(kind))
+}
+
+/// [`error_response`] for a failure with its error in hand: the client gets
+/// the same closed answer, and the response carries `error` as its
+/// in-process report.
+fn failure_response(kind: EndpointErrorKind, error: &dyn Error) -> Response {
+    match error_response(kind) {
+        Ok(response) => Ok(response.with_error_report_from(error)),
+        Err(response) => Err(response.with_error_report_from(error)),
+    }
 }
 
 fn project_response(response: LiveEndpointResponse) -> Response {

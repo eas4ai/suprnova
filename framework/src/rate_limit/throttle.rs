@@ -126,8 +126,9 @@ impl ThrottleRequestsMiddleware {
     ///
     /// The limiter must have been registered via
     /// [`RateLimiter::define`]; otherwise every request returns
-    /// `503 Service Unavailable` with a body that names the missing
-    /// limiter (matching the `MissingRateLimiterException` that Laravel
+    /// `503 Service Unavailable`, and the log and the response's
+    /// [`ErrorReport`](crate::ErrorReport), never the body, name the
+    /// missing limiter (matching the `MissingRateLimiterException` that Laravel
     /// throws - Suprnova surfaces it as an HTTP response rather than
     /// panicking the worker thread).
     pub fn by_name(name: impl Into<String>) -> Self {
@@ -250,7 +251,14 @@ impl Middleware for ThrottleRequestsMiddleware {
                     "throttle middleware: named limiter [{name}] not registered - \
                      register it with RateLimiter::define(\"{name}\", |req| ...) at boot",
                 );
-                return Err(HttpResponse::text("Service Unavailable").status(503));
+                // No error value exists here, only the missing name; the
+                // report carries it, as the log does.
+                return Err(HttpResponse::text("Service Unavailable")
+                    .status(503)
+                    .with_error_report_from(&crate::FrameworkError::internal(format!(
+                        "throttle middleware: named limiter [{name}] not registered - \
+                         register it with RateLimiter::define(\"{name}\", |req| ...) at boot"
+                    ))));
             }
         };
 
@@ -512,7 +520,9 @@ async fn build_too_many_attempts_response(
         // a fixed body, this direct HttpResponse path was the exception. Detail
         // stays in the structured log.
         tracing::error!(error = %e, "rate limiter backend error computing retry-after");
-        HttpResponse::text("Internal Server Error").status(500)
+        HttpResponse::text("Internal Server Error")
+            .status(500)
+            .with_error_report_from(&e)
     })?;
     let remaining = 0_i64;
     if let Some(cb) = &limit.response_callback {

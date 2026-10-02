@@ -2550,3 +2550,80 @@ async fn rejected_uploads_leave_no_ledger_provider_or_metadata_residue() {
         );
     }
 }
+
+/// A control request whose body can't be read answers 500, and the 500
+/// carries the read error as its report, so a test sees why.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_unreadable_control_body_reports_the_read_error_behind_its_500() {
+    ensure_crypt();
+    let _container = TestContainer::fake();
+    let router = semantic_router();
+    let middleware = Arc::new(MiddlewareRegistry::new().append(StrictUploadFacts));
+
+    let response = suprnova::testing::TestResponse::from_response(
+        handle_request(router, middleware, truncated_control_request().await).await,
+    )
+    .await;
+
+    assert_eq!(
+        response.status(),
+        500,
+        "an unreadable body is a 500; body: {}",
+        response.body_text()
+    );
+    let report = response
+        .error_report()
+        .expect("the 500 must carry the read error's report")
+        .to_string();
+    assert!(
+        report.contains("Failed to read request body"),
+        "the report must name the read error; report:\n{report}"
+    );
+}
+
+/// An upload control request that declares a 64-byte body and sends 10
+/// before the client closes, so reading the body fails.
+async fn truncated_control_request() -> hyper::Request<hyper::body::Incoming> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut http_bytes = format!(
+        "POST {LIVE_UPLOAD_PATH} HTTP/1.1\r\nHost: localhost\r\n\
+         Content-Type: application/json\r\nAccept: application/json\r\n\
+         X-Suprnova-Live: upload-v1\r\nContent-Length: 64\r\n\r\n"
+    )
+    .into_bytes();
+    http_bytes.extend_from_slice(b"{\"operatio");
+    let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+    let request_tx = Mutex::new(Some(request_tx));
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+            if let Some(sender) = request_tx
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                let _ = sender.send(request);
+            }
+            // Pending, so hyper keeps pumping the body (and reports its
+            // early end) to the request the test now holds.
+            async {
+                std::future::pending::<()>().await;
+                Ok::<_, std::convert::Infallible>(hyper::Response::new(Full::new(Bytes::new())))
+            }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(server), service)
+            .await;
+    });
+    let mut client = client;
+    client
+        .write_all(&http_bytes)
+        .await
+        .expect("write the truncated request");
+    drop(client);
+    request_rx
+        .await
+        .expect("the server received the truncated request")
+}

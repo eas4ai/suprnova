@@ -49,6 +49,15 @@ fn err_response(status: u16, body: &str) -> Response {
     Ok(HttpResponse::text(body).status(status))
 }
 
+/// [`err_response`] for a failure on the server's side: the provider sees
+/// the same status and body, and the response carries `error` as its
+/// in-process report.
+fn failure_response(status: u16, body: &str, error: &dyn std::error::Error) -> Response {
+    Ok(HttpResponse::text(body)
+        .status(status)
+        .with_error_report_from(error))
+}
+
 /// Return whether SeaORM classified a database failure as a unique-constraint
 /// violation, independent of backend-specific human-readable text.
 fn is_unique_violation(error: &sea_orm::DbErr) -> bool {
@@ -189,7 +198,7 @@ async fn handle_webhook_inner(
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = %e, "db error checking webhook idempotency");
-            return err_response(500, "db");
+            return failure_response(500, "db", &e);
         }
     };
     if let Some(row) = &existing
@@ -228,13 +237,13 @@ async fn handle_webhook_inner(
             Ok(_) => {
                 if let Err(e) = advance_mirror_table::<webhook_event::Entity>().await {
                     tracing::error!(error = %e, "failed to advance render-cache generation for webhook event insert");
-                    return err_response(500, "persist");
+                    return failure_response(500, "persist", &e);
                 }
             }
             Err(e) => {
                 if !is_unique_violation(&e) {
                     tracing::error!(error = %e, "failed to persist webhook event");
-                    return err_response(500, "persist");
+                    return failure_response(500, "persist", &e);
                 }
                 tracing::debug!(
                     provider = %provider_name,
@@ -253,7 +262,7 @@ async fn handle_webhook_inner(
                 Ok(_) => {
                     if let Err(e) = advance_mirror_table::<webhook_event::Entity>().await {
                         tracing::error!(error = %e, "failed to advance render-cache generation for webhook event retry-clear");
-                        return err_response(503, "hydration-failed");
+                        return failure_response(503, "hydration-failed", &e);
                     }
                 }
                 Err(e) => {
@@ -265,7 +274,7 @@ async fn handle_webhook_inner(
                             "failed to record webhook retry preparation failure"
                         );
                     }
-                    return err_response(503, "hydration-failed");
+                    return failure_response(503, "hydration-failed", &e);
                 }
             }
         }
@@ -308,7 +317,7 @@ async fn handle_webhook_inner(
                     "failed to record webhook hydration failure"
                 );
             }
-            err_response(503, "hydration-failed")
+            failure_response(503, "hydration-failed", &e)
         }
     }
 }
@@ -995,7 +1004,7 @@ pub fn webhook_routes(db: Arc<DatabaseConnection>) -> Router {
                     Ok(pair) => pair,
                     Err(e) => {
                         tracing::error!(error = %e, "failed to read webhook body");
-                        return err_response(e.status_code(), "body");
+                        return failure_response(e.status_code(), "body", &e);
                     }
                 };
                 handle_webhook_inner(&db, &provider_name, remote_addr_str, headers, body).await
@@ -1227,6 +1236,45 @@ mod tests {
         assert!(
             mirror.is_none(),
             "hydration failure must roll back the mirror write"
+        );
+    }
+
+    /// A delivery whose hydration fails answers 503 so the provider
+    /// retries, and the 503 carries the hydration error as its report.
+    #[tokio::test]
+    async fn a_failed_hydration_reports_its_error_behind_the_503() {
+        let provider_name: &'static str = "mock-webhook-hydration-report";
+        let _mock = register_mock(provider_name);
+        let db = TestDatabase::fresh::<PaymentsTestMigrator>()
+            .await
+            .expect("TestDatabase::fresh");
+        // A subscription the mock provider has never seen: hydration
+        // fetches it and fails.
+        let body = bytes::Bytes::from(
+            serde_json::json!({
+                "id": "evt_hydration_report",
+                "type": "subscription.created",
+                "data": { "object": {
+                    "id": "sub_never_registered",
+                    "customer": "cus_never_registered"
+                }}
+            })
+            .to_string(),
+        );
+
+        let response =
+            handle_webhook_inner(db.conn(), provider_name, None, http::HeaderMap::new(), body)
+                .await;
+
+        assert_eq!(status_of(&response), 503);
+        let report = match &response {
+            Ok(response) | Err(response) => response.error_report(),
+        }
+        .expect("the 503 must carry the hydration error's report")
+        .to_string();
+        assert!(
+            report.to_lowercase().contains("not found"),
+            "the report must name the hydration error; report:\n{report}"
         );
     }
 
