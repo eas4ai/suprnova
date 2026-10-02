@@ -249,19 +249,25 @@ impl ProviderFailure {
     }
 }
 
-/// The render could not run because the request was no longer available to
-/// hand to it.
+/// The cache-miss render has nothing to serve and no request left to
+/// render again.
 ///
 /// `run_render` moves the request into a slot so the render can happen
 /// inside a database transaction, and exactly one of the transaction
-/// closure and the non-transactional fallback takes it back out. If
-/// neither did, there is nothing left to serve: unlike every other
-/// failure in this module there is no request to pass to `next`, so this
-/// cannot degrade to an uncached render the way `ProviderFailure` does.
+/// closure and the non-transactional fallback takes it back out. When the
+/// transaction opens, runs the closure, and then fails, most often because
+/// the database refused the COMMIT (a deferred constraint, a dropped
+/// connection), the closure has consumed the request and the handler's
+/// writes have rolled back. Its response would claim writes that never
+/// landed, so it is not served, and unlike every other failure in this
+/// module there is no request to pass to `next`, so this cannot degrade to
+/// an uncached render the way `ProviderFailure` does. The caller answers a
+/// controlled 500.
 ///
-/// It is unreachable by construction. It exists so that a violation is a
-/// controlled 500 rather than a panic unwinding through the request task
-/// and the mutex that holds the slot.
+/// The same value covers the one case that is unreachable by construction,
+/// a transaction that never opened finding the slot empty, so that a
+/// violation is a controlled 500 rather than a panic unwinding through the
+/// request task and the mutex that holds the slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RenderRequestLost;
 
@@ -3238,7 +3244,10 @@ async fn render_under_collector(
 /// `request` is captured through a slot rather than moved directly into the
 /// transaction closure, so that if the transaction itself cannot even open
 /// (a provider failure, not a route failure), the still-untouched request
-/// is recoverable for a plain, uncached render instead of being lost.
+/// is recoverable for a plain, uncached render instead of being lost. A
+/// transaction that opened and then failed, such as a COMMIT the database
+/// refused, has consumed the request and rolled the handler's writes back;
+/// that is [`RenderRequestLost`].
 ///
 /// `observes_permission_generation` is [`key_carries_a_resolved_principal`]
 /// for the job's variance; see that function for why the key, not the
@@ -3323,8 +3332,8 @@ async fn run_render(
         .await
     };
     match result {
-        Ok((triple, None)) => Ok(triple),
-        Ok((triple, Some(error))) => {
+        Ok(Ok((triple, None))) => Ok(triple),
+        Ok(Ok((triple, Some(error)))) => {
             // The render committed and a callback the handler deferred with
             // `DB::after_commit` failed afterwards. The handler succeeded and
             // its writes are durable, so the render is served (and judged for
@@ -3337,20 +3346,39 @@ async fn run_render(
             );
             Ok(triple)
         }
+        Ok(Err(error)) => {
+            // The transaction opened and the closure ran, so the request is
+            // consumed, and then the transaction failed: most often the
+            // database refused the COMMIT (a deferred constraint, a dropped
+            // connection). The handler's writes rolled back, so its
+            // response would claim writes that never landed and is not
+            // served, and there is no request left to render again: the
+            // caller answers 500.
+            tracing::error!(
+                target: "suprnova::database",
+                error = %error,
+                "the transaction around a cached render failed after it opened; \
+                 the render is not served",
+            );
+            Err(RenderRequestLost)
+        }
         Err(_) => {
-            // The transaction could not even open, so the closure above
-            // never ran and the request is still sitting in the slot.
+            // CACHE-010: the transaction could not even open, so the closure
+            // above never ran and the request is still sitting in the slot.
             // Render without the shared read-view rather than losing the
             // request: correctness downstream is unaffected (the fresh
             // reread still catches a move), only the snapshot-consistency
             // optimization is lost.
             let Some(request) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() else {
-                // Unreachable: a transaction that failed to open never ran
-                // the closure, so the slot still holds the request. If it
-                // does not, there is no request left to render and no way
-                // to degrade to an uncached response, so the caller turns
-                // this into a controlled 500.
-                debug_assert!(false, "a failed DB::transaction never invoked its closure");
+                // Unreachable: the outer `Err` means the closure never ran,
+                // so the slot still holds the request. If it does not, there
+                // is no request left to render and no way to degrade to an
+                // uncached response, so the caller turns this into a
+                // controlled 500.
+                debug_assert!(
+                    false,
+                    "a DB::transaction that never opened never invoked its closure"
+                );
                 return Err(RenderRequestLost);
             };
             // CACHE-010 (audit finding ASTRA-08): a render with no read view

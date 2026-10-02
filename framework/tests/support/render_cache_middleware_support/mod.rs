@@ -943,6 +943,12 @@ async fn boot(
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
         .build()
         .expect("after commit fails policy");
+    // A public route whose handler writes a row the database refuses only
+    // at the render transaction's COMMIT.
+    let commit_refused_policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("freshness"))
+        .build()
+        .expect("commit refused policy");
     // Final review, F2: a private route whose body shows `Auth::user()`,
     // resolved through `DatabaseUserProvider` (see `ProviderLoginHeader`).
     let shows_auth_user_policy = RenderCachePolicy::builder(RepresentationClass::PrivateCached)
@@ -1233,6 +1239,7 @@ async fn boot(
     let router: Router = router
         .get("/after-commit-fails", after_commit_fails_handler)
         .into();
+    let router: Router = router.get("/commit-refused", commit_refused_handler).into();
     let router: Router = router
         .get("/shows-auth-user", shows_auth_user_handler)
         .into();
@@ -1461,6 +1468,8 @@ async fn boot(
             GroupPolicy::from(after_commit_fails_policy),
         )
         .expect("attach after commit fails policy")
+        .try_render_cache("/commit-refused", GroupPolicy::from(commit_refused_policy))
+        .expect("attach commit refused policy")
         .try_render_cache(
             "/shows-auth-user",
             GroupPolicy::from(shows_auth_user_policy),
@@ -2308,6 +2317,47 @@ async fn after_commit_fails_handler(_request: Request) -> Response {
     .await?;
     let n = counting_route::renders();
     Ok(HttpResponse::html(format!("after-commit render {n}")))
+}
+
+/// Creates the two tables `/commit-refused` writes to. The child's foreign
+/// key is `DEFERRABLE INITIALLY DEFERRED`, so SQLite checks it at COMMIT,
+/// not at the INSERT: an orphan child row is accepted by its statement and
+/// refused by the commit of the transaction it was written in.
+pub async fn create_commit_refused_tables(_harness: &Harness) {
+    DB::unprepared("CREATE TABLE commit_refused_parent (id INTEGER PRIMARY KEY)")
+        .await
+        .expect("create commit_refused_parent");
+    DB::unprepared(
+        "CREATE TABLE commit_refused_child (\
+            id INTEGER PRIMARY KEY, \
+            parent_id INTEGER NOT NULL \
+                REFERENCES commit_refused_parent(id) DEFERRABLE INITIALLY DEFERRED\
+         )",
+    )
+    .await
+    .expect("create commit_refused_child");
+}
+
+/// How many rows `commit_refused_child` holds.
+pub async fn commit_refused_rows(_harness: &Harness) -> u64 {
+    DB::table("commit_refused_child")
+        .count()
+        .await
+        .expect("count commit_refused_child")
+}
+
+/// Writes a child row whose parent does not exist. The INSERT succeeds
+/// inside the render transaction, and that transaction's COMMIT then fails
+/// on the deferred foreign key (see [`create_commit_refused_tables`]).
+async fn commit_refused_handler(_request: Request) -> Response {
+    counting_route::on_render_start().await;
+    DB::insert(
+        "INSERT INTO commit_refused_child (id, parent_id) VALUES (1, 999)",
+        vec![],
+    )
+    .await?;
+    let n = counting_route::renders();
+    Ok(HttpResponse::html(format!("commit refused render {n}")))
 }
 
 /// Final review, F2: shows the signed-in user's own row, resolved through

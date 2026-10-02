@@ -1393,10 +1393,19 @@ impl DB {
     /// and the render cache can serve a render whose handler succeeded
     /// instead of answering 500 for a callback the handler deferred with
     /// [`DB::after_commit`].
+    ///
+    /// And a failure comes back at one of two depths, split at whether the
+    /// closure ran. The outer `Err` is [`Self::transaction_settled`]'s: the
+    /// closure never ran (the nesting refusal, no connection, or a failed
+    /// `BEGIN`), so whatever it would have consumed is still the caller's.
+    /// The inner `Err` means the closure ran and the transaction then
+    /// failed: the closure returned `Err`, the database refused the COMMIT
+    /// (a deferred constraint, a dropped connection), or finalization ended
+    /// without an outcome.
     pub(crate) async fn transaction_with_isolation<F, T>(
         isolation_level: Option<IsolationLevel>,
         f: F,
-    ) -> Result<(T, Option<FrameworkError>), FrameworkError>
+    ) -> Result<Result<(T, Option<FrameworkError>), FrameworkError>, FrameworkError>
     where
         F: for<'b> FnOnce(
             &'b Transaction,
@@ -1410,14 +1419,14 @@ impl DB {
         })
         .await
         .map_err(TransactionFailure::into_error)?;
-        match settled.finalized {
+        Ok(match settled.finalized {
             Ok(()) => settled.value.map(|value| (value, None)),
             // Only a closure that returned `Ok` commits, so `value` is `Ok`.
             Err(TransactionFailure::AfterCommitCallback(error)) => {
                 settled.value.map(|value| (value, Some(error)))
             }
             Err(failure) => Err(failure.into_error()),
-        }
+        })
     }
 
     /// [`DB::transaction`] with the failure cause still intact.
