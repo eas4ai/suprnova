@@ -298,13 +298,40 @@ so the no-panic house rule doesn't apply.
 ### See why a request failed
 
 When a handler or middleware returns an error, or panics, the client
-gets a sanitized body: a 5xx says only
+gets a sanitized body. With debug off, a 5xx says only
 `{"message": "Internal Server Error", ...}`. That's the right answer for
 a client and no help when a test fails. So the framework attaches an
-`ErrorReport` to every response it builds from an error. The report
+`ErrorReport` to the response it builds from a failure. The report
 holds the error and each of its sources, or a panic's message and the
 location it was raised at. It lives in the response's in-process
-extensions and never reaches a header or the body.
+extensions, and it never adds anything to a header or the body.
+
+A response carries a report when one of these built it:
+
+- A handler or middleware returned a `FrameworkError`, other than
+  `PrecognitionSuccess`, which answers a passing dry run.
+- The panic boundary caught a panic in a handler or a middleware, on an
+  HTTP route or in the middleware of a WebSocket route's upgrade.
+- A framework middleware answered a failure with a 5xx of its own:
+  `SessionMiddleware` when it can't store the session safely and fails
+  closed, or when the cache can't take the session's lock;
+  `ThrottleRequestsMiddleware` when its cache fails or it names a
+  limiter that nobody defined; `RateLimitMiddleware` and
+  `LoginThrottleMiddleware` when they fail closed on a backend error;
+  and `TimeoutMiddleware` when the request runs past its deadline.
+
+A refusal that a middleware answers on purpose carries no report,
+because nothing failed: the `429` a throttle or rate limiter answers a
+client over its limit with, the `503` while another request holds the
+session's lock, or the `503` of maintenance mode.
+
+With debug on, which is the default when `APP_DEBUG` is unset in the
+local, development, and testing environments, a 5xx body built from a
+`FrameworkError` also carries
+`debug_message`: the error chain as `render_error_chain` renders it.
+That's the body debug mode gave before the report existed, and the
+report doesn't change it. The field comes from the debug setting; the
+report adds nothing to the body in either mode.
 
 To keep the report, build the `TestResponse` from the response
 `handle_request` returns, with `TestResponse::from_response`. It
@@ -325,7 +352,7 @@ TestResponse::from_response(resp).await.assert_ok();
 ```
 
 When an assertion fails on a response that carries a report, the
-failure message ends with it:
+failure message ends with it. With debug off, it reads:
 
 ```text
 assert_ok()
@@ -356,17 +383,48 @@ assert!(!report.is_panic());
 assert_eq!(report.chain()[0], "posting the invoice failed");
 ```
 
-`chain()` lists the error's own message and then each source's.
-`is_panic()` and `panic_location()` describe a caught panic.
+`chain()` lists the error's own message and then each source's. Only
+an error that keeps its source has more than one link:
+`FrameworkError::from_external` and `from_external_with` keep the
+wrapped error and its sources, while most other variants, including the
+`Domain` error that `FrameworkError::from_http_error` and an `AppError`
+become, hold a message and a status only, so their report is that one
+line. `is_panic()` and `panic_location()` describe a caught panic.
 Middleware can read the same report off an `HttpResponse` with
 `HttpResponse::error_report()`.
 
-Two ways to end up without a report:
+The Inertia error page and the Inertia validation redirect keep the
+report of the response they replace, so an Inertia visit that failed
+with a `500` and came back as the `Error` page still says why. The
+assertions of `assert_inertia()`, and of an `AssertableInertia` built
+with `AssertableInertia::from_response` from an `HttpResponse` that
+carries a report, end their failure messages with it too:
+
+```text
+AssertableInertia::component("Posts/Index")
+  Expected: "Posts/Index"
+  Received: "Error"
+  error report:
+    posting the invoice failed
+    caused by: writing ledger entry 42 failed
+    caused by: disk /var/ledger is full
+```
+
+Ways to end up without a report:
 
 - `TestResponse::new` builds from a `(status, headers, body)` triple,
   which has nowhere to carry one.
 - A response read back over the TCP loopback has crossed the wire,
   and the report stays on the server side by design.
+- A middleware of your own that builds a new `HttpResponse` in place of
+  an error response drops the report, which stays on the response it
+  replaced. Change the response you were given, with `header` or
+  `status`, and the report stays on it.
+- Some framework responses carry none: the `503` of the RenderCache
+  middleware's fail-closed policy and its `500` for a render whose
+  transaction failed, and the 5xx of the payment webhook route and of
+  the Live endpoints. Each answers with its own protocol response and
+  logs the failure.
 
 ### Why Suprnova diverges
 
