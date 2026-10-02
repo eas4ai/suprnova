@@ -2701,6 +2701,56 @@ async fn a_failing_after_commit_callback_still_serves_the_committed_render() {
     );
 }
 
+/// A cache-miss render whose handler ran and whose transaction the database
+/// then refused to COMMIT, here on a deferred foreign key, answers 500: the
+/// handler's write rolled back, and the page it rendered would claim the
+/// write landed. That outcome is reachable, so it is logged with the
+/// database's error rather than taken for a transaction that never opened,
+/// which panicked on a debug assertion before the fix.
+#[tokio::test]
+#[serial_test::serial]
+#[tracing_test::traced_test]
+async fn a_refused_render_commit_answers_500_and_logs_the_database_error() {
+    let harness = boot_with_render_cache().await;
+    render_cache_middleware_support::create_commit_refused_tables(&harness).await;
+
+    let served = dispatch_get(&harness, "/commit-refused", &[]).await;
+
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "precondition: the handler ran"
+    );
+    assert_eq!(
+        render_cache_middleware_support::commit_refused_rows(&harness).await,
+        0,
+        "precondition: the database refused the COMMIT, so the handler's row is gone"
+    );
+    assert_eq!(
+        served.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a render whose writes did not commit is never served"
+    );
+    assert!(
+        !logs_contain("panicked"),
+        "a refused COMMIT is a reachable outcome, not a broken invariant"
+    );
+    logs_assert(|lines: &[&str]| {
+        lines
+            .iter()
+            .any(|line| {
+                line.contains("suprnova::database")
+                    && line
+                        .contains("the transaction around a cached render failed after it opened")
+                    && line.to_lowercase().contains("foreign key")
+            })
+            .then_some(())
+            .ok_or_else(|| {
+                "expected the refused COMMIT logged with the database's error".to_owned()
+            })
+    });
+}
+
 /// A builder query that carries a raw fragment can read tables the builder
 /// does not name: here a `where_raw` subquery on `posts` inside a query on
 /// `users`. Recording only `users` would store the page on an incomplete
