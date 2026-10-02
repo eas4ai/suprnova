@@ -66,6 +66,15 @@
     --sn-color-disabled-text: oklch(62% 0.014 250);
     --sn-color-mark: oklch(93% 0.12 95);
 
+    /* color: the chart palette, distinct hues in series order, each at 3:1
+     * or more against the background and the surface */
+    --sn-color-chart-1: oklch(52% 0.17 262);
+    --sn-color-chart-2: oklch(60% 0.15 45);
+    --sn-color-chart-3: oklch(55% 0.09 185);
+    --sn-color-chart-4: oklch(55% 0.2 350);
+    --sn-color-chart-5: oklch(52% 0.19 300);
+    --sn-color-chart-6: oklch(62% 0.12 95);
+
     /* font */
     --sn-font-sans:
       system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -172,6 +181,12 @@
       --sn-color-disabled-bg: oklch(24% 0.014 260);
       --sn-color-disabled-text: oklch(52% 0.014 250);
       --sn-color-mark: oklch(45% 0.1 95);
+      --sn-color-chart-1: oklch(70% 0.14 262);
+      --sn-color-chart-2: oklch(76% 0.14 50);
+      --sn-color-chart-3: oklch(78% 0.12 185);
+      --sn-color-chart-4: oklch(74% 0.16 350);
+      --sn-color-chart-5: oklch(76% 0.13 305);
+      --sn-color-chart-6: oklch(85% 0.14 95);
       --sn-shadow-sm: 0 1px 2px oklch(0% 0 0 / 0.4);
       --sn-shadow-md: 0 4px 12px oklch(0% 0 0 / 0.5);
       --sn-shadow-lg: 0 12px 32px oklch(0% 0 0 / 0.6);
@@ -207,6 +222,12 @@
     --sn-color-disabled-bg: oklch(24% 0.014 260);
     --sn-color-disabled-text: oklch(52% 0.014 250);
     --sn-color-mark: oklch(45% 0.1 95);
+    --sn-color-chart-1: oklch(70% 0.14 262);
+    --sn-color-chart-2: oklch(76% 0.14 50);
+    --sn-color-chart-3: oklch(78% 0.12 185);
+    --sn-color-chart-4: oklch(74% 0.16 350);
+    --sn-color-chart-5: oklch(76% 0.13 305);
+    --sn-color-chart-6: oklch(85% 0.14 95);
     --sn-shadow-sm: 0 1px 2px oklch(0% 0 0 / 0.4);
     --sn-shadow-md: 0 4px 12px oklch(0% 0 0 / 0.5);
     --sn-shadow-lg: 0 12px 32px oklch(0% 0 0 / 0.6);

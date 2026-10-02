@@ -47,6 +47,12 @@
   --color-disabled-bg: var(--sn-color-disabled-bg);
   --color-disabled-text: var(--sn-color-disabled-text);
   --color-mark: var(--sn-color-mark);
+  --color-chart-1: var(--sn-color-chart-1);
+  --color-chart-2: var(--sn-color-chart-2);
+  --color-chart-3: var(--sn-color-chart-3);
+  --color-chart-4: var(--sn-color-chart-4);
+  --color-chart-5: var(--sn-color-chart-5);
+  --color-chart-6: var(--sn-color-chart-6);
 
   /* font families, sizes, weights and line heights */
   --font-sans: var(--sn-font-sans);
