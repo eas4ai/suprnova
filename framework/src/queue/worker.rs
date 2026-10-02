@@ -425,7 +425,9 @@ pub struct WorkerConfig {
     /// Set from `queue:work --queue=billing,default` to dedicate a pool to
     /// specific work. A job with no route counts as
     /// [`DEFAULT_QUEUE`](crate::queue::envelope::DEFAULT_QUEUE), so
-    /// `--queue=default` still drains unrouted jobs.
+    /// `--queue=default` still drains unrouted jobs. The `sqs` driver is the
+    /// exception: there a name is an SQS queue, and unrouted jobs are on
+    /// `SQS_QUEUE`.
     ///
     /// Drivers that cannot filter reject a non-empty value at the first poll
     /// rather than silently draining everything - see
@@ -1425,7 +1427,9 @@ async fn handle_released(
 ) {
     // A failing release leaves the reservation intact on every in-tree driver,
     // so visibility expiry redelivers the job rather than dropping it. The
-    // release is retried on that delivery.
+    // release is retried on that delivery. On `sqs` the release is a send and
+    // then a delete, so a delete that fails after the send leaves the job on
+    // the queue twice until the original comes back.
     if let Err(e) = driver.release(token, env, delay).await {
         settlement_failure(driver, env, "release", "released", &e);
         return;

@@ -2,13 +2,15 @@
 //! of SQS, signed with Signature Version 4.
 //!
 //! `QUEUE_DRIVER=sqs` builds it from the environment with
-//! [`SqsQueueDriver::from_env`]. The variables are Laravel's: `SQS_PREFIX`,
-//! `SQS_QUEUE` and `SQS_SUFFIX` build the queue URL, `AWS_DEFAULT_REGION`
-//! (or `AWS_REGION`) names the region, and `AWS_ACCESS_KEY_ID`,
-//! `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` are the keys. With no keys
-//! the driver uses the default credential chain of AWS: the profile, web
-//! identity, the ECS task role and the instance role. `SQS_ENDPOINT` points
-//! it at a service that is not AWS, such as LocalStack or ElasticMQ.
+//! [`SqsQueueDriver::from_env`]; [`SqsQueueDriver::new`] builds one from an
+//! [`SqsConfig`], for a second connection in another region or account. The
+//! variables are Laravel's: `SQS_PREFIX`, `SQS_QUEUE` and `SQS_SUFFIX` build
+//! the queue URL, `AWS_DEFAULT_REGION` (or `AWS_REGION`) names the region,
+//! and `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`
+//! are the keys. With no keys the driver uses the default credential chain
+//! of AWS: the profile, web identity, the ECS task role and the instance
+//! role. `SQS_ENDPOINT` points it at another endpoint: a service that is not
+//! AWS, such as LocalStack or ElasticMQ, or a VPC endpoint.
 //!
 //! # Attempts
 //!
@@ -21,6 +23,10 @@
 //! Laravel's SQS job counts every receive, so a release there costs an
 //! attempt; here it matches the other drivers.
 //!
+//! SQS hides a message for at most 12 hours from the receive, so a `nack`
+//! whose delay is longer than the time left also sends a copy, one that
+//! counts the attempt.
+//!
 //! # Delays
 //!
 //! SQS takes at most 15 minutes of delay on one message. A job due later is
@@ -28,11 +34,26 @@
 //! is left and deletes the copy that came too early. Waiting out a delay that
 //! way is not an attempt: the new copy starts its receive count again.
 //!
+//! # The window a copy opens
+//!
+//! A release, a long `nack` and a delay sent on are each a send followed by
+//! a delete, because SQS cannot change a message. If the delete fails after
+//! the send, the job is on the queue twice until the original's visibility
+//! runs out and it is received again. That is the at-least-once delivery the
+//! queue documents; every other in-tree driver does these in place.
+//!
 //! # Queues
 //!
 //! A job goes to the queue its envelope names, or to `SQS_QUEUE`. A worker
 //! receives from the queues `--queue` names, in order, and from `SQS_QUEUE`
-//! when it names none, because SQS has no receive across queues.
+//! when it names none, because SQS has no receive across queues. A name in
+//! `--queue` is an SQS queue name: `default` is the queue
+//! `SQS_PREFIX/default`, which holds the unrouted jobs only when `SQS_QUEUE`
+//! is `default`.
+//!
+//! Each receive waits up to `SQS_WAIT_TIME_SECONDS` (default 1) for a
+//! message, which keeps an idle worker to about one request a second for
+//! each queue it names and makes SQS answer from all of its servers.
 //!
 //! # Overflow
 //!
@@ -40,6 +61,12 @@
 //! a larger job is written to a disk (`SQS_OVERFLOW_DISK`, or else the
 //! default disk) and SQS carries a pointer to it. Laravel keeps these
 //! payloads in a cache store, which can evict one before its job runs.
+//!
+//! A payload is deleted only when the driver knows no message points at it
+//! any more: after SQS refused the send that would have carried it, or after
+//! a delete of its message on a reservation that had not expired. A payload
+//! whose fate the driver cannot know, such as one whose send timed out, is
+//! left on the disk.
 
 use crate::error::FrameworkError;
 use crate::filesystem::Storage;
@@ -47,6 +74,7 @@ use crate::queue::driver::{QueueDriver, QueueFilterCapability, Reservation, Rese
 use crate::queue::envelope::Envelope;
 use async_trait::async_trait;
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use reqsign_aws_v4::{
     Credential, DefaultCredentialProvider, RequestSigner, StaticCredentialProvider,
 };
@@ -55,6 +83,7 @@ use reqsign_file_read_tokio::TokioFileRead;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Mutex;
 use std::time::Duration;
 use uuid::Uuid;
@@ -68,8 +97,21 @@ const MAX_DELAY_SECS: u64 = 900;
 /// The most messages SQS takes in one `SendMessageBatch`.
 const MAX_BATCH: usize = 10;
 
-/// The longest visibility timeout SQS takes: 12 hours.
+/// The longest SQS hides a message, counted from its receive: 12 hours.
 const MAX_VISIBILITY_SECS: u64 = 43_200;
+
+/// What a `nack` keeps in hand below the 12 hours, for the time between the
+/// driver's reading of its clock and SQS's.
+const VISIBILITY_MARGIN_SECS: u64 = 60;
+
+/// How long before its deadline a reservation stops counting as current.
+const DEADLINE_MARGIN_SECS: i64 = 5;
+
+/// The longest a receive waits for a message: 20 seconds.
+const MAX_WAIT_SECS: u64 = 20;
+
+/// How many times one request is made before its failure is returned.
+const MAX_TRIES: u32 = 3;
 
 /// The directory on the overflow disk that payloads are written under, one
 /// subdirectory per queue.
@@ -79,51 +121,57 @@ const OVERFLOW_ROOT: &str = "sqs-payloads";
 /// Laravel's `SqsQueue` writes.
 const POINTER_KEY: &str = "@pointer";
 
-/// Queue driver over Amazon SQS standard queues. See the module
-/// documentation for how it maps the driver contract onto SQS.
-pub struct SqsQueueDriver {
-    client: reqwest::Client,
-    /// The URL requests are posted to, with a trailing `/`.
-    endpoint: String,
-    signer: Signer<Credential>,
-    prefix: Option<String>,
-    /// `SQS_QUEUE`: a name, or a queue URL.
-    queue: String,
-    suffix: String,
-    overflow: Option<Overflow>,
-    held: Mutex<HashMap<ReservationToken, Held>>,
+/// The keys the driver signs with, in place of the default credential chain
+/// of AWS.
+#[derive(Clone)]
+pub struct SqsCredentials {
+    /// `AWS_ACCESS_KEY_ID`.
+    pub access_key_id: String,
+    /// `AWS_SECRET_ACCESS_KEY`.
+    pub secret_access_key: String,
+    /// `AWS_SESSION_TOKEN`, for temporary keys.
+    pub session_token: Option<String>,
 }
 
-/// What a reservation needs to settle its message.
-struct Held {
-    queue_url: String,
-    receipt: String,
-    /// The envelope as it was delivered, with the attempts it carried
-    /// before the worker's own count.
-    envelope: Envelope,
-    /// The overflow payload the message points at, if it does.
-    pointer: Option<String>,
+impl fmt::Debug for SqsCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SqsCredentials")
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &"<redacted>")
+            .field(
+                "session_token",
+                &self.session_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
-/// One message on its way to SQS.
-struct Outgoing {
-    body: String,
-    /// `DelaySeconds`, at most 15 minutes.
-    delay: u64,
-    /// The overflow payload `body` points at, if it does.
-    pointer: Option<String>,
+/// Where jobs too large for one SQS message go: the `SQS_OVERFLOW_*`
+/// variables.
+#[derive(Debug, Clone)]
+pub struct SqsOverflow {
+    /// The disk payloads are written to; `None` is the default disk.
+    pub disk: Option<String>,
+    /// Store every job on the disk, whatever its size.
+    pub always: bool,
+    /// Delete a job's payload when the job is acknowledged.
+    pub delete_after_processing: bool,
+    /// Delete the payloads of the driver's queue when `clear` purges it.
+    pub flush_on_clear: bool,
 }
 
-/// The overflow settings, `SQS_OVERFLOW_*`.
-struct Overflow {
-    /// `SQS_OVERFLOW_DISK`; `None` is the default disk.
-    disk: Option<String>,
-    always: bool,
-    delete_after_processing: bool,
-    flush_on_clear: bool,
+impl Default for SqsOverflow {
+    fn default() -> Self {
+        Self {
+            disk: None,
+            always: false,
+            delete_after_processing: true,
+            flush_on_clear: false,
+        }
+    }
 }
 
-impl Overflow {
+impl SqsOverflow {
     fn operator(&self) -> Result<opendal::Operator, FrameworkError> {
         match &self.disk {
             Some(name) => Storage::disk(name).map_err(|_| {
@@ -142,8 +190,166 @@ impl Overflow {
     }
 }
 
-/// An SQS error reply: the error code and its message.
+/// The settings of an [`SqsQueueDriver`]. [`SqsConfig::from_env`] reads them
+/// from the variables the module documentation lists.
+#[derive(Debug, Clone)]
+pub struct SqsConfig {
+    /// The region the requests are signed for.
+    pub region: String,
+    /// The queue a job that names none goes to, and the one a worker with
+    /// no `--queue` receives from: a name, or the URL of the queue.
+    pub queue: String,
+    /// The URL the queues are under, for queue names that are not URLs.
+    pub prefix: Option<String>,
+    /// Appended to every queue name that does not already end with it.
+    pub suffix: String,
+    /// The endpoint requests go to; `None` is the SQS endpoint of the
+    /// region.
+    pub endpoint: Option<String>,
+    /// The keys to sign with; `None` is the default credential chain of AWS.
+    pub credentials: Option<SqsCredentials>,
+    /// How long a receive waits for a message, 0 to 20 seconds.
+    pub wait_time_seconds: u64,
+    /// Where jobs too large for one message go; `None` refuses them.
+    pub overflow: Option<SqsOverflow>,
+}
+
+impl SqsConfig {
+    /// The settings for `queue` in `region`, with no prefix, suffix,
+    /// endpoint, keys or overflow, and a one-second wait.
+    pub fn new(region: impl Into<String>, queue: impl Into<String>) -> Self {
+        Self {
+            region: region.into(),
+            queue: queue.into(),
+            prefix: None,
+            suffix: String::new(),
+            endpoint: None,
+            credentials: None,
+            wait_time_seconds: 1,
+            overflow: None,
+        }
+    }
+
+    /// Read the settings from the environment. See the module
+    /// documentation for the variables.
+    ///
+    /// # Errors
+    ///
+    /// When no region is set, when only one of the two keys is set, and
+    /// when `SQS_WAIT_TIME_SECONDS` is not a whole number. No error repeats
+    /// a key.
+    pub fn from_env() -> Result<Self, FrameworkError> {
+        Self::from_variables(|name| std::env::var(name).ok())
+    }
+
+    fn from_variables(variable: impl Fn(&str) -> Option<String>) -> Result<Self, FrameworkError> {
+        let var = |name: &str| {
+            variable(name)
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        let region = var("AWS_DEFAULT_REGION")
+            .or_else(|| var("AWS_REGION"))
+            .ok_or_else(missing_region)?;
+        let credentials = match (var("AWS_ACCESS_KEY_ID"), var("AWS_SECRET_ACCESS_KEY")) {
+            (Some(access_key_id), Some(secret_access_key)) => Some(SqsCredentials {
+                access_key_id,
+                secret_access_key,
+                session_token: var("AWS_SESSION_TOKEN"),
+            }),
+            (None, None) => None,
+            _ => {
+                return Err(FrameworkError::internal(
+                    "set both AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for the sqs queue \
+                     driver, or neither to use the default credential chain of AWS",
+                ));
+            }
+        };
+        let wait_time_seconds = match var("SQS_WAIT_TIME_SECONDS") {
+            Some(value) => value.parse().map_err(|_| {
+                FrameworkError::internal("SQS_WAIT_TIME_SECONDS must be a whole number, 0 to 20")
+            })?,
+            None => 1,
+        };
+        let enabled = |name: &str| matches!(var(name).as_deref(), Some("true") | Some("1"));
+        let disabled = |name: &str| matches!(var(name).as_deref(), Some("false") | Some("0"));
+        let overflow = enabled("SQS_OVERFLOW_ENABLED").then(|| SqsOverflow {
+            disk: var("SQS_OVERFLOW_DISK"),
+            always: enabled("SQS_OVERFLOW_ALWAYS"),
+            delete_after_processing: !disabled("SQS_OVERFLOW_DELETE_AFTER_PROCESSING"),
+            flush_on_clear: enabled("SQS_OVERFLOW_FLUSH_ON_CLEAR"),
+        });
+        Ok(Self {
+            region,
+            queue: var("SQS_QUEUE").unwrap_or_else(|| "default".to_owned()),
+            prefix: var("SQS_PREFIX"),
+            suffix: var("SQS_SUFFIX").unwrap_or_default(),
+            endpoint: var("SQS_ENDPOINT"),
+            credentials,
+            wait_time_seconds,
+            overflow,
+        })
+    }
+}
+
+fn missing_region() -> FrameworkError {
+    FrameworkError::internal(
+        "the sqs queue driver needs a region: set AWS_DEFAULT_REGION, or AWS_REGION",
+    )
+}
+
+/// Queue driver over Amazon SQS standard queues. See the module
+/// documentation for how it maps the driver contract onto SQS.
+pub struct SqsQueueDriver {
+    client: reqwest::Client,
+    /// The URL requests are posted to, with a trailing `/`.
+    endpoint: String,
+    signer: Signer<Credential>,
+    prefix: Option<String>,
+    /// A queue name, or a queue URL.
+    queue: String,
+    suffix: String,
+    wait_time_seconds: u64,
+    overflow: Option<SqsOverflow>,
+    held: Mutex<HashMap<ReservationToken, Held>>,
+}
+
+/// What a reservation needs to settle its message.
+struct Held {
+    queue_url: String,
+    receipt: String,
+    /// The envelope as it was delivered, with the attempts it carried
+    /// before the worker's own count.
+    envelope: Envelope,
+    /// The overflow payload the message points at, if it does.
+    pointer: Option<String>,
+    /// When the message was received, by the framework clock.
+    received_at: DateTime<Utc>,
+    /// When the reservation runs out and SQS may hand the message to
+    /// someone else.
+    deadline: DateTime<Utc>,
+}
+
+impl Held {
+    /// Whether the reservation still holds the message, so a delete on its
+    /// receipt handle deletes it.
+    fn is_current(&self) -> bool {
+        crate::clock::now() + chrono::Duration::seconds(DEADLINE_MARGIN_SECS) < self.deadline
+    }
+}
+
+/// One message on its way to SQS.
+struct Outgoing {
+    body: String,
+    /// `DelaySeconds`, at most 15 minutes.
+    delay: u64,
+    /// The overflow payload `body` points at, if it does.
+    pointer: Option<String>,
+}
+
+/// An SQS error reply.
 struct SqsError {
+    status: u16,
     code: String,
     message: String,
 }
@@ -160,6 +366,55 @@ impl SqsError {
             "ReceiptHandleIsInvalid" | "MessageNotInflight"
         ) || (self.code == "InvalidParameterValue"
             && (message.contains("receipt handle") || message.contains("receipthandle")))
+    }
+
+    /// Whether the same request may succeed when it is made again: a
+    /// throttled request or a fault of the service.
+    fn is_retryable(&self) -> bool {
+        self.status >= 500
+            || matches!(
+                self.code.as_str(),
+                "ThrottlingException"
+                    | "Throttling"
+                    | "RequestThrottled"
+                    | "TooManyRequestsException"
+                    | "ServiceUnavailable"
+                    | "InternalError"
+                    | "InternalFailure"
+                    | "RequestTimeout"
+            )
+    }
+}
+
+/// Why a request did not succeed. The difference that matters is whether
+/// SQS may have acted on it: a payload written for a message SQS refused can
+/// go, one for a message SQS may have accepted must stay.
+enum Failure {
+    /// Nothing reached SQS.
+    NotSent(FrameworkError),
+    /// SQS answered with an error.
+    Refused(SqsError),
+    /// No answer: SQS may have acted on it, and asking again may succeed.
+    Unknown(FrameworkError),
+    /// A success status with a reply that is not SQS's: whatever answered
+    /// may not be SQS, so asking again will not help.
+    Garbled(FrameworkError),
+}
+
+impl Failure {
+    /// Whether SQS did not act on the request.
+    fn is_definite(&self) -> bool {
+        matches!(self, Failure::NotSent(_) | Failure::Refused(_))
+    }
+
+    fn into_error(self, action: &str) -> FrameworkError {
+        match self {
+            Failure::NotSent(error) | Failure::Unknown(error) | Failure::Garbled(error) => error,
+            Failure::Refused(error) => FrameworkError::internal(format!(
+                "SQS {action} failed: {}: {}",
+                error.code, error.message
+            )),
+        }
     }
 }
 
@@ -197,34 +452,30 @@ impl reqsign_core::HttpSend for ReqwestSend {
 }
 
 impl SqsQueueDriver {
-    /// Build the driver from the environment. See the module documentation
-    /// for the variables.
+    /// Build the driver from the environment: [`SqsConfig::from_env`], then
+    /// [`SqsQueueDriver::new`].
     ///
     /// # Errors
     ///
-    /// When no region is set; when `SQS_QUEUE` is not a URL and `SQS_PREFIX`
-    /// is not set; when the queue is a FIFO queue; when only one of the two
-    /// keys is set; when `SQS_ENDPOINT` is not an `http` or `https` URL; and
-    /// when overflow is on and its disk is not registered. No error repeats
-    /// a key.
+    /// The errors of both.
     pub fn from_env() -> Result<Self, FrameworkError> {
-        Self::from_variables(|name| std::env::var(name).ok())
+        Self::new(SqsConfig::from_env()?)
     }
 
-    fn from_variables(variable: impl Fn(&str) -> Option<String>) -> Result<Self, FrameworkError> {
-        let var = |name: &str| {
-            variable(name)
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty())
-        };
-        let region = var("AWS_DEFAULT_REGION")
-            .or_else(|| var("AWS_REGION"))
-            .ok_or_else(|| {
-                FrameworkError::internal(
-                    "the sqs queue driver needs a region: set AWS_DEFAULT_REGION, or AWS_REGION",
-                )
-            })?;
-        let endpoint = match var("SQS_ENDPOINT") {
+    /// Build the driver from `config`. Nothing is sent to SQS here.
+    ///
+    /// # Errors
+    ///
+    /// When the region is empty; when the queue is not a URL and there is
+    /// no prefix; when the queue is a FIFO queue; when the endpoint is not
+    /// an `http` or `https` URL; when the wait is over 20 seconds; and when
+    /// overflow is on and its disk is not registered.
+    pub fn new(config: SqsConfig) -> Result<Self, FrameworkError> {
+        let region = config.region.trim().to_owned();
+        if region.is_empty() {
+            return Err(missing_region());
+        }
+        let endpoint = match config.endpoint {
             Some(endpoint) => {
                 if !is_url(&endpoint) {
                     return Err(FrameworkError::internal(
@@ -233,36 +484,21 @@ impl SqsQueueDriver {
                 }
                 endpoint
             }
-            None => format!("https://sqs.{region}.amazonaws.com"),
+            None => default_endpoint(&region),
         };
         let endpoint = format!("{}/", endpoint.trim_end_matches('/'));
-
-        let keys = match (var("AWS_ACCESS_KEY_ID"), var("AWS_SECRET_ACCESS_KEY")) {
-            (Some(key), Some(secret)) => Some((key, secret, var("AWS_SESSION_TOKEN"))),
-            (None, None) => None,
-            _ => {
-                return Err(FrameworkError::internal(
-                    "set both AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for the sqs queue \
-                     driver, or neither to use the default credential chain of AWS",
-                ));
-            }
-        };
-
-        let enabled = |name: &str| matches!(var(name).as_deref(), Some("true") | Some("1"));
-        let disabled = |name: &str| matches!(var(name).as_deref(), Some("false") | Some("0"));
-        let overflow = enabled("SQS_OVERFLOW_ENABLED").then(|| Overflow {
-            disk: var("SQS_OVERFLOW_DISK"),
-            always: enabled("SQS_OVERFLOW_ALWAYS"),
-            delete_after_processing: !disabled("SQS_OVERFLOW_DELETE_AFTER_PROCESSING"),
-            flush_on_clear: enabled("SQS_OVERFLOW_FLUSH_ON_CLEAR"),
-        });
-        if let Some(overflow) = &overflow {
+        if config.wait_time_seconds > MAX_WAIT_SECS {
+            return Err(FrameworkError::internal(
+                "SQS_WAIT_TIME_SECONDS must be a whole number, 0 to 20",
+            ));
+        }
+        if let Some(overflow) = &config.overflow {
             overflow.operator()?;
         }
 
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_secs(60 + config.wait_time_seconds))
             .build()
             .map_err(|error| {
                 FrameworkError::internal(format!("could not build the SQS HTTP client: {error}"))
@@ -271,35 +507,57 @@ impl SqsQueueDriver {
             .with_file_read(TokioFileRead)
             .with_http_send(ReqwestSend(client.clone()))
             .with_env(OsEnv);
-        let mut credentials =
+        let mut chain =
             ProvideCredentialChain::new().push(DefaultCredentialProvider::builder().build());
-        if let Some((key, secret, token)) = keys {
-            let provider = match token {
-                Some(token) => {
-                    StaticCredentialProvider::new(&key, &secret).with_session_token(&token)
-                }
-                None => StaticCredentialProvider::new(&key, &secret),
+        if let Some(keys) = &config.credentials {
+            let provider =
+                StaticCredentialProvider::new(&keys.access_key_id, &keys.secret_access_key);
+            let provider = match &keys.session_token {
+                Some(token) => provider.with_session_token(token),
+                None => provider,
             };
-            credentials = credentials.push_front(provider);
+            chain = chain.push_front(provider);
         }
-        let signer = Signer::new(context, credentials, RequestSigner::new("sqs", &region));
+        let signer = Signer::new(context, chain, RequestSigner::new("sqs", &region));
 
         let driver = Self {
             client,
             endpoint,
             signer,
-            prefix: var("SQS_PREFIX"),
-            queue: var("SQS_QUEUE").unwrap_or_else(|| "default".to_owned()),
-            suffix: var("SQS_SUFFIX").unwrap_or_default(),
-            overflow,
+            prefix: config.prefix.filter(|prefix| !prefix.trim().is_empty()),
+            queue: config.queue,
+            suffix: config.suffix,
+            wait_time_seconds: config.wait_time_seconds,
+            overflow: config.overflow,
             held: Mutex::new(HashMap::new()),
         };
         driver.queue_url(None)?;
         Ok(driver)
     }
 
-    /// The URL of the queue `name` names, or of `SQS_QUEUE`, built as
-    /// Laravel's `SqsQueue::getQueue` builds it: a URL as it is, and
+    /// Send any SQS action, signed as the driver's own requests are, and
+    /// return SQS's reply: the escape hatch Laravel's `getSqs()` gives
+    /// through the AWS client. `body` is the action's request in the AWS JSON
+    /// protocol, `QueueUrl` included.
+    ///
+    /// ```rust,ignore
+    /// let reply = driver
+    ///     .call("ListQueues", serde_json::json!({ "QueueNamePrefix": "orders" }))
+    ///     .await?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// When SQS answers with an error, which the error names, or when no
+    /// answer comes after three tries.
+    pub async fn call(&self, action: &str, body: Value) -> Result<Value, FrameworkError> {
+        self.request(action, &body)
+            .await
+            .map_err(|failure| failure.into_error(action))
+    }
+
+    /// The URL of the queue `name` names, or of the driver's own queue,
+    /// built as Laravel's `SqsQueue::getQueue` builds it: a URL as it is, and
     /// otherwise the prefix, the name, and the suffix unless the name
     /// already ends with it.
     fn queue_url(&self, name: Option<&str>) -> Result<String, FrameworkError> {
@@ -336,15 +594,35 @@ impl SqsQueueDriver {
         Ok(url)
     }
 
-    /// Post one action and return SQS's reply, or its error reply.
-    async fn request(
-        &self,
-        action: &str,
-        body: &Value,
-    ) -> Result<Result<Value, SqsError>, FrameworkError> {
-        let payload = serde_json::to_vec(body)
-            .map_err(|error| FrameworkError::internal(format!("SQS {action}: encode: {error}")))?;
-        let hash = hex::encode(Sha256::digest(&payload));
+    /// Post one action, trying again after a throttled request, a fault of
+    /// the service, or no answer, up to three tries in all.
+    async fn request(&self, action: &str, body: &Value) -> Result<Value, Failure> {
+        let payload = serde_json::to_vec(body).map_err(|error| {
+            Failure::NotSent(FrameworkError::internal(format!(
+                "SQS {action}: encode: {error}"
+            )))
+        })?;
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            let outcome = self.request_once(action, &payload).await;
+            let again = match &outcome {
+                Err(Failure::Refused(error)) => error.is_retryable(),
+                Err(Failure::Unknown(_)) => true,
+                _ => false,
+            };
+            if !again || tries >= MAX_TRIES {
+                return outcome;
+            }
+            // 100 ms, then 200 ms, each with up to 50 ms of jitter so workers
+            // throttled together do not retry together.
+            let jitter = (Uuid::new_v4().as_u128() % 50) as u64;
+            tokio::time::sleep(Duration::from_millis(100 * (1 << (tries - 1)) + jitter)).await;
+        }
+    }
+
+    async fn request_once(&self, action: &str, payload: &[u8]) -> Result<Value, Failure> {
+        let hash = hex::encode(Sha256::digest(payload));
         let (mut parts, ()) = http::Request::builder()
             .method(http::Method::POST)
             .uri(&self.endpoint)
@@ -352,33 +630,54 @@ impl SqsQueueDriver {
             .header("x-amz-target", format!("AmazonSQS.{action}"))
             .header("x-amz-content-sha256", hash)
             .body(())
-            .map_err(|error| FrameworkError::internal(format!("SQS {action}: request: {error}")))?
+            .map_err(|error| {
+                Failure::NotSent(FrameworkError::internal(format!(
+                    "SQS {action}: request: {error}"
+                )))
+            })?
             .into_parts();
         self.signer.sign(&mut parts, None).await.map_err(|error| {
-            FrameworkError::internal(format!("SQS {action}: could not sign the request: {error}"))
+            Failure::NotSent(FrameworkError::internal(format!(
+                "SQS {action}: could not sign the request: {error}"
+            )))
         })?;
 
         let response = self
             .client
             .request(parts.method, parts.uri.to_string())
             .headers(parts.headers)
-            .body(payload)
+            .body(payload.to_vec())
             .send()
             .await
-            .map_err(|error| FrameworkError::internal(format!("SQS {action}: {error}")))?;
+            .map_err(|error| {
+                // A connection that was never made carried nothing to SQS.
+                let not_sent = error.is_connect() || error.is_builder();
+                let error = FrameworkError::internal(format!("SQS {action}: {error}"));
+                if not_sent {
+                    Failure::NotSent(error)
+                } else {
+                    Failure::Unknown(error)
+                }
+            })?;
         let status = response.status();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| FrameworkError::internal(format!("SQS {action}: {error}")))?;
-        let reply: Value = if bytes.is_empty() {
-            Value::Null
+        let bytes = response.bytes().await.map_err(|error| {
+            Failure::Unknown(FrameworkError::internal(format!("SQS {action}: {error}")))
+        })?;
+        let reply: Option<Value> = if bytes.is_empty() {
+            Some(Value::Null)
         } else {
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+            serde_json::from_slice(&bytes).ok()
         };
         if status.is_success() {
-            return Ok(Ok(reply));
+            return reply.ok_or_else(|| {
+                Failure::Garbled(FrameworkError::internal(format!(
+                    "SQS {action}: the reply (HTTP {}) is not SQS JSON; check that \
+                     SQS_ENDPOINT is an SQS endpoint",
+                    status.as_u16()
+                )))
+            });
         }
+        let reply = reply.unwrap_or(Value::Null);
         let code = reply["__type"]
             .as_str()
             .map(|kind| kind.rsplit('#').next().unwrap_or(kind).to_owned())
@@ -388,39 +687,61 @@ impl SqsQueueDriver {
             .or_else(|| reply["Message"].as_str())
             .unwrap_or_default()
             .to_owned();
-        Ok(Err(SqsError { code, message }))
+        Err(Failure::Refused(SqsError {
+            status: status.as_u16(),
+            code,
+            message,
+        }))
     }
 
-    /// [`request`](Self::request), with an error reply as an error.
-    async fn call(&self, action: &str, body: Value) -> Result<Value, FrameworkError> {
-        self.request(action, &body).await?.map_err(|error| {
-            FrameworkError::internal(format!(
-                "SQS {action} failed: {}: {}",
-                error.code, error.message
-            ))
-        })
-    }
-
-    /// A call on a receipt handle, where a handle that is no longer current
-    /// is not an error: the reservation expired, so the message is someone
-    /// else's now, or it is gone.
-    async fn call_on_receipt(&self, action: &str, body: Value) -> Result<(), FrameworkError> {
-        match self.request(action, &body).await? {
-            Ok(_) => Ok(()),
-            Err(error) if error.is_stale_receipt() => {
+    /// A call on a receipt handle. `Ok(true)` when SQS acted on it,
+    /// `Ok(false)` when SQS says the handle is no longer current: the
+    /// reservation expired, so the message is someone else's now, or it is
+    /// gone.
+    async fn call_on_receipt(&self, action: &str, body: Value) -> Result<bool, FrameworkError> {
+        match self.request(action, &body).await {
+            Ok(_) => Ok(true),
+            Err(Failure::Refused(error)) if error.is_stale_receipt() => {
                 tracing::warn!(
                     action,
                     code = %error.code,
                     message = %error.message,
                     "SQS receipt handle is no longer current; the reservation expired"
                 );
-                Ok(())
+                Ok(false)
             }
-            Err(error) => Err(FrameworkError::internal(format!(
-                "SQS {action} failed: {}: {}",
-                error.code, error.message
-            ))),
+            Err(failure) => Err(failure.into_error(action)),
         }
+    }
+
+    /// Delete `held`'s message, then the payload it pointed at when this
+    /// delete is known to have taken the message: SQS acted on it and the
+    /// reservation had not expired. `superseded` says a copy now carries the
+    /// job, so the payload goes whatever `delete_after_processing` says.
+    async fn delete_held(&self, held: &Held, superseded: bool) -> Result<(), FrameworkError> {
+        let current = held.is_current();
+        let deleted = self
+            .call_on_receipt(
+                "DeleteMessage",
+                json!({ "QueueUrl": held.queue_url, "ReceiptHandle": held.receipt }),
+            )
+            .await?;
+        let (Some(path), Some(overflow)) = (&held.pointer, &self.overflow) else {
+            return Ok(());
+        };
+        if !(superseded || overflow.delete_after_processing) {
+            return Ok(());
+        }
+        if deleted && current {
+            self.delete_payload(path).await;
+        } else {
+            tracing::warn!(
+                path,
+                "kept an SQS overflow payload: its reservation expired, so another delivery \
+                 of the message may still point at it"
+            );
+        }
+        Ok(())
     }
 
     /// Send `envelope` to `queue_url`, delayed until its `available_at` or
@@ -432,13 +753,40 @@ impl SqsQueueDriver {
         if message.delay > 0 {
             request["DelaySeconds"] = json!(message.delay);
         }
-        if let Err(error) = self.call("SendMessage", request).await {
-            if let Some(path) = &message.pointer {
-                self.delete_payload(path).await;
+        let outcome = self
+            .request("SendMessage", &request)
+            .await
+            .and_then(|reply| match reply["MessageId"].as_str() {
+                Some(_) => Ok(()),
+                None => Err(Failure::Garbled(FrameworkError::internal(
+                    "SQS SendMessage: the reply has no MessageId; check that SQS_ENDPOINT is \
+                     an SQS endpoint",
+                ))),
+            });
+        match outcome {
+            Ok(()) => Ok(()),
+            Err(failure) => {
+                self.discard(&message, &failure).await;
+                Err(failure.into_error("SendMessage"))
             }
-            return Err(error);
         }
-        Ok(())
+    }
+
+    /// Delete the payload of a message whose send failed, when SQS is known
+    /// not to have taken it.
+    async fn discard(&self, message: &Outgoing, failure: &Failure) {
+        let Some(path) = &message.pointer else {
+            return;
+        };
+        if failure.is_definite() {
+            self.delete_payload(path).await;
+        } else {
+            tracing::warn!(
+                path,
+                "kept an SQS overflow payload: the send failed without an answer, so SQS may \
+                 hold a message that points at it"
+            );
+        }
     }
 
     /// The message for `envelope`: its body, or a pointer to the overflow
@@ -451,7 +799,7 @@ impl SqsQueueDriver {
         let body = envelope
             .to_json()
             .map_err(|error| FrameworkError::internal(format!("SQS: encode the job: {error}")))?;
-        let (message, pointer) = match &self.overflow {
+        let (body, pointer) = match &self.overflow {
             Some(overflow) if overflow.always || body.len() >= MAX_MESSAGE_BYTES => {
                 let path = format!(
                     "{OVERFLOW_ROOT}/{}/{}.json",
@@ -480,7 +828,7 @@ impl SqsQueueDriver {
             _ => (body, None),
         };
         Ok(Outgoing {
-            body: message,
+            body,
             delay: delay_secs(envelope.available_at),
             pointer,
         })
@@ -489,7 +837,7 @@ impl SqsQueueDriver {
     /// Send `messages` to `queue_url` with `SendMessageBatch`, ten at a
     /// time and at most 1 MiB a batch, stopping at the first batch SQS
     /// rejects any of, so a later job cannot arrive ahead of one that was
-    /// not sent. The overflow payloads of the messages not sent are deleted.
+    /// not sent.
     async fn send_batches(
         &self,
         queue_url: &str,
@@ -524,41 +872,53 @@ impl SqsQueueDriver {
                 })
                 .collect();
             let request = json!({ "QueueUrl": queue_url, "Entries": entries });
-            let (unsent, error): (Vec<&Outgoing>, FrameworkError) =
-                match self.call("SendMessageBatch", request).await {
+            // The messages of this batch SQS did not take, and the failure.
+            let (unsent, failure): (Vec<&Outgoing>, Failure) =
+                match self.request("SendMessageBatch", &request).await {
                     Ok(reply) => {
-                        let failed = reply["Failed"].as_array().cloned().unwrap_or_default();
-                        let Some(first) = failed.first() else {
-                            continue;
-                        };
-                        let rejected: Vec<usize> = failed
-                            .iter()
-                            .filter_map(|entry| entry["Id"].as_str()?.parse().ok())
-                            .collect();
-                        let error = FrameworkError::internal(format!(
-                            "SQS SendMessageBatch rejected {} of {} messages. First failure {}: {}",
-                            failed.len(),
-                            chunk.len(),
-                            first["Code"].as_str().unwrap_or("Unknown"),
-                            first["Message"].as_str().unwrap_or_default()
-                        ));
-                        let unsent = chunk
-                            .iter()
-                            .enumerate()
-                            .filter(|(index, _)| rejected.contains(index))
-                            .map(|(_, message)| message)
-                            .collect();
-                        (unsent, error)
+                        if !reply["Successful"].is_array() && !reply["Failed"].is_array() {
+                            let failure = Failure::Garbled(FrameworkError::internal(
+                                "SQS SendMessageBatch: the reply lists no messages; check that \
+                                 SQS_ENDPOINT is an SQS endpoint",
+                            ));
+                            (Vec::new(), failure)
+                        } else {
+                            let failed = reply["Failed"].as_array().cloned().unwrap_or_default();
+                            let Some(first) = failed.first() else {
+                                continue;
+                            };
+                            let rejected: Vec<usize> = failed
+                                .iter()
+                                .filter_map(|entry| entry["Id"].as_str()?.parse().ok())
+                                .collect();
+                            let failure = Failure::NotSent(FrameworkError::internal(format!(
+                                "SQS SendMessageBatch rejected {} of {} messages. First \
+                                 failure {}: {}",
+                                failed.len(),
+                                chunk.len(),
+                                first["Code"].as_str().unwrap_or("Unknown"),
+                                first["Message"].as_str().unwrap_or_default()
+                            )));
+                            let unsent = chunk
+                                .iter()
+                                .enumerate()
+                                .filter(|(index, _)| rejected.contains(index))
+                                .map(|(_, message)| message)
+                                .collect();
+                            (unsent, failure)
+                        }
                     }
-                    Err(error) => (chunk.iter().collect(), error),
+                    Err(failure) if failure.is_definite() => (chunk.iter().collect(), failure),
+                    Err(failure) => (Vec::new(), failure),
                 };
+            // The later batches were never sent.
             let later = chunks.iter().skip(number + 1).flatten();
             for message in unsent.into_iter().chain(later) {
                 if let Some(path) = &message.pointer {
                     self.delete_payload(path).await;
                 }
             }
-            return Err(error);
+            return Err(failure.into_error("SendMessageBatch"));
         }
         Ok(())
     }
@@ -613,33 +973,27 @@ impl SqsQueueDriver {
         }
     }
 
-    /// Delete the payload of a settled message when the settings say so.
-    async fn drop_payload(&self, pointer: Option<&str>) {
-        if let (Some(path), Some(overflow)) = (pointer, &self.overflow)
-            && overflow.delete_after_processing
-        {
-            self.delete_payload(path).await;
-        }
-    }
-
     /// Receive one message from `queue_url`.
     async fn receive(
         &self,
         queue_url: &str,
         visibility_timeout: Duration,
     ) -> Result<Option<Reservation>, FrameworkError> {
+        let visibility = seconds(visibility_timeout, MAX_VISIBILITY_SECS);
         let reply = self
             .call(
                 "ReceiveMessage",
                 json!({
                     "QueueUrl": queue_url,
                     "MaxNumberOfMessages": 1,
-                    "VisibilityTimeout": seconds(visibility_timeout, MAX_VISIBILITY_SECS),
+                    "VisibilityTimeout": visibility,
+                    "WaitTimeSeconds": self.wait_time_seconds,
                     "AttributeNames": ["ApproximateReceiveCount"],
                     "MessageSystemAttributeNames": ["ApproximateReceiveCount"],
                 }),
             )
             .await?;
+        let received_at = crate::clock::now();
         let Some(message) = reply["Messages"]
             .as_array()
             .and_then(|messages| messages.first())
@@ -661,30 +1015,26 @@ impl SqsQueueDriver {
             .unwrap_or(1);
         let (mut envelope, pointer) = self.decode(body).await?;
         envelope.attempts = envelope.attempts.saturating_add(receives.saturating_sub(1));
+        let held = Held {
+            queue_url: queue_url.to_owned(),
+            receipt,
+            envelope,
+            pointer,
+            received_at,
+            deadline: received_at + chrono::Duration::seconds(visibility as i64),
+        };
 
-        if envelope.available_at > crate::clock::now() {
+        if held.envelope.available_at > crate::clock::now() {
             // Received before its time, which only a delay over 15 minutes
             // allows: send it on with what is left and drop this copy.
-            self.send(queue_url, &envelope).await?;
-            self.call_on_receipt(
-                "DeleteMessage",
-                json!({ "QueueUrl": queue_url, "ReceiptHandle": receipt }),
-            )
-            .await?;
-            self.drop_payload(pointer.as_deref()).await;
+            self.send(queue_url, &held.envelope).await?;
+            self.delete_held(&held, true).await?;
             return Ok(None);
         }
 
         let token = ReservationToken(Uuid::new_v4());
-        self.held_map()?.insert(
-            token.clone(),
-            Held {
-                queue_url: queue_url.to_owned(),
-                receipt,
-                envelope: envelope.clone(),
-                pointer,
-            },
-        );
+        let envelope = held.envelope.clone();
+        self.held_map()?.insert(token.clone(), held);
         Ok(Some(Reservation { envelope, token }))
     }
 
@@ -700,7 +1050,7 @@ impl SqsQueueDriver {
         Ok(self.held_map()?.remove(token))
     }
 
-    /// The approximate counts SQS keeps for `SQS_QUEUE`: visible, in
+    /// The approximate counts SQS keeps for the driver's queue: visible, in
     /// flight, and delayed.
     async fn counts(&self) -> Result<(u64, u64, u64), FrameworkError> {
         let reply = self
@@ -720,12 +1070,16 @@ impl SqsQueueDriver {
             reply["Attributes"][name]
                 .as_str()
                 .and_then(|count| count.parse::<u64>().ok())
-                .unwrap_or(0)
+                .ok_or_else(|| {
+                    FrameworkError::internal(format!(
+                        "SQS GetQueueAttributes: the reply has no {name}"
+                    ))
+                })
         };
         Ok((
-            count("ApproximateNumberOfMessages"),
-            count("ApproximateNumberOfMessagesNotVisible"),
-            count("ApproximateNumberOfMessagesDelayed"),
+            count("ApproximateNumberOfMessages")?,
+            count("ApproximateNumberOfMessagesNotVisible")?,
+            count("ApproximateNumberOfMessagesDelayed")?,
         ))
     }
 }
@@ -803,17 +1157,10 @@ impl QueueDriver for SqsQueueDriver {
         let Some(held) = self.take(token)? else {
             return Ok(());
         };
-        let deleted = self
-            .call_on_receipt(
-                "DeleteMessage",
-                json!({ "QueueUrl": held.queue_url, "ReceiptHandle": held.receipt }),
-            )
-            .await;
-        if let Err(error) = deleted {
+        if let Err(error) = self.delete_held(&held, false).await {
             self.held_map()?.insert(token.clone(), held);
             return Err(error);
         }
-        self.drop_payload(held.pointer.as_deref()).await;
         Ok(())
     }
 
@@ -825,32 +1172,34 @@ impl QueueDriver for SqsQueueDriver {
         let Some(held) = self.take(token)? else {
             return Ok(());
         };
-        if requeue_delay > Duration::from_secs(MAX_VISIBILITY_SECS) {
-            // Longer than SQS can hide a message: send a copy that counts
-            // the attempt and waits out the delay, and drop this one.
+        let held_for = (crate::clock::now() - held.received_at)
+            .num_seconds()
+            .max(0) as u64;
+        let left = MAX_VISIBILITY_SECS
+            .saturating_sub(held_for)
+            .saturating_sub(VISIBILITY_MARGIN_SECS);
+        let wait = seconds(requeue_delay, u64::MAX);
+        if wait > left {
+            // Longer than SQS can still hide this message: send a copy that
+            // counts the attempt and waits out the delay, and drop this one.
             let mut copy = held.envelope.clone();
             copy.attempts = copy.attempts.saturating_add(1);
             copy.available_at = crate::clock::now()
                 + chrono::Duration::from_std(requeue_delay)
                     .unwrap_or_else(|_| chrono::Duration::zero());
             self.send(&held.queue_url, &copy).await?;
-            self.call_on_receipt(
-                "DeleteMessage",
-                json!({ "QueueUrl": held.queue_url, "ReceiptHandle": held.receipt }),
-            )
-            .await?;
-            self.drop_payload(held.pointer.as_deref()).await;
-            return Ok(());
+            return self.delete_held(&held, true).await;
         }
         self.call_on_receipt(
             "ChangeMessageVisibility",
             json!({
                 "QueueUrl": held.queue_url,
                 "ReceiptHandle": held.receipt,
-                "VisibilityTimeout": seconds(requeue_delay, MAX_VISIBILITY_SECS),
+                "VisibilityTimeout": wait,
             }),
         )
         .await
+        .map(|_| ())
     }
 
     async fn release(
@@ -867,13 +1216,7 @@ impl QueueDriver for SqsQueueDriver {
         copy.available_at = crate::clock::now()
             + chrono::Duration::from_std(delay).unwrap_or_else(|_| chrono::Duration::zero());
         self.send(&held.queue_url, &copy).await?;
-        self.call_on_receipt(
-            "DeleteMessage",
-            json!({ "QueueUrl": held.queue_url, "ReceiptHandle": held.receipt }),
-        )
-        .await?;
-        self.drop_payload(held.pointer.as_deref()).await;
-        Ok(())
+        self.delete_held(&held, true).await
     }
 
     async fn size(&self) -> Result<u64, FrameworkError> {
@@ -926,6 +1269,15 @@ fn is_url(value: &str) -> bool {
     value.starts_with("https://") || value.starts_with("http://")
 }
 
+/// The SQS endpoint of `region`, in the China partition for a `cn-` region.
+fn default_endpoint(region: &str) -> String {
+    if region.starts_with("cn-") {
+        format!("https://sqs.{region}.amazonaws.com.cn")
+    } else {
+        format!("https://sqs.{region}.amazonaws.com")
+    }
+}
+
 /// The seconds of `duration`, rounded up so nothing comes back early, and
 /// capped at `max`.
 fn seconds(duration: Duration, max: u64) -> u64 {
@@ -935,7 +1287,7 @@ fn seconds(duration: Duration, max: u64) -> u64 {
 
 /// The `DelaySeconds` that holds a job until `available_at`, or as close to
 /// it as SQS goes.
-fn delay_secs(available_at: chrono::DateTime<chrono::Utc>) -> u64 {
+fn delay_secs(available_at: DateTime<Utc>) -> u64 {
     match (available_at - crate::clock::now()).to_std() {
         Ok(wait) => seconds(wait, MAX_DELAY_SECS),
         Err(_) => 0,
@@ -990,43 +1342,106 @@ mod tests {
     }
 
     #[test]
+    fn a_china_region_gets_the_china_endpoint() {
+        assert_eq!(
+            default_endpoint("cn-north-1"),
+            "https://sqs.cn-north-1.amazonaws.com.cn"
+        );
+        assert_eq!(
+            default_endpoint("eu-west-2"),
+            "https://sqs.eu-west-2.amazonaws.com"
+        );
+    }
+
+    #[test]
     fn one_key_without_the_other_is_refused_without_repeating_it() {
-        let Err(error) = SqsQueueDriver::from_variables(variables(&[
+        let error = SqsConfig::from_variables(variables(&[
             ("AWS_DEFAULT_REGION", "us-east-1"),
-            ("SQS_PREFIX", "https://sqs.us-east-1.amazonaws.com/1"),
             ("AWS_ACCESS_KEY_ID", "AKIDONLYHALF"),
-        ])) else {
-            panic!("one key without the other must be refused");
-        };
+        ]))
+        .expect_err("one key without the other must be refused");
         let text = error.to_string();
         assert!(text.contains("AWS_SECRET_ACCESS_KEY"), "{text}");
         assert!(!text.contains("AKIDONLYHALF"), "{text}");
     }
 
     #[test]
-    fn an_endpoint_that_is_not_a_url_is_refused() {
+    fn the_credentials_debug_output_hides_the_secret() {
+        let keys = SqsCredentials {
+            access_key_id: "AKIDVISIBLE".into(),
+            secret_access_key: "very-secret".into(),
+            session_token: Some("also-secret".into()),
+        };
+        let text = format!("{keys:?}");
+        assert!(text.contains("AKIDVISIBLE"));
         assert!(
-            SqsQueueDriver::from_variables(variables(&[
-                ("AWS_DEFAULT_REGION", "us-east-1"),
-                ("SQS_PREFIX", "https://sqs.us-east-1.amazonaws.com/1"),
-                ("SQS_ENDPOINT", "localhost:9324"),
-            ]))
-            .is_err()
+            !text.contains("very-secret") && !text.contains("also-secret"),
+            "{text}"
         );
     }
 
     #[test]
-    fn a_fifo_suffix_is_kept_after_the_suffix_check() {
-        let Err(error) = SqsQueueDriver::from_variables(variables(&[
-            ("AWS_DEFAULT_REGION", "us-east-1"),
-            ("SQS_PREFIX", "https://sqs.us-east-1.amazonaws.com/1"),
-            (
-                "SQS_QUEUE",
-                "https://sqs.us-east-1.amazonaws.com/1/orders.fifo",
-            ),
-        ])) else {
+    fn a_wait_that_is_not_a_number_or_over_twenty_seconds_is_refused() {
+        assert!(
+            SqsConfig::from_variables(variables(&[
+                ("AWS_DEFAULT_REGION", "us-east-1"),
+                ("SQS_WAIT_TIME_SECONDS", "soon"),
+            ]))
+            .is_err()
+        );
+        let mut config = SqsConfig::new("us-east-1", "https://sqs.us-east-1.amazonaws.com/1/q");
+        config.wait_time_seconds = 21;
+        let Err(error) = SqsQueueDriver::new(config) else {
+            panic!("a wait over 20 seconds must be refused");
+        };
+        assert!(error.to_string().contains("SQS_WAIT_TIME_SECONDS"));
+    }
+
+    #[test]
+    fn an_endpoint_that_is_not_a_url_is_refused() {
+        let mut config = SqsConfig::new("us-east-1", "https://sqs.us-east-1.amazonaws.com/1/q");
+        config.endpoint = Some("localhost:9324".into());
+        assert!(SqsQueueDriver::new(config).is_err());
+    }
+
+    #[test]
+    fn a_fifo_queue_url_is_refused() {
+        let config = SqsConfig::new(
+            "us-east-1",
+            "https://sqs.us-east-1.amazonaws.com/1/orders.fifo",
+        );
+        let Err(error) = SqsQueueDriver::new(config) else {
             panic!("a FIFO queue URL must be refused");
         };
         assert!(error.to_string().contains("FIFO"));
+    }
+
+    #[test]
+    fn stale_receipt_and_retryable_errors_are_told_apart() {
+        let error = |status, code: &str, message: &str| SqsError {
+            status,
+            code: code.into(),
+            message: message.into(),
+        };
+        assert!(error(400, "ReceiptHandleIsInvalid", "").is_stale_receipt());
+        assert!(
+            error(
+                400,
+                "InvalidParameterValue",
+                "Value x for parameter ReceiptHandle is invalid. Reason: The receipt handle has expired."
+            )
+            .is_stale_receipt()
+        );
+        assert!(
+            !error(
+                400,
+                "InvalidParameterValue",
+                "Total VisibilityTimeout for the message is beyond the limit"
+            )
+            .is_stale_receipt()
+        );
+        assert!(error(400, "RequestThrottled", "").is_retryable());
+        assert!(error(503, "HTTP 503", "").is_retryable());
+        assert!(!error(400, "QueueDoesNotExist", "").is_retryable());
     }
 }

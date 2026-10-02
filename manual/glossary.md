@@ -641,13 +641,14 @@ fire. Tagged for the registry via the `#[prunable]` macro. See
 
 The whole background-work subsystem - `Queue` facade, [Job](#job)
 trait, [Envelope](#envelope-queue), drivers (memory, sync, redis,
-database, null), worker, batches, chains. See [Queues](queues.md).
+database, sqs, null), worker, batches, chains. See [Queues](queues.md).
 
 ### Queue driver
 
 A type implementing `QueueDriver` (push, pop, release, etc.) -
 ships `MemoryQueueDriver`, `SyncQueueDriver` (run inline),
-`RedisQueueDriver`, `DatabaseQueueDriver`, `NullQueueDriver`. Picked
+`RedisQueueDriver`, `DatabaseQueueDriver`, `SqsQueueDriver`,
+`NullQueueDriver`. Picked
 at boot via `QUEUE_DRIVER`. See
 [Queues - Drivers](queues.md#drivers).
 

@@ -139,7 +139,9 @@ A job goes to the queue it names, with `Job::queue` or a route, at
 names none. A
 queue name that is already a URL is used as it is, so `SQS_QUEUE` can be the
 full URL of the queue and `SQS_PREFIX` left unset. `SQS_ENDPOINT` points the
-driver at a service that is not AWS, such as LocalStack or ElasticMQ.
+driver at another endpoint: a service that is not AWS, such as LocalStack or
+ElasticMQ, or a VPC endpoint. Without it the driver uses the SQS endpoint of
+the region, in the China partition (`amazonaws.com.cn`) for a `cn-` region.
 
 With `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` set (and
 `AWS_SESSION_TOKEN` for temporary keys), the driver signs with them.
@@ -155,12 +157,21 @@ How the driver maps onto SQS:
 
 - **A worker receives from the queues `--queue` names**, in order, and from
   `SQS_QUEUE` when it names none. SQS has no receive across queues, so a
-  job sent to `emails` waits for a worker started with `--queue=emails`.
+  job sent to `emails` waits for a worker started with `--queue=emails`. A
+  name there is an SQS queue name, as in Laravel: `--queue=default` receives
+  from `SQS_PREFIX/default`, which holds the unrouted jobs only when
+  `SQS_QUEUE` is `default`. Name `SQS_QUEUE` itself to drain them.
+- **A receive waits up to `SQS_WAIT_TIME_SECONDS` for a message** (default
+  1, at most 20). The wait keeps an idle worker to about one request a
+  second for each queue it names, where SQS bills each request, and it makes
+  SQS answer from all of its servers, so an empty answer means an empty
+  queue. Setting it to `0` sends short polls, about ten a second.
 - **The visibility timeout is the worker's.** A reservation that expires
   makes the job visible again, and its next delivery counts one more
   attempt.
 - **A `nack` counts an attempt and a release does not**, as on the other
-  drivers. The attempt count is the one in the job plus the receives SQS
+  drivers. A `nack` whose delay is longer than SQS can still hide the
+  message, 12 hours from its receive, sends a copy that counts the attempt. The attempt count is the one in the job plus the receives SQS
   counted before this one (`ApproximateReceiveCount`), so a release sends a
   fresh copy that keeps the count and deletes the original.
 - **Delays longer than 15 minutes hold.** SQS delays one message by 15
@@ -170,6 +181,28 @@ How the driver maps onto SQS:
   keeps for `SQS_QUEUE`, and `clear` purges it. SQS cannot list messages
   without receiving them, so `pending_jobs`, `delayed_jobs` and
   `reserved_jobs` return an error.
+
+A release, a long `nack` and a delay sent on are each a send followed by a
+delete, because SQS cannot change a message. If the delete fails after the
+send, the job is on the queue twice until the original's visibility runs out:
+the at-least-once delivery the queue documents. A request SQS throttles or
+fails with a fault of its own is tried up to three times.
+
+To build the driver in code, for a second connection in another region or
+account, fill an `SqsConfig` and register the driver under a name:
+
+```rust,ignore
+use suprnova::{Queue, SqsConfig, SqsQueueDriver};
+use std::sync::Arc;
+
+let mut config = SqsConfig::new("eu-west-1", "reports");
+config.prefix = Some("https://sqs.eu-west-1.amazonaws.com/123456789012".into());
+Queue::register_connection("reports", Arc::new(SqsQueueDriver::new(config)?));
+```
+
+`SqsQueueDriver::call(action, body)` sends any other SQS action, signed as
+the driver's own requests are, where Laravel hands out the AWS client with
+`getSqs()`.
 
 SQS takes at most 1 MiB in one message, and a larger job fails its push
 with an error that says so. Turn on overflow to store large jobs on a disk
@@ -184,7 +217,10 @@ SQS_OVERFLOW_FLUSH_ON_CLEAR=false         # true deletes the files on Queue::cle
 ```
 
 The files go under `sqs-payloads/<queue>/` on the disk. The server does not
-boot when overflow is on and the disk is not registered.
+boot when overflow is on and the disk is not registered. A file is deleted
+only when the driver knows no message points at it any more, so a send that
+times out, or a settlement after its reservation expired, leaves the file
+on the disk rather than risk a message that can no longer be read.
 
 `SqsQueueDriver` is behind the `queue-sqs` cargo feature, which is on by
 default and brings `filesystem` with it.
@@ -1040,7 +1076,9 @@ Then dedicate a worker to the queue:
 ```
 
 A job with no route belongs to `default`, so `--queue=default` drains
-unrouted work rather than stranding it.
+unrouted work rather than stranding it. The `sqs` driver is the exception:
+there a name is an SQS queue, and unrouted jobs go to `SQS_QUEUE`. See
+[Amazon SQS](#amazon-sqs).
 
 ### Forwarding a whole queue
 

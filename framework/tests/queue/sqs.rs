@@ -6,7 +6,9 @@
 //! The fake keeps its own clock in whole seconds, which a test moves with
 //! [`fake::FakeSqs::advance`], so delays and visibility timeouts are
 //! observable without sleeping. The driver reads the framework clock, which
-//! the delay tests freeze and move with `TestClock`.
+//! the delay tests freeze and move with `TestClock`. The fake refuses a
+//! request whose Signature Version 4 signature it cannot reproduce, so every
+//! test also checks the signing.
 
 use serial_test::serial;
 use std::time::Duration;
@@ -14,9 +16,9 @@ use suprnova::Storage;
 use suprnova::filesystem::testing::StorageFakeGuard;
 use suprnova::queue::driver::QueueDriver;
 use suprnova::queue::envelope::Envelope;
-use suprnova::queue::sqs::SqsQueueDriver;
 use suprnova::queue::{Queue, bootstrap_from_env};
 use suprnova::testing::TestClock;
+use suprnova::{SqsConfig, SqsCredentials, SqsOverflow, SqsQueueDriver};
 
 use crate::env_lock::lock_env_async;
 use crate::env_snapshot::{EnvSnapshot, set_env};
@@ -44,6 +46,7 @@ const VARIABLES: &[&str] = &[
     "AWS_CONFIG_FILE",
     "AWS_SHARED_CREDENTIALS_FILE",
     "AWS_EC2_METADATA_DISABLED",
+    "SQS_WAIT_TIME_SECONDS",
     "SQS_OVERFLOW_ENABLED",
     "SQS_OVERFLOW_ALWAYS",
     "SQS_OVERFLOW_DISK",
@@ -68,7 +71,7 @@ fn configure(fake: &FakeSqs) {
     set_env("SQS_ENDPOINT", Some(&fake.endpoint));
     set_env("AWS_DEFAULT_REGION", Some("us-east-1"));
     set_env("AWS_ACCESS_KEY_ID", Some("AKIDSUPRNOVATEST"));
-    set_env("AWS_SECRET_ACCESS_KEY", Some("suprnova-test-secret"));
+    set_env("AWS_SECRET_ACCESS_KEY", Some(fake::SECRET));
 }
 
 fn envelope(queue: Option<&str>) -> Envelope {
@@ -172,6 +175,10 @@ async fn a_pop_hides_the_job_for_the_visibility_timeout() {
         "the worker's visibility timeout"
     );
     assert_eq!(receive["MaxNumberOfMessages"], 1, "one message per pop");
+    assert_eq!(
+        receive["WaitTimeSeconds"], 1,
+        "a one-second long poll by default"
+    );
 
     fake.advance(29);
     assert!(
@@ -740,6 +747,268 @@ async fn overflow_uses_the_default_disk_when_none_is_named() {
     assert_eq!(stored_payloads().await, 1);
 }
 
+// Review fixes: settlement past SQS's limits, the request layer, and the
+// overflow payloads a copy leaves behind.
+
+#[tokio::test]
+async fn a_nack_longer_than_the_twelve_hours_left_holds_and_counts_one_attempt() {
+    let (_env, _restore, fake) = setup!("default");
+    let clock = TestClock::freeze();
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+    let first = driver.pop(VISIBILITY).await.unwrap().unwrap();
+
+    // The job ran for two minutes, so less than 12 hours of hiding is left.
+    fake.advance(120);
+    clock.advance(chrono::Duration::seconds(120));
+    let twelve_hours = 12 * 3600;
+    driver
+        .nack(&first.token, Duration::from_secs(twelve_hours))
+        .await
+        .expect("a nack of 12 hours is accepted");
+
+    let mut waited = 0;
+    while waited + 900 < twelve_hours {
+        fake.advance(900);
+        clock.advance(chrono::Duration::seconds(900));
+        waited += 900;
+        assert!(
+            driver.pop(VISIBILITY).await.unwrap().is_none(),
+            "back {waited} seconds into a 12-hour requeue delay"
+        );
+    }
+    fake.advance(twelve_hours - waited);
+    clock.advance(chrono::Duration::seconds((twelve_hours - waited) as i64));
+    let again = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("back after 12 hours");
+    assert_eq!(again.envelope.id, first.envelope.id);
+    assert_eq!(again.envelope.attempts, 1, "the nack counted one attempt");
+}
+
+#[tokio::test]
+async fn a_settlement_after_the_reservation_expired_keeps_the_overflow_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let clock = TestClock::freeze();
+    let first_worker = driver();
+    let second_worker = driver();
+    let sent = large_envelope();
+    first_worker.push(sent.clone()).await.unwrap();
+    let first = first_worker.pop(VISIBILITY).await.unwrap().unwrap();
+
+    // The first worker outlives its reservation, and SQS hands the job on.
+    fake.advance(31);
+    clock.advance(chrono::Duration::seconds(31));
+    let second = second_worker
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("redelivered");
+    first_worker.ack(&first.token).await.unwrap();
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "a late ack must not delete the payload the message still points at"
+    );
+
+    second_worker
+        .nack(&second.token, Duration::ZERO)
+        .await
+        .unwrap();
+    let third = second_worker
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("the job is still there");
+    assert_eq!(third.envelope.payload, sent.payload, "and still readable");
+}
+
+#[tokio::test]
+async fn a_refused_send_deletes_its_payload_and_an_unanswered_one_keeps_it() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script(
+        "AmazonSQS.SendMessage",
+        400,
+        r#"{"__type":"com.amazonaws.sqs#InvalidParameterValue","message":"refused"}"#,
+    );
+    driver
+        .push(large_envelope())
+        .await
+        .expect_err("SQS refused the send");
+    assert_eq!(
+        stored_payloads().await,
+        0,
+        "no message points at the payload"
+    );
+
+    fake.script("AmazonSQS.SendMessage", 200, "<html>not sqs</html>");
+    let error = driver
+        .push(large_envelope())
+        .await
+        .expect_err("a reply that is not SQS's fails the push");
+    assert!(error.to_string().contains("SQS_ENDPOINT"), "{error}");
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "whatever answered may have taken the message, so its payload stays"
+    );
+}
+
+#[tokio::test]
+async fn a_delay_sent_on_keeps_one_payload_with_delete_after_processing_off() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    set_env("SQS_OVERFLOW_DELETE_AFTER_PROCESSING", Some("false"));
+    let clock = TestClock::freeze();
+    let driver = driver();
+    let mut delayed = large_envelope();
+    delayed.available_at = suprnova::clock::now() + chrono::Duration::minutes(40);
+    driver.push(delayed).await.unwrap();
+
+    for _ in 0..2 {
+        fake.advance(900);
+        clock.advance(chrono::Duration::minutes(15));
+        assert!(driver.pop(VISIBILITY).await.unwrap().is_none());
+    }
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "each copy sent on replaces the payload of the one it supersedes"
+    );
+}
+
+#[tokio::test]
+async fn a_throttled_request_is_tried_again() {
+    let (_env, _restore, fake) = setup!("default");
+    let driver = driver();
+    fake.script(
+        "AmazonSQS.SendMessage",
+        400,
+        r#"{"__type":"com.amazonaws.sqs#RequestThrottled","message":"slow down"}"#,
+    );
+
+    driver
+        .push(envelope(None))
+        .await
+        .expect("the second try succeeds");
+    assert_eq!(fake.sends().len(), 2, "one throttled try, one that landed");
+    assert_eq!(fake.messages(&url("default")).len(), 1, "one message");
+}
+
+#[tokio::test]
+async fn a_service_that_keeps_failing_fails_the_push_after_three_tries() {
+    let (_env, _restore, fake) = setup!("default");
+    let driver = driver();
+    for _ in 0..3 {
+        fake.script(
+            "AmazonSQS.SendMessage",
+            503,
+            r#"{"__type":"com.amazonaws.sqs#ServiceUnavailable","message":"down"}"#,
+        );
+    }
+
+    let error = driver.push(envelope(None)).await.expect_err("three faults");
+    assert!(error.to_string().contains("ServiceUnavailable"), "{error}");
+    assert_eq!(fake.sends().len(), 3);
+}
+
+#[tokio::test]
+async fn a_size_with_no_counts_in_the_reply_is_an_error() {
+    let (_env, _restore, fake) = setup!("default");
+    let driver = driver();
+    fake.script("AmazonSQS.GetQueueAttributes", 200, "{}");
+
+    assert!(
+        driver.size().await.is_err(),
+        "a reply without the counts is not an empty queue"
+    );
+}
+
+#[tokio::test]
+async fn a_receive_waits_for_the_configured_seconds() {
+    let (_env, _restore, fake) = setup!("default");
+    set_env("SQS_WAIT_TIME_SECONDS", Some("5"));
+    let driver = driver();
+
+    assert!(driver.pop(VISIBILITY).await.unwrap().is_none());
+    let receive = fake.last("AmazonSQS.ReceiveMessage").unwrap();
+    assert_eq!(receive["WaitTimeSeconds"], 5);
+}
+
+#[tokio::test]
+async fn a_driver_built_from_a_config_reaches_its_queue() {
+    let (_env, _restore, fake) = setup!("billing");
+    for name in VARIABLES {
+        set_env(name, None);
+    }
+    set_env("AWS_EC2_METADATA_DISABLED", Some("true"));
+    let mut config = SqsConfig::new("us-east-1", "billing");
+    config.prefix = Some(PREFIX.to_owned());
+    config.endpoint = Some(fake.endpoint.clone());
+    config.credentials = Some(SqsCredentials {
+        access_key_id: "AKIDSUPRNOVATEST".into(),
+        secret_access_key: fake::SECRET.into(),
+        session_token: None,
+    });
+    assert!(SqsOverflow::default().delete_after_processing);
+    let driver = SqsQueueDriver::new(config).expect("a driver from code");
+
+    driver.push(envelope(None)).await.unwrap();
+    assert_eq!(fake.messages(&url("billing")).len(), 1);
+}
+
+#[tokio::test]
+async fn call_sends_any_sqs_action() {
+    let (_env, _restore, fake) = setup!("default");
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+
+    let reply = driver
+        .call(
+            "GetQueueAttributes",
+            serde_json::json!({
+                "QueueUrl": url("default"),
+                "AttributeNames": ["ApproximateNumberOfMessages"],
+            }),
+        )
+        .await
+        .expect("a signed request to any action");
+    assert_eq!(reply["Attributes"]["ApproximateNumberOfMessages"], "1");
+
+    let error = driver
+        .call(
+            "NoSuchAction",
+            serde_json::json!({ "QueueUrl": url("default") }),
+        )
+        .await
+        .expect_err("SQS refuses an action it does not know");
+    assert!(error.to_string().contains("InvalidAction"), "{error}");
+    assert_eq!(fake.messages(&url("default")).len(), 1);
+}
+
+#[tokio::test]
+async fn a_request_signed_with_another_secret_is_refused() {
+    let (_env, _restore, fake) = setup!("default");
+    set_env("AWS_SECRET_ACCESS_KEY", Some("not-the-secret"));
+    let driver = driver();
+
+    let error = driver
+        .push(envelope(None))
+        .await
+        .expect_err("the fake checks every signature");
+    assert!(
+        error.to_string().contains("SignatureDoesNotMatch"),
+        "{error}"
+    );
+    assert!(fake.messages(&url("default")).is_empty());
+}
+
 // A live endpoint, for checking the wire format against a real
 // SQS-compatible server. Run it with the two queues created:
 //
@@ -849,19 +1118,32 @@ async fn live_round_trip_against_an_sqs_endpoint() {
 }
 
 /// A server for the AWS JSON 1.0 protocol of SQS: the eight actions the
-/// driver sends, against standard queues created up front.
+/// driver sends, against standard queues created up front. It checks the
+/// Signature Version 4 signature of every request against [`fake::SECRET`],
+/// and holds a message hidden for at most 12 hours from its receive, as SQS
+/// does. A delete on a receipt handle that is not the latest one succeeds
+/// and deletes nothing, which AWS documents SQS may do.
 mod fake {
+    use hmac::digest::KeyInit;
+    use hmac::{Hmac, Mac};
     use http_body_util::{BodyExt, Full};
     use hyper::body::{Bytes, Incoming};
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
     use serde_json::{Value, json};
-    use std::collections::HashMap;
+    use sha2::{Digest, Sha256};
+    use std::collections::{HashMap, VecDeque};
     use std::convert::Infallible;
     use std::sync::{Arc, Mutex};
 
+    /// The secret key every test signs with.
+    pub const SECRET: &str = "suprnova-test-secret";
+
     /// SQS's limit on one message body.
     const MAX_BODY: usize = 1024 * 1024;
+
+    /// The longest SQS hides a message, counted from its receive.
+    const MAX_VISIBILITY: u64 = 43_200;
 
     #[derive(Clone, Debug)]
     pub struct Message {
@@ -869,6 +1151,7 @@ mod fake {
         pub body: String,
         pub visible_at: u64,
         pub receive_count: u32,
+        received_at: u64,
         receipts: Vec<String>,
     }
 
@@ -886,6 +1169,8 @@ mod fake {
         next: u64,
         queues: HashMap<String, Vec<Message>>,
         requests: Vec<Request>,
+        /// Canned replies, by target, answered before the queue is touched.
+        script: HashMap<String, VecDeque<(u16, String)>>,
     }
 
     #[derive(Clone)]
@@ -930,6 +1215,17 @@ mod fake {
         /// Move the fake's clock on by `seconds`.
         pub fn advance(&self, seconds: u64) {
             self.state.lock().unwrap().now += seconds;
+        }
+
+        /// Answer the next request for `target` with `status` and `body`.
+        pub fn script(&self, target: &str, status: u16, body: &str) {
+            self.state
+                .lock()
+                .unwrap()
+                .script
+                .entry(target.to_owned())
+                .or_default()
+                .push_back((status, body.to_owned()));
         }
 
         /// The messages a queue holds, visible or not.
@@ -992,40 +1288,141 @@ mod fake {
         state: &Mutex<State>,
         request: hyper::Request<Incoming>,
     ) -> hyper::Response<Full<Bytes>> {
+        let method = request.method().as_str().to_owned();
+        let path = request.uri().path().to_owned();
+        let query = request.uri().query().unwrap_or_default().to_owned();
+        let headers: Vec<(String, String)> = request
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_owned(),
+                    value.to_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect();
         let header = |name: &str| {
-            request
-                .headers()
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned)
+            headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
         };
         let target = header("x-amz-target").unwrap_or_default();
-        let authorization = header("authorization");
-        let security_token = header("x-amz-security-token");
         let content_type = header("content-type").unwrap_or_default();
         let bytes = request.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        let signature = verify_signature(&method, &path, &query, &headers, &bytes, SECRET);
 
         let mut state = state.lock().unwrap();
         state.requests.push(Request {
             target: target.clone(),
-            authorization,
-            security_token,
+            authorization: header("authorization"),
+            security_token: header("x-amz-security-token"),
             body: body.clone(),
         });
-        let (status, reply) = if content_type != "application/x-amz-json-1.0" {
-            error(
+        let scripted = state.script.get_mut(&target).and_then(VecDeque::pop_front);
+        let (status, reply) = if let Some((status, reply)) = scripted {
+            (status, reply)
+        } else if let Err(reason) = signature {
+            let (_, reply) = error("SignatureDoesNotMatch", &reason);
+            (403, reply.to_string())
+        } else if content_type != "application/x-amz-json-1.0" {
+            let (status, reply) = error(
                 "InvalidParameterValue",
                 "expected application/x-amz-json-1.0",
-            )
+            );
+            (status, reply.to_string())
         } else {
-            act(&mut state, &target, &body)
+            let (status, reply) = act(&mut state, &target, &body);
+            (status, reply.to_string())
         };
         hyper::Response::builder()
             .status(status)
             .header("content-type", "application/x-amz-json-1.0")
-            .body(Full::new(Bytes::from(reply.to_string())))
+            .body(Full::new(Bytes::from(reply)))
             .unwrap()
+    }
+
+    fn hmac(key: &[u8], data: &str) -> Vec<u8> {
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
+        mac.update(data.as_bytes());
+        mac.finalize().into_bytes().to_vec()
+    }
+
+    /// Recompute the Signature Version 4 signature of a request from
+    /// `secret` and compare it with the one it carries.
+    pub fn verify_signature(
+        method: &str,
+        path: &str,
+        query: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+        secret: &str,
+    ) -> Result<(), String> {
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        let authorization = header("authorization").ok_or("no Authorization header")?;
+        let fields = authorization
+            .strip_prefix("AWS4-HMAC-SHA256 ")
+            .ok_or("not AWS4-HMAC-SHA256")?;
+        let field = |name: &str| {
+            fields
+                .split(',')
+                .map(str::trim)
+                .find_map(|part| part.strip_prefix(&format!("{name}=")))
+                .ok_or(format!("no {name} in Authorization"))
+        };
+        let credential = field("Credential")?;
+        let signed_headers = field("SignedHeaders")?;
+        let signature = field("Signature")?;
+        let scope = credential
+            .split_once('/')
+            .map(|(_, scope)| scope)
+            .ok_or("no scope")?;
+        let mut parts = scope.split('/');
+        let (date, region, service) = (
+            parts.next().ok_or("no date")?,
+            parts.next().ok_or("no region")?,
+            parts.next().ok_or("no service")?,
+        );
+        let signed: Vec<&str> = signed_headers.split(';').collect();
+        for required in ["host", "x-amz-date", "x-amz-content-sha256", "x-amz-target"] {
+            if !signed.contains(&required) {
+                return Err(format!("{required} is not signed"));
+            }
+        }
+        let payload_hash = header("x-amz-content-sha256").ok_or("no x-amz-content-sha256")?;
+        if payload_hash != hex::encode(Sha256::digest(body)) {
+            return Err("x-amz-content-sha256 is not the hash of the body".into());
+        }
+        let mut canonical_headers = String::new();
+        for name in &signed {
+            let value = header(name).ok_or(format!("signed header {name} is missing"))?;
+            let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+            canonical_headers.push_str(&format!("{name}:{value}\n"));
+        }
+        let canonical = format!(
+            "{method}\n{path}\n{query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+        );
+        let amz_date = header("x-amz-date").ok_or("no x-amz-date")?;
+        let to_sign = format!(
+            "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+            hex::encode(Sha256::digest(canonical.as_bytes()))
+        );
+        let key = hmac(format!("AWS4{secret}").as_bytes(), date);
+        let key = hmac(&key, region);
+        let key = hmac(&key, service);
+        let key = hmac(&key, "aws4_request");
+        let expected = hex::encode(hmac(&key, &to_sign));
+        if expected == signature {
+            Ok(())
+        } else {
+            Err("the signature does not match".into())
+        }
     }
 
     fn error(code: &str, message: &str) -> (u16, Value) {
@@ -1041,6 +1438,19 @@ mod fake {
             return error("QueueDoesNotExist", "The specified queue does not exist.");
         }
         let now = state.now;
+        let send = |state: &mut State, text: &str, delay: u64| {
+            state.next += 1;
+            let id = format!("message-{}", state.next);
+            state.queues.get_mut(&url).unwrap().push(Message {
+                id: id.clone(),
+                body: text.to_owned(),
+                visible_at: now + delay,
+                receive_count: 0,
+                received_at: 0,
+                receipts: Vec::new(),
+            });
+            id
+        };
         match target {
             "AmazonSQS.SendMessage" => {
                 let Some(text) = body["MessageBody"].as_str() else {
@@ -1053,16 +1463,7 @@ mod fake {
                 if delay > 900 {
                     return error("InvalidParameterValue", "DelaySeconds over 900");
                 }
-                state.next += 1;
-                let id = format!("message-{}", state.next);
-                let message = Message {
-                    id: id.clone(),
-                    body: text.to_owned(),
-                    visible_at: now + delay,
-                    receive_count: 0,
-                    receipts: Vec::new(),
-                };
-                state.queues.get_mut(&url).unwrap().push(message);
+                let id = send(state, text, delay);
                 (200, json!({ "MessageId": id, "MD5OfMessageBody": "" }))
             }
             "AmazonSQS.SendMessageBatch" => {
@@ -1083,15 +1484,8 @@ mod fake {
                     if delay > 900 {
                         return error("InvalidParameterValue", "DelaySeconds over 900");
                     }
-                    state.next += 1;
-                    let id = format!("message-{}", state.next);
-                    state.queues.get_mut(&url).unwrap().push(Message {
-                        id: id.clone(),
-                        body: entry["MessageBody"].as_str().unwrap_or_default().to_owned(),
-                        visible_at: now + delay,
-                        receive_count: 0,
-                        receipts: Vec::new(),
-                    });
+                    let text = entry["MessageBody"].as_str().unwrap_or_default();
+                    let id = send(state, text, delay);
                     successful.push(json!({ "Id": entry["Id"], "MessageId": id }));
                 }
                 (200, json!({ "Successful": successful, "Failed": [] }))
@@ -1105,6 +1499,7 @@ mod fake {
                     return (200, json!({}));
                 };
                 message.receive_count += 1;
+                message.received_at = now;
                 message.visible_at = now + visibility;
                 message.receipts.push(receipt.clone());
                 (
@@ -1122,23 +1517,31 @@ mod fake {
             "AmazonSQS.DeleteMessage" => {
                 let receipt = body["ReceiptHandle"].as_str().unwrap_or_default();
                 let queue = state.queues.get_mut(&url).unwrap();
-                queue.retain(|m| !m.receipts.iter().any(|r| r == receipt));
+                queue.retain(|m| m.receipts.last().is_none_or(|latest| latest != receipt));
                 (200, json!({}))
             }
             "AmazonSQS.ChangeMessageVisibility" => {
                 let receipt = body["ReceiptHandle"].as_str().unwrap_or_default();
                 let timeout = body["VisibilityTimeout"].as_u64().unwrap_or(0);
                 let queue = state.queues.get_mut(&url).unwrap();
-                match queue
+                let Some(message) = queue
                     .iter_mut()
                     .find(|m| m.receipts.last().is_some_and(|r| r == receipt))
-                {
-                    Some(message) => {
-                        message.visible_at = now + timeout;
-                        (200, json!({}))
-                    }
-                    None => error("ReceiptHandleIsInvalid", "unknown receipt handle"),
+                else {
+                    return error("ReceiptHandleIsInvalid", "unknown receipt handle");
+                };
+                if now + timeout > message.received_at + MAX_VISIBILITY {
+                    return error(
+                        "InvalidParameterValue",
+                        &format!(
+                            "Value {timeout} for parameter VisibilityTimeout is invalid. Reason: \
+                             Total VisibilityTimeout for the message is beyond the limit [43200 \
+                             seconds]"
+                        ),
+                    );
                 }
+                message.visible_at = now + timeout;
+                (200, json!({}))
             }
             "AmazonSQS.GetQueueAttributes" => {
                 let queue = &state.queues[&url];

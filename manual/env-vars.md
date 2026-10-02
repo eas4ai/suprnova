@@ -226,7 +226,8 @@ boots with the framework's embedded English validation catalog.
 | `SQS_PREFIX` | unset | `String` | The URL the SQS queues are under, `https://sqs.<region>.amazonaws.com/<account id>`. Required when `QUEUE_DRIVER=sqs` and `SQS_QUEUE` is a name rather than a URL; boot fails without it. |
 | `SQS_QUEUE` | `"default"` | `String` | The SQS queue a job that names none goes to, and the one a worker with no `--queue` receives from. A name, or the URL of the queue. A FIFO queue (`.fifo`) fails boot. |
 | `SQS_SUFFIX` | unset | `String` | Appended to every SQS queue name that does not already end with it, as in `emails-production`. |
-| `SQS_ENDPOINT` | `https://sqs.<region>.amazonaws.com` | `String` | The endpoint of an SQS-compatible service that is not AWS, such as LocalStack or ElasticMQ. |
+| `SQS_ENDPOINT` | `https://sqs.<region>.amazonaws.com` (`amazonaws.com.cn` for a `cn-` region) | `String` | The endpoint requests go to: an SQS-compatible service that is not AWS, such as LocalStack or ElasticMQ, or a VPC endpoint. A value that is not an `http` or `https` URL fails boot. |
+| `SQS_WAIT_TIME_SECONDS` | `1` | `u64` (0 to 20) | How long each receive of the `sqs` driver waits for a message. A longer wait means fewer billed requests from an idle worker; `0` sends short polls. Outside 0 to 20 fails boot. |
 | `AWS_DEFAULT_REGION`, `AWS_REGION` | unset | `String` | The region of the `sqs` queue driver, read in this order. With neither set, `QUEUE_DRIVER=sqs` fails boot. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | unset | `String` | The keys the `sqs` queue driver signs with. Set both or neither: one without the other fails boot. With neither, the driver uses the default credential chain of AWS. |
 | `SQS_OVERFLOW_ENABLED` | `false` | `bool` (`true` or `1`) | Store an SQS job of 1 MiB or more on a disk and send SQS a pointer to it. Without it such a push fails. |

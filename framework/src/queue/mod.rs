@@ -53,6 +53,8 @@ pub use null::NullQueueDriver;
 pub use outcome::JobOutcome;
 pub use redis::RedisQueueDriver;
 pub use routing::QueueRoute;
+#[cfg(feature = "queue-sqs")]
+pub use sqs::{SqsConfig, SqsCredentials, SqsOverflow, SqsQueueDriver};
 pub use sync::SyncQueueDriver;
 
 use crate::error::FrameworkError;
@@ -1935,7 +1937,7 @@ async fn build_failover_from_env() -> Result<Arc<dyn QueueDriver>, FrameworkErro
         let driver = build_driver_from_env(name).await?.ok_or_else(|| {
             FrameworkError::internal(format!(
                 "QUEUE_FAILOVER_CONNECTIONS names unknown queue connection `{name}`; \
-                 expected one of memory, redis, database"
+                 expected one of memory, sync, null, redis, database, sqs"
             ))
         })?;
         drivers.push((name.to_string(), driver));
