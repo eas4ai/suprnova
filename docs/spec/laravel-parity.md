@@ -140,3 +140,28 @@ Falsifier: under `except`, a named job is recorded instead of dispatched or anot
 Mechanism: `par-queue-fake`.
 Rationale: Laravel `QueueFake::except`, `pushRaw`, `rawPushes`, `assertPushedWithoutChain`.
 Status: Agreed 2026-10-01
+
+## Test diagnostics
+
+The developer ruled on 2026-10-01 that a test should see why a request it
+sent failed, from that request alone, rather than through a process-wide
+collection of logged errors, and made it the first priority after the
+port requests.
+
+[PAR-010] A response the framework builds from an error MUST carry that
+request's error report in process: the error and its source chain, or,
+when the panic boundary caught a panic, the panic message and its
+location. The report MUST NOT reach the response's headers or body.
+Falsifier: a handler or middleware that returns an error, or panics, yields a response without a report; a report holds an error from another request; or a report's text appears in the response's headers or body.
+Mechanism: `par-test-diagnostics`.
+Rationale: Laravel keeps the exceptions a test request logged in a process-wide `LoggedExceptionCollection` and `TestResponse` appends them to a failing assertion. A report carried by the response itself gives the same message without crossing between tests that run concurrently in one process. A development error page can render the same report.
+Status: Agreed 2026-10-01
+
+[PAR-011] `TestResponse` MUST build from a framework response, keeping its
+error report, and every assertion that fails on a response carrying one
+MUST include the report in its failure message. `TestResponse` MUST expose
+the report for a test to inspect.
+Falsifier: `assert_status(200)` or `assert_ok()` on a 500 that a handler error caused fails without that error's message; a panic boundary 500 fails without the panic message; or, with two requests in flight at once in one test process, a failure message names the other request's error.
+Mechanism: `par-test-diagnostics`.
+Rationale: Laravel `TestResponse::assertStatus` and the other status assertions append the request's exceptions to the failure. Building from the response also spares every test the body-collecting boilerplate `TestResponse::new` needs today.
+Status: Agreed 2026-10-01

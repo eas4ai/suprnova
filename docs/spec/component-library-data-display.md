@@ -67,3 +67,15 @@ Falsifier: a call to `render_chart` with a value of 1e12 panics.
 Mechanism: `live-library-review-remediation`.
 Rationale: Evidence: charts-rs 1.0.0 overflows in `src/charts/util.rs` for values from 1e12, and `crates/suprnova-live/src/view/charts.rs` checks only that each value is finite. Refines: DATA-004; the house rule that public-surface code returns a Result and does not panic. Agreed by promotion `the-review-of-live-and-the-component-library-is-remediated-in-one-commitment`.
 Status: Agreed 2026-09-17
+
+[DATA-007] The chart MUST take its colors and font from `--sn-` tokens in
+both color schemes. Its SVG MUST have a transparent background, and its
+text, axes, grid lines and each series MUST carry a class that `chart.css`
+colors from a `--sn-` token; series take their colors in order from a
+palette of chart tokens, defined for light and dark, and wrap around when a
+chart has more series than the palette. The rendered SVG MUST NOT carry a
+literal color or font family.
+Falsifier: a rendered bar or line chart's SVG contains a hex, `rgb()` or named color, or a font-family name, in an attribute or a `style`; a chart's text, axis, grid or series mark carries no class; or `chart.css` colors a chart class with anything but a `var(--sn-...)` reference.
+Mechanism: `data-chart-tokens`.
+Rationale: Backlog item `chart-follows-the-tokens`: the charts-rs built-in light theme writes a white background, `rgb(70, 70, 70)` text, a fixed series palette and the Roboto font into the markup, so the chart shows as a white box in a dark document and ignores the theme, while every other shipped component takes its visual values from the tokens (UI-004 states that rule for stylesheets). Refines: DATA-004.
+Status: Agreed 2026-10-01

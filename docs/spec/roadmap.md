@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: laravel-port-requests
+Current: chart-tokens-and-test-diagnostics
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -182,6 +182,21 @@ Requirements: PAR-001, PAR-002, PAR-003, PAR-004, PAR-005, PAR-006, PAR-007, PAR
    The developer asked for issues #125 to #129 to be done on 2026-10-01;
    the queue fake gaps are among the recommendations the developer accepted
    on 2026-09-30. This is the first commitment cut from the parity map.
+
+## chart-tokens-and-test-diagnostics
+
+Requirements: DATA-007, PAR-010, PAR-011
+
+17. chart-tokens-and-test-diagnostics - the chart takes its colors and
+   font from `--sn-` tokens through a six-color chart palette defined for
+   light and dark (`component-library-data-display.md` DATA-007, backlog
+   item `chart-follows-the-tokens`); and a failed request carries its own
+   error report, which `TestResponse` shows in a failing assertion
+   (`laravel-parity.md` PAR-010 and PAR-011, the developer's first priority
+   from the third review). Done when the chart renders in a dark document
+   with no literal color in its SVG, and a test's failing status assertion
+   names the error that caused the 500, with both mechanisms passing on a
+   committed tree.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
