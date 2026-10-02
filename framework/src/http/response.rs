@@ -1700,7 +1700,7 @@ impl HttpResponse {
             // that resolution). The `message` field stays generic in
             // both modes; this is strictly additive for developers,
             // never to be parsed by production clients.
-            if status >= 500 && crate::config::Config::is_debug() {
+            if status >= 500 {
                 obj.insert(
                     "debug_message".to_string(),
                     serde_json::Value::String(logged.clone()),
