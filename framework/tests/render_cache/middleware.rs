@@ -2751,6 +2751,51 @@ async fn a_refused_render_commit_answers_500_and_logs_the_database_error() {
     });
 }
 
+/// The render whose COMMIT the database refused answers 500, and that 500
+/// carries the database's error as its report, so a test sees why.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_refused_render_commit_reports_the_database_error() {
+    let harness = boot_with_render_cache().await;
+    render_cache_middleware_support::create_commit_refused_tables(&harness).await;
+
+    let served = dispatch_get(&harness, "/commit-refused", &[]).await;
+
+    assert_eq!(served.status, StatusCode::INTERNAL_SERVER_ERROR);
+    let report = served
+        .error_report()
+        .expect("the 500 for a refused commit must carry the database error's report")
+        .to_string();
+    assert!(
+        report.to_lowercase().contains("foreign key"),
+        "the report must name the database's error; report:\n{report}"
+    );
+}
+
+/// A route whose `FailurePolicy` is `Closed` refuses with an empty 503 when
+/// a provider fails before its handler runs. The body stays empty; the
+/// response carries the provider's error as its report.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_fail_closed_route_reports_the_provider_error_behind_its_503() {
+    let harness = boot_with_render_cache().await;
+    render_cache_middleware_support::fail_next_admission(&harness);
+
+    let served = dispatch_get(&harness, "/fail-closed", &[]).await;
+
+    assert_eq!(served.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(served.body.is_empty(), "the refusal's body stays empty");
+    assert_eq!(counting_route::renders(), 0, "the handler never ran");
+    let report = served
+        .error_report()
+        .expect("the fail-closed 503 must carry the provider error's report")
+        .to_string();
+    assert!(
+        report.contains("render_cache_provider_unavailable"),
+        "the report must name the provider's error; report:\n{report}"
+    );
+}
+
 /// A builder query that carries a raw fragment can read tables the builder
 /// does not name: here a `where_raw` subquery on `posts` inside a query on
 /// `users`. Recording only `users` would store the page on an incomplete

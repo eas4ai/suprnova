@@ -25,10 +25,12 @@ use futures::FutureExt;
 /// What went wrong in one request: kept in process for the developer, never
 /// sent to the client.
 ///
-/// The framework attaches one to every response it builds from an error -
+/// The framework attaches one to the response it builds from a failure -
 /// a handler or middleware error converted through
-/// `From<FrameworkError> for HttpResponse`, or a panic caught by the panic
-/// boundary. Read it with
+/// `From<FrameworkError> for HttpResponse`, a panic caught by the panic
+/// boundary, or a failure one of the framework's own middleware answers
+/// with a 5xx it builds itself, such as a session store that cannot write.
+/// Read it with
 /// [`TestResponse::error_report`](crate::testing::TestResponse::error_report)
 /// in a test, or [`HttpResponse::error_report`](crate::HttpResponse::error_report)
 /// in middleware. A failing `TestResponse` assertion prints it.
@@ -216,4 +218,166 @@ fn payload_text(payload: &(dyn Any + Send)) -> Option<&str> {
         .downcast_ref::<&'static str>()
         .copied()
         .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+}
+
+#[cfg(test)]
+mod tests {
+    //! The rules of the report itself: how a chain is walked, how each
+    //! kind renders, and when a panic's location is kept.
+
+    use super::*;
+
+    /// One link of an error chain, with the rest of the chain as its
+    /// source.
+    #[derive(Debug)]
+    struct Link {
+        message: &'static str,
+        source: Option<Box<Link>>,
+    }
+
+    impl fmt::Display for Link {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.message)
+        }
+    }
+
+    impl std::error::Error for Link {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.source
+                .as_deref()
+                .map(|source| source as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    /// The chain `messages`, outermost first.
+    fn chain(messages: &[&'static str]) -> Link {
+        let (first, rest) = messages.split_first().expect("a chain has a first link");
+        Link {
+            message: first,
+            source: (!rest.is_empty()).then(|| Box::new(chain(rest))),
+        }
+    }
+
+    #[test]
+    fn an_error_reports_each_source_outermost_first_one_per_line() {
+        let report = ErrorReport::from_error(&chain(&[
+            "posting the invoice failed",
+            "writing ledger entry 42 failed",
+            "disk /var/ledger is full",
+        ]));
+
+        assert_eq!(
+            report.chain(),
+            [
+                "posting the invoice failed",
+                "writing ledger entry 42 failed",
+                "disk /var/ledger is full",
+            ]
+        );
+        assert_eq!(
+            report.to_string(),
+            "posting the invoice failed\n\
+             caused by: writing ledger entry 42 failed\n\
+             caused by: disk /var/ledger is full"
+        );
+        assert!(!report.is_panic());
+        assert_eq!(report.panic_location(), None);
+    }
+
+    #[test]
+    fn a_link_that_only_repeats_the_end_of_the_one_before_it_is_skipped() {
+        // The wrapper's message ends with its source's, the way
+        // `from_external` and a `format!("...: {e}")` wrapper build one.
+        // The link after the repeat is still compared, and kept.
+        let report = ErrorReport::from_error(&chain(&[
+            "fetching rates: the feed answered 503",
+            "the feed answered 503",
+            "connection reset by peer",
+        ]));
+
+        assert_eq!(
+            report.chain(),
+            [
+                "fetching rates: the feed answered 503",
+                "connection reset by peer"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_link_is_skipped() {
+        let report =
+            ErrorReport::from_error(&chain(&["sending the payout failed", "", "bank offline"]));
+
+        assert_eq!(
+            report.chain(),
+            ["sending the payout failed", "bank offline"]
+        );
+    }
+
+    #[test]
+    fn a_panic_renders_its_location_when_known_and_its_message_alone_when_not() {
+        let located = ErrorReport::from_panic(
+            "ledger index page 7 is unreadable".to_string(),
+            Some("src/ledger.rs:31:9".to_string()),
+        );
+        assert!(located.is_panic());
+        assert_eq!(located.chain(), ["ledger index page 7 is unreadable"]);
+        assert_eq!(located.panic_location(), Some("src/ledger.rs:31:9"));
+        assert_eq!(
+            located.to_string(),
+            "panicked at src/ledger.rs:31:9: ledger index page 7 is unreadable"
+        );
+
+        let unlocated =
+            ErrorReport::from_panic("ledger index page 7 is unreadable".to_string(), None);
+        assert_eq!(unlocated.panic_location(), None);
+        assert_eq!(
+            unlocated.to_string(),
+            "panicked: ledger index page 7 is unreadable"
+        );
+    }
+
+    #[tokio::test]
+    async fn catch_panic_keeps_the_location_of_the_panic_that_unwound() {
+        let line = line!() + 2;
+        let caught = catch_panic(async {
+            panic!("ledger index page 7 is unreadable");
+        })
+        .await;
+
+        let panic = caught.expect_err("the panic must be caught");
+        assert_eq!(
+            payload_text(&*panic.payload),
+            Some("ledger index page 7 is unreadable")
+        );
+        let location = panic
+            .location
+            .expect("the hook must have recorded the location");
+        assert!(
+            location.starts_with(&format!("{}:{line}:", file!())),
+            "the location must name {}:{line}; got {location}",
+            file!()
+        );
+    }
+
+    #[tokio::test]
+    async fn catch_panic_drops_a_location_recorded_for_a_different_panic() {
+        // The future catches its own panic, which records a location,
+        // then unwinds with another payload through `resume_unwind`,
+        // which runs no hook. The recorded location belongs to the first
+        // panic, so the report must not pair it with the second.
+        let caught = catch_panic(async {
+            let _ = std::panic::catch_unwind(|| panic!("the cursor was stale"));
+            std::panic::resume_unwind(Box::new("the ledger feed closed".to_string()));
+        })
+        .await;
+
+        let panic = caught.expect_err("the resumed unwind must be caught");
+        assert_eq!(
+            payload_text(&*panic.payload),
+            Some("the ledger feed closed")
+        );
+        assert_eq!(panic.location, None);
+    }
 }

@@ -457,7 +457,8 @@ impl Middleware for LoginThrottleMiddleware {
                         "Login throttle backend unavailable. Try again shortly.",
                     )
                     .status(503)
-                    .header("retry-after", "1")),
+                    .header("retry-after", "1")
+                    .with_error_report_from(&e)),
                 };
             }
         };

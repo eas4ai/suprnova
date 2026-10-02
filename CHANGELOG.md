@@ -8,16 +8,25 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
-- **A failed request's error report reaches `TestResponse`.** Every
+- **A failed request's error report reaches `TestResponse`.** A
   response the framework builds from an error carries an `ErrorReport`
   in its in-process extensions: the error and each of its sources, or,
   for a panic the panic boundary caught, the panic message and the
-  location it was raised at. The report never reaches a header or the
-  body, so what a client receives is unchanged. The new
+  location it was raised at. That covers a `FrameworkError` a handler or
+  middleware returns, a panic on an HTTP route or in a WebSocket
+  upgrade's middleware, the 5xx the framework's session, session lock,
+  throttle, rate limit, login throttle, timeout, and RenderCache
+  middleware answer a failure with, and the 5xx of the payment webhook
+  route and of the Live endpoints when the endpoint holds the error. The report never reaches a header or the body,
+  so what a client receives is unchanged; with debug on, a 5xx body
+  still carries `debug_message` as before. The new
   `TestResponse::from_response` builds from the response
   `handle_request` returns and keeps the report, and every failing
   assertion then ends with an `error report:` section, so a 500 says
-  why it happened. `TestResponse::error_report` and
+  why it happened. `assert_inertia()` and the `AssertableInertia`
+  assertions print it too, and the Inertia error page and validation
+  redirect keep the report of the response they replace.
+  `TestResponse::error_report` and
   `HttpResponse::error_report` expose it. The report belongs to its own
   response, so two requests in flight in one test process never mix
   their errors. To find a panic's location, the framework wraps the

@@ -105,13 +105,7 @@ impl TestResponse {
     /// when the response carries one: the sanitized body alone rarely
     /// says why a request failed.
     fn fail(&self, message: String) -> ! {
-        match &self.report {
-            Some(report) => {
-                let report = report.to_string().replace('\n', "\n    ");
-                panic!("{message}\n  error report:\n    {report}")
-            }
-            None => panic!("{message}"),
-        }
+        fail_with_report(message, self.report.as_ref())
     }
 
     /// Attach the session store [`Self::assert_session_has`] reads from, and
@@ -423,7 +417,21 @@ impl TestResponse {
                 self.header("x-inertia")
             ));
         }
-        crate::testing::AssertableInertia::from_page(self.json())
+        crate::testing::AssertableInertia::from_page(self.json(), self.report.clone())
+    }
+}
+
+/// Panic with an assertion's `message`, followed by `report` when there
+/// is one. [`TestResponse`] and
+/// [`AssertableInertia`](crate::testing::AssertableInertia) share it, so a
+/// failure on either reads the same way.
+pub(crate) fn fail_with_report(message: String, report: Option<&ErrorReport>) -> ! {
+    match report {
+        Some(report) => {
+            let report = report.to_string().replace('\n', "\n    ");
+            panic!("{message}\n  error report:\n    {report}")
+        }
+        None => panic!("{message}"),
     }
 }
 

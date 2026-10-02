@@ -368,8 +368,9 @@ pub(crate) async fn handle(request: Request) -> Response {
     if request.method() != Method::GET && !is_head {
         return Ok(closed_response(405).header("Allow", "GET, HEAD"));
     }
-    let Ok(catalog) = live_asset_catalog() else {
-        return Ok(closed_response(503));
+    let catalog = match live_asset_catalog() {
+        Ok(catalog) => catalog,
+        Err(error) => return Ok(closed_response(503).with_error_report_from(&error)),
     };
     if request.query().is_some() {
         return Ok(closed_response(404));

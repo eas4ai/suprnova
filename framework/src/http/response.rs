@@ -379,6 +379,17 @@ impl HttpResponse {
         self
     }
 
+    /// Attach the report of `error`, the failure this response answers.
+    ///
+    /// For framework code that answers a failure with a response it builds
+    /// itself - a middleware whose store or backend failed, a request that
+    /// ran out of time - rather than returning a `FrameworkError` through
+    /// `From<FrameworkError>`. The body stays what that code chose for the
+    /// client; the report keeps what went wrong.
+    pub(crate) fn with_error_report_from(self, error: &dyn std::error::Error) -> Self {
+        self.with_error_report(ErrorReport::from_error(error))
+    }
+
     /// Keep the error report of `original`, the response this one
     /// replaces. A middleware that rebuilds an error response - an
     /// Inertia error page, a validation redirect - calls this so the
