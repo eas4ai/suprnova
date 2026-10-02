@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: default-disk
+Current: sqs-queue-driver
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -225,6 +225,18 @@ Requirements: PAR-016, PAR-017
    and PAR-017, next-feature item `default-disk`, the developer's third
    priority from the third review). Done when the mechanism passes on a
    committed tree.
+
+## sqs-queue-driver
+
+Requirements: PAR-018, PAR-019, PAR-020
+
+20. sqs-queue-driver - `QUEUE_DRIVER=sqs` queues jobs on Amazon SQS
+   standard queues, configured from the environment as Laravel's
+   connection is, with delays past 15 minutes, attempt counts that match
+   the other drivers, and overflow of large payloads to a disk
+   (`laravel-parity.md` PAR-018 to PAR-020, next-feature item
+   `sqs-queue-driver`). Done when the mechanism passes on a committed
+   tree.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

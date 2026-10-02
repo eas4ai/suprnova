@@ -243,3 +243,59 @@ error that names the missing disk and `FILESYSTEM_DISK`.
 Falsifier: with `FILESYSTEM_DISK=uploads` and no `uploads` disk registered, `bootstrap_from_env` returns `Ok`; its error does not name `uploads` or `FILESYSTEM_DISK`; or with `FILESYSTEM_DISK=s3` and `S3_BUCKET` set, it fails although it registered the `s3` disk itself.
 Mechanism: `par-default-disk`.
 Status: Agreed 2026-10-02
+
+## SQS queue driver
+
+The developer ruled on 2026-10-01 to build an SQS queue driver, a managed
+queue outside the application database and Redis, after the default disk.
+
+[PAR-018] With `QUEUE_DRIVER=sqs`, the framework MUST queue jobs on Amazon
+SQS standard queues. A push MUST send the job to the queue its envelope
+names, or to `SQS_QUEUE` when it names none, and a delayed job MUST NOT be
+received before its time, a delay longer than the 15 minutes SQS allows on
+one message included. A pop MUST receive one message and hide it for the
+worker's visibility timeout. An acknowledgement MUST delete it, a `nack`
+MUST return it after the requeue delay with one more attempt, and a
+`release` MUST return it after the delay with the same number of attempts.
+A worker MUST receive from the queues its `--queue` list names, in order,
+and from `SQS_QUEUE` when the list is empty. `size`, `pending_size`,
+`delayed_size` and `reserved_size` MUST report the approximate counts SQS
+keeps for `SQS_QUEUE`, and `clear` MUST purge it and return the count it
+held.
+Falsifier: against an SQS endpoint, a pushed job is never received; a job pushed to the queue `emails` is received from `SQS_QUEUE`; a job delayed 20 minutes is received before 20 minutes have passed; an acknowledged job is received again; a nacked job comes back with attempts not one higher, or a released job with its attempts changed; a worker with `--queue=emails` receives a job from `SQS_QUEUE`; or `size` reports other than the counts SQS returns.
+Mechanism: `par-sqs-queue`.
+Rationale: Laravel's `SqsJob` counts every receive as an attempt, so its release counts one, and it passes SQS a delay over 900 seconds, which SQS refuses.
+Status: Agreed 2026-10-02
+
+[PAR-019] The `sqs` driver MUST read its configuration from the
+environment. `SQS_PREFIX`, `SQS_QUEUE` (default `default`) and
+`SQS_SUFFIX` MUST build the queue URL as Laravel does, and a queue name
+that is already a URL MUST be used as it is. `AWS_DEFAULT_REGION`, or else
+`AWS_REGION`, names the region, and `SQS_ENDPOINT` points the driver at a
+service that is not AWS. Requests MUST be signed with AWS Signature
+Version 4 for `sqs` in that region, with `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` when they are set, or else
+with AWS's default credential chain. Boot MUST fail with an error that
+names the variable when no region is set, when the queue is not a URL and
+`SQS_PREFIX` is not set, or when the queue is a FIFO queue, whose name ends
+in `.fifo`. `QUEUE_CONNECTIONS` and `QUEUE_FAILOVER_CONNECTIONS` MUST
+accept `sqs`.
+Falsifier: with `SQS_PREFIX=https://sqs.us-east-1.amazonaws.com/123456789012`, `SQS_QUEUE=jobs` and `SQS_SUFFIX=-prod`, a push names a queue URL other than `https://sqs.us-east-1.amazonaws.com/123456789012/jobs-prod`; a request carries no Signature Version 4 `Authorization` header scoped to the region and `sqs`; boot succeeds with no region, with a plain queue name and no prefix, or with `SQS_QUEUE=jobs.fifo`; or `QUEUE_CONNECTIONS=sqs` is refused.
+Mechanism: `par-sqs-queue`.
+Rationale: a FIFO queue needs a message group and a deduplication ID on each job, and the parity map does not rule `onGroup` or `withDeduplicator` to build, so a FIFO queue is refused at boot rather than sent messages SQS rejects.
+Status: Agreed 2026-10-02
+
+[PAR-020] With `SQS_OVERFLOW_ENABLED=true`, a job whose payload is 1 MiB
+or more, SQS's message limit, or every job when `SQS_OVERFLOW_ALWAYS=true`,
+MUST be stored on a filesystem disk, the one `SQS_OVERFLOW_DISK` names or
+else the default disk, and sent to SQS as a pointer to it. A pop MUST
+return the stored job. An acknowledgement MUST delete the stored payload
+unless `SQS_OVERFLOW_DELETE_AFTER_PROCESSING=false`, and `clear` MUST
+delete the stored payloads too when `SQS_OVERFLOW_FLUSH_ON_CLEAR=true`.
+Without overflow, a push over the limit MUST fail with an error that names
+the limit and `SQS_OVERFLOW_ENABLED`. Boot MUST fail when overflow is on
+and the disk is not registered.
+Falsifier: with overflow on, a 2 MiB job is sent to SQS whole, or a pop returns the pointer instead of the job; its stored payload survives an acknowledgement with delete-after-processing on, or survives `clear` with flush-on-clear on; with overflow off, a 2 MiB push succeeds or its error names neither the limit nor `SQS_OVERFLOW_ENABLED`; or boot succeeds with overflow on and no disk registered under the name.
+Mechanism: `par-sqs-queue`.
+Rationale: Laravel keeps overflow payloads in a cache store, which can evict one before its job runs; a disk keeps it until the job is done.
+Status: Agreed 2026-10-02
