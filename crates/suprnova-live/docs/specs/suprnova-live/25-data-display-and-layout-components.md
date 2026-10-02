@@ -1,7 +1,7 @@
 # Suprnova Live -- 25 Data Display and Layout Components
 
 Status: Normative design specification
-Last revised: 2026-09-15
+Last revised: 2026-10-01
 
 ## Scope
 
@@ -194,6 +194,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-01 -- The chart takes its colors and font from the `--sn-` tokens
+  in both color schemes: its SVG has a transparent background and no
+  literal color or font family, and its text, axis, grid and series carry
+  classes the chart stylesheet colors from tokens, series taking a six-color
+  chart palette in order and wrapping. Cairn DATA-007 refines this spec.
 - 2026-09-15 -- The official data-display components (separator, scroll
   area, aspect image, card, badge, avatar and group, list group, description
   list, stat card, chart, datatable) keep document order and native

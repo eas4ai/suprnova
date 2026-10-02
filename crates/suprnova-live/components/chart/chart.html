@@ -4,6 +4,11 @@
   trusted markup; the figure carries a text summary and a data table in a
   disclosure, so the canonical document reads without the picture. The
   island exposes `pub mod filters { pub use suprnova::view::filters::trusted_html; }`.
+  The SVG has a transparent background and no color or font of its own
+  (DATA-007): its text, axis, grid and series carry classes that chart.css
+  colors from `--sn-` tokens, series taking --sn-color-chart-1 to -6 in
+  order and starting again at the seventh, and its text takes the
+  document's font.
 #}
 {% macro chart(id, title, svg, summary) %}
 <figure class="sn-chart" id="{{ id }}" aria-labelledby="{{ id }}-title">

@@ -946,6 +946,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **The Live chart follows the document's theme.** `render_chart` drew its
+  SVG with charts-rs's light theme, a white background and fixed colors and
+  font, so in a dark document the chart showed as a white box. The SVG now
+  has a transparent background and no color or font of its own: its text,
+  axis, grid and series carry classes that the chart component's
+  stylesheet colors from `--sn-` tokens, and its text takes the document's
+  font. Series take the new `--sn-color-chart-1` to `--sn-color-chart-6`
+  palette in order, defined for light and dark and mapped in the Tailwind
+  preset, and a seventh series starts the palette again. This fix landed on
+  main after the `v3.0.0` tag.
 - **A cached render whose COMMIT fails answers 500 without a panic.** When
   a cache-miss render's handler ran and the database then refused the
   render transaction's COMMIT (a deferred constraint, a dropped
