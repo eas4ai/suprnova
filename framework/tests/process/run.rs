@@ -169,3 +169,29 @@ async fn tty_captures_nothing() {
     assert_eq!(result.output(), "", "the terminal has the output");
     assert_eq!(result.error_output(), "");
 }
+
+#[tokio::test]
+#[serial]
+async fn a_shell_line_runs_through_the_shell() {
+    let result = Process::shell("printf 'b\\na\\n' | sort")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(result.output(), "a\nb\n", "the pipe ran in the shell");
+    assert_eq!(result.command(), "printf 'b\\na\\n' | sort");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_shell_line_sees_the_environment_and_the_working_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.log"), "").unwrap();
+    std::fs::write(dir.path().join("b.log"), "").unwrap();
+    let result = Process::shell("echo $SUPRNOVA_PROCESS_TEST *.log")
+        .path(dir.path())
+        .env("SUPRNOVA_PROCESS_TEST", "expanded")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(result.output(), "expanded a.log b.log\n");
+}

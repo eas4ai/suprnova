@@ -186,3 +186,14 @@ async fn the_fake_ends_with_its_guard() {
         .unwrap();
     assert!(marker.exists(), "real processes run again");
 }
+
+#[tokio::test]
+#[serial]
+async fn a_shell_line_is_matched_and_recorded_as_given() {
+    let fake = Process::fake();
+    fake.when("npm run *", Process::result("built"));
+
+    let result = Process::shell("npm run build && npm test").run().await.unwrap();
+    assert_eq!(result.output(), "built");
+    fake.assert_ran("npm run build && npm test");
+}
