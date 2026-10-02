@@ -19,9 +19,13 @@
 //! it.
 //!
 //! The constructors and conversions are `#[track_caller]`, so each
-//! capture also keeps the site that created the error: the line of the
-//! application's `?`, or of its call to the constructor. A panic keeps
-//! the location the panic hook reports.
+//! capture also keeps the site that called them: the line of a `?` that
+//! converts the error, or of a call to a constructor. A call made from
+//! inside a function that is not `#[track_caller]` reports that
+//! function's line instead: `.map_err(FrameworkError::from)` reports a
+//! line of `Result::map_err` in the toolchain, and the stack frames are
+//! then what lead to the application's code. A panic keeps the location
+//! the panic hook reports.
 //!
 //! # How a report finds its frames
 //!
@@ -59,19 +63,22 @@
 //!   whose source is in the Rust toolchain, and frames with no crate path
 //!   at all (the C runtime, thread start).
 //! - **Async runtime**: `tokio` and the `tokio_*` crates.
-//! - **Framework**: the crates of this repository that an application
-//!   links: `suprnova`, `suprnova_macros`, `suprnova_live`,
-//!   `suprnova_magnetar`, `suprnova_web_push` and the
-//!   `suprnova_payments_*` adapters.
+//! - **Framework**: the library crates of this repository, by their
+//!   `[lib]` names ([`FRAMEWORK_CRATES`]): `suprnova`, `suprnova_live`,
+//!   `magnetar`, `suprnova_web_push`, the `suprnova_payments_*` adapters
+//!   and their helpers.
+//! - **Dependency**, by name, for the async and HTTP stack every request
+//!   runs on ([`ASYNC_STACK_CRATES`]: `hyper`, `h2`, `http`, `tower`,
+//!   `futures`, `tracing` and the like), wherever their source lives.
 //! - **Application** or **dependency**, for every other crate. When the
 //!   binary has debug info, the frame's source file decides: a file in
-//!   Cargo's registry or a Cargo git checkout is a dependency's, any
-//!   other file is the application's. Without debug info, frames have no
-//!   file, and the creation site decides: when it is not in Cargo's
-//!   registry, a git checkout or the toolchain, the crate of the frame
-//!   that called the constructor, or that panicked, is the application's,
-//!   and so is every frame of that crate. Every other crate is a
-//!   dependency.
+//!   Cargo's registry, a Cargo git checkout or a `vendor` directory is a
+//!   dependency's, any other file is the application's. Without debug
+//!   info, frames have no file, and the stack decides: the crates the
+//!   framework's request dispatch polls, and the crate that called the
+//!   constructor from local source, are the application's (see
+//!   [`application_crates`]), and every frame of those crates is shown.
+//!   Every other crate is a dependency.
 //!
 //! The page shows the application's frames and collapses every run of
 //! the others behind a count.
@@ -292,19 +299,88 @@ pub(crate) fn capture_for_panic(location: &Location<'_>) -> Option<RecordedFrame
 /// each frame. `site` is where the error was created or the panic raised.
 fn resolve_text(text: &str, site: &str) -> ResolvedFrames {
     let mut resolved = parse_frames(text);
-    let app_crate = if is_local_source(&site_file(site).replace('\\', "/")) {
-        creation_crate(&resolved.frames).map(str::to_string)
-    } else {
-        None
-    };
+    let app_crates = application_crates(&resolved.frames, site);
     for frame in &mut resolved.frames {
-        frame.origin = classify(
-            &frame.function,
-            frame.location.as_deref(),
-            app_crate.as_deref(),
-        );
+        frame.origin = classify(&frame.function, frame.location.as_deref(), &app_crates);
     }
     resolved
+}
+
+/// The crates a stack without debug info names as the application's.
+///
+/// Two signals, either enough:
+///
+/// - **The dispatch.** Every crate whose frame the framework's request
+///   dispatch polls: the middleware chain, the router and the
+///   framework's own middleware poll the application's middleware and
+///   handlers (see [`is_dispatch`]). Walking from the outermost frame
+///   inward, a frame of a crate that is not the standard library's, the
+///   async stack's or the framework's, whose nearest outer frame of any
+///   such crate or of the framework is a dispatch frame, is the
+///   application's. A dependency the framework calls elsewhere, such as
+///   `sea_orm` under the Eloquent builder, is not.
+/// - **The creation site.** When the site that created the error or
+///   raised the panic is local source, not downloaded or in the
+///   toolchain, the crate of the frame that called the constructor, or
+///   that panicked.
+fn application_crates(frames: &[Frame], site: &str) -> Vec<String> {
+    let mut crates: Vec<String> = Vec::new();
+    let mut called_by_dispatch = false;
+    for frame in frames.iter().rev() {
+        let Some(owner) = owner_crate(&frame.function) else {
+            continue;
+        };
+        if is_dispatch(&frame.function) {
+            called_by_dispatch = true;
+            continue;
+        }
+        if is_std_crate(owner) || is_async_stack_crate(owner) {
+            continue;
+        }
+        if FRAMEWORK_CRATES.contains(&owner) {
+            called_by_dispatch = false;
+            continue;
+        }
+        if called_by_dispatch && !crates.iter().any(|known| known == owner) {
+            crates.push(owner.to_string());
+        }
+        called_by_dispatch = false;
+    }
+    if is_local_source(&site_file(site).replace('\\', "/"))
+        && let Some(owner) = creation_crate(frames)
+        && !crates.iter().any(|known| known == owner)
+    {
+        crates.push(owner.to_string());
+    }
+    crates
+}
+
+/// Whether `function` is part of the framework's request dispatch, the
+/// frames that poll the application's middleware and handlers:
+///
+/// - the middleware chain and the router (`suprnova::middleware` and
+///   `suprnova::routing`);
+/// - the body of one of the framework's own middleware
+///   (`<suprnova::.. as suprnova::middleware::Middleware>::handle`), which
+///   polls what `next` returned: the next middleware, or the handler;
+/// - the poll of a boxed `Response` future, when the name spells out its
+///   instantiation, as v0 symbol names do.
+fn is_dispatch(function: &str) -> bool {
+    let in_module = ["suprnova::middleware::", "suprnova::routing::"]
+        .iter()
+        .any(|module| {
+            function.starts_with(module)
+                || function
+                    .strip_prefix('<')
+                    .is_some_and(|qualified| qualified.starts_with(module))
+        });
+    let framework_middleware = function.contains(" as suprnova::middleware::Middleware>::")
+        && owner_crate(function).is_some_and(|owner| FRAMEWORK_CRATES.contains(&owner));
+    let response_future = function.contains(
+        "Future<Output = core::result::Result<suprnova::http::response::HttpResponse, \
+         suprnova::http::response::HttpResponse>>",
+    );
+    in_module || framework_middleware || response_future
 }
 
 /// Split the standard library's `Display` of a backtrace into frames: one
@@ -364,21 +440,50 @@ const STD_CRATES: &[&str] = &[
     "compiler_builtins",
 ];
 
-/// Suprnova's crates that an application links.
+/// The library crates of this repository, by the names their frames
+/// carry: each package's `[lib]` name, which for `suprnova-magnetar` is
+/// `magnetar`.
 const FRAMEWORK_CRATES: &[&str] = &[
     "suprnova",
     "suprnova_macros",
     "suprnova_live",
-    "suprnova_magnetar",
+    "suprnova_live_test_support",
+    "suprnova_live_macro_fixture",
+    "magnetar",
     "suprnova_web_push",
     "suprnova_payments_stripe",
     "suprnova_payments_paddle",
     "suprnova_payments_nowpayments",
 ];
 
+/// The async and HTTP stack every request runs on, besides `tokio`.
+/// Their frames are dependencies by name, wherever their source lives: a
+/// vendored, Nix or Bazel build gives them paths no rule can recognize,
+/// and every request has them on its stack. A name ending in `_` covers
+/// the crate and every crate it prefixes (`tower_` covers `tower_http`).
+const ASYNC_STACK_CRATES: &[&str] = &[
+    "hyper",
+    "hyper_",
+    "h2",
+    "http",
+    "http_body",
+    "http_body_",
+    "tower",
+    "tower_",
+    "futures",
+    "futures_",
+    "async_trait",
+    "tracing",
+    "tracing_",
+    "mio",
+    "pin_project",
+    "pin_project_",
+];
+
 /// Whose code the frame running `function`, at `location`, belongs to.
-/// `app_crate` is the crate the creation site names as the application's.
-fn classify(function: &str, location: Option<&str>, app_crate: Option<&str>) -> Origin {
+/// `app_crates` are the crates the stack names as the application's; see
+/// [`application_crates`].
+fn classify(function: &str, location: Option<&str>, app_crates: &[String]) -> Origin {
     let file = location.map(|location| location.replace('\\', "/"));
     if file.as_deref().is_some_and(is_toolchain_source) {
         return Origin::Std;
@@ -392,11 +497,13 @@ fn classify(function: &str, location: Option<&str>, app_crate: Option<&str>) -> 
         Origin::Runtime
     } else if FRAMEWORK_CRATES.contains(&owner) {
         Origin::Framework
+    } else if is_async_stack_crate(owner) {
+        Origin::Dependency
     } else {
         match file {
-            Some(file) if is_cargo_source(&file) => Origin::Dependency,
+            Some(file) if is_downloaded_source(&file) => Origin::Dependency,
             Some(_) => Origin::App,
-            None if app_crate == Some(owner) => Origin::App,
+            None if app_crates.iter().any(|app| app == owner) => Origin::App,
             None => Origin::Dependency,
         }
     }
@@ -408,6 +515,17 @@ fn is_std_crate(name: &str) -> bool {
 
 fn is_runtime_crate(name: &str) -> bool {
     name == "tokio" || name.starts_with("tokio_")
+}
+
+/// Whether `name` is `tokio` or one of [`ASYNC_STACK_CRATES`].
+fn is_async_stack_crate(name: &str) -> bool {
+    is_runtime_crate(name)
+        || ASYNC_STACK_CRATES
+            .iter()
+            .any(|family| match family.strip_suffix('_') {
+                Some(_) => name.starts_with(family),
+                None => name == *family,
+            })
 }
 
 /// The crate of the frame that created the error or raised the panic:
@@ -442,9 +560,9 @@ fn site_file(site: &str) -> &str {
 }
 
 /// Whether `file` is source the application builds itself: not part of
-/// the Rust toolchain, and not downloaded by Cargo.
+/// the Rust toolchain, and not a downloaded or vendored dependency.
 fn is_local_source(file: &str) -> bool {
-    !file.is_empty() && !is_toolchain_source(file) && !is_cargo_source(file)
+    !file.is_empty() && !is_toolchain_source(file) && !is_downloaded_source(file)
 }
 
 /// Whether `file` is part of the Rust toolchain's own sources.
@@ -452,10 +570,14 @@ fn is_toolchain_source(file: &str) -> bool {
     file.starts_with("/rustc/") || file.contains("/lib/rustlib/")
 }
 
-/// Whether `file` was downloaded by Cargo: a registry crate or a git
-/// dependency.
-fn is_cargo_source(file: &str) -> bool {
-    file.contains("/registry/src/") || file.contains("/git/checkouts/")
+/// Whether `file` is a dependency's source: a Cargo registry crate, a
+/// Cargo git checkout, or a crate copied into a `vendor` directory, as
+/// `cargo vendor` lays them out.
+fn is_downloaded_source(file: &str) -> bool {
+    file.contains("/registry/src/")
+        || file.contains("/git/checkouts/")
+        || file.starts_with("vendor/")
+        || file.contains("/vendor/")
 }
 
 /// The crate that owns `function`: the first segment of its path, or of
@@ -841,7 +963,7 @@ mod tests {
         ];
         for (function, location, origin) in cases {
             assert_eq!(
-                classify(function, location, None),
+                classify(function, location, &[]),
                 origin,
                 "{function} at {location:?}"
             );
@@ -889,12 +1011,20 @@ mod tests {
     }
 
     #[test]
-    fn without_debug_info_a_downloaded_creation_site_names_no_application_crate() {
+    fn without_debug_info_or_dispatch_a_downloaded_creation_site_names_no_application_crate() {
+        // No frame of the framework's dispatch: nothing on this stack was
+        // called by the middleware chain or the router.
+        let text = "   0: suprnova::error::frames::record_creation
+   1: <suprnova::error::FrameworkError as core::convert::From<sea_orm::error::DbErr>>::from
+   2: app::ledger::show_rows::{closure#0}
+   3: app::main::{closure#0}
+   4: tokio::runtime::park::CachedParkThread::block_on
+";
         for site in [
             "/home/dev/.cargo/registry/src/index/app-1.0.0/src/ledger.rs:41:13",
             "/rustc/48a229cea/library/core/src/convert/mod.rs:767:9",
         ] {
-            let resolved = resolve_text(NO_DEBUG_INFO, site);
+            let resolved = resolve_text(text, site);
 
             assert!(
                 resolved
@@ -906,16 +1036,272 @@ mod tests {
         }
     }
 
+    /// The request stack of a handler and an app middleware, as a build
+    /// without debug info prints it, under the frames of whatever created
+    /// the error. `{inner}` is replaced with those frames.
+    const DISPATCHED: &str = "{inner}
+  20: app::ledger::list_entries::{closure#0}
+  21: <core::pin::Pin<alloc::boxed::Box<dyn core::future::future::Future<Output = core::result::Result<suprnova::http::response::HttpResponse, suprnova::http::response::HttpResponse>> + core::marker::Send>> as core::future::future::Future>::poll
+  22: <app::middleware::Audit as suprnova::middleware::Middleware>::handle::{closure#0}
+  23: <core::pin::Pin<alloc::boxed::Box<dyn core::future::future::Future<Output = ()>>> as core::future::future::Future>::poll
+  24: suprnova::middleware::into_boxed::<app::middleware::Audit>::{closure#0}::{closure#0}
+  25: <suprnova::middleware::chain::MiddlewareChain>::execute::{closure#0}::{closure#1}::{closure#0}
+  26: <suprnova::logging::request_id::RequestIdMiddleware as suprnova::middleware::Middleware>::handle::{closure#0}
+  27: <tracing::instrument::Instrumented<F> as core::future::future::Future>::poll
+  28: <suprnova::middleware::chain::MiddlewareChain>::execute::{closure#0}
+  29: <futures_util::future::future::catch_unwind::CatchUnwind<F> as core::future::future::Future>::poll
+  30: suprnova::error::report::catch_panic::<F>::{closure#0}
+  31: suprnova::server::execute_chain_safely::{closure#0}
+  32: suprnova::server::handle_request_inner::{closure#0}
+  33: <hyper::proto::h1::dispatch::Dispatcher<D, Bs, I, T>>::poll_loop
+  34: app::main::{closure#0}
+  35: tokio::runtime::park::CachedParkThread::block_on
+  36: __libc_start_main
+";
+
+    /// `DISPATCHED` under `inner`, resolved without debug info, as
+    /// `(function, origin)` pairs.
+    fn dispatched(inner: &str, site: &str) -> Vec<(String, Origin)> {
+        resolve_text(&DISPATCHED.replace("{inner}", inner), site)
+            .frames
+            .into_iter()
+            .map(|frame| (frame.function, frame.origin))
+            .collect()
+    }
+
+    fn origin_of(frames: &[(String, Origin)], function: &str) -> Origin {
+        frames
+            .iter()
+            .find(|(name, _)| name.starts_with(function))
+            .map(|(_, origin)| *origin)
+            .unwrap_or_else(|| panic!("no frame {function} in {frames:#?}"))
+    }
+
     #[test]
-    fn an_error_the_framework_creates_names_no_application_crate() {
+    fn without_debug_info_an_error_the_framework_creates_shows_the_handler() {
+        let frames = dispatched(
+            "   0: suprnova::error::frames::record_creation
+   1: <suprnova::error::FrameworkError>::database::<alloc::string::String>
+   2: <suprnova::eloquent::builder::Builder<app::models::Entry>>::get::{closure#0}::{closure#0}
+   3: <core::result::Result<T, E>>::map_err::<suprnova::error::FrameworkError, F>
+   4: <suprnova::eloquent::builder::Builder<app::models::Entry>>::get::{closure#0}",
+            "framework/src/eloquent/builder.rs:4627:26",
+        );
+
+        assert_eq!(origin_of(&frames, "app::ledger::list_entries"), Origin::App);
+        assert_eq!(
+            origin_of(&frames, "<app::middleware::Audit as"),
+            Origin::App
+        );
+        assert_eq!(
+            origin_of(&frames, "<suprnova::eloquent::builder::Builder"),
+            Origin::Framework
+        );
+        assert_eq!(origin_of(&frames, "app::main"), Origin::App);
+        assert_eq!(origin_of(&frames, "<hyper::proto"), Origin::Dependency);
+        assert_eq!(origin_of(&frames, "<tracing::"), Origin::Dependency);
+        assert_eq!(origin_of(&frames, "<futures_util::"), Origin::Dependency);
+    }
+
+    #[test]
+    fn without_debug_info_a_handler_the_frameworks_own_middleware_polls_is_shown() {
+        // Legacy symbol names, which do not spell out the boxed future's
+        // type: the handler's nearest outer frame of any crate is the
+        // framework's own middleware, which polls what `next` returned.
+        let text = "   0: suprnova::error::frames::record_creation
+   1: suprnova::error::FrameworkError::domain
+   2: suprnova::http::abort::abort
+   3: app::ledger::close::{{closure}}
+   4: <core::pin::Pin<P> as core::future::future::Future>::poll
+   5: <suprnova::logging::request_id::RequestIdMiddleware as suprnova::middleware::Middleware>::handle::{{closure}}
+   6: <core::pin::Pin<P> as core::future::future::Future>::poll
+   7: suprnova::middleware::chain::MiddlewareChain::execute::{{closure}}
+   8: suprnova::server::execute_chain_safely::{{closure}}
+   9: <hyper::proto::h1::dispatch::Dispatcher<D,Bs,I,T> as core::future::future::Future>::poll
+";
+        let resolved = resolve_text(text, "src/ledger.rs:12:5");
+
+        assert_eq!(resolved.frames[3].origin, Origin::App);
+        assert_eq!(resolved.frames[5].origin, Origin::Framework);
+        assert_eq!(resolved.frames[9].origin, Origin::Dependency);
+    }
+
+    #[test]
+    fn without_debug_info_a_handler_polled_through_a_boxed_response_future_is_shown() {
+        // v0 names spell out the boxed `Response` future the framework
+        // polls; the frame inward of it is a handler or a middleware.
         let text = "   0: suprnova::error::frames::record_creation
    1: <suprnova::error::FrameworkError>::internal::<&str>
-   2: suprnova::session::middleware::persist::{closure#0}
-   3: app::main::{closure#0}
+   2: suprnova::session::store::persist::{closure#0}
+   3: app::ledger::close::{closure#0}
+   4: <core::pin::Pin<alloc::boxed::Box<dyn core::future::future::Future<Output = core::result::Result<suprnova::http::response::HttpResponse, suprnova::http::response::HttpResponse>> + core::marker::Send>> as core::future::future::Future>::poll
+   5: <suprnova::session::middleware::SessionMiddleware as suprnova::middleware::Middleware>::handle::{closure#0}
+   6: suprnova::server::execute_chain_safely::{closure#0}
 ";
-        let resolved = resolve_text(text, "framework/src/session/middleware.rs:90:20");
+        let resolved = resolve_text(text, "framework/src/session/store.rs:90:20");
 
-        assert_eq!(resolved.frames[3].origin, Origin::Dependency);
+        assert_eq!(resolved.frames[3].origin, Origin::App);
+        assert_eq!(resolved.frames[2].origin, Origin::Framework);
+    }
+
+    #[test]
+    fn without_debug_info_a_handler_that_calls_abort_if_is_shown() {
+        let frames = dispatched(
+            "   0: suprnova::error::frames::record_creation
+   1: <suprnova::error::FrameworkError>::domain::<&str>
+   2: suprnova::http::abort::abort::<&str>
+   3: suprnova::http::abort::abort_if::<&str>",
+            "src/ledger.rs:12:5",
+        );
+
+        assert_eq!(origin_of(&frames, "app::ledger::list_entries"), Origin::App);
+        assert_eq!(
+            origin_of(&frames, "suprnova::http::abort::abort_if"),
+            Origin::Framework
+        );
+    }
+
+    #[test]
+    fn without_debug_info_a_conversion_through_map_err_shows_the_handler() {
+        // `Result::map_err` is not `#[track_caller]`: the site is in the
+        // toolchain, and only the stack names the handler.
+        let frames = dispatched(
+            "   0: suprnova::error::frames::record_creation
+   1: <suprnova::error::FrameworkError as core::convert::From<sea_orm::error::DbErr>>::from
+   2: <core::result::Result<T, E>>::map_err::<suprnova::error::FrameworkError, F>",
+            "/rustc/48a229cea/library/core/src/result.rs:860:27",
+        );
+
+        assert_eq!(origin_of(&frames, "app::ledger::list_entries"), Origin::App);
+    }
+
+    #[test]
+    fn without_debug_info_a_panic_inside_a_dependency_shows_the_handler_and_collapses_the_dependency()
+     {
+        let frames = dispatched(
+            "   0: suprnova::error::report::install_location_hook::{closure#0}::{closure#0}
+   1: std::panicking::panic_with_hook
+   2: core::panicking::panic_fmt
+   3: <str as serde_json::value::index::Index>::index_or_insert
+   4: <serde_json::value::Value as core::ops::index::IndexMut<&str>>::index_mut",
+            "/home/dev/.cargo/registry/src/index/serde_json-1.0.0/src/value/index.rs:102:18",
+        );
+
+        assert_eq!(origin_of(&frames, "app::ledger::list_entries"), Origin::App);
+        assert_eq!(
+            origin_of(&frames, "<serde_json::value::Value"),
+            Origin::Dependency
+        );
+        assert_eq!(origin_of(&frames, "<str as serde_json"), Origin::Dependency);
+    }
+
+    #[test]
+    fn without_debug_info_a_dependency_the_framework_calls_is_not_the_application() {
+        // `sea_orm`, called by the framework's Eloquent builder, is not
+        // called by the dispatch, so it stays a dependency.
+        let frames = dispatched(
+            "   0: suprnova::error::report::install_location_hook::{closure#0}::{closure#0}
+   1: core::panicking::panic_fmt
+   2: sea_orm::executor::query::QueryResult::try_get::{closure#0}
+   3: <suprnova::eloquent::builder::Builder<app::models::Entry>>::get::{closure#0}",
+            "/home/dev/.cargo/registry/src/index/sea-orm-2.0.0/src/executor/query.rs:1:1",
+        );
+
+        assert_eq!(origin_of(&frames, "sea_orm::executor"), Origin::Dependency);
+        assert_eq!(origin_of(&frames, "app::ledger::list_entries"), Origin::App);
+    }
+
+    #[test]
+    fn the_async_stack_crates_are_dependencies_whatever_their_path() {
+        for (function, location) in [
+            (
+                "<hyper::proto::h1::dispatch::Dispatcher<D, Bs, I, T>>::poll_loop",
+                "/nix/store/5x1-hyper-1.6.0/src/proto/h1/dispatch.rs:130:23",
+            ),
+            (
+                "h2::proto::connection::Connection::poll",
+                "/src/third_party/h2/src/proto/connection.rs:1:1",
+            ),
+            (
+                "http::header::map::HeaderMap::get",
+                "./vendor-free/http/src/header/map.rs:1:1",
+            ),
+            (
+                "<futures_util::future::future::catch_unwind::CatchUnwind<F> as core::future::future::Future>::poll",
+                "/work/external/futures-util/src/future/future/catch_unwind.rs:1:1",
+            ),
+            (
+                "tower::util::oneshot::Oneshot::poll",
+                "/opt/src/tower/src/util/oneshot.rs:1:1",
+            ),
+            (
+                "tracing::instrument::Instrumented::poll",
+                "/opt/src/tracing/src/instrument.rs:1:1",
+            ),
+            (
+                "async_trait::__private::Box::pin",
+                "/opt/src/async-trait/src/lib.rs:1:1",
+            ),
+            (
+                "http_body_util::combinators::BoxBody::poll_frame",
+                "/opt/src/http-body-util/src/lib.rs:1:1",
+            ),
+        ] {
+            assert_eq!(
+                classify(function, Some(location), &[]),
+                Origin::Dependency,
+                "{function} at {location}"
+            );
+        }
+        assert_eq!(
+            classify(
+                "tokio::runtime::task::harness::poll_future",
+                Some("/nix/store/5x1-tokio-1.48.0/src/runtime/task/harness.rs:1:1"),
+                &[]
+            ),
+            Origin::Runtime
+        );
+    }
+
+    #[test]
+    fn a_vendored_dependency_is_a_dependency() {
+        assert_eq!(
+            classify(
+                "serde_json::de::from_str",
+                Some("/build/app/vendor/serde_json/src/de.rs:2676:5"),
+                &[]
+            ),
+            Origin::Dependency
+        );
+        assert_eq!(
+            classify(
+                "app::ledger::post",
+                Some("/build/app/src/ledger.rs:12:5"),
+                &[]
+            ),
+            Origin::App
+        );
+    }
+
+    #[test]
+    fn every_library_crate_of_this_repository_is_the_framework() {
+        for function in [
+            "suprnova::server::serve_request",
+            "suprnova_live::render_cache::key::Key::new",
+            "magnetar::sessions::WebSessionBinding::bind",
+            "suprnova_web_push::send",
+            "suprnova_payments_stripe::webhook::verify",
+            "suprnova_payments_paddle::webhook::verify",
+            "suprnova_payments_nowpayments::webhook::verify",
+        ] {
+            for location in [None, Some("/srv/suprnova/crates/x/src/lib.rs:1:1")] {
+                assert_eq!(
+                    classify(function, location, &[]),
+                    Origin::Framework,
+                    "{function} at {location:?}"
+                );
+            }
+        }
     }
 
     #[test]

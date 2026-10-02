@@ -23,7 +23,7 @@ use sea_orm::ConnectionTrait;
 use serial_test::serial;
 
 use suprnova::testing::TestDatabase;
-use suprnova::{DB, FrameworkError, HttpResponse, Request, Router};
+use suprnova::{DB, FrameworkError, HttpResponse, Model, Request, Response, Router};
 
 use super::{BROWSER, Reply, assert_debug_page, debug_mode, get, ledger_routes};
 
@@ -49,6 +49,45 @@ fn database_routes() -> Router {
         .get("/ledger-rows", |req: Request| async move {
             show_ledger_rows(req).await.map_err(HttpResponse::from)
         })
+        .into()
+}
+
+/// A model over a table no migration creates, so every query fails
+/// inside the framework's Eloquent builder.
+#[suprnova::model(table = "ledger_entries_never_migrated")]
+pub struct LedgerEntry {
+    pub id: i64,
+    pub memo: String,
+}
+
+/// A handler whose error the framework creates: the Eloquent builder
+/// turns the database's error into a `FrameworkError`, and the handler
+/// only propagates it.
+async fn list_ledger_entries(_req: Request) -> Response {
+    let entries = LedgerEntry::query().get().await?;
+    HttpResponse::text(entries.len().to_string()).ok()
+}
+
+/// A handler that answers with `abort_if`, whose own frame sits between
+/// the error's constructor and the handler.
+async fn close_ledger(_req: Request) -> Response {
+    suprnova::abort_if(true, 500, "the ledger is closed for the night")?;
+    HttpResponse::text("open").ok()
+}
+
+/// A handler that calls a dependency function that panics: indexing a
+/// JSON number by key panics inside `serde_json`.
+async fn stamp_ledger_total(_req: Request) -> Response {
+    let mut total = serde_json::json!(42);
+    total["currency"] = serde_json::json!("EUR");
+    HttpResponse::text(total.to_string()).ok()
+}
+
+fn framework_created_routes() -> Router {
+    Router::new()
+        .get("/ledger-entries", list_ledger_entries)
+        .get("/close-ledger", close_ledger)
+        .get("/stamp-ledger-total", stamp_ledger_total)
         .into()
 }
 
@@ -166,6 +205,45 @@ async fn a_panicking_function_is_a_shown_frame() {
     let reply = get(ledger_routes(), "/ledger-index", BROWSER).await;
 
     assert_shown_frame(&reply, "read_ledger_index_page");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_handler_whose_error_the_eloquent_builder_creates_is_a_shown_frame() {
+    let _debug = debug_mode(true, &[]).await;
+    let _database = TestDatabase::sqlite_memory()
+        .await
+        .expect("an in-memory SQLite database");
+
+    let reply = get(framework_created_routes(), "/ledger-entries", BROWSER).await;
+
+    assert_shown_frame(&reply, "list_ledger_entries");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_handler_that_answers_with_abort_if_is_a_shown_frame() {
+    let _debug = debug_mode(true, &[]).await;
+
+    let reply = get(framework_created_routes(), "/close-ledger", BROWSER).await;
+
+    assert_shown_frame(&reply, "close_ledger");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_handler_whose_dependency_panics_is_a_shown_frame() {
+    let _debug = debug_mode(true, &[]).await;
+
+    let reply = get(framework_created_routes(), "/stamp-ledger-total", BROWSER).await;
+
+    assert_shown_frame(&reply, "stamp_ledger_total");
+    let shown = outside_details(&reply.body);
+    assert!(
+        !shown.contains("serde_json::"),
+        "the dependency's own frames are collapsed; page:\n{}",
+        reply.body
+    );
 }
 
 #[tokio::test]
