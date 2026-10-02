@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: chart-tokens-and-test-diagnostics
+Current: debug-error-page
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -197,6 +197,23 @@ Requirements: DATA-007, PAR-010, PAR-011
    with no literal color in its SVG, and a test's failing status assertion
    names the error that caused the 500, with both mechanisms passing on a
    committed tree.
+
+## debug-error-page
+
+Requirements: PAR-010, PAR-012, PAR-013, PAR-014, PAR-015
+
+18. debug-error-page - with debug on, a 5xx that carries an error report
+   renders a self-contained development error page for a browser or
+   Inertia request: the error chain or panic, the stack frames where the
+   error began, and the request with its secrets redacted
+   (`laravel-parity.md` PAR-012 to PAR-015, next-feature item
+   `debug-error-page`, the developer's second priority from the third
+   review); and PAR-010's last sentence holds with debug off (next-feature
+   item `par-010-names-debug-off`). Done when, with debug on, a browser
+   request to a failing handler gets the page with the error, the
+   handler's frame and the redacted request, even with no frontend build;
+   with debug off every response is unchanged; and both mechanisms pass on
+   a committed tree.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

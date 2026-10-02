@@ -151,8 +151,9 @@ port requests.
 [PAR-010] A response the framework builds from an error MUST carry that
 request's error report in process: the error and its source chain, or,
 when the panic boundary caught a panic, the panic message and its
-location. The report MUST NOT reach the response's headers or body.
-Falsifier: a handler or middleware that returns an error, or panics, yields a response without a report; a report holds an error from another request; or a report's text appears in the response's headers or body.
+location. With debug off, the report MUST NOT reach the response's
+headers or body.
+Falsifier: a handler or middleware that returns an error, or panics, yields a response without a report; a report holds an error from another request; or, with debug off, a report's text appears in the response's headers or body.
 Mechanism: `par-test-diagnostics`.
 Rationale: Laravel keeps the exceptions a test request logged in a process-wide `LoggedExceptionCollection` and `TestResponse` appends them to a failing assertion. A report carried by the response itself gives the same message without crossing between tests that run concurrently in one process. A development error page can render the same report.
 Status: Agreed 2026-10-01
@@ -165,3 +166,55 @@ Falsifier: `assert_status(200)` or `assert_ok()` on a 500 that a handler error c
 Mechanism: `par-test-diagnostics`.
 Rationale: Laravel `TestResponse::assertStatus` and the other status assertions append the request's exceptions to the failure. Building from the response also spares every test the body-collecting boilerplate `TestResponse::new` needs today.
 Status: Agreed 2026-10-01
+
+## Development error page
+
+The developer ruled on 2026-10-01 to build a development error page,
+second in priority after test diagnostics: the error chain, the useful
+stack frames and the request context, with secrets redacted, working when
+the frontend build is broken. A SQL-debugging dashboard is separate work.
+
+[PAR-012] With debug on, a response with status 500 or above that carries
+an error report (PAR-010), sent to an Inertia visit or to a request whose
+`Accept` header lists `text/html`, MUST be replaced by the development
+error page: an HTML document with the same status that shows the report's
+error chain, or the panic message and location, the stack frames (PAR-013)
+and the request context (PAR-014). For those responses the page MUST take
+the place of the app's Inertia error page. Every other response, and every
+response with debug off, MUST stay as it is today.
+Falsifier: with debug on, a browser request to a handler that returns an error gets JSON, or a page without the error's message or without the 500 status; an Inertia visit to it gets the app's Inertia error page; a request with `Accept: application/json` gets HTML; or, with debug off, a browser request gets anything but the response it got before the page existed.
+Mechanism: `par-debug-error-page`.
+Rationale: Laravel renders its exception page when `APP_DEBUG` is on and the request does not expect JSON, and the Inertia documentation keeps that page in local development, where the client shows it in its modal.
+Status: Agreed 2026-10-02
+
+[PAR-013] With debug on, the framework MUST record the stack frames at the
+place where an error first became a `FrameworkError` or an `AppError`, or
+where a panic happened, and the page MUST list them: the application's
+frames shown, and the frames of the standard library, the async runtime,
+other dependencies and the framework itself collapsed behind a count. With
+debug off, the framework MUST NOT record frames.
+Falsifier: a handler whose `?` turns a database error into a `FrameworkError` yields a page whose frames do not name that handler; a panicking handler's page does not name the function that panicked; a `std`, `tokio` or `hyper` frame is shown outside a collapsed group; or, with debug off, an error records frames.
+Mechanism: `par-debug-error-page`.
+Status: Agreed 2026-10-02
+
+[PAR-014] The page MUST show the request's method, path and query, its
+headers, the matched route pattern when there is one, and the request id.
+It MUST redact the values of the `Authorization`, `Proxy-Authorization`,
+`Cookie` and `Set-Cookie` headers; the value of any header or query
+parameter whose name contains `token`, `secret`, `password`, `key` or
+`signature`, in any letter case; and the password of any URL with
+credentials in the error chain. It MUST NOT show the request body,
+environment variables or configuration values.
+Falsifier: a request carrying `Authorization: Bearer s3cr3t`, a session cookie, `X-Api-Key: s3cr3t` and `?token=s3cr3t` yields a page containing `s3cr3t` or the cookie's value; an error whose message holds `postgres://app:hunter2@db/app` yields a page containing `hunter2`; or the page lacks the method, the path or the request id.
+Mechanism: `par-debug-error-page`.
+Status: Agreed 2026-10-02
+
+[PAR-015] The page MUST be one HTML document that requests nothing: no
+script, stylesheet, font, image or frame from any URL, and no JavaScript.
+It MUST render when the app has no frontend build or Vite manifest, and
+when Inertia or the view layer is what failed. Every value it shows MUST
+be HTML-escaped, and the response MUST carry `Cache-Control: no-store` and
+a `Content-Security-Policy` that allows no script.
+Falsifier: the page contains `<script`, `<link`, `<img`, `<iframe`, `@import` or `url(`; an error message holding `<script>alert(1)</script>` appears unescaped; an app with no frontend build or Vite manifest, or a request whose Inertia render itself fails, gets no page; or the response lacks `Cache-Control: no-store`, or a `Content-Security-Policy` that forbids script.
+Mechanism: `par-debug-error-page`.
+Status: Agreed 2026-10-02

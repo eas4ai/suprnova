@@ -100,7 +100,7 @@ rather than duplicates.
 | Component library - feedback and status | FDB | component-library-feedback.md | Draft; refines Live spec 24 |
 | Component library - data display and layout | DATA | component-library-data-display.md | Draft; refines Live spec 25; DATA-007 Agreed 2026-10-01 |
 | Sessions (concurrent requests on one session) | SESS | sessions.md | Draft; SESS-001 Agreed 2026-09-15 on escalation `form-008` |
-| Laravel parity (the developer's rulings on the parity map, one commitment at a time) | PAR | laravel-parity.md | Draft; PAR-001 to PAR-011 Agreed 2026-10-01; the full list is `feature-map/laravel/parity.jsonl` |
+| Laravel parity (the developer's rulings on the parity map, one commitment at a time) | PAR | laravel-parity.md | Draft; PAR-001 to PAR-011 Agreed 2026-10-01; PAR-012 to PAR-015 Agreed 2026-10-02; the full list is `feature-map/laravel/parity.jsonl` |
 | The manual checked against the code, and remediating what the check finds | MAN | manual-check.md | Agreed 2026-09-27 (delegated by the developer); tooling in `feature-map/`, commands in `feature-map/README.md` |
 
 Domains with no spec file yet, and the manual chapters that are their
