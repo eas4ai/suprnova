@@ -191,7 +191,9 @@ impl Middleware for InertiaErrorPageMiddleware {
                     .with_headers(carried)
                     // Last, and unconditional: the page is per-viewer
                     // where the body it replaced was not.
-                    .header("Cache-Control", ERROR_PAGE_CACHE_CONTROL),
+                    .header("Cache-Control", ERROR_PAGE_CACHE_CONTROL)
+                    // The page replaces the body, not what went wrong.
+                    .with_error_report_of(http),
             ),
             Err(e) => {
                 // The error page failing is not a reason to lose the

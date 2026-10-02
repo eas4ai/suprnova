@@ -1,26 +1,33 @@
-//! `TestResponse` - a fluent wrapper around the `(status, headers,
-//! body)` triple every HTTP-test harness in this crate already
-//! produces after driving a request through [`crate::handle_request`]
-//! (see `manual/http-tests.md`). Laravel's
+//! `TestResponse` - a fluent wrapper around the response a request
+//! driven through [`crate::handle_request`] returns (see
+//! `manual/http-tests.md`), or around a `(status, headers, body)` triple
+//! a harness already captured. Laravel's
 //! `Illuminate\Testing\TestResponse` equivalent: assertions read the
 //! same way and panic with an expected/actual excerpt on failure -
 //! this is a *testing* surface, so panicking is the contract here, the
 //! same way it is for [`crate::testing::Expect`]. Every assertion
 //! returns `&Self`, so they chain.
+//!
+//! Built with [`TestResponse::from_response`], it also keeps the
+//! response's [`ErrorReport`], and every failing assertion prints it.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
+use http_body_util::BodyExt;
 
-use crate::{Cookie, CookiePrefix, SessionStore, is_valid_session_id};
+use crate::{Cookie, CookiePrefix, ErrorReport, SessionStore, is_valid_session_id};
 
 /// A captured HTTP response, wrapped for fluent assertions. Build one
-/// with [`Self::new`] from whatever a test harness already produced.
+/// with [`Self::from_response`] from what [`crate::handle_request`]
+/// returns, or with [`Self::new`] from whatever a test harness already
+/// produced.
 pub struct TestResponse {
     status: u16,
     headers: Vec<(String, String)>,
     body: Bytes,
     session: Option<(Arc<dyn SessionStore>, String)>,
+    report: Option<ErrorReport>,
 }
 
 impl TestResponse {
@@ -46,6 +53,64 @@ impl TestResponse {
                 .collect(),
             body: body.into(),
             session: None,
+            report: None,
+        }
+    }
+
+    /// Build a `TestResponse` from the response [`crate::handle_request`]
+    /// returns, collecting its body.
+    ///
+    /// Unlike [`Self::new`], this keeps the response's [`ErrorReport`],
+    /// which lives in the response's in-process extensions and so never
+    /// survives a trip over a socket. When the framework built the
+    /// response from an error or a panic, every failing assertion then
+    /// prints what went wrong, not only the sanitized body the client
+    /// sees.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the body fails while it is collected. The framework's
+    /// own bodies cannot fail; a test-supplied body can.
+    pub async fn from_response<B>(response: hyper::Response<B>) -> Self
+    where
+        B: hyper::body::Body,
+        B::Error: std::fmt::Display,
+    {
+        let (mut parts, body) = response.into_parts();
+        let report = parts.extensions.remove::<ErrorReport>();
+        let body = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(e) => panic!("TestResponse::from_response(): collecting the body failed: {e}"),
+        };
+        let headers = parts.headers.iter().map(|(name, value)| {
+            (
+                name.as_str().to_string(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        });
+        let mut response = Self::new(parts.status.as_u16(), headers, body);
+        response.report = report;
+        response
+    }
+
+    /// The error report the response carries: the error and its source
+    /// chain, or a caught panic's message and location. `None` when the
+    /// response was not built from an error, and always `None` for a
+    /// response built with [`Self::new`].
+    pub fn error_report(&self) -> Option<&ErrorReport> {
+        self.report.as_ref()
+    }
+
+    /// Fail an assertion with `message`, followed by the error report
+    /// when the response carries one: the sanitized body alone rarely
+    /// says why a request failed.
+    fn fail(&self, message: String) -> ! {
+        match &self.report {
+            Some(report) => {
+                let report = report.to_string().replace('\n', "\n    ");
+                panic!("{message}\n  error report:\n    {report}")
+            }
+            None => panic!("{message}"),
         }
     }
 
@@ -111,21 +176,21 @@ impl TestResponse {
     /// is a test-assertion helper, so an invalid body IS the failure.
     pub fn json(&self) -> serde_json::Value {
         serde_json::from_slice(&self.body).unwrap_or_else(|e| {
-            panic!(
+            self.fail(format!(
                 "TestResponse::json(): body is not valid JSON: {e}\n  body: {}",
                 self.body_text()
-            )
+            ))
         })
     }
 
     /// Assert the exact status code.
     pub fn assert_status(&self, expected: u16) -> &Self {
         if self.status != expected {
-            panic!(
+            self.fail(format!(
                 "assert_status({expected})\n  Expected: {expected}\n  Received: {}\n  body: {}",
                 self.status,
                 self.body_text()
-            );
+            ));
         }
         self
     }
@@ -133,11 +198,11 @@ impl TestResponse {
     /// `assert_status(200)`.
     pub fn assert_ok(&self) -> &Self {
         if self.status != 200 {
-            panic!(
+            self.fail(format!(
                 "assert_ok()\n  Expected: 200\n  Received: {}\n  body: {}",
                 self.status,
                 self.body_text()
-            );
+            ));
         }
         self
     }
@@ -148,20 +213,20 @@ impl TestResponse {
     pub fn assert_redirect(&self, target: Option<&str>) -> &Self {
         let location = self.header("location");
         if !(300..400).contains(&self.status) || location.is_none() {
-            panic!(
+            self.fail(format!(
                 "assert_redirect({target:?})\n  Expected: a 3xx status with a Location header\n  \
                  Received: status {}, location {location:?}\n  body: {}",
                 self.status,
                 self.body_text()
-            );
+            ));
         }
         if let Some(expected) = target
             && location != Some(expected)
         {
-            panic!(
+            self.fail(format!(
                 "assert_redirect(Some({expected:?}))\n  Expected Location: {expected:?}\n  \
                  Received Location: {location:?}"
-            );
+            ));
         }
         self
     }
@@ -174,10 +239,10 @@ impl TestResponse {
     pub fn assert_json(&self, expected: serde_json::Value) -> &Self {
         let actual = self.json();
         if let Some(path) = json_subset_mismatch("$", &expected, &actual) {
-            panic!(
+            self.fail(format!(
                 "assert_json(...)\n  mismatch at `{path}`\n  Expected (subset): {expected}\n  \
                  Received: {actual}"
-            );
+            ));
         }
         self
     }
@@ -190,12 +255,12 @@ impl TestResponse {
         let expected = expected.into();
         let found = json_path(&root, path);
         if found != Some(&expected) {
-            panic!(
+            self.fail(format!(
                 "assert_json_path({path:?}, ...)\n  Expected: {expected}\n  Received: {}",
                 found
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "<missing>".to_string())
-            );
+            ));
         }
         self
     }
@@ -214,13 +279,13 @@ impl TestResponse {
             _ => None,
         };
         if actual_len != Some(expected) {
-            panic!(
+            self.fail(format!(
                 "assert_json_count({path:?}, {expected})\n  Expected: an array of length \
                  {expected}\n  Received: {}",
                 target
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "<missing or not an array>".to_string())
-            );
+            ));
         }
         self
     }
@@ -229,7 +294,9 @@ impl TestResponse {
     pub fn assert_see(&self, needle: &str) -> &Self {
         let body = self.body_text();
         if !body.contains(needle) {
-            panic!("assert_see({needle:?})\n  body did not contain the needle\n  body: {body}");
+            self.fail(format!(
+                "assert_see({needle:?})\n  body did not contain the needle\n  body: {body}"
+            ));
         }
         self
     }
@@ -238,10 +305,10 @@ impl TestResponse {
     pub fn assert_header(&self, name: &str, expected: &str) -> &Self {
         let actual = self.header(name);
         if actual != Some(expected) {
-            panic!(
+            self.fail(format!(
                 "assert_header({name:?}, {expected:?})\n  Expected: {expected:?}\n  \
                  Received: {actual:?}"
-            );
+            ));
         }
         self
     }
@@ -249,11 +316,11 @@ impl TestResponse {
     /// Assert a cookie named `name` was set (any `Set-Cookie` header).
     pub fn assert_cookie(&self, name: &str) -> &Self {
         if self.cookie(name).is_none() {
-            panic!(
+            self.fail(format!(
                 "assert_cookie({name:?})\n  no Set-Cookie header named {name:?}\n  Set-Cookie \
                  headers: {:?}",
                 self.headers_named("set-cookie")
-            );
+            ));
         }
         self
     }
@@ -281,45 +348,52 @@ impl TestResponse {
         expected: impl Into<serde_json::Value>,
     ) -> &Self {
         let Some((store, cookie_name)) = self.session.as_ref() else {
-            panic!(
+            self.fail(format!(
                 "assert_session_has({key:?}, ...) called without a session store - call \
                  .with_session_store(store, cookie_name) first"
-            );
+            ));
         };
         let Some(raw) = self.cookie(cookie_name) else {
-            panic!("assert_session_has({key:?}, ...): no {cookie_name:?} cookie in the response");
+            self.fail(format!(
+                "assert_session_has({key:?}, ...): no {cookie_name:?} cookie in the response"
+            ));
         };
         let plaintext = Cookie::read_encrypted_for(CookiePrefix::strip(cookie_name), &raw)
             .unwrap_or_else(|e| {
-                panic!("assert_session_has({key:?}, ...): session cookie failed to decrypt: {e}")
+                self.fail(format!(
+                    "assert_session_has({key:?}, ...): session cookie failed to decrypt: {e}"
+                ))
             });
         let Some(session_id) = plaintext
             .split('.')
             .next()
             .filter(|id| is_valid_session_id(id))
         else {
-            panic!(
+            self.fail(format!(
                 "assert_session_has({key:?}, ...): decrypted cookie payload is not a valid \
                  session id: {plaintext:?}"
-            );
+            ));
         };
-        let stored = store
-            .read(session_id)
-            .await
-            .unwrap_or_else(|e| panic!("assert_session_has({key:?}, ...): store read failed: {e}"));
+        let stored = store.read(session_id).await.unwrap_or_else(|e| {
+            self.fail(format!(
+                "assert_session_has({key:?}, ...): store read failed: {e}"
+            ))
+        });
         let Some(session_data) = stored else {
-            panic!("assert_session_has({key:?}, ...): no session row for id {session_id}");
+            self.fail(format!(
+                "assert_session_has({key:?}, ...): no session row for id {session_id}"
+            ));
         };
         let expected = expected.into();
         let actual = session_data.data.get(key);
         if actual != Some(&expected) {
-            panic!(
+            self.fail(format!(
                 "assert_session_has({key:?}, ...)\n  Expected: {expected}\n  Received: {}\n  \
                  session id: {session_id}",
                 actual
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "<missing key>".to_string())
-            );
+            ));
         }
         self
     }
@@ -341,13 +415,13 @@ impl TestResponse {
     /// isn't a valid Inertia page object.
     pub fn assert_inertia(&self) -> crate::testing::AssertableInertia {
         if self.header("x-inertia") != Some("true") {
-            panic!(
+            self.fail(format!(
                 "assert_inertia(): expected an X-Inertia response (X-Inertia: true header), \
                  got X-Inertia = {:?}. A hard navigation returns the HTML shell instead of a \
                  page object - send `X-Inertia: true` with the request, or use \
                  AssertableInertia::from_response(&http_response) directly.",
                 self.header("x-inertia")
-            );
+            ));
         }
         crate::testing::AssertableInertia::from_page(self.json())
     }

@@ -1,5 +1,5 @@
 use super::cookie::Cookie;
-use crate::error::FrameworkError;
+use crate::error::{ErrorReport, FrameworkError};
 use bytes::Bytes;
 use futures::Stream;
 use http_body_util::combinators::BoxBody;
@@ -42,6 +42,11 @@ pub struct HttpResponse {
     status: u16,
     body: Body,
     headers: Vec<(String, String)>,
+    /// What went wrong, when this response was built from an error. In
+    /// process only: [`Self::into_hyper`] moves it into the hyper
+    /// response's extensions, never into a header or the body. Boxed so a
+    /// response without one, the common case, grows by one pointer.
+    error_report: Option<Box<ErrorReport>>,
 }
 
 /// Handler return type: a `Result` whose **error** is also an
@@ -72,6 +77,7 @@ impl HttpResponse {
             status: 200,
             body: Body::Static(Bytes::new()),
             headers: Vec::new(),
+            error_report: None,
         }
     }
 
@@ -81,6 +87,7 @@ impl HttpResponse {
             status: 200,
             body: Body::Static(Bytes::from(body.into())),
             headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+            error_report: None,
         }
     }
 
@@ -90,6 +97,7 @@ impl HttpResponse {
             status: 200,
             body: Body::Static(Bytes::from(body.to_string())),
             headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+            error_report: None,
         }
     }
 
@@ -108,6 +116,7 @@ impl HttpResponse {
             status: 200,
             body: Body::Static(body),
             headers: vec![("Content-Type".to_string(), content_type.into())],
+            error_report: None,
         }
     }
 
@@ -169,6 +178,7 @@ impl HttpResponse {
                 "Content-Type".to_string(),
                 "text/html; charset=utf-8".to_string(),
             )],
+            error_report: None,
         }
     }
 
@@ -259,6 +269,7 @@ impl HttpResponse {
             status: 200,
             body: Body::Stream(BoxBody::new(stream_body)),
             headers: Vec::new(),
+            error_report: None,
         }
     }
 
@@ -326,6 +337,7 @@ impl HttpResponse {
             status: 200,
             body: Body::Static(body.into()),
             headers: vec![("Content-Type".to_string(), content_type.into())],
+            error_report: None,
         }
     }
 
@@ -348,6 +360,34 @@ impl HttpResponse {
     /// substituting a redirect, for one - has to check this first.
     pub fn is_streaming(&self) -> bool {
         matches!(self.body, Body::Stream(_))
+    }
+
+    /// The error report this response carries, when the framework built
+    /// it from an error: the error and its source chain, or a caught
+    /// panic's message and location.
+    ///
+    /// The report exists only in process. It never reaches a header or
+    /// the body, so a middleware can log or forward it without changing
+    /// what the client receives. See [`ErrorReport`].
+    pub fn error_report(&self) -> Option<&ErrorReport> {
+        self.error_report.as_deref()
+    }
+
+    /// Attach `report`, replacing any report already attached.
+    pub(crate) fn with_error_report(mut self, report: ErrorReport) -> Self {
+        self.error_report = Some(Box::new(report));
+        self
+    }
+
+    /// Keep the error report of `original`, the response this one
+    /// replaces. A middleware that rebuilds an error response - an
+    /// Inertia error page, a validation redirect - calls this so the
+    /// report survives the rebuild.
+    pub(crate) fn with_error_report_of(mut self, original: HttpResponse) -> Self {
+        if original.error_report.is_some() {
+            self.error_report = original.error_report;
+        }
+        self
     }
 
     /// Add a header to the response
@@ -588,9 +628,14 @@ impl HttpResponse {
         // fail is an internal hyper invariant violation - which would
         // be a hyper bug, not user input. Panic in that case is the
         // right move because there's no meaningful recovery.
-        builder
+        let mut response = builder
             .body(body)
-            .expect("hyper builder body must succeed after pre-validated headers + status")
+            .expect("hyper builder body must succeed after pre-validated headers + status");
+        // In-process only: extensions never reach the wire.
+        if let Some(report) = self.error_report {
+            response.extensions_mut().insert(*report);
+        }
+        response
     }
 }
 
@@ -1465,6 +1510,26 @@ impl From<RedirectRouteBuilder> for Response {
 /// framework errors as appropriate HTTP responses.
 impl From<crate::error::FrameworkError> for HttpResponse {
     fn from(err: crate::error::FrameworkError) -> HttpResponse {
+        // The report is built here, once, and only for a failure.
+        // `PrecognitionSuccess` travels as an error but answers a passing
+        // dry run with a 204, so it carries none.
+        let report = match &err {
+            crate::error::FrameworkError::PrecognitionSuccess => None,
+            failure => Some(ErrorReport::from_error(failure)),
+        };
+        let response = HttpResponse::render_framework_error(err);
+        match report {
+            Some(report) => response.with_error_report(report),
+            None => response,
+        }
+    }
+}
+
+impl HttpResponse {
+    /// Render `err` as the response the client receives: the status, the
+    /// body shape, and the headers. The error report is attached by the
+    /// `From<FrameworkError>` impl above, apart from this rendering.
+    fn render_framework_error(err: crate::error::FrameworkError) -> HttpResponse {
         // Precognition gets early-exit treatment: success → 204 with
         // headers and no body; failure → 422 with errors body and the
         // Precognition envelope. Both responses carry `Vary: Precognition`

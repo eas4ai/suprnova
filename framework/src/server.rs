@@ -1151,6 +1151,10 @@ fn into_hyper_in_scope(response: HttpResponse) -> hyper::Response<ServerBody> {
 /// request method + path for triage, and returns a 500 so the client
 /// always gets a well-formed HTTP response.
 ///
+/// The 500 carries an [`ErrorReport`](crate::ErrorReport) with the panic
+/// message and, when the panic hook recorded it, the location the panic
+/// was raised at. Like every report, it stays in process.
+///
 /// `AssertUnwindSafe` is sound here because the captured state (chain,
 /// request, handler) is internal framework data; users don't observe
 /// partially-mutated state across the await boundary.
@@ -1162,11 +1166,10 @@ async fn execute_chain_safely(
     path: &str,
     request_id: RequestId,
 ) -> HttpResponse {
-    let exec = AssertUnwindSafe(chain.execute(request, handler));
-    match exec.catch_unwind().await {
+    match crate::error::catch_panic(chain.execute(request, handler)).await {
         Ok(result) => result.unwrap_or_else(|e| e),
         Err(panic) => {
-            let msg = panic_payload_message(&panic);
+            let msg = panic_payload_message(&panic.payload);
             tracing::error!(
                 panic = %msg,
                 method = %method,
@@ -1197,6 +1200,10 @@ async fn execute_chain_safely(
                     )))
                 })
                 .header("X-Request-Id", request_id.as_str())
+                // The panic replaces the `Internal` error the conversion
+                // above reported: its message and location are what a
+                // developer needs, not the wrapper's text.
+                .with_error_report(crate::error::ErrorReport::from_panic(msg, panic.location))
         }
     }
 }
@@ -1731,6 +1738,7 @@ fn live_preparation_failed(
     );
     HttpResponse::text("Live request preparation failed")
         .status(500)
+        .with_error_report(crate::error::ErrorReport::from_error(error))
         .into_hyper()
 }
 
