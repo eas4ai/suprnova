@@ -94,6 +94,8 @@ rather than duplicates.
 | RenderCache (document cache: policy, keys, storage, coherence) | CACHE | render-cache.md | Agreed 2026-09-13; ten requirements from the audit of that day, each refining Live specs 15-18; reference: `crates/suprnova-live/docs/specs/suprnova-live/15-...` to `18-...` and `manual/render-cache.md` |
 | Live (engine, facade, browser runtime, tooling) | LIVE | live.md | Observed; reference: `crates/suprnova-live/docs/specs/suprnova-live/` (26 numbered specs, glossary, conventions, iteration contracts 001-006) and `manual/live.md` |
 | Component library - foundations (inherited by every commitment) | UI | component-library-foundations.md | Draft; refines Live spec 20 |
+| Shared Live library contract | LCT | live-library-contract.md | Agreed 2026-10-01; public structural validation, with live-library-schema.md as its schema detail |
+| Live library schema detail | LCS | live-library-schema.md | Agreed 2026-10-01; schema detail incorporated by LCT-002 through LCT-005, with no separate requirement blocks |
 | Component library - form and input | FORM | component-library-forms.md | Draft; refines Live spec 21; the first commitment with foundations |
 | Component library - navigation | NAV | component-library-navigation.md | Draft; refines Live spec 22 |
 | Component library - overlay and disclosure | OVL | component-library-overlays.md | Draft; refines Live spec 23 |

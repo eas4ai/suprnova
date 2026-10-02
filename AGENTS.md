@@ -48,3 +48,20 @@ A Consequential decision -- one with real options and a recommendation, tied to 
 ## The developer
 
 The developer is never asked to run a command. When an escalation waits, the prompt is the escalation itself in plain prose, in this order: the problem (its question and because); `ok`, what the recommendation does, naming every finding on wake's `ok closes:` line; `instead`, what it costs if the recommendation is wrong and the alternative; `ask`, if the developer does not understand or wants to discuss it further. End with `ok | instead | ask` and wait. Record the answer in the developer's own words: `sudus answer <slug> ok | instead | ask --quote "<their words>"`. Read the queue with `sudus decisions`; after the developer has read a decision with you, record it with `sudus decisions --read <id> --quote "<their words>"`. After changing `docs/spec/`, `AGENTS.md` or `.sudus/settings.json` between commitments, state what changed and what would be bound, end with `ok | instead | ask`, and on ok run `sudus authorize --quote "<their words>"`; a change request or a question is `sudus authorize instead | ask --quote "<their words>"`, which binds nothing. Never use a choice widget for these questions; the prose and `ok | instead | ask` is the prompt. After Done, open the next work with `/next-feature`.
+
+## Live library commitment boundary
+
+The `live-library-contract` commitment covers LCT-001 through LCT-006 only.
+Keep implementation within the shared Live library validator, its public Live
+boundary, supported library tooling, and required proof and regression checks.
+Do not change unrelated framework features. Runtime-template evaluation and
+changes to Live specifications 01 and 19 need a later reviewed contract.
+
+## Repository production standard
+
+Read and apply `BEST_PRACTICES.md` before planning, coding, reviewing, or
+completing implementation work. Use `.agents/skills/best-practices/SKILL.md`.
+Maintain a todo list with exactly one item in progress for multi-step work.
+Inspect existing code before edits; complete relevant verification before
+marking work done. Reread rule 13 and revise any deficient work before delivery.
+Write responses, commits, comments, and documentation in simple technical English.

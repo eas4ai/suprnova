@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: chart-tokens-and-test-diagnostics
+Current: live-library-contract
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -208,3 +208,29 @@ developer writes them in.
 Every commitment inherits the Live gate and the repository gate; a
 commitment is Done only when its mechanisms pass on a committed tree and
 its review is recorded (`sudus review`).
+
+
+## live-library-contract
+
+Requirements: LCT-001 LCT-002 LCT-003 LCT-004 LCT-005 LCT-006
+
+Deliver the public `suprnova-live-library-contract` crate, its shared golden
+corpus, a supported framework tooling adapter, and an independent public-API
+consumer probe. The crate owns schema 1 metadata validation, bounded and safe
+filesystem inspection, canonical package identity, and structured diagnostics.
+The existing legacy installer path and its edit-preservation behavior remain
+covered by regression tests.
+
+The developer chose this focused prerequisite for the Live SDK. It does not
+promote or reprioritize unrelated framework backlog or next-feature items.
+Runtime evaluation, reload, bundle admission, and catalog installation need their
+own later Live contract and proof; this foundation records those stages as skipped.
+
+Done when all six requirements have current passing evidence from real framework
+operations, each mechanism has detected its stated violating example, the legacy
+regressions and affected repository gates pass, and the Sudus review/report gates
+are complete. Unit tests of the observers alone do not satisfy this delivery.
+
+The work uses the isolated Live worktree and a separate pull request. Merging and
+publication require separate developer direction. Final authorization binds the
+prepared contract, agreement, settings, and mechanisms before this commitment starts.
