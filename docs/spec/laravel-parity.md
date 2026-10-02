@@ -218,3 +218,28 @@ a `Content-Security-Policy` that allows no script.
 Falsifier: the page contains `<script`, `<link`, `<img`, `<iframe`, `@import` or `url(`; an error message holding `<script>alert(1)</script>` appears unescaped; an app with no frontend build or Vite manifest, or a request whose Inertia render itself fails, gets no page; or the response lacks `Cache-Control: no-store`, or a `Content-Security-Policy` that forbids script.
 Mechanism: `par-debug-error-page`.
 Status: Agreed 2026-10-02
+
+## Default disk
+
+The developer ruled on 2026-10-01 to build a default filesystem disk,
+validated at startup, third in priority.
+
+[PAR-016] The application's default disk MUST be the disk named by
+`Storage::set_default_disk`, or else by `FILESYSTEM_DISK`, and
+`Storage::default_disk()` MUST return the disk registered under that
+name. With neither set, `Storage::default_disk()` MUST return an error
+that names `FILESYSTEM_DISK`. A call that names its disk MUST behave as
+it does today.
+Falsifier: with `FILESYSTEM_DISK=uploads` and a disk registered as `uploads`, bytes written through `Storage::default_disk()` cannot be read through `Storage::disk("uploads")`; `Storage::set_default_disk("archive")` does not win over `FILESYSTEM_DISK`; with neither set, `Storage::default_disk()` returns a disk, or an error that does not name `FILESYSTEM_DISK`; or `Storage::disk(name)` answers differently with a default set.
+Mechanism: `par-default-disk`.
+Rationale: Laravel's `Storage::disk()` with no name and `Storage::put` use `filesystems.default`, which reads `FILESYSTEM_DISK`.
+Status: Agreed 2026-10-02
+
+[PAR-017] When a default disk is named, startup MUST fail if no disk is
+registered under that name once the application's bootstrap and the
+environment's disks are in place: `filesystem::bootstrap_from_env`,
+which the server and the worker commands run at boot, MUST return an
+error that names the missing disk and `FILESYSTEM_DISK`.
+Falsifier: with `FILESYSTEM_DISK=uploads` and no `uploads` disk registered, `bootstrap_from_env` returns `Ok`; its error does not name `uploads` or `FILESYSTEM_DISK`; or with `FILESYSTEM_DISK=s3` and `S3_BUCKET` set, it fails although it registered the `s3` disk itself.
+Mechanism: `par-default-disk`.
+Status: Agreed 2026-10-02

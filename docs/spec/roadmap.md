@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: debug-error-page
+Current: default-disk
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -214,6 +214,17 @@ Requirements: PAR-010, PAR-012, PAR-013, PAR-014, PAR-015
    handler's frame and the redacted request, even with no frontend build;
    with debug off every response is unchanged; and both mechanisms pass on
    a committed tree.
+
+## default-disk
+
+Requirements: PAR-016, PAR-017
+
+19. default-disk - `Storage::default_disk()` returns the disk
+   `Storage::set_default_disk` or `FILESYSTEM_DISK` names, and startup
+   fails when that disk is not registered (`laravel-parity.md` PAR-016
+   and PAR-017, next-feature item `default-disk`, the developer's third
+   priority from the third review). Done when the mechanism passes on a
+   committed tree.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
