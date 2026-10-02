@@ -160,3 +160,12 @@ async fn the_result_names_the_command() {
     let result = Process::command(["printf", "a b"]).run().await.unwrap();
     assert_eq!(result.command(), "printf a b");
 }
+
+#[tokio::test]
+#[serial]
+async fn tty_captures_nothing() {
+    let result = Process::command(["true"]).tty().run().await.unwrap();
+    assert!(result.successful());
+    assert_eq!(result.output(), "", "the terminal has the output");
+    assert_eq!(result.error_output(), "");
+}
