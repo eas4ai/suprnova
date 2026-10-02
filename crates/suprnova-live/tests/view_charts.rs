@@ -537,6 +537,35 @@ fn chart_tokens_chart_css_colors_every_chart_class_from_a_token() {
 }
 
 #[test]
+fn chart_tokens_chart_css_gives_the_chart_its_font_from_a_token() {
+    let rules = css_rules(&live_file("components/chart/chart.css"));
+    let fonts: Vec<(String, String)> = rules
+        .iter()
+        .flat_map(|(selector, body)| {
+            declarations(body)
+                .into_iter()
+                .filter(|(property, _)| property == "font-family" || property == "font")
+                .map(|(_, value)| (selector.clone(), value))
+        })
+        .collect();
+    // The figure holds the title, the SVG and the summary, so a font set on
+    // it reaches every piece of the chart's text, whatever font the
+    // document or a container around the chart sets.
+    assert!(
+        fonts
+            .iter()
+            .any(|(selector, value)| selector == ".sn-chart" && value == "var(--sn-font-sans)"),
+        "chart.css does not set font-family: var(--sn-font-sans) on .sn-chart; its font rules: {fonts:?}"
+    );
+    for (selector, value) in &fonts {
+        assert!(
+            value.starts_with("var(--sn-font-") && value.ends_with(')') && !value.contains(','),
+            "chart.css sets the font of {selector} to {value}, not a var(--sn-font-...) token"
+        );
+    }
+}
+
+#[test]
 fn chart_tokens_the_token_stylesheet_defines_the_chart_palette_for_light_and_dark() {
     let rules = css_rules(&live_file("browser/src/styles/suprnova-ui.css"));
     for (scheme, wanted) in [
