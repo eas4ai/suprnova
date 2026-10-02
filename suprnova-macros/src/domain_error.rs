@@ -218,11 +218,11 @@ pub fn domain_error_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
                 }
 
                 impl #impl_generics ::std::convert::From<#name #ty_generics> for ::suprnova::FrameworkError #where_clause {
+                    #[track_caller]
                     fn from(e: #name #ty_generics) -> Self {
-                        ::suprnova::FrameworkError::Domain {
-                            message: e.to_string(),
-                            status_code: #status_code,
-                        }
+                        // The constructor records where the error became a
+                        // `FrameworkError`, for the development error page.
+                        ::suprnova::FrameworkError::domain(e.to_string(), #status_code)
                     }
                 }
             }

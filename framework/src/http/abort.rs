@@ -34,11 +34,9 @@ use crate::error::FrameworkError;
 /// validation (same behavior as
 /// `HttpResponse::into_hyper`'s status fallback) - so callers don't
 /// need to defend against bad input here.
+#[track_caller]
 pub fn abort(status: u16, message: impl Into<String>) -> Result<(), FrameworkError> {
-    Err(FrameworkError::Domain {
-        message: message.into(),
-        status_code: status,
-    })
+    Err(FrameworkError::domain(message, status))
 }
 
 /// Return an error when `condition` is true. Mirrors Laravel's
@@ -46,6 +44,7 @@ pub fn abort(status: u16, message: impl Into<String>) -> Result<(), FrameworkErr
 ///
 /// Returns `Ok(())` when the condition is false; the caller's `?`
 /// then continues normally.
+#[track_caller]
 pub fn abort_if(
     condition: bool,
     status: u16,
@@ -60,6 +59,7 @@ pub fn abort_if(
 
 /// Return an error when `condition` is false. Mirrors Laravel's
 /// `abort_unless($condition, $code, $message)`.
+#[track_caller]
 pub fn abort_unless(
     condition: bool,
     status: u16,

@@ -3,8 +3,8 @@
 This is the day-to-day patterns guide for writing fallible code in
 Suprnova handlers, services, and middleware. For the underlying model -
 the conversion contract, the panic boundary, the 5xx sanitisation
-rule, observability hooks - read [Error Model](error-model.md). This
-chapter shows what to actually type.
+rule, the development error page, observability hooks - read
+[Error Model](error-model.md). This chapter shows what to actually type.
 
 The shape to remember:
 
@@ -253,8 +253,10 @@ if let Some(src) = err.external_source() {
 `std::error::Error::source()` hands back the shared `Arc` handle, not the wrapped error, so
 downcasting through it returns `None`. `external_source()` dereferences the handle first.
 
-The framework renders the full chain into the 5xx log line and into the `debug_message` field it
-adds when `APP_DEBUG=true`, so a wrapped error's text is never lost.
+The framework renders the full chain into the 5xx log line. When `APP_DEBUG=true`, it also shows
+the chain on the [development error page](#see-a-failure-in-the-browser) for a browser or an
+Inertia visit, and in the `debug_message` field of the JSON body for every other client, so a
+wrapped error's text is never lost.
 
 ### Preserving rate-limit hints
 
@@ -554,6 +556,52 @@ sanitised - see [Error Model](error-model.md)), the status, and the
 correlatable request id. This is Suprnova's equivalent of Laravel's
 `report()` callback on the exception handler.
 
+## See a failure in the browser
+
+With debug mode on, a route that fails with a 5xx shows the development
+error page in a browser instead of a JSON body. Debug mode is on when
+`APP_DEBUG=true`, and when `APP_DEBUG` is unset in the `local`,
+`development`, or `testing` environment.
+
+```rust
+use suprnova::{FrameworkError, HttpResponse, Request, Response};
+
+pub async fn post_invoice(_req: Request) -> Response {
+    write_ledger()?;
+    HttpResponse::text("posted").ok()
+}
+
+fn write_ledger() -> Result<(), FrameworkError> {
+    std::fs::write("storage/ledger.log", b"invoice 42\n")
+        .map_err(|e| FrameworkError::from_external_with("writing the ledger failed", e))
+}
+```
+
+When the write fails, a browser that opens the route gets a 500 page
+that shows the following:
+
+- The message `writing the ledger failed`, and the I/O error it wraps.
+- The line in `write_ledger` that created the error, and the stack
+  frames of your code that led there. The frames of the framework, the
+  async runtime, and the standard library are collapsed.
+- The request's method, path, query, headers, route pattern, and request
+  id. Credentials and secret-named values are redacted.
+
+An Inertia visit gets the same page, in place of your Inertia error
+page. `curl`, and every other client whose `Accept` header does not list
+`text/html`, still gets
+`{"message": "Internal Server Error", "request_id": "...", "debug_message": "..."}`.
+With debug off, nobody gets the page. The rules are in
+[Error Model](error-model.md#the-development-error-page).
+
+### Why Suprnova diverges
+
+Laravel's exception page also shows the request body and runs a script
+for its "copy as Markdown" button. Suprnova's page does neither. A
+request body can hold the passwords and tokens the page redacts
+everywhere else, and a page that runs no script and loads nothing still
+renders when your frontend build is what broke.
+
 ## Patterns you'll write a lot
 
 ### Parse a path parameter as a typed value
@@ -655,12 +703,13 @@ and the lookup failure to a response.
 | Duplicate-key violation → 422 | `FrameworkError::from_unique_violation(field, msg, e)` |
 | Annotate an existing error | `err.context("creating user")` |
 | Observe every 5xx | Listen for `ErrorOccurred` |
+| See a 5xx in the browser while developing | `APP_DEBUG=true`, then open the route |
 | Render errors as an Inertia page | `InertiaConfig::error_page("Error")` |
 
 ## Next
 
 - [Error Model](error-model.md) - variants, conversion contract,
-  5xx sanitisation, panic boundary
+  5xx sanitisation, panic boundary, development error page
 - [Validation](validation.md) - `#[derive(Validate)]`, form requests,
   and `after_validation`
 - [Responses](responses.md) - `HttpResponse` builders, status, headers

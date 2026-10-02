@@ -1028,6 +1028,7 @@ impl fmt::Debug for LiveDocumentError {
 impl Error for LiveDocumentError {}
 
 impl From<LiveDocumentError> for FrameworkError {
+    #[track_caller]
     fn from(_: LiveDocumentError) -> Self {
         FrameworkError::internal("Live document request was rejected")
     }
