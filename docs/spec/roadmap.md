@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: sqs-queue-driver
+Current: process-facade
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -237,6 +237,17 @@ Requirements: PAR-018, PAR-019, PAR-020
    (`laravel-parity.md` PAR-018 to PAR-020, next-feature item
    `sqs-queue-driver`). Done when the mechanism passes on a committed
    tree.
+
+## process-facade
+
+Requirements: PAR-021, PAR-022, PAR-023, PAR-024, PAR-025
+
+21. process-facade - `Process::command(args)` runs a program with its
+   arguments and no shell, captures its output, kills it with its children
+   on a timeout, an idle timeout or a drop, runs pools with bounded
+   concurrency and pipes, and fakes every process in tests
+   (`laravel-parity.md` PAR-021 to PAR-025, next-feature item
+   `process-facade`). Done when the mechanism passes on a committed tree.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

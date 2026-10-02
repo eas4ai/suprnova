@@ -299,3 +299,80 @@ Falsifier: with overflow on, a 2 MiB job is sent to SQS whole, or a pop returns 
 Mechanism: `par-sqs-queue`.
 Rationale: Laravel keeps overflow payloads in a cache store, which can evict one before its job runs; a disk keeps it until the job is done.
 Status: Agreed 2026-10-02
+
+## Process facade
+
+The developer ruled on 2026-10-01 to build a focused Process facade:
+argument-based execution, captured output, timeouts, cancellation and
+cleanup, bounded concurrency, and fakes that stop real execution in tests,
+with pipes and idle timeouts as requirements of their own. On 2026-10-02
+the developer reversed the argument-based part, so a command line run
+through the shell is built as well.
+
+[PAR-021] `Process::command(args)` MUST run the program `args[0]` with the
+remaining arguments passed to it as they are, through no shell, and
+`Process::shell(line)` MUST run `line` through the system shell (`sh -c`,
+or `cmd /C` on Windows), as Laravel runs a string command. `run` MUST
+return a result with the exit code and the full standard output and
+standard error, and a nonzero exit MUST be a result that reports failure,
+not an error; `throw` MUST turn a failed result into an error that carries
+the exit code and both outputs. `path` MUST set the working directory,
+`env` MUST add a variable to the environment the process inherits, `input`
+MUST be written to its standard input, and an output callback MUST receive
+each chunk of standard output and standard error as it arrives unless
+`quietly` is set, and `tty` MUST hand the process the terminal's standard
+input and output, capturing nothing. A program that cannot be started
+MUST be an error that names it.
+Falsifier: running `sh -c 'printf out; printf err >&2; exit 3'` does not give the output `out`, the error output `err`, exit code 3 and a failed result, or `run` returns an error for it; an argument to `Process::command` holding `; touch marker` is run by a shell, so `marker` exists; `Process::shell("printf 'b\na\n' | sort")` does not output `a\nb\n`; `path`, `env` or `input` does not reach the process; the callback misses a chunk, or is called under `quietly`; output is captured under `tty`; or a missing program gives a result, or an error that does not name it.
+Mechanism: `par-process`.
+Rationale: Laravel's `Process::run` takes a string, run through the shell, or an array, run as it is; `shell` and `command` are the two, kept apart so the shell is never reached by accident.
+Status: Agreed 2026-10-02
+
+[PAR-022] A process MUST be killed, with every process it started, when
+it runs past its `timeout` (60 seconds unless set, none after `forever`),
+and `run` MUST then return a timeout error that names the command and the
+timeout. `start` MUST return a running process with its id, whether it is
+still running, the output so far and since the last read, a way to send it
+a signal, `stop` (a terminate signal, then a kill after a grace period)
+and `wait`, which returns its result. Dropping a running process, or the
+future of `run` before it completes, MUST kill it with every process it
+started.
+Falsifier: `sh -c 'sleep 30 & sleep 30'` with a one-second timeout does not return a timeout error naming the command within five seconds, or either `sleep` is still running afterwards; a started process reports no id, reports running after it exited, or `stop` leaves it running; or after the `run` future or a started process is dropped, the process or a child of it is still running.
+Mechanism: `par-process`.
+Status: Agreed 2026-10-02
+
+[PAR-023] `idle_timeout` MUST kill a process, with every process it
+started, when it writes no output for that long, and `run` MUST then
+return an idle timeout error that names the command; a process that keeps
+writing MUST run on past the idle timeout.
+Falsifier: `sleep 30` with a one-second idle timeout does not return an idle timeout error within five seconds; or a process that prints every 200 milliseconds for three seconds is killed by a one-second idle timeout.
+Mechanism: `par-process`.
+Status: Agreed 2026-10-02
+
+[PAR-024] `Process::pool()` MUST run the processes added to it, each under
+the key it was added with or its position, and return every result under
+its key in the order added, a failure of one not stopping the others.
+With `concurrency(n)`, at most `n` MUST run at once. `Process::pipe()`
+MUST run its processes in order, each with the previous one's output as
+its input, and return the last result, or the first failed result without
+running the rest.
+Falsifier: six processes that each run one second, in a pool with concurrency 2, ever run more than two at once or finish in under three seconds; a result is missing or under another key; a failing process stops the others; or a pipe of `printf 'b\na\n'` and `sort` does not return `a\nb\n`, or a pipe whose first process fails runs the second.
+Mechanism: `par-process`.
+Status: Agreed 2026-10-02
+
+[PAR-025] `Process::fake()` MUST stop every process from running while its
+guard lives: a command matching a faked pattern (`*` matches any run of
+characters in the command line: the arguments joined by spaces, or the
+shell line as given) MUST get
+the faked result, its output, error output and exit code, and any other
+command an empty successful one, unless `prevent_stray_processes` makes it
+an error that names the command. A described fake MUST support a run that
+lasts a given number of `running` checks, and a sequence MUST answer its
+results in turn. Every faked run, start, pool and pipe MUST be recorded,
+and `assert_ran`, `assert_ran_times`, `assert_ran_in_order`,
+`assert_not_ran` and `assert_nothing_ran` MUST fail the test when the
+record does not match.
+Falsifier: with a fake installed, a command that creates a file creates it; a matching command gets another result; an unmatched command errors without `prevent_stray_processes` or runs with it; a sequence answers out of turn; a described process stops reporting running before its count; or an assertion passes on a record that does not match it.
+Mechanism: `par-process`.
+Rationale: Laravel's `Process::fake` with pattern handlers, `describe`, `sequence`, `preventStrayProcesses` and the assertions.
+Status: Agreed 2026-10-02
