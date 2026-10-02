@@ -1,0 +1,83 @@
+# Rust
+**/target/
+Cargo.lock
+
+# Node
+**/node_modules/
+**/dist/
+# The Live browser runtime's built artifacts are tracked on purpose: the
+# engine embeds them and the Live gate checks a rebuild is byte-identical.
+!crates/suprnova-live/browser/dist/
+!crates/suprnova-live/browser/dist/**
+
+# Build outputs
+/public/assets
+
+# IDE
+.idea
+.vscode
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+reference/
+# docs/ is the Cairn record: the spec set, commitments, decisions, and the
+# recon survey are tracked - Cairn is tooling under the owner's rule.
+# Planning archives (plans, design docs, reviews) are development
+# artifacts and stay out at any level, including the Live crate's.
+**/docs/superpowers/
+# Magnetar's pre-monorepo spec notes stay local, as they were under the old docs/ rule.
+/crates/suprnova-magnetar/docs/
+# Cairn's evidence history is tracked; the agent's in-progress marker is not.
+/.cairn/in-progress
+.claude/
+.codex
+.agents/
+.gitnexus
+
+# Local-only AI review notes (Grok, Opus, etc.) - working artifacts, not source
+/GROK-*.md
+/grok-*.md
+/opus*.md
+/*-grok.md
+/*-review.md
+/*-REVIEW.md
+/remediate-*.md
+
+# Planning + audit artifacts - local working notes, not source
+/.planning/
+/release-prep.md
+**/MODULE_REVIEW_NOTES.md
+**/REVIEW_DEEP_DIVE_*.md
+/FRAMEWORK-1.0-AUDIT.md
+# Remediation working docs. These enumerate findings that are still open,
+# so they stay local until the fixes ship - and they leave the tree dirty,
+# which suppresses the gate stamp and makes every push re-run the suite.
+/REMEDIATION-PLAN.md
+/REMAINING-WORK.md
+/REVIEW-FINDINGS.md
+/BENCHMARK-PLAN.md
+/PHASE1-FIXES-PLAN.md
+/BENCHMARK-SPEC.md
+
+# Per-directory CLAUDE/AGENTS guidance - AI assistant scope notes,
+# not part of the published framework surface
+CLAUDE.md
+AGENTS.md
+AGENTS.local.md
+assets/
+
+# Local dev tooling + stray artifacts - kept locally, not published
+/database.db
+/bacon.toml
+/dev.sh
+
+# Local tooling - the gate, release scripts, git hooks, and the
+# cargo-audit policy. Not published.
+/scripts/
+/.cargo/
+/.githooks/
+__pycache__/
+*.pyc
