@@ -41,6 +41,10 @@ const INVOICE_ERROR: &str = "posting the invoice failed";
 const LEDGER_ERROR: &str = "writing ledger entry 42 failed";
 const DISK_ERROR: &str = "disk /var/ledger is full";
 
+/// What the rates handler fails with. `from_external` copies it into the
+/// wrapping error, so the chain repeats it.
+const RATES_ERROR: &str = "the rates feed answered 503";
+
 /// What the ledger index handler panics with.
 const PANIC_MESSAGE: &str = "ledger index page 7 is unreadable";
 
@@ -100,6 +104,11 @@ async fn post_invoice(_req: Request) -> Response {
     text("posted")
 }
 
+/// Fails with `from_external`, whose message is its source's message.
+async fn fetch_rates(_req: Request) -> Response {
+    Err(FrameworkError::from_external(RootCause(RATES_ERROR)).into())
+}
+
 /// The line `read_ledger_index` panics on. It is recorded when the
 /// handler runs, so the location check does not depend on how this file
 /// is formatted.
@@ -135,6 +144,7 @@ async fn fail_once_both_are_in_flight(
 fn ledger_routes() -> Arc<Router> {
     let router = Router::new()
         .get("/invoice", post_invoice)
+        .get("/rates", fetch_rates)
         .get("/ledger-index", read_ledger_index)
         .get("/ledger", |_req: Request| async { text("ledger") })
         .middleware(RequireLedgerLock)
@@ -241,6 +251,15 @@ async fn a_handler_error_reports_its_source_chain() {
         positions.is_sorted(),
         "the report must read the chain outermost first; report:\n{report}"
     );
+}
+
+#[tokio::test]
+async fn a_source_that_repeats_its_error_is_reported_once() {
+    production_config();
+    let (response, _) = get(&ledger_routes(), "/rates").await;
+
+    assert_eq!(response.status(), 500);
+    assert_eq!(report_of(&response).chain(), [RATES_ERROR]);
 }
 
 #[tokio::test]

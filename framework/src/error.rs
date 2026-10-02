@@ -8,6 +8,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod report;
+
+pub use report::ErrorReport;
+pub(crate) use report::catch_panic;
+
 /// Trait for errors that can be converted to HTTP responses
 ///
 /// Implement this trait on your domain errors to customize the HTTP status code

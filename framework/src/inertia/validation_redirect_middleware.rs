@@ -81,10 +81,12 @@ impl Middleware for InertiaValidationRedirectMiddleware {
         // the only one `SessionData::pull_errors_flash` drains. The parsed
         // JSON goes straight through rather than back via the
         // `(field, message)` string-pair API, which would flatten it.
-        Redirect::to(target)
+        let redirect: Response = Redirect::to(target)
             .status(303)
             .with(format!("errors.{bag}"), errors)
-            .into()
+            .into();
+        // The redirect replaces the `422`, not what went wrong.
+        redirect.map(|redirect| redirect.with_error_report_of(http))
     }
 }
 
