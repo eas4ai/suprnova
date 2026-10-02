@@ -812,10 +812,41 @@ runs before that, and the console binary boots no driver of the environment.
 If a callback or a console command needs the disk, call
 `suprnova::filesystem::bootstrap_from_env()?` in your own bootstrap.
 
-There is no implicit default disk, and the framework does not read
-`FILESYSTEM_DISK`. Every call names the disk it uses, and each driver is a
-peer. Azure Blob and GCS disks have no environment variables: register them
-in code.
+Each driver is a peer. Azure Blob and GCS disks have no environment
+variables: register them in code.
+
+### The default disk
+
+`FILESYSTEM_DISK` names the application's default disk, and
+`Storage::default_disk()` returns it. A name set in code with
+`Storage::set_default_disk` wins over the variable, the way a disk the
+bootstrap registers wins over the one the environment describes:
+
+```rust
+use suprnova::Storage;
+
+// bootstrap.rs
+Storage::register_fs("uploads", "storage/app/uploads")?;
+Storage::set_default_disk("uploads"); // or FILESYSTEM_DISK=uploads
+
+// anywhere after boot
+Storage::default_disk()?.write("avatars/42.png", bytes).await?;
+```
+
+The boot checks the name once the bootstrap and the `s3` disk of the
+environment are in place: a default disk that names no registered disk
+stops the server with an error that names the disk and `FILESYSTEM_DISK`,
+rather than failing the first upload. With nothing named there is no
+default disk, and `Storage::default_disk()` returns an error that names
+`FILESYSTEM_DISK`. A call that names its disk, `Storage::disk("s3")`, is
+not affected.
+
+#### Why Suprnova diverges
+
+Laravel ships a `local` disk and defaults `FILESYSTEM_DISK` to it. Suprnova
+registers no disk on its own, so there is no default until you name one,
+and the default disk is reached through `Storage::default_disk()` rather
+than through `Storage::put` and the other methods on the facade.
 
 See [Configuration](configuration.md) for the wider rule on where the
 framework reads from the environment.

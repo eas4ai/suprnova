@@ -33,8 +33,7 @@ registration pattern.
   irrelevant unless `MAIL_DRIVER=ses`). Everything else is optional.
 
 Where a starter `.env` ships a key the framework never reads
-(`MAIL_FROM_ADDRESS`, `FILESYSTEM_DISK`), it's
-called out at the end of this chapter.
+(`MAIL_FROM_ADDRESS`), it's called out at the end of this chapter.
 
 ## Application
 
@@ -348,8 +347,9 @@ name `s3` is kept as it is, and the variables are not read then.
 
 Blank values count as unset. No error repeats the value of a variable.
 
-There is no default disk. Every call names the disk it uses, so `FILESYSTEM_DISK`
-is not read. The console binary boots no driver of the environment. A command
+`FILESYSTEM_DISK` names the default disk that `Storage::default_disk()` returns;
+`Storage::set_default_disk` in code wins over it. When it names a disk that is
+not registered once the bootstrap has run, boot fails. The console binary boots no driver of the environment. A command
 that uses the `s3` disk calls `suprnova::filesystem::bootstrap_from_env()` in its
 own bootstrap. To register the same configuration under a name of your own, use
 `S3Config::from_env()`. See [Filesystem](filesystem.md).
@@ -490,10 +490,9 @@ framework reads:
 
 - **Filesystem / Storage, apart from S3.** Disks are registered by name with
   `Storage::register_*` in `bootstrap()` and addressed by name at the
-  call site (`Storage::disk("public")`). There is no default disk, so
-  there is no `FILESYSTEM_DISK` env var (see "Variables the framework
-  does not read" below). The one exception is the S3-compatible `s3`
-  disk, which the `S3_*` variables configure (see **Filesystem** above and
+  call site (`Storage::disk("public")`), or reached as the default disk
+  `FILESYSTEM_DISK` names (`Storage::default_disk()`). The one exception
+  is the S3-compatible `s3` disk, which the `S3_*` variables configure (see **Filesystem** above and
   [Docker](cli-docker.md)).
 - **Broadcasting & WebSockets.** Channels are registered with the
   `ws!()` macro and `BroadcastHub` configuration in code. The driver
@@ -527,9 +526,6 @@ here so a reader searching for them isn't left wondering:
   `env_optional` if you want to keep the Laravel name, but nothing in
   `suprnova::*` does. (`MAIL_FROM_NAME` **is** read as of 0.5.9 - see the
   Mail chapter - so it's no longer listed here.)
-- `FILESYSTEM_DISK` - Laravel's default disk name. Suprnova has no
-  default disk: every call names the disk it uses
-  (`Storage::disk("s3")`).
 
 ## How values are parsed
 

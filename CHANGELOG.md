@@ -8,6 +8,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **A default disk.** `Storage::default_disk()` returns the disk
+  `Storage::set_default_disk` names in code, or else `FILESYSTEM_DISK`.
+  When the named disk is not registered once the bootstrap has run,
+  `filesystem::bootstrap_from_env` fails and the server does not boot.
+  With nothing named there is no default, and `default_disk()` returns an
+  error that names `FILESYSTEM_DISK`. Calls that name their disk are
+  unchanged.
 - **A failed request's error report reaches `TestResponse`.** A
   response the framework builds from an error carries an `ErrorReport`
   in its in-process extensions: the error and each of its sources, or,

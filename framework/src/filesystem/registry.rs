@@ -35,6 +35,26 @@ struct Disk {
 
 static REGISTRY: RwLock<Option<HashMap<String, Disk>>> = RwLock::new(None);
 
+/// The default disk named in code with `Storage::set_default_disk`. It
+/// wins over `FILESYSTEM_DISK`, the way a disk the application registers
+/// wins over the one the environment describes.
+static DEFAULT_DISK: RwLock<Option<String>> = RwLock::new(None);
+
+/// Name the default disk in code.
+pub(crate) fn set_default(name: String) {
+    *DEFAULT_DISK
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(name);
+}
+
+/// The default disk named in code, when one is.
+pub(crate) fn default_name() -> Option<String> {
+    DEFAULT_DISK
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
 /// Whether a disk is registered under `name`.
 pub(crate) fn contains(name: &str) -> bool {
     REGISTRY
@@ -119,6 +139,9 @@ pub(crate) fn reset() {
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     *guard = None;
+    *DEFAULT_DISK
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 }
 
 /// Drop a single named disk from the registry, returning whether it was
