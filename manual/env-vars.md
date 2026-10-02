@@ -343,15 +343,19 @@ name `s3` is kept as it is, and the variables are not read then.
 | `S3_ENDPOINT` | unset (AWS) | `String` | The endpoint of a service that is not AWS. |
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | unset | `String` | The access key and the secret. Set both or neither. One without the other fails boot. With neither, the driver uses the default credential chain of AWS: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, the profile, and the role of the instance. |
 | `S3_ROOT` | unset | `String` | A prefix inside the bucket that every path is under. |
+| `FILESYSTEM_DISK` | unset (no default disk) | `String` | The name of the default disk that `Storage::default_disk()` returns. `Storage::set_default_disk` in code wins over it. A name with no registered disk fails boot. |
 | `S3_PUBLIC_URL` | unset | `String` | The public base URL of the `s3` disk, which `Storage::url("s3", path)` joins with the path. It is an absolute `http` or `https` URL (`https://cdn.example.com/files`) or a path of your own host (`/storage`). A value with a user or a password, a query or a fragment, a backslash, or a `.` or `..` segment fails boot. With it unset, `Storage::url` on the `s3` disk returns an error. |
 
-Blank values count as unset. No error repeats the value of a variable.
+Blank values count as unset. No error repeats the value of a variable, except
+the disk name `FILESYSTEM_DISK` gives.
 
 `FILESYSTEM_DISK` names the default disk that `Storage::default_disk()` returns;
 `Storage::set_default_disk` in code wins over it. When it names a disk that is
-not registered once the bootstrap has run, boot fails. The console binary boots no driver of the environment. A command
-that uses the `s3` disk calls `suprnova::filesystem::bootstrap_from_env()` in its
-own bootstrap. To register the same configuration under a name of your own, use
+not registered once the bootstrap has run, boot fails. The console binary boots
+no driver of the environment. A command that uses the `s3` disk calls
+`suprnova::filesystem::bootstrap_from_env()` at the end of its own bootstrap,
+after it registers its disks, because that call checks the default disk too. To
+register the same configuration under a name of your own, use
 `S3Config::from_env()`. See [Filesystem](filesystem.md).
 
 ## Vector search

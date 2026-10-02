@@ -84,7 +84,8 @@ const URL_PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
 /// The disk is there when the server has booted its drivers. A `booted`
 /// callback runs before that, and the console binary boots no driver of
 /// the environment. An application that needs the disk in either place
-/// calls this function in its own bootstrap.
+/// calls this function in its own bootstrap, after it registers its
+/// disks and sets the default, because the check below runs here too.
 ///
 /// It then checks the default disk ([`Storage::default_disk`]): when
 /// `Storage::set_default_disk` or `FILESYSTEM_DISK` names one, a disk
@@ -121,8 +122,9 @@ fn default_disk_name(variable: &impl Fn(&str) -> Option<String>) -> Option<Strin
 fn unregistered_default_disk(name: &str) -> FrameworkError {
     FrameworkError::internal(format!(
         "the default disk '{name}' is not registered: register a disk named \
-         '{name}' in the bootstrap, or name a registered disk with \
-         FILESYSTEM_DISK or Storage::set_default_disk"
+         '{name}' in the bootstrap before filesystem::bootstrap_from_env runs, \
+         or name a registered disk with FILESYSTEM_DISK or \
+         Storage::set_default_disk"
     ))
 }
 

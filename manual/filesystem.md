@@ -810,7 +810,10 @@ if let Some(config) = S3Config::from_env()? {
 The disk exists after the server has booted its drivers. A `booted` callback
 runs before that, and the console binary boots no driver of the environment.
 If a callback or a console command needs the disk, call
-`suprnova::filesystem::bootstrap_from_env()?` in your own bootstrap.
+`suprnova::filesystem::bootstrap_from_env()?` at the end of your own
+bootstrap, after you register your disks and set the default disk: it
+checks the default disk too, so a call before the disk is registered
+fails.
 
 Each driver is a peer. Azure Blob and GCS disks have no environment
 variables: register them in code.

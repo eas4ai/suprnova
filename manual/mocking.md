@@ -133,9 +133,9 @@ never collide.
 
 ### Storage's extension trait
 
-`Storage::fake()` returns a guard *and* a default in-memory disk, but
-its assertions hang off the disk itself through the `DiskAssertExt`
-extension trait:
+`Storage::fake()` returns a guard *and* an in-memory disk named
+`"default"`, but its assertions hang off the disk itself through the
+`DiskAssertExt` extension trait:
 
 ```rust,ignore
 use suprnova::{Storage, DiskExt};
@@ -464,11 +464,16 @@ async fn invoice_upload_persists() {
 }
 ```
 
-The guard pre-registers a `"default"` in-memory disk, so trivial
+The guard pre-registers an in-memory disk named `"default"`, so trivial
 tests don't need any disk setup. Register additional disks under
 custom names with `Storage::register_memory("audit_logs")` from
-inside the test if the code under test reaches for a non-default
-disk.
+inside the test if the code under test reaches for another disk.
+
+The disk named `"default"` is not the default disk. The guard clears a
+default disk set in code, and `FILESYSTEM_DISK` stays as the environment
+has it. If the code under test calls `Storage::default_disk()`, name the
+fake disk in the test with `Storage::set_default_disk("default")`, which
+wins over `FILESYSTEM_DISK`.
 
 | Assertion                                        | Asserts…                                          |
 |--------------------------------------------------|---------------------------------------------------|

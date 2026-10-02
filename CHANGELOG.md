@@ -14,7 +14,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `filesystem::bootstrap_from_env` fails and the server does not boot.
   With nothing named there is no default, and `default_disk()` returns an
   error that names `FILESYSTEM_DISK`. Calls that name their disk are
-  unchanged.
+  unchanged. **What to check when you upgrade:** `FILESYSTEM_DISK` was not
+  read before, so an application that carries `FILESYSTEM_DISK=local` from a
+  Laravel `.env` now refuses to boot unless it registers a disk named
+  `local`: register it, or remove the variable. An application that calls
+  `filesystem::bootstrap_from_env` in its own bootstrap calls it after it
+  registers its disks and sets the default.
 - **A failed request's error report reaches `TestResponse`.** A
   response the framework builds from an error carries an `ErrorReport`
   in its in-process extensions: the error and each of its sources, or,
@@ -454,8 +459,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   configuration for a disk with a name of your own, and
   `filesystem::bootstrap_from_env()` is the function the server calls; the
   console binary boots no driver of the environment, so an application whose
-  commands use the disk calls it in its own bootstrap. There is still no
-  default disk, and `FILESYSTEM_DISK` is not read.
+  commands use the disk calls it in its own bootstrap, after it registers its
+  disks. `FILESYSTEM_DISK` names the default disk; see the entry above.
 - **`Storage::url(disk, path)` returns the public URL of a file.** Storage had
   presigned links that expire, `temporary_url` and `temporary_upload_url`, and
   nothing for a file that is meant to be public, so applications built those
