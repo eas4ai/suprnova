@@ -34,9 +34,10 @@ use suprnova::session::{
 use suprnova::testing::{AssertableInertia, TestContainer, TestResponse};
 use suprnova::ws::{OriginPolicy, WebSocketHandler, WsConfig, WsSocket};
 use suprnova::{
-    BruteForce, CacheStore, Crypt, EncryptionKey, ErrorReport, FrameworkError, InMemoryCache,
-    InertiaErrorPageMiddleware, LoginThrottleMiddleware, Middleware, MiddlewareRegistry, Next,
-    RateLimiterDriver, Request, Response, Router, ThrottleRequestsMiddleware, TimeoutMiddleware,
+    BruteForce, CacheStore, Crypt, EncryptionKey, ErrorReport, FrameworkError, HttpResponse,
+    InMemoryCache, InertiaErrorPageMiddleware, InertiaValidationRedirectMiddleware,
+    LoginThrottleMiddleware, Middleware, MiddlewareRegistry, Next, RateLimiterDriver, Request,
+    Response, Router, ThrottleRequestsMiddleware, TimeoutMiddleware, ValidationErrors,
     handle_request,
 };
 
@@ -1044,4 +1045,52 @@ async fn assertable_inertia_from_an_error_page_response_shows_the_error_report()
             "has() on an error page must show {text:?}; failure:\n{failure}"
         );
     }
+}
+
+#[tokio::test]
+async fn the_inertia_error_page_keeps_the_report_of_the_error_it_replaces() {
+    production_config();
+    let response = failed_inertia_visit().await;
+
+    assert_eq!(response.status(), 500);
+    assert_report_names(&response, &[INVOICE_ERROR, LEDGER_ERROR, DISK_ERROR]);
+}
+
+#[tokio::test]
+async fn the_inertia_validation_redirect_keeps_the_report_of_the_422_it_replaces() {
+    production_config();
+    let router: Arc<Router> = Arc::new(
+        Router::new()
+            .get("/invoices/new", |_req: Request| async {
+                let mut errors = ValidationErrors::new();
+                errors.add("amount", "The amount must be positive.");
+                let response: Response = Err(HttpResponse::from(
+                    FrameworkError::validation_errors(errors),
+                ));
+                response
+            })
+            .into(),
+    );
+    let registry = MiddlewareRegistry::new()
+        .append(SessionScope)
+        .append(InertiaValidationRedirectMiddleware::new());
+
+    let (response, _) = send(
+        &router,
+        registry,
+        "/invoices/new",
+        &[
+            ("X-Inertia", "true"),
+            ("Referer", "http://localhost/invoices/new"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response.status(),
+        303,
+        "the 422 must have become the redirect back; body: {}",
+        response.body_text()
+    );
+    assert_eq!(report_of(&response).chain(), ["Validation failed"]);
 }

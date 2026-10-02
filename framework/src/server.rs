@@ -2288,6 +2288,28 @@ mod tests {
     }
 
     #[test]
+    fn a_live_preparation_failure_carries_its_error_report() {
+        let error = crate::error::FrameworkError::from_external_with(
+            "binding the Live runtime failed",
+            std::io::Error::other("no ledger provider is registered"),
+        );
+
+        let response = live_preparation_failed(&error, "/orders/{id}", "bind");
+
+        let report = response
+            .extensions()
+            .get::<crate::error::ErrorReport>()
+            .expect("the 500 must carry the preparation error's report");
+        assert_eq!(
+            report.chain(),
+            [
+                "binding the Live runtime failed",
+                "no ledger provider is registered"
+            ]
+        );
+    }
+
+    #[test]
     fn invalid_host_returns_typed_error_not_panic() {
         let server = Server::new(Router::new()).host("not-a-valid-host");
         let result = server.get_addr();
