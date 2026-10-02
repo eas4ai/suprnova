@@ -31,12 +31,13 @@ use suprnova::rate_limit::{BackendErrorPolicy, RateLimitMiddleware, SlidingWindo
 use suprnova::session::{
     SessionBlock, SessionConfig, SessionData, SessionMiddleware, SessionStore,
 };
-use suprnova::testing::{TestContainer, TestResponse};
+use suprnova::testing::{AssertableInertia, TestContainer, TestResponse};
 use suprnova::ws::{OriginPolicy, WebSocketHandler, WsConfig, WsSocket};
 use suprnova::{
     BruteForce, CacheStore, Crypt, EncryptionKey, ErrorReport, FrameworkError, InMemoryCache,
-    LoginThrottleMiddleware, Middleware, MiddlewareRegistry, Next, RateLimiterDriver, Request,
-    Response, Router, ThrottleRequestsMiddleware, TimeoutMiddleware, handle_request,
+    InertiaErrorPageMiddleware, LoginThrottleMiddleware, Middleware, MiddlewareRegistry, Next,
+    RateLimiterDriver, Request, Response, Router, ThrottleRequestsMiddleware, TimeoutMiddleware,
+    handle_request,
 };
 
 use crate::common::incoming_get_request;
@@ -933,4 +934,114 @@ async fn a_websocket_upgrade_middleware_panic_reports_its_message_and_location()
         "the report must name where the middleware panicked, {}:{line}; report:\n{report}",
         file!()
     );
+}
+
+// ---------------------------------------------------------------------
+// Inertia
+// ---------------------------------------------------------------------
+
+/// The page component the error page middleware renders.
+const ERROR_PAGE: &str = "Error";
+
+/// The headers of an Inertia visit.
+const INERTIA_VISIT: &[(&str, &str)] = &[("X-Inertia", "true")];
+
+/// Stands in for `SessionMiddleware`: the Inertia error page and the
+/// validation redirect read and write the session, so they run inside a
+/// session scope as they do in an app. A fresh slot per request keeps the
+/// tests independent.
+struct SessionScope;
+
+#[async_trait]
+impl Middleware for SessionScope {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let slot = suprnova::session::new_session_slot_for_test();
+        suprnova::session::session_scope_for_test(slot, next(request)).await
+    }
+}
+
+/// `/posts` fails the way `/invoice` does, behind the Inertia error page.
+fn inertia_routes() -> Arc<Router> {
+    Arc::new(
+        Router::new()
+            .get("/posts", post_invoice)
+            .middleware(InertiaErrorPageMiddleware::new(ERROR_PAGE))
+            .into(),
+    )
+}
+
+/// An Inertia visit to `/posts`, which comes back as the error page.
+async fn failed_inertia_visit() -> TestResponse {
+    let (response, _) = send(
+        &inertia_routes(),
+        MiddlewareRegistry::new().append(SessionScope),
+        "/posts",
+        INERTIA_VISIT,
+    )
+    .await;
+    assert_eq!(
+        response.header("x-inertia"),
+        Some("true"),
+        "the 500 must have become the Inertia error page; body: {}",
+        response.body_text()
+    );
+    response
+}
+
+#[tokio::test]
+async fn assert_inertia_on_an_error_page_shows_the_error_report() {
+    production_config();
+    let response = failed_inertia_visit().await;
+
+    let failure = failure_of(|| {
+        response.assert_inertia().component("Posts/Index");
+    });
+    for text in [
+        "AssertableInertia::component",
+        SECTION,
+        INVOICE_ERROR,
+        LEDGER_ERROR,
+        DISK_ERROR,
+    ] {
+        assert!(
+            failure.contains(text),
+            "component() on an error page must show {text:?}; failure:\n{failure}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn assertable_inertia_from_an_error_page_response_shows_the_error_report() {
+    production_config();
+    let request = Request::new(incoming_get_request("/posts", INERTIA_VISIT).await);
+    let next: Next = Arc::new(|request| Box::pin(post_invoice(request)));
+    let rendered = suprnova::session::session_scope_for_test(
+        suprnova::session::new_session_slot_for_test(),
+        InertiaErrorPageMiddleware::new(ERROR_PAGE).handle(request, next),
+    )
+    .await;
+    let Err(page) = rendered else {
+        panic!("the error page must keep the failed request's Err side");
+    };
+    assert_eq!(
+        page.header_value("X-Inertia"),
+        Some("true"),
+        "the 500 must have become the Inertia error page"
+    );
+
+    let failure = failure_of(|| {
+        AssertableInertia::from_response(&page).has("posts");
+    });
+    for text in [
+        "AssertableInertia::has",
+        SECTION,
+        INVOICE_ERROR,
+        LEDGER_ERROR,
+        DISK_ERROR,
+    ] {
+        assert!(
+            failure.contains(text),
+            "has() on an error page must show {text:?}; failure:\n{failure}"
+        );
+    }
 }

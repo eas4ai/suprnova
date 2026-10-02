@@ -45,7 +45,8 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
-use crate::HttpResponse;
+use super::response::fail_with_report;
+use crate::{ErrorReport, HttpResponse};
 
 /// Closure that replays a [`ReloadRequest`] and returns the reloaded
 /// page's assertions. See the module docs for why this is a
@@ -68,6 +69,11 @@ type Reloader = Arc<
 /// methods are bare the same way. The contract doesn't change with the
 /// name: every method here still panics on failure exactly like its
 /// `assert_*`-prefixed siblings.
+///
+/// Built from a response that carries an
+/// [`ErrorReport`] - an Inertia error page that replaced a failed
+/// request's `500`, most often - every failing assertion ends with that
+/// report, the same way [`crate::testing::TestResponse`]'s do.
 pub struct AssertableInertia {
     component: String,
     url: String,
@@ -76,6 +82,7 @@ pub struct AssertableInertia {
     flash: Value,
     deferred_props: Map<String, Value>,
     reload: Option<Reloader>,
+    report: Option<ErrorReport>,
 }
 
 impl AssertableInertia {
@@ -98,56 +105,79 @@ impl AssertableInertia {
     /// the page-object builder omits them rather than emitting `false`
     /// (`framework/src/inertia/response.rs` `build_page_object`).
     pub fn from_response(response: &HttpResponse) -> Self {
+        let report = response.error_report().cloned();
         let page = if response.header_value("X-Inertia").is_some() {
             serde_json::from_slice(response.body()).unwrap_or_else(|e| {
-                panic!(
-                    "AssertableInertia::from_response(...): X-Inertia response body is not \
-                     valid JSON: {e}"
+                fail_with_report(
+                    format!(
+                        "AssertableInertia::from_response(...): X-Inertia response body is \
+                         not valid JSON: {e}"
+                    ),
+                    report.as_ref(),
                 )
             })
         } else {
             let html = String::from_utf8_lossy(response.body());
             match page_object_from_html(&html) {
                 Some(Ok(page)) => page,
-                Some(Err(e)) => panic!(
-                    "AssertableInertia::from_response(...): found the <script \
-                     type=\"application/json\" data-page=\"app\"> element, but its content is \
-                     not valid JSON: {e}"
+                Some(Err(e)) => fail_with_report(
+                    format!(
+                        "AssertableInertia::from_response(...): found the <script \
+                         type=\"application/json\" data-page=\"app\"> element, but its content \
+                         is not valid JSON: {e}"
+                    ),
+                    report.as_ref(),
                 ),
-                None => panic!(
+                None => fail_with_report(
                     "AssertableInertia::from_response(...): no Inertia page object found - no \
                      X-Inertia header and no <script type=\"application/json\" \
                      data-page=\"app\"> element in the body"
+                        .to_string(),
+                    report.as_ref(),
                 ),
             }
         };
-        Self::from_page(page)
+        Self::from_page(page, report)
     }
 
-    /// Build directly from an already-parsed page object [`Value`].
+    /// Build directly from an already-parsed page object [`Value`] and
+    /// the error report of the response it came from.
     /// [`crate::testing::TestResponse::assert_inertia`] uses this after
     /// parsing the response body itself, so the two entry points share
     /// one validation path.
-    pub(crate) fn from_page(page: Value) -> Self {
+    pub(crate) fn from_page(page: Value, report: Option<ErrorReport>) -> Self {
+        let fail = |message: String| -> ! { fail_with_report(message, report.as_ref()) };
         let Some(obj) = page.as_object() else {
-            panic!("AssertableInertia: page object is not a JSON object: {page}");
+            fail(format!(
+                "AssertableInertia: page object is not a JSON object: {page}"
+            ));
         };
         for key in ["component", "props", "url", "version"] {
             if !obj.contains_key(key) {
-                panic!("AssertableInertia: page object is missing required key `{key}`: {page}");
+                fail(format!(
+                    "AssertableInertia: page object is missing required key `{key}`: {page}"
+                ));
             }
         }
         let component = obj["component"]
             .as_str()
-            .unwrap_or_else(|| panic!("AssertableInertia: `component` is not a string: {page}"))
+            .unwrap_or_else(|| {
+                fail(format!(
+                    "AssertableInertia: `component` is not a string: {page}"
+                ))
+            })
             .to_string();
         let url = obj["url"]
             .as_str()
-            .unwrap_or_else(|| panic!("AssertableInertia: `url` is not a string: {page}"))
+            .unwrap_or_else(|| fail(format!("AssertableInertia: `url` is not a string: {page}")))
             .to_string();
         let version = obj["version"]
             .as_str()
-            .unwrap_or_else(|| panic!("AssertableInertia: `version` is not a string: {page}"))
+            .unwrap_or_else(|| {
+                fail(format!(
+                    "AssertableInertia: `version` is not a string: {page}"
+                ))
+            })
             .to_string();
         let props = obj["props"].clone();
         let flash = obj
@@ -167,7 +197,14 @@ impl AssertableInertia {
             flash,
             deferred_props,
             reload: None,
+            report,
         }
+    }
+
+    /// Fail an assertion with `message`, followed by the error report of
+    /// the response this page came from, when it carries one.
+    fn fail(&self, message: String) -> ! {
+        fail_with_report(message, self.report.as_ref())
     }
 
     /// Attach the closure [`Self::reload_only`], [`Self::reload_except`],
@@ -185,11 +222,11 @@ impl AssertableInertia {
     /// Assert the page's component name.
     pub fn component(&self, expected: &str) -> &Self {
         if self.component != expected {
-            panic!(
+            self.fail(format!(
                 "AssertableInertia::component({expected:?})\n  Expected: {expected:?}\n  \
                  Received: {:?}",
                 self.component
-            );
+            ));
         }
         self
     }
@@ -197,11 +234,11 @@ impl AssertableInertia {
     /// Assert the page's `url`.
     pub fn url(&self, expected: &str) -> &Self {
         if self.url != expected {
-            panic!(
+            self.fail(format!(
                 "AssertableInertia::url({expected:?})\n  Expected: {expected:?}\n  Received: \
                  {:?}",
                 self.url
-            );
+            ));
         }
         self
     }
@@ -213,11 +250,11 @@ impl AssertableInertia {
     /// hasn't built a frontend.
     pub fn version(&self, expected: &str) -> &Self {
         if self.version != expected {
-            panic!(
+            self.fail(format!(
                 "AssertableInertia::version({expected:?})\n  Expected: {expected:?}\n  \
                  Received: {:?}",
                 self.version
-            );
+            ));
         }
         self
     }
@@ -233,10 +270,10 @@ impl AssertableInertia {
     /// Assert a prop exists at `path`.
     pub fn has(&self, path: &str) -> &Self {
         if dot_path(&self.props, path).is_none() {
-            panic!(
+            self.fail(format!(
                 "AssertableInertia::has({path:?})\n  prop not present\n  props: {}",
                 self.props
-            );
+            ));
         }
         self
     }
@@ -244,10 +281,10 @@ impl AssertableInertia {
     /// Assert no prop exists at `path`.
     pub fn missing(&self, path: &str) -> &Self {
         if dot_path(&self.props, path).is_some() {
-            panic!(
+            self.fail(format!(
                 "AssertableInertia::missing({path:?})\n  prop unexpectedly present\n  props: {}",
                 self.props
-            );
+            ));
         }
         self
     }
@@ -257,13 +294,13 @@ impl AssertableInertia {
         let expected = expected.into();
         let actual = dot_path(&self.props, path);
         if actual != Some(&expected) {
-            panic!(
+            self.fail(format!(
                 "AssertableInertia::where_({path:?}, ...)\n  Expected: {expected}\n  Received: \
                  {}",
                 actual
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "<missing>".to_string())
-            );
+            ));
         }
         self
     }
@@ -276,13 +313,13 @@ impl AssertableInertia {
             _ => None,
         };
         if len != Some(expected) {
-            panic!(
+            self.fail(format!(
                 "AssertableInertia::count({path:?}, {expected})\n  Expected: an array of \
                  length {expected}\n  Received: {}",
                 actual
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "<missing or not an array>".to_string())
-            );
+            ));
         }
         self
     }
@@ -293,20 +330,20 @@ impl AssertableInertia {
     pub fn has_flash<V: Into<Value>>(&self, key: &str, expected: Option<V>) -> &Self {
         let actual = dot_path(&self.flash, key);
         if actual.is_none() {
-            panic!(
+            self.fail(format!(
                 "AssertableInertia::has_flash({key:?}, ...)\n  flash key not present\n  flash: \
                  {}",
                 self.flash
-            );
+            ));
         }
         if let Some(expected) = expected {
             let expected = expected.into();
             if actual != Some(&expected) {
-                panic!(
+                self.fail(format!(
                     "AssertableInertia::has_flash({key:?}, Some(...))\n  Expected: \
                      {expected}\n  Received: {}",
                     actual.unwrap()
-                );
+                ));
             }
         }
         self
@@ -382,11 +419,11 @@ impl AssertableInertia {
         except: Option<Vec<String>>,
     ) -> AssertableInertia {
         let Some(reload) = self.reload.clone() else {
-            panic!(
+            self.fail(format!(
                 "AssertableInertia::reload_only/reload_except/load_deferred_props: no reloader \
                  attached - call `.with_reload(...)` first; see \
                  manual/http-tests.md#testing-inertia-responses"
-            );
+            ));
         };
         let request = ReloadRequest {
             url: self.url.clone(),
