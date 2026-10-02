@@ -1058,6 +1058,65 @@ async fn the_inertia_error_page_keeps_the_report_of_the_error_it_replaces() {
     assert_report_names(&response, &[INVOICE_ERROR, LEDGER_ERROR, DISK_ERROR]);
 }
 
+/// The `Accept` a browser sends on a hard navigation.
+const BROWSER_ACCEPT: &str = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+
+/// With debug off, the audiences the development error page (PAR-012)
+/// serves with debug on - a browser and an Inertia visit - get no report
+/// text either. The Inertia HTML shell writes `/` as `\/` inside its page
+/// object, so each text is also searched for in that form.
+#[tokio::test]
+async fn with_debug_off_no_report_text_reaches_the_headers_or_body_of_a_browser_or_inertia_request()
+{
+    production_config();
+    let browser: &[(&str, &str)] = &[("Accept", BROWSER_ACCEPT)];
+    let cases = [
+        (
+            "/invoice",
+            ledger_routes(),
+            MiddlewareRegistry::new(),
+            browser,
+        ),
+        (
+            "/ledger-index",
+            ledger_routes(),
+            MiddlewareRegistry::new(),
+            browser,
+        ),
+        (
+            "/posts",
+            inertia_routes(),
+            MiddlewareRegistry::new().append(SessionScope),
+            INERTIA_VISIT,
+        ),
+        (
+            "/posts",
+            inertia_routes(),
+            MiddlewareRegistry::new().append(SessionScope),
+            browser,
+        ),
+    ];
+
+    for (path, router, registry, headers) in cases {
+        let (response, wire_headers) = send(&router, registry, path, headers).await;
+
+        assert_eq!(
+            response.status(),
+            500,
+            "GET {path} with {headers:?}; body: {}",
+            response.body_text()
+        );
+        let report = report_of(&response);
+        let mut texts = vec![report.to_string()];
+        texts.extend(report.chain().iter().cloned());
+        texts.extend(report.panic_location().map(str::to_string));
+        let escaped: Vec<String> = texts.iter().map(|text| text.replace('/', "\\/")).collect();
+        texts.extend(escaped);
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        assert_off_the_wire(&response, &wire_headers, &texts);
+    }
+}
+
 #[tokio::test]
 async fn the_inertia_validation_redirect_keeps_the_report_of_the_422_it_replaces() {
     production_config();

@@ -1,7 +1,7 @@
 # Suprnova Live -- 20 Component Library Foundations
 
 Status: Normative design specification
-Last revised: 2026-10-01
+Last revised: 2026-09-14
 
 ## Scope
 
@@ -39,39 +39,6 @@ UX flow:
    supported helpers integrate into a Live or SSR view.
 2. Developer chooses custom presentation -> core Live runtime remains fully
    usable without the official styles.
-
-### Shared structural contract for third-party libraries
-
-Suprnova shall own the public `suprnova-live-library-contract` crate and its
-shared conformance corpus. The crate validates local schema 1 library packages
-without depending on the HTTP framework or internal Live engine. SDK and
-framework tooling shall use this implementation for package rules and canonical
-package identity. Application integration remains behind `suprnova::live` and
-`suprnova::view`.
-
-Acceptance criteria:
-- The public crate and supported framework tooling agree with independent golden
-  outcomes for every valid and invalid shared fixture, including diagnostic codes.
-- Closed catalog, manifest, and view-data schema rules cover duplicate JSON keys,
-  namespaces, versions, license expressions, dependencies, element declarations,
-  exact file inventory, ordered roles, payload bytes, and canonical package digests.
-- Filesystem inspection rejects traversal, links and link swaps, special files,
-  undeclared files, and missing or changed payloads without mutating the package.
-- Size, count, and nesting limits are enforced while reading. Package inspection
-  runs no package-provided code, builds, scripts, imports, or network operations.
-- Reports identify validator version, locations when available, checked and
-  skipped stages, and package identity when available. Terminal diagnostics
-  escape metadata control characters.
-- Structural acceptance does not claim runtime-template, binary, installation,
-  or rendering compatibility. Those stages require their own checks.
-- Existing legacy manifest semantics and edit-preservation tests remain valid;
-  legacy packages are not silently reclassified as schema 1 catalog releases.
-
-UX flow:
-1. A library author checks local source through the SDK or framework tooling ->
-   the shared validator reports the same structural result and diagnostic codes.
-2. Runtime or consumer checks are unavailable -> the report names those stages
-   as skipped and makes no runtime-compatibility claim.
 
 ### Tailwind CSS 4 styling contract
 
@@ -210,13 +177,6 @@ UX flow:
 - Catalog examples are executable canonical Live/SSR demonstrations.
 
 ## Decisions and revisions
-
-- 2026-10-01 -- Added the framework-owned shared structural contract for
-  third-party schema 1 library packages, with public validation and a shared
-  conformance corpus. Structural checking does not authorize runtime-template
-  evaluation or replace the existing Askama view/checker contract. Exact schema
-  and filesystem requirements are adopted through the Live library-contract
-  domain before implementation; this entry records no passing implementation.
 
 - 2026-09-14 -- Built the foundations: the token stylesheet and base layer
   (`crates/suprnova-live/browser/src/styles/suprnova-ui.css`, the `ui-styles`
