@@ -102,12 +102,16 @@ Mechanism: `par-query-helpers`.
 Rationale: Issue #128. Laravel `Builder::whereAny`, `whereAll`, `whereNone`, `orWhereIn`, `orWhereNotIn`, `orWhereRaw`, `orWhereNull`, `orWhereNotNull`, `reorder`.
 Status: Agreed 2026-10-01
 
-[PAR-007] `DB::after_commit` MUST run a callback after the outermost open
-transaction commits, at once when no transaction is open, and never when
-that transaction rolls back.
-Falsifier: the callback runs inside a transaction that rolls back, runs before the outermost commit, or does not run when no transaction is open.
+[PAR-007] `DB::after_commit` MUST run a callback after the `DB::transaction`
+around it commits, at once when no `DB::transaction` is open, and never when
+that transaction rolls back. A transaction opened with
+`DB::begin_transaction` is a handle, not ambient state: the handle MUST
+offer `tx.after_commit`, which runs a callback after `tx.commit()` and never
+after a rollback, a drop without a commit, or a rollback to a savepoint taken
+before the callback was registered.
+Falsifier: a `DB::after_commit` callback runs inside a `DB::transaction` that rolls back, runs before that transaction commits, or does not run when no transaction is open; or a `tx.after_commit` callback runs before `tx.commit()`, or after the handle rolls back, is dropped uncommitted, or rolls back to a savepoint taken before the callback.
 Mechanism: `par-after-commit`.
-Rationale: Issue #128. Laravel `DatabaseManager::afterCommit` through `ManagesTransactions::afterCommit`.
+Rationale: Issue #128. Laravel `DatabaseManager::afterCommit` through `ManagesTransactions::afterCommit`. In Laravel `DB::beginTransaction()` puts the connection itself in the transaction, so `afterCommit` waits for it; a Suprnova manual transaction is a handle only the calls naming it use, so its after-commit work names it too. The developer accepted this reading on 2026-10-01 (decision 01M3W9VVCVG5NYE2SWJVWG0QN3).
 Status: Agreed 2026-10-01
 
 [PAR-008] `inertia_response!` MUST read an optional page lookup from the

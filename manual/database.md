@@ -517,7 +517,10 @@ In Laravel, `DB::afterCommit` inside `DB::beginTransaction()` waits for
 `DB::commit()`, because the connection itself is in the transaction. A
 Suprnova manual transaction is a handle that only the calls naming it use,
 so the after-commit work that waits for it names it too:
-`tx.after_commit(callback)` rather than `DB::after_commit(callback)`.
+`tx.after_commit(callback)` rather than `DB::after_commit(callback)`. When
+you port `DB::beginTransaction()` code, change each `DB::afterCommit` in it
+to `tx.after_commit`: a `DB::after_commit` there runs at once, before the
+commit, even when the transaction then rolls back.
 
 ## Observability
 
