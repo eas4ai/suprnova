@@ -1,0 +1,75 @@
+{
+ "build_time_env": {
+  "CARGO_MANIFEST_DIR": [
+   "suprnova-macros/src/inertia.rs:275",
+   "suprnova-macros/src/redirect.rs:59"
+  ],
+  "CARGO_PKG_NAME": [
+   "suprnova-macros/src/live/live_impl.rs:488"
+  ],
+  "CARGO_PKG_VERSION": [
+   "framework/src/render_cache/config.rs:661",
+   "framework/src/telemetry/init.rs:89"
+  ],
+  "OUT_DIR": [
+   "suprnova-cli/src/commands/live_add.rs:44"
+  ]
+ },
+ "declared_but_rejected_by_binary": {
+  "app": [],
+  "console": [],
+  "suprnova": []
+ },
+ "demo_app_commands": [
+  "bench:enqueue-abort",
+  "bench:enqueue-records",
+  "bench:enqueue-sleep",
+  "bench:password-hash",
+  "bench:verify-records",
+  "bench:verify-ticks",
+  "greet"
+ ],
+ "internal_macro_keywords": {
+  "__eager / __pivot": "hidden eager-load and pivot carrier fields the model macro injects",
+  "__suprnova_live": "internal twin of #[live] used by generated code",
+  "bool (policy.rs)": "return-type classification in #[policy]",
+  "form_request / multipart / data / factory / mail / console / live / field": "the attribute names themselves",
+  "id": "default key name inside relation code generation",
+  "primitive type names (bool, i64, u64, f32, ...)": "type classification inside Data and Live codecs",
+  "self / super": "path rewriting in #[suprnova::view] field access",
+  "static": "`'static` detection in #[service]",
+  "suprnova": "crate-path detection in #[handler] parameter classification",
+  "suprnova_test": "the attribute recognising itself"
+ },
+ "not_env_vars": {
+  "APP_CLUSTER": [
+   "framework/src/broadcasting/pusher/config.rs:243"
+  ],
+  "APP_ID": [
+   "framework/src/broadcasting/pusher/config.rs:213"
+  ],
+  "ENCRYPTION_MASTER_KEY_BASE64": [
+   "framework/src/broadcasting/pusher/config.rs:246"
+  ],
+  "SCREAMING_SNAKE_CASE": [
+   "suprnova-cli/src/commands/generate_types.rs:316",
+   "suprnova-macros/src/serde_attrs.rs:33"
+  ],
+  "TIMEOUT_SECS": [
+   "framework/src/broadcasting/pusher/config.rs:253"
+  ],
+  "VEC_DISTANCE_COSINE": [
+   "framework/src/vector/mariadb.rs:152"
+  ],
+  "VEC_DISTANCE_EUCLIDEAN": [
+   "framework/src/vector/mariadb.rs:153"
+  ]
+ },
+ "rust_items_not_extracted": [
+  "private, pub(crate) and #[doc(hidden)] items (rustdoc removes them before extraction)",
+  "methods of external trait impls (Debug, Clone, Serialize, ...); the traits themselves are listed in each type's implements_external",
+  "demo application code (app/), test-support crates and fixtures"
+ ],
+ "sibling_reexports_folded_into_aliases": 299,
+ "source_rev": "e720588d"
+}
