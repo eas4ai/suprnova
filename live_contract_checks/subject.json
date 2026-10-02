@@ -1,1 +1,1 @@
-{"schema":1,"kind":"framework"}
+{"schema": 1, "kind": "observer-control", "requirement": "LCT-001", "observation": {"external_build_exit": 0, "consumer_dependencies": ["suprnova", "suprnova-live-library-contract"], "contract_dependencies": ["serde", "sha2", "suprnova-live"], "internal_imports": [], "ownership_review": {"source_identity": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "reviewed_files": ["src/main.rs"], "duplicated_rules": [], "evidence": "Synthetic control; no real source review."}}}
