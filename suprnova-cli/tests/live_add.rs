@@ -248,6 +248,86 @@ fn ui_022_a_shipped_file_installed_from_an_older_release_is_replaced() {
     );
 }
 
+/// The chart stylesheet `live:add chart` installed in 2.1.0 and 3.0.0, before
+/// the chart took its colors from the tokens (DATA-007): it has no rule for
+/// the classes the rendered SVG now carries, so every mark paints the text
+/// color.
+const CHART_CSS_BEFORE_DATA_007: &str = "@layer suprnova-ui {
+  .sn-chart {
+    display: grid;
+    gap: var(--sn-space-2);
+    margin: 0;
+  }
+
+  .sn-chart-title {
+    font-weight: var(--sn-font-weight-semibold);
+  }
+
+  .sn-chart-marks {
+    inline-size: 100%;
+    overflow-x: auto;
+  }
+
+  .sn-chart-marks svg {
+    display: block;
+    max-inline-size: 100%;
+    block-size: auto;
+  }
+
+  .sn-chart-summary {
+    margin: 0;
+    color: var(--sn-color-text-muted);
+    font-size: var(--sn-font-size-sm);
+  }
+}
+";
+
+#[test]
+fn data_007_a_chart_vendored_before_the_token_classes_takes_them_from_live_add() {
+    let project = project();
+    let root = project.path();
+    let first = add(root, &["chart"]);
+    assert!(first.status.success(), "{}", combined(&first));
+    let directory = root.join("templates/suprnova-ui/chart");
+    let stylesheet = directory.join("chart.css");
+
+    // The install an earlier release left: the older stylesheet, which its
+    // record vouches for because the application never edited it.
+    fs::write(&stylesheet, CHART_CSS_BEFORE_DATA_007).expect("older stylesheet");
+    let record_path = directory.join(".suprnova-installed.json");
+    let mut record: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&fs::read_to_string(&record_path).expect("install record"))
+            .expect("record json");
+    let digest: String = sha2::Sha256::digest(CHART_CSS_BEFORE_DATA_007.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    record.insert("chart.css".to_owned(), serde_json::Value::String(digest));
+    fs::write(&record_path, serde_json::to_vec(&record).expect("encode")).expect("record");
+
+    let upgraded = add(root, &["chart"]);
+    let report = combined(&upgraded);
+    assert!(upgraded.status.success(), "{report}");
+    assert!(
+        report.contains("chart.css") && report.contains("replaced"),
+        "{report}"
+    );
+    let css = fs::read_to_string(&stylesheet).expect("stylesheet");
+    let mut classes = vec![
+        "sn-chart-text".to_owned(),
+        "sn-chart-axis-text".to_owned(),
+        "sn-chart-axis".to_owned(),
+        "sn-chart-grid".to_owned(),
+    ];
+    classes.extend((1..=6).map(|n| format!("sn-chart-series-{n}")));
+    for class in classes {
+        assert!(
+            css.contains(&format!(".{class} {{")),
+            "the re-vendored chart.css has no .{class} rule:\n{css}"
+        );
+    }
+}
+
 #[test]
 fn ui_022_a_differing_file_no_record_vouches_for_is_kept_with_the_reason() {
     let project = project();

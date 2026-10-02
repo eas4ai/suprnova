@@ -10,8 +10,9 @@
 //! The SVG carries no color or font of its own (DATA-007). charts-rs draws
 //! each role with a sentinel color, and the renderer turns every sentinel
 //! into `currentColor` plus a class that `chart.css` colors from a `--sn-`
-//! token, so the chart follows the document's light or dark theme and its
-//! text takes the document's font.
+//! token, so the chart follows the document's light or dark theme, and the
+//! chart's text takes the `--sn-font-sans` font `chart.css` sets on the
+//! figure.
 
 use std::error::Error;
 use std::fmt;
