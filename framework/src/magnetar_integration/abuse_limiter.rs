@@ -111,11 +111,10 @@ pub(crate) async fn check_auth_abuse(
     }
 }
 
+/// Built through the constructor, not a struct literal, so the 503
+/// records its frames for the development error page.
 fn unavailable() -> FrameworkError {
-    FrameworkError::Domain {
-        message: "authentication service temporarily unavailable".to_owned(),
-        status_code: 503,
-    }
+    FrameworkError::domain("authentication service temporarily unavailable", 503)
 }
 
 /// Magnetar's [`magnetar::abuse::AbuseLimiter`] backed by the framework's
@@ -167,5 +166,30 @@ impl magnetar::abuse::AbuseLimiter for FrameworkAbuseLimiter {
             }
             Err(()) => Err(Self::backend_unavailable()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ErrorReport;
+    use crate::error::frames::record_frames;
+
+    #[tokio::test]
+    async fn an_unavailable_limiter_is_a_503_that_records_its_frames() {
+        let (status, recorded) = record_frames(true, async {
+            let error = unavailable();
+            (
+                error.status_code(),
+                ErrorReport::from_error(&error).frames().is_some(),
+            )
+        })
+        .await;
+
+        assert_eq!(status, 503);
+        assert!(
+            recorded,
+            "a 5xx the framework builds must record its frames for the development error page"
+        );
     }
 }
