@@ -9,7 +9,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub(crate) mod debug_page;
-mod frames;
+pub(crate) mod frames;
 mod report;
 
 pub use report::ErrorReport;

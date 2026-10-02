@@ -194,13 +194,15 @@ impl Response {
         } else if self.message.is_none() && self.code.is_none() && self.status.is_none() {
             Err(FrameworkError::Unauthorized)
         } else {
-            Err(FrameworkError::Domain {
-                message: self
-                    .message
+            // The constructor, not a struct literal: a policy may pick a
+            // 5xx status, and a 5xx records its frames for the development
+            // error page.
+            Err(FrameworkError::domain(
+                self.message
                     .clone()
                     .unwrap_or_else(|| "This action is unauthorized.".to_string()),
-                status_code: self.status.unwrap_or(403),
-            })
+                self.status.unwrap_or(403),
+            ))
         }
     }
 }
@@ -220,6 +222,28 @@ impl std::fmt::Display for Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_denial_with_a_5xx_status_records_its_frames() {
+        let (status, recorded) = crate::error::frames::record_frames(true, async {
+            let error = Response::deny_with_status(503, "the policy store is down")
+                .authorize()
+                .expect_err("a denial is an error");
+            (
+                error.status_code(),
+                crate::error::ErrorReport::from_error(&error)
+                    .frames()
+                    .is_some(),
+            )
+        })
+        .await;
+
+        assert_eq!(status, 503);
+        assert!(
+            recorded,
+            "a 5xx the framework builds must record its frames for the development error page"
+        );
+    }
 
     #[test]
     fn allow_and_deny_basics() {
