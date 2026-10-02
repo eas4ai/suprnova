@@ -1057,8 +1057,8 @@ struct LoadedSession {
     session: SessionData,
     /// The cookie named a row that the store does not hold.
     stale_session_cookie: bool,
-    /// The store failed to read the row that the cookie named.
-    session_read_failed: bool,
+    /// The store failed to read the row that the cookie named: how.
+    session_read_error: Option<FrameworkError>,
 }
 
 /// The facts of a request that decide, after the handler, whether its URL
@@ -1100,8 +1100,8 @@ struct PersistInput {
     session_id: String,
     /// The cookie named a row that the store does not hold.
     stale_session_cookie: bool,
-    /// The store failed to read the row that the cookie named.
-    session_read_failed: bool,
+    /// The store failed to read the row that the cookie named: how.
+    session_read_error: Option<FrameworkError>,
     /// The loaded row carried a pending second-factor challenge.
     loaded_two_factor_pending: bool,
 }
@@ -1175,7 +1175,7 @@ impl SessionMiddleware {
             session_id,
             mut session,
             stale_session_cookie,
-            session_read_failed,
+            session_read_error,
         } = self.load_session(&original_session_id).await;
 
         // Only a row actually loaded with pending 2FA state can enter the
@@ -1183,7 +1183,7 @@ impl SessionMiddleware {
         // challenge has no old persisted row to migrate.
         let loaded_two_factor_pending = original_session_id.is_some()
             && !stale_session_cookie
-            && !session_read_failed
+            && session_read_error.is_none()
             && session
                 .data
                 .get(TWO_FACTOR_PENDING_KEY)
@@ -1235,7 +1235,7 @@ impl SessionMiddleware {
         // resolution branch. A store outage deliberately leaves the proof
         // absent even though ordinary non-Live requests retain the existing
         // graceful-degradation behavior.
-        if !session_read_failed {
+        if session_read_error.is_none() {
             let session_id = session.id.as_bytes().to_vec();
             request.record_live_security_check(
                 crate::live::attestation::SecurityCheck::Session,
@@ -1303,7 +1303,7 @@ impl SessionMiddleware {
             last_touch_at,
             session_id,
             stale_session_cookie,
-            session_read_failed,
+            session_read_error,
             loaded_two_factor_pending,
         })
         .await
@@ -1320,20 +1320,19 @@ impl SessionMiddleware {
         // session, so do not issue a guaranteed database miss. Keep a clean
         // session in memory for handlers that need one; it is persisted only
         // if request handling actually mutates it.
-        let (session, stale_session_cookie, session_read_failed) = if original_session_id.is_none()
-        {
+        let (session, stale_session_cookie, session_read_error) = if original_session_id.is_none() {
             (
                 SessionData::new(session_id.clone(), generate_csrf_token()),
                 false,
-                false,
+                None,
             )
         } else {
             match self.store.read(&session_id).await {
-                Ok(Some(s)) => (s, false, false),
+                Ok(Some(s)) => (s, false, None),
                 Ok(None) => (
                     SessionData::new(generate_session_id(), generate_csrf_token()),
                     true,
-                    false,
+                    None,
                 ),
                 Err(e) => {
                     // Store read failed (outage, corruption). Degrade
@@ -1341,11 +1340,13 @@ impl SessionMiddleware {
                     // Laravel when the session row is unreadable. `warn!`, not
                     // `error!`: this fires once per request, so during an
                     // outage an error-level line would spam at request rate.
+                    // The error is kept: if the request then changes the
+                    // session, the 500 it fails closed with reports it.
                     tracing::warn!(error = %e, "session read failed; minting a fresh session");
                     (
                         SessionData::new(session_id.clone(), generate_csrf_token()),
                         false,
-                        true,
+                        Some(e),
                     )
                 }
             }
@@ -1355,7 +1356,7 @@ impl SessionMiddleware {
             session_id,
             session,
             stale_session_cookie,
-            session_read_failed,
+            session_read_error,
         }
     }
 
@@ -1862,9 +1863,8 @@ impl SessionMiddleware {
         let pending_revocations =
             std::mem::take(&mut *crate::lock::recover(pending_remember_revocations));
         for (guard_name, user_id, selector) in pending_revocations {
-            if crate::auth::Auth::revoke_remember_selector(&guard_name, &user_id, &selector)
-                .await
-                .is_err()
+            if let Err(error) =
+                crate::auth::Auth::revoke_remember_selector(&guard_name, &user_id, &selector).await
             {
                 retire_unpersisted_opaque_session(
                     magnetar_session_authority.as_ref(),
@@ -1882,7 +1882,8 @@ impl SessionMiddleware {
                 let failure = Err(crate::http::HttpResponse::text(
                     "Internal Server Error: identity transition cleanup failed",
                 )
-                .status(500));
+                .status(500)
+                .with_error_report_from(&error));
                 return ControlFlow::Break(attach_pending_cookies(failure, pending_cookies));
             }
         }
@@ -1908,7 +1909,7 @@ impl SessionMiddleware {
             last_touch_at,
             session_id,
             stale_session_cookie,
-            session_read_failed,
+            session_read_error,
             loaded_two_factor_pending,
         } = input;
         let PreviousUrlCandidate {
@@ -1944,10 +1945,17 @@ impl SessionMiddleware {
                 )
                 .await;
             }
+            // No error value reaches this point: the panic was caught by
+            // whoever called `session_mut`, and only the poisoned slot is
+            // left. The report says what that means for the request.
             let failure = Err(crate::http::HttpResponse::text(
                 "Internal Server Error: session state unavailable",
             )
-            .status(500));
+            .status(500)
+            .with_error_report_from(&FrameworkError::internal(
+                "a closure passed to session_mut panicked and the panic was caught; \
+                 the session is not stored",
+            )));
             return attach_pending_cookies(failure, pending_cookies);
         }
 
@@ -2007,7 +2015,7 @@ impl SessionMiddleware {
         let touched_at = unix_timestamp_now();
         let touch_due = original_session_id.is_some()
             && !stale_session_cookie
-            && !session_read_failed
+            && session_read_error.is_none()
             && session_touch_is_due(
                 last_touch_at,
                 touched_at,
@@ -2016,7 +2024,9 @@ impl SessionMiddleware {
         if stale_session_cookie && session.as_ref().is_some_and(|session| !session.is_dirty()) {
             pending_cookies.push(self.create_forget_session_cookie());
         }
-        if session_read_failed && session.as_ref().is_some_and(SessionData::is_dirty) {
+        if let Some(read_error) = &session_read_error
+            && session.as_ref().is_some_and(SessionData::is_dirty)
+        {
             retire_unpersisted_opaque_session(
                 magnetar_session_authority.as_ref(),
                 &pending_opaque_session,
@@ -2030,7 +2040,8 @@ impl SessionMiddleware {
             let failure = Err(crate::http::HttpResponse::text(
                 "Internal Server Error: session state unavailable",
             )
-            .status(500));
+            .status(500)
+            .with_error_report_from(read_error));
             return attach_pending_cookies(failure, pending_cookies);
         }
 
@@ -2103,7 +2114,8 @@ impl SessionMiddleware {
                         let failure = Err(crate::http::HttpResponse::text(
                             "Internal Server Error: session rotation failed",
                         )
-                        .status(500));
+                        .status(500)
+                        .with_error_report_from(&e));
                         return attach_pending_cookies(failure, pending_cookies);
                     }
                 }
@@ -2116,7 +2128,7 @@ impl SessionMiddleware {
             // authenticated session.
             let session_cookie = match self.create_session_cookie(&session.id, touched_at) {
                 Ok(cookie) => cookie,
-                Err(_) => {
+                Err(error) => {
                     if is_two_factor_promotion {
                         suppress_and_retire_uncommitted_remember(
                             &session,
@@ -2134,7 +2146,8 @@ impl SessionMiddleware {
                     let failure = Err(crate::http::HttpResponse::text(
                         "Internal Server Error: session cookie encryption failed",
                     )
-                    .status(500));
+                    .status(500)
+                    .with_error_report_from(&error));
                     return attach_pending_cookies(failure, pending_cookies);
                 }
             };
@@ -2146,7 +2159,7 @@ impl SessionMiddleware {
                     .await
                 {
                     Ok(()) => Ok(()),
-                    Err(SessionMigrationError::RolledBack(_)) => {
+                    Err(SessionMigrationError::RolledBack(error)) => {
                         suppress_and_retire_uncommitted_remember(
                             &session,
                             &self.config,
@@ -2167,10 +2180,11 @@ impl SessionMiddleware {
                         let failure = Err(crate::http::HttpResponse::text(
                             "Internal Server Error: two-factor session promotion failed",
                         )
-                        .status(500));
+                        .status(500)
+                        .with_error_report_from(&error));
                         return attach_pending_cookies(failure, pending_cookies);
                     }
-                    Err(SessionMigrationError::OutcomeUnknown(_)) => {
+                    Err(SessionMigrationError::OutcomeUnknown(error)) => {
                         suppress_and_retire_uncommitted_remember(
                             &session,
                             &self.config,
@@ -2197,7 +2211,8 @@ impl SessionMiddleware {
                         let failure = Err(crate::http::HttpResponse::text(
                             "Internal Server Error: two-factor session promotion outcome unknown",
                         )
-                        .status(500));
+                        .status(500)
+                        .with_error_report_from(&error));
                         return attach_pending_cookies(failure, pending_cookies);
                     }
                 },
@@ -2239,7 +2254,8 @@ impl SessionMiddleware {
                     let failure = Err(crate::http::HttpResponse::text(
                         "Internal Server Error: session persistence failed",
                     )
-                    .status(500));
+                    .status(500)
+                    .with_error_report_from(&e));
                     return attach_pending_cookies(failure, pending_cookies);
                 }
             };

@@ -1392,10 +1392,11 @@ async fn handle_ws_upgrade(
                         *guard = Some(req);
                         Ok(HttpResponse::text("").status(200))
                     }
-                    Err(_) => Err(HttpResponse::text(
+                    Err(error) => Err(HttpResponse::text(
                         "internal error: websocket upgrade aborted (terminator lock poisoned)",
                     )
-                    .status(500)),
+                    .status(500)
+                    .with_error_report_from(&error)),
                 }
             })
                 as std::pin::Pin<
@@ -1431,19 +1432,20 @@ async fn handle_ws_upgrade(
         // auth gate that *succeeds* had nowhere to put the identity it
         // resolved. That is why the terminator below can now capture one.
         //
-        // catch_unwind around the WS chain so a panicking middleware
-        // can't tear down the upgrading connection task. On panic we
-        // abort the upgrade with 500 - same policy as the HTTP request
-        // path (see `execute_chain_safely`).
-        let chain_response = match AssertUnwindSafe(crate::auth::request_state::scope(
+        // The panic boundary around the WS chain, so a panicking
+        // middleware can't tear down the upgrading connection task. On
+        // panic we abort the upgrade with 500 - same policy as the HTTP
+        // request path (see `execute_chain_safely`), and the same
+        // `catch_panic`, so the 500 reports the panic's message and
+        // where it was raised.
+        let chain_response = match crate::error::catch_panic(crate::auth::request_state::scope(
             chain.execute(initial_request, terminator),
         ))
-        .catch_unwind()
         .await
         {
             Ok(resp) => resp,
             Err(panic) => {
-                let msg = panic_payload_message(&panic);
+                let msg = panic_payload_message(&panic.payload);
                 tracing::error!(
                     panic = %msg,
                     route = %pattern,
@@ -1454,6 +1456,7 @@ async fn handle_ws_upgrade(
                 )
                 .status(500)
                 .header("X-Request-Id", request_id.as_str())
+                .with_error_report(crate::error::ErrorReport::from_panic(msg, panic.location))
                 .into_hyper();
             }
         };
@@ -1495,10 +1498,14 @@ async fn handle_ws_upgrade(
                     )
                     .status(500)
                     .header("X-Request-Id", request_id.as_str())
+                    .with_error_report_from(&crate::error::FrameworkError::internal(
+                        "websocket upgrade aborted: the middleware chain answered 2xx \
+                         without calling next",
+                    ))
                     .into_hyper();
                 }
             },
-            Err(_) => {
+            Err(error) => {
                 tracing::error!(
                     route = %pattern,
                     "websocket upgrade aborted: terminator lock poisoned"
@@ -1508,6 +1515,7 @@ async fn handle_ws_upgrade(
                 )
                 .status(500)
                 .header("X-Request-Id", request_id.as_str())
+                .with_error_report_from(&error)
                 .into_hyper();
             }
         }
@@ -1738,7 +1746,7 @@ fn live_preparation_failed(
     );
     HttpResponse::text("Live request preparation failed")
         .status(500)
-        .with_error_report(crate::error::ErrorReport::from_error(error))
+        .with_error_report_from(error)
         .into_hyper()
 }
 

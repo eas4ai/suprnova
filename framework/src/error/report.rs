@@ -25,10 +25,12 @@ use futures::FutureExt;
 /// What went wrong in one request: kept in process for the developer, never
 /// sent to the client.
 ///
-/// The framework attaches one to every response it builds from an error -
+/// The framework attaches one to the response it builds from a failure -
 /// a handler or middleware error converted through
-/// `From<FrameworkError> for HttpResponse`, or a panic caught by the panic
-/// boundary. Read it with
+/// `From<FrameworkError> for HttpResponse`, a panic caught by the panic
+/// boundary, or a failure one of the framework's own middleware answers
+/// with a 5xx it builds itself, such as a session store that cannot write.
+/// Read it with
 /// [`TestResponse::error_report`](crate::testing::TestResponse::error_report)
 /// in a test, or [`HttpResponse::error_report`](crate::HttpResponse::error_report)
 /// in middleware. A failing `TestResponse` assertion prints it.

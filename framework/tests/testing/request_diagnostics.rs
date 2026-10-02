@@ -24,11 +24,19 @@ use async_trait::async_trait;
 use tokio::sync::Barrier;
 
 use suprnova::config::{AppConfig, Config, Environment};
+use suprnova::http::cookie::Cookie;
 use suprnova::http::text;
-use suprnova::testing::TestResponse;
+use suprnova::middleware::into_boxed;
+use suprnova::rate_limit::{BackendErrorPolicy, RateLimitMiddleware, SlidingWindowConfig};
+use suprnova::session::{
+    SessionBlock, SessionConfig, SessionData, SessionMiddleware, SessionStore,
+};
+use suprnova::testing::{TestContainer, TestResponse};
+use suprnova::ws::{OriginPolicy, WebSocketHandler, WsConfig, WsSocket};
 use suprnova::{
-    ErrorReport, FrameworkError, Middleware, MiddlewareRegistry, Next, Request, Response, Router,
-    handle_request,
+    BruteForce, CacheStore, Crypt, EncryptionKey, ErrorReport, FrameworkError, InMemoryCache,
+    LoginThrottleMiddleware, Middleware, MiddlewareRegistry, Next, RateLimiterDriver, Request,
+    Response, Router, ThrottleRequestsMiddleware, TimeoutMiddleware, handle_request,
 };
 
 use crate::common::incoming_get_request;
@@ -171,13 +179,19 @@ fn production_config() {
 /// as it goes on the wire (`name: value`, one per line), so a test can
 /// check all of them and not only the first of each name.
 async fn get(router: &Arc<Router>, path: &str) -> (TestResponse, String) {
-    let request = incoming_get_request(path, &[]).await;
-    let response = handle_request(
-        Arc::clone(router),
-        Arc::new(MiddlewareRegistry::new()),
-        request,
-    )
-    .await;
+    send(router, MiddlewareRegistry::new(), path, &[]).await
+}
+
+/// [`get`], with global middleware and request headers of the test's
+/// choosing.
+async fn send(
+    router: &Arc<Router>,
+    registry: MiddlewareRegistry,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> (TestResponse, String) {
+    let request = incoming_get_request(path, headers).await;
+    let response = handle_request(Arc::clone(router), Arc::new(registry), request).await;
     let wire_headers = response
         .headers()
         .iter()
@@ -464,5 +478,459 @@ async fn a_successful_response_carries_no_report() {
     assert!(
         !failure.contains(SECTION),
         "a response with no report must print no report section; failure:\n{failure}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Framework middleware that answer a failure with a 5xx of their own
+// ---------------------------------------------------------------------
+//
+// These never return a `FrameworkError` for `From` to convert: each logs
+// the failure and builds its own response. The report has to be attached
+// at each of those sites, so each gets a case here.
+
+/// Fail if the report `response` carries does not name every one of
+/// `texts`.
+fn assert_report_names(response: &TestResponse, texts: &[&str]) {
+    let report = report_of(response).to_string();
+    for text in texts {
+        assert!(
+            report.contains(text),
+            "the report must name {text:?}; report:\n{report}"
+        );
+    }
+}
+
+/// The session middleware refuses to run without an encryption key.
+fn ensure_crypt() {
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INIT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
+}
+
+fn session_config() -> SessionConfig {
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    config
+}
+
+/// What [`SessionStoreOutage`] fails with.
+const SESSION_WRITE_ERROR: &str = "the sessions table is read-only";
+const SESSION_DESTROY_ERROR: &str = "deleting session row 7 timed out";
+
+/// A session store that reads every session it is asked for, signed in,
+/// and can neither write nor delete one.
+struct SessionStoreOutage;
+
+#[async_trait]
+impl SessionStore for SessionStoreOutage {
+    async fn read(&self, id: &str) -> Result<Option<SessionData>, FrameworkError> {
+        let mut session = SessionData::new(id.to_string(), "d".repeat(40));
+        session.user_id = Some("ledger-clerk".to_string());
+        session.loaded_from_store = true;
+        Ok(Some(session))
+    }
+    async fn write(&self, _session: &SessionData) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal(SESSION_WRITE_ERROR))
+    }
+    async fn destroy(&self, _id: &str) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal(SESSION_DESTROY_ERROR))
+    }
+    async fn destroy_for_user(&self, _user_id: &str) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+    async fn gc(&self) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+}
+
+/// A `Cookie` header naming a stored session, encrypted the way the
+/// session middleware reads it.
+fn session_cookie(config: &SessionConfig) -> String {
+    let id = suprnova::session::generate_session_id();
+    let cookie = Cookie::encrypted(&config.cookie_name, &id).expect("encrypt the session cookie");
+    let mut value = String::new();
+    for byte in cookie.value().bytes() {
+        match byte {
+            b'=' => value.push_str("%3D"),
+            b'+' => value.push_str("%2B"),
+            b'/' => value.push_str("%2F"),
+            _ => value.push(byte as char),
+        }
+    }
+    format!("{}={value}", config.cookie_name)
+}
+
+#[tokio::test]
+async fn a_failed_session_write_carries_the_store_error() {
+    production_config();
+    ensure_crypt();
+    let router: Arc<Router> = Arc::new(
+        Router::new()
+            .get("/sign-in", |_req: Request| async {
+                suprnova::session::set_auth_user("ledger-clerk");
+                text("signed in")
+            })
+            .middleware(SessionMiddleware::with_store(
+                session_config(),
+                Arc::new(SessionStoreOutage),
+            ))
+            .into(),
+    );
+
+    let (response, _) = get(&router, "/sign-in").await;
+
+    assert_eq!(response.status(), 500);
+    assert_report_names(&response, &[SESSION_WRITE_ERROR]);
+}
+
+#[tokio::test]
+async fn a_failed_session_rotation_carries_the_store_error() {
+    production_config();
+    ensure_crypt();
+    let config = session_config();
+    let cookie = session_cookie(&config);
+    let router: Arc<Router> = Arc::new(
+        Router::new()
+            .get("/elevate", |_req: Request| async {
+                suprnova::session::regenerate_session_id();
+                text("elevated")
+            })
+            .middleware(SessionMiddleware::with_store(
+                config,
+                Arc::new(SessionStoreOutage),
+            ))
+            .into(),
+    );
+
+    let (response, _) = send(
+        &router,
+        MiddlewareRegistry::new(),
+        "/elevate",
+        &[("Cookie", cookie.as_str())],
+    )
+    .await;
+
+    assert_eq!(response.status(), 500);
+    assert_report_names(&response, &[SESSION_DESTROY_ERROR]);
+}
+
+/// What [`CacheOutage`] fails with.
+const CACHE_READ_ERROR: &str = "the cache replica at 10.0.0.7 refused the read";
+const CACHE_LOCK_ERROR: &str = "the cache lock script was evicted";
+
+/// A cache whose counters work and whose reads and locks fail: enough
+/// for a throttle to count a hit and then fail to say when to retry.
+struct CacheOutage(InMemoryCache);
+
+#[async_trait]
+impl CacheStore for CacheOutage {
+    async fn get_raw(&self, _key: &str) -> Result<Option<String>, FrameworkError> {
+        Err(FrameworkError::internal(CACHE_READ_ERROR))
+    }
+    async fn put_raw(
+        &self,
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<(), FrameworkError> {
+        self.0.put_raw(key, value, ttl).await
+    }
+    async fn add_raw(
+        &self,
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<bool, FrameworkError> {
+        self.0.add_raw(key, value, ttl).await
+    }
+    async fn has(&self, key: &str) -> Result<bool, FrameworkError> {
+        self.0.has(key).await
+    }
+    async fn forget(&self, key: &str) -> Result<bool, FrameworkError> {
+        self.0.forget(key).await
+    }
+    async fn flush(&self) -> Result<(), FrameworkError> {
+        self.0.flush().await
+    }
+    async fn increment(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+        self.0.increment(key, amount).await
+    }
+    async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+        self.0.decrement(key, amount).await
+    }
+    async fn tagged_put_raw(
+        &self,
+        tags: &[&str],
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<(), FrameworkError> {
+        self.0.tagged_put_raw(tags, key, value, ttl).await
+    }
+    async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError> {
+        self.0.flush_tags(tags).await
+    }
+    async fn acquire_lock(
+        &self,
+        _key: &str,
+        _ttl: Duration,
+    ) -> Result<Option<String>, FrameworkError> {
+        Err(FrameworkError::internal(CACHE_LOCK_ERROR))
+    }
+    async fn release_lock(&self, key: &str, token: &str) -> Result<bool, FrameworkError> {
+        self.0.release_lock(key, token).await
+    }
+    async fn refresh_lock(
+        &self,
+        key: &str,
+        token: &str,
+        ttl: Duration,
+    ) -> Result<bool, FrameworkError> {
+        self.0.refresh_lock(key, token, ttl).await
+    }
+    async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
+        self.0.touch(key, ttl).await
+    }
+}
+
+/// Run `request` with [`CacheOutage`] as the cache, for this test only.
+async fn during_a_cache_outage<F: std::future::Future>(request: F) -> F::Output {
+    TestContainer::scope(async {
+        TestContainer::bind::<dyn CacheStore>(Arc::new(CacheOutage(InMemoryCache::new())));
+        request.await
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_session_lock_the_cache_cannot_take_carries_the_cache_error() {
+    production_config();
+    ensure_crypt();
+    let config = session_config().block(SessionBlock::new(
+        Duration::from_secs(5),
+        Duration::from_millis(200),
+    ));
+    let cookie = session_cookie(&config);
+    let router: Arc<Router> = Arc::new(
+        Router::new()
+            .get("/notices", |_req: Request| async { text("notices") })
+            .middleware(SessionMiddleware::with_store(
+                config,
+                Arc::new(SessionStoreOutage),
+            ))
+            .into(),
+    );
+
+    let (response, _) = during_a_cache_outage(send(
+        &router,
+        MiddlewareRegistry::new(),
+        "/notices",
+        &[("Cookie", cookie.as_str())],
+    ))
+    .await;
+
+    assert_eq!(response.status(), 500);
+    assert_report_names(&response, &[CACHE_LOCK_ERROR]);
+}
+
+#[tokio::test]
+async fn a_throttle_whose_cache_fails_carries_the_cache_error() {
+    production_config();
+    // No attempts allowed, so the first request trips the limit and the
+    // throttle reads the cache to say when to retry.
+    let router: Arc<Router> = Arc::new(
+        Router::new()
+            .get("/statement", |_req: Request| async { text("statement") })
+            .middleware(ThrottleRequestsMiddleware::with(0, 1, "statement"))
+            .into(),
+    );
+
+    let (response, _) = during_a_cache_outage(get(&router, "/statement")).await;
+
+    assert_eq!(response.status(), 500);
+    assert_report_names(&response, &[CACHE_READ_ERROR]);
+}
+
+#[tokio::test]
+async fn a_throttle_naming_an_undefined_limiter_reports_the_name() {
+    production_config();
+    const LIMITER: &str = "ledger-exports-never-defined";
+    let router: Arc<Router> = Arc::new(
+        Router::new()
+            .get("/exports", |_req: Request| async { text("exports") })
+            .middleware(ThrottleRequestsMiddleware::by_name(LIMITER))
+            .into(),
+    );
+
+    let (response, _) = get(&router, "/exports").await;
+
+    assert_eq!(response.status(), 503);
+    assert_report_names(&response, &[LIMITER]);
+}
+
+/// What [`LimiterOutage`] fails with.
+const LIMITER_ERROR: &str = "the limiter's Redis at 10.0.0.9 is unreachable";
+
+/// A rate limiter backend that can never decide.
+struct LimiterOutage;
+
+#[async_trait]
+impl RateLimiterDriver for LimiterOutage {
+    async fn try_acquire(
+        &self,
+        _key: &str,
+        _config: &SlidingWindowConfig,
+    ) -> Result<bool, FrameworkError> {
+        Err(FrameworkError::internal(LIMITER_ERROR))
+    }
+    async fn retry_after(
+        &self,
+        _key: &str,
+        _config: &SlidingWindowConfig,
+    ) -> Result<Option<Duration>, FrameworkError> {
+        Err(FrameworkError::internal(LIMITER_ERROR))
+    }
+}
+
+#[tokio::test]
+async fn a_rate_limiter_failing_closed_carries_the_backend_error() {
+    production_config();
+    let limiter = RateLimitMiddleware::new(
+        Arc::new(LimiterOutage),
+        SlidingWindowConfig {
+            max_requests: 5,
+            window: Duration::from_secs(60),
+        },
+        |_req| "ledger".to_string(),
+    )
+    .on_backend_error(BackendErrorPolicy::FailClosed);
+    let router: Arc<Router> = Arc::new(
+        Router::new()
+            .get("/payouts", |_req: Request| async { text("payouts") })
+            .middleware(limiter)
+            .into(),
+    );
+
+    let (response, _) = get(&router, "/payouts").await;
+
+    assert_eq!(response.status(), 503);
+    assert_report_names(&response, &[LIMITER_ERROR]);
+}
+
+#[tokio::test]
+async fn a_login_throttle_failing_closed_carries_the_backend_error() {
+    production_config();
+    const EMAIL: &str = "clerk@ledger.test";
+    // No Magnetar is bound in this binary, so the brute-force backend
+    // cannot answer; ask it directly for the error the middleware sees.
+    let backend_error = BruteForce::get_lockout_status(EMAIL)
+        .await
+        .expect_err("with no Magnetar bound the brute-force backend must fail");
+    let router: Arc<Router> = Arc::new(
+        Router::new()
+            .get("/login", |_req: Request| async { text("login") })
+            .middleware(LoginThrottleMiddleware::new(|req: &Request| {
+                req.header("X-Login-Email").map(str::to_string)
+            }))
+            .into(),
+    );
+
+    let (response, _) = send(
+        &router,
+        MiddlewareRegistry::new(),
+        "/login",
+        &[("X-Login-Email", EMAIL)],
+    )
+    .await;
+
+    assert_eq!(response.status(), 503);
+    assert_eq!(report_of(&response).chain()[0], backend_error.to_string());
+}
+
+#[tokio::test]
+async fn a_request_past_its_timeout_reports_the_route_and_the_deadline() {
+    production_config();
+    let router: Arc<Router> = Arc::new(
+        Router::new()
+            .get("/ledger-rebuild", |_req: Request| async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                text("rebuilt")
+            })
+            .middleware(TimeoutMiddleware::new(Duration::from_millis(50)))
+            .into(),
+    );
+
+    let (response, _) = get(&router, "/ledger-rebuild").await;
+
+    assert_eq!(response.status(), 503);
+    assert_report_names(&response, &["/ledger-rebuild", "50 ms"]);
+}
+
+/// What the WebSocket route's middleware panics with.
+const UPGRADE_PANIC: &str = "the ledger feed lost its cursor";
+
+/// The line [`PanicsBeforeUpgrade`] panics on, recorded when it runs.
+static UPGRADE_PANIC_LINE: AtomicU32 = AtomicU32::new(0);
+
+/// A middleware on a WebSocket route that panics before the upgrade.
+struct PanicsBeforeUpgrade;
+
+#[async_trait]
+impl Middleware for PanicsBeforeUpgrade {
+    async fn handle(&self, _request: Request, _next: Next) -> Response {
+        UPGRADE_PANIC_LINE.store(line!() + 1, Ordering::SeqCst);
+        panic!("{UPGRADE_PANIC}");
+    }
+}
+
+/// Never reached: the upgrade is aborted before it.
+struct LedgerFeed;
+
+#[async_trait]
+impl WebSocketHandler for LedgerFeed {
+    async fn handle(&self, _socket: WsSocket, _request: Request) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+/// The headers of a well-formed WebSocket upgrade (RFC 6455).
+const UPGRADE: &[(&str, &str)] = &[
+    ("Connection", "Upgrade"),
+    ("Upgrade", "websocket"),
+    ("Sec-WebSocket-Version", "13"),
+    ("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="),
+];
+
+#[tokio::test]
+async fn a_websocket_upgrade_middleware_panic_reports_its_message_and_location() {
+    production_config();
+    let router = Arc::new(Router::new().ws_with_middleware_and_config(
+        "/ledger-feed",
+        LedgerFeed,
+        vec![into_boxed(PanicsBeforeUpgrade)],
+        WsConfig {
+            origin_policy: OriginPolicy::AllowAny,
+            ..WsConfig::default()
+        },
+    ));
+
+    let (response, _) = send(&router, MiddlewareRegistry::new(), "/ledger-feed", UPGRADE).await;
+
+    assert_eq!(response.status(), 500);
+    let report = report_of(&response);
+    assert!(
+        report.is_panic(),
+        "the report must be the panic's: {report}"
+    );
+    let report = report.to_string();
+    assert!(
+        report.contains(UPGRADE_PANIC),
+        "the report must carry the panic message; report:\n{report}"
+    );
+    let line = UPGRADE_PANIC_LINE.load(Ordering::SeqCst);
+    assert!(
+        names_location(&report, file!(), line),
+        "the report must name where the middleware panicked, {}:{line}; report:\n{report}",
+        file!()
     );
 }
