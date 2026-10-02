@@ -26,8 +26,10 @@
 //! values of `Authorization`, `Proxy-Authorization`, `Cookie` and
 //! `Set-Cookie`, and of every header and query parameter whose name
 //! contains `token`, `secret`, `password`, `key` or `signature` in any
-//! letter case, are redacted, and so is the password of every URL with
-//! credentials in the text it shows.
+//! letter case, are redacted. So is every such parameter wherever else it
+//! appears in the text the page shows, such as the query of a `Referer` or
+//! an `X-Original-URI` header, and the password of every URL with
+//! credentials.
 //!
 //! # What it loads
 //!
@@ -218,8 +220,7 @@ impl DebugRequest {
 
     /// The page, as one HTML document.
     fn render(&self, status: StatusCode, report: &ErrorReport, request_id: Option<&str>) -> String {
-        let headline =
-            redact_url_passwords(report.chain().first().map_or("", String::as_str)).into_owned();
+        let headline = redact_text(report.chain().first().map_or("", String::as_str)).into_owned();
         let status_line = format!(
             "{} {}",
             status.as_u16(),
@@ -253,7 +254,7 @@ impl DebugRequest {
         html.raw("<h2>Request</h2>\n<table>\n<tr><th>Method</th><td><code>")
             .text(&self.method)
             .raw("</code></td></tr>\n<tr><th>Path</th><td><code>")
-            .text(&redact_url_passwords(&self.path))
+            .text(&redact_text(&self.path))
             .raw("</code></td></tr>\n<tr><th>Route</th><td>");
         match self.notes.route_pattern.get() {
             Some(pattern) => html.raw("<code>").text(pattern).raw("</code>"),
@@ -291,7 +292,7 @@ impl DebugRequest {
             let secret = header_value_is_secret(name);
             render_pair(html, name, value, secret);
         }
-        html.raw("</table>\n<p class=\"note\">The values of credential and cookie headers, and of every header and query parameter whose name contains token, secret, password, key or signature, are redacted. This page never shows the request body, environment variables or configuration values.</p>\n");
+        html.raw("</table>\n<p class=\"note\">The values of credential and cookie headers, and of every header and parameter whose name contains token, secret, password, key or signature, are redacted, wherever the parameter appears; so are URL passwords. This page never shows the request body, environment variables or configuration values.</p>\n");
     }
 }
 
@@ -303,9 +304,7 @@ fn render_pair(html: &mut Html, name: &str, value: &str, secret: bool) {
             .text(REDACTED)
             .raw("</span>");
     } else {
-        html.raw("<code>")
-            .text(&redact_url_passwords(value))
-            .raw("</code>");
+        html.raw("<code>").text(&redact_text(value)).raw("</code>");
     }
     html.raw("</td></tr>\n");
 }
@@ -322,7 +321,7 @@ fn render_failure(html: &mut Html, report: &ErrorReport) {
             None => html.raw("The request panicked. Its location was not recorded:</p>\n"),
         };
         html.raw("<pre>")
-            .text(&redact_url_passwords(
+            .text(&redact_text(
                 report.chain().first().map_or("", String::as_str),
             ))
             .raw("</pre>\n");
@@ -335,7 +334,7 @@ fn render_failure(html: &mut Html, report: &ErrorReport) {
             html.raw("<span class=\"cause\">caused by</span> ");
         }
         html.raw("<code>")
-            .text(&redact_url_passwords(link))
+            .text(&redact_text(link))
             .raw("</code></li>\n");
     }
     html.raw("</ol>\n");
@@ -474,12 +473,90 @@ fn names_a_secret(name: &str) -> bool {
     SECRET_NAME_PARTS.iter().any(|part| name.contains(part))
 }
 
+/// `text` with every secret the page must not show replaced: the value of
+/// each parameter whose name names a secret
+/// ([`redact_secret_parameters`]), and the password of each URL
+/// ([`redact_url_passwords`]).
+///
+/// Every value the page shows from the request or the error goes through
+/// this, not only the query: a `Referer`, an `X-Original-URI` or an
+/// error message can carry the same URL.
+fn redact_text(text: &str) -> Cow<'_, str> {
+    match redact_secret_parameters(text) {
+        Cow::Borrowed(text) => redact_url_passwords(text),
+        Cow::Owned(text) => Cow::Owned(redact_url_passwords(&text).into_owned()),
+    }
+}
+
+/// Whether `c` ends a parameter's name, looking back from its `=`.
+fn ends_parameter_name(c: char) -> bool {
+    c.is_ascii_whitespace()
+        || matches!(
+            c,
+            '?' | '&' | ';' | ',' | '#' | '/' | '"' | '\'' | '<' | '>' | '`'
+        )
+}
+
+/// Whether `c` ends a parameter's value. A value may hold `=`, `,`, `/`
+/// and `?`, so none of them ends it.
+fn ends_parameter_value(c: char) -> bool {
+    c.is_ascii_whitespace() || matches!(c, '&' | ';' | '#' | '"' | '\'' | '<' | '>' | '`')
+}
+
+/// `text` with the value of every `name=value` parameter whose name
+/// contains `token`, `secret`, `password`, `key` or `signature` replaced.
+///
+/// It reads parameters wherever they stand: in a URL's query, a bare
+/// query string, matrix parameters after `;`, a fragment such as
+/// `#access_token=...`, or a `key=value` list. Names are
+/// percent-decoded before they are checked, so `api%5Fkey` counts. A
+/// parameter that only looks like one is redacted too: hiding a value
+/// that was not secret costs less than showing one that was.
+fn redact_secret_parameters(text: &str) -> Cow<'_, str> {
+    if !text.contains('=') {
+        return Cow::Borrowed(text);
+    }
+    let mut redacted = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(equals) = rest.find('=') {
+        let (before, from_equals) = rest.split_at(equals);
+        let value_and_rest = &from_equals[1..];
+        // Every delimiter is one ASCII byte, so `at + 1` is a boundary.
+        let name_start = before.rfind(ends_parameter_name).map_or(0, |at| at + 1);
+        let name = decoded_parameter_name(&before[name_start..]);
+        let value_end = value_and_rest
+            .find(ends_parameter_value)
+            .unwrap_or(value_and_rest.len());
+        redacted.push_str(before);
+        redacted.push('=');
+        if value_end > 0 && names_a_secret(&name) {
+            redacted.push_str(REDACTED);
+        } else {
+            redacted.push_str(&value_and_rest[..value_end]);
+        }
+        rest = &value_and_rest[value_end..];
+    }
+    redacted.push_str(rest);
+    Cow::Owned(redacted)
+}
+
+/// A parameter name, percent-decoded the way a query string is.
+fn decoded_parameter_name(raw: &str) -> String {
+    url::form_urlencoded::parse(raw.as_bytes())
+        .next()
+        .map(|(name, _)| name.into_owned())
+        .unwrap_or_default()
+}
+
 /// `text` with the password of every `scheme://user:password@host` URL
 /// replaced, and the rest of the URL kept readable.
 ///
-/// The authority runs from `://` to the first `/`, `?`, `#`, space or
-/// quote, as RFC 3986 delimits it; its user info ends at the last `@`,
-/// and the password starts after the first `:` in the user info.
+/// A URL runs from `://` to the next whitespace or quote. Its user info
+/// ends at the last `@` in it and the password starts after the first `:`
+/// in the user info, so a password holding an unencoded `/`, `?` or `#`,
+/// as generated secrets often do, is still found. A URL whose path holds
+/// both `:` and `@` loses more than its password; that over-redaction is
+/// the safe side.
 fn redact_url_passwords(text: &str) -> Cow<'_, str> {
     if !text.contains("://") {
         return Cow::Borrowed(text);
@@ -490,21 +567,19 @@ fn redact_url_passwords(text: &str) -> Cow<'_, str> {
         let (head, tail) = rest.split_at(at + 3);
         redacted.push_str(head);
         let end = tail
-            .find(|c: char| {
-                c.is_whitespace() || matches!(c, '/' | '?' | '#' | '"' | '\'' | '<' | '>' | '`')
-            })
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`'))
             .unwrap_or(tail.len());
-        let authority = &tail[..end];
-        let credentials = authority
+        let url = &tail[..end];
+        let credentials = url
             .rfind('@')
-            .and_then(|at_sign| authority[..at_sign].find(':').map(|colon| (colon, at_sign)));
+            .and_then(|at_sign| url[..at_sign].find(':').map(|colon| (colon, at_sign)));
         match credentials {
             Some((colon, at_sign)) => {
-                redacted.push_str(&authority[..=colon]);
+                redacted.push_str(&url[..=colon]);
                 redacted.push_str(REDACTED);
-                redacted.push_str(&authority[at_sign..]);
+                redacted.push_str(&url[at_sign..]);
             }
-            None => redacted.push_str(authority),
+            None => redacted.push_str(url),
         }
         rest = &tail[end..];
     }
@@ -750,6 +825,10 @@ mod tests {
                 "https://user@example.com/a and https://example.com:8443/b",
                 "https://user@example.com/a and https://example.com:8443/b",
             ),
+            (
+                "postgres://app:pa/ss@db/app and redis://:p?ss@cache:6379 and amqp://u:p#ss@mq/vhost",
+                "postgres://app:[redacted]@db/app and redis://:[redacted]@cache:6379 and amqp://u:[redacted]@mq/vhost",
+            ),
             ("no url here", "no url here"),
             ("dangling ://", "dangling ://"),
         ];
@@ -802,6 +881,44 @@ mod tests {
         assert!(!page.contains("s3cr3t"), "{page}");
         assert!(!page.contains("<b>"), "{page}");
         assert!(!page.to_ascii_lowercase().contains("<script"), "{page}");
+    }
+
+    #[test]
+    fn secret_parameters_in_any_header_value_are_redacted() {
+        let captured = request(
+            "/ledger",
+            &[
+                ("Accept", "text/html"),
+                (
+                    "Referer",
+                    "https://app.test/reset?token=s3cr3t-1&view=summary&Api%5FKey=s3cr3t-2",
+                ),
+                ("X-Original-URI", "/reset?client_secret=s3cr3t-3&page=7"),
+                (
+                    "X-Rewrite-URL",
+                    "/a;password=s3cr3t-4#access_token=s3cr3t-5",
+                ),
+                ("X-Forwarded-Query", "SIGNATURE=s3cr3t-6&sort=asc"),
+                ("Forwarded", "for=192.0.2.60;proto=https;by=203.0.113.43"),
+            ],
+        );
+
+        let page = captured.render(StatusCode::INTERNAL_SERVER_ERROR, &report(), None);
+
+        assert!(!page.contains("s3cr3t"), "{page}");
+        for shown in [
+            "https://app.test/reset?token=",
+            "view=summary",
+            "page=7",
+            "/a;password=",
+            "sort=asc",
+            "for=192.0.2.60;proto=https;by=203.0.113.43",
+        ] {
+            assert!(
+                page.contains(shown),
+                "the page must show {shown:?}:\n{page}"
+            );
+        }
     }
 
     #[test]

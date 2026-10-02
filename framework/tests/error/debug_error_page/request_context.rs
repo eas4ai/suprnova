@@ -178,6 +178,57 @@ async fn a_request_carrying_credentials_yields_a_page_without_their_values() {
 
 #[tokio::test]
 #[serial]
+async fn a_header_that_carries_the_request_url_yields_a_page_without_its_secret_parameters() {
+    let _debug = debug_mode(true, &[]).await;
+
+    // A same-origin form post or an Inertia reload sends the page's own
+    // URL as `Referer`; a proxy in front of the app forwards the original
+    // request URI in a header of its own.
+    let referer = format!(
+        "http://localhost:8000/reset?token={SECRET_MARKER}-referer-token\
+         &view={VISIBLE_QUERY_VALUE}&Api_Key={SECRET_MARKER}-referer-key"
+    );
+    let original_uri = format!(
+        "/ledger/accounts/42?client_secret={SECRET_MARKER}-uri-secret&page=7\
+         &signature={SECRET_MARKER}-uri-signature"
+    );
+    let forwarded_uri =
+        format!("/reset;password={SECRET_MARKER}-matrix#access_token={SECRET_MARKER}-fragment");
+
+    let reply = get(
+        account_routes(),
+        "/ledger/accounts/42",
+        &[
+            ("Accept", BROWSER_ACCEPT),
+            ("Referer", referer.as_str()),
+            ("X-Original-URI", original_uri.as_str()),
+            ("X-Forwarded-Uri", forwarded_uri.as_str()),
+        ],
+    )
+    .await;
+
+    assert_debug_page(&reply, 500);
+    let decoded = reply.text();
+    let found = find_on_page(&reply.body, &decoded, SECRET_MARKER);
+    assert!(
+        found.is_none(),
+        "the page shows a secret parameter of a URL header: {found:?}"
+    );
+    // The URLs stay readable: their path and their other parameters are
+    // shown.
+    assert_page_shows(
+        &reply,
+        &[
+            "http://localhost:8000/reset?token=",
+            VISIBLE_QUERY_VALUE,
+            "page=7",
+            "/reset;password=",
+        ],
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn a_url_password_in_the_error_chain_is_redacted() {
     let _debug = debug_mode(true, &[]).await;
 
