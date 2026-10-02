@@ -32,6 +32,33 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   their errors. To find a panic's location, the framework wraps the
   process panic hook once and calls the hook it replaced. This landed on
   main after the `v3.0.0` tag.
+- **A development error page.** With debug on, a 5xx the framework
+  built from an error or a caught panic, sent to a browser (an `Accept`
+  that lists `text/html`) or an Inertia visit, becomes one HTML document
+  with the same status: the error chain or the panic message and
+  location, the stack frames recorded where the error was created, and
+  the request's method, path, query, headers, matched route pattern and
+  request id. The application's frames are shown; the frames of the
+  framework, the async runtime, other dependencies and the standard
+  library are collapsed behind a count. The `FrameworkError` and
+  `AppError` constructors, the `From` conversions into `FrameworkError`,
+  the `abort_with`, `abort_if` and `abort_unless` helpers and the
+  `#[domain_error]` conversions are now `#[track_caller]`, so the page
+  names the line of the `?` or the call that created the error even in
+  a build without debug info. The page
+  redacts the `Authorization`, `Proxy-Authorization`, `Cookie` and
+  `Set-Cookie` headers, every header and query parameter whose name
+  contains `token`, `secret`, `password`, `key` or `signature`, and the
+  password of a URL in the error chain, and it never shows the request
+  body, environment variables or configuration values. It loads nothing
+  and runs no script, so it renders when the frontend build, the Vite
+  manifest or Inertia is what failed, and it carries `Cache-Control:
+  no-store` and a `Content-Security-Policy` that allows no script. For
+  those responses it takes the place of the app's Inertia error page. A
+  JSON client keeps the JSON body with `debug_message`, a 4xx and a 5xx
+  built without an error are unchanged, and with debug off the framework
+  records no frames, captures nothing about the request, and sends every
+  response as before. This landed on main after the `v3.0.0` tag.
 - **A Pusher-protocol broadcast driver.** `PusherBroadcastHub` publishes
   broadcasts through the REST API that Pusher Channels, Soketi and Laravel
   Reverb share, and still delivers them to in-process subscribers, so a

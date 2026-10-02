@@ -1186,6 +1186,12 @@ object with `X-Inertia: true`; a hard navigation - someone pasting
 same one a first load of any page gets. So the error page works whether
 the user arrived through the SPA or not.
 
+With debug mode on, a `5xx` the framework built from an error reaches
+both audiences as the development error page instead: the error, the
+stack frames, and the request, as one HTML document. See
+[Error Model](error-model.md#the-development-error-page). A `4xx`, and
+every response with debug off, still renders your component.
+
 ### What it never touches
 
 The middleware only stands in where nobody else has an answer. It leaves

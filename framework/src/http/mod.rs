@@ -48,10 +48,11 @@ impl From<ParamError> for HttpResponse {
 }
 
 impl From<ParamError> for crate::error::FrameworkError {
+    #[track_caller]
     fn from(err: ParamError) -> crate::error::FrameworkError {
-        crate::error::FrameworkError::ParamError {
-            param_name: err.param_name,
-        }
+        // The constructor, not a struct literal: it records where the
+        // error was created for the development error page.
+        crate::error::FrameworkError::param(err.param_name)
     }
 }
 

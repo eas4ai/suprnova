@@ -722,7 +722,40 @@ pub async fn handle_request_with_peer(
 
 /// The body of [`handle_request_with_peer`], run inside the request's
 /// container scope.
+///
+/// Debug mode is read here, once per request. With it off, the request is
+/// routed as it is and nothing is captured or recorded for the
+/// development error page. With it on, the request is captured before the
+/// middleware chain takes it, served with stack frames recorded, and a
+/// failure answered with a 5xx may become the page; see
+/// `crate::error::debug_page`. This is the one place every request passes
+/// after the panic boundary, which no middleware can see past.
 async fn serve_request(
+    router: Arc<Router>,
+    middleware_registry: Arc<MiddlewareRegistry>,
+    req: hyper::Request<hyper::body::Incoming>,
+    peer_ip: Option<std::net::IpAddr>,
+) -> hyper::Response<ServerBody> {
+    if !Config::is_debug() {
+        return route_request(router, middleware_registry, req, peer_ip).await;
+    }
+    let debug_request = crate::error::debug_page::DebugRequest::capture(&req);
+    let is_head = req.method() == hyper::Method::HEAD;
+    let response = debug_request
+        .serve(route_request(router, middleware_registry, req, peer_ip))
+        .await;
+    // `route_request` already stripped a HEAD response's body; the page
+    // must not add one back.
+    if is_head {
+        strip_body_for_head(response)
+    } else {
+        response
+    }
+}
+
+/// Route one request: the WebSocket upgrade, the built-in endpoints, or
+/// the middleware chain and the handler.
+async fn route_request(
     router: Arc<Router>,
     middleware_registry: Arc<MiddlewareRegistry>,
     req: hyper::Request<hyper::body::Incoming>,
@@ -741,6 +774,7 @@ async fn serve_request(
     if hyper_tungstenite::is_upgrade_request(&req)
         && let Some(ws_match) = router.match_ws(&path)
     {
+        crate::error::debug_page::note_route_pattern(ws_match.pattern());
         let live_metadata = router.live_route_metadata(&hyper::Method::GET, ws_match.pattern());
         return handle_ws_upgrade(req, ws_match, middleware_registry, peer_ip, live_metadata).await;
     }
@@ -962,6 +996,7 @@ async fn handle_request_inner(
 
     match router.match_route(&method, path) {
         Some((pattern, handler, params)) => {
+            crate::error::debug_page::note_route_pattern(&pattern);
             let mut request = stamp_peer(
                 Request::new(req)
                     .with_params(params)
@@ -985,6 +1020,7 @@ async fn handle_request_inner(
             // `execute_chain_safely` (which echoes it on a synthesized 500
             // if the chain panics - the request scope is gone by then).
             let request_id = crate::logging::request_id::resolve_request_id(&request);
+            crate::error::debug_page::note_request_id(request_id.as_str());
 
             // Build middleware chain, pre-sized so the backing Vec
             // never re-allocates mid-assembly (was 2–3 reallocs per
@@ -1047,6 +1083,7 @@ async fn handle_request_inner(
                 let request =
                     stamp_peer(Request::new(req).with_params(std::collections::HashMap::new()));
                 let request_id = crate::logging::request_id::resolve_request_id(&request);
+                crate::error::debug_page::note_request_id(request_id.as_str());
 
                 // Build middleware chain for fallback, pre-sized
                 // (see matched-route branch for rationale).
@@ -1090,6 +1127,7 @@ async fn handle_request_inner(
                 let request =
                     stamp_peer(Request::new(req).with_params(std::collections::HashMap::new()));
                 let request_id = crate::logging::request_id::resolve_request_id(&request);
+                crate::error::debug_page::note_request_id(request_id.as_str());
 
                 let global_mw = middleware_registry.global_middleware();
                 let mut chain = MiddlewareChain::with_capacity(1 + global_mw.len());
@@ -1203,7 +1241,11 @@ async fn execute_chain_safely(
                 // The panic replaces the `Internal` error the conversion
                 // above reported: its message and location are what a
                 // developer needs, not the wrapper's text.
-                .with_error_report(crate::error::ErrorReport::from_panic(msg, panic.location))
+                .with_error_report(crate::error::ErrorReport::from_panic(
+                    msg,
+                    panic.location,
+                    panic.frames,
+                ))
         }
     }
 }
@@ -1343,6 +1385,7 @@ async fn handle_ws_upgrade(
     // the post-upgrade session task, and - via `RequestIdMiddleware` -
     // attached to any rejection response the chain produces.
     let request_id = crate::logging::request_id::resolve_request_id(&initial_request);
+    crate::error::debug_page::note_request_id(request_id.as_str());
 
     // A WebSocket upgrade is an HTTP GET, so the SAME middleware chain an
     // ordinary request gets applies here, in the SAME fixed order:
@@ -1456,7 +1499,11 @@ async fn handle_ws_upgrade(
                 )
                 .status(500)
                 .header("X-Request-Id", request_id.as_str())
-                .with_error_report(crate::error::ErrorReport::from_panic(msg, panic.location))
+                .with_error_report(crate::error::ErrorReport::from_panic(
+                    msg,
+                    panic.location,
+                    panic.frames,
+                ))
                 .into_hyper();
             }
         };

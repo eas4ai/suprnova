@@ -339,7 +339,10 @@ local, development, and testing environments, a 5xx body built from a
 `debug_message`: the error chain as `render_error_chain` renders it.
 That's the body debug mode gave before the report existed, and the
 report doesn't change it. The field comes from the debug setting; the
-report adds nothing to the body in either mode.
+report adds nothing to the body in either mode. A test request that is
+an Inertia visit, or whose `Accept` header lists `text/html`, gets the
+development error page in place of that body, with the report still
+attached; see [Error Model](error-model.md#the-development-error-page).
 
 To keep the report, build the `TestResponse` from the response
 `handle_request` returns, with `TestResponse::from_response`. It

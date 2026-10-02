@@ -133,6 +133,7 @@ impl fmt::Debug for ToolingError {
 impl Error for ToolingError {}
 
 impl From<ToolingError> for FrameworkError {
+    #[track_caller]
     fn from(error: ToolingError) -> Self {
         Self::internal(format!("Live tooling helper failed: {error}"))
     }
