@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.search-input",
+  "version": 1,
+  "root": "suprnova-ui/search-input",
+  "files": [
+    "search-input.html",
+    "search-input.css"
+  ],
+  "elements": []
+}

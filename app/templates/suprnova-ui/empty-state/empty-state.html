@@ -1,0 +1,13 @@
+{#
+  suprnova.empty-state - the specific reason a region has nothing to show
+  (FDB-003): empty, no-results, no-permission or disconnected, taken from
+  server-rendered state. The caller renders a next action in the body only
+  when the principal can take one; the view offers none of its own.
+#}
+{% macro empty_state(id, reason, title, text="") %}
+<section class="sn-empty-state" id="{{ id }}" data-sn-reason="{{ reason }}" aria-labelledby="{{ id }}-title">
+<h3 class="sn-empty-state-title" id="{{ id }}-title">{{ title }}</h3>
+{% if text != "" %}<p class="sn-empty-state-text">{{ text }}</p>{% endif %}
+<div class="sn-empty-state-actions">{{ caller() }}</div>
+</section>
+{% endmacro %}

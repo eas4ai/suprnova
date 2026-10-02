@@ -1,0 +1,923 @@
+# Task Scheduling
+
+Scheduled tasks are async functions the framework runs on a cron expression - every minute, hourly, daily, weekly, or any custom 5-field cron. Tasks live inside your application binary; `schedule:run` evaluates due tasks once (call it from system cron) and `schedule:work` runs the same evaluator as a long-lived daemon.
+
+## Generating Tasks
+
+The fastest way to create a new scheduled task is using the suprnova CLI:
+
+```bash
+suprnova make:task CleanupLogs
+```
+
+This command will:
+1. Create `src/tasks/cleanup_logs_task.rs` with a working task stub
+2. Create `src/tasks/mod.rs` if it doesn't exist, re-exporting the task
+3. Create `src/schedule.rs` for registering tasks, if it doesn't exist
+4. Declare `pub mod schedule;` and `pub mod tasks;` in `src/lib.rs`
+5. Wire `.schedule(<crate>::schedule::register)` into your application
+   builder in `cmd/main.rs` (or `src/main.rs` for the API starter)
+
+Steps 2-5 are idempotent, so re-running `make:task` repairs wiring that was
+removed by hand. The scheduler runs inside your application binary - there is
+no separate scheduler executable to build or deploy.
+
+```bash Examples
+# Creates CleanupLogsTask in src/tasks/cleanup_logs_task.rs
+suprnova make:task CleanupLogs
+
+# Creates SendRemindersTask in src/tasks/send_reminders_task.rs
+suprnova make:task SendReminders
+
+# You can also include "Task" suffix (same result)
+suprnova make:task BackupDatabaseTask
+```
+
+```rust Generated File
+//! CleanupLogsTask scheduled task
+//!
+//! Created with `suprnova make:task cleanup_logs_task`.
+
+use std::time::Instant;
+
+use async_trait::async_trait;
+use suprnova::{Task, TaskResult};
+
+/// CleanupLogsTask - A scheduled task.
+///
+/// Register the task in `src/schedule.rs` with the fluent API; the skeleton
+/// below times its own run and prints a structured log line on each
+/// invocation so it works end-to-end the first time you wire it up.
+pub struct CleanupLogsTask;
+
+impl CleanupLogsTask {
+    /// Create a new instance of this task.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for CleanupLogsTask {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Task for CleanupLogsTask {
+    async fn handle(&self) -> TaskResult {
+        let started_at = Instant::now();
+        println!("[CleanupLogsTask] task started");
+
+        // Replace this with the real job. The skeleton ships as a
+        // no-op success so the task can be scheduled and observed
+        // before the implementation is filled in.
+
+        println!(
+            "[CleanupLogsTask] task finished in {} ms",
+            started_at.elapsed().as_millis(),
+        );
+        Ok(())
+    }
+}
+```
+
+## Defining Schedules
+
+suprnova supports three approaches for defining scheduled tasks:
+
+### 1. Trait-Based Tasks (Recommended)
+
+For complex tasks that need dependencies or reusable logic, implement the `Task` trait and configure the schedule during registration:
+
+```rust
+// src/tasks/cleanup_logs_task.rs
+use async_trait::async_trait;
+use chrono::{Duration, Utc};
+use suprnova::{Task, TaskResult};
+use crate::models::Log;
+
+pub struct CleanupLogsTask;
+
+impl CleanupLogsTask {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Task for CleanupLogsTask {
+    async fn handle(&self) -> TaskResult {
+        // Eloquent works exactly as it does inside a controller; tasks see
+        // the same container bindings (`DB::connection()`, `App::get::<T>()`)
+        // that a request handler does - see Application bootstrap below.
+        let cutoff = Utc::now() - Duration::days(30);
+        Log::query()
+            .filter_op("created_at", "<", cutoff)
+            .delete_all()
+            .await?;
+
+        println!("Old logs cleaned up successfully");
+        Ok(())
+    }
+}
+```
+
+Then register with fluent scheduling API in `src/schedule.rs`:
+
+```rust
+// src/schedule.rs
+use suprnova::Schedule;
+use crate::tasks::CleanupLogsTask;
+
+pub fn register(schedule: &mut Schedule) {
+    schedule.add(
+        schedule.task(CleanupLogsTask::new())
+            .daily()
+            .at("03:00")
+            .name("cleanup:logs")
+            .description("Removes logs older than 30 days")
+    );
+}
+```
+
+### 2. Closure-Based Tasks
+
+For quick, inline tasks without separate files:
+
+```rust
+// src/schedule.rs
+use suprnova::Schedule;
+
+pub fn register(schedule: &mut Schedule) {
+    // Simple closure task
+    schedule.add(
+        schedule.call(|| async {
+            println!("Ping! Running every minute");
+            Ok(())
+        })
+        .every_minute()
+        .name("heartbeat")
+    );
+
+    // Configured closure task
+    schedule.add(
+        schedule.call(|| async {
+            // Your task logic
+            Ok(())
+        })
+        .daily()
+        .at("09:00")
+        .name("morning-report")
+        .description("Sends daily morning report")
+    );
+}
+```
+
+### 3. Console Commands
+
+To run a [console command](console.md) on a schedule, pass the command line to `Schedule::command`. Write it the way you type it after the name of the console binary:
+
+```rust
+// src/schedule.rs
+use suprnova::Schedule;
+
+pub fn register(schedule: &mut Schedule) {
+    schedule.add(
+        schedule.command("emails:send --force")
+            .daily()
+            .at("06:00"),
+    );
+
+    // A built-in command works the same way. See [Database](database.md#busy-database---dbmonitor-and-dbmonitor) for `db:monitor`.
+    schedule.add(schedule.command("model:prune").daily().at("02:00"));
+
+    // So does `db:monitor`, which dispatches `DatabaseBusy` at 80 connections.
+    schedule.add(schedule.command("db:monitor --max 80").every_minute());
+}
+```
+
+`command` splits the line into words the way a shell does: whitespace separates words, and single quotes, double quotes, and backslashes keep a word together. It runs no variables, globbing, or pipes, because the console runs the line and not a shell. It returns the same `TaskBuilder` as `task` and `call`, so every frequency method, `without_overlapping()`, and `on_one_server()` apply.
+
+The command runs in the scheduler's process, not in a new one. The task is named by its command line, with one space between the words, and it is described by the command's about text. `.name(...)` and `.description(...)` override both.
+
+The command line is checked when the schedule is built, which is at boot. `command` panics, and the boot stops, when no command has the name (the message lists the registered commands), when the arguments do not parse for the command, and when a quote is not closed. A scheduled task runs when nobody is watching, so a typing error stops the boot instead of failing at 3 a.m. A command that is not linked into the binary that runs the scheduler has no name there and stops the boot the same way.
+
+Use `try_command` when the command line comes from configuration and you want the error:
+
+```rust
+use suprnova::{FrameworkError, Schedule};
+
+fn add_from_config(schedule: &mut Schedule, line: &str) -> Result<(), FrameworkError> {
+    // Err(FrameworkError::Internal) on a bad command line
+    schedule.add(schedule.try_command(line)?.hourly());
+    Ok(())
+}
+```
+
+A command that returns an error is a failed task, and the scheduler reports it. The console does not print the error as well.
+
+## Registering Tasks
+
+Register your tasks in `src/schedule.rs`:
+
+```rust
+// src/schedule.rs
+use suprnova::Schedule;
+use crate::tasks;
+
+pub fn register(schedule: &mut Schedule) {
+    // Trait-based tasks with fluent schedule configuration
+    schedule.add(
+        schedule.task(tasks::CleanupLogsTask::new())
+            .daily()
+            .at("03:00")
+            .name("cleanup:logs")
+            .description("Removes logs older than 30 days")
+    );
+
+    schedule.add(
+        schedule.task(tasks::SendRemindersTask::new())
+            .daily()
+            .at("09:00")
+            .name("send:reminders")
+            .description("Sends daily reminder emails")
+    );
+
+    schedule.add(
+        schedule.task(tasks::BackupDatabaseTask::new())
+            .weekly()
+            .at("00:00")
+            .name("backup:database")
+            .description("Weekly database backup")
+            .without_overlapping()
+    );
+
+    // Closure-based tasks
+    schedule.add(
+        schedule.call(|| async {
+            println!("Quick task!");
+            Ok(())
+        })
+        .hourly()
+        .name("quick-task")
+    );
+}
+```
+
+## Schedule Frequency Options
+
+suprnova provides a fluent API for defining when tasks should run:
+
+### Common Intervals
+
+| Method | Description |
+|--------|-------------|
+| `.every_minute()` | Run every minute |
+| `.every_two_minutes()` | Run every 2 minutes |
+| `.every_five_minutes()` | Run every 5 minutes |
+| `.every_ten_minutes()` | Run every 10 minutes |
+| `.every_fifteen_minutes()` | Run every 15 minutes |
+| `.every_thirty_minutes()` | Run every 30 minutes |
+| `.hourly()` | Run every hour at minute 0 |
+| `.hourly_at(30)` | Run every hour at minute 30 |
+| `.every_two_hours()` / `.every_three_hours()` / `.every_four_hours()` / `.every_six_hours()` | Run on the hour every N hours |
+| `.daily()` | Run daily at midnight |
+| `.daily_at("03:00")` | Run daily at 3:00 AM |
+| `.twice_daily(1, 13)` | Run twice daily (e.g. 1:00 AM and 1:00 PM) |
+| `.weekly()` | Run weekly on Sunday at midnight |
+| `.monthly()` | Run monthly on the 1st at midnight |
+| `.monthly_on(15)` | Run monthly on a specific day |
+| `.quarterly()` | Run on the 1st of Jan/Apr/Jul/Oct at midnight |
+| `.yearly()` | Run on January 1st at midnight |
+
+### Day-Specific Schedules
+
+```rust
+use suprnova::DayOfWeek;
+
+// Run on specific days
+.weekly_on(DayOfWeek::Monday)
+.weekly_on(DayOfWeek::Friday)
+
+// Shorthand day methods
+.sundays()
+.mondays()
+.tuesdays()
+.wednesdays()
+.thursdays()
+.fridays()
+.saturdays()
+
+// Multiple days
+.days(&[DayOfWeek::Monday, DayOfWeek::Wednesday, DayOfWeek::Friday])
+
+// Weekdays/Weekends
+.weekdays()  // Monday-Friday
+.weekends()  // Saturday-Sunday
+```
+
+### Time Modifiers
+
+Chain `.at()` with any schedule to set a specific time:
+
+```rust
+.daily().at("14:30")           // Daily at 2:30 PM
+.weekly().at("09:00")          // Weekly at 9:00 AM
+.mondays().at("08:00")         // Every Monday at 8:00 AM
+.monthly().at("00:00")         // First of month at midnight
+```
+
+### Timezones
+
+By default the scheduler reads every cron expression against the process's
+local zone, whatever `TZ` the container was started with. Pin a task to a
+named IANA zone when its schedule belongs to a place rather than to a
+server:
+
+```rust
+use suprnova::chrono_tz;
+
+schedule.add(
+    schedule.task(GenerateReportTask::new())
+        .daily()
+        .at("02:00")
+        .timezone(chrono_tz::America::New_York)
+        .name("report:generate")
+);
+```
+
+`timezone` takes a typed `chrono_tz::Tz`, so a misspelled zone is a compile
+error rather than a task that quietly runs at the wrong hour. The zone
+constants live under `suprnova::chrono_tz` (`chrono_tz::Asia::Tokyo`,
+`chrono_tz::Europe::Berlin`, and so on), re-exported so you do not need
+`chrono-tz` in your own `Cargo.toml`.
+
+When the zone name only exists at runtime - a config value, a tenant
+column - use the fallible sibling:
+
+```rust
+schedule.add(
+    schedule.task(GenerateReportTask::new())
+        .daily()
+        .at("02:00")
+        .try_timezone(&tenant.timezone)?   // Err(String) on an unknown zone
+        .name("report:generate")
+);
+```
+
+A pinned zone changes exactly one thing: which wall clock the five cron
+fields are read against. The scheduler still ticks once per process minute,
+and the same-minute dedup gate is unaffected.
+
+#### A schedule-wide default
+
+If most of your tasks belong to one business zone, set it once on the
+schedule rather than repeating it on every task:
+
+```rust
+pub fn register(schedule: &mut Schedule) {
+    schedule.timezone(chrono_tz::America::Chicago);
+
+    // Read as 02:00 America/Chicago
+    let nightly = schedule
+        .call(|| async { Ok(()) })
+        .daily()
+        .at("02:00")
+        .name("nightly");
+    schedule.add(nightly);
+
+    // An explicit per-task zone always wins
+    let tokyo = schedule
+        .call(|| async { Ok(()) })
+        .daily()
+        .at("09:00")
+        .timezone(chrono_tz::Asia::Tokyo)
+        .name("tokyo-open");
+    schedule.add(tokyo);
+}
+```
+
+The default is applied when a task is added, so it covers tasks registered
+after the call and leaves earlier ones alone.
+
+#### Daylight saving
+
+Some zones observe daylight saving time. When the clocks change, a task
+pinned to such a zone may run twice or not run at all:
+
+- On a fall-back, one wall-clock hour happens twice. A task at `01:30`
+  matches both passes. They are two different minutes of real time, so the
+  same-minute dedup gate does not merge them and the task runs twice.
+- On a spring-forward, one wall-clock hour never happens. A task at `02:30`
+  is skipped entirely that day.
+
+Avoid timezone scheduling where you can, and prefer a zone without DST
+(`chrono_tz::UTC`) for anything that must run exactly once.
+
+#### Reading the listing in another zone
+
+`schedule:list` takes `--timezone` and shows both the cron expression and
+the next run time as they read in that zone. See
+[List Tasks](#list-tasks) for worked output.
+
+### Why Suprnova diverges: timezones
+
+Laravel's `timezone()` takes a string and its schedule-wide default comes
+from an `app.schedule_timezone` config key. Suprnova takes a typed
+`chrono_tz::Tz` and has no config key: `Schedule::timezone` in your
+`schedule::register` function is the one place a default is set, so the
+schedule reads top to bottom without a second file to consult.
+
+Suprnova's default when nothing is pinned is the process's local zone
+rather than a configured application timezone. That is the behaviour the
+scheduler has always had, and it stays the default so adding this feature
+changes nothing for schedules that do not use it.
+
+### Custom Cron Expressions
+
+For full control, use cron syntax:
+
+```rust
+// Standard cron format: minute hour day-of-month month day-of-week
+.cron("0 */2 * * *")    // Every 2 hours
+.cron("30 4 * * 1-5")   // 4:30 AM on weekdays
+.cron("0 0 1,15 * *")   // 1st and 15th of each month
+```
+
+`.cron(...)` **panics** if the expression is malformed (wrong field count,
+unparseable step/range/list). Use `.try_cron(expr)` when the expression is
+supplied at runtime (configuration, user input) and you'd rather propagate
+the parse error:
+
+```rust
+schedule.add(
+    schedule.task(MyTask::new())
+        .try_cron(env_expr)?   // returns Err(String) on a bad expression
+        .name("from-config")
+);
+```
+
+The same `panic` / `try_*` pair exists on every numeric-range builder method:
+`try_hourly_at`, `try_daily_at`, `try_twice_daily`, `try_monthly_on`. The
+infallible variants panic on out-of-range numerics (e.g. `daily_at("25:00")`
+or `monthly_on(40)`); the fallible siblings return `Err(String)`.
+
+## Task Configuration
+
+### Preventing Overlapping
+
+Skip a tick when a previous run of the same task is still in flight:
+
+```rust
+schedule.add(
+    schedule.task(LongRunningTask::new())
+        .daily()
+        .name("long-task")
+        .without_overlapping()
+);
+```
+
+**How the lock works.** When the flag is set, suprnova tries to acquire a
+distributed mutex via the configured [`Cache`](cache.md) backend
+(`schedule:lock:<task-name>`). A successful acquire runs the task and releases
+the lock; a contended acquire is reported as a successful skip - `Ok(())`,
+with the task's skip counter ticked so observability surfaces can see it
+without poisoning the `schedule:run` exit code.
+
+**Cache is required for cross-process protection.** If you run multiple
+processes that schedule the same task (e.g. several boxes invoking
+`suprnova schedule:run` from system cron, or `schedule:work` daemons behind a
+load-balancer), the Cache backend is what coordinates them. **Without a
+configured Cache, `without_overlapping()` silently degrades to a per-process
+`AtomicBool`** - two separate processes will not see each other's locks. The
+framework emits a one-time `WARN` (`suprnova::schedule`) the first time this
+fallback fires so operators notice the weaker guarantee:
+
+> `without_overlapping() falling back to in-process AtomicBool protection - Cache is not bootstrapped. Multi-process deployments will NOT see each other's locks. Configure Cache (CACHE_DRIVER=memory|redis) before relying on cross-process overlap protection.`
+
+**Custom lock TTL.** The lock TTL defaults to 30 minutes - long enough for
+most tasks to finish, short enough that a crashed task holding the lock
+unblocks the next tick without operator intervention. Override per task with
+`.without_overlapping_for(Duration)`. `Duration::ZERO` is undefined across
+cache backends (Redis errors, in-memory expires instantly, Memcached treats
+it as "never expire"), so the builder coerces it to the 30-minute default
+with a one-time `WARN` so the operator can fix the call site.
+
+```rust
+use std::time::Duration;
+
+schedule.add(
+    schedule.task(SlowBackupTask::new())
+        .daily()
+        .name("backup:full")
+        // This job legitimately runs longer than the 30-minute default;
+        // give the lock a 2-hour TTL so a slow run doesn't get pre-empted
+        // by the next tick.
+        .without_overlapping_for(Duration::from_secs(2 * 3600))
+);
+```
+
+### Running on One Server
+
+Run a task exactly once per due tick, no matter how many replicas are
+running the scheduler:
+
+```rust
+schedule.add(
+    schedule.task(NightlyBillingTask::new())
+        .daily()
+        .at("02:00")
+        .name("billing:nightly")
+        .on_one_server()
+);
+```
+
+**What goes wrong without it.** Every replica running `schedule:work`
+evaluates the schedule independently, and nothing stops all of them
+deciding the same tick is theirs. Three replicas were measured producing
+three executions of the same task, every minute, with no variance. For a
+nightly billing job that means every customer is billed three times.
+
+**Why `without_overlapping()` does not cover this.** The two look alike
+and solve different problems:
+
+| | Lock key | Held for | Prevents |
+|---|---|---|---|
+| `without_overlapping()` | task | the task's duration | a slow run overlapping its own next tick |
+| `on_one_server()` | task **+ the tick** | the tick window | a second replica running the same tick |
+
+The distinction that matters is when the lock is released.
+`without_overlapping()` releases as soon as the handler returns - for a
+fast task, before a second replica has even looked, so all N still run.
+`on_one_server()` deliberately holds its lock past the handler and lets it
+expire on TTL, because a replica arriving later in the same tick has to
+find it taken.
+
+They compose. A long-running task that must also be single-server takes
+both.
+
+**Requires a shared cache.** The election is a [`Cache`](cache.md) lock, so
+"one server" means "one process among those sharing a cache backend". Under
+`CACHE_DRIVER=memory` the lock lives in a single process's heap, every
+replica wins its own election, and the guarantee is silently absent.
+
+In production that is a **boot failure**, not a warning:
+
+> `refusing to boot in production: 1 task(s) request single-server execution (billing:nightly) but CACHE_DRIVER is memory or unset, so the election lock lives in this process's heap. Every replica would win its own election and run the task, which is what on_one_server() exists to prevent. Set CACHE_DRIVER=redis with REDIS_URL, or set SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true to acknowledge per-process locking - which is only accurate if you run exactly one scheduler.`
+
+Set `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true` if your deployment
+really does run a single scheduler. Outside production the memory driver
+stays usable and the framework warns once instead.
+
+**Custom lock TTL.** Defaults to 60 seconds - one minute-aligned tick.
+Both edges matter: too short and a replica whose tick lands a few seconds
+late finds the lock gone and runs the task again; too long and the lock
+outlives its tick, so the *next* due run finds it held and is skipped
+entirely. Use `.on_one_server_for(Duration)` for coarser schedules.
+
+```rust
+use std::time::Duration;
+
+schedule.add(
+    schedule.task(HourlyRollupTask::new())
+        .hourly()
+        .name("rollup:hourly")
+        // An hourly task only needs the lock to outlast the window in
+        // which replicas could still call this tick due.
+        .on_one_server_for(Duration::from_secs(300))
+);
+```
+
+**If the cache is unreachable**, the tick is skipped rather than run.
+Losing coordination is the worst possible moment to let every replica
+through: a skipped tick is recoverable next tick, duplicate side effects
+generally are not.
+
+### Why Suprnova diverges
+
+Laravel's `onOneServer()` is the same opt-in, and Suprnova keeps that:
+per-server tasks - log rotation, warming a local cache - are legitimate
+and stay expressible.
+
+Where it diverges is the failure mode. Laravel will happily run
+`onOneServer()` against a cache driver that cannot coordinate. Suprnova
+refuses to boot in production instead, on the same reasoning as the
+in-memory rate limiter: a control that silently does much less than it
+claims is worse than one that is visibly absent.
+
+### Running in Background
+
+Detach tasks from the per-tick critical path so they don't block other due
+tasks from starting:
+
+```rust
+schedule.add(
+    schedule.task(BackgroundTask::new())
+        .hourly()
+        .name("background-task")
+        .run_in_background()
+);
+```
+
+**Panic isolation.** Background tasks run inside a `tokio::task::JoinSet`
+with `catch_unwind`, so a panicking task surfaces as a `FrameworkError`
+recorded against the task's name rather than tearing down the scheduler. The
+`schedule:work` daemon drains the JoinSet on shutdown (Ctrl-C / SIGTERM) so
+in-flight background tasks complete before exit.
+
+**Combine with `without_overlapping`.** The two flags compose - a background
+task with `without_overlapping()` will spawn into the JoinSet and acquire the
+overlap lock from inside the spawned future, so the lock semantics described
+above still apply.
+
+### Same-Minute Dedup
+
+Cron resolution is minute-level, and suprnova enforces that: if the same task
+is asked to run twice within the same wall-clock minute inside a single
+process, the second call is a no-op skip - `Ok(())`, with the task's skip
+counter ticked. This closes a class of bug where a daemon loop or a tight
+`schedule:run` invocation could run a `.every_minute()` task multiple times
+in the same minute.
+
+This in-process gate is **always on**, independent of `without_overlapping`.
+It does NOT span processes (each process has its own per-task state). If you
+need cross-process same-minute coordination, layer on `without_overlapping` + a configured Cache backend - together they cover both directions.
+
+## Running the Scheduler
+
+suprnova provides CLI commands for running scheduled tasks:
+
+### Run Once
+
+Execute all due tasks once (typically called by cron every minute):
+
+```bash
+suprnova schedule:run
+```
+
+### Daemon Mode
+
+Run continuously, checking for due tasks every minute:
+
+```bash
+suprnova schedule:work
+```
+
+This is ideal for development or when using a process manager like systemd.
+
+### List Tasks
+
+Display all registered scheduled tasks:
+
+```bash
+suprnova schedule:list
+```
+
+Output:
+```
+Registered scheduled tasks:
+  cleanup:logs [0 3 * * *] next: 2026-05-29 03:00 UTC
+  send:reminders [0 9 * * *] next: 2026-05-28 09:00 UTC
+  report:generate [0 6 * * *] (UTC) next: 2026-05-29 06:00 UTC
+```
+
+Each line is the task name, the cron expression, an optional zone label,
+the next time the task fires, and the task's description if it has one.
+
+`next:` is the first minute after now at which the expression matches,
+computed in the zone the task is evaluated in and then shown in the
+listing's zone. An expression that can never match (`0 0 30 2 *` names a
+date that does not exist) prints `next: never`.
+
+The listing's zone is UTC unless you pass `--timezone`. The `suprnova` CLI
+passes the flag to your application, which exits with an error when the zone
+name is unknown. `cleanup:logs` and
+`send:reminders` above pinned no zone, so their expressions are printed as
+written - the scheduler reads them against the process's local zone, which
+has no IANA name to convert from - and they carry no zone label.
+`report:generate` pinned `America/New_York` and asked for `02:00`, so its
+expression is rewritten into the listing's zone and labelled with it.
+
+```bash
+suprnova schedule:list --timezone=Asia/Tokyo
+```
+
+```
+Registered scheduled tasks:
+  cleanup:logs [0 3 * * *] next: 2026-05-29 12:00 JST
+  send:reminders [0 9 * * *] next: 2026-05-28 18:00 JST
+  report:generate [0 15 * * *] (Asia/Tokyo) next: 2026-05-29 15:00 JST
+```
+
+One task can occupy several lines. An expression that straddles midnight in
+the listing's zone needs one cron line per side, because no single
+five-field expression describes both:
+
+```
+  monday-digest [0 23 * * 1] (Asia/Tokyo) next: 2026-06-01 23:00 JST
+  monday-digest [0 5 * * 2] (Asia/Tokyo) next: 2026-06-01 23:00 JST
+```
+
+`next:` belongs to the task, not to the line, so it repeats: both lines
+describe the same task and the same upcoming run.
+
+Some conversions are refused rather than approximated, and the refused
+expression is printed exactly as written, labelled with the task's own
+zone. A conversion is refused when a daylight-saving transition falls
+between the next two runs (no one expression is right on both sides), when
+a day rollover would have to move a restricted day-of-month and a
+restricted day-of-week together (cron ORs those two fields, so shifting
+both would change which days match), or when a rollover would have to
+decide how long February is.
+
+## Production Setup
+
+### Using Cron
+
+Add a single cron entry to run the scheduler every minute:
+
+```bash
+* * * * * cd /path/to/your/project && suprnova schedule:run >> /dev/null 2>&1
+```
+
+**Cross-process coordination.** If you run `schedule:run` from system cron on
+more than one host (or alongside a `schedule:work` daemon), tasks with
+`.without_overlapping()` need a configured **Cache** backend
+(`CACHE_DRIVER=redis` recommended for production) to coordinate across
+processes. Without it, the overlap flag degrades to per-process protection
+and the same task can run on multiple hosts in the same minute. See
+[Preventing Overlapping](#preventing-overlapping) above for the full lock
+semantics.
+
+### Using Systemd
+
+Create a systemd service for the scheduler daemon:
+
+```ini
+# /etc/systemd/system/myapp-scheduler.service
+[Unit]
+Description=MyApp Scheduler
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/path/to/your/project
+ExecStart=/path/to/suprnova schedule:work
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable myapp-scheduler
+sudo systemctl start myapp-scheduler
+```
+
+## Accessing App Context
+
+Scheduled tasks have full access to the application context, just like controllers:
+
+```rust
+use async_trait::async_trait;
+use suprnova::{App, Task, TaskResult};
+use crate::actions::SendEmailAction;
+use crate::models::User;
+
+pub struct SendRemindersTask;
+
+#[async_trait]
+impl Task for SendRemindersTask {
+    async fn handle(&self) -> TaskResult {
+        // Eloquent: `.get()` returns a `Collection<User>` you can iterate.
+        let users = User::query()
+            .filter("reminder_enabled", true)
+            .get()
+            .await?;
+
+        // Anything bound in `bootstrap.rs` is reachable here too.
+        let send_email = App::get::<SendEmailAction>()
+            .expect("SendEmailAction bound in bootstrap()");
+
+        for user in users.iter() {
+            send_email.execute(&user.email, "Daily Reminder").await?;
+        }
+
+        Ok(())
+    }
+}
+```
+
+## File Organization
+
+The recommended file structure for scheduled tasks:
+
+```
+src/
+├── tasks/
+│   ├── mod.rs              # Re-exports all tasks (auto-updated by make:task)
+│   ├── cleanup_logs_task.rs
+│   ├── send_reminders_task.rs
+│   └── backup_database_task.rs
+├── schedule.rs             # Registers tasks (run by the schedule:* commands)
+├── bootstrap.rs
+├── routes.rs
+└── lib.rs                  # Declares `pub mod schedule;` + `pub mod tasks;`
+cmd/
+└── main.rs                 # Calls `.schedule(<crate>::schedule::register)`
+```
+
+**src/tasks/mod.rs:**
+```rust
+pub mod cleanup_logs_task;
+pub mod send_reminders_task;
+pub mod backup_database_task;
+
+pub use cleanup_logs_task::CleanupLogsTask;
+pub use send_reminders_task::SendRemindersTask;
+pub use backup_database_task::BackupDatabaseTask;
+```
+
+## Wiring the scheduler into your application
+
+`make:task` wires `.schedule(<crate>::schedule::register)` into your
+`Application` builder automatically. If you build the chain by hand, the
+relevant call is on `Application`:
+
+```rust
+// cmd/main.rs (or src/main.rs for the api starter)
+Application::new()
+    .config(my_app::config::register)
+    .bootstrap(my_app::bootstrap::bootstrap)
+    .routes(my_app::routes::register)
+    .schedule(my_app::schedule::register)        // <- this line
+    .migrations::<my_app::migrations::Migrator>()
+    .run()
+    .await;
+```
+
+Without `.schedule(...)` the `schedule:*` subcommands all report that no
+tasks are registered. `schedule:work` and `schedule:run` also run the same
+runtime drivers and `bootstrap_fn` as the HTTP server, so observers,
+listeners, and container bindings registered at boot are visible to your
+task handlers exactly as they are to controllers (see
+[Application Bootstrap](bootstrap.md)).
+
+### Why Suprnova diverges
+
+Laravel's scheduler is itself a single Artisan command (`schedule:run`) that
+PHP-cron triggers every minute. The PHP runtime spins up, evaluates due
+tasks, runs them in-process or shells out, then tears the runtime down. PHP
+has no long-lived processes, so the daemon form (`schedule:work`) was
+backported by Lumen and ships in Laravel itself as a workaround for sites
+without crontab access.
+
+In Suprnova the daemon is first-class. `schedule:work` runs inside a Tokio
+runtime that's already long-lived, so:
+
+- **Background tasks (`run_in_background`) compose with the tick loop.**
+  Laravel spawns a child process per background task; we spawn into a
+  `JoinSet` and surface completions on the next tick or at shutdown.
+- **Graceful shutdown is a `tokio::select!` arm.** Ctrl-C / SIGTERM
+  drains in-flight background tasks before exit; in-process tasks finish
+  their current call.
+- **Same-minute dedup is in-process state.** A `last_run_minute` atomic
+  per task guarantees a single process can't double-fire a minute-aligned
+  task even if the loop ticks fast. PHP can't do this - every cron tick
+  is a fresh process - which is why Laravel uses filesystem locks as the
+  only line of defence.
+
+The `Cache::lock`-backed `without_overlapping` still exists for the
+multi-process case (system cron on multiple hosts, multiple `schedule:work`
+daemons behind a load balancer). It's the same mechanism, just at a layer
+the scheduler doesn't always need.
+
+## Summary
+
+| Feature | Usage |
+|---------|-------|
+| Create task | `suprnova make:task TaskName` |
+| Trait-based | Implement `Task` trait, configure schedule during registration |
+| Closure-based | `schedule.call(\|\| async { ... })` |
+| Console command | `schedule.command("emails:send --force")` (panics at boot on a bad line), or `schedule.try_command(line)?` |
+| Register tasks | `schedule.add(schedule.task(...).daily().name("..."))` |
+| Wire into app | `Application::new().schedule(schedule::register)` |
+| Run once | `suprnova schedule:run` |
+| Run daemon | `suprnova schedule:work` |
+| List tasks | `suprnova schedule:list` |
+| Prevent overlap | `.without_overlapping()` (default 30-min lock TTL via Cache backend) |
+| Custom overlap TTL | `.without_overlapping_for(Duration)` |
+| Background | `.run_in_background()` (panic-isolated via JoinSet) |
+| Same-minute dedup | Always on per-process; skipped runs return `Ok(())` |
+| Validated cron at runtime | `.try_cron(expr)` / `.try_daily_at(s)` / `.try_hourly_at(n)` |
+
+## Next
+
+- [Scheduling Commands](cli-scheduling.md) - `schedule:run` / `schedule:work` / `schedule:list` CLI reference
+- [Queues](queues.md) - for work that should be picked up by a worker rather than tick on a clock
+- [Console](console.md) - `#[command]` for one-shot operator tasks (not on a schedule)
+- [Cache](cache.md) - the backend that powers cross-process `without_overlapping`
+- [Application Bootstrap](bootstrap.md) - how `.schedule(...)` plugs into the builder, and what tasks can resolve from the container

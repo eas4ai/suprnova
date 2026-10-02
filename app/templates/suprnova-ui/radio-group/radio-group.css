@@ -1,0 +1,11 @@
+.sn-radio-group {
+  display: grid;
+  gap: var(--sn-space-2);
+}
+
+.sn-radio {
+  display: flex;
+  align-items: center;
+  gap: var(--sn-space-2);
+  font-weight: var(--sn-font-weight-normal);
+}
