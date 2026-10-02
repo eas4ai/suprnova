@@ -434,8 +434,6 @@ Ways to end up without a report:
   async publisher, and the `503` kinds of the upload service. Those
   error types carry only the kind, by design, so the cause is in the log
   alone.
-- `SessionMiddleware`'s `500` when no encryption key is installed
-  carries none: no error value exists, and the body names the cause.
 
 ### Why Suprnova diverges
 

@@ -2297,7 +2297,11 @@ impl Middleware for SessionMiddleware {
             return Err(crate::http::HttpResponse::text(
                 "Internal Server Error: encryption key not installed",
             )
-            .status(500));
+            .status(500)
+            .with_error_report_from(&FrameworkError::internal(
+                "the session middleware ran without an installed encryption key; \
+                 install one with Crypt before serving requests",
+            )));
         }
 
         let (original_session_id, last_touch_at) = self.inbound_session(&request);
