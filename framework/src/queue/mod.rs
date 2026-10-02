@@ -21,6 +21,8 @@ pub mod outcome;
 pub mod redis;
 pub mod retry;
 pub mod routing;
+#[cfg(feature = "queue-sqs")]
+pub mod sqs;
 pub mod sync;
 pub mod testing;
 pub mod worker;
@@ -1631,8 +1633,8 @@ pub async fn bootstrap_default() {
 }
 
 /// Read `QUEUE_DRIVER` env and configure the matching driver: `memory`, `sync`,
-/// `null`, `redis`, `database` or `failover`. An unset `QUEUE_DRIVER` is
-/// `memory`.
+/// `null`, `redis`, `database`, `sqs` or `failover`. An unset `QUEUE_DRIVER` is
+/// `memory`. The module `queue::sqs` lists the variables `sqs` reads.
 ///
 /// A value that names no driver is a boot error in production, where falling
 /// back to an in-memory queue would lose every job at the next restart with a
@@ -1758,16 +1760,16 @@ fn plan_connections(
 }
 
 /// The stored queues a driver built from the environment under `kind` reads
-/// and writes: `redis` and `database` name one each, and `failover` names
+/// and writes: `redis`, `database` and `sqs` name one each, and `failover` names
 /// those of its inner connections, `failover_inner`. The in-memory kinds
 /// name none, because every driver built from one is a queue of its own.
 fn stored_queues_of(kind: &str, failover_inner: &str) -> Vec<String> {
     match kind {
-        "redis" | "database" => vec![kind.to_owned()],
+        "redis" | "database" | "sqs" => vec![kind.to_owned()],
         "failover" => failover_inner
             .split(',')
             .map(str::trim)
-            .filter(|inner| matches!(*inner, "redis" | "database"))
+            .filter(|inner| matches!(*inner, "redis" | "database" | "sqs"))
             .map(str::to_owned)
             .collect(),
         _ => Vec::new(),
@@ -1775,7 +1777,7 @@ fn stored_queues_of(kind: &str, failover_inner: &str) -> Vec<String> {
 }
 
 /// Every name `QUEUE_DRIVER` accepts, for the message a wrong one gets.
-const QUEUE_DRIVER_NAMES: &str = "memory, sync, null, redis, database, failover";
+const QUEUE_DRIVER_NAMES: &str = "memory, sync, null, redis, database, sqs, failover";
 
 /// What a `QUEUE_DRIVER` that names no driver becomes: a boot error in
 /// production, and outside it a warning and the in-memory driver.
@@ -1890,6 +1892,13 @@ async fn build_driver_from_env(name: &str) -> Result<Option<Arc<dyn QueueDriver>
             }
             Ok(Some(Arc::new(driver)))
         }
+        #[cfg(feature = "queue-sqs")]
+        "sqs" => Ok(Some(Arc::new(sqs::SqsQueueDriver::from_env()?))),
+        #[cfg(not(feature = "queue-sqs"))]
+        "sqs" => Err(FrameworkError::internal(
+            "QUEUE_DRIVER=sqs needs the `queue-sqs` feature of suprnova, which this build \
+             leaves out",
+        )),
         _ => Ok(None),
     }
 }

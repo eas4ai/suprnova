@@ -1733,11 +1733,12 @@ where
         crate::cache::Cache::bootstrap().await?;
         #[cfg(feature = "localization")]
         crate::localization::Localization::bootstrap().await?;
+        // The disks first: the `sqs` queue driver checks its overflow disk.
+        #[cfg(feature = "filesystem")]
+        crate::filesystem::bootstrap_from_env()?;
         crate::queue::bootstrap_from_env().await?;
         crate::rate_limit::bootstrap_from_env().await?;
         crate::mail::boot::bootstrap_from_env()?;
-        #[cfg(feature = "filesystem")]
-        crate::filesystem::bootstrap_from_env()?;
         Ok(())
     }
 
