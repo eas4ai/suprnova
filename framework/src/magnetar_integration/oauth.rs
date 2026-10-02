@@ -308,31 +308,56 @@ fn provider_not_configured(provider: &str) -> FrameworkError {
     }
 }
 
+/// Every arm builds its error through a constructor, not a struct
+/// literal, so a 5xx records its frames for the development error page.
 fn map_error(error: super::engine::HostOAuthError) -> FrameworkError {
     match error {
-        super::engine::HostOAuthError::Protocol(error) => FrameworkError::Domain {
-            message: error.to_string(),
-            status_code: error.class().status(),
-        },
+        super::engine::HostOAuthError::Protocol(error) => {
+            FrameworkError::domain(error.to_string(), error.class().status())
+        }
         super::engine::HostOAuthError::Auth(magnetar::Error::InvalidInput { message, .. })
         | super::engine::HostOAuthError::Auth(magnetar::Error::NotFound {
             identifier: message,
             ..
         })
         | super::engine::HostOAuthError::Auth(magnetar::Error::Conflict { message, .. }) => {
-            FrameworkError::Domain {
-                message,
-                status_code: 400,
-            }
+            FrameworkError::domain(message, 400)
         }
         super::engine::HostOAuthError::Auth(magnetar::Error::DependencyUnavailable { .. }) => {
-            FrameworkError::Domain {
-                message: "OAuth dependency unavailable".to_owned(),
-                status_code: 502,
-            }
+            FrameworkError::domain("OAuth dependency unavailable", 502)
         }
         super::engine::HostOAuthError::Auth(error) => {
             FrameworkError::internal(format!("Magnetar OAuth operation: {error}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ErrorReport;
+    use crate::error::frames::record_frames;
+
+    #[tokio::test]
+    async fn an_unavailable_oauth_dependency_is_a_502_that_records_its_frames() {
+        let (status, recorded) = record_frames(true, async {
+            let error = map_error(super::super::engine::HostOAuthError::Auth(
+                magnetar::Error::DependencyUnavailable {
+                    dependency: "github".to_owned(),
+                    message: "connect timeout".to_owned(),
+                },
+            ));
+            (
+                error.status_code(),
+                ErrorReport::from_error(&error).frames().is_some(),
+            )
+        })
+        .await;
+
+        assert_eq!(status, 502);
+        assert!(
+            recorded,
+            "a 5xx the framework builds must record its frames for the development error page"
+        );
     }
 }

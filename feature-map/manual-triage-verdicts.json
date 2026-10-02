@@ -209,13 +209,13 @@
    "class": "noise",
    "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
   },
+  "It attaches each id the relation doesn't hold yet and leaves every other pivot row as it is, which suits an \"add to favorites\" action that must not drop the rows already there:": {
+   "class": "noise",
+   "evidence": "'yet' is ordinary English about runtime state (the pivot rows the relation holds), not a claim about the code's development. Checked: sync_without_detaching calls sync_ids(.., false) (framework/src/eloquent/relations/belongs_to_many.rs:511-517, morph_to_many.rs:477-483), and sync_inner attaches target minus current and builds an empty detach set when `detaching` is false (belongs_to_many.rs:601-616)."
+  },
   "JoinSet::abort_all": {
    "class": "noise",
    "evidence": "A third-party type used as documented; `tokio::task::JoinSet::abort_all, the supervisor drain fallback at framework/src/supervisor/mod.rs:295`. Not a Suprnova API."
-  },
-  "JsonValue::from_query_result": {
-   "class": "noise",
-   "evidence": "A third-party type used as documented; `sea-orm's impl FromQueryResult for JsonValue (src/query/json.rs:5), which raw DB::select rows go through`. Not a Suprnova API."
   },
   "Laravel's `Response::resolvePartialProperties` walks the dotted path through the raw, not-yet-resolved prop array, so a path into a `LazyProp` or `DeferProp` degrades to `null` - the walk hits an unresolved closure and stops (`inertia-laravel-2.0.25/src/Response.php:273-297`).": {
    "class": "noise",
@@ -520,6 +520,10 @@
   "While the primary holds the path, the fallback's copy is unreachable through this disk, so removing it first changes nothing you can observe - and if the delete fails, nothing has moved yet.": {
    "class": "noise",
    "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+  },
+  "Without a `select`, a model query with a join selects only the model's own columns (`\"posts\".*`), so the joined table's `id`, `name`, or `created_at` never lands in the model.": {
+   "class": "noise",
+   "evidence": "'lands in' is ordinary English, not a claim about the code's development. Checked: with a join and no select, render_select_into selects the model table's `.*` (framework/src/eloquent/builder.rs:3735-3740), so a joined table's columns are not selected."
   },
   "You opt routes and groups in explicitly; everything else keeps working exactly as it does today.": {
    "class": "noise",

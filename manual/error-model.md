@@ -636,22 +636,28 @@ curl -H 'Accept: text/html' http://localhost:8000/invoices/42
 
 - The error chain, one line per source, or the panic message and the
   `file:line:column` where the panic was raised.
-- The site that created the error: the line of your `?`, or of your call
-  to a `FrameworkError` or `AppError` constructor.
+- The site that created the error: the line of the call to a
+  `FrameworkError` or `AppError` constructor, or of a `?` that converts
+  the error.
 - The stack frames recorded at that site. Your application's frames are
-  listed. Each run of frames from the framework, the async runtime,
-  other dependencies, and the standard library is collapsed behind a
-  count.
+  listed: your handlers and middleware, and the code they call. Each run
+  of frames from the framework, the async runtime, other dependencies,
+  and the standard library is collapsed behind a count.
 - The request: the method, the path, the query parameters, the headers,
   the matched route pattern, and the request id.
 
 Frames are recorded for an error created on the request's own task by a
 `FrameworkError` or `AppError` constructor or by a `From` conversion,
 which includes `?`. An error built as a struct literal, or created on a
-task the request spawned, has no frames, and the page says so. A build
-without debug info names each frame's function but not its line; the
-creation site always has its line, because the constructors and
-conversions are `#[track_caller]`.
+task the request spawned, has no frames, and the page says so.
+
+The constructors and conversions are `#[track_caller]`, so the site is
+the line that called them, even in a build without debug info. A call
+made inside a function that is not `#[track_caller]` reports that
+function's line instead: with `.map_err(FrameworkError::from)?`, the site
+is a line of `Result::map_err` in the Rust toolchain, and the frames show
+the handler that called it. A build without debug info names each
+frame's function but not its line.
 
 ### What it never shows
 
@@ -659,7 +665,10 @@ conversions are `#[track_caller]`.
   `Set-Cookie` headers, and of every header and query parameter whose
   name contains `token`, `secret`, `password`, `key`, or `signature` in
   any letter case. Each value reads `[redacted]`.
-- The password of a URL with credentials in the error chain:
+- The value of every such parameter anywhere else in the text the page
+  shows: in a `Referer` or an `X-Original-URI` header that repeats the
+  request's URL, `/reset?token=...` reads `/reset?token=[redacted]`.
+- The password of a URL with credentials:
   `postgres://app:hunter2@db/app` reads `postgres://app:[redacted]@db/app`.
 - The request body, environment variables, and configuration values.
   The page never reads them.
@@ -679,18 +688,17 @@ script.
 
 Laravel's exception page shows the request body, lists the SQL queries
 the request ran, and runs a bundled JavaScript app that adds a "copy as
-Markdown" button. Suprnova's page has none of the three:
+Markdown" button. Suprnova's page differs on all three:
 
-- A request body often holds the passwords, tokens, and personal data
-  the header redaction exists to protect, and a development server on a
-  shared network or behind a tunnel shows the page to whoever triggers
-  the error.
-- A page that runs no script and loads nothing renders in the situations
+- It never shows the request body. A body often holds the passwords,
+  tokens, and personal data the header redaction exists to protect, and
+  a development server on a shared network or behind a tunnel shows the
+  page to whoever triggers the error.
+- It runs no script and loads nothing, so it renders in the situations
   where a developer needs it most: a broken frontend build, a missing
   Vite manifest, or a failure inside Inertia.
-- Listing queries needs a listener on every query of every request. The
-  structured log already records the error chain of every 5xx with the
-  request id the page shows.
+- It lists no queries. SQL debugging is separate work, outside this
+  page.
 
 ## Hooking observability with `ErrorOccurred`
 
