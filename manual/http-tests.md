@@ -295,6 +295,88 @@ panic with an expected/actual excerpt, the same contract as `expect!`
 ([Testing](testing.md)) - this is a testing surface, not library code,
 so the no-panic house rule doesn't apply.
 
+### See why a request failed
+
+When a handler or middleware returns an error, or panics, the client
+gets a sanitized body: a 5xx says only
+`{"message": "Internal Server Error", ...}`. That's the right answer for
+a client and no help when a test fails. So the framework attaches an
+`ErrorReport` to every response it builds from an error. The report
+holds the error and each of its sources, or a panic's message and the
+location it was raised at. It lives in the response's in-process
+extensions and never reaches a header or the body.
+
+To keep the report, build the `TestResponse` from the response
+`handle_request` returns, with `TestResponse::from_response`. It
+collects the body for you:
+
+```rust
+use std::sync::Arc;
+
+use suprnova::testing::TestResponse;
+use suprnova::{MiddlewareRegistry, handle_request};
+
+// `incoming_get_request` builds a real `Incoming` request over an
+// in-memory pipe. Copy it from `framework/tests/support/common.rs`.
+let req = incoming_get_request("/invoices/42", &[]).await;
+let resp = handle_request(Arc::new(router), Arc::new(MiddlewareRegistry::new()), req).await;
+
+TestResponse::from_response(resp).await.assert_ok();
+```
+
+When an assertion fails on a response that carries a report, the
+failure message ends with it:
+
+```text
+assert_ok()
+  Expected: 200
+  Received: 500
+  body: {"message":"Internal Server Error","request_id":"9f1c..."}
+  error report:
+    posting the invoice failed
+    caused by: writing ledger entry 42 failed
+    caused by: disk /var/ledger is full
+```
+
+For a panic, the report names the panic and where it was raised:
+`panicked at src/controllers/ledger.rs:31:9: ledger index page 7 is
+unreadable`. To capture the location, the framework wraps the process
+panic hook once, and the wrapper calls the hook it replaced. An app
+that installs its own hook later, without calling the previous one,
+still gets the panic message in the report but not the location.
+
+To inspect the report in a test, call `error_report()`. It returns
+`None` for a response that wasn't built from an error:
+
+```rust
+let response = TestResponse::from_response(resp).await;
+let report = response.error_report().expect("the request failed");
+
+assert!(!report.is_panic());
+assert_eq!(report.chain()[0], "posting the invoice failed");
+```
+
+`chain()` lists the error's own message and then each source's.
+`is_panic()` and `panic_location()` describe a caught panic.
+Middleware can read the same report off an `HttpResponse` with
+`HttpResponse::error_report()`.
+
+Two ways to end up without a report:
+
+- `TestResponse::new` builds from a `(status, headers, body)` triple,
+  which has nowhere to carry one.
+- A response read back over the TCP loopback has crossed the wire,
+  and the report stays on the server side by design.
+
+### Why Suprnova diverges
+
+Laravel records a test request's exceptions in a process-wide
+`LoggedExceptionCollection`, and `TestResponse` appends them to a
+failing assertion. `cargo test` runs tests on several threads in one
+process, so a process-wide list would hand one test another test's
+error. The report rides on the response instead, so each failure
+message names only its own request's error.
+
 ### `assert_session_has` needs a session store
 
 Every other assertion reads only the wire-level response.
@@ -802,6 +884,7 @@ A short list of footguns that catch first-time authors:
 | `MiddlewareRegistry::new`, `append`, `prepend` | `framework/src/middleware/registry.rs` |
 | Loopback test harness (canonical) | `framework/tests/cors/middleware.rs` |
 | `TestResponse` (fluent assertions over the triple above) | `framework/src/testing/response.rs` |
+| `ErrorReport` (what went wrong, kept in process) | `framework/src/error/report.rs` |
 | `AssertableInertia`, `ReloadRequest` (fluent Inertia page-object assertions) | `framework/src/testing/inertia.rs` |
 | In-process `Request` capture harness | `framework/tests/http/request_accessors.rs` |
 | Panic-boundary test pattern | `framework/tests/middleware/panic_safety.rs` |

@@ -8,6 +8,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **A failed request's error report reaches `TestResponse`.** Every
+  response the framework builds from an error carries an `ErrorReport`
+  in its in-process extensions: the error and each of its sources, or,
+  for a panic the panic boundary caught, the panic message and the
+  location it was raised at. The report never reaches a header or the
+  body, so what a client receives is unchanged. The new
+  `TestResponse::from_response` builds from the response
+  `handle_request` returns and keeps the report, and every failing
+  assertion then ends with an `error report:` section, so a 500 says
+  why it happened. `TestResponse::error_report` and
+  `HttpResponse::error_report` expose it. The report belongs to its own
+  response, so two requests in flight in one test process never mix
+  their errors. To find a panic's location, the framework wraps the
+  process panic hook once and calls the hook it replaced. This landed on
+  main after the `v3.0.0` tag.
 - **A Pusher-protocol broadcast driver.** `PusherBroadcastHub` publishes
   broadcasts through the REST API that Pusher Channels, Soketi and Laravel
   Reverb share, and still delivers them to in-process subscribers, so a
