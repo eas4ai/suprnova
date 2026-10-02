@@ -33,7 +33,7 @@ fi
 cd "${live_root}"
 
 printf '%s\n' "[upload-budget] U4/16 server control path profile=${profile} CPU set ${cpu_set}"
-rtk node browser/scripts/run-upload-server-processes.mjs \
+node browser/scripts/run-upload-server-processes.mjs \
     --profile "${profile}" \
     --cpu-set "${cpu_set}" \
     --baseline "${baseline}" \
@@ -42,7 +42,7 @@ rtk node browser/scripts/run-upload-server-processes.mjs \
 printf '%s\n' "[upload-budget] U4/16 production browser upload path profile=${profile}"
 (
     cd browser
-    rtk env \
+    env \
         SUPRNOVA_LIVE_B1_DEDICATED="${SUPRNOVA_LIVE_B1_DEDICATED:-0}" \
         taskset -c "${cpu_set}" \
         npm run budget:upload -- \
@@ -53,7 +53,7 @@ printf '%s\n' "[upload-budget] U4/16 production browser upload path profile=${pr
 )
 
 printf '%s\n' "[upload-budget] checked schema and wiring contract"
-rtk env CARGO_INCREMENTAL=0 cargo test \
+env CARGO_INCREMENTAL=0 cargo test \
     --manifest-path "${workspace_manifest}" \
     --package suprnova-live \
     --test upload_budget_contract

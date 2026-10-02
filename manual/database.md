@@ -517,7 +517,10 @@ In Laravel, `DB::afterCommit` inside `DB::beginTransaction()` waits for
 `DB::commit()`, because the connection itself is in the transaction. A
 Suprnova manual transaction is a handle that only the calls naming it use,
 so the after-commit work that waits for it names it too:
-`tx.after_commit(callback)` rather than `DB::after_commit(callback)`.
+`tx.after_commit(callback)` rather than `DB::after_commit(callback)`. When
+you port `DB::beginTransaction()` code, change each `DB::afterCommit` in it
+to `tx.after_commit`: a `DB::after_commit` there runs at once, before the
+commit, even when the transaction then rolls back.
 
 ## Observability
 
@@ -605,6 +608,34 @@ The log is **unbounded** - every captured query grows it until the
 process exits, `flush_query_log()` runs, or `disable_query_log()` is
 called. Use it for development, not as a long-running production
 profiler.
+
+### Listeners and the query log in tests
+
+Inside a test container, `DB::listen` callbacks and the query log
+belong to that container. `TestDatabase::fresh`,
+`TestDatabase::sqlite_memory`, and `TestContainer::fake` each start
+one, so a test that counts queries counts only the queries it runs,
+even when `cargo test` runs other tests in the same process. The
+callbacks and the log end with the container.
+
+```rust
+use suprnova::testing::TestDatabase;
+use suprnova::DB;
+
+#[tokio::test]
+async fn listing_posts_runs_one_query() {
+    let _db = TestDatabase::fresh::<Migrator>().await.unwrap();
+    DB::enable_query_log().unwrap();
+
+    Post::query().get().await.unwrap();
+
+    assert_eq!(DB::get_query_log().unwrap().len(), 1);
+}
+```
+
+A callback that you register outside any test container, as
+`bootstrap.rs` does, receives every query of the process, including
+the queries that tests run inside their containers.
 
 ### Transaction lifecycle events
 
@@ -809,9 +840,10 @@ db.execute_unprepared("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").awai
 
 When a `TestDatabase` is dropped, the test container is cleared and
 the connection registry is wiped - no cross-test leakage. Tests that
-mutate process-wide state (the registry, the listener registry, the
-query log) should be annotated `#[serial_test::serial]` so they don't
-collide.
+mutate process-wide state, such as the connection registry, should be
+annotated `#[serial_test::serial]` so they don't collide. `DB::listen`
+callbacks and the query log aren't process-wide inside a test: see
+[Listeners and the query log in tests](#listeners-and-the-query-log-in-tests).
 
 ## Next
 

@@ -18,7 +18,7 @@ result_path=${SUPRNOVA_LIVE_BENCH_RESULT:-"${live_root}/benchmarks/snapshot-budg
 cd "${live_root}"
 
 printf '%s\n' "[snapshot-budget] release A8/16 benchmark on CPU set ${cpu_set}"
-rtk env \
+env \
     CARGO_INCREMENTAL=0 \
     SUPRNOVA_LIVE_BENCH_RESULT="${result_path}" \
     taskset -c "${cpu_set}" \
@@ -28,7 +28,7 @@ rtk env \
         --bench snapshot_budget
 
 printf '%s\n' "[snapshot-budget] checked-result contract"
-rtk env CARGO_INCREMENTAL=0 cargo test \
+env CARGO_INCREMENTAL=0 cargo test \
     --manifest-path "${workspace_manifest}" \
     --package suprnova-live \
     --test benchmark_contract

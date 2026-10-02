@@ -45,8 +45,8 @@ export function resolveGitWorkspaceRoot(directory, spawn = spawnSync) {
 
 export function loadLockedCargoMetadata(directory, spawn = spawnSync) {
   const result = spawn(
-    "rtk",
-    ["cargo", "metadata", "--locked", "--format-version", "1"],
+    "cargo",
+    ["metadata", "--locked", "--format-version", "1"],
     {
       cwd: directory,
       encoding: "utf8",

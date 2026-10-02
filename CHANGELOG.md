@@ -946,6 +946,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **A cached render whose COMMIT fails answers 500 without a panic.** When
+  a cache-miss render's handler ran and the database then refused the
+  render transaction's COMMIT (a deferred constraint, a dropped
+  connection), the render cache took the failure for a transaction that
+  never opened: a debug build panicked, and the log said nothing about the
+  commit. It now logs the database error under `suprnova::database` and
+  answers the same 500, because the handler's writes rolled back and the
+  rendered page would claim they landed. A render transaction that cannot
+  open still renders uncached, as before. This fix landed on main after the
+  `v3.0.0` tag.
+- **A savepoint can be named with a reserved word.** `tx.savepoint("inner")`
+  failed with a syntax error on PostgreSQL and MySQL, because the validated
+  name went into the statement unquoted. Savepoint names are now quoted for
+  the backend; they stay case-insensitive. This fix landed on main after the
+  `v3.0.0` tag.
 - **The sync queue driver runs a whole chain.** `SyncQueueDriver` ran a
   chain's first job and dropped every later link. It now runs the chain
   inline, link by link, as Laravel's sync queue does; a link that fails

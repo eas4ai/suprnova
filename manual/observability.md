@@ -224,6 +224,11 @@ The buffer is **unbounded** - every captured query grows it. Use it for
 tests and one-shot investigation, flush periodically if you leave it on
 in production.
 
+In a test, the log and any `DB::listen` callback belong to the test
+container that `TestDatabase` or `TestContainer::fake` starts, so they
+hold only the queries of that test. For more information, see
+[Listeners and the query log in tests](database.md#listeners-and-the-query-log-in-tests).
+
 ## Distributed tracing (OTel)
 
 Add the `otel` feature to opt in:

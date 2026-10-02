@@ -13,7 +13,7 @@
 use serial_test::serial;
 use suprnova::DbConnection;
 use suprnova::database::ConnectionRegistry;
-use suprnova::testing::TestContainer;
+use suprnova::testing::{TestContainer, TestContainerGuard};
 use suprnova::{Model, attrs, model};
 
 #[model(table = "epnc_users", connection = "pivot_named_only", relations = {
@@ -41,8 +41,13 @@ pub struct EpncUserTag {
     pub epnc_tag_id: i64,
 }
 
-async fn fresh_named_only_pool() -> DbConnection {
-    let _ = TestContainer::fake();
+/// The guard is held for the whole test. The last live
+/// `TestContainerGuard` of the process clears the named-connection
+/// registry when it drops, so a test that held none could lose
+/// `pivot_named_only` whenever the other tests running beside it under
+/// plain `cargo test` happened to drop theirs.
+async fn fresh_named_only_pool() -> (TestContainerGuard, DbConnection) {
+    let container = TestContainer::fake();
     ConnectionRegistry::clear();
 
     let conn = sea_orm::Database::connect("sqlite::memory:?mode=rwc")
@@ -82,13 +87,13 @@ async fn fresh_named_only_pool() -> DbConnection {
     ConnectionRegistry::register_existing("pivot_named_only", db.clone())
         .await
         .unwrap();
-    db
+    (container, db)
 }
 
 #[tokio::test]
 #[serial]
 async fn pivot_attach_routes_to_parent_model_named_connection() {
-    let _db = fresh_named_only_pool().await;
+    let (_container, _db) = fresh_named_only_pool().await;
     suprnova::eloquent::unguarded(|| async {
         let u = EpncUser::create(attrs! { id: 1i64, name: "Alice" })
             .await
@@ -120,7 +125,7 @@ async fn pivot_attach_routes_to_parent_model_named_connection() {
 #[tokio::test]
 #[serial]
 async fn pivot_sync_routes_to_parent_model_named_connection() {
-    let _db = fresh_named_only_pool().await;
+    let (_container, _db) = fresh_named_only_pool().await;
     suprnova::eloquent::unguarded(|| async {
         let u = EpncUser::create(attrs! { id: 2i64, name: "Bob" })
             .await
@@ -165,7 +170,7 @@ async fn pivot_sync_routes_to_parent_model_named_connection() {
 #[tokio::test]
 #[serial]
 async fn pivot_detach_routes_to_parent_model_named_connection() {
-    let _db = fresh_named_only_pool().await;
+    let (_container, _db) = fresh_named_only_pool().await;
     suprnova::eloquent::unguarded(|| async {
         let u = EpncUser::create(attrs! { id: 3i64, name: "Carol" })
             .await

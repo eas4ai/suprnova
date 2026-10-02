@@ -254,6 +254,6 @@ require_text THIRD_PARTY_LICENSES.md \
 # The shared data-driven semantic contract also runs in this shell gate. Its
 # in-memory mutation cases prove that one critical inversion in each Iteration
 # 004 guide and one broken README link are detected.
-rtk node "${live_root}/scripts/check-implementation-docs.mjs" --semantic-only
+node "${live_root}/scripts/check-implementation-docs.mjs" --semantic-only
 
 printf '%s\n' "documentation contract ok"

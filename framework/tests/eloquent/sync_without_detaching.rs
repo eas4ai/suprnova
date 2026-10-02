@@ -385,10 +385,13 @@ async fn live_sync_without_detaching(env: &str) {
     use sea_orm::ConnectionTrait;
 
     let (guard, database) = connect_live(env).await;
-    let (id_column, timestamp_type) = match database.inner().get_database_backend() {
-        sea_orm::DatabaseBackend::Postgres => ("id BIGSERIAL PRIMARY KEY", "TIMESTAMPTZ"),
-        _ => ("id BIGINT AUTO_INCREMENT PRIMARY KEY", "DATETIME(6)"),
+    let id_column = match database.inner().get_database_backend() {
+        sea_orm::DatabaseBackend::Postgres => "id BIGSERIAL PRIMARY KEY",
+        _ => "id BIGINT AUTO_INCREMENT PRIMARY KEY",
     };
+    // `VARCHAR(255)` timestamps, as `t.timestamps()` creates them: a
+    // `DateTime<Utc>` field without a cast stores RFC 3339 text.
+    let timestamp_type = "VARCHAR(255)";
     for sql in [
         format!("CREATE TEMPORARY TABLE swd_users ({id_column}, name VARCHAR(255) NOT NULL)"),
         format!("CREATE TEMPORARY TABLE swd_roles ({id_column}, name VARCHAR(255) NOT NULL)"),

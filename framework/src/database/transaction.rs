@@ -67,6 +67,7 @@
 //! semantics. Use [`Transaction::savepoint`] for nested behaviour.
 
 use crate::database::DB;
+use crate::database::clauses::quote_identifier;
 use crate::database::identifier::canonical_savepoint_name;
 use crate::error::FrameworkError;
 use rand::RngExt;
@@ -1069,7 +1070,8 @@ impl Transaction {
     /// that splices untrusted input gets a
     /// [`FrameworkError::bad_request`] instead of an injected
     /// statement. [`Self::rollback_to`] applies the same guard.
-    /// Names are case-insensitive. PostgreSQL also aliases names that share
+    /// The name is then quoted, so a reserved word such as `inner` is a
+    /// valid name on every backend. Names are case-insensitive. PostgreSQL also aliases names that share
     /// their first 63 ASCII bytes; SQLite and MySQL retain all 64 bytes.
     ///
     /// Inside [`DB::transaction`] the call also marks the after-commit
@@ -1079,7 +1081,7 @@ impl Transaction {
     /// back, which is how every backend resolves it.
     pub async fn savepoint(&self, name: &str) -> Result<(), FrameworkError> {
         let validated = canonical_savepoint_name(name, self.backend())?;
-        let sql = format!("SAVEPOINT {validated}");
+        let sql = format!("SAVEPOINT {}", quote_identifier(self.backend(), &validated));
         self.inner
             .execute_unprepared(&sql)
             .await
@@ -1124,7 +1126,10 @@ impl Transaction {
     /// goes to the cache store, and neither shipped store is database-backed.
     pub async fn rollback_to(&self, name: &str) -> Result<(), FrameworkError> {
         let validated = canonical_savepoint_name(name, self.backend())?;
-        let sql = format!("ROLLBACK TO SAVEPOINT {validated}");
+        let sql = format!(
+            "ROLLBACK TO SAVEPOINT {}",
+            quote_identifier(self.backend(), &validated)
+        );
         self.inner
             .execute_unprepared(&sql)
             .await
@@ -1388,10 +1393,19 @@ impl DB {
     /// and the render cache can serve a render whose handler succeeded
     /// instead of answering 500 for a callback the handler deferred with
     /// [`DB::after_commit`].
+    ///
+    /// And a failure comes back at one of two depths, split at whether the
+    /// closure ran. The outer `Err` is [`Self::transaction_settled`]'s: the
+    /// closure never ran (the nesting refusal, no connection, or a failed
+    /// `BEGIN`), so whatever it would have consumed is still the caller's.
+    /// The inner `Err` means the closure ran and the transaction then
+    /// failed: the closure returned `Err`, the database refused the COMMIT
+    /// (a deferred constraint, a dropped connection), or finalization ended
+    /// without an outcome.
     pub(crate) async fn transaction_with_isolation<F, T>(
         isolation_level: Option<IsolationLevel>,
         f: F,
-    ) -> Result<(T, Option<FrameworkError>), FrameworkError>
+    ) -> Result<Result<(T, Option<FrameworkError>), FrameworkError>, FrameworkError>
     where
         F: for<'b> FnOnce(
             &'b Transaction,
@@ -1405,14 +1419,14 @@ impl DB {
         })
         .await
         .map_err(TransactionFailure::into_error)?;
-        match settled.finalized {
+        Ok(match settled.finalized {
             Ok(()) => settled.value.map(|value| (value, None)),
             // Only a closure that returned `Ok` commits, so `value` is `Ok`.
             Err(TransactionFailure::AfterCommitCallback(error)) => {
                 settled.value.map(|value| (value, Some(error)))
             }
             Err(failure) => Err(failure.into_error()),
-        }
+        })
     }
 
     /// [`DB::transaction`] with the failure cause still intact.
@@ -1767,6 +1781,12 @@ async fn finish_query_event<T>(
 /// 3. The framework-wide [`EventDispatcher`](crate::EventDispatcher)
 ///    so `EventFacade::listen::<QueryExecuted, _>(...)` works.
 ///
+/// The first two are read in the application's scope and in the active
+/// test container's, if any (see
+/// [`QueryObservation`](super::events::QueryObservation)). The scopes
+/// are taken before the first await, on the thread and in the task that
+/// ran the query.
+///
 /// The whole call runs inside
 /// [`with_dispatching_flag`](super::events::with_dispatching_flag) so
 /// any listener that re-queries does not re-fire QueryExecuted.
@@ -1774,6 +1794,7 @@ async fn finish_query_event<T>(
 /// [`dispatch_best_effort`](crate::EventFacade::dispatch_best_effort) -
 /// observation must never fail the query.
 pub(crate) async fn emit_query_executed(event: super::events::QueryExecuted) {
+    let scopes = super::events::reached_observations();
     super::events::with_dispatching_flag(async move {
         // (1) Direct DB::listen callbacks. Cloning the registry's
         // listener Vec keeps the lock window tight; listeners are
@@ -1785,10 +1806,13 @@ pub(crate) async fn emit_query_executed(event: super::events::QueryExecuted) {
         // executor and surface as a "query failed" error to the
         // caller. Mirrors the EventFacade `dispatch_best_effort`
         // contract: observation never fails the query.
-        let callbacks: Vec<super::events::QueryListener> = match super::events::listeners().read() {
-            Ok(reg) => reg.listeners.clone(),
-            Err(_) => Vec::new(),
-        };
+        let callbacks: Vec<super::events::QueryListener> = scopes
+            .iter()
+            .flat_map(|scope| match scope.listeners.read() {
+                Ok(reg) => reg.listeners.clone(),
+                Err(_) => Vec::new(),
+            })
+            .collect();
         for cb in callbacks {
             let event_ref = &event;
             let cb_ref = &cb;
@@ -1810,10 +1834,12 @@ pub(crate) async fn emit_query_executed(event: super::events::QueryExecuted) {
             }
         }
         // (2) Query log.
-        if let Ok(mut log) = super::events::query_log().lock()
-            && log.enabled
-        {
-            log.entries.push(event.clone());
+        for scope in &scopes {
+            if let Ok(mut log) = scope.log.lock()
+                && log.enabled
+            {
+                log.entries.push(event.clone());
+            }
         }
         // (3) EventFacade dispatch. Best-effort - a logging listener
         // returning Err must not fail the query.

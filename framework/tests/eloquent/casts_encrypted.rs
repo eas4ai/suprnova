@@ -120,12 +120,12 @@ async fn setup_db() -> TestDatabase {
     TestDatabase::sqlite_memory().await.unwrap()
 }
 
-/// Install the deterministic test encryption key + return a fresh in-memory
-/// SQLite. Idempotent - the underlying `Crypt` facade is `OnceLock`-backed
-/// so the second call is a no-op (the helper itself ignores the return).
+/// Install the key ring of this binary + return a fresh in-memory SQLite.
+/// Idempotent - the underlying `Crypt` facade is `OnceLock`-backed, and
+/// the ring is shared with the rotation tests (see `key_ring`).
 #[cfg(feature = "testing")]
 async fn setup_db_with_key() -> TestDatabase {
-    suprnova::testing::install_test_encryption_key();
+    crate::key_ring::rotation_keys();
     setup_db().await
 }
 

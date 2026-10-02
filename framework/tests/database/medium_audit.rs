@@ -107,9 +107,24 @@ async fn setup_widget_db_with_render_cache() -> TestDatabase {
     db
 }
 
+/// Runs alone in a child process (see `own_process`). Whether this
+/// process advances RenderCache generations is decided once, by the first
+/// write the process makes, and kept for its life: a write by another test
+/// here against a database without the RenderCache migration decides
+/// "never", and the `mark_installed` below cannot reopen it.
+#[test]
+fn entity_ext_mut_insert_and_update_advance_the_table_generation() {
+    crate::own_process::run_alone(
+        "medium_audit::entity_ext_mut_insert_and_update_advance_the_table_generation_child",
+    );
+}
+
 #[tokio::test]
 #[serial_test::serial]
-async fn entity_ext_mut_insert_and_update_advance_the_table_generation() {
+async fn entity_ext_mut_insert_and_update_advance_the_table_generation_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     let _db = setup_widget_db_with_render_cache().await;
     let ledger = SqlGenerationLedger::new();
     let table = DependencyIdentity::table("audit_widgets");

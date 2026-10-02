@@ -62,11 +62,10 @@ async fn fixture(n: usize) -> TestDatabase {
     Context::test_clear_query();
     // Cursor paginate emits encrypted cursors via `CursorPaginator::encode_value`,
     // which requires Crypt to be initialised. Test binaries don't run
-    // `Server::from_config`, so we install a deterministic test key
-    // ourselves. Idempotent - the first installer in the binary wins;
-    // subsequent calls are no-ops.
+    // `Server::from_config`, so we install the key ring of this binary
+    // ourselves (see `key_ring`). Idempotent - only the first call installs.
     #[cfg(feature = "testing")]
-    suprnova::testing::install_test_encryption_key();
+    crate::key_ring::rotation_keys();
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
     seed(n).await;

@@ -23,20 +23,20 @@
 //! possible. The pattern is:
 //!
 //! 1. Decide the final ring shape (current = B, previous = [A]).
-//! 2. Install it once at the top of the binary via a mutex-guarded
-//!    helper.
+//! 2. Install it once for the binary via a `OnceLock`-guarded helper
+//!    (`key_ring::rotation_keys`, shared with every other test of this
+//!    binary that needs a key).
 //! 3. Use `suprnova::crypto::testing::encrypt_string_under(&A, purpose,
 //!    plaintext)` to mint ciphertext "as if it had been written when A
 //!    was current."
 //! 4. Decrypt it through the public `Crypt::decrypt_string` and
 //!    assert success + origin.
 //!
-//! Tests that need a *different* ring shape go in their own binary.
+//! Tests that need a *different* ring shape go in their own binary, or
+//! in a child process of this one.
 //! `OnceLock` + cargo test default-thread-pool semantics make
 //! multi-ring-per-binary brittle; one ring per binary is cheap and
 //! correct.
-
-use std::sync::OnceLock;
 
 use suprnova::crypto::testing::{encrypt_string_for_under, encrypt_string_under};
 use suprnova::testing::TestDatabase;
@@ -46,41 +46,7 @@ use suprnova::{
     model,
 };
 
-// ---- One-shot ring installer -------------------------------------------
-
-/// Keys used by every test in this binary. Materialised once; the
-/// installed ring is `current = B`, `previous = [A, A2]` (A2 for the
-/// multi-step-rotation test, harmless for the single-fallback tests).
-///
-/// `current` (B) - used for any new encrypt issued via `Crypt::encrypt_string`.
-/// `previous[0]` (A) - the oldest fallback; tests that simulate "data
-///                     was written under A" use this.
-/// `previous[1]` (A2) - a second fallback to prove the ring walks the
-///                      full list instead of stopping at index 0.
-struct RotationKeys {
-    current: EncryptionKey,
-    previous_oldest: EncryptionKey,
-    previous_middle: EncryptionKey,
-}
-
-fn rotation_keys() -> &'static RotationKeys {
-    static KEYS: OnceLock<RotationKeys> = OnceLock::new();
-    KEYS.get_or_init(|| {
-        let keys = RotationKeys {
-            current: EncryptionKey::generate(),
-            previous_oldest: EncryptionKey::generate(),
-            previous_middle: EncryptionKey::generate(),
-        };
-        // Install the ring exactly once. The installer is idempotent
-        // (returns false if a ring was already present from a sibling
-        // test binary's static init), so we ignore the bool.
-        let _ = suprnova::testing::install_test_encryption_keyring(
-            keys.current.clone(),
-            vec![keys.previous_oldest.clone(), keys.previous_middle.clone()],
-        );
-        keys
-    })
-}
+use crate::key_ring::rotation_keys;
 
 // ---- Cast-level tests (pure facade) ------------------------------------
 

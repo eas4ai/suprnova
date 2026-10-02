@@ -714,7 +714,8 @@ fn docker_copies_the_frontend_build_from_the_vite_output_dir() {
 }
 
 /// The Rust build stage must have the frontend page sources, because
-/// `inertia_response!` resolves them at COMPILE time: it looks for
+/// `inertia_response!` resolves them at COMPILE time: without a page lookup
+/// table in `Cargo.toml` (which a scaffold does not write) it looks for
 /// `frontend/src/pages/<component>.{svelte,tsx,jsx,vue}` under
 /// `CARGO_MANIFEST_DIR` and fails the build when the file is absent.
 ///
@@ -728,15 +729,18 @@ fn docker_copies_the_frontend_build_from_the_vite_output_dir() {
 /// has to move both sides together.
 #[test]
 fn docker_backend_stage_has_the_pages_the_inertia_macro_resolves() {
-    let macro_src = read_from_repo("suprnova-macros/src/inertia.rs");
+    let macro_src = read_from_repo("suprnova-macros/src/inertia_pages.rs");
 
-    // The macro builds the directory as `.join("frontend").join("src").join("pages")`.
-    assert!(
-        macro_src.contains(r#".join("frontend").join("src").join("pages")"#),
-        "validate_component_exists no longer resolves frontend/src/pages the \
-         way this test assumes - re-derive the expected COPY from its new path"
-    );
+    // The page lookup's starter directory, used when `Cargo.toml` has no
+    // `[package.metadata.suprnova.inertia]` table.
     let pages_dir = "frontend/src/pages";
+    assert!(
+        macro_src.contains(&format!(
+            r#"const STARTER_PAGES_DIR: &str = "{pages_dir}";"#
+        )),
+        "the page lookup no longer defaults to {pages_dir} the way this test \
+         assumes - re-derive the expected COPY from its new default"
+    );
 
     let dockerfile = read("src/templates/files/docker/Dockerfile.tpl");
     let backend_stage = dockerfile

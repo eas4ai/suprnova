@@ -768,8 +768,23 @@ async fn queued_cookie_survives_the_router_and_middleware_chain() {
 /// self-clearing, `testing`-feature-gated hook built for exactly
 /// this case; see its doc comment for why it clears itself after one
 /// use rather than staying on.
+///
+/// The hook fails the next encryption of the whole process, and the
+/// guard above serializes only this file's tests: the test runs alone in
+/// a child process (see `own_process`), so no other test's request can
+/// take the failure it arms.
+#[test]
+fn queued_cookie_survives_a_session_cookie_encryption_failure_500() {
+    crate::own_process::run_alone(
+        "cookie_queue::queued_cookie_survives_a_session_cookie_encryption_failure_500_child",
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn queued_cookie_survives_a_session_cookie_encryption_failure_500() {
+async fn queued_cookie_survives_a_session_cookie_encryption_failure_500_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     ensure_crypt();
     let _guard = crypt_hook_guard().lock().await;
 
@@ -817,8 +832,20 @@ async fn queued_cookie_survives_a_session_cookie_encryption_failure_500() {
     assert!(set_cookie.contains("promo=10OFF"), "got: {set_cookie}");
 }
 
+/// Arms the process-wide encryption failure hook, so it runs alone in a
+/// child process, as the test above does.
+#[test]
+fn rotated_session_cookie_failure_removes_old_row_without_writing_new_row() {
+    crate::own_process::run_alone(
+        "cookie_queue::rotated_session_cookie_failure_removes_old_row_without_writing_new_row_child",
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rotated_session_cookie_failure_removes_old_row_without_writing_new_row() {
+async fn rotated_session_cookie_failure_removes_old_row_without_writing_new_row_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     ensure_crypt();
     let _guard = crypt_hook_guard().lock().await;
 

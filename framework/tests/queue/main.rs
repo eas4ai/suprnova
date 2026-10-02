@@ -27,6 +27,8 @@ pub mod inspection_api;
 pub mod introspection;
 pub mod memory;
 pub mod middleware_pipeline;
+#[path = "../support/own_process.rs"]
+mod own_process;
 pub mod panic_isolation;
 pub mod pause;
 pub mod reclaim_attempts;
