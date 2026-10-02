@@ -22,6 +22,8 @@ use std::sync::Once;
 
 use futures::FutureExt;
 
+use super::frames::{self, RecordedFrames};
+
 /// What went wrong in one request: kept in process for the developer, never
 /// sent to the client.
 ///
@@ -38,10 +40,27 @@ use futures::FutureExt;
 /// `Display` renders an error's chain one link per line, outermost first,
 /// each source on a `caused by:` line. A panic renders as
 /// `panicked at <file:line:column>: <message>`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// With debug mode on, a report built while the server serves a request
+/// also holds the stack frames recorded where the error was created or
+/// the panic was raised. The development error page lists them. Two
+/// reports are equal when they report the same failure; the frames are
+/// not compared.
+#[derive(Debug, Clone)]
 pub struct ErrorReport {
     kind: Kind,
+    /// Where the error was created or the panic raised. `None` with debug
+    /// off, and for an error created outside the request's own task.
+    frames: Option<RecordedFrames>,
 }
+
+impl PartialEq for ErrorReport {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
+impl Eq for ErrorReport {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Kind {
@@ -62,6 +81,9 @@ impl ErrorReport {
     /// [`FrameworkError::from_external`](crate::FrameworkError::from_external)
     /// copies its source's message, so a plain walk would report that text
     /// twice.
+    ///
+    /// The frames are the ones recorded in this request under the error's
+    /// message, when there are any.
     pub(crate) fn from_error(error: &dyn std::error::Error) -> Self {
         let mut chain = vec![error.to_string()];
         let mut current = error.source();
@@ -75,17 +97,30 @@ impl ErrorReport {
             }
             current = source.source();
         }
+        let frames = frames::recorded_for(&chain[0]);
         Self {
             kind: Kind::Error { chain },
+            frames,
         }
     }
 
-    /// Report a panic the panic boundary caught. `location` is `None` when
-    /// it was not captured; see [`catch_panic`].
-    pub(crate) fn from_panic(message: String, location: Option<String>) -> Self {
+    /// Report a panic the panic boundary caught. `location` and `frames`
+    /// are `None` when they were not captured; see [`catch_panic`].
+    pub(crate) fn from_panic(
+        message: String,
+        location: Option<String>,
+        frames: Option<RecordedFrames>,
+    ) -> Self {
         Self {
             kind: Kind::Panic { message, location },
+            frames,
         }
+    }
+
+    /// The stack frames recorded where the error was created or the panic
+    /// raised, for the development error page.
+    pub(crate) fn frames(&self) -> Option<&RecordedFrames> {
+        self.frames.as_ref()
     }
 
     /// The error's own message, then the message of each `source()` in
@@ -146,22 +181,35 @@ pub(crate) struct CaughtPanic {
     pub(crate) payload: Box<dyn Any + Send>,
     /// `file:line:column` of the panic, when the hook recorded it.
     pub(crate) location: Option<String>,
+    /// The stack of the panic, when the hook recorded it: only while the
+    /// request records frames, which it does with debug mode on.
+    pub(crate) frames: Option<RecordedFrames>,
+}
+
+/// What the panic hook saw of the last panic.
+struct HookedPanic {
+    /// The message, when the payload was a string.
+    message: Option<String>,
+    location: String,
+    frames: Option<RecordedFrames>,
 }
 
 tokio::task_local! {
     /// The last panic raised while the current request's chain was being
-    /// polled: its message as the hook saw it, and its location.
+    /// polled: its message as the hook saw it, its location, and its
+    /// stack when the request records frames.
     ///
     /// Task-local and not thread-local: the slot exists only while this
     /// request's own future is polled, so a panic on another task that
     /// shares the worker thread can never write into it.
-    static LAST_PANIC: Cell<Option<(Option<String>, String)>>;
+    static LAST_PANIC: Cell<Option<HookedPanic>>;
 }
 
 static INSTALL_LOCATION_HOOK: Once = Once::new();
 
 /// Wrap the process panic hook, once, so a panic raised while a request's
-/// chain is polled records its location for that request.
+/// chain is polled records its location, and with debug on its stack, for
+/// that request.
 ///
 /// `catch_unwind` hands back the payload but not the location; only the
 /// panic hook sees that. The wrapper calls the hook it replaced on every
@@ -176,10 +224,11 @@ fn install_location_hook() {
                 // thread, a plain thread - there is no slot, and the panic
                 // is no request's to report.
                 let _ = LAST_PANIC.try_with(|slot| {
-                    slot.set(Some((
-                        info.payload_as_str().map(str::to_owned),
-                        location.to_string(),
-                    )));
+                    slot.set(Some(HookedPanic {
+                        message: info.payload_as_str().map(str::to_owned),
+                        location: location.to_string(),
+                        frames: frames::capture_for_panic(location),
+                    }));
                 });
             }
             previous(info);
@@ -188,10 +237,10 @@ fn install_location_hook() {
 }
 
 /// Poll `future` to completion, catching a panic and the location it was
-/// raised at.
+/// raised at, and its stack when the request records frames.
 ///
-/// The location is kept only when the message the hook recorded matches
-/// the payload that unwound here. A panic the request caught itself and a
+/// The location and stack are kept only when the message the hook
+/// recorded matches the payload that unwound here. A panic the request caught itself and a
 /// later `resume_unwind` of a different payload, which does not run the
 /// hook, would otherwise pair the new message with the old location.
 pub(crate) async fn catch_panic<F: Future>(future: F) -> Result<F::Output, CaughtPanic> {
@@ -201,10 +250,18 @@ pub(crate) async fn catch_panic<F: Future>(future: F) -> Result<F::Output, Caugh
             match AssertUnwindSafe(future).catch_unwind().await {
                 Ok(output) => Ok(output),
                 Err(payload) => {
-                    let location = LAST_PANIC.with(Cell::take).and_then(|(message, location)| {
-                        (message.as_deref() == payload_text(&*payload)).then_some(location)
-                    });
-                    Err(CaughtPanic { payload, location })
+                    let hooked = LAST_PANIC
+                        .with(Cell::take)
+                        .filter(|hooked| hooked.message.as_deref() == payload_text(&*payload));
+                    let (location, frames) = match hooked {
+                        Some(hooked) => (Some(hooked.location), hooked.frames),
+                        None => (None, None),
+                    };
+                    Err(CaughtPanic {
+                        payload,
+                        location,
+                        frames,
+                    })
                 }
             }
         })
@@ -320,6 +377,7 @@ mod tests {
         let located = ErrorReport::from_panic(
             "ledger index page 7 is unreadable".to_string(),
             Some("src/ledger.rs:31:9".to_string()),
+            None,
         );
         assert!(located.is_panic());
         assert_eq!(located.chain(), ["ledger index page 7 is unreadable"]);
@@ -330,7 +388,7 @@ mod tests {
         );
 
         let unlocated =
-            ErrorReport::from_panic("ledger index page 7 is unreadable".to_string(), None);
+            ErrorReport::from_panic("ledger index page 7 is unreadable".to_string(), None, None);
         assert_eq!(unlocated.panic_location(), None);
         assert_eq!(
             unlocated.to_string(),

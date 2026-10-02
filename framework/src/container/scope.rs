@@ -318,6 +318,7 @@ impl fmt::Display for ScopedError {
 }
 
 impl From<ScopedError> for crate::error::FrameworkError {
+    #[track_caller]
     fn from(error: ScopedError) -> Self {
         Self::internal(error.to_string())
     }

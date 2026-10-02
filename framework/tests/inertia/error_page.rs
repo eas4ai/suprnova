@@ -13,6 +13,7 @@
 //! middleware chain, the RBAC route middleware, and the page renderer -
 //! none of which a unit test sees together.
 
+use crate::env_snapshot::{EnvSnapshot, set_env};
 use crate::http_wire::request;
 
 use std::any::Any;
@@ -267,6 +268,30 @@ async fn spawn_server(
     addr
 }
 
+/// Debug mode off until dropped. Holds the binary's env lock and restores
+/// `APP_DEBUG`; the snapshot is declared first so it is restored before
+/// the lock is released.
+struct DebugOff {
+    _env: EnvSnapshot,
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+/// Turn debug mode off for one test, which must also be `#[serial]`.
+///
+/// With debug on - the default when `APP_ENV` is unset, as here - a 5xx
+/// sent to an Inertia visit or a browser becomes the development error
+/// page instead of the app's Inertia error page (PAR-012). The tests that
+/// take this are about what production serves.
+async fn debug_off() -> DebugOff {
+    let lock = crate::env_lock::lock_env_async().await;
+    let snapshot = EnvSnapshot::capture(&["APP_DEBUG"]);
+    set_env("APP_DEBUG", Some("false"));
+    DebugOff {
+        _env: snapshot,
+        _lock: lock,
+    }
+}
+
 /// Headers an Inertia XHR visit carries.
 fn inertia_visit() -> Vec<(&'static str, &'static str)> {
     vec![
@@ -374,7 +399,9 @@ async fn an_inertia_visit_to_an_unknown_route_renders_the_error_page() {
 }
 
 #[tokio::test]
+#[serial]
 async fn a_failing_handler_renders_the_error_page_with_the_sanitized_message() {
+    let _debug = debug_off().await;
     let addr = spawn_server(router(), stack(), 2).await;
 
     let (status, _headers, body) = request(addr, "GET", "/boom", &inertia_visit()).await;
@@ -554,12 +581,14 @@ async fn a_handlers_own_inertia_page_keeps_its_component_even_on_an_error_status
 }
 
 #[tokio::test]
+#[serial]
 async fn a_panicking_handler_is_out_of_reach_of_the_error_page() {
     // `execute_chain_safely` (framework/src/server.rs) wraps the WHOLE
     // middleware chain in `catch_unwind`, so a panic unwinds every
     // middleware frame - this one included - before the synthesized 500
     // exists. No middleware can rewrite it. Pinned here so the gap is a
     // recorded fact rather than a surprise in production.
+    let _debug = debug_off().await;
     let addr = spawn_server(router(), stack(), 2).await;
 
     let (status, headers, body) = request(addr, "GET", "/panic", &inertia_visit()).await;

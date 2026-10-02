@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 
+pub(crate) mod debug_page;
+mod frames;
 mod report;
 
 pub use report::ErrorReport;
@@ -76,11 +78,17 @@ pub struct AppError {
 
 impl AppError {
     /// Create a new AppError with status 500 (Internal Server Error)
+    ///
+    /// With debug mode on, this records where the error was created, for
+    /// the development error page.
+    #[track_caller]
     pub fn new(message: impl Into<String>) -> Self {
-        Self {
+        let error = Self {
             message: message.into(),
             status_code: 500,
-        }
+        };
+        frames::record_creation(&error, std::panic::Location::caller());
+        error
     }
 
     /// Set the HTTP status code
@@ -90,31 +98,37 @@ impl AppError {
     }
 
     /// Create a 404 Not Found error
+    #[track_caller]
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(message).status(404)
     }
 
     /// Create a 400 Bad Request error
+    #[track_caller]
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new(message).status(400)
     }
 
     /// Create a 401 Unauthorized error
+    #[track_caller]
     pub fn unauthorized(message: impl Into<String>) -> Self {
         Self::new(message).status(401)
     }
 
     /// Create a 403 Forbidden error
+    #[track_caller]
     pub fn forbidden(message: impl Into<String>) -> Self {
         Self::new(message).status(403)
     }
 
     /// Create a 422 Unprocessable Entity error
+    #[track_caller]
     pub fn unprocessable(message: impl Into<String>) -> Self {
         Self::new(message).status(422)
     }
 
     /// Create a 409 Conflict error
+    #[track_caller]
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::new(message).status(409)
     }
@@ -139,6 +153,8 @@ impl HttpError for AppError {
 }
 
 impl From<AppError> for FrameworkError {
+    /// Records no frames: [`AppError::new`] recorded them where the error
+    /// was created, under the same message.
     fn from(e: AppError) -> Self {
         FrameworkError::Domain {
             message: e.message,
@@ -1068,46 +1084,57 @@ pub enum FrameworkError {
 
 impl FrameworkError {
     /// Create a ServiceNotFound error for a given type
+    #[track_caller]
     pub fn service_not_found<T: ?Sized>() -> Self {
         Self::ServiceNotFound {
             type_name: std::any::type_name::<T>(),
         }
+        .recorded()
     }
 
     /// Create a ParamError for a missing parameter
+    #[track_caller]
     pub fn param(name: impl Into<String>) -> Self {
         Self::ParamError {
             param_name: name.into(),
         }
+        .recorded()
     }
 
     /// Create a ValidationError
+    #[track_caller]
     pub fn validation(field: impl Into<String>, message: impl Into<String>) -> Self {
         Self::ValidationError {
             field: field.into(),
             message: message.into(),
         }
+        .recorded()
     }
 
     /// Create a DatabaseError
+    #[track_caller]
     pub fn database(message: impl Into<String>) -> Self {
-        Self::Database(message.into())
+        Self::Database(message.into()).recorded()
     }
 
     /// Create an Internal error
+    #[track_caller]
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal {
             message: message.into(),
         }
+        .recorded()
     }
 
     /// Create a [`Self::Timeout`]: `elapsed` is the deadline that passed and
     /// `message` names what was being waited on.
+    #[track_caller]
     pub fn timeout(elapsed: std::time::Duration, message: impl Into<String>) -> Self {
         Self::Timeout {
             elapsed,
             message: message.into(),
         }
+        .recorded()
     }
 
     /// Whether this error is a [`Self::Timeout`].
@@ -1125,8 +1152,9 @@ impl FrameworkError {
     /// Pair with [`Self::is_silent`] at the consume site. Type-safe:
     /// constructing `FrameworkError::internal("")` directly does NOT
     /// produce a silent error - only this constructor does.
+    #[track_caller]
     pub fn silent() -> Self {
-        Self::AlreadyReported
+        Self::AlreadyReported.recorded()
     }
 
     /// Whether this error has already been reported to the user.
@@ -1139,11 +1167,13 @@ impl FrameworkError {
     }
 
     /// Create a Domain error with custom status code
+    #[track_caller]
     pub fn domain(message: impl Into<String>, status_code: u16) -> Self {
         Self::Domain {
             message: message.into(),
             status_code,
         }
+        .recorded()
     }
 
     /// Bridge from any [`HttpError`]-implementing domain error into
@@ -1182,11 +1212,13 @@ impl FrameworkError {
     /// taken from [`HttpError::status_code`] and
     /// [`HttpError::error_message`] and stored in a [`Self::Domain`]
     /// variant - response rendering follows the normal Domain path.
+    #[track_caller]
     pub fn from_http_error<E: HttpError>(err: E) -> Self {
         Self::Domain {
             message: err.error_message(),
             status_code: err.status_code(),
         }
+        .recorded()
     }
 
     /// Wrap a foreign error, taking its `Display` as the message.
@@ -1197,6 +1229,7 @@ impl FrameworkError {
     /// recorded on [`Self::from_http_error`].
     ///
     /// Maps to HTTP 500.
+    #[track_caller]
     pub fn from_external<E>(err: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
@@ -1205,6 +1238,7 @@ impl FrameworkError {
             message: err.to_string(),
             source: Arc::new(err),
         }
+        .recorded()
     }
 
     /// Wrap a foreign error under a caller-supplied message, keeping the
@@ -1215,6 +1249,7 @@ impl FrameworkError {
     /// data instead of being melted into a string.
     ///
     /// Maps to HTTP 500.
+    #[track_caller]
     pub fn from_external_with<E>(message: impl Into<String>, err: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
@@ -1223,6 +1258,7 @@ impl FrameworkError {
             message: message.into(),
             source: Arc::new(err),
         }
+        .recorded()
     }
 
     /// The wrapped foreign error, for callers that need to downcast to a
@@ -1240,11 +1276,13 @@ impl FrameworkError {
     }
 
     /// Create a generic bad-request (400) error.
+    #[track_caller]
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::Domain {
             message: message.into(),
             status_code: 400,
         }
+        .recorded()
     }
 
     /// Get the HTTP status code for this error
@@ -1275,6 +1313,7 @@ impl FrameworkError {
     /// rate-limited services into framework errors (web-push, HTTP
     /// clients, etc.) so the duration survives instead of collapsing into
     /// the message body.
+    #[track_caller]
     pub fn rate_limited(
         retry_after: Option<std::time::Duration>,
         message: impl Into<String>,
@@ -1283,6 +1322,7 @@ impl FrameworkError {
             retry_after,
             message: message.into(),
         }
+        .recorded()
     }
 
     /// Pull the structured `Retry-After` duration off a
@@ -1296,8 +1336,9 @@ impl FrameworkError {
     }
 
     /// Create a Validation error from ValidationErrors struct
+    #[track_caller]
     pub fn validation_errors(errors: ValidationErrors) -> Self {
-        Self::Validation(errors)
+        Self::Validation(errors).recorded()
     }
 
     /// Turn a database write error into a field-scoped 422 validation
@@ -1344,6 +1385,7 @@ impl FrameworkError {
     /// [`Unique`]: crate::validation::rule::async_rules::Unique
     /// [`DbErr::sql_err`]: sea_orm::DbErr::sql_err
     /// [`SqlErr::UniqueConstraintViolation`]: sea_orm::SqlErr::UniqueConstraintViolation
+    #[track_caller]
     pub fn from_unique_violation(
         field: impl Into<String>,
         message: impl Into<String>,
@@ -1356,32 +1398,40 @@ impl FrameworkError {
                 // this is a keyless message: translating it is the
                 // caller's business, not the framework's.
                 errors.add(field, message.into());
-                Self::Validation(errors)
+                Self::Validation(errors).recorded()
             }
-            _ => err.into(),
+            // `Self::from`, not `err.into()`: the blanket `Into` is not
+            // `#[track_caller]`, so it would record the wrong site.
+            _ => Self::from(err),
         }
     }
 
     /// Create a ModelNotFound error (404)
+    #[track_caller]
     pub fn model_not_found(name: impl Into<String>) -> Self {
         Self::ModelNotFound {
             model_name: name.into(),
         }
+        .recorded()
     }
 
     /// Create a ParamParse error (400)
+    #[track_caller]
     pub fn param_parse(param: impl Into<String>, expected_type: &'static str) -> Self {
         Self::ParamParse {
             param: param.into(),
             expected_type,
         }
+        .recorded()
     }
 
     /// Create a 404 Not Found error (convenience constructor).
+    #[track_caller]
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::ModelNotFound {
             model_name: message.into(),
         }
+        .recorded()
     }
 
     /// Return the per-variant payload string (param name, model name,
@@ -1455,8 +1505,20 @@ impl FrameworkError {
     /// variants (`Internal`, `Database`, `Domain`, `ServiceNotFound`,
     /// `ParamError`) flatten to `Domain { message: "<ctx>: <original>",
     /// status_code }` as before.
+    ///
+    /// With debug mode on, the frames recorded where this error was
+    /// created stay with it under its new message.
     pub fn context(self, ctx: impl Into<String>) -> Self {
-        let prefix = ctx.into();
+        let before = frames::is_recording().then(|| self.to_string());
+        let contexted = self.with_context(ctx.into());
+        if let Some(before) = before {
+            frames::rename(&before, contexted.to_string());
+        }
+        contexted
+    }
+
+    /// [`Self::context`] without the frame bookkeeping.
+    fn with_context(self, prefix: String) -> Self {
         match self {
             // The prefix rides along on each message rather than being
             // baked into its text, so a contexted bag still translates:
@@ -1525,6 +1587,20 @@ impl FrameworkError {
                 }
             }
         }
+    }
+}
+
+impl FrameworkError {
+    /// Hand a newly created error to the frame recorder and return it.
+    ///
+    /// Every constructor and `From` conversion ends here, so with debug
+    /// mode on the development error page can list the frames where the
+    /// error was created. Outside a request with debug on, this records
+    /// nothing; see the `frames` module.
+    #[track_caller]
+    fn recorded(self) -> Self {
+        frames::record_creation(&self, std::panic::Location::caller());
+        self
     }
 }
 
@@ -1786,8 +1862,9 @@ mod http_error_bridge_tests {
 
 // Implement From<DbErr> for automatic error conversion with ?
 impl From<sea_orm::DbErr> for FrameworkError {
+    #[track_caller]
     fn from(e: sea_orm::DbErr) -> Self {
-        Self::Database(e.to_string())
+        Self::Database(e.to_string()).recorded()
     }
 }
 
@@ -1795,10 +1872,12 @@ impl From<sea_orm::DbErr> for FrameworkError {
 // in handler/service code that already returns `FrameworkError`.
 #[cfg(feature = "filesystem")]
 impl From<opendal::Error> for FrameworkError {
+    #[track_caller]
     fn from(e: opendal::Error) -> Self {
         Self::Internal {
             message: format!("storage: {e}"),
         }
+        .recorded()
     }
 }
 
@@ -1816,6 +1895,7 @@ impl From<opendal::Error> for FrameworkError {
 // `render_cache_*` tokens) and nothing else: no key text, no digest, no
 // stored bytes, and no identity ever reaches it.
 impl From<suprnova_live::render_cache::RenderCacheError> for FrameworkError {
+    #[track_caller]
     fn from(error: suprnova_live::render_cache::RenderCacheError) -> Self {
         Self::internal(format!("RenderCache contract violated: {error}"))
     }
