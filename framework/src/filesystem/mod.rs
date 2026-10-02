@@ -86,15 +86,18 @@ const URL_PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
 /// the environment. An application that needs the disk in either place
 /// calls this function in its own bootstrap.
 ///
-/// There is no default disk. Every call names the disk it uses, so
-/// `FILESYSTEM_DISK` is not read.
+/// It then checks the default disk ([`Storage::default_disk`]): when
+/// `Storage::set_default_disk` or `FILESYSTEM_DISK` names one, a disk
+/// must be registered under that name by now, or the boot stops here
+/// rather than at the first upload.
 ///
 /// # Errors
 ///
 /// When the variables describe no usable disk: no region, one half of
 /// the pair of keys, an S3 driver that refuses the configuration, a
-/// public URL that is none. The server does not boot then. No error
-/// repeats the value of a variable.
+/// public URL that is none. When the default disk is named and not
+/// registered. The server does not boot then. No error repeats the value
+/// of a variable other than the disk name.
 pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
     bootstrap_from_variables(|name| std::env::var(name).ok())
 }
@@ -103,17 +106,47 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
 fn bootstrap_from_variables(
     variable: impl Fn(&str) -> Option<String>,
 ) -> Result<(), FrameworkError> {
+    register_env_s3(&variable)?;
+    check_default_disk(&variable)
+}
+
+/// The name of the default disk: the one set in code, or else the one
+/// `FILESYSTEM_DISK` names.
+fn default_disk_name(variable: &impl Fn(&str) -> Option<String>) -> Option<String> {
+    registry::default_name().or_else(|| set_variable(variable, "FILESYSTEM_DISK"))
+}
+
+/// The error for a default disk that names no registered disk. It names
+/// both ways to fix it, since either one may be where the name came from.
+fn unregistered_default_disk(name: &str) -> FrameworkError {
+    FrameworkError::internal(format!(
+        "the default disk '{name}' is not registered: register a disk named \
+         '{name}' in the bootstrap, or name a registered disk with \
+         FILESYSTEM_DISK or Storage::set_default_disk"
+    ))
+}
+
+/// Fail when a default disk is named and no disk is registered under it.
+fn check_default_disk(variable: &impl Fn(&str) -> Option<String>) -> Result<(), FrameworkError> {
+    match default_disk_name(variable) {
+        Some(name) if !registry::contains(&name) => Err(unregistered_default_disk(&name)),
+        _ => Ok(()),
+    }
+}
+
+/// Register the S3 disk the variables describe, when they describe one.
+fn register_env_s3(variable: &impl Fn(&str) -> Option<String>) -> Result<(), FrameworkError> {
     // The disk of the application is looked for first. With it there the
     // variables describe nothing that will be used, and a fault in them
     // must not stop the boot.
     if registry::contains(ENV_S3_DISK) {
         return Ok(());
     }
-    let Some(config) = S3Config::from_variables(&variable)? else {
+    let Some(config) = S3Config::from_variables(variable)? else {
         return Ok(());
     };
     Storage::register_s3(ENV_S3_DISK, config)?;
-    if let Some(url) = set_variable(&variable, "S3_PUBLIC_URL") {
+    if let Some(url) = set_variable(variable, "S3_PUBLIC_URL") {
         let base = public_base(&url).map_err(|reason| {
             FrameworkError::internal(format!(
                 "S3_PUBLIC_URL was refused: {reason}. Write an absolute URL \
@@ -614,6 +647,42 @@ impl Storage {
     /// `name`. The returned `Operator` is cheap to clone (it is `Arc`-backed).
     pub fn disk(name: &str) -> Result<Operator, FrameworkError> {
         registry::get(name)
+    }
+
+    /// The application's default disk: the one named with
+    /// [`Storage::set_default_disk`], or else by `FILESYSTEM_DISK`.
+    ///
+    /// Laravel's `Storage::disk()` with no name. A call that names its disk
+    /// with [`Storage::disk`] is not affected by the default.
+    ///
+    /// # Errors
+    ///
+    /// When neither names a disk, with an error that names
+    /// `FILESYSTEM_DISK`; when the named disk is not registered. The server
+    /// already refuses to boot in the second case
+    /// ([`bootstrap_from_env`]), so in a running server it
+    /// means a disk was forgotten after boot.
+    pub fn default_disk() -> Result<Operator, FrameworkError> {
+        let name = default_disk_name(&|name| std::env::var(name).ok()).ok_or_else(|| {
+            FrameworkError::internal(
+                "no default disk is named: set FILESYSTEM_DISK or call \
+                 Storage::set_default_disk in the bootstrap",
+            )
+        })?;
+        if !registry::contains(&name) {
+            return Err(unregistered_default_disk(&name));
+        }
+        registry::get(&name)
+    }
+
+    /// Name the application's default disk in code. It wins over
+    /// `FILESYSTEM_DISK`, the way a disk the bootstrap registers wins over
+    /// the one the environment describes.
+    ///
+    /// The disk need not be registered yet; the boot checks it once the
+    /// bootstrap has run ([`bootstrap_from_env`]).
+    pub fn set_default_disk(name: impl Into<String>) {
+        registry::set_default(name.into());
     }
 
     /// Register a local filesystem disk rooted at `root`.

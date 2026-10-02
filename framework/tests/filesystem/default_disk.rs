@@ -38,7 +38,10 @@ async fn bytes_written_through_the_default_disk_are_on_the_disk_filesystem_disk_
     Storage::register_memory("uploads");
 
     let default = Storage::default_disk().expect("FILESYSTEM_DISK names a registered disk");
-    default.write("avatar.txt", b"pixels".to_vec()).await.unwrap();
+    default
+        .write("avatar.txt", b"pixels".to_vec())
+        .await
+        .unwrap();
 
     let named = Storage::disk("uploads").unwrap();
     assert_eq!(
@@ -91,9 +94,9 @@ async fn with_no_default_named_default_disk_is_an_error_naming_filesystem_disk()
     clear_variables();
     Storage::register_memory("uploads");
 
-    let error = Storage::default_disk()
-        .err()
-        .expect("with neither a default set in code nor FILESYSTEM_DISK, there is no default disk");
+    let error = Storage::default_disk().expect_err(
+        "with neither a default set in code nor FILESYSTEM_DISK, there is no default disk",
+    );
     assert!(
         error.to_string().contains("FILESYSTEM_DISK"),
         "the error must tell the developer which variable names the default disk: {error}"
@@ -134,8 +137,7 @@ async fn startup_fails_when_filesystem_disk_names_no_registered_disk() {
     set_env("FILESYSTEM_DISK", Some("uploads"));
 
     let error = suprnova::filesystem::bootstrap_from_env()
-        .err()
-        .expect("startup must fail when the default disk is not registered");
+        .expect_err("startup must fail when the default disk is not registered");
     let text = error.to_string();
     assert!(
         text.contains("uploads"),
