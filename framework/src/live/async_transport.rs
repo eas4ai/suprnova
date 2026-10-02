@@ -87,7 +87,7 @@ struct MembershipControl {
 pub(crate) async fn subscriptions(request: Request) -> Response {
     Ok(match control(request, ControlRoute::Subscriptions).await {
         Ok(response) => response,
-        Err(kind) => error_response(kind),
+        Err(refusal) => refusal.into_response(),
     })
 }
 
@@ -95,7 +95,7 @@ pub(crate) async fn subscriptions(request: Request) -> Response {
 pub(crate) async fn memberships(request: Request) -> Response {
     Ok(match control(request, ControlRoute::Memberships).await {
         Ok(response) => response,
-        Err(kind) => error_response(kind),
+        Err(refusal) => refusal.into_response(),
     })
 }
 
@@ -103,8 +103,41 @@ pub(crate) async fn memberships(request: Request) -> Response {
 pub(crate) async fn events(request: Request) -> Response {
     Ok(match events_inner(request).await {
         Ok(response) => response,
-        Err(kind) => error_response(kind),
+        Err(refusal) => refusal.into_response(),
     })
+}
+
+/// Why an async endpoint refused a request: the closed kind the client
+/// sees and, when a failure on the server's side caused it and the error
+/// is still in hand, that error, which the response carries as its
+/// in-process report.
+struct AsyncRefusal {
+    kind: AsyncErrorKind,
+    cause: Option<FrameworkError>,
+}
+
+impl From<AsyncErrorKind> for AsyncRefusal {
+    fn from(kind: AsyncErrorKind) -> Self {
+        Self { kind, cause: None }
+    }
+}
+
+impl AsyncRefusal {
+    /// [`AsyncErrorKind::Unavailable`], caused by `cause`.
+    fn unavailable(cause: FrameworkError) -> Self {
+        Self {
+            kind: AsyncErrorKind::Unavailable,
+            cause: Some(cause),
+        }
+    }
+
+    fn into_response(self) -> HttpResponse {
+        let response = error_response(self.kind);
+        match &self.cause {
+            Some(cause) => response.with_error_report_from(cause),
+            None => response,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -113,12 +146,12 @@ enum ControlRoute {
     Memberships,
 }
 
-async fn control(request: Request, route: ControlRoute) -> Result<HttpResponse, AsyncErrorKind> {
+async fn control(request: Request, route: ControlRoute) -> Result<HttpResponse, AsyncRefusal> {
     if request.method() != Method::POST {
         return Ok(closed_response(405).header("Allow", "POST"));
     }
     if request.header("x-suprnova-live") != Some(PROTOCOL_HEADER_VALUE) {
-        return Err(AsyncErrorKind::ProtocolInvalid);
+        return Err(AsyncErrorKind::ProtocolInvalid.into());
     }
     if request.header("content-type") != Some("application/json") {
         return Ok(closed_response(415));
@@ -127,22 +160,28 @@ async fn control(request: Request, route: ControlRoute) -> Result<HttpResponse, 
     let request = match request.buffer_body(MAX_CONTROL_BODY_BYTES).await {
         Ok(request) => request,
         Err(error) if error.status_code() == 413 => return Ok(closed_response(413)),
-        Err(_) => return Err(AsyncErrorKind::Unavailable),
+        Err(error) => return Err(AsyncRefusal::unavailable(error)),
     };
-    let body = request.cached_body().ok_or(AsyncErrorKind::Unavailable)?;
+    let body = request.cached_body().ok_or_else(|| {
+        AsyncRefusal::unavailable(FrameworkError::internal(
+            "the buffered async control body was missing",
+        ))
+    })?;
     if !matches!(
         serde_json::from_slice::<serde_json::Value>(body),
         Ok(serde_json::Value::Object(_))
     ) {
-        return Err(AsyncErrorKind::ProtocolInvalid);
+        return Err(AsyncErrorKind::ProtocolInvalid.into());
     }
     if crate::auth::guard::Auth::id().is_none() {
-        return Err(AsyncErrorKind::AuthorizationDenied);
+        return Err(AsyncErrorKind::AuthorizationDenied.into());
     }
-    match route {
-        ControlRoute::Subscriptions => subscription_control(&runtime, &state, &request, body).await,
-        ControlRoute::Memberships => membership_control(&state, &request, body).await,
-    }
+    Ok(match route {
+        ControlRoute::Subscriptions => {
+            subscription_control(&runtime, &state, &request, body).await?
+        }
+        ControlRoute::Memberships => membership_control(&state, &request, body).await?,
+    })
 }
 
 async fn subscription_control(
@@ -277,7 +316,7 @@ async fn membership_control(
     ))
 }
 
-async fn events_inner(request: Request) -> Result<HttpResponse, AsyncErrorKind> {
+async fn events_inner(request: Request) -> Result<HttpResponse, AsyncRefusal> {
     if request.method() != Method::GET {
         return Ok(closed_response(405).header("Allow", "GET"));
     }
@@ -292,7 +331,7 @@ async fn events_inner(request: Request) -> Result<HttpResponse, AsyncErrorKind> 
         .ok_or(AsyncErrorKind::GenerationInvalid)?;
     let (_, state) = bind_state()?;
     if crate::auth::guard::Auth::id().is_none() {
-        return Err(AsyncErrorKind::AuthorityInvalid);
+        return Err(AsyncErrorKind::AuthorityInvalid.into());
     }
     let facts = request_scope_facts(&request, state.now()?)?;
     let key = state.transport_for_credential(&credential, &facts)?;
@@ -447,8 +486,8 @@ async fn close(socket: &mut WsSocket, reason: &'static str) -> Result<(), Framew
     Ok(())
 }
 
-fn bind_state() -> Result<(LiveRuntime, Arc<AsyncState>), AsyncErrorKind> {
-    let runtime = LiveRuntime::bind().map_err(|_| AsyncErrorKind::Unavailable)?;
+fn bind_state() -> Result<(LiveRuntime, Arc<AsyncState>), AsyncRefusal> {
+    let runtime = LiveRuntime::bind().map_err(AsyncRefusal::unavailable)?;
     let state = Arc::clone(runtime.async_state());
     Ok((runtime, state))
 }
