@@ -66,7 +66,7 @@ fire identically for inserts from a queue handler. `queue:work --connection
 
 ## Drivers
 
-Five drivers ship in-tree. Configure via `QUEUE_DRIVER` env or by calling
+Six drivers ship in-tree. Configure via `QUEUE_DRIVER` env or by calling
 `Queue::set_driver(...)` programmatically.
 
 | Driver | Use for | Strengths |
@@ -74,6 +74,7 @@ Five drivers ship in-tree. Configure via `QUEUE_DRIVER` env or by calling
 | `MemoryQueueDriver` | tests, single-process apps | `tokio::time::DelayQueue` for `available_at`, virtual-clock compatible |
 | `RedisQueueDriver` | production fan-out | consumer groups + `XAUTOCLAIM` + ZSET-backed delayed jobs |
 | `DatabaseQueueDriver` | single-DB apps | `FOR UPDATE SKIP LOCKED` on Postgres/MySQL, `BEGIN`-serialised on SQLite |
+| `SqsQueueDriver` | production on AWS | a managed queue outside your database and Redis; see [Amazon SQS](#amazon-sqs) |
 | `SyncQueueDriver` | dev, CI | runs the handler inline on `push`, no worker |
 | `NullQueueDriver` | testing wrappers | drops every push without running |
 
@@ -82,15 +83,15 @@ driver; `suprnova::queue::bootstrap_default()` always wires the memory driver. T
 server boot path calls one of these for you - most apps only configure via
 env.
 
-`QUEUE_DRIVER` accepts `memory`, `sync`, `null`, `redis`, `database` and
-`failover`, and defaults to `memory`. `sync` selects `SyncQueueDriver` and
+`QUEUE_DRIVER` accepts `memory`, `sync`, `null`, `redis`, `database`, `sqs`
+and `failover`, and defaults to `memory`. `sync` selects `SyncQueueDriver` and
 `null` selects `NullQueueDriver`. A value that names no driver is a boot
 error when `APP_ENV` is `production`, because an in-memory queue chosen by
 mistake loses every job at the next restart. In any other environment the
 boot logs a warning that lists the accepted names and uses the memory
 driver.
 
-`FailoverQueueDriver` isn't a sixth backend. It wraps an ordered list of
+`FailoverQueueDriver` isn't a seventh backend. It wraps an ordered list of
 the drivers above so a push one connection refuses falls through to the
 next. See [Failover connections](#failover-connections).
 
@@ -117,6 +118,89 @@ newer). The visibility timeout is the `XAUTOCLAIM` idle threshold, set once
 per connection, so the per-pop `visibility_timeout` argument is ignored on
 Redis (a documented divergence from the trait contract imposed by Redis
 Streams).
+
+### Amazon SQS
+
+`QUEUE_DRIVER=sqs` queues jobs on Amazon SQS standard queues. It reads the
+variables Laravel's `sqs` connection reads:
+
+```bash
+QUEUE_DRIVER=sqs
+SQS_PREFIX=https://sqs.us-east-1.amazonaws.com/123456789012
+SQS_QUEUE=default          # the queue a job that names none goes to
+SQS_SUFFIX=-production     # optional, appended to every queue name
+AWS_DEFAULT_REGION=us-east-1
+AWS_ACCESS_KEY_ID=...      # optional, see below
+AWS_SECRET_ACCESS_KEY=...
+```
+
+A job goes to the queue it names, with `Job::queue` or a route, at
+`SQS_PREFIX/emails-production` for `emails`, and to `SQS_QUEUE` when it
+names none. A
+queue name that is already a URL is used as it is, so `SQS_QUEUE` can be the
+full URL of the queue and `SQS_PREFIX` left unset. `SQS_ENDPOINT` points the
+driver at a service that is not AWS, such as LocalStack or ElasticMQ.
+
+With `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` set (and
+`AWS_SESSION_TOKEN` for temporary keys), the driver signs with them.
+Without them it uses the default credential chain of AWS: the shared
+profile, web identity, the ECS task role and the EC2 instance role.
+
+The server does not boot when no region is set, when the queue is not a URL
+and `SQS_PREFIX` is not set, or when the queue is a FIFO queue (its name
+ends in `.fifo`): a FIFO queue needs a message group and a deduplication ID
+on each job, which Suprnova jobs do not carry.
+
+How the driver maps onto SQS:
+
+- **A worker receives from the queues `--queue` names**, in order, and from
+  `SQS_QUEUE` when it names none. SQS has no receive across queues, so a
+  job sent to `emails` waits for a worker started with `--queue=emails`.
+- **The visibility timeout is the worker's.** A reservation that expires
+  makes the job visible again, and its next delivery counts one more
+  attempt.
+- **A `nack` counts an attempt and a release does not**, as on the other
+  drivers. The attempt count is the one in the job plus the receives SQS
+  counted before this one (`ApproximateReceiveCount`), so a release sends a
+  fresh copy that keeps the count and deletes the original.
+- **Delays longer than 15 minutes hold.** SQS delays one message by 15
+  minutes at most, so a job due later is sent on with what is left when it
+  arrives early. Waiting out the delay is not an attempt.
+- **`Queue::size` and its siblings** report the approximate counts SQS
+  keeps for `SQS_QUEUE`, and `clear` purges it. SQS cannot list messages
+  without receiving them, so `pending_jobs`, `delayed_jobs` and
+  `reserved_jobs` return an error.
+
+SQS takes at most 1 MiB in one message, and a larger job fails its push
+with an error that says so. Turn on overflow to store large jobs on a disk
+instead. SQS then carries a pointer to the file:
+
+```bash
+SQS_OVERFLOW_ENABLED=true
+SQS_OVERFLOW_DISK=s3                      # optional; the default disk otherwise
+SQS_OVERFLOW_ALWAYS=false                 # true stores every job on the disk
+SQS_OVERFLOW_DELETE_AFTER_PROCESSING=true # delete the file when the job is done
+SQS_OVERFLOW_FLUSH_ON_CLEAR=false         # true deletes the files on Queue::clear
+```
+
+The files go under `sqs-payloads/<queue>/` on the disk. The server does not
+boot when overflow is on and the disk is not registered.
+
+`SqsQueueDriver` is behind the `queue-sqs` cargo feature, which is on by
+default and brings `filesystem` with it.
+
+#### Why Suprnova diverges
+
+- **A release does not cost an attempt.** Laravel's SQS job counts every
+  receive as an attempt, so releasing a job there spends one. Suprnova
+  keeps the rule every other driver follows.
+- **Long delays work.** Laravel passes SQS a delay over 900 seconds, which
+  SQS refuses.
+- **Overflow goes to a disk, not a cache store.** A cache can evict a
+  payload before its job runs; a disk keeps it until the job is done.
+- **No default region or prefix.** Laravel's configuration falls back to
+  `us-east-1` and a placeholder account URL; a missing setting here stops
+  the boot instead.
 
 ### Why Suprnova diverges
 

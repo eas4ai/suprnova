@@ -411,6 +411,12 @@ impl Server {
         #[cfg(feature = "localization")]
         Localization::bootstrap().await?;
 
+        // Register the S3 disk the environment describes, when it
+        // describes one (`S3_BUCKET`). It goes before the queue, because the
+        // `sqs` driver checks its overflow disk as it boots.
+        #[cfg(feature = "filesystem")]
+        crate::filesystem::bootstrap_from_env()?;
+
         // Bootstrap queue and rate-limit drivers from env vars.
         // Defaults to in-memory when QUEUE_DRIVER / RATE_LIMIT_DRIVER are unset.
         crate::queue::bootstrap_from_env().await?;
@@ -419,11 +425,6 @@ impl Server {
         // Bootstrap the mail transport from MAIL_DRIVER. Defaults to the
         // `log` driver when the env var is unset.
         crate::mail::boot::bootstrap_from_env()?;
-
-        // Register the S3 disk the environment describes, when it
-        // describes one (`S3_BUCKET`).
-        #[cfg(feature = "filesystem")]
-        crate::filesystem::bootstrap_from_env()?;
 
         let addr: SocketAddr = self.get_addr()?;
         let listener = TcpListener::bind(addr).await?;

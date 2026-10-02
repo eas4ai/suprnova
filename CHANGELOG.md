@@ -8,6 +8,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **An SQS queue driver.** `QUEUE_DRIVER=sqs` queues jobs on Amazon SQS
+  standard queues, configured by Laravel's variables: `SQS_PREFIX`,
+  `SQS_QUEUE` and `SQS_SUFFIX` build the queue URL, `AWS_DEFAULT_REGION`
+  (or `AWS_REGION`) names the region, and `AWS_ACCESS_KEY_ID` and
+  `AWS_SECRET_ACCESS_KEY` sign the requests, or the default credential
+  chain of AWS when they are not set. `SQS_ENDPOINT` points it at
+  LocalStack or ElasticMQ, and `QUEUE_CONNECTIONS` and failover accept
+  `sqs`. A job goes to the queue it names, and a worker receives from the
+  queues `--queue` lists, or from `SQS_QUEUE`. A `nack` counts an attempt
+  and a release does not, as on the other drivers, and a delay longer than
+  the 15 minutes SQS allows still holds. With `SQS_OVERFLOW_ENABLED=true`, a
+  job of 1 MiB or more is stored on a disk and SQS carries a pointer to it.
+  The boot fails with no region, with a queue name and no `SQS_PREFIX`, and
+  for a FIFO queue. The driver is behind the `queue-sqs` feature, on by
+  default.
 - **A default disk.** `Storage::default_disk()` returns the disk
   `Storage::set_default_disk` names in code, or else `FILESYSTEM_DISK`.
   When the named disk is not registered once the bootstrap has run,

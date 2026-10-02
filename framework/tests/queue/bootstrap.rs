@@ -164,7 +164,7 @@ async fn production_refuses_an_unknown_queue_driver() {
     let message = error.to_string();
     assert!(message.contains("QUEUE_DRIVER=`redsi`"), "{message}");
     assert!(
-        message.contains("memory, sync, null, redis, database, failover"),
+        message.contains("memory, sync, null, redis, database, sqs, failover"),
         "the message lists what is accepted: {message}"
     );
     assert_eq!(
