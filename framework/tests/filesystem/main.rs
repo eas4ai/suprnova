@@ -3,9 +3,14 @@
 
 #[path = "../support/common.rs"]
 mod common;
+#[path = "../support/env_lock.rs"]
+mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
 
 pub mod atomic_writes;
 pub mod copy_atomicity;
+pub mod default_disk;
 pub mod disk_ext;
 pub mod disk_responses;
 pub mod filesystem;
