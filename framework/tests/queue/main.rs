@@ -16,6 +16,8 @@ pub mod dispatch;
 pub mod drivers_sync_null;
 #[path = "../support/env_lock.rs"]
 mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
 pub mod envelope;
 pub mod events;
 pub mod failed_store;
@@ -36,6 +38,7 @@ pub mod redis;
 pub mod restart;
 pub mod retry;
 pub mod routing;
+pub mod sqs;
 pub mod unique;
 pub mod unique_until_processing;
 pub mod worker;
