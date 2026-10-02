@@ -97,12 +97,12 @@ const semanticRequirements = new Map([
       {
         id: "benchmark_snapshot_integrated_crate_root",
         pattern:
-          /Run a local exploratory measurement from the integrated crate root:[\s\S]{0,150}rtk env CARGO_INCREMENTAL=0 scripts\/run-snapshot-budget\.sh/u,
+          /Run a local exploratory measurement from the integrated crate root:[\s\S]{0,150}env CARGO_INCREMENTAL=0 scripts\/run-snapshot-budget\.sh/u,
       },
       {
         id: "benchmark_action_integrated_crate_root",
         pattern:
-          /Run it from the integrated crate root:[\s\S]{0,150}rtk env CARGO_INCREMENTAL=0 scripts\/run-action-budget\.sh/u,
+          /Run it from the integrated crate root:[\s\S]{0,150}env CARGO_INCREMENTAL=0 scripts\/run-action-budget\.sh/u,
       },
     ],
   ],

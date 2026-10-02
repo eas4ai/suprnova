@@ -2,7 +2,7 @@
 
 ## Artifact contract
 
-`rtk npm --prefix browser run build` produces ten deterministic files:
+`npm --prefix browser run build` produces ten deterministic files:
 
 - `suprnova-live.esm.js`, the module runtime;
 - `suprnova-live.classic.js`, the classic bootstrap runtime;

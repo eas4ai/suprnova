@@ -61,7 +61,6 @@ async function boundedProcessResult(path, expectedRunIndex) {
 
 async function productionRunProcess({ cpuSet, profile, resultPath, runIndex }) {
   const arguments_ = [
-    "env",
     "CARGO_INCREMENTAL=0",
     `SUPRNOVA_LIVE_UPLOAD_SERVER_RESULT=${resultPath}`,
     `SUPRNOVA_LIVE_UPLOAD_SERVER_RUN_INDEX=${String(runIndex)}`,
@@ -78,7 +77,7 @@ async function productionRunProcess({ cpuSet, profile, resultPath, runIndex }) {
       clearTimeout(watchdog);
       operation();
     };
-    const child = spawn("rtk", arguments_, {
+    const child = spawn("env", arguments_, {
       cwd: resolve(dirname(fileURLToPath(import.meta.url)), "../.."),
       signal: controller.signal,
       stdio: "inherit",

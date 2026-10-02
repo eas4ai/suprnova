@@ -43,7 +43,7 @@ workloads_path=${SUPRNOVA_LIVE_WORKLOADS_RESULT:-"${live_root}/benchmarks/render
 cd "${live_root}"
 
 printf '%s\n' "[render-cache-budget] release C64 and C64+4 engine benchmark on CPU set ${cpu_set}"
-rtk env \
+env \
     CARGO_INCREMENTAL=0 \
     SUPRNOVA_LIVE_BENCH_RESULT="${result_path}" \
     taskset -c "${cpu_set}" \
@@ -54,7 +54,7 @@ rtk env \
 
 if [[ ${SUPRNOVA_LIVE_SKIP_WORKLOADS:-0} != 1 ]]; then
     printf '%s\n' "[render-cache-budget] release framework workloads on CPU set ${cpu_set}"
-    rtk env \
+    env \
         CARGO_INCREMENTAL=0 \
         SUPRNOVA_LIVE_WORKLOADS_RESULT="${workloads_path}" \
         taskset -c "${cpu_set}" \
@@ -68,7 +68,7 @@ else
 fi
 
 printf '%s\n' "[render-cache-budget] checked-result contract"
-rtk env CARGO_INCREMENTAL=0 cargo test \
+env CARGO_INCREMENTAL=0 cargo test \
     --manifest-path "${workspace_manifest}" \
     --package suprnova-live \
     --test benchmark_contract
