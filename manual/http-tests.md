@@ -318,7 +318,15 @@ A response carries a report when one of these built it:
   `ThrottleRequestsMiddleware` when its cache fails or it names a
   limiter that nobody defined; `RateLimitMiddleware` and
   `LoginThrottleMiddleware` when they fail closed on a backend error;
-  and `TimeoutMiddleware` when the request runs past its deadline.
+  `TimeoutMiddleware` when the request runs past its deadline; and the
+  RenderCache middleware's `503` when a provider fails on a route whose
+  `FailurePolicy` is `Closed`, and its `500` for a render whose
+  transaction the database refused.
+- A route the framework ships answered a failure with a 5xx: the payment
+  webhook route when its database, the render cache, hydration, or the
+  body read fails, and the Live endpoints when the endpoint itself holds
+  the error: binding the Live runtime, reading the request body,
+  completing an action's response, or loading the asset catalog.
 
 A refusal that a middleware answers on purpose carries no report,
 because nothing failed: the `429` a throttle or rate limiter answers a
@@ -420,11 +428,14 @@ Ways to end up without a report:
   an error response drops the report, which stays on the response it
   replaced. Change the response you were given, with `header` or
   `status`, and the report stays on it.
-- Some framework responses carry none: the `503` of the RenderCache
-  middleware's fail-closed policy and its `500` for a render whose
-  transaction failed, and the 5xx of the payment webhook route and of
-  the Live endpoints. Each answers with its own protocol response and
-  logs the failure.
+- A Live 5xx whose cause the Live stack reduces to a closed error kind
+  before the endpoint answers carries none: the action endpoint's
+  answers from the Live engine itself, the `unavailable` answers of the
+  async publisher, and the `503` kinds of the upload service. Those
+  error types carry only the kind, by design, so the cause is in the log
+  alone.
+- `SessionMiddleware`'s `500` when no encryption key is installed
+  carries none: no error value exists, and the body names the cause.
 
 ### Why Suprnova diverges
 

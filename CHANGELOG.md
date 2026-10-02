@@ -14,9 +14,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   for a panic the panic boundary caught, the panic message and the
   location it was raised at. That covers a `FrameworkError` a handler or
   middleware returns, a panic on an HTTP route or in a WebSocket
-  upgrade's middleware, and the 5xx the framework's session, session
-  lock, throttle, rate limit, login throttle, and timeout middleware
-  answer a failure with. The report never reaches a header or the body,
+  upgrade's middleware, the 5xx the framework's session, session lock,
+  throttle, rate limit, login throttle, timeout, and RenderCache
+  middleware answer a failure with, and the 5xx of the payment webhook
+  route and of the Live endpoints when the endpoint holds the error. The report never reaches a header or the body,
   so what a client receives is unchanged; with debug on, a 5xx body
   still carries `debug_message` as before. The new
   `TestResponse::from_response` builds from the response
