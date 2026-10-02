@@ -8,6 +8,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **A Process facade.** `Process::command(["git", "status"])` runs a
+  program with its arguments, each passed as it is through no shell, and
+  `Process::shell("npm ci && npm run build")` runs a command line through
+  the system shell, as Laravel runs a string command. `run` returns the exit
+  code and the captured output; a nonzero exit is a failed result, and
+  `throw` makes it an error. `path`, `env`, `input`, `quietly`, `tty`, an
+  output callback, a timeout (60 seconds unless set) and an idle timeout
+  are options. A timeout, an idle timeout, `stop`, or dropping a started
+  process or the future of `run` kills the program with every process it
+  started. `start` returns the program running; `Process::pool()` runs
+  processes side by side with an optional concurrency limit, and
+  `Process::pipe()` feeds each output to the next input. `Process::fake()`
+  stops every process in a test, answers by pattern, `describe` and
+  sequence, and records each run for the assertions.
 - **An SQS queue driver.** `QUEUE_DRIVER=sqs` queues jobs on Amazon SQS
   standard queues, configured by Laravel's variables: `SQS_PREFIX`,
   `SQS_QUEUE` and `SQS_SUFFIX` build the queue URL, `AWS_DEFAULT_REGION`

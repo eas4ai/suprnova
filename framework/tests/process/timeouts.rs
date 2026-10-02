@@ -5,7 +5,7 @@ use serial_test::serial;
 use std::time::{Duration, Instant};
 use suprnova::{Process, ProcessError, Signal};
 
-use crate::support::{all_gone, alive, parent_and_child, pids_in, sh};
+use crate::support::{alive, all_gone, parent_and_child, pids_in, sh};
 
 #[tokio::test]
 #[serial]
@@ -20,7 +20,11 @@ async fn a_timeout_kills_the_process_and_every_process_it_started() {
         .await
         .expect_err("thirty seconds is past a one-second timeout");
 
-    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
     assert!(matches!(error, ProcessError::TimedOut { .. }), "{error:?}");
     let text = error.to_string();
     assert!(text.contains("sh -c"), "names the command: {text}");
@@ -56,7 +60,11 @@ async fn a_started_process_reports_its_id_output_and_exit() {
 
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(process.latest_output(), "first");
-    assert_eq!(process.latest_output(), "", "nothing new since the last read");
+    assert_eq!(
+        process.latest_output(),
+        "",
+        "nothing new since the last read"
+    );
 
     let result = process.wait().await.unwrap();
     assert_eq!(result.output(), "firstsecond");
@@ -78,9 +86,11 @@ async fn running_turns_false_once_the_process_exits() {
 #[tokio::test]
 #[serial]
 async fn a_signal_reaches_a_started_process() {
-    let mut process = Process::command(sh("trap 'printf got-term; exit 7' TERM; sleep 30 & wait"))
-        .start()
-        .unwrap();
+    let process = Process::command(sh(
+        "trap 'printf got-term; exit 7' TERM; while :; do sleep 0.1; done",
+    ))
+    .start()
+    .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     process.signal(Signal::Term).expect("signalled");
 
@@ -94,12 +104,9 @@ async fn a_signal_reaches_a_started_process() {
 async fn stop_kills_a_process_that_ignores_the_terminate_signal() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("pids");
-    let process = Process::command(sh(&format!(
-        "trap '' TERM; {}",
-        parent_and_child(&file)
-    )))
-    .start()
-    .unwrap();
+    let process = Process::command(sh(&format!("trap '' TERM; {}", parent_and_child(&file))))
+        .start()
+        .unwrap();
     let pids = pids_in(&file, 2).await;
 
     let started = Instant::now();
@@ -155,7 +162,10 @@ async fn an_idle_timeout_kills_a_silent_process() {
         .expect_err("a silent process goes idle");
 
     assert!(started.elapsed() < Duration::from_secs(5));
-    assert!(matches!(error, ProcessError::IdleTimedOut { .. }), "{error:?}");
+    assert!(
+        matches!(error, ProcessError::IdleTimedOut { .. }),
+        "{error:?}"
+    );
     assert!(error.to_string().contains("sh -c"), "{error}");
     let pids = pids_in(&file, 2).await;
     assert!(all_gone(&pids, Duration::from_secs(3)).await, "{pids:?}");

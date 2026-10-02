@@ -105,10 +105,12 @@ async fn the_environment_is_inherited() {
 async fn the_output_callback_gets_every_chunk_as_it_arrives() {
     let seen: Arc<Mutex<Vec<(OutputKind, String)>>> = Arc::default();
     let sink = Arc::clone(&seen);
-    let result = Process::command(sh("printf one; sleep 0.2; printf two >&2; sleep 0.2; printf three"))
-        .run_with(move |kind, chunk| sink.lock().unwrap().push((kind, chunk.to_owned())))
-        .await
-        .unwrap();
+    let result = Process::command(sh(
+        "printf one; sleep 0.2; printf two >&2; sleep 0.2; printf three",
+    ))
+    .run_with(move |kind, chunk| sink.lock().unwrap().push((kind, chunk.to_owned())))
+    .await
+    .unwrap();
 
     let seen = seen.lock().unwrap().clone();
     let out: String = seen
@@ -147,7 +149,10 @@ async fn a_program_that_cannot_start_is_an_error_naming_it() {
         .run()
         .await
         .expect_err("a missing program is an error");
-    assert!(matches!(error, ProcessError::NotStarted { .. }), "{error:?}");
+    assert!(
+        matches!(error, ProcessError::NotStarted { .. }),
+        "{error:?}"
+    );
     assert!(
         error.to_string().contains("suprnova-no-such-program-4f1c"),
         "{error}"
@@ -194,4 +199,9 @@ async fn a_shell_line_sees_the_environment_and_the_working_directory() {
         .await
         .unwrap();
     assert_eq!(result.output(), "expanded a.log b.log\n");
+}
+
+#[test]
+fn supports_tty_answers_without_running_anything() {
+    let _ = Process::supports_tty();
 }

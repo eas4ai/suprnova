@@ -86,6 +86,7 @@ pub mod notifications;
 pub mod pagination;
 pub mod payments;
 pub mod prelude;
+pub mod process;
 pub mod queue;
 pub mod rate_limit;
 pub mod rbac;
@@ -342,6 +343,14 @@ pub use middleware::{
 pub use pagination::{
     CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, PageLink, Paginated,
     Pagination, Paginator,
+};
+pub use process::{
+    DEFAULT_TIMEOUT as DEFAULT_PROCESS_TIMEOUT, InvokedPool, InvokedProcess, OutputKind,
+    PendingProcess, Pipe, Pool, PoolResults, Process, ProcessError, ProcessResult, Signal,
+};
+#[cfg(any(test, feature = "testing"))]
+pub use process::{
+    FakeDescription, FakeHandler, FakeResult, FakeSequence, ProcessFake, RecordedProcess,
 };
 pub use queue::{
     BackoffSchedule, Batch, BatchCallback, BatchOptions, BatchRepository, ChainLink,
