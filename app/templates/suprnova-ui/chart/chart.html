@@ -8,7 +8,7 @@
   (DATA-007): its text, axis, grid and series carry classes that chart.css
   colors from `--sn-` tokens, series taking --sn-color-chart-1 to -6 in
   order and starting again at the seventh, and its text takes the
-  document's font.
+  `--sn-font-sans` font chart.css sets on the figure.
 #}
 {% macro chart(id, title, svg, summary) %}
 <figure class="sn-chart" id="{{ id }}" aria-labelledby="{{ id }}-title">

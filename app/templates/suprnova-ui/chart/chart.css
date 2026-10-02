@@ -1,8 +1,11 @@
 @layer suprnova-ui {
+  /* The figure sets the font, so the title, the SVG text and the summary
+   * take it from a token whatever font a container around the chart sets. */
   .sn-chart {
     display: grid;
     gap: var(--sn-space-2);
     margin: 0;
+    font-family: var(--sn-font-sans);
   }
 
   .sn-chart-title {
@@ -20,7 +23,7 @@
     block-size: auto;
   }
 
-  /* The SVG paints with currentColor and inherits the document's font, so
+  /* The SVG paints with currentColor and inherits the figure's font, so
    * each class sets only `color`, from a token, in both color schemes. */
   .sn-chart-text {
     color: var(--sn-color-text);
