@@ -49,6 +49,7 @@
     - [Localization](localization.md)
     - [Mail](mail.md)
     - [Notifications](notifications.md)
+    - [Processes](processes.md)
     - [Web Push](web-push.md)
     - [Queues](queues.md)
     - [Command Bus](bus.md)

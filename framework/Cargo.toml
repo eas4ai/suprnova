@@ -229,6 +229,12 @@ oxideav-gif = { version = "=0.0.11", optional = true }
 oxideav-bmp = { version = "=0.1.6", optional = true }
 crypto_secretbox = "0.1.1"
 
+[target.'cfg(unix)'.dependencies]
+# Signals for the Process facade: a kill reaches the process group a
+# process leads, so what it started dies with it. The version suprnova-cli
+# already pins, so the lock gains nothing.
+nix = { version = "=0.31.3", default-features = false, features = ["process", "signal"] }
+
 [features]
 default = [
     "testing",

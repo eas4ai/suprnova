@@ -69,11 +69,21 @@ async fn pool_results_are_keyed_in_the_order_added_and_a_failure_stops_nothing()
         .await;
 
     let keys: Vec<&str> = results.keys().collect();
-    assert_eq!(keys, ["slow", "fails", "2"], "named keys, then the position");
-    assert_eq!(results.get("slow").unwrap().as_ref().unwrap().output(), "slow");
+    assert_eq!(
+        keys,
+        ["slow", "fails", "2"],
+        "named keys, then the position"
+    );
+    assert_eq!(
+        results.get("slow").unwrap().as_ref().unwrap().output(),
+        "slow"
+    );
     let failed = results.get("fails").unwrap().as_ref().unwrap();
     assert_eq!(failed.exit_code(), Some(2));
-    assert_eq!(results.get("2").unwrap().as_ref().unwrap().output(), "third");
+    assert_eq!(
+        results.get("2").unwrap().as_ref().unwrap().output(),
+        "third"
+    );
     assert!(!results.successful());
     assert_eq!(results.failed().collect::<Vec<_>>(), ["fails"]);
 }
