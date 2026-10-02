@@ -17,7 +17,7 @@ outside the timed region.
 Run a local exploratory measurement from the integrated crate root:
 
 ```sh
-rtk env CARGO_INCREMENTAL=0 scripts/run-snapshot-budget.sh
+env CARGO_INCREMENTAL=0 scripts/run-snapshot-budget.sh
 ```
 
 The runner warms the pipeline for 500 iterations, then records 40 batches of
@@ -43,7 +43,7 @@ Askama rendering are excluded so the benchmark isolates framework overhead.
 Run it from the integrated crate root:
 
 ```sh
-rtk env CARGO_INCREMENTAL=0 scripts/run-action-budget.sh
+env CARGO_INCREMENTAL=0 scripts/run-action-budget.sh
 ```
 
 The runner records 40 post-warmup samples and enforces the architecture's
@@ -61,7 +61,7 @@ The budget uses pinned nightly expansion for token/byte counts and isolated
 MSRV `cargo check` work for each fixture:
 
 ```sh
-rtk node scripts/check-expansion-budget.mjs
+node scripts/check-expansion-budget.mjs
 ```
 
 The checked local evidence records 1,762/15,622/154,222 expanded tokens,
@@ -100,7 +100,7 @@ allocator the allocation rows need; `src/lib.rs` keeps
 Run both RenderCache benchmarks from the workspace root:
 
 ```sh
-rtk env CARGO_INCREMENTAL=0 crates/suprnova-live/scripts/run-render-cache-budget.sh
+env CARGO_INCREMENTAL=0 crates/suprnova-live/scripts/run-render-cache-budget.sh
 ```
 
 The runner pins both benchmarks to `SUPRNOVA_LIVE_S1_CPUSET` (default `0-7`)
@@ -201,7 +201,7 @@ benchmark below is the only browser-side budget tool.
 Record an exploratory result with:
 
 ```sh
-rtk npm --prefix browser run budget:browser
+npm --prefix browser run budget:browser
 ```
 
 The harness uses pinned Chromium with 4x CPU throttling, five warmups, thirty
@@ -230,7 +230,7 @@ providers. The benchmark can inspect every condition except whether the vCPUs
 are dedicated, so a qualifying runner must supply that explicit attestation:
 
 ```sh
-rtk env \
+env \
   SUPRNOVA_LIVE_S1_CPUSET=0-7 \
   SUPRNOVA_LIVE_S1_DEDICATED=1 \
   SUPRNOVA_LIVE_REQUIRE_S1=1 \

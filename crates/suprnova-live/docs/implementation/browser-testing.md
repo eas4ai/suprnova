@@ -62,5 +62,5 @@ Playwright traces are retained on failure. The lifecycle test port exposes
 closed observer/listener/timer/transport/controller counts, and heap/DevTools
 inspection is corroboration rather than the normative leak oracle. Diagnostics
 must remain closed and redacted in every mode. The complete unattended command
-is `rtk env CARGO_INCREMENTAL=0 scripts/gate.sh`; set
+is `env CARGO_INCREMENTAL=0 scripts/gate.sh`; set
 `SUPRNOVA_LIVE_RELEASE=1` only in a release-qualified environment.

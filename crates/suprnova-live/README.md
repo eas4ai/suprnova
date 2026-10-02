@@ -53,7 +53,7 @@ workspace and has no default features. Dependencies are resolved by the parent
 Run the unattended Live gate from this integrated crate root:
 
 ```sh
-rtk env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 scripts/gate.sh
+env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 scripts/gate.sh
 ```
 
 The gate checks the implementation-document contract, specs and optional Fable

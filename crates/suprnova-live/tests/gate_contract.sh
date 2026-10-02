@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Every gate probe below sets SUPRNOVA_LIVE_GATE_TRACE and runs the gate from a
+# staged crate root whose contract scripts are stubs. If a gate under test runs
+# this real script instead, for example because it no longer changes to its own
+# crate root, fail at once rather than start another round of probes.
+if [[ -n ${SUPRNOVA_LIVE_GATE_TRACE-} ]]; then
+    printf '%s\n' \
+        "gate contract: a probed gate ran the real contract script, not its stub" >&2
+    exit 1
+fi
+
 live_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 workspace_root=$(git -C "${live_root}" rev-parse --show-toplevel)
 gate_path=${live_root}/scripts/gate.sh
@@ -113,7 +123,7 @@ run_gate_probe() {
     local output_path=$4
 
     : >"${trace_path}"
-    if ! PATH="${probe_root}:${PATH}" \
+    if ! PATH="${probe_bin}:${PATH}" \
         SUPRNOVA_LIVE_GATE_TRACE="${trace_path}" \
         SUPRNOVA_LIVE_RELEASE="${release_mode}" \
         bash "${gate_under_test}" >"${output_path}" 2>&1; then
@@ -141,7 +151,7 @@ normalize_gate_trace() {
             continue
         fi
         for ((index = start; index < ${#fields[@]}; index += 1)); do
-            field=${fields[index]//${live_root}/<live>}
+            field=${fields[index]//${probe_live_root}/<live>}
             field=${field//${workspace_root}/<workspace>}
             if (( index > start )); then
                 printf '\t' >>"${normalized_path}"
@@ -157,8 +167,8 @@ write_expected_gate_commands() {
     local expected_path=$2
 
     printf '%s\n' \
-        $'proxy\ttests/gate_contract.sh' \
-        $'proxy\ttests/documentation_contract.sh' \
+        'tests/gate_contract.sh' \
+        'tests/documentation_contract.sh' \
         $'node\tscripts/check-implementation-docs.mjs' \
         $'node\tscripts/check-specs.mjs' \
         $'git\tdiff\t--check' \
@@ -311,7 +321,7 @@ gate_stops_at_clippy_failure() {
     local last_command
 
     : >"${trace_path}"
-    if PATH="${probe_root}:${PATH}" \
+    if PATH="${probe_bin}:${PATH}" \
         SUPRNOVA_LIVE_GATE_TRACE="${trace_path}" \
         SUPRNOVA_LIVE_GATE_FAIL_MATCH="cargo clippy" \
         SUPRNOVA_LIVE_RELEASE=0 \
@@ -557,7 +567,7 @@ do
     fi
 done
 
-rtk node "${live_root}/scripts/generate-license-inventory.mjs" --check
+node "${live_root}/scripts/generate-license-inventory.mjs" --check
 
 if contains_blanket_warning_denial "${gate_source}"; then
     printf '%s\n' "gate contract: blanket -D warnings is forbidden" >&2
@@ -565,19 +575,19 @@ if contains_blanket_warning_denial "${gate_source}"; then
 fi
 
 for warning_denial_mutation in \
-    'rtk cargo clippy -- -D warnings' \
-    'rtk cargo clippy -- -Dwarnings' \
-    'rtk cargo clippy -- --deny warnings' \
-    $'rtk cargo clippy -- --deny\twarnings' \
-    'rtk cargo clippy -- --deny=warnings' \
-    'RUSTFLAGS=-Dwarnings rtk cargo clippy' \
-    'RUSTFLAGS="-D warnings" rtk cargo clippy' \
-    "RUSTFLAGS='--deny warnings' rtk cargo clippy" \
-    "RUSTFLAGS='--deny=warnings' rtk cargo clippy" \
-    'CARGO_INCREMENTAL=0 RUSTFLAGS=-Dwarnings rtk cargo clippy' \
-    'BUILD_SENTINEL=present CARGO_INCREMENTAL=0 RUSTFLAGS="--deny warnings" rtk cargo clippy' \
-    '/usr/bin/env CARGO_INCREMENTAL=0 CARGO_ENCODED_RUSTFLAGS=-Dwarnings /opt/bin/rtk cargo clippy' \
-    "PATH_SENTINEL=/opt/tools CARGO_INCREMENTAL=0 RUSTFLAGS=\$'-Dwarnings' ./bin/rtk cargo clippy"; do
+    'cargo clippy -- -D warnings' \
+    'cargo clippy -- -Dwarnings' \
+    'cargo clippy -- --deny warnings' \
+    $'cargo clippy -- --deny\twarnings' \
+    'cargo clippy -- --deny=warnings' \
+    'RUSTFLAGS=-Dwarnings cargo clippy' \
+    'RUSTFLAGS="-D warnings" cargo clippy' \
+    "RUSTFLAGS='--deny warnings' cargo clippy" \
+    "RUSTFLAGS='--deny=warnings' cargo clippy" \
+    'CARGO_INCREMENTAL=0 RUSTFLAGS=-Dwarnings cargo clippy' \
+    'BUILD_SENTINEL=present CARGO_INCREMENTAL=0 RUSTFLAGS="--deny warnings" cargo clippy' \
+    '/usr/bin/env CARGO_INCREMENTAL=0 CARGO_ENCODED_RUSTFLAGS=-Dwarnings /opt/bin/cargo clippy' \
+    "PATH_SENTINEL=/opt/tools CARGO_INCREMENTAL=0 RUSTFLAGS=\$'-Dwarnings' ./bin/cargo clippy"; do
     if ! contains_blanket_warning_denial "${warning_denial_mutation}"; then
         printf 'gate contract: warning-denial mutation survived (%s)\n' \
             "${warning_denial_mutation}" >&2
@@ -585,12 +595,12 @@ for warning_denial_mutation in \
     fi
 done
 if contains_blanket_warning_denial \
-    'BUILD_SENTINEL=present CARGO_INCREMENTAL=0 RUSTFLAGS="-C target-cpu=native -D dead_code" rtk cargo clippy'; then
+    'BUILD_SENTINEL=present CARGO_INCREMENTAL=0 RUSTFLAGS="-C target-cpu=native -D dead_code" cargo clippy'; then
     printf '%s\n' "gate contract: narrow lint denial was mistaken for blanket warning denial" >&2
     exit 1
 fi
 if contains_blanket_warning_denial \
-    "BUILD_SENTINEL=present CARGO_ENCODED_RUSTFLAGS=\$'-Ddead_code\\x1f-Copt-level=2' ./bin/rtk cargo clippy"; then
+    "BUILD_SENTINEL=present CARGO_ENCODED_RUSTFLAGS=\$'-Ddead_code\\x1f-Copt-level=2' ./bin/cargo clippy"; then
     printf '%s\n' \
         "gate contract: narrow encoded lint denial was mistaken for blanket warning denial" >&2
     exit 1
@@ -622,50 +632,115 @@ require_order "iteration 004 Rust boundaries" 'phase "iteration 004 Rust boundar
 require_order "iteration 004 reference host" 'phase "iteration 004 reference host"' \
     "broad Rust suite" 'phase "Rust all-target and documentation tests"'
 
+# Prints the stub lines that append "${recorded_name}" and the stub's arguments
+# to the gate trace instead of running anything, and that fail the step when
+# its command line contains SUPRNOVA_LIVE_GATE_FAIL_MATCH.
+print_trace_lines() {
+    printf '%s\n' \
+        'printf '\''profile=%s\t%s'\'' "${SUPRNOVA_LIVE_BUDGET_PROFILE-}" "${recorded_name}" >>"${SUPRNOVA_LIVE_GATE_TRACE:?}"' \
+        'for argument in "$@"; do' \
+        '    printf '\''\t%s'\'' "${argument}" >>"${SUPRNOVA_LIVE_GATE_TRACE:?}"' \
+        'done' \
+        'printf '\''\n'\'' >>"${SUPRNOVA_LIVE_GATE_TRACE:?}"' \
+        'if [[ -n ${SUPRNOVA_LIVE_GATE_FAIL_MATCH-} && "${recorded_name} $*" == *"${SUPRNOVA_LIVE_GATE_FAIL_MATCH}"* ]]; then' \
+        '    exit 97' \
+        'fi'
+}
+
+real_git=$(command -v git)
 probe_root=$(mktemp -d)
-mutant_runners=()
+probe_live_root=
 cleanup_probes() {
-    local mutant_runner
     rm -rf -- "${probe_root}"
-    for mutant_runner in "${mutant_runners[@]}"; do
-        rm -f -- "${mutant_runner}"
-    done
+    if [[ -n ${probe_live_root} ]]; then
+        rm -rf -- "${probe_live_root}"
+    fi
 }
 trap cleanup_probes EXIT
-printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    'set -euo pipefail' \
-    'printf '\''profile=%s'\'' "${SUPRNOVA_LIVE_BUDGET_PROFILE-}" >>"${SUPRNOVA_LIVE_GATE_TRACE:?}"' \
-    'for argument in "$@"; do' \
-    '    printf '\''\t%s'\'' "${argument}" >>"${SUPRNOVA_LIVE_GATE_TRACE:?}"' \
-    'done' \
-    'printf '\''\n'\'' >>"${SUPRNOVA_LIVE_GATE_TRACE:?}"' \
-    'if [[ -n ${SUPRNOVA_LIVE_GATE_FAIL_MATCH-} && "$*" == *"${SUPRNOVA_LIVE_GATE_FAIL_MATCH}"* ]]; then' \
-    '    exit 97' \
-    'fi' \
-    >"${probe_root}/rtk"
-chmod +x "${probe_root}/rtk"
+
+# The gate runs every step as a plain command. The probe puts a tracing stub
+# first on PATH for each command the gate runs, so the trace records the steps
+# without running them.
+probe_bin=${probe_root}/bin
+mkdir -p "${probe_bin}"
+for traced_command in cargo env git node npm; do
+    {
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
+        if [[ ${traced_command} == git ]]; then
+            # The gate resolves its parent workspace with git before any step
+            # runs. The git stub hands that one lookup to the real git,
+            # untraced, so the root checks run for real; every other git call
+            # is a gate step and is traced.
+            printf '%s\n' \
+                'if [[ $# == 4 && $1 == -C && $3 == rev-parse && $4 == --show-toplevel ]]; then'
+            printf '    exec %q "$@"\n' "${real_git}"
+            printf '%s\n' 'fi'
+        fi
+        printf 'recorded_name=%q\n' "${traced_command}"
+        print_trace_lines
+    } >"${probe_bin}/${traced_command}"
+    chmod +x "${probe_bin}/${traced_command}"
+done
+
+# The gate also runs its two contract scripts by crate-relative path, which no
+# PATH stub can intercept. Each probe therefore runs the gate from a staged
+# crate root inside the workspace: scripts/ holds the gate under test, tests/
+# holds stubs for the two scripts, and browser/ exists for the gate's
+# `cd browser`. The trace normalizes this root to <live>.
+#
+# Each script stub names the recorder below as its interpreter. When the gate
+# runs a stub directly, the kernel passes the recorder the script path exactly
+# as the gate wrote it, and the recorder traces that path. A stub run through an
+# explicit shell, such as `bash tests/gate_contract.sh`, never reaches the
+# recorder: the shell reads the interpreter line as a comment, and the stub
+# fails the probe.
+script_recorder=${probe_root}/record-script
+{
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        'set -euo pipefail' \
+        'recorded_name=$1' \
+        'shift'
+    print_trace_lines
+} >"${script_recorder}"
+chmod +x "${script_recorder}"
+probe_live_root=$(mktemp -d "${live_root}/scripts/.gate-contract-probe.XXXXXX")
+mkdir -p \
+    "${probe_live_root}/scripts" \
+    "${probe_live_root}/tests" \
+    "${probe_live_root}/browser"
+for script_stub in tests/gate_contract.sh tests/documentation_contract.sh; do
+    {
+        printf '#!%s\n' "${script_recorder}"
+        printf '%s\n' \
+            'printf '\''gate contract: %s must run directly, not through a shell\n'\'' "$0" >&2' \
+            'exit 98'
+    } >"${probe_live_root}/${script_stub}"
+    chmod +x "${probe_live_root}/${script_stub}"
+done
+probe_gate=${probe_live_root}/scripts/gate.sh
+ln -s -- "${gate_path}" "${probe_gate}"
 
 ordinary_trace=${probe_root}/ordinary.trace
 ordinary_output=${probe_root}/ordinary.output
 release_trace=${probe_root}/release.trace
 release_output=${probe_root}/release.output
-run_gate_probe "${gate_path}" 0 "${ordinary_trace}" "${ordinary_output}"
-run_gate_probe "${gate_path}" 1 "${release_trace}" "${release_output}"
+run_gate_probe "${probe_gate}" 0 "${ordinary_trace}" "${ordinary_output}"
+run_gate_probe "${probe_gate}" 1 "${release_trace}" "${release_output}"
 
 alternate_cwd_trace=${probe_root}/alternate-cwd.trace
 alternate_cwd_output=${probe_root}/alternate-cwd.output
 (
     cd "${probe_root}"
     run_gate_probe \
-        "${gate_path}" 0 "${alternate_cwd_trace}" "${alternate_cwd_output}"
+        "${probe_gate}" 0 "${alternate_cwd_trace}" "${alternate_cwd_output}"
 )
 
 outside_repository=${probe_root}/outside-repository
 mkdir -p "${outside_repository}/scripts"
 cp "${gate_path}" "${outside_repository}/scripts/gate.sh"
 git -C "${outside_repository}" init --quiet
-if PATH="${probe_root}:${PATH}" \
+if PATH="${probe_bin}:${PATH}" \
     SUPRNOVA_LIVE_GATE_TRACE="${probe_root}/outside.trace" \
     SUPRNOVA_LIVE_RELEASE=0 \
     bash "${outside_repository}/scripts/gate.sh" \
@@ -683,7 +758,7 @@ require_gate_execution_trace \
     "${alternate_cwd_trace}" "${alternate_cwd_output}" "alternate-cwd"
 
 if ! gate_stops_at_clippy_failure \
-    "${gate_path}" \
+    "${probe_gate}" \
     "${probe_root}/strict-original.trace" \
     "${probe_root}/strict-original.output" \
     "${probe_root}/strict-original.normalized"; then
@@ -691,8 +766,7 @@ if ! gate_stops_at_clippy_failure \
     exit 1
 fi
 
-strict_mutant=$(mktemp "${live_root}/scripts/.gate-contract-strict-mutant.XXXXXX")
-mutant_runners+=("${strict_mutant}")
+strict_mutant=${probe_live_root}/scripts/strict-mutant.sh
 write_replacement_mutant \
     "${gate_path}" "${strict_mutant}" \
     "set -euo pipefail" "set -uo pipefail"
@@ -705,13 +779,11 @@ if gate_stops_at_clippy_failure \
     exit 1
 fi
 
-conditional_mutant=$(mktemp \
-    "${live_root}/scripts/.gate-contract-conditional-mutant.XXXXXX")
-mutant_runners+=("${conditional_mutant}")
+conditional_mutant=${probe_live_root}/scripts/conditional-mutant.sh
 write_replacement_mutant \
     "${gate_path}" "${conditional_mutant}" \
-    $'rtk env CARGO_INCREMENTAL=0 cargo clippy \\\n    --manifest-path "${workspace_manifest}" \\\n    "${live_packages[@]}" \\\n    --all-targets \\\n    --all-features' \
-    $'if false; then\n    rtk env CARGO_INCREMENTAL=0 cargo clippy \\\n        --manifest-path "${workspace_manifest}" \\\n        "${live_packages[@]}" \\\n        --all-targets \\\n        --all-features\nfi'
+    $'env CARGO_INCREMENTAL=0 cargo clippy \\\n    --manifest-path "${workspace_manifest}" \\\n    "${live_packages[@]}" \\\n    --all-targets \\\n    --all-features' \
+    $'if false; then\n    env CARGO_INCREMENTAL=0 cargo clippy \\\n        --manifest-path "${workspace_manifest}" \\\n        "${live_packages[@]}" \\\n        --all-targets \\\n        --all-features\nfi'
 run_gate_probe \
     "${conditional_mutant}" 0 \
     "${probe_root}/conditional-mutant.trace" \
@@ -725,9 +797,7 @@ if gate_execution_trace_is_valid \
     exit 1
 fi
 
-bfcache_mutant=$(mktemp \
-    "${live_root}/scripts/.gate-contract-bfcache-mutant.XXXXXX")
-mutant_runners+=("${bfcache_mutant}")
+bfcache_mutant=${probe_live_root}/scripts/bfcache-mutant.sh
 write_replacement_mutant \
     "${gate_path}" "${bfcache_mutant}" \
     "--project=chrome-bfcache" "--project=chromium"

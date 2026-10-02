@@ -278,7 +278,7 @@ the conservative dependency closure reachable from the four Live package roots
 in the shared Suprnova resolution, plus the separately resolved fuzz and compile
 fixture roots. Unrelated parent-workspace roots and their unreachable
 dependencies are excluded. Regenerate it with
-\`rtk node scripts/generate-license-inventory.mjs\`; the unattended gate uses
+\`node scripts/generate-license-inventory.mjs\`; the unattended gate uses
 \`--check\` to reject lockfile or license drift.
 
 Cargo feature unification is shared-workspace-wide, so this conservative closure
@@ -302,7 +302,7 @@ if (process.argv.includes("--check")) {
   const observed = readFileSync(inventoryPath, "utf8");
   if (observed !== expected) {
     process.stderr.write(
-      "THIRD_PARTY_LICENSES.md is stale; run rtk node scripts/generate-license-inventory.mjs\n",
+      "THIRD_PARTY_LICENSES.md is stale; run node scripts/generate-license-inventory.mjs\n",
     );
     process.exitCode = 1;
   }

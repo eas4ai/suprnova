@@ -7,7 +7,7 @@ a production Suprnova deployment guide.
 
 ## Artifacts
 
-`rtk npm --prefix browser run build` creates a deterministic manifest-schema-v3
+`npm --prefix browser run build` creates a deterministic manifest-schema-v3
 asset set. The manifest records engine version `0.1.0`, runtime contract version
 1, Live protocol versions 1 and 2, snapshot version 1, exact bytes, SHA-256, SRI,
 content type, script kind, preload relation, compatibility range, and immutable
@@ -159,19 +159,19 @@ artifact has a cap or drift rule.
 Run the ordinary reduced evidence locally:
 
 ```sh
-rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-upload-budget.sh
-rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-async-budget.sh
+env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-upload-budget.sh
+env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-async-budget.sh
 ```
 
 Run full qualification only on dedicated pinned runners:
 
 ```sh
-rtk env \
+env \
   SUPRNOVA_LIVE_BUDGET_PROFILE=qualified \
   SUPRNOVA_LIVE_S1_DEDICATED=1 \
   SUPRNOVA_LIVE_B1_DEDICATED=1 \
   scripts/run-upload-budget.sh
-rtk env \
+env \
   SUPRNOVA_LIVE_BUDGET_PROFILE=qualified \
   SUPRNOVA_LIVE_B1_DEDICATED=1 \
   scripts/run-async-budget.sh
@@ -180,7 +180,7 @@ rtk env \
 The complete ordinary project gate is:
 
 ```sh
-rtk env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 scripts/gate.sh
+env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 scripts/gate.sh
 ```
 
 `SUPRNOVA_LIVE_RELEASE=1` makes the gate's compatibility check refuse
@@ -213,13 +213,13 @@ administration APIs.
 Build artifacts and run the reference-host suite with:
 
 ```sh
-rtk npm --prefix browser run test:host
+npm --prefix browser run test:host
 ```
 
 For manual conformance diagnosis, after a browser build:
 
 ```sh
-rtk npm --prefix browser run host:iteration-004
+npm --prefix browser run host:iteration-004
 ```
 
 These commands prove that the Rust engine drives the production browser

@@ -28,7 +28,7 @@ if [[ ${profile} == qualified && ${SUPRNOVA_LIVE_B1_DEDICATED:-0} != 1 ]]; then
 fi
 
 cd "${live_root}/browser"
-rtk env \
+env \
     SUPRNOVA_LIVE_B1_DEDICATED="${SUPRNOVA_LIVE_B1_DEDICATED:-0}" \
     npm run budget:async -- \
     --profile "${profile}" \
@@ -37,7 +37,7 @@ rtk env \
     --output "${browser_result}"
 
 cd "${live_root}"
-rtk env CARGO_INCREMENTAL=0 cargo test \
+env CARGO_INCREMENTAL=0 cargo test \
     --manifest-path "${workspace_manifest}" \
     --package suprnova-live \
     --test async_budget_contract

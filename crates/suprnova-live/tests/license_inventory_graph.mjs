@@ -145,7 +145,7 @@ assert.throws(
   "a malformed resolve node fails closed",
 );
 
-const spawnFailure = new Error("spawn rtk ENOENT");
+const spawnFailure = new Error("spawn cargo ENOENT");
 assert.throws(
   () =>
     loadLockedCargoMetadata("/fixture", () => ({
@@ -157,7 +157,7 @@ assert.throws(
   (error) =>
     error instanceof Error &&
     error.cause === spawnFailure &&
-    error.message.includes("spawn rtk ENOENT"),
+    error.message.includes("spawn cargo ENOENT"),
   "Cargo metadata spawn failures preserve their root cause",
 );
 

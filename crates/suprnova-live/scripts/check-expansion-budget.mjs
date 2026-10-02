@@ -34,8 +34,8 @@ const localResultPath = resolve(
 const fixtureCounts = [1, 10, 100];
 const tokenPattern = /[A-Za-z_][A-Za-z0-9_]*|::|->|=>|[^\s]/gu;
 
-function runRtk(arguments_, options = {}) {
-  const result = spawnSync("rtk", arguments_, {
+function runCommand(command, arguments_, options = {}) {
+  const result = spawnSync(command, arguments_, {
     cwd: repositoryRoot,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
@@ -44,7 +44,7 @@ function runRtk(arguments_, options = {}) {
   if (result.status !== 0) {
     process.stderr.write(result.stdout ?? "");
     process.stderr.write(result.stderr ?? "");
-    throw new Error(`rtk ${arguments_.join(" ")} failed`);
+    throw new Error(`${command} ${arguments_.join(" ")} failed`);
   }
   return (result.stdout ?? "").trim();
 }
@@ -83,15 +83,16 @@ function measureFixture(componentCount) {
   };
 
   const checkStarted = performance.now();
-  runRtk(
-    ["cargo", "check", "--locked", "--manifest-path", paths.manifest],
+  runCommand(
+    "cargo",
+    ["check", "--locked", "--manifest-path", paths.manifest],
     { env: environment },
   );
   const cargoCheckMilliseconds = Math.round(performance.now() - checkStarted);
 
-  const expanded = runRtk(
+  const expanded = runCommand(
+    "cargo",
     [
-      "cargo",
       "+nightly",
       "rustc",
       "--locked",
@@ -132,16 +133,14 @@ const observed = {
     operating_system: platform(),
     architecture: arch(),
     kernel: release(),
-    rustc: runRtk(["proxy", "rustc", "--version"]),
-    nightly_rustc: runRtk([
-      "proxy",
-      "rustup",
+    rustc: runCommand("rustc", ["--version"]),
+    nightly_rustc: runCommand("rustup", [
       "run",
       "nightly",
       "rustc",
       "--version",
     ]),
-    cargo: runRtk(["cargo", "--version"]),
+    cargo: runCommand("cargo", ["--version"]),
     release_qualified: false,
   },
 };

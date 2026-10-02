@@ -559,7 +559,7 @@ warmup or sample count of its own.
 ### Running it, and what the results claim
 
 ```sh
-rtk env CARGO_INCREMENTAL=0 crates/suprnova-live/scripts/run-render-cache-budget.sh
+env CARGO_INCREMENTAL=0 crates/suprnova-live/scripts/run-render-cache-budget.sh
 ```
 
 The runner pins both benches to `SUPRNOVA_LIVE_S1_CPUSET` (default `0-7`)
