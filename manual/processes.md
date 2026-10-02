@@ -93,7 +93,7 @@ use suprnova::{OutputKind, Process};
 Process::command(["npm", "run", "build"])
     .run_with(|kind, chunk| match kind {
         OutputKind::Out => print!("{chunk}"),
-        OutputKind::Err => eprint!("{chunk}"),
+        OutputKind::Err => print!("[stderr] {chunk}"),
     })
     .await?;
 ```
