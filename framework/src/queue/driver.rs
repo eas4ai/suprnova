@@ -192,7 +192,10 @@ pub trait QueueDriver: Send + Sync {
     ///
     /// Expressing the release as one driver operation lets each backend do it
     /// in place and atomically, so there is no window in which the message
-    /// exists twice or not at all.
+    /// exists twice or not at all. The SQS driver cannot: an SQS message
+    /// cannot be changed, so its release sends a copy and then deletes the
+    /// original, and a delete that fails leaves the job on the queue twice
+    /// until the original's visibility runs out.
     async fn release(
         &self,
         token: &ReservationToken,

@@ -21,8 +21,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   the 15 minutes SQS allows still holds. With `SQS_OVERFLOW_ENABLED=true`, a
   job of 1 MiB or more is stored on a disk and SQS carries a pointer to it.
   The boot fails with no region, with a queue name and no `SQS_PREFIX`, and
-  for a FIFO queue. The driver is behind the `queue-sqs` feature, on by
-  default.
+  for a FIFO queue. A receive waits up to `SQS_WAIT_TIME_SECONDS` (default
+  1) for a message, a throttled or failed request is tried up to three times,
+  and `SqsConfig` with `SqsQueueDriver::new` builds a driver in code for a
+  second connection. `SqsQueueDriver::call` sends any other SQS action. The
+  driver is behind the `queue-sqs` feature, on by default.
 - **A default disk.** `Storage::default_disk()` returns the disk
   `Storage::set_default_disk` names in code, or else `FILESYSTEM_DISK`.
   When the named disk is not registered once the bootstrap has run,

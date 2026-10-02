@@ -179,6 +179,8 @@ enum Commands {
         max_jobs: Option<u64>,
         /// Only drain these queues, comma-separated (e.g. `--queue=billing,default`).
         /// Omit to drain every queue. Jobs with no route count as `default`.
+        /// With the `sqs` driver a name is an SQS queue, unrouted jobs are on
+        /// `SQS_QUEUE`, and omitting the list drains `SQS_QUEUE` only.
         #[arg(long = "queue", value_delimiter = ',')]
         queues: Vec<String>,
         /// Drain this queue connection. Omit for the default connection.
@@ -2142,6 +2144,48 @@ mod worker_boot_order_tests {
 
         // Leave the global driver as the harmless default for anything that
         // runs after this test in the same process.
+        crate::queue::Queue::set_driver(std::sync::Arc::new(
+            crate::queue::memory::MemoryQueueDriver::new(),
+        ));
+    }
+
+    /// The `sqs` queue driver checks its overflow disk as it boots, so the
+    /// worker boot must register the disks of the environment first: here
+    /// the overflow disk is the `s3` disk `S3_BUCKET` describes, and booting
+    /// the queue before the filesystem fails with "SQS_OVERFLOW_DISK names
+    /// the disk 's3', which is not registered".
+    #[cfg(feature = "queue-sqs")]
+    #[tokio::test]
+    #[serial]
+    async fn worker_boot_registers_the_environment_disks_before_the_queue() {
+        let _storage = crate::filesystem::Storage::fake();
+        let _env = EnvGuard::set(&[
+            ("QUEUE_DRIVER", "sqs"),
+            (
+                "SQS_PREFIX",
+                "https://sqs.us-east-1.amazonaws.com/123456789012",
+            ),
+            ("SQS_QUEUE", "default"),
+            ("AWS_DEFAULT_REGION", "us-east-1"),
+            ("AWS_ACCESS_KEY_ID", "AKIDSUPRNOVATEST"),
+            ("AWS_SECRET_ACCESS_KEY", "suprnova-test-secret"),
+            ("SQS_OVERFLOW_ENABLED", "true"),
+            ("SQS_OVERFLOW_DISK", "s3"),
+            ("S3_BUCKET", "suprnova-boot-order"),
+            ("S3_REGION", "us-east-1"),
+            ("S3_ENDPOINT", "http://127.0.0.1:9"),
+            ("S3_ACCESS_KEY", "suprnova-test-key"),
+            ("S3_SECRET_KEY", "suprnova-test-secret"),
+        ]);
+
+        Application::<NoMigrator>::boot_worker_process(None)
+            .await
+            .expect("the overflow disk the environment describes is registered in time");
+
+        assert_eq!(
+            crate::queue::Queue::driver_name().expect("driver registered"),
+            "sqs",
+        );
         crate::queue::Queue::set_driver(std::sync::Arc::new(
             crate::queue::memory::MemoryQueueDriver::new(),
         ));

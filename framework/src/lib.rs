@@ -355,6 +355,8 @@ pub use queue::{
     ReservationToken, Settled, Skip, SkipIfBatchCancelled, SyncQueueDriver, TerminalCallbackClaim,
     ThrottlesExceptions, TimeoutExceeded, UpdatedBatchJobCounts, WithoutOverlapping,
 };
+#[cfg(feature = "queue-sqs")]
+pub use queue::{SqsConfig, SqsCredentials, SqsOverflow, SqsQueueDriver};
 pub use rate_limit::{
     BackendErrorPolicy, ConnectionsPerIp, GlobalLimit, Limit, LimitResult, RateLimitMiddleware,
     RateLimiter, RateLimiterDriver, SlidingWindowConfig, ThrottleRequestsMiddleware, Unlimited,
