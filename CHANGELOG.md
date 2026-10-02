@@ -44,16 +44,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `AppError` constructors, the `From` conversions into `FrameworkError`,
   the `abort_with`, `abort_if` and `abort_unless` helpers and the
   `#[domain_error]` conversions are now `#[track_caller]`, so the page
-  names the line of the `?` or the call that created the error even in
-  a build without debug info. The page
-  redacts the `Authorization`, `Proxy-Authorization`, `Cookie` and
-  `Set-Cookie` headers, every header and query parameter whose name
-  contains `token`, `secret`, `password`, `key` or `signature`, and the
-  password of a URL in the error chain, and it never shows the request
-  body, environment variables or configuration values. It loads nothing
-  and runs no script, so it renders when the frontend build, the Vite
-  manifest or Inertia is what failed, and it carries `Cache-Control:
-  no-store` and a `Content-Security-Policy` that allows no script. For
+  names the line that called them even in a build without debug info; a
+  call from inside `Result::map_err` names that line of the toolchain,
+  and the frames name the handler. Without debug info, the handler and
+  middleware the framework's dispatch polls are the application's
+  frames. The page redacts the `Authorization`, `Proxy-Authorization`,
+  `Cookie` and `Set-Cookie` headers, every header and query parameter
+  whose name contains `token`, `secret`, `password`, `key` or
+  `signature`, every such parameter in any other shown value (a
+  `Referer` or `X-Original-URI` that repeats the URL), and the password
+  of a URL, and it never shows the request body, environment variables
+  or configuration values. It loads nothing and runs no script, so it
+  renders when the frontend build, the Vite manifest or Inertia is what
+  failed, and it carries `Cache-Control: no-store` and a
+  `Content-Security-Policy` that allows no script. For
   those responses it takes the place of the app's Inertia error page. A
   JSON client keeps the JSON body with `debug_message`, a 4xx and a 5xx
   built without an error are unchanged, and with debug off the framework

@@ -84,7 +84,9 @@ right answer for an API client and the wrong one for an Inertia visit,
 which needs a page. Name an
 [error page](frontend-inertia-responses.md#error-pages) and an Inertia
 app renders these errors as a real page while API clients keep the JSON
-unchanged.
+unchanged. With debug mode on, a 5xx reaches a browser or an Inertia
+visit as the [development error page](#see-a-failure-in-the-browser)
+instead.
 
 ## `AppError` - inline domain errors
 
@@ -581,11 +583,12 @@ When the write fails, a browser that opens the route gets a 500 page
 that shows the following:
 
 - The message `writing the ledger failed`, and the I/O error it wraps.
-- The line in `write_ledger` that created the error, and the stack
-  frames of your code that led there. The frames of the framework, the
-  async runtime, and the standard library are collapsed.
+- The line in `write_ledger` that called `from_external_with`, and the
+  stack frames of your code that led there. The frames of the framework,
+  the async runtime, and the standard library are collapsed.
 - The request's method, path, query, headers, route pattern, and request
-  id. Credentials and secret-named values are redacted.
+  id. Credentials and secret-named values are redacted, including the
+  secret parameters of a URL in a header such as `Referer`.
 
 An Inertia visit gets the same page, in place of your Inertia error
 page. `curl`, and every other client whose `Accept` header does not list
