@@ -1,0 +1,11 @@
+{
+ "records": 11479,
+ "source_paths": [
+  "framework",
+  "crates",
+  "suprnova-cli",
+  "suprnova-macros",
+  "Cargo.toml"
+ ],
+ "source_rev": "875f32ce"
+}

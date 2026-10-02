@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Gate the current HEAD when needed; require accepted stamps for other tips.
+
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+remote_name="${1-}"
+remote_url="${2-}"
+if [[ -z "$remote_name" || -z "$remote_url" ]]; then
+    printf 'pre-push: Git did not provide the remote name and URL\n' >&2
+    exit 2
+fi
+
+exec python3 scripts/gate-runner.py \
+    --authorize-push "$remote_name" "$remote_url"
