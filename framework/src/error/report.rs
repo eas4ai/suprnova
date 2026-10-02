@@ -346,7 +346,7 @@ mod tests {
         })
         .await;
 
-        let panic = caught.err().expect("the panic must be caught");
+        let panic = caught.expect_err("the panic must be caught");
         assert_eq!(
             payload_text(&*panic.payload),
             Some("ledger index page 7 is unreadable")
@@ -373,7 +373,7 @@ mod tests {
         })
         .await;
 
-        let panic = caught.err().expect("the resumed unwind must be caught");
+        let panic = caught.expect_err("the resumed unwind must be caught");
         assert_eq!(
             payload_text(&*panic.payload),
             Some("the ledger feed closed")

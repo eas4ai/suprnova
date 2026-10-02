@@ -419,11 +419,12 @@ impl AssertableInertia {
         except: Option<Vec<String>>,
     ) -> AssertableInertia {
         let Some(reload) = self.reload.clone() else {
-            self.fail(format!(
+            self.fail(
                 "AssertableInertia::reload_only/reload_except/load_deferred_props: no reloader \
                  attached - call `.with_reload(...)` first; see \
                  manual/http-tests.md#testing-inertia-responses"
-            ));
+                    .to_string(),
+            );
         };
         let request = ReloadRequest {
             url: self.url.clone(),
