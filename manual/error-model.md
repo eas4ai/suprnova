@@ -497,7 +497,10 @@ skeleton:
   request scope, such as during early boot or in tests with no request
   context).
 - `debug_message` only appears for 5xx when `APP_DEBUG=true`. It is
-  strictly additive - production clients must not key on it.
+  strictly additive - production clients must not key on it. With
+  debug on, a browser or an Inertia visit gets the
+  [development error page](#the-development-error-page) in place of
+  this body.
 
 Three special variants return before request-id injection:
 
@@ -526,7 +529,9 @@ to:
 When `APP_DEBUG=true` (false by default outside `local`/`dev`/`test`),
 the response also carries a `debug_message` field with the raw detail -
 but `message` stays generic in both modes, so frontends and clients
-can't accidentally couple to dev-only data.
+can't accidentally couple to dev-only data. A browser or an Inertia visit
+gets the [development error page](#the-development-error-page) instead,
+which shows the same detail as HTML.
 
 This is the contract that lets you call `FrameworkError::internal("db
 connection refused: password mismatch on user 'app_rw'")` without
@@ -567,7 +572,10 @@ a panic it:
 4. Echoes the request id back as `X-Request-Id`.
 
 The panic payload stays in the log entry; the client gets the
-sanitised `{"message": "Internal Server Error"}` body. Observability
+sanitised `{"message": "Internal Server Error"}` body. With debug on, a
+browser or an Inertia visit gets the
+[development error page](#the-development-error-page) instead, with the
+panic message and the line that panicked. Observability
 listeners that fire on `ErrorOccurred` for returned 5xx errors also
 fire on panics - there is no separate panic-event surface to wire up.
 
@@ -581,6 +589,108 @@ The same panic-recovery pattern is used by:
 A panic in one of these subsystems is logged and either translated to
 an error state or auto-restarted; it does not bring down the worker
 task.
+
+## The development error page
+
+With debug mode on, a failed request is hard to read as a
+`debug_message` string in a browser tab. So for a browser or an Inertia
+visit, Suprnova replaces a 5xx built from a failure with the development
+error page: one HTML document that shows what failed, where, and on
+which request.
+
+### When it renders
+
+The server replaces a response with the page when all of these hold:
+
+- `Config::is_debug()` returns `true`: `APP_DEBUG=true`, or `APP_DEBUG`
+  unset in the `local`, `development`, or `testing` environment.
+- The status is 500 or above.
+- The response carries an `ErrorReport`: a `FrameworkError` became the
+  response, the panic boundary caught a panic, or one of the framework's
+  middleware answered a failure with a 5xx.
+- The request is an Inertia visit (`X-Inertia: true`), or its `Accept`
+  header lists `text/html`.
+
+Everything else stays as it is. A 4xx keeps its body, and so does a 5xx
+your handler built itself without an error. A client whose `Accept`
+header doesn't list `text/html` (`application/json`, `*/*`, or no
+`Accept` at all) and isn't an Inertia visit keeps the JSON body with
+`debug_message`. With debug off, no request gets the page,
+nothing about the request is captured, no stack frames are recorded, and
+every response is the one production sends.
+
+The page is built in the server, after the panic boundary, so it covers
+panics as well as returned errors. For these responses it takes the
+place of the app's Inertia error page. It keeps the status, the error
+report, `Set-Cookie`, `X-Request-Id`, and the other headers that describe
+the request, and it replaces the ones that described the old body.
+
+To see it, run the app with `APP_DEBUG=true` and open a route that fails
+in a browser. From a terminal, ask for HTML:
+
+```bash
+curl -H 'Accept: text/html' http://localhost:8000/invoices/42
+```
+
+### What it shows
+
+- The error chain, one line per source, or the panic message and the
+  `file:line:column` where the panic was raised.
+- The site that created the error: the line of your `?`, or of your call
+  to a `FrameworkError` or `AppError` constructor.
+- The stack frames recorded at that site. Your application's frames are
+  listed. Each run of frames from the framework, the async runtime,
+  other dependencies, and the standard library is collapsed behind a
+  count.
+- The request: the method, the path, the query parameters, the headers,
+  the matched route pattern, and the request id.
+
+Frames are recorded for an error created on the request's own task by a
+`FrameworkError` or `AppError` constructor or by a `From` conversion,
+which includes `?`. An error built as a struct literal, or created on a
+task the request spawned, has no frames, and the page says so. A build
+without debug info names each frame's function but not its line; the
+creation site always has its line, because the constructors and
+conversions are `#[track_caller]`.
+
+### What it never shows
+
+- The values of the `Authorization`, `Proxy-Authorization`, `Cookie`, and
+  `Set-Cookie` headers, and of every header and query parameter whose
+  name contains `token`, `secret`, `password`, `key`, or `signature` in
+  any letter case. Each value reads `[redacted]`.
+- The password of a URL with credentials in the error chain:
+  `postgres://app:hunter2@db/app` reads `postgres://app:[redacted]@db/app`.
+- The request body, environment variables, and configuration values.
+  The page never reads them.
+
+### What it loads
+
+Nothing. The page is one HTML document with an inline style sheet and no
+JavaScript. It requests no script, style sheet, font, image, or frame,
+so it renders when the frontend build, the Vite manifest, Inertia, or the
+view layer is what failed. Every value it shows is HTML-escaped. The
+response carries `Cache-Control: no-store` and a
+`Content-Security-Policy` of `default-src 'none'; style-src
+'unsafe-inline'; base-uri 'none'; form-action 'none'`, which allows no
+script.
+
+### Why Suprnova diverges
+
+Laravel's exception page shows the request body, lists the SQL queries
+the request ran, and runs a bundled JavaScript app that adds a "copy as
+Markdown" button. Suprnova's page has none of the three:
+
+- A request body often holds the passwords, tokens, and personal data
+  the header redaction exists to protect, and a development server on a
+  shared network or behind a tunnel shows the page to whoever triggers
+  the error.
+- A page that runs no script and loads nothing renders in the situations
+  where a developer needs it most: a broken frontend build, a missing
+  Vite manifest, or a failure inside Inertia.
+- Listing queries needs a listener on every query of every request. The
+  structured log already records the error chain of every 5xx with the
+  request id the page shows.
 
 ## Hooking observability with `ErrorOccurred`
 
@@ -698,7 +808,10 @@ The contract Suprnova gives you:
   sentinel returns the same generic message without `request_id`.
 - **Optional debug visibility**. `APP_DEBUG=true` adds a
   `debug_message` field for ordinary 5xx responses, never `message`.
-  Production clients cannot accidentally couple to dev-only data.
+  Production clients cannot accidentally couple to dev-only data. A
+  browser or an Inertia visit gets the development error page instead,
+  which redacts credentials and never shows the request body,
+  environment variables, or configuration values.
 - **Correlatable request ids**. Every ordinary error body that reaches the
   common renderer carries the request id (or `null` when no request scope
   exists); the same id appears in the log line and the `ErrorOccurred`
@@ -720,6 +833,8 @@ The contract Suprnova gives you:
 | `From<FrameworkError> for HttpResponse` (conversion + sanitisation) | `framework/src/http/response.rs` |
 | `abort`, `abort_if`, `abort_unless` | `framework/src/http/abort.rs` |
 | `execute_chain_safely` (panic boundary) | `framework/src/server.rs` |
+| The development error page | `framework/src/error/debug_page.rs` |
+| Stack frame recording and classification | `framework/src/error/frames.rs` |
 | `ErrorOccurred` event | `framework/src/events/builtins.rs` |
 | `#[domain_error]` macro | `suprnova-macros/src/domain_error.rs` |
 
