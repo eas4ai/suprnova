@@ -263,7 +263,9 @@ pub use broadcasting::{
 pub use bus::{Bus, Dispatched};
 pub use console::{CommandEntry, CommandHandler, TypedCommand, dispatch_argv, two_column_detail};
 pub use cors::{AllowedHeaders, AllowedOrigins, CorsConfig, CorsMiddleware};
-pub use error::{AppError, FrameworkError, HttpError, ValidationErrors, render_error_chain};
+pub use error::{
+    AppError, ErrorReport, FrameworkError, HttpError, ValidationErrors, render_error_chain,
+};
 pub use events::{
     DebouncedListener, ErrorOccurred, Event, EventDispatcher, EventFacade, EventFakeGuard,
     Listener, QueuedListener, Subscriber,
