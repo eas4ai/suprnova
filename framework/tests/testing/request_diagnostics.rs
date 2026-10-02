@@ -696,6 +696,8 @@ impl CacheStore for CacheOutage {
 }
 
 /// Run `request` with [`CacheOutage`] as the cache, for this test only.
+/// Callers pass the request boxed: the scope wraps the whole request
+/// future, and held inline it overflows a test thread's default stack.
 async fn during_a_cache_outage<F: std::future::Future>(request: F) -> F::Output {
     TestContainer::scope(async {
         TestContainer::bind::<dyn CacheStore>(Arc::new(CacheOutage(InMemoryCache::new())));
@@ -723,12 +725,12 @@ async fn a_session_lock_the_cache_cannot_take_carries_the_cache_error() {
             .into(),
     );
 
-    let (response, _) = during_a_cache_outage(send(
+    let (response, _) = during_a_cache_outage(Box::pin(send(
         &router,
         MiddlewareRegistry::new(),
         "/notices",
         &[("Cookie", cookie.as_str())],
-    ))
+    )))
     .await;
 
     assert_eq!(response.status(), 500);
@@ -747,7 +749,7 @@ async fn a_throttle_whose_cache_fails_carries_the_cache_error() {
             .into(),
     );
 
-    let (response, _) = during_a_cache_outage(get(&router, "/statement")).await;
+    let (response, _) = during_a_cache_outage(Box::pin(get(&router, "/statement"))).await;
 
     assert_eq!(response.status(), 500);
     assert_report_names(&response, &[CACHE_READ_ERROR]);
