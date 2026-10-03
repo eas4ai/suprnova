@@ -101,6 +101,7 @@ rather than duplicates.
 | Component library - data display and layout | DATA | component-library-data-display.md | Draft; refines Live spec 25; DATA-007 Agreed 2026-10-01 |
 | Sessions (concurrent requests on one session) | SESS | sessions.md | Draft; SESS-001 Agreed 2026-09-15 on escalation `form-008` |
 | Laravel parity (the developer's rulings on the parity map, one commitment at a time) | PAR | laravel-parity.md | Draft; PAR-001 to PAR-011 Agreed 2026-10-01; PAR-012 to PAR-015 Agreed 2026-10-02; PAR-016 and PAR-017 Agreed 2026-10-02; PAR-018 to PAR-020 Agreed 2026-10-02; PAR-021 to PAR-025 Agreed 2026-10-02; PAR-026 to PAR-030 Agreed 2026-10-02; PAR-031 to PAR-034 Agreed 2026-10-03; PAR-035 to PAR-037 Agreed 2026-10-03; PAR-038 to PAR-040 Agreed 2026-10-03; the full list is `feature-map/laravel/parity.jsonl` |
+| Memory footprint (the 2026-10-02 allocation audit, validated and addressed; heap profiling) | MEM | memory.md | Agreed 2026-10-03 |
 | The manual checked against the code, and remediating what the check finds | MAN | manual-check.md | Agreed 2026-09-27 (delegated by the developer); tooling in `feature-map/`, commands in `feature-map/README.md` |
 
 Domains with no spec file yet, and the manual chapters that are their

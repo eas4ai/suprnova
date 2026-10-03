@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: schema-dump
+Current: memory-footprint
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -294,6 +294,20 @@ Requirements: PAR-038, PAR-039, PAR-040
    (`laravel-parity.md` PAR-038 to PAR-040, next-feature item
    `schema-dump`). Done when the mechanism passes on a committed tree,
    against SQLite, Postgres, MySQL and MariaDB.
+
+## memory-footprint
+
+Requirements: MEM-001, MEM-002, MEM-003, MEM-004, MEM-005, MEM-006, MEM-007
+
+26. memory-footprint - every validated item of the 2026-10-02 allocation
+   audit addressed: memory a long-running process kept for finished work,
+   capacity reserved and never used, full copies on request and job paths,
+   the browser runtime's buffers and the tooling's; the defects validation
+   found beside them; and heap profiling with dhat behind the
+   `heap-profiling` feature, with a `profiling` Cargo profile
+   (`memory.md` MEM-001 to MEM-007). Done when the mechanism passes on a
+   committed tree, and a dhat profile of the dogfood app on one fixed
+   workload, before and after, is in the delivery report.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
