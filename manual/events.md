@@ -251,8 +251,9 @@ Four `OrderUpdated` events for order 55 enqueue four jobs and run one. See
 
 Queued in-process listeners spawn into a `JoinSet` tracked by the
 dispatcher, which lets go of each one as it finishes. The server's
-graceful shutdown, and `queue:work`, `schedule:work` and `workflow:work`
-when they stop, wait up to ten seconds for the listeners still running:
+graceful shutdown, `queue:work`, `schedule:work` and `workflow:work`
+when they stop, and `schedule:run` once its tasks have run, wait up to
+ten seconds for the listeners still running:
 returning from `main` would end them part way. A process of your own
 calls `EventFacade::drain_queued(timeout)` to do the same:
 

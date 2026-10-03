@@ -113,6 +113,30 @@ test.describe("FDB-007: the toast region holds a toast's timer", () => {
     await expect(page.locator("#saved")).toBeHidden();
   });
 
+  test("MEM-006 resumes the timers when the hovered toast is removed under a still pointer", async ({
+    page,
+  }) => {
+    // The list is anchored at the bottom, so removing the upper of two
+    // toasts leaves the pointer over nothing in the region.
+    await page.evaluate(() => {
+      const list = document.getElementById("toasts");
+      if (list === null) throw new Error("no toast list");
+      const later = document.createElement("div");
+      later.className = "sn-toast";
+      later.id = "later";
+      later.setAttribute("data-sn-variant", "info");
+      later.setAttribute("data-sn-duration", "1000");
+      later.innerHTML = '<span class="sn-toast-text">Later</span>';
+      list.append(later);
+    });
+    await expect(page.locator("#later")).toBeVisible();
+    const saved = await center(page, "#saved");
+    await page.mouse.move(saved.x, saved.y);
+    await page.evaluate(() => document.getElementById("saved")?.remove());
+    await page.clock.runFor(1_100);
+    await expect(page.locator("#later")).toBeHidden();
+  });
+
   test("MEM-006 resumes the timers when the focused toast is removed", async ({ page }) => {
     await page.locator("#saved-dismiss").focus();
     await page.mouse.move(1, 1);

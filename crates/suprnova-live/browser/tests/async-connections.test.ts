@@ -583,6 +583,31 @@ describe("browser SSE authorization adapters", () => {
     expect(copied).toBeLessThanOrEqual(4 * record.byteLength);
   });
 
+  it("MEM-004 reads records split across two chunks at every offset", async () => {
+    const stream = new TextEncoder().encode('data:abcd\n\ndata:{"n":2}\n\ndata:xyz1234567\n\n');
+    for (let split = 1; split < stream.byteLength; split += 1) {
+      const result = await deliver([stream.slice(0, split), stream.slice(split)], 3);
+      expect(result.failure, `split at ${String(split)}`).toBeNull();
+      expect(result.messages, `split at ${String(split)}`).toEqual([
+        "abcd",
+        '{"n":2}',
+        "xyz1234567",
+      ]);
+    }
+  });
+
+  it("MEM-004 reads a record fed in three uneven chunks", async () => {
+    const stream = new TextEncoder().encode("data:first\n\ndata:second\n\n");
+    for (let one = 1; one < stream.byteLength - 1; one += 1) {
+      for (let two = one + 1; two < stream.byteLength; two += 1) {
+        const chunks = [stream.slice(0, one), stream.slice(one, two), stream.slice(two)];
+        const result = await deliver(chunks, 2);
+        expect(result.failure, `splits at ${String(one)} and ${String(two)}`).toBeNull();
+        expect(result.messages).toEqual(["first", "second"]);
+      }
+    }
+  });
+
   it("MEM-004 reads a network chunk larger than one record when its records are small", async () => {
     const records = Array.from({ length: 5_000 }, (_, n) => `data:{"n":${String(n)}}\n\n`).join("");
     const input = new TextEncoder().encode(records);

@@ -788,6 +788,49 @@ async fn a_nack_longer_than_the_twelve_hours_left_holds_and_counts_one_attempt()
     assert_eq!(again.envelope.attempts, 1, "the nack counted one attempt");
 }
 
+/// MEM-003: a reservation keeps the message body rather than a decoded
+/// envelope, so the nack that sends a copy decodes the body again; for an
+/// overflow message that reads the payload back from the disk.
+#[tokio::test]
+async fn a_nack_longer_than_the_twelve_hours_left_copies_an_overflow_job_whole() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let clock = TestClock::freeze();
+    let driver = driver();
+    let sent = large_envelope();
+    driver.push(sent.clone()).await.unwrap();
+    let first = driver.pop(VISIBILITY).await.unwrap().unwrap();
+
+    // Within the reservation, so the original message and its payload
+    // are deleted once the copy is sent.
+    fake.advance(20);
+    clock.advance(chrono::Duration::seconds(20));
+    let twelve_hours = 12 * 3600;
+    driver
+        .nack(&first.token, Duration::from_secs(twelve_hours))
+        .await
+        .expect("a nack of 12 hours is accepted");
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "the copy's payload replaced the original's"
+    );
+
+    fake.advance(twelve_hours);
+    clock.advance(chrono::Duration::seconds(twelve_hours as i64));
+    let again = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("back after 12 hours");
+    assert_eq!(again.envelope.id, sent.id);
+    assert_eq!(
+        again.envelope.payload, sent.payload,
+        "the copy is the whole job"
+    );
+    assert_eq!(again.envelope.attempts, 1, "the nack counted one attempt");
+}
+
 #[tokio::test]
 async fn a_settlement_after_the_reservation_expired_keeps_the_overflow_payload() {
     let (_env, _restore, fake) = setup!("default");

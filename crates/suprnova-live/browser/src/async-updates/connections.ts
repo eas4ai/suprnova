@@ -215,14 +215,21 @@ class SseRecordReader {
     let view = chunk;
     if (this.#carryLength !== 0) {
       const carried = this.#carryLength;
-      // The blank line ending the carried record may straddle the boundary.
-      const end =
-        this.#carry[carried - 1] === 10 && chunk[0] === 10 ? carried - 1 : findRecordEnd(chunk, 0);
-      if (end < 0) {
-        this.#append(chunk);
-        return;
+      // Where the carried record ends, in the joined bytes. The blank line
+      // either straddles the boundary, its first \n carried and its second
+      // the chunk's first byte, or lies wholly inside the chunk; each case
+      // gives its own position, never inferred from the other's.
+      let recordEnd: number;
+      if (this.#carry[carried - 1] === 10 && chunk[0] === 10) {
+        recordEnd = carried - 1;
+      } else {
+        const inChunk = findRecordEnd(chunk, 0);
+        if (inChunk < 0) {
+          this.#append(chunk);
+          return;
+        }
+        recordEnd = carried + inChunk;
       }
-      const recordEnd = end === carried - 1 ? end : carried + end;
       if (recordEnd > MAX_SSE_RECORD_BYTES) throw new Error("async_sse_record_too_large");
       if (recordEnd > carried) this.#append(chunk.subarray(0, recordEnd - carried));
       record(this.#carry.subarray(0, recordEnd));

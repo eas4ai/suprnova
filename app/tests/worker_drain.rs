@@ -9,10 +9,12 @@
 //! worker returned while that listener slept and the runtime dropped it
 //! with the process, so `path` never appeared.
 //!
-//! The scheduler and the workflow worker end through the same shutdown
-//! step. Neither can be driven here: the scheduler ticks on minute
-//! boundaries, and `workflow:work` needs Postgres (see
-//! `daemon_sigterm.rs`).
+//! `schedule:run` is driven through the app's `bench:queued-listener`
+//! task, which fires the same event when `BENCH_LISTENER_PATH` names the
+//! file. `schedule:work` and the workflow worker end through the same
+//! shutdown step as `queue:work`. Neither can be driven here: the daemon
+//! scheduler ticks on minute boundaries, and `workflow:work` needs
+//! Postgres (see `daemon_sigterm.rs`).
 
 #![cfg(unix)]
 
@@ -148,5 +150,28 @@ fn mem_audit_a_signalled_worker_waits_for_its_listeners() {
     assert!(
         done.exists(),
         "the worker exited while its queued listener ran"
+    );
+}
+
+#[test]
+fn mem_audit_schedule_run_waits_for_its_listeners() {
+    let tmp = tempfile::TempDir::new().expect("tmpdir");
+    let db = tmp.path().join("schedule-drain.db");
+    let done = tmp.path().join("listener.done");
+    run(APP_BIN, &db, &["migrate"]);
+    let output = command(APP_BIN, &db)
+        .arg("schedule:run")
+        .env("BENCH_LISTENER_PATH", &done)
+        .output()
+        .unwrap_or_else(|e| panic!("spawn `{APP_BIN} schedule:run`: {e}"));
+    assert!(
+        done.with_extension("done.started").exists(),
+        "the listener never started, so this run proves nothing:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        done.exists(),
+        "schedule:run exited while its queued listener ran"
     );
 }

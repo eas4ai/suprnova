@@ -155,3 +155,51 @@ async fn mem_audit_a_body_in_several_frames_holds_only_its_length() {
         "the body is not held at its length: {response}"
     );
 }
+
+/// MEM-002: a body sent as many tiny frames is held as its bytes, not as
+/// a handle per frame. A client chooses the frame count, so holding every
+/// frame until the body ends let a small request hold many times its size.
+/// The bound is the same body sent as one chunk, plus the extra wire bytes
+/// hyper may buffer before it decodes them, plus one body for a buffer
+/// that grows chunk by chunk. Holding a handle per frame peaked at 3.2 MB.
+#[tokio::test]
+async fn mem_audit_a_body_in_tiny_frames_holds_its_bytes_not_its_frames() {
+    let _lock = exclusive().await;
+    const SIZE: usize = 64 * 1024;
+    let router = Router::new().post("/body", |req: Request| async move {
+        let (_, bytes) = req.body_bytes().await.expect("the body");
+        text(bytes.len().to_string())
+    });
+    let addr = serve(router, MiddlewareRegistry::new()).await;
+    let head = b"POST /body HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+    let mut tiny = head.to_vec();
+    for _ in 0..SIZE {
+        tiny.extend_from_slice(b"1\r\na\r\n");
+    }
+    tiny.extend_from_slice(b"0\r\n\r\n");
+    let mut whole = head.to_vec();
+    whole.extend_from_slice(format!("{SIZE:x}\r\n").as_bytes());
+    whole.extend_from_slice(&[b'a'; SIZE]);
+    whole.extend_from_slice(b"\r\n0\r\n\r\n");
+
+    let mut peaks = Vec::new();
+    for request in [&whole, &tiny] {
+        exchange(addr, request).await;
+        let heap = Heap::start();
+        let start = heap.live();
+        let (read, response) = exchange(addr, request).await;
+        peaks.push(heap.peak() - start);
+        drop(heap);
+        let response = String::from_utf8_lossy(&response[..read.min(response.len())]).into_owned();
+        assert!(
+            response.ends_with(&SIZE.to_string()),
+            "the body was not read whole: {response}"
+        );
+    }
+    assert!(
+        peaks[1] < peaks[0] + (tiny.len() - whole.len()) + SIZE,
+        "a {SIZE}-byte body in 1-byte frames peaked at {} bytes, in one frame at {}",
+        peaks[1],
+        peaks[0]
+    );
+}
