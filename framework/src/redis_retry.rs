@@ -122,7 +122,7 @@ pub(crate) fn is_transient(e: &redis::RedisError) -> bool {
 /// site that uses this carries a comment saying why its command is idempotent.
 ///
 /// `op` names the command for the retry log line only.
-pub(crate) async fn retry_read<T, F, Fut>(op: &'static str, mut make: F) -> redis::RedisResult<T>
+pub(crate) async fn retry_read<T, F, Fut>(op: &str, mut make: F) -> redis::RedisResult<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = redis::RedisResult<T>>,

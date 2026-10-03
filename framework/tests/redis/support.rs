@@ -148,10 +148,7 @@ async fn relay(client: TcpStream, server: TcpStream, markers: Vec<String>, held:
     // sent every marker before it, or waited for it.
     let mut decided = false;
     let mut buffer = [0u8; 8192];
-    loop {
-        let Ok(n) = server_read.read(&mut buffer).await else {
-            break;
-        };
+    while let Ok(n) = server_read.read(&mut buffer).await {
         if n == 0 {
             break;
         }

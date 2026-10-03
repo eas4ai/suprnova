@@ -19,12 +19,18 @@ async fn subscribe_yields_each_messages_channel_and_payload() {
     assert_eq!(redis.publish(&channel, "hello").await.unwrap(), 1);
     assert_eq!(redis.publish(&channel, "again").await.unwrap(), 1);
 
-    let message = tokio::time::timeout(WAIT, subscription.next()).await.unwrap().unwrap();
+    let message = tokio::time::timeout(WAIT, subscription.next())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(message.channel, channel);
     assert_eq!(message.pattern, None);
     assert_eq!(message.payload, b"hello");
     assert_eq!(message.payload_str(), Some("hello"));
-    let message = tokio::time::timeout(WAIT, subscription.next()).await.unwrap().unwrap();
+    let message = tokio::time::timeout(WAIT, subscription.next())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(message.payload, b"again");
 }
 
@@ -40,7 +46,10 @@ async fn psubscribe_yields_the_pattern_a_message_matched() {
     let channel = format!("{prefix}:created");
     assert_eq!(redis.publish(&channel, "payload").await.unwrap(), 1);
 
-    let message = tokio::time::timeout(WAIT, subscription.next()).await.unwrap().unwrap();
+    let message = tokio::time::timeout(WAIT, subscription.next())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(message.channel, channel);
     assert_eq!(message.pattern.as_deref(), Some(pattern.as_str()));
     assert_eq!(message.payload, b"payload");
@@ -77,7 +86,10 @@ async fn a_dropped_subscription_unsubscribes() {
 
     let start = Instant::now();
     while subscribers(&redis, &channel).await != 0 {
-        assert!(start.elapsed() < WAIT, "the subscription's connection never closed");
+        assert!(
+            start.elapsed() < WAIT,
+            "the subscription's connection never closed"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -105,7 +117,9 @@ async fn a_blpop_that_waits_delays_no_other_command_and_waits_its_whole_timeout(
     let waited_list = list.clone();
     let blpop = tokio::spawn(async move {
         let start = Instant::now();
-        let popped = waiting.blpop(&[waited_list.as_str()], Duration::from_secs(2)).await;
+        let popped = waiting
+            .blpop(&[waited_list.as_str()], Duration::from_secs(2))
+            .await;
         (popped, start.elapsed())
     });
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -136,12 +150,18 @@ async fn a_blpop_returns_an_element_pushed_while_it_waits() {
     let waiting = redis.clone();
     let waited_list = list.clone();
     let blpop = tokio::spawn(async move {
-        waiting.blpop(&[waited_list.as_str()], Duration::from_secs(5)).await
+        waiting
+            .blpop(&[waited_list.as_str()], Duration::from_secs(5))
+            .await
     });
     tokio::time::sleep(Duration::from_millis(200)).await;
     redis.rpush(&list, &["pushed"]).await.unwrap();
 
-    let popped = tokio::time::timeout(WAIT, blpop).await.unwrap().unwrap().unwrap();
+    let popped = tokio::time::timeout(WAIT, blpop)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     assert_eq!(popped, Some((list.clone(), "pushed".to_owned())));
 }
 
@@ -167,7 +187,11 @@ async fn blocking_commands_return_what_is_there() {
         Some("a")
     );
     assert_eq!(
-        redis.brpoplpush(&list, &other, second).await.unwrap().as_deref(),
+        redis
+            .brpoplpush(&list, &other, second)
+            .await
+            .unwrap()
+            .as_deref(),
         Some("c")
     );
     assert_eq!(redis.lrange(&other, 0, -1).await.unwrap(), vec!["c", "a"]);

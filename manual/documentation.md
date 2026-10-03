@@ -54,6 +54,7 @@
     - [Queues](queues.md)
     - [Command Bus](bus.md)
     - [Rate Limiting](rate-limiting.md)
+    - [Redis](redis.md)
     - [Task Scheduling](scheduling.md)
     - [Workflows](workflows.md)
     - [Supervisors](supervisors.md)
