@@ -482,3 +482,55 @@ impl Retirement {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn queue_of(count: u32) -> BoundedQueue<u32> {
+        let mut queue = BoundedQueue::new(ResourceBounds::new(64, 64).expect("bounds"));
+        for value in 0..count {
+            queue.try_push(1, value).expect("push");
+        }
+        queue
+    }
+
+    /// MEM-002: a removal that matches nothing keeps the queue's storage.
+    #[test]
+    fn mem_audit_a_removal_that_matches_nothing_keeps_the_storage() {
+        let mut queue = queue_of(40);
+        let storage = queue.items.as_slices().0.as_ptr();
+        let capacity = queue.items.capacity();
+        let removed = queue.remove_if_preserving(&mut |_| false);
+        assert_eq!(removed.count, 0);
+        assert_eq!(
+            queue.items.as_slices().0.as_ptr(),
+            storage,
+            "the queue was rebuilt"
+        );
+        assert_eq!(queue.items.capacity(), capacity);
+        assert_eq!(queue.len(), 40);
+    }
+
+    /// MEM-002: a partial removal reuses the storage, keeps FIFO order and
+    /// sizes the removed items exactly.
+    #[test]
+    fn mem_audit_a_partial_removal_reuses_the_storage() {
+        let mut queue = queue_of(40);
+        let capacity = queue.items.capacity();
+        let removed = queue.remove_if_preserving(&mut |value: &u32| value % 2 == 0);
+        assert_eq!(removed.count, 20);
+        assert_eq!(removed.bytes, 20);
+        assert_eq!(
+            removed.items.capacity(),
+            20,
+            "the removed items grew by doubling"
+        );
+        assert_eq!(queue.items.capacity(), capacity, "the queue was rebuilt");
+        let kept: Vec<u32> = queue.items.iter().map(|item| item.value).collect();
+        assert_eq!(kept, (0..40).filter(|v| v % 2 == 1).collect::<Vec<_>>());
+        let gone: Vec<u32> = removed.items.iter().map(|item| item.value).collect();
+        assert_eq!(gone, (0..40).filter(|v| v % 2 == 0).collect::<Vec<_>>());
+        assert_eq!(queue.retained_bytes, 20);
+    }
+}

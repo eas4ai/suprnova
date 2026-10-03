@@ -137,3 +137,56 @@ impl<S: AuthSchema> Store<S> {
         &self.db
     }
 }
+
+#[cfg(test)]
+mod mem_audit {
+    use super::*;
+
+    /// MEM-003: hex is written into one buffer of exactly its length.
+    #[test]
+    fn mem_audit_hex_is_written_into_one_exact_buffer() {
+        let hex = hex_lower(&[0x00, 0xab, 0xff]);
+        assert_eq!(hex, "00abff");
+        assert_eq!(hex.capacity(), hex.len());
+        let token = random_token();
+        assert_eq!(token.len(), 64);
+        assert!(
+            token
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
+    }
+
+    /// MEM-003: no Magnetar source formats hex one byte at a time.
+    #[test]
+    fn mem_audit_no_source_formats_hex_a_byte_at_a_time() {
+        fn sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read src") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    sources(&path, found);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let mut offenders = Vec::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).expect("a source");
+            for (number, line) in text.lines().enumerate() {
+                if line.contains(".map(") && line.contains(":02x}") {
+                    offenders.push(format!("{}:{}", file.display(), number + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "per-byte hex formatting at {offenders:?}"
+        );
+    }
+}

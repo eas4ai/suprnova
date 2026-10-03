@@ -150,6 +150,11 @@ pub async fn register() {
     register_job::<crate::jobs::bench::BenchSleep>();
     register_job::<crate::jobs::bench::BenchAbort>();
     register_job::<crate::jobs::bench::BenchRecord>();
+    register_job::<crate::jobs::bench::BenchListener>();
+    EventFacade::listen::<crate::jobs::bench::BenchListenerRan, _>(Arc::new(
+        crate::jobs::bench::BenchListenerWriter,
+    ))
+    .await;
 
     // Phase 5B Task 20 - mail dogfood.
     //

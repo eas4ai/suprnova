@@ -38,3 +38,32 @@ pub fn levenshtein_distance(a: &str, b: &str) -> usize {
 
     matrix[len_a][len_b]
 }
+
+#[cfg(test)]
+mod mem_audit {
+    use super::levenshtein_distance;
+
+    /// MEM-005: the distances are the same as ever.
+    #[test]
+    fn mem_audit_distances_are_unchanged() {
+        assert_eq!(levenshtein_distance("kitten", "sitting"), 3);
+        assert_eq!(levenshtein_distance("", "abc"), 3);
+        assert_eq!(levenshtein_distance("abc", ""), 3);
+        assert_eq!(levenshtein_distance("é", "e"), 1);
+        assert_eq!(levenshtein_distance("日本", "日"), 1);
+        assert_eq!(levenshtein_distance("same", "same"), 0);
+    }
+
+    /// MEM-005: the distance keeps two rows, not the whole matrix. This
+    /// crate's test binary links the standard library dynamically, so a
+    /// heap profiler cannot see its allocations; the source is checked.
+    #[test]
+    fn mem_audit_the_distance_keeps_two_rows() {
+        let source = include_str!("utils.rs");
+        let body = &source[..source.find("#[cfg(test)]").expect("the tests")];
+        assert!(
+            !body.contains("Vec<Vec<"),
+            "the distance keeps a whole matrix"
+        );
+    }
+}

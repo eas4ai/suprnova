@@ -1901,4 +1901,65 @@ mod tests {
             "the attribute value must be escaped; got:\n{generated}"
         );
     }
+
+    /// MEM-005: `live_component` renders in one pass to exactly the text the
+    /// chained replacements gave.
+    #[test]
+    fn mem_audit_live_component_renders_in_one_pass() {
+        let rendered = live_component(
+            "counter_card",
+            "CounterCard",
+            "app.counter-card",
+            "live/counter_card.html",
+        );
+        let expected = include_str!("files/backend/live/component.rs.tpl")
+            .replace("{snake}", "counter_card")
+            .replace("{pascal}", "CounterCard")
+            .replace("{component_name}", "app.counter-card")
+            .replace("{view}", "live/counter_card.html");
+        assert_eq!(rendered, expected);
+        assert_eq!(
+            rendered.capacity(),
+            rendered.len(),
+            "the render grew by copying"
+        );
+    }
+
+    /// MEM-007: both scaffolds offer the `profiling` profile, the release
+    /// profile with debug symbols, and a `heap-profiling` feature that
+    /// turns on the framework's.
+    #[test]
+    fn mem_audit_the_scaffolds_offer_heap_profiling() {
+        for (scaffold, manifest) in [
+            ("backend", cargo_toml("demo", "A demo", "")),
+            ("api", api::cargo_toml("demo", "demo")),
+        ] {
+            let manifest: toml::Table = toml::from_str(&manifest)
+                .unwrap_or_else(|e| panic!("the {scaffold} manifest parses: {e}"));
+            let profile = manifest
+                .get("profile")
+                .and_then(|p| p.get("profiling"))
+                .unwrap_or_else(|| panic!("the {scaffold} scaffold has no profiling profile"));
+            assert_eq!(
+                profile.get("inherits").and_then(toml::Value::as_str),
+                Some("release"),
+                "the {scaffold} profiling profile inherits the release profile"
+            );
+            assert_eq!(
+                profile.get("debug").and_then(toml::Value::as_bool),
+                Some(true),
+                "the {scaffold} profiling profile keeps debug symbols"
+            );
+            let feature = manifest
+                .get("features")
+                .and_then(|f| f.get("heap-profiling"))
+                .and_then(toml::Value::as_array)
+                .unwrap_or_else(|| panic!("the {scaffold} scaffold has no heap-profiling feature"));
+            assert_eq!(
+                feature.iter().map(toml::Value::as_str).collect::<Vec<_>>(),
+                [Some("suprnova/heap-profiling")],
+                "the {scaffold} heap-profiling feature turns on the framework's"
+            );
+        }
+    }
 }

@@ -57,6 +57,8 @@ serde_json = "1"
 # Per-test tempdir for the `public` Storage disk so parallel avatar-upload
 # e2e tests do not collide on the same on-disk path.
 tempfile = "3"
+# MEM-007: reads the workspace manifest's `profiling` profile.
+toml = "1.1.2"
 serial_test = "=2.0.0"
 # Live dogfood tests decode island snapshots, checksum upload chunks, and
 # open the asynchronous WebSocket transport.

@@ -49,6 +49,77 @@ test.describe("FDB-007: the toast region holds a toast's timer", () => {
     await page.clock.runFor(1_100);
     await expect(page.locator("#saved")).toBeHidden();
   });
+
+  /** Replaces the region's toasts with a fresh one, keeping the removed node. */
+  async function morph(page: Page, id: string): Promise<void> {
+    await page.evaluate((fresh) => {
+      const list = document.getElementById("toasts");
+      if (list === null) throw new Error("no toast list");
+      const removed = (window as unknown as { __removed?: Element[] }).__removed ?? [];
+      removed.push(...Array.from(list.children));
+      (window as unknown as { __removed?: Element[] }).__removed = removed;
+      const toast = document.createElement("div");
+      toast.className = "sn-toast";
+      toast.id = fresh;
+      toast.setAttribute("data-sn-variant", "info");
+      toast.setAttribute("data-sn-duration", "1000");
+      toast.innerHTML = `<span class="sn-toast-text">${fresh}</span><button class="sn-toast-dismiss" id="${fresh}-dismiss" type="button" data-sn-toast-dismiss aria-label="Dismiss">&#215;</button>`;
+      list.replaceChildren(toast);
+    }, id);
+  }
+
+  /** How many removed toasts a timer still dismissed. */
+  async function dismissedRemoved(page: Page): Promise<number> {
+    return page.evaluate(
+      () =>
+        ((window as unknown as { __removed?: Element[] }).__removed ?? []).filter((node) =>
+          node.hasAttribute("data-sn-dismissed"),
+        ).length,
+    );
+  }
+
+  test("MEM-001 forgets a toast a morph removed", async ({ page }) => {
+    await morph(page, "fresh");
+    await page.clock.runFor(1_100);
+    expect(await dismissedRemoved(page)).toBe(0);
+    await expect(page.locator("#fresh")).toBeHidden();
+  });
+
+  test("MEM-001 forgets toasts removed while the region is held", async ({ page }) => {
+    const toast = await center(page, "#saved");
+    await page.mouse.move(toast.x, toast.y);
+    for (const id of ["one", "two", "three", "four", "five"]) {
+      await morph(page, id);
+    }
+    await page.mouse.move(1, 1);
+    await page.clock.runFor(1_100);
+    expect(await dismissedRemoved(page)).toBe(0);
+    await expect(page.locator("#five")).toBeHidden();
+  });
+
+  test("MEM-001 keeps the timer of a toast a morph moved", async ({ page }) => {
+    await page.clock.runFor(500);
+    await page.evaluate(() => {
+      const list = document.getElementById("toasts");
+      const saved = document.getElementById("saved");
+      if (list === null || saved === null) throw new Error("no toast");
+      const before = document.createElement("div");
+      before.className = "sn-toast";
+      before.setAttribute("data-sn-duration", "0");
+      list.insertBefore(before, null);
+      list.insertBefore(saved, null);
+    });
+    await page.clock.runFor(600);
+    await expect(page.locator("#saved")).toBeHidden();
+  });
+
+  test("MEM-006 resumes the timers when the focused toast is removed", async ({ page }) => {
+    await page.locator("#saved-dismiss").focus();
+    await page.mouse.move(1, 1);
+    await morph(page, "fresh");
+    await page.clock.runFor(1_100);
+    await expect(page.locator("#fresh")).toBeHidden();
+  });
 });
 
 test("NAV-007: a nested local tabs instance selects only its own tabs and panels", async ({

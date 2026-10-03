@@ -120,3 +120,62 @@ fn cosine(query: &[f32], item: &[f32], q_norm: f32) -> f32 {
     }
     dot / (q_norm * item_norm)
 }
+
+#[cfg(test)]
+mod mem_audit {
+    use super::*;
+    use crate::vector::VectorItem;
+
+    /// MEM-002: a top-3 search over 1,000 items holds three results' room.
+    #[tokio::test]
+    async fn mem_audit_a_search_holds_only_its_k_results() {
+        let driver = MemoryVectorDriver::new();
+        driver
+            .upsert(
+                "s",
+                (0..1000)
+                    .map(|i| {
+                        VectorItem::new(
+                            format!("id-{i}"),
+                            vec![1.0, i as f32],
+                            serde_json::json!({ "i": i }),
+                        )
+                    })
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        let hits = driver.similar("s", vec![1.0, 0.0], 3).await.unwrap();
+        assert_eq!(hits.len(), 3);
+        assert!(
+            hits.capacity() <= 3,
+            "the result kept room for {}",
+            hits.capacity()
+        );
+        assert_eq!(hits[0].id, "id-0");
+        assert!(hits.windows(2).all(|w| w[0].score >= w[1].score));
+    }
+
+    /// MEM-006: a NaN score does not panic the search.
+    #[tokio::test]
+    async fn mem_audit_a_nan_score_does_not_panic() {
+        let driver = MemoryVectorDriver::new();
+        let mut items: Vec<VectorItem> = (0..64)
+            .map(|i| {
+                VectorItem::new(
+                    format!("id-{i}"),
+                    vec![1.0, i as f32],
+                    serde_json::json!({}),
+                )
+            })
+            .collect();
+        items.push(VectorItem::new(
+            "nan",
+            vec![f32::NAN, 1.0],
+            serde_json::json!({}),
+        ));
+        driver.upsert("s", items).await.unwrap();
+        let hits = driver.similar("s", vec![1.0, 0.0], 10).await.unwrap();
+        assert_eq!(hits.len(), 10);
+    }
+}

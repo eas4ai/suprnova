@@ -372,4 +372,14 @@ mod tests {
         let m: MissingValue<&str> = Maybe::present("hi");
         assert!(m.is_present());
     }
+
+    /// MEM-006: dropping a missing attribute keeps the others in order.
+    #[test]
+    fn mem_audit_dropping_a_missing_attribute_keeps_the_order() {
+        let sentinel = serde_json::to_value(Maybe::<i32>::missing()).unwrap();
+        let mut value = serde_json::json!({"a": sentinel, "b": 1, "c": 2});
+        strip_missing_values(&mut value);
+        let keys: Vec<&String> = value.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["b", "c"]);
+    }
 }

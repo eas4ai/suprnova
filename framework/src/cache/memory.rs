@@ -1045,4 +1045,41 @@ mod tests {
         );
         assert!(cache.release_lock("job", &token).await.unwrap());
     }
+
+    /// MEM-001: entries that expire and are never read again are swept,
+    /// tags included, while a forever entry stays.
+    #[tokio::test]
+    async fn mem_audit_the_periodic_sweep_reclaims_entries_no_one_reads() {
+        let cache =
+            InMemoryCache::with_periodic_sweep(&CacheConfig::default(), Duration::from_millis(20));
+        for i in 0..1_000 {
+            cache
+                .put_raw(&format!("k{i}"), "v", Some(Duration::from_millis(5)))
+                .await
+                .unwrap();
+        }
+        cache
+            .tagged_put_raw(&["t"], "tagged", "v", Some(Duration::from_millis(5)))
+            .await
+            .unwrap();
+        cache.put_raw("forever", "v", None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(cache.raw_len(), 1, "only the forever entry is left");
+        assert!(cache.tag_index.read().expect("tag index").is_empty());
+        assert!(cache.has("forever").await.unwrap());
+    }
+
+    /// MEM-001: the sweep task holds the cache weakly and ends with it.
+    #[tokio::test]
+    async fn mem_audit_the_sweep_task_ends_with_the_cache() {
+        let cache =
+            InMemoryCache::with_periodic_sweep(&CacheConfig::default(), Duration::from_millis(10));
+        let weak = std::sync::Arc::downgrade(&cache);
+        drop(cache);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            weak.upgrade().is_none(),
+            "the sweep task kept the cache alive"
+        );
+    }
 }

@@ -320,6 +320,10 @@ impl Drop for TraceFixture {
     }
 }
 
+/// Characters `dehydrate` appends to the serial, so a test can size the
+/// snapshot a mount signs. Zero for every test that does not set it.
+pub(crate) static SNAPSHOT_PADDING: AtomicUsize = AtomicUsize::new(0);
+
 pub(crate) struct TraceFixture {
     pub(crate) trace: Arc<Mutex<Vec<&'static str>>>,
     pub(crate) failure: FailurePoint,
@@ -510,9 +514,10 @@ impl ComponentInstance for TraceFixture {
                 CanonicalValue::Bool(true),
             )])));
         }
+        let padding = "0".repeat(SNAPSHOT_PADDING.load(Ordering::SeqCst));
         Ok(CanonicalValue::Object(BTreeMap::from([(
             "serial".to_owned(),
-            CanonicalValue::String(self.serial.to_string()),
+            CanonicalValue::String(format!("{}{padding}", self.serial)),
         )])))
     }
 

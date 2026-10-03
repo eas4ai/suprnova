@@ -44,6 +44,12 @@ impl SingleFlight {
         Self::default()
     }
 
+    /// The keys the map holds right now.
+    #[cfg(test)]
+    async fn tracked_keys(&self) -> usize {
+        self.locks.lock().await.len()
+    }
+
     /// Run `task` while holding the exclusive in-process lock for `key`.
     pub async fn run<T, Fut>(&self, key: &str, task: Fut) -> T
     where
@@ -58,5 +64,58 @@ impl SingleFlight {
         };
         let _permit = lock.lock().await;
         task.await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// MEM-001: a key is forgotten once every caller of it has finished.
+    #[tokio::test]
+    async fn mem_audit_finished_keys_are_forgotten() {
+        let flight = SingleFlight::new();
+        for i in 0..1_000 {
+            flight.run(&format!("record-{i}"), async {}).await;
+        }
+        assert_eq!(flight.tracked_keys().await, 0);
+    }
+
+    /// MEM-001: a key stays while a second caller waits on it, and goes
+    /// when both are done.
+    #[tokio::test]
+    async fn mem_audit_a_waiting_caller_keeps_the_key() {
+        let flight = Arc::new(SingleFlight::new());
+        let (release, gate) = tokio::sync::oneshot::channel::<()>();
+        let first = tokio::spawn({
+            let flight = flight.clone();
+            async move {
+                flight
+                    .run("shared", async {
+                        let _ = gate.await;
+                    })
+                    .await;
+            }
+        });
+        tokio::task::yield_now().await;
+        let second = tokio::spawn({
+            let flight = flight.clone();
+            async move { flight.run("shared", async {}).await }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(flight.tracked_keys().await, 1);
+        release.send(()).expect("the first caller waits");
+        first.await.expect("first");
+        second.await.expect("second");
+        assert_eq!(flight.tracked_keys().await, 0);
+    }
+
+    /// MEM-001: a caller dropped mid-task forgets its key too.
+    #[tokio::test]
+    async fn mem_audit_a_cancelled_caller_forgets_its_key() {
+        let flight = SingleFlight::new();
+        let pending = flight.run("cancelled", std::future::pending::<()>());
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(10), pending).await;
+        assert_eq!(flight.tracked_keys().await, 0);
     }
 }

@@ -963,4 +963,20 @@ mod tests {
         // The reload absorbed the out-of-band insert.
         assert_eq!(snapshot_value(&eval, "beta", ""), Some(true));
     }
+
+    /// MEM-002: the identity map is sized by features, not rows.
+    #[test]
+    fn mem_audit_the_identity_map_is_sized_by_features() {
+        let flags: HashMap<(String, String), bool> = (0..10_000)
+            .map(|i| ((format!("feature-{}", i % 5), format!("user:{i}")), true))
+            .collect();
+        let snapshot = Snapshot::from_flags(flags);
+        assert_eq!(snapshot.identity.len(), 5);
+        assert!(
+            snapshot.identity.capacity() < 64,
+            "the identity map reserved {} slots for 5 features",
+            snapshot.identity.capacity()
+        );
+        assert!(snapshot.identity_scopes("feature-0").principal);
+    }
 }

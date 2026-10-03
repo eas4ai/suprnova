@@ -394,6 +394,8 @@ broadcasting-fanout = []
 vector-pinecone = []
 
 [dev-dependencies]
+# Heap profiling for the allocation tests (MEM-001 to MEM-005).
+dhat = "0.3"
 secrecy = "0.10"
 suprnova-live-test-support = { path = "../crates/suprnova-live/crates/suprnova-live-test-support" }
 # Smoke test for the `opendal::layers::PrometheusClientLayer` feature.

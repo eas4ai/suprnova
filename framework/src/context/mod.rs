@@ -1273,4 +1273,24 @@ mod tests {
         // The current thread never had the override installed.
         assert_eq!(Context::query_param("page"), None);
     }
+
+    /// MEM-003: pushing onto a scalar moves the scalar into the array.
+    #[tokio::test]
+    async fn mem_audit_push_onto_a_scalar_moves_the_scalar() {
+        CONTEXT
+            .scope(ContextStore::default(), async {
+                Context::add("k", "x".repeat(4096));
+                let before =
+                    CONTEXT.with(|s| s.data.get("k").unwrap().as_str().unwrap().as_ptr() as usize);
+                Context::push("k", "y");
+                let after = CONTEXT
+                    .with(|s| s.data.get("k").unwrap()[0].as_str().unwrap().as_ptr() as usize);
+                assert_eq!(before, after, "the promoted scalar was copied");
+                assert_eq!(
+                    Context::get::<Vec<String>>("k").unwrap(),
+                    vec!["x".repeat(4096), "y".to_string()]
+                );
+            })
+            .await;
+    }
 }

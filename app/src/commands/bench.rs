@@ -10,7 +10,7 @@ use clap::Parser;
 use sea_orm::{ConnectionTrait, Statement};
 use suprnova::{Command, FrameworkError, Queue, TypedCommand};
 
-use crate::jobs::bench::{BenchAbort, BenchRecord, BenchSleep};
+use crate::jobs::bench::{BenchAbort, BenchListener, BenchRecord, BenchSleep};
 
 /// Enqueue one long-running job (Phase 1.4).
 #[derive(Parser, Command, Debug)]
@@ -32,6 +32,34 @@ impl TypedCommand for EnqueueSleep {
         })
         .await?;
         println!("enqueued BenchSleep({}s)", self.seconds);
+        Ok(())
+    }
+}
+
+/// Enqueue a job whose queued listener outlives it.
+#[derive(Parser, Command, Debug)]
+#[console(
+    name = "bench:enqueue-listener",
+    description = "enqueue a job that starts a queued listener, which writes a file when it finishes"
+)]
+pub struct EnqueueListener {
+    /// The file the listener writes when it finishes.
+    #[arg(long)]
+    pub path: String,
+    /// How long the listener runs before it writes.
+    #[arg(long, default_value_t = 500)]
+    pub millis: u64,
+}
+
+#[async_trait]
+impl TypedCommand for EnqueueListener {
+    async fn run(self) -> Result<(), FrameworkError> {
+        Queue::push(BenchListener {
+            path: self.path.clone(),
+            millis: self.millis,
+        })
+        .await?;
+        println!("enqueued BenchListener({})", self.path);
         Ok(())
     }
 }

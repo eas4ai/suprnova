@@ -966,4 +966,24 @@ mod tests {
         let mut stream = Utf8Stream::default();
         assert_eq!(stream.push(&[b'a', 0xff, b'b']), "a\u{fffd}b");
     }
+
+    /// MEM-003: a process that is waited on to the end moves its settled
+    /// output into the result rather than copying it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mem_audit_waiting_moves_the_captured_output() {
+        let process = crate::process::Process::shell("printf hello")
+            .start()
+            .unwrap();
+        let captured = match &process.inner {
+            super::Inner::Real(real) => std::sync::Arc::clone(&real.captured),
+            _ => unreachable!("a started process is real"),
+        };
+        let result = process.wait().await.unwrap();
+        assert_eq!(result.output(), "hello");
+        assert!(
+            captured.state.lock().unwrap().out.is_empty(),
+            "the settled output was copied, not moved"
+        );
+    }
 }

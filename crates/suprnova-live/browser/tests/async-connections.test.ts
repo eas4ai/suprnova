@@ -491,6 +491,107 @@ describe("browser SSE authorization adapters", () => {
     await expect(failed).resolves.toBe("protocol_invalid");
   });
 
+  /** Streams `chunks` to a bearer SSE port and resolves with what it delivered. */
+  async function deliver(
+    chunks: readonly Uint8Array[],
+    expected: number,
+  ): Promise<{ readonly messages: readonly string[]; readonly failure: string | null }> {
+    const messages: string[] = [];
+    let settle: ((failure: string | null) => void) | undefined;
+    const settled = new Promise<string | null>((resolve) => {
+      settle = resolve;
+    });
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: vi.fn<BrowserAsyncTransportOptions["eventSource"]>(),
+      fetch: vi.fn<typeof globalThis.fetch>(() =>
+        Promise.resolve(
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                for (const chunk of chunks) controller.enqueue(chunk);
+              },
+            }),
+            { headers: { "Content-Type": "text/event-stream" } },
+          ),
+        ),
+      ),
+      membershipTimeoutMs: 5_000,
+      sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
+      timers: new FakeTimers().port,
+      webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+    });
+    const port = ports.eventSource(
+      connectRequest(Object.freeze({ credential: "bounded-bearer", kind: "bearer" as const }), {
+        failed: (reason) => settle?.(reason),
+        message: (data) => {
+          messages.push(data);
+          if (messages.length === expected) settle?.(null);
+        },
+      }),
+    );
+    const failure = await settled;
+    port.close("document_retired");
+    return { messages, failure };
+  }
+
+  /** Counts the bytes `Uint8Array` copies while `run` runs. */
+  async function copiedBytes(run: () => Promise<void>): Promise<number> {
+    let copied = 0;
+    const slice = vi.spyOn(Uint8Array.prototype, "slice").mockImplementation(function (
+      this: Uint8Array,
+      ...args: Parameters<Uint8Array["slice"]>
+    ) {
+      const result = Uint8Array.prototype.subarray.apply(this, args).map((byte) => byte);
+      copied += result.byteLength;
+      return result;
+    });
+    const set = vi.spyOn(Uint8Array.prototype, "set");
+    try {
+      await run();
+    } finally {
+      for (const call of set.mock.calls) copied += call[0].length;
+      slice.mockRestore();
+      set.mockRestore();
+    }
+    return copied;
+  }
+
+  it("MEM-004 reads many records from one chunk without copying the tail for each", async () => {
+    const records = Array.from({ length: 500 }, (_, n) => `data:{"n":${String(n)}}\n\n`).join("");
+    const input = new TextEncoder().encode(records);
+    let delivered: readonly string[] = [];
+    const copied = await copiedBytes(async () => {
+      const result = await deliver([input], 500);
+      expect(result.failure).toBeNull();
+      delivered = result.messages;
+    });
+    expect(delivered).toHaveLength(500);
+    expect(delivered[499]).toBe('{"n":499}');
+    expect(copied).toBeLessThanOrEqual(2 * input.byteLength);
+  });
+
+  it("MEM-004 assembles a record sent a byte at a time without copying it per byte", async () => {
+    const record = new TextEncoder().encode(`data:${"y".repeat(8_192)}\n\n`);
+    const chunks = Array.from(record, (byte) => Uint8Array.of(byte));
+    let delivered: readonly string[] = [];
+    const copied = await copiedBytes(async () => {
+      const result = await deliver(chunks, 1);
+      expect(result.failure).toBeNull();
+      delivered = result.messages;
+    });
+    expect(delivered).toEqual(["y".repeat(8_192)]);
+    expect(copied).toBeLessThanOrEqual(4 * record.byteLength);
+  });
+
+  it("MEM-004 reads a network chunk larger than one record when its records are small", async () => {
+    const records = Array.from({ length: 5_000 }, (_, n) => `data:{"n":${String(n)}}\n\n`).join("");
+    const input = new TextEncoder().encode(records);
+    expect(input.byteLength).toBeGreaterThan(66_048);
+    const result = await deliver([input], 5_000);
+    expect(result.failure).toBeNull();
+    expect(result.messages).toHaveLength(5_000);
+  });
+
   it("bounds active noncooperative SSE controls and drops queued ownership on close", () => {
     const timers = new FakeTimers();
     const signals: AbortSignal[] = [];

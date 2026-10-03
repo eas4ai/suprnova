@@ -1489,4 +1489,40 @@ mod tests {
         d.dispatch(Pinged { n: 9 }).await.unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 9);
     }
+
+    struct Quick(Arc<AtomicI64>);
+    #[async_trait]
+    impl Listener<QueuedPing> for Quick {
+        async fn handle(&self, _event: &QueuedPing) -> Result<(), FrameworkError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// MEM-001: finished queued-listener tasks are reaped as new ones
+    /// spawn, so the set never holds more than the running ones.
+    #[tokio::test]
+    async fn mem_audit_finished_queued_listener_tasks_do_not_accumulate() {
+        let d = EventDispatcher::with_concurrency(1);
+        let hits = Arc::new(AtomicI64::new(0));
+        d.listen::<QueuedPing, _>(Arc::new(Quick(hits.clone())))
+            .await;
+        for _ in 0..200 {
+            d.dispatch(QueuedPing).await.unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while hits.load(Ordering::SeqCst) < 200 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("every listener ran");
+        d.dispatch(QueuedPing).await.unwrap();
+        let held = d.queued_tasks.lock().await.len();
+        assert!(
+            held <= 2,
+            "finished listener tasks were kept: the set holds {held}"
+        );
+        assert_eq!(d.drain_queued(std::time::Duration::from_secs(5)).await, 0);
+    }
 }
