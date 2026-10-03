@@ -473,3 +473,45 @@ async fn validation_failure_renders_issues_without_running_the_action_body() {
     assert_eq!(output.validation().len(), 1);
     assert!(!control.values().contains(&"action"));
 }
+
+/// MEM-003: prepared arguments keep the values they were given, not a copy.
+#[test]
+fn mem_audit_prepared_arguments_keep_the_given_values() {
+    let amount = ActionArgumentSchema::new(vec![
+        ActionArgumentField::new(
+            ModelField::parse("amount").expect("argument name"),
+            ModelCodec::U64,
+            true,
+        )
+        .expect("argument field"),
+    ])
+    .expect("argument schema");
+    let table = ActionTable::new(vec![action(
+        "increment",
+        amount,
+        AuthorizationRequirement::Current,
+        increment,
+    )])
+    .expect("closed action table");
+    let text = u64::MAX.to_string();
+    let original = text.as_ptr() as usize;
+    let prepared = table
+        .prepare(
+            &ActionName::parse("increment").expect("action name"),
+            raw_amount(CanonicalValue::String(text)),
+            &InputLimits::default(),
+        )
+        .expect("prepared");
+    let CanonicalValue::Object(arguments) = prepared.canonical() else {
+        panic!("prepared arguments are an object");
+    };
+    let Some(CanonicalValue::String(kept)) = arguments.get("amount") else {
+        panic!("the amount is a string");
+    };
+    assert_eq!(
+        kept.as_ptr() as usize,
+        original,
+        "the arguments were copied"
+    );
+    assert_eq!(prepared.decode::<u64>("amount").expect("decode"), u64::MAX);
+}

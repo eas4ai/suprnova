@@ -2395,3 +2395,26 @@ mod parse_database_name_tests {
         assert_eq!(parse_database_name("not a url"), "");
     }
 }
+
+#[cfg(test)]
+mod mem_audit {
+    use super::*;
+    use crate::container::testing::TestContainer;
+
+    /// MEM-001: flushing the query log releases its buffer.
+    #[tokio::test]
+    async fn mem_audit_flushing_the_query_log_releases_its_buffer() {
+        let _container = TestContainer::fake();
+        DB::enable_query_log().unwrap();
+        {
+            let observation = crate::database::events::current_observation();
+            let mut log = observation.log.lock().unwrap();
+            log.entries.reserve(10_000);
+        }
+        DB::flush_query_log().unwrap();
+        assert!(DB::get_query_log().unwrap().is_empty());
+        let observation = crate::database::events::current_observation();
+        assert_eq!(observation.log.lock().unwrap().entries.capacity(), 0);
+        DB::disable_query_log().unwrap();
+    }
+}

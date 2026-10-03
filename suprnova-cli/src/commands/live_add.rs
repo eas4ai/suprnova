@@ -457,4 +457,22 @@ mod tests {
             assert!(!valid_file_name(hostile), "{hostile}");
         }
     }
+
+    /// MEM-005: the install plan borrows the component's files.
+    #[test]
+    fn mem_audit_the_plan_borrows_the_component_files() {
+        let source = super::embedded("combobox").expect("a shipped component");
+        let plan: Vec<(&str, &str)> = super::plan(&source).collect();
+        assert_eq!(plan[0].0, "manifest.json");
+        assert_eq!(plan[0].1.as_ptr(), source.manifest_source.as_ptr());
+        assert_eq!(plan.len(), source.files.len() + 1);
+        for ((name, content), (file, text)) in plan[1..].iter().zip(&source.files) {
+            assert_eq!(*name, file.as_str());
+            assert_eq!(
+                content.as_ptr(),
+                text.as_ptr(),
+                "{name} was copied for the plan"
+            );
+        }
+    }
 }

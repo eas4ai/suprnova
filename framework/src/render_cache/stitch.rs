@@ -1500,4 +1500,13 @@ mod tests {
         let holes = collect_holes(&body, b"XY", &[(4, 6)]).expect("nothing exceeded a bound");
         assert_eq!(holes, vec![(0, 2), (6, 8)]);
     }
+
+    /// MEM-002: `find_all` reserves for what it finds, never above its limit.
+    #[test]
+    fn mem_audit_find_all_reserves_what_it_finds() {
+        assert!(find_all(b"aXYb", b"XY", MAX_NONCE_HOLES + 1).capacity() <= 4);
+        let all = find_all(&body_with(MAX_NONCE_HOLES + 1), b"XY", MAX_NONCE_HOLES + 1);
+        assert_eq!(all.len(), MAX_NONCE_HOLES + 1);
+        assert!(all.capacity() <= MAX_NONCE_HOLES + 1);
+    }
 }

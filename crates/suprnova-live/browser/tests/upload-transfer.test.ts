@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { FetchUploadTransport } from "../src/uploads/feature.js";
 import { UploadTransfer, uploadSha256HexForTest } from "../src/uploads/transfer.js";
@@ -126,6 +126,76 @@ describe("bounded upload transfer", () => {
         signal: new AbortController().signal,
       }),
     ).rejects.toThrow("upload_transport_failed");
+  });
+
+  it("MEM-004 decodes a small control response without a 16 KiB buffer", async () => {
+    const body = new TextEncoder().encode('{"state":"transferring","revision":"2"}');
+    const decode = vi.spyOn(TextDecoder.prototype, "decode");
+    const transport = new FetchUploadTransport(() =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(body);
+              controller.close();
+            },
+          }),
+          { headers: { "Content-Type": "application/json" }, status: 200 },
+        ),
+      ),
+    );
+    try {
+      await transport
+        .send({
+          field: "avatar",
+          file: { lastModified: 0, name: "avatar.png", size: 0, type: "image/png" },
+          idempotencyKey: "status-1",
+          island: { component: "fixture.upload", documentKey: "doc", slot: "slot" },
+          operation: "create",
+          signal: new AbortController().signal,
+        })
+        .catch(() => undefined);
+      const decoded = decode.mock.calls[0]?.[0] as ArrayBufferView | undefined;
+      expect(decoded).toBeDefined();
+      expect(decoded?.buffer.byteLength).toBeLessThan(16 * 1024);
+    } finally {
+      decode.mockRestore();
+    }
+  });
+
+  it("MEM-004 joins a response that arrives in two chunks across a UTF-8 character", async () => {
+    const body = new TextEncoder().encode('{"state":"transferring","note":"é"}');
+    const split = body.indexOf(0xc3) + 1;
+    const transport = new FetchUploadTransport(() =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(body.slice(0, split));
+              controller.enqueue(body.slice(split));
+              controller.close();
+            },
+          }),
+          { headers: { "Content-Type": "application/json" }, status: 200 },
+        ),
+      ),
+    );
+    const decode = vi.spyOn(TextDecoder.prototype, "decode");
+    try {
+      await transport
+        .send({
+          field: "avatar",
+          file: { lastModified: 0, name: "avatar.png", size: 0, type: "image/png" },
+          idempotencyKey: "status-2",
+          island: { component: "fixture.upload", documentKey: "doc", slot: "slot" },
+          operation: "create",
+          signal: new AbortController().signal,
+        })
+        .catch(() => undefined);
+      expect(decode.mock.results[0]?.value).toBe('{"state":"transferring","note":"é"}');
+    } finally {
+      decode.mockRestore();
+    }
   });
 
   it("retries an uncertain chunk with identical bytes and idempotency identity", async () => {

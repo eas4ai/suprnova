@@ -273,4 +273,11 @@ mod tests {
             "https://api.eu.mailgun.net/v3/example.com/messages"
         );
     }
+
+    /// MEM-002: the form reserves the fields the message has.
+    #[test]
+    fn mem_audit_the_form_reserves_only_its_fields() {
+        let fields = build_form_fields(&base_msg()).unwrap();
+        assert_eq!(fields.capacity(), fields.len());
+    }
 }

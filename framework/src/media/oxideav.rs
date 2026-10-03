@@ -1431,4 +1431,50 @@ mod tests {
         .expect_err("oversized target");
         assert!(err.to_string().contains("limit"), "got: {err}");
     }
+
+    /// MEM-003: a filter step hands the canvas's plane to the filter and
+    /// adopts the filter's output, copying neither.
+    #[test]
+    fn mem_audit_a_filter_step_moves_planes() {
+        use std::sync::Mutex;
+        struct Probe {
+            input: Mutex<usize>,
+            output: Mutex<usize>,
+        }
+        impl ImageFilter for Probe {
+            fn apply(
+                &self,
+                input: &VideoFrame,
+                _params: VideoStreamParams,
+            ) -> Result<VideoFrame, oxideav_core::Error> {
+                *self.input.lock().unwrap() = input.planes[0].data.as_ptr() as usize;
+                let data = input.planes[0].data.clone();
+                *self.output.lock().unwrap() = data.as_ptr() as usize;
+                Ok(VideoFrame {
+                    pts: Some(0),
+                    planes: vec![VideoPlane {
+                        stride: input.planes[0].stride,
+                        data,
+                    }],
+                })
+            }
+        }
+        let source = canvas(64, 64, [1, 2, 3, 255]);
+        let source_ptr = source.pixels.as_ptr() as usize;
+        let probe = Probe {
+            input: Mutex::new(0),
+            output: Mutex::new(0),
+        };
+        let result = filter(source, &probe).unwrap();
+        assert_eq!(
+            *probe.input.lock().unwrap(),
+            source_ptr,
+            "the filter saw a copy"
+        );
+        assert_eq!(
+            result.pixels.as_ptr() as usize,
+            *probe.output.lock().unwrap(),
+            "the canvas copied the filter's output"
+        );
+    }
 }

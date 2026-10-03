@@ -2001,3 +2001,135 @@ async fn retirement_during_streaming_cancels_without_committing_partial_work() {
         0
     );
 }
+
+/// A file store that records the address of every buffer `read_at`
+/// returns, so a test can tell the store's bytes from a copy of them.
+struct AddressRecordingStore {
+    root: PathBuf,
+    reads: Mutex<Vec<usize>>,
+}
+
+impl AddressRecordingStore {
+    fn path_for(&self, object: &QuarantineObject) -> PathBuf {
+        self.root.join(object.storage_key())
+    }
+}
+
+impl QuarantineStore for AddressRecordingStore {
+    fn create_exclusive(&self, object: &QuarantineObject) -> QuarantineOperation<()> {
+        QuarantineOperation::ready(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(self.path_for(object))
+                .map(|_| ())
+                .map_err(|_| UploadError::new(UploadErrorKind::StorageConflict)),
+        )
+    }
+
+    fn write_at(
+        &self,
+        object: &QuarantineObject,
+        offset: u64,
+        bytes: &[u8],
+    ) -> QuarantineOperation<()> {
+        QuarantineOperation::ready((|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(self.path_for(object))
+                .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
+            file.seek(std::io::SeekFrom::Start(offset))
+                .and_then(|_| file.write_all(bytes))
+                .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))
+        })())
+    }
+
+    fn sync(&self, _object: &QuarantineObject) -> QuarantineOperation<()> {
+        QuarantineOperation::ready(Ok(()))
+    }
+
+    fn read_at(
+        &self,
+        object: &QuarantineObject,
+        offset: u64,
+        maximum_bytes: usize,
+    ) -> QuarantineOperation<QuarantineBytes> {
+        QuarantineOperation::ready((|| {
+            let mut file = std::fs::File::open(self.path_for(object))
+                .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
+            file.seek(std::io::SeekFrom::Start(offset))
+                .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
+            let mut bytes = vec![0; maximum_bytes];
+            let read = file
+                .read(&mut bytes)
+                .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
+            bytes.truncate(read);
+            let bytes = QuarantineBytes::from(bytes);
+            self.reads
+                .lock()
+                .expect("reads")
+                .push(bytes.as_ptr() as usize);
+            Ok(bytes)
+        })())
+    }
+
+    fn remove(&self, object: &QuarantineObject) -> QuarantineOperation<RemoveDisposition> {
+        QuarantineOperation::ready(match std::fs::remove_file(self.path_for(object)) {
+            Ok(()) => Ok(RemoveDisposition::Removed),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(RemoveDisposition::AlreadyAbsent)
+            }
+            Err(_) => Err(UploadError::new(UploadErrorKind::ProviderUnavailable)),
+        })
+    }
+}
+
+/// MEM-003: a read the store answers in full returns the store's bytes,
+/// not a copy of them.
+#[tokio::test]
+async fn mem_audit_a_full_read_returns_the_store_bytes() {
+    let root = TempRoot::new();
+    let store = Arc::new(AddressRecordingStore {
+        root: root.0.clone(),
+        reads: Mutex::new(Vec::new()),
+    });
+    let provider =
+        QuarantinedFileProvider::new(store.clone(), limits()).expect("recording provider");
+    let upload = handle(HANDLE);
+    let expected = checksum(b"safe");
+    provider
+        .prepare(PrepareTransfer::new(
+            &upload,
+            4,
+            "address.bin",
+            UnixMillis::new(1_000),
+        ))
+        .await
+        .expect("prepare");
+    let mut body = TestBody::bytes(&[b"safe"]);
+    provider
+        .write_chunk(WriteChunk::new(&upload, 0, 0, 4, &expected), &mut body)
+        .await
+        .expect("write");
+    provider
+        .verify(VerifyTransfer::new(&upload, &expected))
+        .await
+        .expect("verify");
+    let read = provider
+        .read(ReadUpload::new(&upload, 0, 4))
+        .await
+        .expect("read");
+    assert_eq!(read.as_ref(), b"safe");
+    let last = *store
+        .reads
+        .lock()
+        .expect("reads")
+        .last()
+        .expect("a store read");
+    assert_eq!(
+        read.as_ptr() as usize,
+        last,
+        "the read returned a copy of the store's bytes"
+    );
+    provider.cancel(&upload).await.expect("cleanup");
+}

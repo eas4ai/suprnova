@@ -382,4 +382,72 @@ mod tests {
             "empty channels must not touch the hub"
         );
     }
+
+    /// A hub that records the address of each published payload string.
+    struct PayloadAddresses(Mutex<Vec<usize>>);
+
+    #[async_trait]
+    impl BroadcastHub for PayloadAddresses {
+        fn subscribe(&self, _channel: &str) -> broadcast::Receiver<BroadcastEnvelope> {
+            broadcast::channel(1).0.subscribe()
+        }
+
+        async fn publish(&self, envelope: BroadcastEnvelope) -> Result<(), FrameworkError> {
+            let address = envelope.data.as_str().map_or(0, |s| s.as_ptr() as usize);
+            self.0.lock().unwrap().push(address);
+            Ok(())
+        }
+    }
+
+    /// An event whose payload is a large string; it records where it made it.
+    #[derive(Serialize, Clone, Debug)]
+    struct LargePayload {
+        channels: Vec<String>,
+        #[serde(skip)]
+        made: Arc<Mutex<usize>>,
+    }
+
+    impl Event for LargePayload {
+        fn event_name() -> &'static str {
+            "LargePayload"
+        }
+    }
+
+    impl Broadcastable for LargePayload {
+        fn broadcast_on(&self) -> Vec<String> {
+            self.channels.clone()
+        }
+
+        fn broadcast_with(&self) -> Option<serde_json::Value> {
+            let payload = "x".repeat(4096);
+            *self.made.lock().unwrap() = payload.as_ptr() as usize;
+            Some(serde_json::Value::String(payload))
+        }
+    }
+
+    /// MEM-003: the last channel of a broadcast gets the payload itself.
+    #[tokio::test]
+    async fn mem_audit_the_last_channel_gets_the_payload_itself() {
+        for channels in [vec!["a"], vec!["a", "b"]] {
+            let hub = Arc::new(PayloadAddresses(Mutex::new(Vec::new())));
+            let listener: BroadcastListener<LargePayload> =
+                BroadcastListener::new(hub.clone() as Arc<dyn BroadcastHub>);
+            let event = LargePayload {
+                channels: channels.iter().map(|c| c.to_string()).collect(),
+                made: Arc::new(Mutex::new(0)),
+            };
+            listener.handle(&event).await.unwrap();
+            let made = *event.made.lock().unwrap();
+            let published = hub.0.lock().unwrap().clone();
+            assert_eq!(
+                published.len(),
+                channels.len(),
+                "every channel was published"
+            );
+            assert_eq!(published.last(), Some(&made), "the last channel got a copy");
+            if channels.len() == 2 {
+                assert_ne!(published[0], made, "an earlier channel shares the payload");
+            }
+        }
+    }
 }

@@ -509,3 +509,35 @@ mod login_throttle_policy_tests {
         assert_eq!(mw.on_backend_error, BackendErrorPolicy::FailOpen);
     }
 }
+
+#[cfg(test)]
+mod mem_audit {
+    use super::*;
+    use serial_test::serial;
+
+    /// MEM-006: with more live lockouts than the threshold, the map sweeps
+    /// only when it has doubled since its last sweep.
+    #[test]
+    #[serial]
+    fn mem_audit_live_lockouts_do_not_sweep_on_every_lockout() {
+        {
+            let mut guard = locked_event_dedup().lock().unwrap();
+            guard.entries.clear();
+            guard.next_sweep = DEDUP_SWEEP_THRESHOLD;
+        }
+        let until = crate::clock::now() + chrono::Duration::minutes(15);
+        for i in 0..3_000 {
+            assert!(should_fire_locked_once(
+                &format!("u{i}@example.test"),
+                Some(until)
+            ));
+        }
+        let guard = locked_event_dedup().lock().unwrap();
+        assert_eq!(guard.entries.len(), 3_000, "a live lockout was dropped");
+        assert!(
+            guard.next_sweep >= 2 * 2_048,
+            "the next sweep is due at {}, so every lockout sweeps",
+            guard.next_sweep
+        );
+    }
+}

@@ -642,4 +642,19 @@ mod tests {
         let text = result.throw().unwrap_err().to_string();
         assert!(text.contains("exit code 2") && text.contains("o") && text.contains("e"));
     }
+
+    /// MEM-003: valid UTF-8 output is stored once.
+    #[test]
+    fn mem_audit_valid_utf8_output_is_stored_once() {
+        let result = ProcessResult::new("x".into(), Some(0), b"hello".to_vec(), Vec::new());
+        assert_eq!(result.output(), "hello");
+        assert_eq!(
+            result.output().as_ptr(),
+            result.output_bytes().as_ptr(),
+            "valid UTF-8 output is stored twice"
+        );
+        let lossy = ProcessResult::new("x".into(), Some(0), vec![b'a', 0xff], Vec::new());
+        assert_eq!(lossy.output(), "a\u{fffd}");
+        assert_eq!(lossy.output_bytes(), &[b'a', 0xff]);
+    }
 }

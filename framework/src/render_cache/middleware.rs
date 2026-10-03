@@ -4267,4 +4267,43 @@ mod tests {
             RepresentationClass::PublicShared,
         ));
     }
+
+    /// MEM-002: a composite shell holds capacity for its literal bytes only.
+    #[tokio::test]
+    async fn mem_audit_a_composite_shell_holds_only_its_literal_bytes() {
+        const NONCE: &str = "mem-audit-nonce-012345";
+        let keys = test_keys();
+        let runtime = lookup_only_runtime(test_keys());
+        let mut body = b"<!doctype html><html><head>".to_vec();
+        for _ in 0..10 {
+            body.extend_from_slice(b"<script nonce=\"");
+            body.extend_from_slice(NONCE.as_bytes());
+            body.extend_from_slice(b"\"></script>");
+        }
+        body.extend_from_slice(b"</head><body>shell</body></html>");
+        let key = RenderKey::for_test(&keys, "/composite");
+        let header = entry_for(&key).header().clone();
+        let facts = crate::render_cache::live::LiveDocumentFacts {
+            stitch: crate::render_cache::live::StitchCapture {
+                slots: Vec::new(),
+                shell_islands: Vec::new(),
+                nonce: Some(NONCE.to_owned()),
+                document_digest: Some(sha2::Sha256::digest(&body).into()),
+                invalid: false,
+            },
+            ..Default::default()
+        };
+        let entry = super::super::stitch::build_composite_entry(&runtime, header, &body, &facts)
+            .await
+            .expect("a composite entry");
+        let DecodedEntry::Composite(composite) = entry else {
+            panic!("a composite entry");
+        };
+        let shell = composite.shell().clone();
+        let expected = body.len() - 10 * NONCE.len();
+        assert_eq!(shell.len(), expected);
+        drop(composite);
+        let capacity = shell.try_into_mut().expect("the only owner").capacity();
+        assert_eq!(capacity, expected, "the shell reserved the whole body");
+    }
 }

@@ -153,3 +153,65 @@ impl Job for BenchRecord {
         Ok(())
     }
 }
+
+/// Fires an in-process queued event whose listener outlives the job.
+///
+/// The claim under test is that a worker waits for the queued listeners
+/// its jobs started before the process exits, as the server does. The
+/// listener writes `<path>.started` first, sleeps, and writes `path` last,
+/// so `path` exists only when the worker let it finish.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BenchListener {
+    /// The file the listener writes when it finishes.
+    pub path: String,
+    /// How long the listener runs before it writes.
+    pub millis: u64,
+}
+
+#[async_trait]
+impl Job for BenchListener {
+    fn job_name() -> &'static str {
+        "BenchListener"
+    }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        suprnova::EventFacade::dispatch(BenchListenerRan {
+            path: self.path,
+            millis: self.millis,
+        })
+        .await
+    }
+}
+
+/// The queued event [`BenchListener`] fires.
+#[derive(Debug, Clone)]
+pub struct BenchListenerRan {
+    /// The file the listener writes when it finishes.
+    pub path: String,
+    /// How long the listener runs before it writes.
+    pub millis: u64,
+}
+
+impl suprnova::Event for BenchListenerRan {
+    fn event_name() -> &'static str {
+        "BenchListenerRan"
+    }
+
+    fn queued() -> bool {
+        true
+    }
+}
+
+/// Marks that it started, sleeps, then writes the event's file.
+pub struct BenchListenerWriter;
+
+#[async_trait]
+impl suprnova::events::Listener<BenchListenerRan> for BenchListenerWriter {
+    async fn handle(&self, event: &BenchListenerRan) -> Result<(), FrameworkError> {
+        std::fs::write(format!("{}.started", event.path), b"started")
+            .map_err(|e| FrameworkError::from_external_with("bench listener write failed", e))?;
+        tokio::time::sleep(std::time::Duration::from_millis(event.millis)).await;
+        std::fs::write(&event.path, b"finished")
+            .map_err(|e| FrameworkError::from_external_with("bench listener write failed", e))
+    }
+}

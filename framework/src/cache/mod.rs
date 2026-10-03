@@ -636,3 +636,40 @@ impl LockGuard {
         self.store.refresh_lock(&self.key, &self.token, ttl).await
     }
 }
+
+#[cfg(test)]
+mod mem_audit {
+    use super::*;
+    use crate::container::testing::TestContainer;
+    use serial_test::serial;
+
+    /// MEM-001: the memory cache the framework binds has its sweep task,
+    /// which holds the one weak reference.
+    #[tokio::test]
+    #[serial]
+    async fn mem_audit_the_bound_memory_cache_is_swept() {
+        let _container = TestContainer::fake();
+        Cache::bootstrap().await.unwrap();
+        let store = App::resolve_make::<dyn CacheStore>().unwrap();
+        assert_eq!(
+            Arc::weak_count(&store),
+            1,
+            "the bound memory cache has no sweep task"
+        );
+    }
+
+    /// MEM-006: a cache store the application bound is kept.
+    #[tokio::test]
+    #[serial]
+    async fn mem_audit_bootstrap_keeps_the_store_the_application_bound() {
+        let _container = TestContainer::fake();
+        let mine: Arc<dyn CacheStore> = Arc::new(InMemoryCache::new());
+        App::bind::<dyn CacheStore>(mine.clone());
+        Cache::bootstrap().await.unwrap();
+        let bound = App::resolve_make::<dyn CacheStore>().unwrap();
+        assert!(
+            Arc::ptr_eq(&bound, &mine),
+            "Cache::bootstrap replaced the bound store"
+        );
+    }
+}

@@ -1384,4 +1384,14 @@ mod tests {
     fn _unused_imports_keep() {
         let _ = Empty::<Bytes>::new();
     }
+
+    /// MEM-003: normalizing a path for an exemption rule borrows it.
+    #[test]
+    fn mem_audit_normalizing_a_path_borrows_it() {
+        let input = String::from("/api/webhook");
+        let out = normalize_pattern(&input);
+        assert_eq!(out.as_ptr(), input[1..].as_ptr(), "the path was copied");
+        let root = String::from("/");
+        assert_eq!(normalize_pattern(&root).as_ptr(), root.as_ptr());
+    }
 }
