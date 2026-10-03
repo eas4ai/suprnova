@@ -138,6 +138,13 @@ fn main_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
         },
     };
 
+    let schema_defaults = match read_schema_defaults() {
+        Ok(tokens) => tokens,
+        Err(message) => {
+            return syn::Error::new(proc_macro2::Span::call_site(), message).to_compile_error();
+        }
+    };
+
     let worker_threads = match &args.worker_threads {
         Some(n) => quote! { .worker_threads(#n) },
         None => quote! {},
@@ -156,6 +163,7 @@ fn main_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
         #vis fn #name() #output {
             ::suprnova::boot::load_env_or_exit();
             ::suprnova::boot::set_default_build_id(::core::env!("CARGO_PKG_VERSION"));
+            #schema_defaults
 
             let __suprnova_runtime = #builder
                 #worker_threads
@@ -171,6 +179,33 @@ fn main_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
     let _ = args.flavor_span;
 
     expanded
+}
+
+/// The boot calls `[package.metadata.suprnova.schema]` asks for, with the
+/// manifest tracked so editing the table rebuilds `main`.
+fn read_schema_defaults() -> Result<TokenStream2, String> {
+    let (manifest, table) = crate::manifest::read("schema")?;
+    let track = crate::manifest::track(manifest.as_deref());
+    let unsigned_ids = match &table {
+        Some(table) => unsigned_ids(table).map_err(|problem| {
+            format!("[package.metadata.suprnova.schema] in Cargo.toml: {problem}")
+        })?,
+        None => false,
+    };
+    let set_unsigned_ids =
+        unsigned_ids.then(|| quote! { ::suprnova::boot::set_unsigned_ids(true); });
+    Ok(quote! { #track #set_unsigned_ids })
+}
+
+/// Reads `unsigned_ids` from the schema table: `false` when absent.
+fn unsigned_ids(table: &toml::Table) -> Result<bool, String> {
+    crate::manifest::reject_unknown_keys(table, &["unsigned_ids"])?;
+    match table.get("unsigned_ids") {
+        None => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "`unsigned_ids` must be true or false".to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -283,6 +318,22 @@ mod tests {
             expanded.contains("env !") || expanded.contains("env!"),
             "the build id must come from env! so it expands in the application crate, \
              not a literal; got:\n{expanded}"
+        );
+    }
+
+    #[test]
+    fn unsigned_ids_reads_a_boolean() {
+        let read = |body: &str| unsigned_ids(&body.parse::<toml::Table>().unwrap());
+        assert_eq!(read(""), Ok(false));
+        assert_eq!(read("unsigned_ids = true"), Ok(true));
+        assert_eq!(read("unsigned_ids = false"), Ok(false));
+        assert_eq!(
+            read("unsigned_ids = \"yes\""),
+            Err("`unsigned_ids` must be true or false".to_string())
+        );
+        assert_eq!(
+            read("unsigned_id = true"),
+            Err("unknown key `unsigned_id`; the keys are `unsigned_ids`".to_string())
         );
     }
 }

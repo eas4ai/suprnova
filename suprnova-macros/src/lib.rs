@@ -24,6 +24,7 @@ mod injectable;
 mod input_names;
 mod live;
 mod main_macro;
+mod manifest;
 mod model;
 mod model_attribute;
 mod multipart;
@@ -926,7 +927,7 @@ pub fn derive_notification_mailable(input: TokenStream) -> TokenStream {
 ///   the struct's snake-case name (`User` → `users`).
 /// - `primary_key = "..."` - primary-key column name. Defaults to `"id"`.
 /// - `key_type = "..."` - primary-key Rust type (parsed as a `Type`).
-///   Defaults to `"i64"`.
+///   Defaults to the type of the primary-key field, or `i64` without one.
 /// - `auto_increment = true|false` - defaults to `true`.
 /// - `connection = "..."` - multi-connection routing identifier.
 ///   Defaults to `"default"`.

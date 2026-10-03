@@ -1196,7 +1196,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             type Column = #module_name::Column;
             // The declared primary-key Rust type. `key_type` is the
             // parsed `#[model(key_type = "...")]` attribute, defaulted
-            // to `i64` at parse time - the same type the inherent
+            // to the key field's type at parse time - the same type the inherent
             // `find` / `find_many` signatures already use, so a model
             // whose key compiles there compiles here.
             type Key = #key_type;

@@ -65,6 +65,9 @@ pub struct Blueprint {
     foreigns: Vec<ForeignSpec>,
     commands: Vec<Command>,
     faults: Vec<String>,
+    /// `id()` and `foreign_id()` are unsigned, from
+    /// [`crate::boot::set_unsigned_ids`].
+    unsigned_ids: bool,
 }
 
 impl Blueprint {
@@ -75,6 +78,7 @@ impl Blueprint {
             foreigns: Vec::new(),
             commands: Vec::new(),
             faults: Vec::new(),
+            unsigned_ids: crate::boot::unsigned_ids(),
         }
     }
 
@@ -232,7 +236,16 @@ impl Blueprint {
     }
 
     /// Adds `id`: `BIGINT`, auto-increment, primary key.
+    ///
+    /// With `unsigned_ids = true` under `[package.metadata.suprnova.schema]`
+    /// in the application's `Cargo.toml` it is [`unsigned_id`], as Laravel's
+    /// `id()` is.
+    ///
+    /// [`unsigned_id`]: Blueprint::unsigned_id
     pub fn id(&mut self) -> ColumnBuilder<'_> {
+        if self.unsigned_ids {
+            return self.unsigned_id();
+        }
         self.column("id", ColumnKind::Id)
     }
 
@@ -245,9 +258,15 @@ impl Blueprint {
     }
 
     /// Adds a `BIGINT` column meant to hold a foreign key. It has the type of
-    /// [`id`](Blueprint::id). Call `.constrained(table)` on the result to
+    /// [`id`](Blueprint::id), so it is [`unsigned_foreign_id`] with
+    /// `unsigned_ids = true`. Call `.constrained(table)` on the result to
     /// create the key.
+    ///
+    /// [`unsigned_foreign_id`]: Blueprint::unsigned_foreign_id
     pub fn foreign_id(&mut self, name: &str) -> ForeignIdBuilder<'_> {
+        if self.unsigned_ids {
+            return self.unsigned_foreign_id(name);
+        }
         let column = self.push_column(name, ColumnKind::ForeignId);
         self.push_foreign_id(name, column)
     }
@@ -616,5 +635,46 @@ impl Blueprint {
         let name = ForeignSpec::new(column).name(&self.table);
         self.commands.push(Command::DropForeign(name));
         self.commands.push(Command::DropColumn(column.to_owned()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Blueprint;
+    use crate::schema::plan::{Step, plan_create};
+    use sea_orm::DbBackend;
+    use sea_orm::sea_query::{MysqlQueryBuilder, PostgresQueryBuilder};
+
+    fn create_sql(unsigned_ids: bool, backend: DbBackend) -> String {
+        let mut t = Blueprint::new("orders");
+        t.unsigned_ids = unsigned_ids;
+        t.id();
+        t.foreign_id("user_id");
+        let steps = plan_create(&t, backend).expect("plan the table");
+        let Some(Step::CreateTable(statement)) = steps.first() else {
+            panic!("the plan starts with CREATE TABLE");
+        };
+        match backend {
+            DbBackend::MySql => statement.to_string(MysqlQueryBuilder),
+            _ => statement.to_string(PostgresQueryBuilder),
+        }
+    }
+
+    #[test]
+    fn unsigned_ids_make_id_and_foreign_id_unsigned_on_mysql() {
+        let sql = create_sql(true, DbBackend::MySql);
+        assert!(sql.contains("`id` bigint UNSIGNED"), "{sql}");
+        assert!(sql.contains("`user_id` bigint UNSIGNED"), "{sql}");
+
+        let signed = create_sql(false, DbBackend::MySql);
+        assert!(!signed.contains("UNSIGNED"), "{signed}");
+    }
+
+    #[test]
+    fn unsigned_ids_keep_postgres_signed() {
+        assert_eq!(
+            create_sql(true, DbBackend::Postgres),
+            create_sql(false, DbBackend::Postgres)
+        );
     }
 }

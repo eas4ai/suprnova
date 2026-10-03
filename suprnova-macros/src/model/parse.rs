@@ -255,17 +255,69 @@ pub struct ModelInput {
     pub unique_id: Option<String>,
 }
 
+/// App-wide `#[model]` defaults, read from the application crate's
+/// `[package.metadata.suprnova.model]` table. Without the table every
+/// field keeps its built-in default.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ModelDefaults {
+    /// `datetime_cast = "native"`: a `DateTime<Utc>` field with no declared
+    /// cast uses `AsNativeDateTime` instead of the RFC 3339 text cast.
+    pub native_datetimes: bool,
+}
+
+impl ModelDefaults {
+    pub fn from_table(table: &toml::Table) -> std::result::Result<Self, String> {
+        crate::manifest::reject_unknown_keys(table, &["datetime_cast"])?;
+        let native_datetimes = match table.get("datetime_cast") {
+            None => false,
+            Some(value) => match value.as_str() {
+                Some("text") => false,
+                Some("native") => true,
+                Some(other) => {
+                    return Err(format!(
+                        "`datetime_cast` must be \"text\" or \"native\", got \"{other}\""
+                    ));
+                }
+                None => return Err("`datetime_cast` must be a string".to_string()),
+            },
+        };
+        Ok(Self { native_datetimes })
+    }
+}
+
 impl ModelInput {
+    /// [`parse_with`](Self::parse_with) under the built-in defaults.
+    #[cfg(test)]
     pub fn parse(attr: TokenStream, item: TokenStream) -> Result<Self> {
+        Self::parse_with(attr, item, &ModelDefaults::default())
+    }
+
+    pub fn parse_with(
+        attr: TokenStream,
+        item: TokenStream,
+        defaults: &ModelDefaults,
+    ) -> Result<Self> {
         let item: ItemStruct = parse2(item)?;
         let attrs = parse2::<ModelAttrs>(attr)?;
         let struct_name = item.ident.to_string();
 
         let table = attrs.table.unwrap_or_else(|| pluralize_snake(&struct_name));
         let primary_key = attrs.primary_key.unwrap_or_else(|| "id".to_string());
-        let key_type = attrs
-            .key_type
-            .unwrap_or_else(|| syn::parse_str("i64").expect("i64 parses"));
+        // Without `key_type` the key has the type of the primary-key field,
+        // so `pub id: u64` needs nothing else; `i64` when there is no field.
+        let key_type = attrs.key_type.unwrap_or_else(|| {
+            let field = match &item.fields {
+                syn::Fields::Named(named) => named
+                    .named
+                    .iter()
+                    .find(|f| f.ident.as_ref().is_some_and(|i| *i == primary_key)),
+                _ => None,
+            };
+            field.map_or_else(
+                || syn::parse_str("i64").expect("i64 parses"),
+                |f| f.ty.clone(),
+            )
+        });
         let auto_increment = attrs.auto_increment.unwrap_or(true);
         // T12 - `connection = "..."` is optional. `None` means "fall
         // through to the default routing chain". We do NOT default to
@@ -502,21 +554,21 @@ impl ModelInput {
                     // their intent wins.
                     continue;
                 }
-                match classify_datetime(&field.ty) {
-                    DateTimeShape::DateTime => {
-                        let ty: Type = syn::parse_str("::suprnova::AsDateTime").expect(
-                            "::suprnova::AsDateTime parses - Suprnova lib re-exports this type",
-                        );
-                        casts.push((ident.clone(), ty));
-                    }
-                    DateTimeShape::OptionalDateTime => {
-                        let ty: Type = syn::parse_str("::suprnova::AsOptionalDateTime").expect(
-                            "::suprnova::AsOptionalDateTime parses - Suprnova lib re-exports this type",
-                        );
-                        casts.push((ident.clone(), ty));
-                    }
-                    DateTimeShape::Other => {}
-                }
+                // `datetime_cast` in the app's manifest picks the cast.
+                let optional = match classify_datetime(&field.ty) {
+                    DateTimeShape::DateTime => false,
+                    DateTimeShape::OptionalDateTime => true,
+                    DateTimeShape::Other => continue,
+                };
+                let cast = match (defaults.native_datetimes, optional) {
+                    (false, false) => "::suprnova::AsDateTime",
+                    (false, true) => "::suprnova::AsOptionalDateTime",
+                    (true, false) => "::suprnova::AsNativeDateTime",
+                    (true, true) => "::suprnova::AsOptionalNativeDateTime",
+                };
+                let ty: Type = syn::parse_str(cast)
+                    .expect("the cast path parses - Suprnova lib re-exports these types");
+                casts.push((ident.clone(), ty));
             }
         }
 
@@ -2274,5 +2326,105 @@ mod tests {
         assert_eq!(relations[0].name.to_string(), "profile");
         assert_eq!(relations[1].name.to_string(), "posts");
         assert_eq!(relations[2].name.to_string(), "role");
+    }
+
+    fn key_type_of(input: &ModelInput) -> String {
+        let ty = &input.key_type;
+        quote!(#ty).to_string()
+    }
+
+    fn cast_of(input: &ModelInput, field: &str) -> String {
+        let ty = &input.casts.iter().find(|(i, _)| i == field).unwrap().1;
+        quote!(#ty).to_string()
+    }
+
+    #[test]
+    fn key_type_follows_the_primary_key_field() {
+        let unsigned =
+            ModelInput::parse(quote! {}, quote! { pub struct Order { pub id: u64 } }).unwrap();
+        assert_eq!(key_type_of(&unsigned), "u64");
+
+        let named = ModelInput::parse(
+            quote! { primary_key = "code", auto_increment = false },
+            quote! { pub struct Country { pub code: String, pub id: i64 } },
+        )
+        .unwrap();
+        assert_eq!(key_type_of(&named), "String");
+    }
+
+    #[test]
+    fn declared_key_type_wins_and_no_key_field_keeps_i64() {
+        let declared = ModelInput::parse(
+            quote! { key_type = "i64" },
+            quote! { pub struct Order { pub id: u64 } },
+        )
+        .unwrap();
+        assert_eq!(key_type_of(&declared), "i64");
+
+        let missing =
+            ModelInput::parse(quote! {}, quote! { pub struct Pivot { pub a: u64 } }).unwrap();
+        assert_eq!(key_type_of(&missing), "i64");
+    }
+
+    #[test]
+    fn native_datetime_default_swaps_the_injected_casts() {
+        let defaults = ModelDefaults {
+            native_datetimes: true,
+        };
+        let input = ModelInput::parse_with(
+            quote! { soft_deletes = true, casts = { published_at = AsImmutableDateTime } },
+            quote! {
+                pub struct Post {
+                    pub id: u64,
+                    pub created_at: chrono::DateTime<chrono::Utc>,
+                    pub updated_at: DateTime<Utc>,
+                    pub deleted_at: Option<DateTime<Utc>>,
+                    pub published_at: DateTime<Utc>,
+                }
+            },
+            &defaults,
+        )
+        .unwrap();
+        assert_eq!(
+            cast_of(&input, "created_at"),
+            ":: suprnova :: AsNativeDateTime"
+        );
+        assert_eq!(
+            cast_of(&input, "updated_at"),
+            ":: suprnova :: AsNativeDateTime"
+        );
+        assert_eq!(
+            cast_of(&input, "deleted_at"),
+            ":: suprnova :: AsOptionalNativeDateTime"
+        );
+        assert_eq!(cast_of(&input, "published_at"), "AsImmutableDateTime");
+    }
+
+    #[test]
+    fn model_defaults_read_datetime_cast() {
+        let read = |body: &str| ModelDefaults::from_table(&body.parse::<toml::Table>().unwrap());
+        assert_eq!(read(""), Ok(ModelDefaults::default()));
+        assert_eq!(
+            read("datetime_cast = \"text\""),
+            Ok(ModelDefaults::default())
+        );
+        assert_eq!(
+            read("datetime_cast = \"native\""),
+            Ok(ModelDefaults {
+                native_datetimes: true
+            })
+        );
+        assert_eq!(
+            read("datetime_cast = \"Native\""),
+            Err("`datetime_cast` must be \"text\" or \"native\", got \"Native\"".to_string())
+        );
+        assert_eq!(
+            read("datetime_cast = true"),
+            Err("`datetime_cast` must be a string".to_string())
+        );
+        assert_eq!(
+            read("key_type = \"u64\""),
+            Err("unknown key `key_type`; the keys are `datetime_cast`".to_string())
+        );
     }
 }

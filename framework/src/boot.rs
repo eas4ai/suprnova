@@ -29,6 +29,27 @@ static ENV_LOADED_PRE_RUNTIME: AtomicBool = AtomicBool::new(false);
 /// [`crate::main`] from the application crate's compilation.
 static DEFAULT_BUILD_ID: OnceLock<&'static str> = OnceLock::new();
 
+/// `unsigned_ids = true` from the application's
+/// `[package.metadata.suprnova.schema]`, recorded by [`crate::main`].
+static UNSIGNED_IDS: AtomicBool = AtomicBool::new(false);
+
+/// Makes the schema builder's `id()` and `foreign_id()` create the columns
+/// Laravel's do: `BIGINT UNSIGNED` on MySQL, the signed `BIGINT` on Postgres
+/// and SQLite, which have no unsigned integers.
+///
+/// [`crate::main`]'s expansion calls this when the application crate's
+/// `Cargo.toml` sets `unsigned_ids = true` under
+/// `[package.metadata.suprnova.schema]`, before any migration runs.
+pub fn set_unsigned_ids(unsigned: bool) {
+    UNSIGNED_IDS.store(unsigned, Ordering::Relaxed);
+}
+
+/// Whether [`set_unsigned_ids`] turned unsigned keys on.
+#[must_use]
+pub fn unsigned_ids() -> bool {
+    UNSIGNED_IDS.load(Ordering::Relaxed)
+}
+
 /// Records `version` as the RenderCache default build identity.
 ///
 /// [`crate::main`]'s expansion calls this with the application crate's own

@@ -220,3 +220,10 @@ async fn postgres_action_shorthands() {
 async fn postgres_unsigned_keys_everywhere() {
     laravel_cases::unsigned_keys_everywhere(&connect_postgres().await).await;
 }
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_unsigned_ids_default_everywhere() {
+    laravel_cases::unsigned_ids_default_everywhere(&connect_postgres().await).await;
+}
