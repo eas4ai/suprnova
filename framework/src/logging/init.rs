@@ -68,12 +68,9 @@ pub fn init_subscriber(config: LogConfig) {
 /// in place and emits a `tracing::warn!` through it so the operator can
 /// see that this `LogConfig` was not applied.
 pub(crate) fn install_base_subscriber(config: &LogConfig) -> bool {
-    if let Err(error) = super::layer::check_channels() {
-        // The server and the workers check first and stop; anything else
-        // that installs a subscriber still gets its log, on stdout.
-        eprintln!("suprnova: {error}; logging to stdout instead");
-        let _ = super::facade::set_default("stdout");
-    }
+    // The application's bootstrap may define the channel yet; the server
+    // and the workers check it with `check_channels` once it has run.
+    super::layer::default_or_stdout();
     let result = tracing_subscriber::registry()
         .with(build_env_filter(&config.level))
         .with(super::layer::output_layers(config))

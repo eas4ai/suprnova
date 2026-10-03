@@ -3,31 +3,48 @@
 
 use super::channel::{LogLevel, LogRecord};
 use super::config::{LogConfig, LogFormat};
-use super::facade::{configured_default, default_sinks, set_default, stream_enabled};
+use super::facade::{
+    configured_default, default_sinks, set_default, stream_enabled, validate_environment,
+};
 use super::init::build_env_filter;
 use super::sinks::{replace_placeholders, set_format};
 use crate::error::FrameworkError;
 use tracing::Subscriber;
 use tracing::field::{Field, Visit};
 use tracing_subscriber::Layer;
-use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::filter::dynamic_filter_fn;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
-/// Check the channels `LOG_CHANNEL` and `LOG_STACK` name, and make the one
-/// `LOG_CHANNEL` names the default. The server and the workers call it
-/// before they install the subscriber, so a channel that does not exist
-/// stops the boot.
+/// Check the log settings of the environment and make the channel
+/// `LOG_CHANNEL` names the default. The server and the workers call it once
+/// the application's bootstrap has run, so a channel the bootstrap defines
+/// is known, and a setting that is wrong stops the boot.
+///
+/// `LOG_STACK`, `LOG_SYSLOG_FACILITY` and `LOG_DAILY_DAYS` are checked
+/// whenever they are set, whether or not the default channel uses them.
 ///
 /// # Errors
 ///
-/// When `LOG_CHANNEL`, or a channel a stack lists, names no channel, or a
-/// channel's settings are wrong, such as an unknown syslog facility.
+/// When `LOG_CHANNEL`, or a name `LOG_STACK` lists, names no channel; when
+/// `LOG_SYSLOG_FACILITY` is no facility or `LOG_DAILY_DAYS` no number; or
+/// when the default channel's settings are wrong.
 pub fn check_channels() -> Result<(), FrameworkError> {
+    validate_environment()?;
     let name = configured_default();
     set_default(&name)
         .map_err(|error| FrameworkError::internal(format!("LOG_CHANNEL is '{name}': {error}")))
+}
+
+/// Make the channel `LOG_CHANNEL` names the default if it can be, and
+/// stdout otherwise. A subscriber installed before the application's
+/// bootstrap uses this: the bootstrap may define the channel, and the boot
+/// checks it with [`check_channels`] once the bootstrap has run.
+pub(crate) fn default_or_stdout() {
+    if set_default(&configured_default()).is_err() {
+        let _ = set_default("stdout");
+    }
 }
 
 /// The output layers: `tracing`'s own formatter for standard output and
@@ -38,8 +55,11 @@ where
     S: Subscriber + for<'a> LookupSpan<'a> + Send + Sync,
 {
     set_format(config.format);
-    let stdout_on = filter_fn(|meta| stream_enabled(false, meta.level()));
-    let stderr_on = filter_fn(|meta| stream_enabled(true, meta.level()));
+    // A dynamic filter, so a callsite's interest is never cached: the
+    // default channel can move with `Log::set_default_channel`, and each
+    // event asks again whether the stream is in it.
+    let stdout_on = dynamic_filter_fn(|meta, _| stream_enabled(false, meta.level()));
+    let stderr_on = dynamic_filter_fn(|meta, _| stream_enabled(true, meta.level()));
     let (stdout, stderr): (
         Box<dyn Layer<S> + Send + Sync>,
         Box<dyn Layer<S> + Send + Sync>,
@@ -101,11 +121,57 @@ pub fn build_subscriber(
 }
 
 /// Writes each event to the default channel's sinks other than the
-/// standard streams: files, syslog, the application's drivers.
+/// standard streams: files, syslog, the application's drivers. An event's
+/// record carries the fields of the spans it is in, the request span's
+/// `request_id` among them, as the stdout formatter shows them.
 struct ChannelLayer;
 
-impl<S: Subscriber> Layer<S> for ChannelLayer {
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+/// The fields a span was created or recorded with, kept for its events.
+#[derive(Default)]
+struct SpanFields(Vec<(String, String)>);
+
+impl<S> Layer<S> for ChannelLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: Context<'_, S>,
+    ) {
+        let mut fields = Fields::default();
+        attrs.record(&mut fields);
+        if let Some(span) = ctx.span(id) {
+            span.extensions_mut().insert(SpanFields(fields.context));
+        }
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: Context<'_, S>,
+    ) {
+        let mut fields = Fields::default();
+        values.record(&mut fields);
+        if let Some(span) = ctx.span(id) {
+            let mut extensions = span.extensions_mut();
+            match extensions.get_mut::<SpanFields>() {
+                Some(kept) => {
+                    for (key, value) in fields.context {
+                        match kept.0.iter_mut().find(|(name, _)| *name == key) {
+                            Some(slot) => slot.1 = value,
+                            None => kept.0.push((key, value)),
+                        }
+                    }
+                }
+                None => extensions.insert(SpanFields(fields.context)),
+            }
+        }
+    }
+
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
         let sinks = default_sinks();
         if sinks.is_empty() {
             return;
@@ -116,6 +182,21 @@ impl<S: Subscriber> Layer<S> for ChannelLayer {
         }
         let mut fields = Fields::default();
         event.record(&mut fields);
+        // The spans' fields, outermost first, then the event's own.
+        if let Some(scope) = ctx.event_scope(event) {
+            let mut inherited = Vec::new();
+            for span in scope.from_root() {
+                if let Some(kept) = span.extensions().get::<SpanFields>() {
+                    for (key, value) in &kept.0 {
+                        if !fields.context.iter().any(|(name, _)| name == key) {
+                            inherited.push((key.clone(), value.clone()));
+                        }
+                    }
+                }
+            }
+            inherited.append(&mut fields.context);
+            fields.context = inherited;
+        }
         let record = LogRecord {
             time: crate::clock::now(),
             level,

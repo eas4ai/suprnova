@@ -187,6 +187,9 @@ where
             // stays outside.
             let command = (entry.handler)(sub_matches);
             let result = crate::container::scope::run_in_new_scope(command).await;
+            // The file log channels buffer; a command's last records reach
+            // the file before the process exits.
+            crate::logging::Log::flush();
             if let Err(ref e) = result
                 && !e.is_silent()
             {

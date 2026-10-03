@@ -223,20 +223,21 @@ impl LogChannel {
         self
     }
 
-    /// How many daily files to keep, today's included. Applies to a
+    /// How many daily files to keep, counting the one written to; 0 keeps
+    /// every file, as Laravel's `max_files` of 0 does. Applies to a
     /// [`daily`](Self::daily) channel.
     pub fn days(mut self, keep: u32) -> Self {
         if let ChannelKind::Daily { days, .. } = &mut self.kind {
-            *days = keep.max(1);
+            *days = keep;
         }
         self
     }
 
-    /// How many monthly files to keep, this month's included. Applies to
-    /// a [`monthly`](Self::monthly) channel.
+    /// How many monthly files to keep, counting the one written to; 0 keeps
+    /// every file. Applies to a [`monthly`](Self::monthly) channel.
     pub fn months(mut self, keep: u32) -> Self {
         if let ChannelKind::Monthly { months, .. } = &mut self.kind {
-            *months = keep.max(1);
+            *months = keep;
         }
         self
     }

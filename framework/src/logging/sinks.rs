@@ -35,8 +35,9 @@ fn format() -> LogFormat {
 }
 
 /// Replace each `{key}` in `message` with the context's value under `key`,
-/// as Laravel's `replace_placeholders` does. A placeholder with no value in
-/// the context is left as it is.
+/// for any key the context holds, as Laravel's `replace_placeholders`
+/// does: in one pass, so a value that holds a placeholder is not replaced
+/// again. A placeholder with no value in the context is left as it is.
 pub(crate) fn replace_placeholders(message: &str, context: &[(String, String)]) -> String {
     if !message.contains('{') || context.is_empty() {
         return message.to_owned();
@@ -46,17 +47,19 @@ pub(crate) fn replace_placeholders(message: &str, context: &[(String, String)]) 
     while let Some(open) = rest.find('{') {
         out.push_str(&rest[..open]);
         let after = &rest[open + 1..];
-        let key_end = after
-            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
-            .unwrap_or(after.len());
-        let key = &after[..key_end];
-        let closed = after[key_end..].starts_with('}');
-        match context.iter().find(|(name, _)| name == key) {
-            Some((_, value)) if closed && !key.is_empty() => {
+        let found = after.find('}').and_then(|close| {
+            let key = &after[..close];
+            context
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| (value, close))
+        });
+        match found {
+            Some((value, close)) => {
                 out.push_str(value);
-                rest = &after[key_end + 1..];
+                rest = &after[close + 1..];
             }
-            _ => {
+            None => {
                 out.push('{');
                 rest = after;
             }
@@ -229,13 +232,17 @@ impl FileSink {
         self.base.with_file_name(name)
     }
 
-    /// Delete the dated files beyond the number kept, newest kept first.
+    /// Delete the dated files beyond the number kept, newest kept first. A
+    /// count of 0 keeps every file, as Monolog's `max_files` of 0 does.
     fn prune(&self) {
         let (keep, monthly) = match self.rotation {
             Rotation::None => return,
             Rotation::Daily(keep) => (keep, false),
             Rotation::Monthly(keep) => (keep, true),
         };
+        if keep == 0 {
+            return;
+        }
         let Some(dir) = self.base.parent() else {
             return;
         };
@@ -430,6 +437,10 @@ impl LogSink for SyslogSink {
 mod tests {
     use super::*;
 
+    fn context_of(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        context(pairs)
+    }
+
     fn context(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
             .iter()
@@ -443,6 +454,12 @@ mod tests {
         assert_eq!(
             replace_placeholders("user {id} {user.name} {nope} {} {id", &context),
             "user 7 ada {nope} {} {id"
+        );
+        let odd = context_of(&[("user-id", "9"), ("a b", "{id}"), ("id", "7")]);
+        assert_eq!(
+            replace_placeholders("{user-id} {a b} {id}", &odd),
+            "9 {id} 7",
+            "any key, and one pass"
         );
         assert_eq!(replace_placeholders("no braces", &context), "no braces");
     }

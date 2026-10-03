@@ -509,6 +509,7 @@ fn init_telemetry_with_otel(log_config: LogConfig, otel_config: OtelConfig) -> T
     // tests). The existing subscriber wins and we still hand back a guard
     // for orderly shutdown of the providers we built. It also forwards
     // the records of the `log` crate, as the base subscriber does.
+    crate::logging::layer::default_or_stdout();
     let installed = tracing_subscriber::registry()
         .with(env_filter)
         .with(crate::logging::layer::output_layers(&log_config))
