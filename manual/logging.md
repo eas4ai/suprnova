@@ -54,7 +54,7 @@ the one `tracing`'s events go to:
 | `stdout` | standard output, in the `LOG_FORMAT`; the default |
 | `stderr` (also `errorlog`) | standard error |
 | `single` | `storage/logs/suprnova.log`, appended to |
-| `daily` | `storage/logs/suprnova-2026-10-02.log`, a file a day, keeping the newest `LOG_DAILY_DAYS` (14) |
+| `daily` | `storage/logs/suprnova-2026-10-02.log`, a file a day, keeping the newest `LOG_DAILY_DAYS` (14; 0 keeps every file) |
 | `monthly` | `storage/logs/suprnova-2026-10.log`, a file a month, keeping the newest 3 |
 | `syslog` | the local syslog socket, with the facility `LOG_SYSLOG_FACILITY` (`user`) |
 | `null` | nowhere |
@@ -67,9 +67,12 @@ LOG_DAILY_DAYS=30
 ```
 
 A channel that does not exist stops the server and the workers at boot,
-with an error that names it. Dates are those of the framework clock, in
-UTC. File lines are text, one line a record, or JSON objects when
-`LOG_FORMAT=json`.
+once the bootstrap has run, with an error that names it; so does a name in
+`LOG_STACK`, a `LOG_SYSLOG_FACILITY` or a `LOG_DAILY_DAYS` that is wrong,
+whichever channel is the default. Dates are those of the framework clock,
+in UTC. File lines are text, one line a record, or JSON objects when
+`LOG_FORMAT=json`, and carry the fields of the spans the event is in, the
+request's `request_id` among them.
 
 Define your own channels in the bootstrap, and reach any channel with
 `Log`:
@@ -99,7 +102,8 @@ A stack writes each record to every channel it lists, and a channel that
 cannot write, such as a file it cannot open, stops none of the others;
 the failure is reported once on stderr, and the code that logged never
 sees an error. `Log::channels()` lists the channels in use,
-`Log::forget_channel(name)` closes one, and `Log::default_channel()` and
+`Log::forget_channel(name)` closes one, which is resolved again on its
+next use, reopening a file rotated away, and `Log::default_channel()` and
 `Log::set_default_channel(name)` read and move the default.
 
 `Log::extend` adds a driver for anything else, such as Slack or a log
@@ -128,8 +132,9 @@ Log::define("ops", LogChannel::driver("webhook").option("url", "https://..."));
 
 File channels buffer their lines. A record at `error` or above is written
 out at once, the rest within a second, and everything on `Log::flush()`,
-which the server and the workers call when they shut down. A record
-written before a clean exit is never lost.
+which the server, the workers and every console command call when they
+end. A record written before a clean exit is never lost. A driver added
+with `Log::extend` is flushed with the files.
 
 ## Emitting events
 

@@ -1784,10 +1784,9 @@ where
     /// race ahead of `serve`'s telemetry one and cost OTel builds their
     /// layers.
     fn install_daemon_logging() {
-        if let Err(error) = crate::logging::check_channels() {
-            eprintln!("suprnova: {error}");
-            std::process::exit(1);
-        }
+        // The channel is checked in `boot_worker_process`, once the
+        // bootstrap that may define it has run; until then the bootstrap's
+        // own events go to the channel if it is built in, else stdout.
         crate::logging::init_subscriber(crate::logging::LogConfig::from_env());
     }
 
@@ -1815,6 +1814,9 @@ where
         if let Some(bootstrap_fn) = bootstrap_fn {
             bootstrap_fn().await;
         }
+        // After the bootstrap, so a channel it defines is known; a channel
+        // that does not exist stops the worker here.
+        crate::logging::check_channels()?;
         Self::bootstrap_runtime_drivers().await
     }
 
@@ -2151,6 +2153,38 @@ mod worker_boot_order_tests {
 
         // Leave the global driver as the harmless default for anything that
         // runs after this test in the same process.
+        crate::queue::Queue::set_driver(std::sync::Arc::new(
+            crate::queue::memory::MemoryQueueDriver::new(),
+        ));
+    }
+
+    /// A worker resolves its log channel after the application's bootstrap,
+    /// so a channel the bootstrap defines can be `LOG_CHANNEL`; one that
+    /// nothing defines still stops the boot, naming it.
+    #[tokio::test]
+    #[serial]
+    async fn worker_boot_takes_a_log_channel_the_bootstrap_defines() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("worker.log");
+        let name = "bootstrap-defined-log-channel";
+        let _env = EnvGuard::set(&[("LOG_CHANNEL", name)]);
+        let bootstrap: BootstrapFn = Box::new(move || {
+            let path = path.clone();
+            Box::pin(async move {
+                crate::logging::Log::define(name, crate::logging::LogChannel::single(path));
+            })
+        });
+        Application::<NoMigrator>::boot_worker_process(Some(bootstrap))
+            .await
+            .expect("the channel the bootstrap defines is the default");
+        assert_eq!(crate::logging::Log::default_channel(), name);
+
+        let _missing = EnvGuard::set(&[("LOG_CHANNEL", "no-such-log-channel")]);
+        let error = Application::<NoMigrator>::boot_worker_process(None)
+            .await
+            .expect_err("a channel nothing defines stops the worker");
+        assert!(error.to_string().contains("no-such-log-channel"), "{error}");
+        let _ = crate::logging::Log::set_default_channel("stdout");
         crate::queue::Queue::set_driver(std::sync::Arc::new(
             crate::queue::memory::MemoryQueueDriver::new(),
         ));

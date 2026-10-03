@@ -630,3 +630,271 @@ fn an_unknown_syslog_facility_fails() {
         .expect("an unknown LOG_SYSLOG_FACILITY fails boot");
     assert!(error.to_string().contains("bogus"), "{error}");
 }
+
+// Review fixes.
+
+/// In a child: the default channel is a stack of both standard streams;
+/// one `error!` callsite writes before and after the default moves to a
+/// file, so the callsite's cached interest is what is tested.
+#[test]
+fn child_moves_the_default_off_the_standard_streams() {
+    if !is_child() {
+        return;
+    }
+    let file = std::env::var("SUPRNOVA_LOG_FILE").unwrap();
+    let guard = suprnova::telemetry::init_telemetry(
+        LogConfig::from_env(),
+        suprnova::telemetry::OtelConfig::disabled(),
+    );
+    for phase in ["before", "after"] {
+        tracing::error!("{phase}-switch-marker");
+        if phase == "before" {
+            Log::define("switched", LogChannel::single(&file));
+            Log::set_default_channel("switched").unwrap();
+        }
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(guard.shutdown());
+}
+
+#[test]
+fn set_default_channel_moves_events_off_stdout_and_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("switched.log");
+    let output = run_child(
+        "channels::child_moves_the_default_off_the_standard_streams",
+        &[
+            ("LOG_CHANNEL", "stack"),
+            ("LOG_STACK", "stdout,stderr"),
+            ("SUPRNOVA_LOG_FILE", file.to_str().unwrap()),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("before-switch-marker") && stderr.contains("before-switch-marker"));
+    assert!(
+        !stdout.contains("after-switch-marker"),
+        "stdout after the switch:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("after-switch-marker"),
+        "stderr after the switch:\n{stderr}"
+    );
+    let text = read(&file);
+    assert!(text.contains("after-switch-marker") && !text.contains("before-switch-marker"));
+}
+
+#[test]
+#[serial]
+fn the_log_variables_are_checked_whether_or_not_the_default_uses_them() {
+    let _env = lock_env();
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    set_env("LOG_CHANNEL", Some("stdout"));
+
+    set_env("LOG_STACK", Some("stdout,nope"));
+    let error = build_subscriber(LogConfig::from_env())
+        .err()
+        .expect("LOG_STACK");
+    assert!(error.to_string().contains("nope"), "{error}");
+    set_env("LOG_STACK", None);
+
+    set_env("LOG_SYSLOG_FACILITY", Some("bogus"));
+    let error = build_subscriber(LogConfig::from_env())
+        .err()
+        .expect("LOG_SYSLOG_FACILITY");
+    assert!(error.to_string().contains("bogus"), "{error}");
+    set_env("LOG_SYSLOG_FACILITY", None);
+
+    set_env("LOG_DAILY_DAYS", Some("abc"));
+    let error = build_subscriber(LogConfig::from_env())
+        .err()
+        .expect("LOG_DAILY_DAYS");
+    assert!(error.to_string().contains("abc"), "{error}");
+}
+
+#[test]
+fn zero_days_keeps_every_daily_file() {
+    let dir = tempfile::tempdir().unwrap();
+    for day in 1..=20 {
+        std::fs::write(
+            dir.path().join(format!("app-2026-09-{day:02}.log")),
+            "old\n",
+        )
+        .unwrap();
+    }
+    let _clock = TestClock::travel_to(at("2026-09-21T08:00:00Z"));
+    Log::build(LogChannel::daily(dir.path().join("app.log")).days(0))
+        .unwrap()
+        .info("today");
+    Log::flush();
+    assert_eq!(
+        files_in(dir.path()).len(),
+        21,
+        "0 keeps every file, as in Laravel"
+    );
+}
+
+#[test]
+fn log_daily_days_zero_keeps_every_file_of_the_built_in_channel() {
+    let base = tempfile::tempdir().unwrap();
+    let logs = base.path().join("storage/logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    for day in 1..=5 {
+        std::fs::write(logs.join(format!("suprnova-2026-09-{day:02}.log")), "old\n").unwrap();
+    }
+    run_child(
+        "channels::child_writes_to_the_built_in_daily_channel",
+        &[
+            ("APP_BASE_PATH", base.path().to_str().unwrap()),
+            ("LOG_DAILY_DAYS", "0"),
+        ],
+    );
+    assert_eq!(files_in(&logs).len(), 6);
+}
+
+#[test]
+fn a_placeholder_key_can_hold_any_character() {
+    let dir = tempfile::tempdir().unwrap();
+    let logger = Log::build(LogChannel::single(dir.path().join("keys.log"))).unwrap();
+    logger.info_with(
+        "user {user-id} in {the team}",
+        json!({"user-id": 7, "the team": "ops"}),
+    );
+    Log::flush();
+    assert!(read(&dir.path().join("keys.log")).contains("user 7 in ops"));
+}
+
+#[test]
+#[serial]
+fn a_file_line_carries_the_fields_of_its_spans() {
+    let _env = lock_env();
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    let dir = tempfile::tempdir().unwrap();
+    let name = unique("spans");
+    Log::define(&name, LogChannel::single(dir.path().join("spans.log")));
+    set_env("LOG_CHANNEL", Some(&name));
+
+    let subscriber = build_subscriber(LogConfig::from_env()).unwrap();
+    tracing::subscriber::with_default(subscriber, || {
+        let request = tracing::info_span!(
+            "request",
+            request_id = "req-123",
+            user = tracing::field::Empty
+        );
+        let _entered = request.enter();
+        request.record("user", 7);
+        tracing::info!(step = "charge", "in-span");
+    });
+    Log::flush();
+    let text = read(&dir.path().join("spans.log"));
+    assert!(text.contains("in-span"), "{text}");
+    assert!(text.contains("req-123"), "the request span's id: {text}");
+    assert!(
+        text.contains("\"user\":\"7\""),
+        "a recorded span field: {text}"
+    );
+    assert!(text.contains("charge"), "the event's own field: {text}");
+}
+
+#[test]
+#[serial]
+fn redefining_or_forgetting_the_default_channel_moves_its_events() {
+    let _env = lock_env();
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    let dir = tempfile::tempdir().unwrap();
+    let name = unique("moving");
+    Log::define(&name, LogChannel::single(dir.path().join("first.log")));
+    set_env("LOG_CHANNEL", Some(&name));
+    let subscriber = build_subscriber(LogConfig::from_env()).unwrap();
+
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::error!("to-first");
+        Log::define(&name, LogChannel::single(dir.path().join("second.log")));
+        tracing::error!("to-second");
+        // A file rotated away is reopened once the channel is forgotten.
+        std::fs::rename(
+            dir.path().join("second.log"),
+            dir.path().join("rotated.log"),
+        )
+        .unwrap();
+        Log::forget_channel(&name);
+        tracing::error!("reopened");
+    });
+    assert!(read(&dir.path().join("first.log")).contains("to-first"));
+    assert!(read(&dir.path().join("rotated.log")).contains("to-second"));
+    assert!(read(&dir.path().join("second.log")).contains("reopened"));
+}
+
+/// A driver sink that counts its flushes.
+#[derive(Default)]
+struct CountingSink {
+    flushes: std::sync::atomic::AtomicUsize,
+}
+
+impl LogSink for CountingSink {
+    fn write(&self, _record: &LogRecord) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn flush(&self) -> std::io::Result<()> {
+        self.flushes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[test]
+fn log_flush_reaches_a_driver_sink() {
+    let sink = Arc::new(CountingSink::default());
+    let driver = unique("counting");
+    let shared = Arc::clone(&sink);
+    Log::extend(&driver, move |_| Ok(shared.clone() as Arc<dyn LogSink>));
+    let logger = Log::build(LogChannel::driver(&driver)).unwrap();
+    logger.info("buffered-by-a-driver");
+    Log::flush();
+    assert!(sink.flushes.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+}
+
+#[suprnova::command(
+    name = "log:write-and-exit",
+    description = "Writes one record to a file channel"
+)]
+async fn write_and_exit(_args: Vec<String>) -> Result<(), FrameworkError> {
+    let file = std::env::var("SUPRNOVA_LOG_FILE").unwrap();
+    Log::build(LogChannel::single(file))?.info("console-marker");
+    Ok(())
+}
+
+/// In a child: run a console command, then exit at once, with no
+/// destructor and no time for the flusher.
+#[test]
+fn child_runs_a_console_command_and_exits() {
+    if !is_child() {
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(suprnova::console::dispatch_argv(vec![
+            "console".into(),
+            "log:write-and-exit".into(),
+        ]))
+        .unwrap();
+    std::process::exit(0);
+}
+
+#[test]
+fn a_console_command_flushes_its_records_before_the_process_exits() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("console.log");
+    run_child(
+        "channels::child_runs_a_console_command_and_exits",
+        &[("SUPRNOVA_LOG_FILE", file.to_str().unwrap())],
+    );
+    assert!(read(&file).contains("console-marker"));
+}

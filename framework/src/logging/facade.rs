@@ -40,6 +40,10 @@ pub(crate) static STDOUT_MIN: AtomicU8 = AtomicU8::new(8);
 pub(crate) static STDERR_ON: AtomicBool = AtomicBool::new(false);
 pub(crate) static STDERR_MIN: AtomicU8 = AtomicU8::new(8);
 
+/// Set when the default channel was forgotten: the next event resolves it
+/// again, as Laravel resolves a forgotten channel on its next use.
+static DEFAULT_FORGOTTEN: AtomicBool = AtomicBool::new(false);
+
 fn read() -> RwLockReadGuard<'static, Registry> {
     REGISTRY
         .read()
@@ -73,7 +77,8 @@ fn built_in(name: &str) -> Result<Option<LogChannel>, FrameworkError> {
             let days = match var("LOG_DAILY_DAYS") {
                 Some(days) => days.parse::<u32>().map_err(|_| {
                     FrameworkError::internal(format!(
-                        "LOG_DAILY_DAYS is '{days}', and must be a number of days"
+                        "LOG_DAILY_DAYS is '{days}', and must be a number of days (0 keeps \
+                         every file)"
                     ))
                 })?,
                 None => 14,
@@ -163,7 +168,10 @@ fn build(channel: &LogChannel, depth: u8) -> Result<Vec<Leaf>, FrameworkError> {
                     "the log driver '{driver}' does not exist: add it with Log::extend"
                 ))
             })?;
-            vec![Leaf::Sink(factory(channel)?, level)]
+            let sink = factory(channel)?;
+            // A driver may buffer, so it is flushed with the files.
+            register_flushable(&sink);
+            vec![Leaf::Sink(sink, level)]
         }
     })
 }
@@ -220,6 +228,9 @@ pub(crate) fn set_default(name: &str) -> Result<(), FrameworkError> {
 
 /// The sinks of the default channel that are not the standard streams.
 pub(crate) fn default_sinks() -> Vec<(Arc<dyn LogSink>, Option<LogLevel>)> {
+    if DEFAULT_FORGOTTEN.swap(false, Ordering::Relaxed) {
+        refresh_default();
+    }
     read()
         .default_leaves
         .iter()
@@ -240,6 +251,50 @@ pub(crate) fn stream_enabled(stderr: bool, level: &tracing::Level) -> bool {
     };
     on.load(Ordering::Relaxed)
         && LogLevel::from(*level).severity() <= minimum.load(Ordering::Relaxed)
+}
+
+/// Check the log variables that are set, whether or not the default
+/// channel uses them: every name `LOG_STACK` lists is a channel,
+/// `LOG_SYSLOG_FACILITY` a facility, and `LOG_DAILY_DAYS` a number.
+pub(crate) fn validate_environment() -> Result<(), FrameworkError> {
+    let var = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    };
+    if let Some(stack) = var("LOG_STACK") {
+        for name in stack
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            let known = read().defined.contains_key(name) || built_in(name)?.is_some();
+            if !known {
+                return Err(FrameworkError::internal(format!(
+                    "LOG_STACK lists '{name}': {}",
+                    unknown(name)
+                )));
+            }
+        }
+    }
+    if let Some(facility) = var("LOG_SYSLOG_FACILITY") {
+        facility_number(&facility)
+            .map_err(|error| FrameworkError::internal(format!("LOG_SYSLOG_FACILITY: {error}")))?;
+    }
+    if var("LOG_DAILY_DAYS").is_some() {
+        built_in("daily")?;
+    }
+    Ok(())
+}
+
+/// Resolve the default channel again, after its definition or its sinks
+/// changed. A default that no longer resolves keeps its sinks.
+fn refresh_default() {
+    let current = read().default.clone();
+    if let Some(name) = current {
+        let _ = set_default(&name);
+    }
 }
 
 /// The channel `LOG_CHANNEL` names, `stdout` when it is not set.
@@ -274,10 +329,14 @@ impl Log {
     /// Add a channel under `name`, or replace the one there. Call it in the
     /// bootstrap, before the server installs the default channel.
     pub fn define(name: &str, channel: LogChannel) {
-        let mut registry = write();
-        registry.defined.insert(name.to_owned(), channel);
-        // A stack that lists the name resolves it again.
-        registry.resolved.clear();
+        {
+            let mut registry = write();
+            registry.defined.insert(name.to_owned(), channel);
+            // A stack that lists the name resolves it again.
+            registry.resolved.clear();
+        }
+        // The default may be the channel, or a stack that lists it.
+        refresh_default();
     }
 
     /// Add a driver: `factory` builds the sink of each channel defined with
@@ -331,14 +390,20 @@ impl Log {
         read().resolved.keys().cloned().collect()
     }
 
-    /// Drop the resolved channel `name`, writing out what it buffered. It
-    /// is resolved again the next time it is used.
+    /// Drop the resolved channel `name`, writing out what it buffered and
+    /// closing its files. It is resolved again the next time it is used,
+    /// the default channel by the next `tracing` event, which reopens its
+    /// file, as Laravel's `forgetChannel` does after a file was rotated
+    /// away.
     pub fn forget_channel(name: &str) {
         let removed = write().resolved.remove(name);
         for leaf in removed.into_iter().flatten() {
             if let Leaf::Sink(sink, _) = leaf {
                 let _ = sink.flush();
             }
+        }
+        if read().default.as_deref() == Some(name) {
+            DEFAULT_FORGOTTEN.store(true, Ordering::Relaxed);
         }
     }
 
