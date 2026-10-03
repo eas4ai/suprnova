@@ -263,3 +263,22 @@ async fn a_sequence_takes_pushed_results_and_a_result_for_when_it_is_empty() {
     let after = step().await.unwrap();
     assert_eq!((after.output(), after.exit_code()), ("done", Some(9)));
 }
+
+// Review fixes.
+
+#[tokio::test]
+#[serial]
+async fn a_quiet_faked_run_calls_no_callback_and_keeps_no_output() {
+    let fake = Process::fake();
+    fake.when("noisy *", Process::result("out").error_output("err"));
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(0));
+    let count = std::sync::Arc::clone(&calls);
+
+    let result = Process::command(["noisy", "run"])
+        .quietly()
+        .run_with(move |_, _| *count.lock().unwrap() += 1)
+        .await
+        .unwrap();
+    assert_eq!(*calls.lock().unwrap(), 0, "as a real quiet run");
+    assert_eq!((result.output(), result.error_output()), ("", ""));
+}

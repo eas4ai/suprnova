@@ -41,15 +41,17 @@ impl Pool {
         Self::default()
     }
 
-    /// Add a process under `key`.
+    /// Add a process under `key`. A key already in the pool has its process
+    /// replaced, as a repeated key does in Laravel.
     pub fn add(mut self, key: impl Into<String>, process: PendingProcess) -> Self {
-        self.processes.push((key.into(), process));
+        insert_keyed(&mut self.processes, key.into(), process);
         self
     }
 
-    /// Add a process under its position in the pool, counted from 0.
+    /// Add a process under its position in the pool, counted from 0, or
+    /// the next free number when a key already holds that one.
     pub fn push(mut self, process: PendingProcess) -> Self {
-        let key = self.processes.len().to_string();
+        let key = next_number(&self.processes);
         self.processes.push((key, process));
         self
     }
@@ -99,6 +101,7 @@ impl Pool {
                 .map(|(index, (key, process))| (index, key, process))
                 .collect(),
             running: Vec::new(),
+            exited: Vec::new(),
             finished: Vec::new(),
             limit,
             output,
@@ -112,6 +115,9 @@ impl Pool {
 pub struct InvokedPool {
     pending: VecDeque<(usize, String, PendingProcess)>,
     running: Vec<(usize, String, InvokedProcess)>,
+    /// Processes that have exited and wait to be collected; they hold no
+    /// slot.
+    exited: Vec<(usize, String, InvokedProcess)>,
     finished: Vec<(usize, String, Result<ProcessResult, ProcessError>)>,
     limit: usize,
     output: Option<KeyedCallback>,
@@ -140,18 +146,27 @@ impl InvokedPool {
         }
     }
 
-    /// Whether any process is running or still waiting for a slot.
+    /// Whether any process is running or still waiting for a slot. Each
+    /// call starts waiting processes in the slots that exited ones freed, so
+    /// a pool polled with `running` and no `wait` still works through its
+    /// queue.
     pub fn running(&mut self) -> bool {
-        !self.pending.is_empty()
-            || self
-                .running
-                .iter_mut()
-                .any(|(_, _, process)| process.running())
+        let mut index = 0;
+        while index < self.running.len() {
+            if self.running[index].2.running() {
+                index += 1;
+            } else {
+                let exited = self.running.remove(index);
+                self.exited.push(exited);
+            }
+        }
+        self.fill(0);
+        !self.pending.is_empty() || !self.running.is_empty()
     }
 
     /// The number of processes, running, waiting or done.
     pub fn len(&self) -> usize {
-        self.pending.len() + self.running.len() + self.finished.len()
+        self.pending.len() + self.running.len() + self.exited.len() + self.finished.len()
     }
 
     /// Whether the pool has no processes.
@@ -181,6 +196,13 @@ impl InvokedPool {
     /// return the results in the order the processes were added.
     pub async fn wait(mut self) -> PoolResults {
         let mut waits = FuturesUnordered::new();
+        for (index, key, process) in self.exited.drain(..) {
+            waits.push(wait_keyed(index, key, process));
+        }
+        // Exited processes hold no slot; fill the free ones first. They
+        // resolve at the first poll, so the count of futures in flight is
+        // the count of running processes from then on.
+        self.fill(0);
         for (index, key, process) in self.running.drain(..) {
             waits.push(wait_keyed(index, key, process));
         }
@@ -199,9 +221,10 @@ impl InvokedPool {
     /// results of the processes that started.
     pub async fn stop(mut self, grace: Duration) -> PoolResults {
         self.pending.clear();
-        let stops: FuturesUnordered<_> = self
-            .running
-            .drain(..)
+        let mut stopping = std::mem::take(&mut self.running);
+        stopping.append(&mut self.exited);
+        let stops: FuturesUnordered<_> = stopping
+            .into_iter()
             .map(|(index, key, process)| async move { (index, key, process.stop(grace).await) })
             .collect();
         let stopped: Vec<_> = stops.collect().await;
@@ -311,15 +334,17 @@ impl Pipe {
         Self::default()
     }
 
-    /// Add a process under `key`, for the output callback.
+    /// Add a process under `key`, for the output callback. A key already in
+    /// the pipe has its process replaced.
     pub fn add(mut self, key: impl Into<String>, process: PendingProcess) -> Self {
-        self.processes.push((key.into(), process));
+        insert_keyed(&mut self.processes, key.into(), process);
         self
     }
 
-    /// Add a process under its position, counted from 0.
+    /// Add a process under its position, or the next free number, as
+    /// [`Pool::push`] does.
     pub fn push(mut self, process: PendingProcess) -> Self {
-        let key = self.processes.len().to_string();
+        let key = next_number(&self.processes);
         self.processes.push((key, process));
         self
     }
@@ -352,7 +377,7 @@ impl Pipe {
         let mut previous: Option<ProcessResult> = None;
         for (key, process) in self.processes {
             let process = match &previous {
-                Some(result) => process.input(result.output.clone().into_bytes()),
+                Some(result) => process.input(result.output_bytes.clone()),
                 None => process,
             };
             let result = match &output {
@@ -369,11 +394,30 @@ impl Pipe {
             }
             previous = Some(result);
         }
-        Ok(previous.unwrap_or(ProcessResult {
-            command: String::new(),
-            exit_code: Some(0),
-            output: String::new(),
-            error_output: String::new(),
-        }))
+        Ok(previous
+            .unwrap_or_else(|| ProcessResult::new(String::new(), Some(0), Vec::new(), Vec::new())))
     }
+}
+
+/// Put `process` under `key`, replacing a process already there in its
+/// place.
+fn insert_keyed(
+    processes: &mut Vec<(String, PendingProcess)>,
+    key: String,
+    process: PendingProcess,
+) {
+    match processes.iter_mut().find(|(existing, _)| *existing == key) {
+        Some(slot) => slot.1 = process,
+        None => processes.push((key, process)),
+    }
+}
+
+/// The position the next process takes, counted from 0, or the next number
+/// after it that no key holds.
+fn next_number(processes: &[(String, PendingProcess)]) -> String {
+    let mut number = processes.len();
+    while processes.iter().any(|(key, _)| *key == number.to_string()) {
+        number += 1;
+    }
+    number.to_string()
 }

@@ -133,3 +133,49 @@ async fn a_pipe_stops_at_the_first_failure() {
     assert_eq!(result.error_output(), "nope");
     assert!(!marker.exists(), "the second process did not run");
 }
+
+// Review fixes.
+
+#[tokio::test]
+#[serial]
+async fn a_started_pool_polled_with_running_works_through_its_queue() {
+    let mut pool = Process::pool().concurrency(2);
+    for _ in 0..6 {
+        pool = pool.push(Process::command(["sleep", "0.2"]));
+    }
+    let mut pool = pool.start();
+    let started = Instant::now();
+    while pool.running() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the queue never moved"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let results = pool.wait().await;
+    assert_eq!(results.len(), 6);
+    assert!(results.successful());
+}
+
+#[tokio::test]
+#[serial]
+async fn pool_keys_never_collide() {
+    let results = Process::pool()
+        .add("1", Process::command(["printf", "a"]))
+        .push(Process::command(["printf", "b"]))
+        .add("x", Process::command(["printf", "first"]))
+        .add("x", Process::command(["printf", "second"]))
+        .run()
+        .await;
+    let keys: Vec<&str> = results.keys().collect();
+    assert_eq!(
+        keys,
+        ["1", "2", "x"],
+        "push takes its position, or the next free number; a repeated key replaces"
+    );
+    assert_eq!(results.get("2").unwrap().as_ref().unwrap().output(), "b");
+    assert_eq!(
+        results.get("x").unwrap().as_ref().unwrap().output(),
+        "second"
+    );
+}

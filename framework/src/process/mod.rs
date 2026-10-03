@@ -14,12 +14,21 @@
 //!
 //! # Cleanup
 //!
-//! On Unix each process gets a process group of its own, and every kill
-//! reaches the whole group, so the processes a command started die with
-//! it: on a timeout, an idle timeout, a `stop`, and when a started process
-//! or the future of `run` is dropped before it completes. A process that
-//! exits normally is waited on until its output closes, as Laravel waits,
-//! and is not killed. Elsewhere only the program itself is killed.
+//! A kill reaches everything the program started: on a timeout, an idle
+//! timeout, a `stop`, and when a started process or the future of `run` is
+//! dropped before it completes. On Unix each process gets a process group
+//! of its own, and the group is killed. A [`tty`](PendingProcess::tty)
+//! process stays in the terminal's group, which it must share to read the
+//! terminal, so its descendants are found in the process table and killed
+//! one by one; on Windows `taskkill /T` ends the tree. A process that exits
+//! normally is waited on until its output closes, as Laravel waits, and
+//! nothing it left behind is killed.
+//!
+//! A child in a group of its own does not get the `SIGINT` a terminal sends
+//! on Ctrl-C. The server and the workers end their children when they shut
+//! down, since their futures are dropped; a console command that Ctrl-C
+//! kills outright leaves its children running unless it handles the signal
+//! itself.
 //!
 //! # Pools and pipes
 //!
@@ -190,7 +199,7 @@ impl Command {
     pub(crate) fn program(&self) -> String {
         match self {
             Command::Args(args) => args.first().cloned().unwrap_or_default(),
-            Command::Shell(_) => shell_program().to_owned(),
+            Command::Shell(_) => SHELL.to_owned(),
         }
     }
 
@@ -203,33 +212,29 @@ impl Command {
                 command
             }
             Command::Shell(line) => {
-                let mut command = tokio::process::Command::new(shell_program());
-                command.arg(shell_flag()).arg(line);
+                let mut command = tokio::process::Command::new(SHELL);
+                #[cfg(windows)]
+                {
+                    // cmd parses its own command line, not the quoting Rust
+                    // gives each argument, so the line goes over as it is.
+                    command.arg("/C").raw_arg(line);
+                }
+                #[cfg(not(windows))]
+                command.arg("-c").arg(line);
                 command
             }
         }
     }
 }
 
+/// The shell [`Process::shell`] runs, by its path on Unix, so a `PATH` set
+/// for the process cannot put another `sh` in its place.
 #[cfg(windows)]
-fn shell_program() -> &'static str {
-    "cmd"
-}
+const SHELL: &str = "cmd";
 
+/// The shell [`Process::shell`] runs.
 #[cfg(not(windows))]
-fn shell_program() -> &'static str {
-    "sh"
-}
-
-#[cfg(windows)]
-fn shell_flag() -> &'static str {
-    "/C"
-}
-
-#[cfg(not(windows))]
-fn shell_flag() -> &'static str {
-    "-c"
-}
+const SHELL: &str = "/bin/sh";
 
 /// A process to run, with its settings. Every setter takes and returns the
 /// builder, so a process reads as one chain.
@@ -279,16 +284,19 @@ impl PendingProcess {
     }
 
     /// Kill the process, with every process it started, when it runs
-    /// longer than this. The default is [`DEFAULT_TIMEOUT`].
+    /// longer than this. The default is [`DEFAULT_TIMEOUT`]; zero means no
+    /// timeout, as in Laravel.
     pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
+        self.timeout = (!timeout.is_zero()).then_some(timeout);
         self
     }
 
     /// Kill the process, with every process it started, when it writes no
-    /// output for this long.
+    /// output for this long; zero means none. A [`tty`](Self::tty) process
+    /// cannot have one: its output goes to the terminal, where nothing can
+    /// watch it, and [`run`](Self::run) refuses the pair.
     pub fn idle_timeout(mut self, timeout: Duration) -> Self {
-        self.idle_timeout = Some(timeout);
+        self.idle_timeout = (!timeout.is_zero()).then_some(timeout);
         self
     }
 
@@ -298,7 +306,8 @@ impl PendingProcess {
         self
     }
 
-    /// Keep the output out of the result and call no output callback.
+    /// Keep no output: it is read and thrown away, the result's output is
+    /// empty, and no output callback is called.
     pub fn quietly(mut self) -> Self {
         self.quietly = true;
         self
@@ -324,10 +333,11 @@ impl PendingProcess {
     /// # Errors
     ///
     /// [`ProcessError::NotStarted`] when the program cannot be started,
-    /// [`ProcessError::TimedOut`] and [`ProcessError::IdleTimedOut`] when it
-    /// is killed for running too long or going quiet, and, under a fake,
-    /// [`ProcessError::Stray`] and [`ProcessError::FakeExhausted`]. A
-    /// nonzero exit is not an error.
+    /// [`ProcessError::Unsupported`] for a [`tty`](Self::tty) process with an
+    /// idle timeout, [`ProcessError::TimedOut`] and
+    /// [`ProcessError::IdleTimedOut`] when it is killed for running too long
+    /// or going quiet, and, under a fake, [`ProcessError::Stray`] and
+    /// [`ProcessError::FakeExhausted`]. A nonzero exit is not an error.
     pub async fn run(self) -> Result<ProcessResult, ProcessError> {
         self.start()?.wait().await
     }
@@ -350,8 +360,9 @@ impl PendingProcess {
     ///
     /// # Errors
     ///
-    /// [`ProcessError::NotStarted`] when the program cannot be started, and
-    /// under a fake [`ProcessError::Stray`] and
+    /// [`ProcessError::NotStarted`] when the program cannot be started,
+    /// [`ProcessError::Unsupported`] for a [`tty`](Self::tty) process with an
+    /// idle timeout, and under a fake [`ProcessError::Stray`] and
     /// [`ProcessError::FakeExhausted`].
     pub fn start(self) -> Result<InvokedProcess, ProcessError> {
         InvokedProcess::start(self, None)
@@ -378,9 +389,27 @@ pub struct ProcessResult {
     pub(crate) exit_code: Option<i32>,
     pub(crate) output: String,
     pub(crate) error_output: String,
+    pub(crate) output_bytes: Vec<u8>,
+    pub(crate) error_output_bytes: Vec<u8>,
 }
 
 impl ProcessResult {
+    pub(crate) fn new(
+        command: String,
+        exit_code: Option<i32>,
+        output: Vec<u8>,
+        error_output: Vec<u8>,
+    ) -> Self {
+        Self {
+            command,
+            exit_code,
+            output: String::from_utf8_lossy(&output).into_owned(),
+            error_output: String::from_utf8_lossy(&error_output).into_owned(),
+            output_bytes: output,
+            error_output_bytes: error_output,
+        }
+    }
+
     /// The command line that ran.
     pub fn command(&self) -> &str {
         &self.command
@@ -401,15 +430,27 @@ impl ProcessResult {
         self.exit_code
     }
 
-    /// Everything the process wrote to standard output. Bytes that are not
-    /// UTF-8 are replaced.
+    /// Everything the process wrote to standard output, as text. Bytes that
+    /// are not UTF-8 are replaced; [`output_bytes`](Self::output_bytes) has
+    /// them as they were.
     pub fn output(&self) -> &str {
         &self.output
     }
 
-    /// Everything the process wrote to standard error.
+    /// Everything the process wrote to standard error, as text.
     pub fn error_output(&self) -> &str {
         &self.error_output
+    }
+
+    /// Everything the process wrote to standard output, byte for byte, for
+    /// output that is not text: an image, an archive, a dump.
+    pub fn output_bytes(&self) -> &[u8] {
+        &self.output_bytes
+    }
+
+    /// Everything the process wrote to standard error, byte for byte.
+    pub fn error_output_bytes(&self) -> &[u8] {
+        &self.error_output_bytes
     }
 
     /// Whether standard output contains `text`.
@@ -500,6 +541,15 @@ pub enum ProcessError {
         /// The command line.
         command: String,
     },
+    /// The options cannot run together: a [`tty`](PendingProcess::tty)
+    /// process with an idle timeout.
+    #[error("the process \"{command}\" cannot run: {reason}")]
+    Unsupported {
+        /// The command line.
+        command: String,
+        /// Why.
+        reason: String,
+    },
     /// The faked sequence for the command had no result left.
     #[error("the faked sequence for \"{command}\" has no result left")]
     FakeExhausted {
@@ -588,12 +638,7 @@ mod tests {
 
     #[test]
     fn a_failed_result_throws_with_its_outputs() {
-        let result = ProcessResult {
-            command: "x".into(),
-            exit_code: Some(2),
-            output: "o".into(),
-            error_output: "e".into(),
-        };
+        let result = ProcessResult::new("x".into(), Some(2), b"o".to_vec(), b"e".to_vec());
         let text = result.throw().unwrap_err().to_string();
         assert!(text.contains("exit code 2") && text.contains("o") && text.contains("e"));
     }

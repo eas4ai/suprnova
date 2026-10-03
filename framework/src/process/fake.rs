@@ -397,12 +397,12 @@ pub(crate) struct Canned {
 
 impl Canned {
     fn result(&self, command: &str) -> ProcessResult {
-        ProcessResult {
-            command: command.to_owned(),
-            exit_code: Some(self.exit_code),
-            output: self.output.clone(),
-            error_output: self.error_output.clone(),
-        }
+        ProcessResult::new(
+            command.to_owned(),
+            Some(self.exit_code),
+            self.output.clone().into_bytes(),
+            self.error_output.clone().into_bytes(),
+        )
     }
 }
 
@@ -515,10 +515,12 @@ pub(crate) struct FakeInvoked {
     err_read: AtomicUsize,
     callback: Mutex<Option<OutputCallback>>,
     signals: Mutex<Vec<Signal>>,
+    /// Under `quietly` the faked output is kept back, as a real run's is.
+    quiet: bool,
 }
 
 impl FakeInvoked {
-    pub(crate) fn new(canned: Canned, callback: Option<OutputCallback>) -> Self {
+    pub(crate) fn new(canned: Canned, callback: Option<OutputCallback>, quiet: bool) -> Self {
         Self {
             remaining: canned.iterations,
             canned,
@@ -528,6 +530,7 @@ impl FakeInvoked {
             err_read: AtomicUsize::new(0),
             callback: Mutex::new(callback),
             signals: Mutex::new(Vec::new()),
+            quiet,
         }
     }
 
@@ -578,6 +581,9 @@ impl FakeInvoked {
     }
 
     pub(crate) fn read(&self, kind: OutputKind, latest: bool) -> String {
+        if self.quiet {
+            return String::new();
+        }
         let text = match kind {
             OutputKind::Out => self.canned.output.clone(),
             OutputKind::Err => self.canned.error_output.clone(),
@@ -608,7 +614,12 @@ impl FakeInvoked {
         if !self.stopped {
             self.show_all();
         }
-        self.canned.result(command)
+        let result = self.canned.result(command);
+        if self.quiet {
+            ProcessResult::new(result.command, result.exit_code, Vec::new(), Vec::new())
+        } else {
+            result
+        }
     }
 }
 
