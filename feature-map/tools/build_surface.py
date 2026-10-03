@@ -94,6 +94,7 @@ PATH_RULES = {
     "framework/src/queue/": "queues",
     "framework/src/rate_limit/": "rate-limiting",
     "framework/src/redis_facade/": "redis",
+    "framework/src/strings/": "strings",
     "framework/src/render_cache/providers/": "render-cache-deployment",
     "framework/src/render_cache/ledger": "render-cache-deployment",
     "framework/src/render_cache/migration": "render-cache-deployment",
