@@ -11,6 +11,7 @@ use crate::mail::address::Address;
 use crate::mail::http_provider::{err, read_error_body, shared_client};
 use crate::mail::transport::{MailTransport, OutgoingMessage};
 use async_trait::async_trait;
+use std::borrow::Cow;
 
 const DEFAULT_ENDPOINT: &str = "https://api.mailgun.net";
 
@@ -74,6 +75,10 @@ fn validate_header_name(name: &str) -> Result<(), FrameworkError> {
     Ok(())
 }
 
+/// One form field: a name, mostly static, and a value borrowed from the
+/// message wherever the message already holds it.
+type FormField<'a> = (Cow<'static, str>, Cow<'a, str>);
+
 /// Build the common Mailgun field set shared by the form-encoded and
 /// multipart code paths. Kept as a single function so the two paths can't
 /// drift on field names or order.
@@ -84,41 +89,56 @@ fn validate_header_name(name: &str) -> Result<(), FrameworkError> {
 /// * `v:<name>` - message variables (Mailgun's metadata mechanism)
 /// * `h:<header-name>` - custom MIME headers
 /// * `h:X-Priority` - used by Mailgun for explicit priority
-fn build_form_fields(msg: &OutgoingMessage) -> Result<Vec<(String, String)>, FrameworkError> {
-    let mut form: Vec<(String, String)> = Vec::with_capacity(32);
-    form.push(("from".into(), msg.from.to_string()));
-    form.push(("to".into(), join(&msg.to)));
+fn build_form_fields(msg: &OutgoingMessage) -> Result<Vec<FormField<'_>>, FrameworkError> {
+    // Sized to the fields this message has, and borrowing every value the
+    // message already holds: the subject, the bodies, the tags and the
+    // header and variable values are encoded straight from the message
+    // rather than from a copy of it.
+    let count = 3
+        + usize::from(!msg.cc.is_empty())
+        + usize::from(!msg.bcc.is_empty())
+        + usize::from(!msg.reply_to.is_empty())
+        + usize::from(msg.html.is_some())
+        + usize::from(msg.text.is_some())
+        + msg.tags.len()
+        + msg.metadata.len()
+        + msg.headers.len()
+        + usize::from(msg.priority.is_some())
+        + usize::from(msg.return_path.is_some());
+    let mut form: Vec<FormField<'_>> = Vec::with_capacity(count);
+    form.push(("from".into(), msg.from.to_string().into()));
+    form.push(("to".into(), join(&msg.to).into()));
     if !msg.cc.is_empty() {
-        form.push(("cc".into(), join(&msg.cc)));
+        form.push(("cc".into(), join(&msg.cc).into()));
     }
     if !msg.bcc.is_empty() {
-        form.push(("bcc".into(), join(&msg.bcc)));
+        form.push(("bcc".into(), join(&msg.bcc).into()));
     }
     if !msg.reply_to.is_empty() {
-        form.push(("h:Reply-To".into(), join(&msg.reply_to)));
+        form.push(("h:Reply-To".into(), join(&msg.reply_to).into()));
     }
-    form.push(("subject".into(), msg.subject.clone()));
+    form.push(("subject".into(), msg.subject.as_str().into()));
     if let Some(h) = &msg.html {
-        form.push(("html".into(), h.clone()));
+        form.push(("html".into(), h.as_str().into()));
     }
     if let Some(t) = &msg.text {
-        form.push(("text".into(), t.clone()));
+        form.push(("text".into(), t.as_str().into()));
     }
     for tag in &msg.tags {
-        form.push(("o:tag".into(), tag.clone()));
+        form.push(("o:tag".into(), tag.as_str().into()));
     }
     for (k, v) in &msg.metadata {
-        form.push((format!("v:{k}"), v.clone()));
+        form.push((format!("v:{k}").into(), v.as_str().into()));
     }
     for (k, v) in &msg.headers {
         validate_header_name(k)?;
-        form.push((format!("h:{k}"), v.clone()));
+        form.push((format!("h:{k}").into(), v.as_str().into()));
     }
     if let Some(p) = msg.priority {
-        form.push(("h:X-Priority".into(), p.to_string()));
+        form.push(("h:X-Priority".into(), p.to_string().into()));
     }
     if let Some(rp) = &msg.return_path {
-        form.push(("h:Return-Path".into(), rp.to_string()));
+        form.push(("h:Return-Path".into(), rp.to_string().into()));
     }
     Ok(form)
 }
@@ -140,8 +160,10 @@ impl MailTransport for MailgunMailTransport {
             // multipart/form-data path: Mailgun's form-encoded API does not
             // accept file uploads; attachments must ride a multipart body.
             let mut form = reqwest::multipart::Form::new();
+            // A multipart part owns its text, so this path copies each
+            // value once, as it always has.
             for (key, value) in fields {
-                form = form.text(key, value);
+                form = form.text(key, value.into_owned());
             }
             for att in &msg.attachments {
                 let part = reqwest::multipart::Part::bytes(att.content.clone())
@@ -277,7 +299,8 @@ mod tests {
     /// MEM-002: the form reserves the fields the message has.
     #[test]
     fn mem_audit_the_form_reserves_only_its_fields() {
-        let fields = build_form_fields(&base_msg()).unwrap();
+        let msg = base_msg();
+        let fields = build_form_fields(&msg).unwrap();
         assert_eq!(fields.capacity(), fields.len());
     }
 }

@@ -250,7 +250,7 @@ fn mac(message: &[u8], key: &str) -> Result<[u8; 32]> {
 fn random_id() -> String {
     let mut bytes = [0_u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::storage::hex_lower(&bytes)
 }
 
 #[cfg(test)]

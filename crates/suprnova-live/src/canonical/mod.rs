@@ -5,6 +5,7 @@ mod serializer;
 mod value;
 
 pub use parser::parse_canonical_value;
+pub(crate) use serializer::check_canonical;
 pub use serializer::to_canonical_bytes;
 pub use value::{
     CanonicalError, CanonicalErrorKind, CanonicalNumber, CanonicalValue, MAX_SAFE_INTEGER,

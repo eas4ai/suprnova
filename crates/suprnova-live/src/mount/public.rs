@@ -390,7 +390,8 @@ impl PublicSeedMountService {
             expected.slot().clone(),
             expected.component().name().clone(),
             MountSnapshotKind::PublicSeed,
-            Bytes::from(signed_snapshot.clone()),
+            // Moved and shrunk to its length, as a private mount's is.
+            Bytes::from(signed_snapshot.into_boxed_slice()),
         )
         .map_err(|error| MountError::caused_by(MountErrorKind::MetadataTooLarge, &error))?;
         let revision = Revision::new(0);
@@ -402,7 +403,7 @@ impl PublicSeedMountService {
                 document_key: request.key.as_str().to_owned(),
                 protocol_minimum: catalog.minimum_protocol(),
                 runtime_contract: 1,
-                snapshot: Bytes::from(signed_snapshot),
+                snapshot: metadata.signed_snapshot(),
                 snapshot_form: IslandSnapshotForm::Seed,
                 instance_id: None,
                 revision,

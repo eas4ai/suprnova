@@ -348,8 +348,9 @@ async fn run_pipeline(env: Envelope) -> Result<JobOutcome, FrameworkError> {
             // never its own - so its very first dispatch can look overdue and
             // fire with no delay at all.
             reset_debounce_max_wait(&env).await;
-            let payload = env.payload.clone();
-            dispatch_by_name(&env.job_name, payload).await?;
+            // The envelope is done with here, so its payload is handed to
+            // the job rather than copied for it.
+            dispatch_by_name(&env.job_name, env.payload).await?;
             Ok(JobOutcome::Completed)
         })
     });

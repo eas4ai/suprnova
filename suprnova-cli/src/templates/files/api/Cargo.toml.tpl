@@ -36,6 +36,19 @@ clap = { version = "4", features = ["derive"] }
 validator = { version = "0.20", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 
+[features]
+# Heap profiling with dhat, for measuring this application's memory: build
+# with `cargo build --profile profiling --features heap-profiling`, and a
+# command that finishes or a server that shuts down gracefully writes
+# `dhat-heap.json`. See the manual, "Heap profiling" (deployment.md).
+heap-profiling = ["suprnova/heap-profiling"]
+
+# The release profile with debug symbols, for samply, perf, or a heap
+# profile with readable stacks.
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [dev-dependencies]
 # Turns `testing` back on for `cargo test` and every `--tests` build
 # only; it never reaches the binaries above. See the manual,

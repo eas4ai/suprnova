@@ -47,13 +47,15 @@ impl IslandRootFlag {
     }
 }
 
-pub(crate) struct IslandRootInput {
+/// What an island root is built from. The signed snapshot is borrowed: the
+/// root only base64-encodes it, so the caller's bytes need no copy.
+pub(crate) struct IslandRootInput<'a> {
     pub(crate) component: ComponentName,
     pub(crate) slot: IslandSlot,
     pub(crate) document_key: String,
     pub(crate) protocol_minimum: u16,
     pub(crate) runtime_contract: u16,
-    pub(crate) snapshot: Bytes,
+    pub(crate) snapshot: &'a [u8],
     pub(crate) snapshot_form: IslandSnapshotForm,
     pub(crate) instance_id: Option<InstanceId>,
     pub(crate) revision: Revision,
@@ -81,11 +83,11 @@ pub(crate) fn declared_stream(metadata: &crate::metadata::ComponentMetadata) -> 
 
 pub(crate) fn assemble_island_root(
     render: IslandRender,
-    input: IslandRootInput,
+    input: IslandRootInput<'_>,
     max_metadata_bytes: usize,
 ) -> Result<IslandRender, ViewError> {
     validate(&input)?;
-    let encoded_snapshot = URL_SAFE_NO_PAD.encode(&input.snapshot);
+    let encoded_snapshot = URL_SAFE_NO_PAD.encode(input.snapshot);
     let mut attributes = String::new();
     write_attribute(
         &mut attributes,
@@ -176,7 +178,7 @@ pub(crate) fn assemble_island_root(
     })
 }
 
-fn validate(input: &IslandRootInput) -> Result<(), ViewError> {
+fn validate(input: &IslandRootInput<'_>) -> Result<(), ViewError> {
     let key_valid = !input.document_key.is_empty()
         && input.document_key.len() <= MAX_DOCUMENT_KEY_BYTES
         && input

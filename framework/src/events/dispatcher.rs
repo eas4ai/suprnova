@@ -427,6 +427,12 @@ impl EventDispatcher {
         // so a retry never sees what the failed attempt wrote.
         let context = crate::context::Context::dehydrate();
         let mut tasks = self.queued_tasks.lock().await;
+        // A JoinSet keeps each finished task until it is joined, and only a
+        // drain at shutdown joins them; reaping here keeps the set as large
+        // as the listeners still running, not every one the process ran.
+        while let Some(finished) = tasks.try_join_next() {
+            settle_queued_task(finished);
+        }
         tasks.spawn(async move {
             let _permit = permit; // released when the task ends
             let mut attempt: u32 = 1;
@@ -514,23 +520,7 @@ impl EventDispatcher {
                     next = set.join_next() => {
                         match next {
                             None => break, // this batch drained; re-swap for late arrivals
-                            // Defense-in-depth: each spawned task body catches
-                            // its own panic before this point, so an is_panic
-                            // JoinError here means something escaped the
-                            // boundary (e.g. an abort during shutdown that
-                            // races with a panic). Log it so a missed surface
-                            // is observable rather than silently swallowed.
-                            Some(Err(join_err)) if join_err.is_panic() => {
-                                tracing::error!(
-                                    target: "suprnova::events",
-                                    panic = ?join_err,
-                                    "queued listener task panicked outside the per-attempt boundary"
-                                );
-                            }
-                            Some(Err(_cancelled)) => {
-                                // Cancellation during shutdown is expected; no log.
-                            }
-                            Some(Ok(())) => {}
+                            Some(finished) => settle_queued_task(finished),
                         }
                     }
                     _ = &mut deadline => {
@@ -696,6 +686,45 @@ impl EventDispatcher {
     }
 }
 
+/// How long a process that is shutting down waits for its queued listeners.
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(10);
+
+/// Wait, up to ten seconds, for the queued listeners still running, as a
+/// process shuts down, and log any the deadline cut off.
+///
+/// Queued listeners run as tasks of their own, spawned by whatever
+/// dispatched the event: a request, a job, a scheduled task. Returning
+/// from `main` drops the runtime and every task still on it, so the
+/// server's graceful shutdown and each worker's call this last.
+pub(crate) async fn drain_queued_at_shutdown() {
+    let in_flight = global().drain_queued(SHUTDOWN_DRAIN).await;
+    if in_flight > 0 {
+        tracing::warn!(
+            queued_listeners_in_flight = in_flight,
+            "queued event-listener drain deadline exceeded; aborted remaining tasks"
+        );
+    }
+}
+
+/// Log the outcome of a joined queued-listener task.
+///
+/// Each spawned task body catches its own panic, so an `is_panic`
+/// `JoinError` here means something escaped that boundary (an abort during
+/// shutdown that races with a panic, say); it is logged so a missed surface
+/// is observable rather than silently swallowed. A cancellation is expected
+/// during shutdown and is not logged.
+fn settle_queued_task(finished: Result<(), tokio::task::JoinError>) {
+    if let Err(join_err) = finished
+        && join_err.is_panic()
+    {
+        tracing::error!(
+            target: "suprnova::events",
+            panic = ?join_err,
+            "queued listener task panicked outside the per-attempt boundary"
+        );
+    }
+}
+
 /// In-process exponential backoff for queued-listener retries: base 100ms,
 /// doubling, capped at 2s, with full jitter (uniform in `[0, capped]`). Short
 /// by design - these are in-memory transient-fault retries, not the durable
@@ -735,6 +764,15 @@ impl Event {
             return Ok(());
         }
         global().dispatch(event).await
+    }
+
+    /// Whether a dispatch of `E` now would reach anything: a listener, a
+    /// fake recording it, or a deferral scope buffering it. A caller whose
+    /// event is costly to build skips building one nothing would see.
+    pub(crate) fn is_observed<E: super::Event>() -> bool {
+        super::testing::is_active::<E>()
+            || DEFER_BUFFER.try_with(|_| ()).is_ok()
+            || global().has_listeners::<E>()
     }
 
     /// Best-effort variant of [`dispatch`](Self::dispatch): run every

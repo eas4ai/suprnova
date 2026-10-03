@@ -669,14 +669,7 @@ impl Server {
         // (bounded) rather than cut them off. Runs after supervisors so any
         // events they emit on the way down are caught, and before the telemetry
         // flush so listener spans land in the batch.
-        let queued_in_flight =
-            crate::events::EventFacade::drain_queued(std::time::Duration::from_secs(10)).await;
-        if queued_in_flight > 0 {
-            tracing::warn!(
-                queued_listeners_in_flight = queued_in_flight,
-                "queued event-listener drain deadline exceeded; aborted remaining tasks"
-            );
-        }
+        crate::events::drain_queued_at_shutdown().await;
 
         // Flush buffered telemetry before returning. Safe to call when
         // OTel is disabled - guard just no-ops.

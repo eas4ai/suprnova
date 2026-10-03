@@ -2467,14 +2467,15 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // `IN (...)` against the child table, group by FK on each
             // returned row, and stuff into each parent's `__eager`.
             //
-            // The FK is read off the target row via
-            // `serde_json::to_value(&r).get(#fk)` rather than
-            // `r.<fk_ident>` field access. The field-access form
-            // would force the macro to assume the target struct
+            // The FK is read off the target row by the target's own
+            // `Model::field_value(&r, #fk)`, through `eager_row_column`,
+            // rather than `r.<fk_ident>` field access. The field-access
+            // form would force the macro to assume the target struct
             // declared a field by exactly that ident, which it can't
-            // verify (the target's `#[model]` invocation is a
-            // separate macro expansion). JSON-pluck works uniformly
-            // for any field name the user wrote on the target.
+            // verify (the target's `#[model]` invocation is a separate
+            // macro expansion). The column is serialized alone; the whole
+            // row is serialized only when the target's `field_value` does
+            // not know the column.
             //
             // PK values use `serde_json::to_value(&p.<pk>)`
             // serialisation as `HashMap` keys so the lookup is total
@@ -2500,10 +2501,11 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     use ::std::collections::HashMap;
                     let mut by_fk: HashMap<::std::string::String, #target_ty> = HashMap::new();
                     for r in rows.into_iter() {
-                        let row_json = ::suprnova::serde_json::to_value(&r)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let key = row_json
-                            .get(#fk)
+                        let key = ::suprnova::eloquent::relations::eager_row_column(
+                            &r,
+                            ::suprnova::eloquent::Model::field_value(&r, #fk),
+                            #fk,
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
                         by_fk.insert(key, r);
@@ -2595,16 +2597,16 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     // non-`id` PK can use `lk = "<pk>"` to align.
                     let mut by_pk: HashMap<::std::string::String, #target_ty> = HashMap::new();
                     for row in parent_rows.into_iter() {
-                        // The owner-key column is read out of the parent
-                        // target by serialising the whole row to JSON
-                        // and plucking the key - works uniformly for
-                        // any field name the user wrote, without
-                        // requiring the macro here to know the parent
-                        // struct's field layout.
-                        let row_json = ::suprnova::serde_json::to_value(&row)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let key = row_json
-                            .get(#owner_key)
+                        // The owner-key column is read off the parent
+                        // target through its `field_value` - works
+                        // uniformly for any field name the user wrote,
+                        // without requiring the macro here to know the
+                        // parent struct's field layout.
+                        let key = ::suprnova::eloquent::relations::eager_row_column(
+                            &row,
+                            ::suprnova::eloquent::Model::field_value(&row, #owner_key),
+                            #owner_key,
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
                         by_pk.insert(key, row);
@@ -2663,7 +2665,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // `.get()` on the inner builder.
             let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
 
-            // Same JSON-pluck FK-reading pattern as HasOne's eager
+            // Same `eager_row_column` FK-reading pattern as HasOne's eager
             // arm - see the long-form comment there for why we don't
             // do field-access on the target struct. The difference is
             // we accumulate into `HashMap<key, Vec<R>>` rather than
@@ -2693,10 +2695,11 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let mut by_fk: HashMap<::std::string::String, ::std::vec::Vec<#target_ty>>
                         = HashMap::new();
                     for r in rows.into_iter() {
-                        let row_json = ::suprnova::serde_json::to_value(&r)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let key = row_json
-                            .get(#fk)
+                        let key = ::suprnova::eloquent::relations::eager_row_column(
+                            &r,
+                            ::suprnova::eloquent::Model::field_value(&r, #fk),
+                            #fk,
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
                         by_fk.entry(key).or_default().push(r);
@@ -2788,12 +2791,14 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let mut seen_rel: ::std::collections::HashSet<::std::string::String>
                         = ::std::collections::HashSet::new();
                     for pv in pivots.iter() {
-                        let pj = ::suprnova::serde_json::to_value(pv)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        if let ::core::option::Option::Some(v) = pj.get(#pivot_related) {
+                        if let ::core::option::Option::Some(v) = ::suprnova::eloquent::relations::eager_row_column(
+                            pv,
+                            ::suprnova::eloquent::Model::field_value(pv, #pivot_related),
+                            #pivot_related,
+                        ) {
                             let s = v.to_string();
                             if seen_rel.insert(s) {
-                                related_ids.push(v.clone());
+                                related_ids.push(v);
                             }
                         }
                     }
@@ -2824,10 +2829,11 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let mut by_related_id: HashMap<::std::string::String, #target_ty>
                         = HashMap::new();
                     for r in related_rows.into_iter() {
-                        let rj = ::suprnova::serde_json::to_value(&r)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let key = rj
-                            .get("id")
+                        let key = ::suprnova::eloquent::relations::eager_row_column(
+                            &r,
+                            ::suprnova::eloquent::Model::field_value(&r, "id"),
+                            "id",
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
                         by_related_id.insert(key, r);
@@ -2841,14 +2847,18 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::std::vec::Vec<#target_ty>,
                     > = HashMap::new();
                     for pv in pivots.into_iter() {
-                        let pj = ::suprnova::serde_json::to_value(&pv)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let parent_key = pj
-                            .get(#pivot_fk)
+                        let parent_key = ::suprnova::eloquent::relations::eager_row_column(
+                            &pv,
+                            ::suprnova::eloquent::Model::field_value(&pv, #pivot_fk),
+                            #pivot_fk,
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        let related_key = pj
-                            .get(#pivot_related)
+                        let related_key = ::suprnova::eloquent::relations::eager_row_column(
+                            &pv,
+                            ::suprnova::eloquent::Model::field_value(&pv, #pivot_related),
+                            #pivot_related,
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
                         if let ::core::option::Option::Some(template)
@@ -3114,17 +3124,19 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let c_rows: ::std::vec::Vec<#target_ty> = __sn_builder.get().await?.into_vec();
 
                     // Group C rows by parent_id, via the b->parent
-                    // map. The per-row C.second_key is JSON-plucked
-                    // (same pattern as HasMany's eager arm) and
+                    // map. The per-row C.second_key is read through
+                    // `eager_row_column` (as in HasMany's eager arm) and
                     // normalised to the raw string form so it lines
                     // up with the CAST-as-TEXT keys in `b_to_parent`.
                     for r in c_rows.into_iter() {
-                        let row_json = ::suprnova::serde_json::to_value(&r)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let b_id_key = match row_json.get(#second_key) {
+                        let b_id_key = match ::suprnova::eloquent::relations::eager_row_column(
+                            &r,
+                            ::suprnova::eloquent::Model::field_value(&r, #second_key),
+                            #second_key,
+                        ) {
                             ::core::option::Option::Some(
                                 ::suprnova::serde_json::Value::String(s),
-                            ) => s.clone(),
+                            ) => s,
                             ::core::option::Option::Some(other) => other.to_string(),
                             ::core::option::Option::None => ::std::string::String::new(),
                         };
@@ -3226,15 +3238,16 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let mut by_fk: HashMap<::std::string::String, ::std::vec::Vec<#target_ty>>
                         = HashMap::new();
                     for r in rows.into_iter() {
-                        // JSON-pluck the morph-id column off the
-                        // returned row - same pattern as the HasMany
+                        // Read the morph-id column off the returned row
+                        // through `eager_row_column` - as in the HasMany
                         // arm. Avoids requiring the macro at THIS
                         // expansion site to know the target struct's
                         // field layout.
-                        let row_json = ::suprnova::serde_json::to_value(&r)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let key = row_json
-                            .get(#id_col)
+                        let key = ::suprnova::eloquent::relations::eager_row_column(
+                            &r,
+                            ::suprnova::eloquent::Model::field_value(&r, #id_col),
+                            #id_col,
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
                         by_fk.entry(key).or_default().push(r);
@@ -3316,12 +3329,14 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let mut seen_rel: ::std::collections::HashSet<::std::string::String>
                         = ::std::collections::HashSet::new();
                     for pv in pivots.iter() {
-                        let pj = ::suprnova::serde_json::to_value(pv)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        if let ::core::option::Option::Some(v) = pj.get(#pivot_related) {
+                        if let ::core::option::Option::Some(v) = ::suprnova::eloquent::relations::eager_row_column(
+                            pv,
+                            ::suprnova::eloquent::Model::field_value(pv, #pivot_related),
+                            #pivot_related,
+                        ) {
                             let s = v.to_string();
                             if seen_rel.insert(s) {
-                                related_ids.push(v.clone());
+                                related_ids.push(v);
                             }
                         }
                     }
@@ -3343,10 +3358,11 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let mut by_related_id: HashMap<::std::string::String, #target_ty>
                         = HashMap::new();
                     for r in related_rows.into_iter() {
-                        let rj = ::suprnova::serde_json::to_value(&r)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let key = rj
-                            .get("id")
+                        let key = ::suprnova::eloquent::relations::eager_row_column(
+                            &r,
+                            ::suprnova::eloquent::Model::field_value(&r, "id"),
+                            "id",
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
                         by_related_id.insert(key, r);
@@ -3361,14 +3377,18 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::std::vec::Vec<#target_ty>,
                     > = HashMap::new();
                     for pv in pivots.into_iter() {
-                        let pj = ::suprnova::serde_json::to_value(&pv)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let parent_key = pj
-                            .get(#id_col)
+                        let parent_key = ::suprnova::eloquent::relations::eager_row_column(
+                            &pv,
+                            ::suprnova::eloquent::Model::field_value(&pv, #id_col),
+                            #id_col,
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        let related_key = pj
-                            .get(#pivot_related)
+                        let related_key = ::suprnova::eloquent::relations::eager_row_column(
+                            &pv,
+                            ::suprnova::eloquent::Model::field_value(&pv, #pivot_related),
+                            #pivot_related,
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
                         if let ::core::option::Option::Some(template)
@@ -3474,12 +3494,14 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let mut seen_target: ::std::collections::HashSet<::std::string::String>
                         = ::std::collections::HashSet::new();
                     for pv in pivots.iter() {
-                        let pj = ::suprnova::serde_json::to_value(pv)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        if let ::core::option::Option::Some(v) = pj.get(#id_col) {
+                        if let ::core::option::Option::Some(v) = ::suprnova::eloquent::relations::eager_row_column(
+                            pv,
+                            ::suprnova::eloquent::Model::field_value(pv, #id_col),
+                            #id_col,
+                        ) {
                             let s = v.to_string();
                             if seen_target.insert(s) {
-                                target_ids.push(v.clone());
+                                target_ids.push(v);
                             }
                         }
                     }
@@ -3502,10 +3524,11 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let mut by_target_id: HashMap<::std::string::String, #target_ty>
                         = HashMap::new();
                     for r in target_rows.into_iter() {
-                        let rj = ::suprnova::serde_json::to_value(&r)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let key = rj
-                            .get("id")
+                        let key = ::suprnova::eloquent::relations::eager_row_column(
+                            &r,
+                            ::suprnova::eloquent::Model::field_value(&r, "id"),
+                            "id",
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
                         by_target_id.insert(key, r);
@@ -3523,14 +3546,18 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::std::vec::Vec<#target_ty>,
                     > = HashMap::new();
                     for pv in pivots.into_iter() {
-                        let pj = ::suprnova::serde_json::to_value(&pv)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let tag_key = pj
-                            .get(#pivot_fk)
+                        let tag_key = ::suprnova::eloquent::relations::eager_row_column(
+                            &pv,
+                            ::suprnova::eloquent::Model::field_value(&pv, #pivot_fk),
+                            #pivot_fk,
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        let target_key = pj
-                            .get(#id_col)
+                        let target_key = ::suprnova::eloquent::relations::eager_row_column(
+                            &pv,
+                            ::suprnova::eloquent::Model::field_value(&pv, #id_col),
+                            #id_col,
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
                         if let ::core::option::Option::Some(template)
@@ -3713,7 +3740,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_has_fk(&parent_name));
             // Same shape as `__eager_load`: run an IN query, group by
-            // FK (via JSON-pluck - see eager arm for why), store the
+            // FK (via `eager_row_column` - see eager arm for why), store the
             // per-parent count via `set_count`.
             Ok(Some(quote! {
                 #name_str => {
@@ -3732,10 +3759,11 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     use ::std::collections::HashMap;
                     let mut counts: HashMap<::std::string::String, u64> = HashMap::new();
                     for r in rows.iter() {
-                        let row_json = ::suprnova::serde_json::to_value(r)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let key = row_json
-                            .get(#fk)
+                        let key = ::suprnova::eloquent::relations::eager_row_column(
+                            r,
+                            ::suprnova::eloquent::Model::field_value(r, #fk),
+                            #fk,
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
                         *counts.entry(key).or_insert(0) += 1;
@@ -3796,9 +3824,11 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     use ::std::collections::HashSet;
                     let mut existing_keys: HashSet<::std::string::String> = HashSet::new();
                     for r in parent_rows.iter() {
-                        let row_json = ::suprnova::serde_json::to_value(r)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        if let ::core::option::Option::Some(v) = row_json.get(#owner_key) {
+                        if let ::core::option::Option::Some(v) = ::suprnova::eloquent::relations::eager_row_column(
+                            r,
+                            ::suprnova::eloquent::Model::field_value(r, #owner_key),
+                            #owner_key,
+                        ) {
                             existing_keys.insert(v.to_string());
                         }
                     }
@@ -4721,14 +4751,18 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     use ::std::collections::HashMap;
                     let mut by_fk: HashMap<::std::string::String, f64> = HashMap::new();
                     for r in rows.iter() {
-                        let row_json = ::suprnova::serde_json::to_value(r)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let key = row_json
-                            .get(#fk)
+                        let key = ::suprnova::eloquent::relations::eager_row_column(
+                            r,
+                            ::suprnova::eloquent::Model::field_value(r, #fk),
+                            #fk,
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        let col_val = row_json
-                            .get(column)
+                        let col_val = ::suprnova::eloquent::relations::eager_row_column(
+                            r,
+                            ::suprnova::eloquent::Model::field_value(r, column),
+                            column,
+                        )
                             .and_then(|v| v.as_f64())
                             .unwrap_or(0.0);
                         // Each parent's group has 0-or-1 row, so the
@@ -4826,14 +4860,18 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     use ::std::collections::HashMap;
                     let mut by_pk: HashMap<::std::string::String, f64> = HashMap::new();
                     for r in parent_rows.iter() {
-                        let row_json = ::suprnova::serde_json::to_value(r)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let key = row_json
-                            .get(#owner_key)
+                        let key = ::suprnova::eloquent::relations::eager_row_column(
+                            r,
+                            ::suprnova::eloquent::Model::field_value(r, #owner_key),
+                            #owner_key,
+                        )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        let col_val = row_json
-                            .get(column)
+                        let col_val = ::suprnova::eloquent::relations::eager_row_column(
+                            r,
+                            ::suprnova::eloquent::Model::field_value(r, column),
+                            column,
+                        )
                             .and_then(|v| v.as_f64())
                             .unwrap_or(0.0);
                         by_pk.insert(key, col_val);

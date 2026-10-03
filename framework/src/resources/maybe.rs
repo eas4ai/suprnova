@@ -194,15 +194,11 @@ pub(crate) fn is_missing_sentinel(v: &Value) -> bool {
 pub fn strip_missing_values(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            // Two passes: collect keys to drop, then drop.
-            let to_drop: Vec<String> = map
-                .iter()
-                .filter(|(_, v)| is_missing_sentinel(v))
-                .map(|(k, _)| k.clone())
-                .collect();
-            for k in to_drop {
-                map.remove(&k);
-            }
+            // `retain` keeps the remaining keys in declaration order, as
+            // Laravel's resource does. `remove` on the order-preserving map
+            // swaps the last key into the hole, so a missing first attribute
+            // moved the last one to the front.
+            map.retain(|_, v| !is_missing_sentinel(v));
             for (_, v) in map.iter_mut() {
                 strip_missing_values(v);
             }

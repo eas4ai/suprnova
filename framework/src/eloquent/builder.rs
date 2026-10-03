@@ -4647,10 +4647,11 @@ where
                     FrameworkError::database(format!("serialise inner Model for runtime cast: {e}"))
                 })?;
                 if let serde_json::Value::Object(ref mut map) = as_json {
+                    // Each column is converted where it sits, the stored
+                    // value handed to the cast rather than cloned for it.
                     for (col, cast) in &runtime_casts {
-                        if let Some(v) = map.get(*col).cloned() {
-                            let coerced = cast.from_storage_json(&v)?;
-                            map.insert((*col).to_string(), coerced);
+                        if let Some(slot) = map.get_mut(*col) {
+                            *slot = cast.from_storage_json_owned(std::mem::take(slot))?;
                         }
                     }
                 }

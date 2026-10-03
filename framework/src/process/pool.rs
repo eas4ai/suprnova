@@ -377,7 +377,7 @@ impl Pipe {
         let mut previous: Option<ProcessResult> = None;
         for (key, process) in self.processes {
             let process = match &previous {
-                Some(result) => process.input(result.output_bytes.clone()),
+                Some(result) => process.input(result.output_bytes().to_vec()),
                 None => process,
             };
             let result = match &output {

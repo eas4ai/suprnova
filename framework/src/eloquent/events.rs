@@ -143,6 +143,16 @@ where
 /// model event proceeds uncancellable (matches Laravel's
 /// `WithoutModelEvents`).
 pub async fn dispatch_cancellable<E: Event + Clone>(event: E) -> Result<(), FrameworkError> {
+    dispatch_cancellable_with(move || event).await
+}
+
+/// [`dispatch_cancellable`] that builds the event only when a cancellable
+/// listener is registered for it. A model event carries a copy of the
+/// model, and building one that nothing will see copied the model for
+/// nothing.
+pub async fn dispatch_cancellable_with<E: Event + Clone>(
+    build: impl FnOnce() -> E + Send,
+) -> Result<(), FrameworkError> {
     if crate::seed::events_muted() {
         return Ok(());
     }
@@ -150,6 +160,7 @@ pub async fn dispatch_cancellable<E: Event + Clone>(event: E) -> Result<(), Fram
     if listeners.is_empty() {
         return Ok(());
     }
+    let event = build();
     for l in listeners {
         // Each listener gets its own clone - the same `event` value
         // is reused across all of them when no listener cancels.
@@ -177,6 +188,21 @@ pub async fn dispatch_after<E: Event>(event: E) -> Result<(), FrameworkError> {
         return Ok(());
     }
     EventFacade::dispatch(event).await
+}
+
+/// [`dispatch_after`] that builds the event only when something will see
+/// it: a listener, a fake recording it, or a deferral scope buffering it.
+///
+/// A model event carries a copy of the model, eager-loaded relations and
+/// all, and `Retrieved` fires for every row of every query. Building it
+/// when nothing listens copied every row the application read.
+pub async fn dispatch_after_with<E: Event>(
+    build: impl FnOnce() -> E + Send,
+) -> Result<(), FrameworkError> {
+    if crate::seed::events_muted() || !EventFacade::is_observed::<E>() {
+        return Ok(());
+    }
+    EventFacade::dispatch(build()).await
 }
 
 // --- Cancellable listener registry --------------------------------------

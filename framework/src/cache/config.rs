@@ -47,6 +47,8 @@ impl CacheDriver {
 /// - `REDIS_URL` - Redis connection URL (default: redis://127.0.0.1:6379)
 /// - `REDIS_PREFIX` - Key prefix for cache entries (default: "suprnova_cache:")
 /// - `CACHE_DEFAULT_TTL` - Default TTL in seconds, 0 = no expiration (default: 3600)
+/// - `CACHE_SWEEP_INTERVAL` - Seconds between sweeps of the in-memory
+///   driver's expired entries, 0 = no sweep (default: 60)
 ///
 /// # Example
 ///
@@ -77,6 +79,11 @@ pub struct CacheConfig {
     /// this to `Cache::put(None)` / `Cache::tags_put(None)`. `Cache::forever`
     /// and `Cache::remember_forever` always bypass it.
     pub default_ttl: u64,
+    /// Seconds between sweeps of the in-memory driver's expired entries
+    /// (0 = no sweep). A read removes the expired entry it finds, but a
+    /// key that expires and is never read again stays in memory until a
+    /// sweep removes it. Redis expires keys itself and ignores this.
+    pub sweep_interval: u64,
 }
 
 impl CacheConfig {
@@ -96,6 +103,7 @@ impl CacheConfig {
             url: env_optional("REDIS_URL").unwrap_or_else(|| "redis://127.0.0.1:6379".to_string()),
             prefix: env("REDIS_PREFIX", "suprnova_cache:".to_string()),
             default_ttl: env("CACHE_DEFAULT_TTL", 3600),
+            sweep_interval: env("CACHE_SWEEP_INTERVAL", 60),
         })
     }
 
@@ -116,6 +124,7 @@ impl Default for CacheConfig {
             url: "redis://127.0.0.1:6379".to_string(),
             prefix: "suprnova_cache:".to_string(),
             default_ttl: 3600,
+            sweep_interval: 60,
         }
     }
 }
@@ -127,6 +136,7 @@ pub struct CacheConfigBuilder {
     url: Option<String>,
     prefix: Option<String>,
     default_ttl: Option<u64>,
+    sweep_interval: Option<u64>,
 }
 
 impl CacheConfigBuilder {
@@ -154,6 +164,13 @@ impl CacheConfigBuilder {
         self
     }
 
+    /// Set the seconds between sweeps of the in-memory driver's expired
+    /// entries; 0 turns the sweep off.
+    pub fn sweep_interval(mut self, seconds: u64) -> Self {
+        self.sweep_interval = Some(seconds);
+        self
+    }
+
     /// Build the configuration. Falls back to `CacheConfig::default()`
     /// for any unset field rather than re-reading the environment, so
     /// the builder is fully deterministic.
@@ -164,6 +181,7 @@ impl CacheConfigBuilder {
             url: self.url.unwrap_or(defaults.url),
             prefix: self.prefix.unwrap_or(defaults.prefix),
             default_ttl: self.default_ttl.unwrap_or(defaults.default_ttl),
+            sweep_interval: self.sweep_interval.unwrap_or(defaults.sweep_interval),
         }
     }
 }

@@ -25,3 +25,9 @@ license = "MIT"
 [profile.dev]
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
+
+# The release profile with debug symbols, for samply, perf, or a heap
+# profile (`--features heap-profiling`) with readable stacks.
+[profile.profiling]
+inherits = "release"
+debug = true

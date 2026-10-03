@@ -702,6 +702,7 @@ async fn redis_synchronously_blocked_body_reports_unfenced_after_takeover() {
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_owned()),
         prefix: format!("idem-final-proof:{}:", uuid::Uuid::new_v4()),
         default_ttl: 0,
+        sweep_interval: 0,
     };
     let store: Arc<dyn CacheStore> = Arc::new(
         suprnova::cache::RedisCache::connect(&config)

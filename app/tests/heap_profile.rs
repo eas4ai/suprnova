@@ -34,18 +34,34 @@ fn mem_audit_the_workspace_offers_a_profiling_profile() {
 fn mem_audit_a_command_writes_a_heap_profile() {
     let tmp = tempfile::TempDir::new().expect("tmpdir");
     let profile = tmp.path().join("heap.json");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_console"))
-        .arg("greet")
-        .env(
-            "DATABASE_URL",
-            format!("sqlite://{}?mode=rwc", tmp.path().join("heap.db").display()),
-        )
-        .env("APP_ENV", "testing")
-        .env("LOG_LEVEL", "warn")
-        .env("SUPRNOVA_HEAP_PROFILE", &profile)
-        .current_dir(tmp.path())
-        .output()
-        .expect("spawn the console");
+    let run = |bin: &str, args: &[&str]| {
+        std::process::Command::new(bin)
+            .args(args)
+            .env(
+                "DATABASE_URL",
+                format!("sqlite://{}?mode=rwc", tmp.path().join("heap.db").display()),
+            )
+            .env("APP_ENV", "testing")
+            .env("LOG_LEVEL", "warn")
+            .env("SUPRNOVA_HEAP_PROFILE", &profile)
+            // A `.env` in the app directory would otherwise override
+            // every variable set here.
+            .current_dir(tmp.path())
+            .output()
+            .expect("spawn the binary")
+    };
+    // The bootstrap reads the `features` table, so the database is
+    // migrated first. That run writes a profile of its own, which is
+    // removed so the file read below can only be the command's.
+    let migrated = run(env!("CARGO_BIN_EXE_app"), &["migrate"]);
+    assert!(
+        migrated.status.success(),
+        "`app migrate` failed:\n{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    std::fs::remove_file(&profile).expect("`app migrate` wrote a heap profile too");
+
+    let output = run(env!("CARGO_BIN_EXE_console"), &["greet"]);
     assert!(
         output.status.success(),
         "`console greet` failed:\n{}",

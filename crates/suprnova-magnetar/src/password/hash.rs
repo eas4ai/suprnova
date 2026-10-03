@@ -452,5 +452,5 @@ fn random_secret() -> String {
     use rand::RngCore;
     let mut bytes = [0_u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::storage::hex_lower(&bytes)
 }

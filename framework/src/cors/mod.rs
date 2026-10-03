@@ -146,7 +146,7 @@ pub enum AllowedHeaders {
 pub struct CorsConfig {
     origins: AllowedOrigins,
     origin_patterns: Vec<Regex>,
-    paths: Vec<String>,
+    paths: Vec<PathPattern>,
     methods: Vec<String>,
     headers: AllowedHeaders,
     exposed_headers: Vec<String>,
@@ -167,7 +167,14 @@ impl std::fmt::Debug for CorsConfig {
                     .map(|r| r.as_str())
                     .collect::<Vec<_>>(),
             )
-            .field("paths", &self.paths)
+            .field(
+                "paths",
+                &self
+                    .paths
+                    .iter()
+                    .map(|p| p.raw.as_str())
+                    .collect::<Vec<_>>(),
+            )
             .field("methods", &self.methods)
             .field("headers", &self.headers)
             .field("exposed_headers", &self.exposed_headers)
@@ -201,37 +208,68 @@ fn anchor_regex(raw: &str) -> String {
     out
 }
 
-/// Match a Laravel-style URL path pattern against a request path. `*` in
-/// the pattern matches any run of characters (including `/`), mirroring
+/// A Laravel-style URL path pattern, compiled once when the configuration
+/// is built. `*` matches any run of characters (including `/`), mirroring
 /// Laravel's `Str::is`. A leading `/` on either side is normalized so
 /// `"api/*"` and `"/api/*"` both match `"/api/posts"`.
-fn path_pattern_matches(pattern: &str, path: &str) -> bool {
-    let pattern = pattern.trim_start_matches('/');
-    let path = path.trim_start_matches('/');
+///
+/// Compiling here rather than per request matters: translating a wildcard
+/// pattern and building its regex allocated on every request to a CORS
+/// path, the same work each time.
+#[derive(Clone)]
+struct PathPattern {
+    /// The pattern as configured, which `Debug` shows.
+    raw: String,
+    matcher: PathMatcher,
+}
 
-    if pattern == "*" {
-        return true;
-    }
-    if !pattern.contains('*') {
-        return pattern == path;
-    }
+#[derive(Clone)]
+enum PathMatcher {
+    /// A lone `*`: every path.
+    Any,
+    /// No `*`: the path, less its leading `/`, equals the pattern's.
+    Exact,
+    /// A `*` somewhere: the translated regex, or `None` when it would not
+    /// compile, which matches nothing.
+    Glob(Option<Regex>),
+}
 
-    // Translate `*` to `.*`, escape every other regex metacharacter.
-    let mut re = String::with_capacity(pattern.len() + 4);
-    re.push('^');
-    for ch in pattern.chars() {
-        if ch == '*' {
-            re.push_str(".*");
-        } else if ch.is_ascii_alphanumeric() || ch == '/' || ch == '-' || ch == '_' {
-            re.push(ch);
+impl PathPattern {
+    fn new(raw: String) -> Self {
+        let pattern = raw.trim_start_matches('/');
+        let matcher = if pattern == "*" {
+            PathMatcher::Any
+        } else if !pattern.contains('*') {
+            PathMatcher::Exact
         } else {
-            // Escape regex metacharacters in literal segments.
-            re.push('\\');
-            re.push(ch);
+            // Translate `*` to `.*`, escape every other regex metacharacter.
+            let mut re = String::with_capacity(pattern.len() + 4);
+            re.push('^');
+            for ch in pattern.chars() {
+                if ch == '*' {
+                    re.push_str(".*");
+                } else if ch.is_ascii_alphanumeric() || ch == '/' || ch == '-' || ch == '_' {
+                    re.push(ch);
+                } else {
+                    // Escape regex metacharacters in literal segments.
+                    re.push('\\');
+                    re.push(ch);
+                }
+            }
+            re.push('$');
+            PathMatcher::Glob(Regex::new(&re).ok())
+        };
+        Self { raw, matcher }
+    }
+
+    fn matches(&self, path: &str) -> bool {
+        let path = path.trim_start_matches('/');
+        match &self.matcher {
+            PathMatcher::Any => true,
+            PathMatcher::Exact => self.raw.trim_start_matches('/') == path,
+            PathMatcher::Glob(regex) => regex.as_ref().is_some_and(|regex| regex.is_match(path)),
         }
     }
-    re.push('$');
-    Regex::new(&re).map(|r| r.is_match(path)).unwrap_or(false)
 }
 
 impl CorsConfig {
@@ -305,7 +343,10 @@ impl CorsConfig {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.paths = patterns.into_iter().map(Into::into).collect();
+        self.paths = patterns
+            .into_iter()
+            .map(|pattern| PathPattern::new(pattern.into()))
+            .collect();
         self
     }
 
@@ -524,7 +565,7 @@ impl CorsConfig {
         if self.paths.is_empty() {
             return true;
         }
-        self.paths.iter().any(|p| path_pattern_matches(p, path))
+        self.paths.iter().any(|p| p.matches(path))
     }
 
     /// Whether any registered `skip_when` predicate matches `request`.
@@ -896,6 +937,10 @@ mod tests {
     }
 
     // -- paths scoping ----------------------------------------------------
+
+    fn path_pattern_matches(pattern: &str, path: &str) -> bool {
+        PathPattern::new(pattern.to_owned()).matches(path)
+    }
 
     #[test]
     fn path_pattern_handles_wildcard_suffix() {

@@ -187,21 +187,77 @@ function messageData(event: unknown): string | null {
   }
 }
 
-function findRecordEnd(bytes: Uint8Array): number {
-  for (let index = 0; index + 1 < bytes.byteLength; index += 1) {
+/** The index of the first blank line, `\n\n`, at or after `from`, or -1. */
+function findRecordEnd(bytes: Uint8Array, from: number): number {
+  for (let index = from; index + 1 < bytes.byteLength; index += 1) {
     if (bytes[index] === 10 && bytes[index + 1] === 10) return index;
   }
   return -1;
 }
 
-function appendBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
-  if (right.byteLength > MAX_SSE_RECORD_BYTES + 512 - left.byteLength) {
-    throw new Error("async_sse_record_too_large");
+/** The most an incomplete record may hold while the rest of it arrives. */
+const MAX_SSE_CARRY_BYTES = MAX_SSE_RECORD_BYTES + 512;
+
+/**
+ * Splits a server-sent event stream into records. A record wholly inside a
+ * network chunk is decoded from a view of that chunk; only a record a chunk
+ * leaves unfinished is carried, in a buffer that grows by doubling. Joining
+ * every chunk onto the bytes held before, and slicing the rest off after
+ * every record, copied the stream over and over. The size limit applies to
+ * each record, so a chunk of many small records is read whole.
+ */
+class SseRecordReader {
+  #carry = new Uint8Array(0);
+  #carryLength = 0;
+
+  /** Reads `chunk`, calling `record` with each complete record's bytes. */
+  push(chunk: Uint8Array, record: (bytes: Uint8Array) => void): void {
+    let view = chunk;
+    if (this.#carryLength !== 0) {
+      const carried = this.#carryLength;
+      // The blank line ending the carried record may straddle the boundary.
+      const end =
+        this.#carry[carried - 1] === 10 && chunk[0] === 10 ? carried - 1 : findRecordEnd(chunk, 0);
+      if (end < 0) {
+        this.#append(chunk);
+        return;
+      }
+      const recordEnd = end === carried - 1 ? end : carried + end;
+      if (recordEnd > MAX_SSE_RECORD_BYTES) throw new Error("async_sse_record_too_large");
+      if (recordEnd > carried) this.#append(chunk.subarray(0, recordEnd - carried));
+      record(this.#carry.subarray(0, recordEnd));
+      this.#carryLength = 0;
+      view = chunk.subarray(recordEnd + 2 - carried);
+    }
+    let start = 0;
+    for (;;) {
+      const end = findRecordEnd(view, start);
+      if (end < 0) break;
+      if (end - start > MAX_SSE_RECORD_BYTES) throw new Error("async_sse_record_too_large");
+      record(view.subarray(start, end));
+      start = end + 2;
+    }
+    if (start < view.byteLength) this.#append(view.subarray(start));
   }
-  const joined = new Uint8Array(left.byteLength + right.byteLength);
-  joined.set(left);
-  joined.set(right, left.byteLength);
-  return joined;
+
+  /** Whether an unfinished record is carried. */
+  get pending(): boolean {
+    return this.#carryLength !== 0;
+  }
+
+  #append(bytes: Uint8Array): void {
+    const length = this.#carryLength + bytes.byteLength;
+    if (length > MAX_SSE_CARRY_BYTES) throw new Error("async_sse_record_too_large");
+    if (length > this.#carry.byteLength) {
+      const grown = new Uint8Array(
+        Math.min(MAX_SSE_CARRY_BYTES, Math.max(length, this.#carry.byteLength * 2, 256)),
+      );
+      grown.set(this.#carry.subarray(0, this.#carryLength));
+      this.#carry = grown;
+    }
+    this.#carry.set(bytes, this.#carryLength);
+    this.#carryLength = length;
+  }
 }
 
 function decodeSseRecord(bytes: Uint8Array): string | null {
@@ -225,9 +281,9 @@ function decodeSseRecord(bytes: Uint8Array): string | null {
       throw new Error("async_sse_record_invalid");
     }
   }
-  if (data === null || new TextEncoder().encode(data).byteLength > MAX_SSE_RECORD_BYTES) {
-    throw new Error("async_sse_record_invalid");
-  }
+  // The record is at most MAX_SSE_RECORD_BYTES, and `data` is part of it,
+  // so its UTF-8 length cannot exceed the limit: no need to encode it again.
+  if (data === null) throw new Error("async_sse_record_invalid");
   return data;
 }
 
@@ -627,7 +683,7 @@ class FetchEventSourceAdapter implements EventSourcePort {
         return;
       }
       this.#request.opened();
-      let buffered: Uint8Array = new Uint8Array(0);
+      const records = new SseRecordReader();
       for (;;) {
         const item = await reader.read();
         // The owned adapter can be closed while the awaited stream read is pending.
@@ -637,22 +693,14 @@ class FetchEventSourceAdapter implements EventSourcePort {
           return;
         }
         if (item.done) {
-          if (buffered.byteLength !== 0) throw new Error("async_sse_record_invalid");
+          if (records.pending) throw new Error("async_sse_record_invalid");
           this.#request.failed("transport_lost");
           return;
         }
-        buffered = appendBytes(buffered, item.value);
-        for (;;) {
-          const end = findRecordEnd(buffered);
-          if (end < 0) break;
-          if (end > MAX_SSE_RECORD_BYTES) throw new Error("async_sse_record_too_large");
-          const data = decodeSseRecord(buffered.slice(0, end));
-          buffered = buffered.slice(end + 2);
+        records.push(item.value, (bytes) => {
+          const data = decodeSseRecord(bytes);
           if (data !== null) this.#request.message(data);
-        }
-        if (buffered.byteLength > MAX_SSE_RECORD_BYTES + 512) {
-          throw new Error("async_sse_record_too_large");
-        }
+        });
       }
     } catch {
       if (!this.#closed && !this.#abort.signal.aborted) this.#request.failed("protocol_invalid");

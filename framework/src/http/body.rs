@@ -96,7 +96,11 @@ pub async fn collect_body_with_cap(
     // pinning.
     let mut body = body;
     let mut total: usize = 0;
-    let mut buf: Vec<u8> = Vec::new();
+    // The frames are held as they arrive and joined once the length is
+    // known, so the body is one allocation of exactly its size. Growing a
+    // buffer frame by frame left it up to twice the body, for as long as
+    // the handler kept the bytes.
+    let mut frames: Vec<Bytes> = Vec::new();
     while let Some(frame) = body.frame().await {
         let frame = frame
             .map_err(|e| FrameworkError::internal(format!("Failed to read request body: {e}")))?;
@@ -108,8 +112,16 @@ pub async fn collect_body_with_cap(
             if total > max_bytes {
                 return Err(over_limit(max_bytes));
             }
-            buf.extend_from_slice(&data);
+            if !data.is_empty() {
+                frames.push(data);
+            }
         }
+    }
+    // Copied even when there is one frame: a frame shares the connection's
+    // read buffer, and holding it would hold that whole buffer.
+    let mut buf: Vec<u8> = Vec::with_capacity(total);
+    for frame in &frames {
+        buf.extend_from_slice(frame);
     }
     Ok(Bytes::from(buf))
 }

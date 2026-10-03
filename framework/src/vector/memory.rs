@@ -63,27 +63,43 @@ impl VectorDriver for MemoryVectorDriver {
                 "vector::similar query is zero-vector",
             ));
         }
-        let mut scored: Vec<VectorMatch> = bucket
+        // Rank borrowed items and copy out only the `k` that are returned:
+        // cloning every item's id and metadata to keep three of them was
+        // the whole store's size again on every search.
+        let mut scored: Vec<(f32, &VectorItem)> = bucket
             .values()
-            .filter_map(|item| {
-                if item.embedding.len() != query.len() {
-                    return None;
-                }
-                let score = cosine(&query, &item.embedding, q_norm);
-                Some(VectorMatch {
-                    id: item.id.clone(),
-                    score,
-                    metadata: item.metadata.clone(),
-                })
-            })
+            .filter(|item| item.embedding.len() == query.len())
+            .map(|item| (cosine(&query, &item.embedding, q_norm), item))
             .collect();
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        scored.truncate(k);
-        Ok(scored)
+        // A NaN score, from a NaN in a stored embedding, ranks below every
+        // number. `partial_cmp` called it equal to everything, which is not
+        // an order, and the standard sort may panic on a comparator that
+        // is not one.
+        let rank = |score: f32| {
+            if score.is_nan() {
+                f32::NEG_INFINITY
+            } else {
+                score
+            }
+        };
+        let best_first =
+            |a: &(f32, &VectorItem), b: &(f32, &VectorItem)| rank(b.0).total_cmp(&rank(a.0));
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        if k < scored.len() {
+            scored.select_nth_unstable_by(k - 1, best_first);
+            scored.truncate(k);
+        }
+        scored.sort_by(best_first);
+        Ok(scored
+            .into_iter()
+            .map(|(score, item)| VectorMatch {
+                id: item.id.clone(),
+                score,
+                metadata: item.metadata.clone(),
+            })
+            .collect())
     }
 
     async fn delete(&self, store: &str, ids: Vec<String>) -> Result<(), FrameworkError> {

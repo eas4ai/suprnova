@@ -5,7 +5,7 @@ use std::fmt;
 
 use serde::de::DeserializeOwned;
 
-use crate::canonical::{CanonicalValue, to_canonical_bytes};
+use crate::canonical::{CanonicalValue, check_canonical};
 use crate::identity::ModelField;
 use crate::limits::InputLimits;
 use crate::state::ModelCodec;
@@ -116,7 +116,8 @@ impl RawActionArguments {
 /// Schema-authorized action arguments whose values remain redacted until typed access.
 pub struct PreparedActionArguments {
     schema: ActionArgumentSchema,
-    values: BTreeMap<String, CanonicalValue>,
+    /// The argument object as the browser sent it, validated and kept: the
+    /// values a typed decode reads and the canonical object one value.
     canonical: CanonicalValue,
     limits: InputLimits,
 }
@@ -127,7 +128,9 @@ impl PreparedActionArguments {
         raw: RawActionArguments,
         limits: &InputLimits,
     ) -> Result<Self, ActionError> {
-        to_canonical_bytes(&raw.value, limits).map_err(|_| ActionError::invalid_arguments())?;
+        // Only the limit check: the canonical bytes themselves are not kept,
+        // so they are counted rather than written into a copy of the value.
+        check_canonical(&raw.value, limits).map_err(|_| ActionError::invalid_arguments())?;
         let CanonicalValue::Object(values) = raw.value else {
             return Err(ActionError::invalid_arguments());
         };
@@ -155,13 +158,19 @@ impl PreparedActionArguments {
                 return Err(ActionError::invalid_arguments());
             }
         }
-        let canonical = CanonicalValue::Object(values.clone());
         Ok(Self {
             schema: schema.clone(),
-            values,
-            canonical,
+            canonical: CanonicalValue::Object(values),
             limits: *limits,
         })
+    }
+
+    /// The argument object; `prepare` stores nothing else.
+    fn values(&self) -> Option<&BTreeMap<String, CanonicalValue>> {
+        match &self.canonical {
+            CanonicalValue::Object(values) => Some(values),
+            _ => None,
+        }
     }
 
     /// Decodes one generated argument using its registered Rust codec.
@@ -171,7 +180,7 @@ impl PreparedActionArguments {
             .schema
             .field(&name)
             .ok_or_else(ActionError::invalid_arguments)?;
-        let value = self.values.get(name.as_str());
+        let value = self.values().and_then(|values| values.get(name.as_str()));
         match value {
             Some(CanonicalValue::Null) | None if !field.required => {
                 serde_json::from_value(serde_json::Value::Null)
@@ -196,7 +205,7 @@ impl fmt::Debug for PreparedActionArguments {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PreparedActionArguments")
-            .field("argument_count", &self.values.len())
+            .field("argument_count", &self.values().map_or(0, BTreeMap::len))
             .finish()
     }
 }

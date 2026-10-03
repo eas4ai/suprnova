@@ -25,9 +25,10 @@ if (!customElements.get("sn-toast-region")) {
         this.addEventListener("pointerleave", this.#onPointerLeave);
         this.addEventListener("focusin", this.#onFocusIn);
         this.addEventListener("focusout", this.#onFocusOut);
-        this.#observer = new MutationObserver(() => this.#schedule());
+        document.addEventListener("pointerover", this.#onDocumentPointerOver);
+        this.#observer = new MutationObserver(() => this.#settle());
         this.#observer.observe(this, { childList: true, subtree: true });
-        this.#schedule();
+        this.#settle();
       }
 
       disconnectedCallback() {
@@ -36,6 +37,7 @@ if (!customElements.get("sn-toast-region")) {
         this.removeEventListener("pointerleave", this.#onPointerLeave);
         this.removeEventListener("focusin", this.#onFocusIn);
         this.removeEventListener("focusout", this.#onFocusOut);
+        document.removeEventListener("pointerover", this.#onDocumentPointerOver);
         this.#observer?.disconnect();
         this.#observer = null;
         for (const timer of this.#timers.values()) clearTimeout(timer.handle);
@@ -58,6 +60,27 @@ if (!customElements.get("sn-toast-region")) {
 
       #toasts() {
         return [...this.querySelectorAll(".sn-toast")];
+      }
+
+      // After the region's children change: forget the toasts that left it,
+      // then queue and time the ones in it. A morph that replaces a toast
+      // removes the old node; its timer would otherwise keep it, and later
+      // dismiss it, for as long as the page lives. A toast a morph only moved
+      // is still inside by the time this runs, so it keeps its timer.
+      #settle() {
+        for (const [toast, timer] of this.#timers) {
+          if (this.contains(toast)) continue;
+          clearTimeout(timer.handle);
+          this.#timers.delete(toast);
+        }
+        // Removing the element that holds focus moves focus to the body, and
+        // not every engine reports that as a focusout, which would leave the
+        // remaining toasts held for good.
+        if (this.#focused && !this.contains(document.activeElement)) {
+          this.#focused = false;
+          this.#resume();
+        }
+        this.#schedule();
       }
 
       #schedule() {
@@ -107,6 +130,17 @@ if (!customElements.get("sn-toast-region")) {
       };
 
       #onPointerLeave = () => {
+        this.#hovered = false;
+        this.#resume();
+      };
+
+      // The region's own pointerleave does not always arrive: an engine can
+      // lose it when the toast under the pointer is replaced, leaving every
+      // timer held after the pointer has gone. The pointer entering any
+      // element outside the region says the same thing.
+      #onDocumentPointerOver = (event) => {
+        if (!this.#hovered) return;
+        if (event.target instanceof Node && this.contains(event.target)) return;
         this.#hovered = false;
         this.#resume();
       };

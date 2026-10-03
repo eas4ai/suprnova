@@ -500,12 +500,29 @@ pub struct CompositeHeader {
 impl CompositeHeader {
     /// Canonical bounded JSON bytes of this header, as the codec writes them.
     pub fn canonical_bytes(&self, max_header_bytes: usize) -> Result<Vec<u8>, RenderCacheError> {
-        let json = serde_json::to_vec(self).map_err(|_| invalid())?;
-        let limits = super::entry::header_limits(max_header_bytes)?;
-        crate::canonical::parse_canonical_value(&json, &limits)
-            .and_then(|value| crate::canonical::to_canonical_bytes(&value, &limits))
-            .map_err(|_| invalid())
+        canonical_header_bytes(self, max_header_bytes)
     }
+}
+
+/// A [`CompositeHeader`] borrowed from an entry: the same fields, so the
+/// same JSON, without cloning the entry's header and graph to write it.
+#[derive(serde::Serialize)]
+struct CompositeHeaderRef<'a> {
+    #[serde(flatten)]
+    entry: &'a EntryHeader,
+    graph: &'a SegmentGraph,
+}
+
+/// Canonical bounded JSON bytes of a composite header, owned or borrowed.
+fn canonical_header_bytes<H: serde::Serialize>(
+    header: &H,
+    max_header_bytes: usize,
+) -> Result<Vec<u8>, RenderCacheError> {
+    let json = serde_json::to_vec(header).map_err(|_| invalid())?;
+    let limits = super::entry::header_limits(max_header_bytes)?;
+    crate::canonical::parse_canonical_value(&json, &limits)
+        .and_then(|value| crate::canonical::to_canonical_bytes(&value, &limits))
+        .map_err(|_| invalid())
 }
 
 /// A representation that needs assembly before it can be sent.
@@ -601,11 +618,13 @@ impl CompositeEntry {
         &self,
         max_header_bytes: usize,
     ) -> Result<Vec<u8>, RenderCacheError> {
-        CompositeHeader {
-            entry: self.header.clone(),
-            graph: self.graph.clone(),
-        }
-        .canonical_bytes(max_header_bytes)
+        canonical_header_bytes(
+            &CompositeHeaderRef {
+                entry: &self.header,
+                graph: &self.graph,
+            },
+            max_header_bytes,
+        )
     }
 }
 

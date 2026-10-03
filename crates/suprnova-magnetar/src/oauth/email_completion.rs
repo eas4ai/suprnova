@@ -298,11 +298,7 @@ impl EmailCompletionService {
 fn resend_key(pending_id: &str, _email: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(pending_id.as_bytes());
-    let digest = hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let digest = crate::storage::hex_lower(&hasher.finalize());
     format!("{OAUTH_EMAIL_COMPLETION_RESEND_PURPOSE}:{digest}")
 }
 

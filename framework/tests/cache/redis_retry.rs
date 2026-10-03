@@ -51,6 +51,7 @@ async fn fresh_store(url: &str, prefix: &str) -> Arc<dyn CacheStore> {
         url: url.to_string(),
         prefix: format!("{}{}:", prefix, uuid::Uuid::new_v4()),
         default_ttl: 0,
+        sweep_interval: 0,
     };
     let cache = RedisCache::connect(&cfg)
         .await

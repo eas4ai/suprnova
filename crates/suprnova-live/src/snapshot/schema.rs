@@ -32,18 +32,7 @@ pub struct MountedDocumentPath(String);
 impl MountedDocumentPath {
     /// Validates a normalized root-relative path without query or fragment.
     pub fn parse(path: &str) -> Result<Self, SnapshotError> {
-        let valid = !path.is_empty()
-            && path.len() <= MAX_FRAMEWORK_DOCUMENT_PATH_BYTES
-            && path.starts_with('/')
-            && !path.starts_with("//")
-            && !path.starts_with("/\\")
-            && !path
-                .chars()
-                .any(|character| matches!(character, '?' | '#' | '\\') || character.is_control())
-            && path_segments_are_normalized(path);
-        if !valid {
-            return Err(SnapshotError::new(SnapshotErrorKind::InvalidSchema));
-        }
+        validate_document_path(path)?;
         Ok(Self(path.to_owned()))
     }
 
@@ -61,32 +50,59 @@ impl MountedDocumentPath {
     }
 }
 
+/// The checks [`MountedDocumentPath::parse`] makes, without the owned path.
+fn validate_document_path(path: &str) -> Result<(), SnapshotError> {
+    let valid = !path.is_empty()
+        && path.len() <= MAX_FRAMEWORK_DOCUMENT_PATH_BYTES
+        && path.starts_with('/')
+        && !path.starts_with("//")
+        && !path.starts_with("/\\")
+        && !path
+            .chars()
+            .any(|character| matches!(character, '?' | '#' | '\\') || character.is_control())
+        && path_segments_are_normalized(path);
+    if valid {
+        Ok(())
+    } else {
+        Err(SnapshotError::new(SnapshotErrorKind::InvalidSchema))
+    }
+}
+
+/// Whether no segment of `path` is `.` or `..`, percent-encoded or not,
+/// and no escape decodes to a separator or a control byte.
+///
+/// The decoded segment is never built: only its length and whether every
+/// byte is a dot decide `.` and `..`, so validating a path allocates
+/// nothing.
 fn path_segments_are_normalized(path: &str) -> bool {
     path.split('/').all(|segment| {
         let bytes = segment.as_bytes();
-        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut decoded_len = 0usize;
+        let mut all_dots = true;
         let mut index = 0;
         while index < bytes.len() {
             let byte = bytes[index];
-            if byte != b'%' {
-                decoded.push(byte);
+            let decoded_byte = if byte != b'%' {
                 index += 1;
-                continue;
-            }
-            let Some(high) = bytes.get(index + 1).and_then(|byte| hex_value(*byte)) else {
-                return false;
+                byte
+            } else {
+                let Some(high) = bytes.get(index + 1).and_then(|byte| hex_value(*byte)) else {
+                    return false;
+                };
+                let Some(low) = bytes.get(index + 2).and_then(|byte| hex_value(*byte)) else {
+                    return false;
+                };
+                let decoded_byte = high << 4 | low;
+                if matches!(decoded_byte, b'/' | b'\\' | 0..=31 | 127) {
+                    return false;
+                }
+                index += 3;
+                decoded_byte
             };
-            let Some(low) = bytes.get(index + 2).and_then(|byte| hex_value(*byte)) else {
-                return false;
-            };
-            let decoded_byte = high << 4 | low;
-            if matches!(decoded_byte, b'/' | b'\\' | 0..=31 | 127) {
-                return false;
-            }
-            decoded.push(decoded_byte);
-            index += 3;
+            decoded_len += 1;
+            all_dots &= decoded_byte == b'.';
         }
-        decoded != b"." && decoded != b".."
+        !(all_dots && matches!(decoded_len, 1 | 2))
     })
 }
 
@@ -108,7 +124,8 @@ pub(crate) fn mounted_document_path(
     let CanonicalValue::String(path) = value else {
         return Err(SnapshotError::new(SnapshotErrorKind::InvalidSchema));
     };
-    MountedDocumentPath::parse(path)?;
+    // Validated in place: parsing would build an owned path only to drop it.
+    validate_document_path(path)?;
     Ok(Some(path))
 }
 

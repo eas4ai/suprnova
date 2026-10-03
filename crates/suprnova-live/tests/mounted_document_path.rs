@@ -34,3 +34,21 @@ fn mounted_document_path_keeps_valid_parameterized_paths() {
 
     assert_eq!(path.as_str(), "/catalog/rust%20books/edition-2");
 }
+
+/// MEM-003: deciding `.` and `..` without decoding a segment keeps the same
+/// answers: a dot segment is exactly one or two dots, encoded or not.
+#[test]
+fn mounted_document_path_tells_dot_segments_from_dotted_names() {
+    for path in ["/%2E", "/.%2e", "/a/%2e", "/."] {
+        assert!(
+            MountedDocumentPath::parse(path).is_err(),
+            "a dot segment must be rejected: {path}"
+        );
+    }
+    for path in ["/%2e%2e%2e", "/.a", "/a.", "/...", "/a..b"] {
+        assert!(
+            MountedDocumentPath::parse(path).is_ok(),
+            "a dotted name is not a dot segment: {path}"
+        );
+    }
+}

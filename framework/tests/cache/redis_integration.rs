@@ -36,6 +36,7 @@ async fn store_at(url: &str, prefix: String) -> Arc<dyn CacheStore> {
         url: url.to_string(),
         prefix,
         default_ttl: 0,
+        sweep_interval: 0,
     };
     let cache = RedisCache::connect(&cfg)
         .await

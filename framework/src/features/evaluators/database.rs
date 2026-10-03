@@ -133,11 +133,13 @@ struct Snapshot {
 
 impl Snapshot {
     /// Build a snapshot from a freshly-selected flag map, deriving the
-    /// identity-scope record from the same rows.
+    /// identity-scope record from the same rows. The record has one entry
+    /// per feature, so it grows as features appear rather than being sized
+    /// by the rows, which number a feature's scopes times its features.
     fn from_flags(flags: HashMap<(String, String), bool>) -> Self {
         let mut me = Self {
             flags: HashMap::new(),
-            identity: HashMap::with_capacity(flags.len()),
+            identity: HashMap::new(),
         };
         for (name, scope_key) in flags.keys() {
             me.record_scope(name, scope_key);
@@ -162,7 +164,12 @@ impl Snapshot {
     /// no axis: this framework has no way to tell which dimension it
     /// partitions, so it is outside what the render-cache guard can see.
     fn record_scope(&mut self, name: &str, scope_key: &str) {
-        let entry = self.identity.entry(name.to_owned()).or_default();
+        // `entry` would take an owned key, a copy of the name per row; a
+        // feature already recorded needs none.
+        let entry = match self.identity.get_mut(name) {
+            Some(entry) => entry,
+            None => self.identity.entry(name.to_owned()).or_default(),
+        };
         entry.known = true;
         entry.principal |= scope_key.starts_with(USER_SCOPE_PREFIX);
         entry.tenant |= scope_key.starts_with(TEAM_SCOPE_PREFIX);

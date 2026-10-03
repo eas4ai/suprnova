@@ -767,10 +767,7 @@ fn migration_identity_id(plan_id: &str, source_user_id: &str) -> String {
 }
 
 fn token_digest(token: &str) -> String {
-    Sha256::digest(token.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::storage::hex_lower(&Sha256::digest(token.as_bytes()))
 }
 
 fn parse_optional(value: Option<&str>, field: &str) -> Result<Option<DateTime<Utc>>> {

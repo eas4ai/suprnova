@@ -8,6 +8,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Heap profiling.** With the framework's `heap-profiling` feature an
+  application profiles its heap with dhat: the framework installs dhat's
+  allocator, `#[suprnova::main]` starts the profiler, and a command that
+  finishes or a server that shuts down gracefully writes `dhat-heap.json`,
+  or the file `SUPRNOVA_HEAP_PROFILE` names, for DHAT's viewer, and prints
+  the bytes allocated, the peak and the heap left at the end. Without the
+  feature no dhat code is compiled. The workspace and new applications
+  have a `profiling` Cargo profile, the release profile with debug
+  symbols, and new applications a `heap-profiling` feature that turns on
+  the framework's.
+- **The in-memory cache sweeps its expired entries.** The cache the
+  framework binds removes every entry whose time is up every
+  `CACHE_SWEEP_INTERVAL` seconds (60 unless set; 0 turns it off), so keys
+  written once and never read again no longer stay for the life of the
+  process. `InMemoryCache::with_periodic_sweep` builds such a cache, and
+  `CacheConfig::sweep_interval` sets the interval in code.
 - **Schema dumps.** `suprnova schema:dump` writes the database's schema
   and its migration ledger to `database/schema/<engine>-schema.sql`, with
   `pg_dump`, `mysqldump` or `mariadb-dump`, or straight from SQLite.
@@ -866,6 +882,39 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **Less memory for the same work.** Model events are built only when a
+  listener, a fake or a deferral will see them, so a query no longer
+  copies every row it reads for a `Retrieved` event nobody hears. Eager
+  loading reads each key from its field instead of serializing the whole
+  row, and a runtime cast converts its column where it sits. The first
+  Inertia page is written into one buffer, a file download reads each
+  chunk straight into the bytes it sends, a body sent in several frames
+  is held at its length, CORS path patterns are compiled once per
+  configuration, and a broadcast's last channel takes the payload instead
+  of a copy. A queue job receives its envelope's payload, the SQS driver
+  parses a message once, sends a retried request's bytes without copying
+  them and holds a reservation's body rather than a second envelope.
+  `Context::push`, image transformations and encoding, filesystem
+  `append` and `prepend`, `Collection::pluck`, the in-memory vector search,
+  the feature-flag snapshot, Mailgun's form, composite render-cache shells
+  and the docs builder each keep or copy less. A process result holds its
+  output once when the output is valid UTF-8. In the Live engine a mount
+  no longer copies its signed snapshot, action arguments are kept once,
+  a full upload read returns the store's bytes, and the resource queue
+  compacts in place. The Live browser runtime reads a server-sent event
+  stream without copying what it already holds for every chunk, and an
+  upload control response no longer allocates 16 KiB. Magnetar writes hex
+  into one buffer, and its single-flight map holds a key only while a
+  caller holds or waits on it. Every response, file, digest and snapshot
+  is byte for byte what it was.
+- **`CacheConfig` has a `sweep_interval` field.** Code that builds a
+  `CacheConfig` as a struct literal has to set it, or use
+  `CacheConfig::builder()`, which defaults it to 60.
+- **`DynCast` has a `from_storage_json_owned` method** that converts a
+  stored value the caller no longer needs. Its default calls
+  `from_storage_json`; a cast whose in-memory value is the stored value
+  returns it without copying.
+
 - **Magnetar's `CeremonyStore` takes a named request for its atomic
   transition.** `transition_and_consume` and `transition_and_consume_exact`
   took six and seven positional strings, so a transposed selector or state
@@ -1098,6 +1147,29 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `MorphTo` returns the generated enum.
 
 ### Fixed
+
+- **Workers wait for their queued listeners.** `queue:work`,
+  `schedule:work` and `workflow:work` now wait, up to ten seconds, for the
+  queued event listeners still running when they stop, as the server
+  does; returning dropped them part way.
+- **`Cache::bootstrap` keeps the cache store the application bound**, as
+  the localization chapter says it does, instead of replacing it at boot.
+- **The event dispatcher forgets its finished queued listeners** as it
+  starts new ones; it kept every one until shutdown.
+- **`DB::flush_query_log` releases the log's buffer** rather than keeping
+  its capacity.
+- **The in-memory vector search no longer panics on a NaN score**; such
+  an item ranks below every other.
+- **A `#[json_resource]` keeps its attributes in declaration order** when
+  it drops a missing one; the last attribute used to move into its place.
+- **The brute-force lockout map sweeps once each time it doubles.** With
+  more than 1,024 current lockouts it swept on every new lockout.
+- **The toast region lets go of toasts a morph removed**, which it timed
+  and later dismissed for the life of the page, and resumes its timers
+  when the focused toast is removed or the pointer has left it without the
+  region hearing it.
+- **The Live browser runtime reads a network chunk larger than one record**
+  when the chunk holds only complete records; it ended the stream.
 
 - **The Live chart follows the document's theme.** `render_chart` drew its
   SVG with charts-rs's light theme, a white background and fixed colors and

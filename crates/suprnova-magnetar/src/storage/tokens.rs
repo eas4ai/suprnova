@@ -141,11 +141,7 @@ pub trait PasswordResetStore: Send + Sync {
 fn digest(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::storage::hex_lower(&hasher.finalize())
 }
 
 fn invalid_id(field: &str) -> Error {

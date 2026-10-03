@@ -4,6 +4,9 @@
 //! one profiler runs at a time; the mechanism runs each test in a process
 //! of its own.
 
+// With `heap-profiling` on, the framework installs this same allocator,
+// and a second `#[global_allocator]` would not link.
+#[cfg(not(feature = "heap-profiling"))]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 

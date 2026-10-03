@@ -409,11 +409,7 @@ fn check_binding(binding: &CeremonyBinding, presented: Option<[u8; 32]>) -> Resu
 fn abuse_key(purpose: &str, provider: &str, identity: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(identity.as_bytes());
-    let digest = hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let digest = crate::storage::hex_lower(&hasher.finalize());
     format!("{purpose}:{provider}:{digest}")
 }
 

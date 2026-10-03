@@ -24,9 +24,29 @@ use std::sync::{Mutex, OnceLock};
 /// duplicate firings within a single process; multi-process deploys
 /// still race, but the listeners (audit log, ops alert) handle this
 /// idempotently in practice.
-fn locked_event_dedup() -> &'static Mutex<HashMap<String, DateTime<Utc>>> {
-    static MAP: OnceLock<Mutex<HashMap<String, DateTime<Utc>>>> = OnceLock::new();
-    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+fn locked_event_dedup() -> &'static Mutex<LockedEventDedup> {
+    static MAP: OnceLock<Mutex<LockedEventDedup>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        Mutex::new(LockedEventDedup {
+            entries: HashMap::new(),
+            next_sweep: DEDUP_SWEEP_THRESHOLD,
+        })
+    })
+}
+
+/// The AccountLocked dedup map and the size at which it next sweeps.
+///
+/// The bound it keeps: at most twice the lockouts that were current at
+/// its last sweep, or [`DEDUP_SWEEP_THRESHOLD`] entries, whichever is
+/// larger. A sweep removes every lapsed entry and never a current one,
+/// because a dropped current lockout would fire `AccountLocked` again. It
+/// then sets the next sweep at twice what is left, so a map full of
+/// current lockouts sweeps once each time it doubles rather than on every
+/// new lockout.
+struct LockedEventDedup {
+    entries: HashMap<String, DateTime<Utc>>,
+    /// The size at which the next fresh insert sweeps.
+    next_sweep: usize,
 }
 
 /// Returns `true` exactly once per unlocked→locked transition for an
@@ -47,7 +67,7 @@ fn should_fire_locked_once(email: &str, locked_until: Option<DateTime<Utc>>) -> 
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let now = crate::clock::now();
-    let fire = match guard.get(email) {
+    let fire = match guard.entries.get(email) {
         // Previous lockout window is still in effect - additional
         // failed attempts inside it must not re-fire AccountLocked.
         Some(prev) if *prev > now => false,
@@ -56,25 +76,21 @@ fn should_fire_locked_once(email: &str, locked_until: Option<DateTime<Utc>>) -> 
         _ => true,
     };
     if fire {
-        guard.insert(email.to_string(), locked_until);
-        // Bounded eviction: every fresh insert sweeps stale entries
-        // (those whose `locked_until` is already in the past) so the
-        // map can't grow unbounded across the lifetime of the
-        // process. The sweep is amortised - we only do it on the
-        // "fire" branch, which by construction is rare (one per
-        // lockout cycle per email).
-        if guard.len() >= DEDUP_SWEEP_THRESHOLD {
-            guard.retain(|_, expires_at| *expires_at > now);
+        guard.entries.insert(email.to_string(), locked_until);
+        // Only the fire branch sweeps, and only once the map has reached
+        // `next_sweep`; see `LockedEventDedup` for the bound that keeps.
+        if guard.entries.len() >= guard.next_sweep {
+            guard.entries.retain(|_, expires_at| *expires_at > now);
+            guard.next_sweep = (2 * guard.entries.len()).max(DEDUP_SWEEP_THRESHOLD);
         }
     }
     fire
 }
 
-/// When the dedup map's size hits this threshold, a single sweep
-/// drops every entry whose `locked_until` is already in the past.
-/// Sized so steady-state ops doesn't sweep (typical lockout volume is
-/// a few-to-tens of events per process per day), but a sustained
-/// brute-force burst can't grow the map without bound.
+/// The smallest size at which the dedup map sweeps. Sized so steady-state
+/// ops doesn't sweep (typical lockout volume is a few-to-tens of events
+/// per process per day), but a sustained brute-force burst can't grow the
+/// map without bound.
 const DEDUP_SWEEP_THRESHOLD: usize = 1024;
 
 /// Facade for brute-force-protection operations.
@@ -245,7 +261,7 @@ impl BruteForce {
             // Magnetar happens to produce a `locked_until` <= the prior
             // window's expiry.
             if let Ok(mut guard) = locked_event_dedup().lock() {
-                guard.remove(email);
+                guard.entries.remove(email);
             }
 
             // Intentionally discard the dispatch error - the unlock has

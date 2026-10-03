@@ -297,26 +297,40 @@ impl<T> BoundedQueue<T> {
             .iter()
             .map(|item| predicate(&item.value))
             .collect::<Vec<_>>();
-        let mut kept = VecDeque::with_capacity(self.items.len());
-        let mut removed = VecDeque::new();
+        let count = decisions.iter().filter(|remove| **remove).count();
+        if count == 0 {
+            return RemovedItems {
+                count: 0,
+                bytes: 0,
+                items: VecDeque::new(),
+            };
+        }
+        // Each item is taken from the front and put back at the back unless
+        // it goes, so the kept ones stay in FIFO order in the queue's own
+        // storage, and the removed ones fill a buffer of exactly their
+        // number. Rebuilding the queue allocated a second one on every
+        // removal, one that matched nothing included.
+        let mut removed = VecDeque::with_capacity(count);
         let mut removed_bytes = 0usize;
-        for (item, remove) in std::mem::take(&mut self.items).into_iter().zip(decisions) {
+        for remove in decisions {
+            let Some(item) = self.items.pop_front() else {
+                break;
+            };
             if remove {
                 removed_bytes = removed_bytes
                     .checked_add(item.bytes)
                     .expect("bounded queue removal byte invariant");
                 removed.push_back(item);
             } else {
-                kept.push_back(item);
+                self.items.push_back(item);
             }
         }
-        self.items = kept;
         self.retained_bytes = self
             .retained_bytes
             .checked_sub(removed_bytes)
             .expect("bounded queue removal byte accounting invariant");
         RemovedItems {
-            count: removed.len(),
+            count,
             bytes: removed_bytes,
             items: removed,
         }
@@ -518,7 +532,7 @@ mod tests {
     fn mem_audit_a_partial_removal_reuses_the_storage() {
         let mut queue = queue_of(40);
         let capacity = queue.items.capacity();
-        let removed = queue.remove_if_preserving(&mut |value: &u32| value % 2 == 0);
+        let removed = queue.remove_if_preserving(&mut |value: &u32| value.is_multiple_of(2));
         assert_eq!(removed.count, 20);
         assert_eq!(removed.bytes, 20);
         assert_eq!(

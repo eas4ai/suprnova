@@ -638,6 +638,10 @@ where
     /// whose JSON value doesn't deserialise into `U`, are silently
     /// skipped (matches Laravel's missing-key handling).
     ///
+    /// The result is sized for every row, the usual case; when fewer than
+    /// half the rows had the field, the spare room is released rather
+    /// than kept for as long as the result is.
+    ///
     /// ## Example
     ///
     /// ```ignore
@@ -655,6 +659,9 @@ where
             {
                 out.push(u);
             }
+        }
+        if out.len() < out.capacity() / 2 {
+            out.shrink_to_fit();
         }
         Collection(out)
     }
