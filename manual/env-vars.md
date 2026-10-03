@@ -463,6 +463,12 @@ explicit value always wins.
 |---|---|---|---|
 | `LOG_LEVEL` | `"info"` | `String` (`error`, `warn`, `info`, `debug`, `trace` - case-insensitive) | Tracing-subscriber filter level. |
 | `LOG_FORMAT` | env-aware (`json` in production, `pretty` elsewhere) | `String` (`json`, `pretty`) | Tracing-subscriber output format. |
+| `LOG_CHANNEL` | `stdout` | `String` | The default log channel: `stdout`, `stderr`, `errorlog`, `single`, `daily`, `monthly`, `syslog`, `null`, `stack`, or one the bootstrap defines with `Log::define`. A name that is no channel fails boot. See [Logging](logging.md#channels). |
+| `LOG_STACK` | `single` | `String` (comma-separated) | The channels the `stack` channel writes to. |
+| `LOG_DAILY_DAYS` | `14` | `u32` | How many files the `daily` channel keeps, today's included. |
+| `LOG_SYSLOG_FACILITY` | `user` | `String` (`user`, `daemon`, `local0` to `local7`, another facility name, or 0 to 23) | The facility the `syslog` channel sends with. An unknown one fails boot. |
+| `LOG_SYSLOG_SOCKET` | `/dev/log` (`/var/run/syslog` on macOS) | `String` | The socket the `syslog` channel sends to. |
+| `MAIL_LOG_CHANNEL` | unset (the default channel) | `String` | The log channel the `log` mail transport writes to. |
 
 ## Observability (OpenTelemetry)
 

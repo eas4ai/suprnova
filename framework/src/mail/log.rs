@@ -49,6 +49,25 @@ impl LogMailTransport {
 impl MailTransport for LogMailTransport {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
         let to: Vec<String> = msg.to.iter().map(|a| a.email.clone()).collect();
+        // `MAIL_LOG_CHANNEL` names the channel, as Laravel's `log` mailer's
+        // `channel` does; without it the line goes to the default channel.
+        if let Some(channel) = std::env::var("MAIL_LOG_CHANNEL")
+            .ok()
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+        {
+            crate::logging::Log::channel(&channel)?.info_with(
+                "mail (log driver): would send",
+                serde_json::json!({
+                    "from": msg.from.email,
+                    "to": to,
+                    "subject": msg.subject,
+                    "text": msg.text.as_deref().unwrap_or(""),
+                    "html": msg.html.as_deref().unwrap_or(""),
+                }),
+            );
+            return Ok(());
+        }
         // `info!`, where Laravel logs at debug: this driver exists so a
         // developer can read the link off their console, and a line that
         // needs `RUST_LOG=debug` to appear would not be found by the person

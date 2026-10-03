@@ -8,6 +8,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Log channels.** `LOG_CHANNEL` names the channel `tracing`'s events go
+  to, still `stdout` unless set: `stderr` (or `errorlog`), `single`
+  (`storage/logs/suprnova.log`), `daily` (a file a day, keeping
+  `LOG_DAILY_DAYS`, 14), `monthly` (keeping 3), `syslog` (the local socket,
+  `LOG_SYSLOG_FACILITY`), `null`, and `stack` (the channels `LOG_STACK`
+  lists). `Log::define` adds a channel in the bootstrap and `Log::extend` a
+  driver, through the `LogSink` trait. `Log::channel`, `Log::stack` and
+  `Log::build` return a logger with Laravel's eight levels and a JSON
+  context whose values fill `{key}` placeholders; a broken channel in a
+  stack stops none of the others. File channels flush at once for errors,
+  within a second otherwise, and on `Log::flush` and shutdown.
+  `MAIL_LOG_CHANNEL` routes the `log` mail transport. A channel that does
+  not exist fails boot. `logging::build_subscriber` builds the subscriber
+  the server installs, for an application or a test that installs its own.
 - **A Process facade.** `Process::command(["git", "status"])` runs a
   program with its arguments, each passed as it is through no shell, and
   `Process::shell("npm ci && npm run build")` runs a command line through

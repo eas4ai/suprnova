@@ -326,6 +326,7 @@ pub use localization::{
     LocaleShare, Localization, LocalizationConfig, RelativeUnit, TimeStyle, Translator,
     scope_locale,
 };
+pub use logging::{Log, LogChannel, LogLevel, LogRecord, LogSink, Logger};
 pub use logging::{
     LogConfig, LogFormat, RequestId, RequestIdMiddleware, current_request_id, init_subscriber,
     spawn_with_request_id,

@@ -161,7 +161,11 @@ fn log_channel_single_writes_the_storage_file_and_not_stdout() {
         ],
     );
     let file = base.path().join("storage/logs/suprnova.log");
-    assert!(read(&file).contains(&marker), "the record is in {}", file.display());
+    assert!(
+        read(&file).contains(&marker),
+        "the record is in {}",
+        file.display()
+    );
     assert!(
         !String::from_utf8_lossy(&output.stdout).contains(&marker),
         "and not on stdout"
@@ -192,7 +196,9 @@ fn an_extended_driver_receives_the_records_of_a_channel_on_it() {
     let sink = Arc::new(MemorySink::default());
     let driver = unique("memory");
     let shared = Arc::clone(&sink);
-    Log::extend(&driver, move |_channel| Ok(shared.clone() as Arc<dyn LogSink>));
+    Log::extend(&driver, move |_channel| {
+        Ok(shared.clone() as Arc<dyn LogSink>)
+    });
     let name = unique("kept");
     Log::define(&name, LogChannel::driver(&driver));
     set_env("LOG_CHANNEL", Some(&name));
@@ -204,7 +210,10 @@ fn an_extended_driver_receives_the_records_of_a_channel_on_it() {
     assert_eq!(records[0].message, "extended-event");
     assert_eq!(records[0].level, LogLevel::Warning);
     assert!(
-        records[0].context.iter().any(|(key, value)| key == "user" && value == "7"),
+        records[0]
+            .context
+            .iter()
+            .any(|(key, value)| key == "user" && value == "7"),
         "{:?}",
         records[0].context
     );
@@ -266,7 +275,11 @@ fn daily_writes_one_file_a_day_by_the_framework_clock() {
 fn daily_keeps_the_newest_days() {
     let dir = tempfile::tempdir().unwrap();
     for day in 1..=20 {
-        std::fs::write(dir.path().join(format!("app-2026-09-{day:02}.log")), "old\n").unwrap();
+        std::fs::write(
+            dir.path().join(format!("app-2026-09-{day:02}.log")),
+            "old\n",
+        )
+        .unwrap();
     }
     std::fs::write(dir.path().join("unrelated.txt"), "keep me").unwrap();
     let _clock = TestClock::travel_to(at("2026-09-21T08:00:00Z"));
@@ -281,7 +294,10 @@ fn daily_keeps_the_newest_days() {
     assert_eq!(logs.len(), 14, "{logs:?}");
     assert_eq!(logs.first().unwrap(), "app-2026-09-08.log");
     assert_eq!(logs.last().unwrap(), "app-2026-09-21.log");
-    assert!(dir.path().join("unrelated.txt").exists(), "other files are left alone");
+    assert!(
+        dir.path().join("unrelated.txt").exists(),
+        "other files are left alone"
+    );
 }
 
 #[test]
@@ -301,7 +317,11 @@ fn the_built_in_daily_channel_reads_log_daily_days() {
     );
     assert_eq!(
         files_in(&logs),
-        ["suprnova-2026-09-04.log", "suprnova-2026-09-05.log", "suprnova-2026-09-10.log"]
+        [
+            "suprnova-2026-09-04.log",
+            "suprnova-2026-09-05.log",
+            "suprnova-2026-09-10.log"
+        ]
     );
 }
 
@@ -332,7 +352,10 @@ fn a_stack_writes_to_every_channel_and_a_broken_one_stops_nothing() {
     let (first, broken, last) = (unique("first"), unique("broken"), unique("last"));
     Log::define(&first, LogChannel::single(dir.path().join("first.log")));
     // A directory cannot be made under a file, so this channel cannot open.
-    Log::define(&broken, LogChannel::single(dir.path().join("a-file/x/broken.log")));
+    Log::define(
+        &broken,
+        LogChannel::single(dir.path().join("a-file/x/broken.log")),
+    );
     Log::define(&last, LogChannel::single(dir.path().join("last.log")));
 
     let logger = Log::stack(&[first.as_str(), broken.as_str(), last.as_str()]).unwrap();
@@ -394,7 +417,10 @@ fn log_build_writes_to_a_channel_with_no_name() {
 fn placeholders_are_replaced_from_the_context() {
     let dir = tempfile::tempdir().unwrap();
     let logger = Log::build(LogChannel::single(dir.path().join("p.log"))).unwrap();
-    logger.info_with("user {id} did {what} at {missing}", json!({"id": 7, "what": "login"}));
+    logger.info_with(
+        "user {id} did {what} at {missing}",
+        json!({"id": 7, "what": "login"}),
+    );
     Log::flush();
     let text = read(&dir.path().join("p.log"));
     assert!(text.contains("user 7 did login at {missing}"), "{text}");
@@ -416,7 +442,14 @@ fn the_eight_levels_are_written_with_their_names() {
     Log::flush();
     let text = read(&file);
     for name in [
-        "EMERGENCY", "ALERT", "CRITICAL", "ERROR", "WARNING", "NOTICE", "INFO", "DEBUG",
+        "EMERGENCY",
+        "ALERT",
+        "CRITICAL",
+        "ERROR",
+        "WARNING",
+        "NOTICE",
+        "INFO",
+        "DEBUG",
     ] {
         assert!(text.contains(name), "{name} in {text}");
     }
@@ -431,7 +464,10 @@ fn a_channel_level_drops_the_records_below_it() {
     logger.error("high-enough");
     Log::flush();
     let text = read(&file);
-    assert!(!text.contains("too-low") && text.contains("high-enough"), "{text}");
+    assert!(
+        !text.contains("too-low") && text.contains("high-enough"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -509,7 +545,9 @@ fn log_flush_writes_a_buffered_record() {
 fn an_error_record_is_in_the_file_when_the_call_returns() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("error.log");
-    Log::build(LogChannel::single(&file)).unwrap().error("at-once");
+    Log::build(LogChannel::single(&file))
+        .unwrap()
+        .error("at-once");
     assert!(read(&file).contains("at-once"));
 }
 
@@ -549,7 +587,9 @@ fn syslog_sends_rfc3164_datagrams_with_the_priority() {
     let dir = tempfile::tempdir().unwrap();
     let socket_path = dir.path().join("log.sock");
     let socket = UnixDatagram::bind(&socket_path).unwrap();
-    socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
 
     let logger = Log::build(
         LogChannel::syslog()

@@ -289,6 +289,9 @@ impl TelemetryGuard {
         // Mark shutdown so the `Drop` impl doesn't warn about a lost flush.
         // `shutdown` takes `self` by value, so it runs at most once.
         self.shutdown_called.store(true, Ordering::SeqCst);
+        // The file log channels buffer; nothing written before a clean
+        // exit may be lost.
+        crate::logging::Log::flush();
         #[cfg(feature = "otel")]
         {
             if let Some(provider) = &self.tracer_provider
@@ -312,6 +315,7 @@ impl TelemetryGuard {
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
+        crate::logging::Log::flush();
         // Warn only when we hold providers that were never flushed.
         // Guards with no providers (disabled path, legacy subscriber path,
         // non-`otel` builds) have nothing buffered, so a silent drop is
@@ -377,7 +381,6 @@ pub fn init_telemetry(log_config: LogConfig, otel_config: OtelConfig) -> Telemet
 
 #[cfg(feature = "otel")]
 fn init_telemetry_with_otel(log_config: LogConfig, otel_config: OtelConfig) -> TelemetryGuard {
-    use crate::logging::config::LogFormat;
     use crate::logging::init::build_env_filter;
     use opentelemetry::KeyValue;
     use opentelemetry::global;
@@ -390,7 +393,6 @@ fn init_telemetry_with_otel(log_config: LogConfig, otel_config: OtelConfig) -> T
     use opentelemetry_semantic_conventions::resource as semconv;
     use tracing_subscriber::Layer;
     use tracing_subscriber::filter::filter_fn;
-    use tracing_subscriber::fmt;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -497,60 +499,29 @@ fn init_telemetry_with_otel(log_config: LogConfig, otel_config: OtelConfig) -> T
 
     // --- Wire layers into the global subscriber ---
     //
-    // `OpenTelemetryLayer<S, T>` is parameterized on the subscriber type
-    // `S` it wraps, so we have to build the bridge layers fresh inside
-    // each format arm - the inferred `S` differs between Pretty and Json
-    // (different concrete fmt::Layer types) and a single layer instance
-    // can only commit to one `S`. A signal that was not built has no
-    // layer: `None` is a layer that does nothing.
+    // The output layers are boxed, so the subscriber has one type whatever
+    // the format, and the OpenTelemetry layers are built once on top of it.
+    // A signal that was not built has no layer: `None` is a layer that does
+    // nothing.
     let env_filter = build_env_filter(&log_config.level);
 
     // try_init() returns Err if a global default is already set (e.g.
     // tests). The existing subscriber wins and we still hand back a guard
     // for orderly shutdown of the providers we built. It also forwards
     // the records of the `log` crate, as the base subscriber does.
-    let installed = match log_config.format {
-        LogFormat::Pretty => {
-            let subscriber = tracing_subscriber::registry()
-                .with(env_filter)
-                .with(
-                    fmt::layer()
-                        .with_target(true)
-                        .with_thread_ids(false)
-                        .pretty(),
-                )
-                .with(tracer_provider.as_ref().map(|_| {
-                    tracing_opentelemetry::layer()
-                        .with_tracer(global::tracer("suprnova"))
-                        .with_filter(filter_fn(not_of_the_exporters))
-                }))
-                .with(logger_provider.as_ref().map(|provider| {
-                    OpenTelemetryTracingBridge::new(provider)
-                        .with_filter(filter_fn(not_of_the_exporters))
-                }));
-            subscriber.try_init().is_ok()
-        }
-        LogFormat::Json => {
-            let subscriber = tracing_subscriber::registry()
-                .with(env_filter)
-                .with(
-                    fmt::layer()
-                        .json()
-                        .with_target(true)
-                        .with_current_span(true),
-                )
-                .with(tracer_provider.as_ref().map(|_| {
-                    tracing_opentelemetry::layer()
-                        .with_tracer(global::tracer("suprnova"))
-                        .with_filter(filter_fn(not_of_the_exporters))
-                }))
-                .with(logger_provider.as_ref().map(|provider| {
-                    OpenTelemetryTracingBridge::new(provider)
-                        .with_filter(filter_fn(not_of_the_exporters))
-                }));
-            subscriber.try_init().is_ok()
-        }
-    };
+    let installed = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(crate::logging::layer::output_layers(&log_config))
+        .with(tracer_provider.as_ref().map(|_| {
+            tracing_opentelemetry::layer()
+                .with_tracer(global::tracer("suprnova"))
+                .with_filter(filter_fn(not_of_the_exporters))
+        }))
+        .with(logger_provider.as_ref().map(|provider| {
+            OpenTelemetryTracingBridge::new(provider).with_filter(filter_fn(not_of_the_exporters))
+        }))
+        .try_init()
+        .is_ok();
 
     if !installed {
         tracing::warn!(
