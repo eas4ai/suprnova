@@ -208,3 +208,65 @@ async fn blocking_commands_return_what_is_there() {
     );
     redis.del(&[list.as_str(), other.as_str()]).await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+async fn a_blocking_command_given_to_command_runs_on_a_connection_of_its_own() {
+    let redis = connection("blocking-command");
+    let list = unique("empty-list");
+    let key = unique("key");
+    redis.set(&key, "answer").await.unwrap();
+
+    let waiting = redis.clone();
+    let waited_list = list.clone();
+    let blpop = tokio::spawn(async move {
+        let start = Instant::now();
+        let reply = waiting.command("blpop", &[waited_list.as_str(), "2"]).await;
+        (reply, start.elapsed())
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let start = Instant::now();
+    assert_eq!(redis.get(&key).await.unwrap().as_deref(), Some("answer"));
+    assert!(
+        start.elapsed() < Duration::from_millis(500),
+        "the GET waited {:?} behind the BLPOP",
+        start.elapsed()
+    );
+    let (reply, waited) = blpop.await.unwrap();
+    assert_eq!(reply.unwrap(), RedisValue::Nil);
+    assert!(
+        waited >= Duration::from_millis(1900),
+        "returned after {waited:?}"
+    );
+    redis.del(&[key.as_str()]).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+async fn command_refuses_what_would_change_the_shared_connection() {
+    let redis = connection("refused");
+    let key = unique("key");
+    for (name, instead) in [
+        ("SUBSCRIBE", "subscribe"),
+        ("psubscribe", "psubscribe"),
+        ("MULTI", "transaction"),
+        ("WATCH", "suprnova::redis::Client"),
+        ("SELECT", "URL"),
+        ("MONITOR", "suprnova::redis::Client"),
+    ] {
+        let error = redis
+            .command(name, &[key.as_str()])
+            .await
+            .expect_err("refused before it is sent");
+        assert!(error.to_string().contains(instead), "{name}: {error}");
+    }
+    redis.set(&key, "still shared").await.unwrap();
+    assert_eq!(
+        redis.get(&key).await.unwrap().as_deref(),
+        Some("still shared")
+    );
+    redis.del(&[key.as_str()]).await.unwrap();
+}

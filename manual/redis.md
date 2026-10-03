@@ -89,6 +89,14 @@ if let RedisValue::Int(count) = redis.command("PFCOUNT", &["visitors"]).await? {
 }
 ```
 
+`command` sends a blocking command, such as `BLMPOP` or `XREAD` with
+`BLOCK`, on a connection of its own, as the typed blocking methods do. It
+refuses the commands that would change the connection every other command
+shares, and the error names what to use instead: `subscribe` for
+`SUBSCRIBE` and its family, `transaction` for `MULTI` and `EXEC`, the URL
+for `SELECT` and `AUTH`, and a connection of your own from
+`suprnova::redis::Client` for `WATCH` and `MONITOR`.
+
 A `RedisValue` is `Nil`, `Int`, `Bytes` for a bulk string, `Status` for
 a reply such as `OK`, `Array`, or, from a server speaking RESP3, `Map`,
 `Double`, or `Bool`. `as_str` and `as_int` read the common cases. Binary

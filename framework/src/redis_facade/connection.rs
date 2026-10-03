@@ -81,6 +81,41 @@ const RETRYABLE: &[&str] = &[
     "ZSCORE",
 ];
 
+/// The blocking commands, which `command` sends on a connection of their
+/// own. `XREAD` and `XREADGROUP` block too when given `BLOCK`.
+const BLOCKING: &[&str] = &[
+    "BLPOP",
+    "BRPOP",
+    "BLMOVE",
+    "BRPOPLPUSH",
+    "BZPOPMIN",
+    "BZPOPMAX",
+    "BLMPOP",
+    "BZMPOP",
+    "WAIT",
+    "WAITAOF",
+];
+
+/// Why `command` refuses a command that would change the shared
+/// connection for every task that uses it, and what to use instead.
+fn refused(command: &str) -> Option<&'static str> {
+    match command {
+        "SUBSCRIBE" | "PSUBSCRIBE" | "SSUBSCRIBE" | "UNSUBSCRIBE" | "PUNSUBSCRIBE"
+        | "SUNSUBSCRIBE" => {
+            Some("use subscribe or psubscribe, which open a connection of their own")
+        }
+        "MULTI" | "EXEC" | "DISCARD" => Some("use transaction"),
+        "WATCH" | "UNWATCH" | "MONITOR" | "SYNC" | "PSYNC" => Some(
+            "it needs a connection no other task shares: open one with suprnova::redis::Client",
+        ),
+        "SELECT" => Some("name the database in the connection's URL"),
+        "AUTH" | "HELLO" | "RESET" | "QUIT" => {
+            Some("the connection's URL sets its credentials and protocol")
+        }
+        _ => None,
+    }
+}
+
 /// Which end of a list [`blmove`](RedisConnection::blmove) takes from or
 /// puts to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,19 +349,37 @@ impl RedisConnection {
     /// Run any command and return its reply. A read Laravel lists as
     /// retryable (`GET`, `LRANGE`, `HGETALL` and the rest) is sent again
     /// after a lost connection; any other command is not, since it may
-    /// already have been applied.
+    /// already have been applied. A blocking command (`BLPOP`, `XREAD` with
+    /// `BLOCK` and the rest) runs on a connection of its own.
     ///
     /// # Errors
     ///
-    /// When the server rejects the command or cannot be reached.
+    /// When the server rejects the command or cannot be reached, and, before
+    /// anything is sent, for a command that would change the connection
+    /// every other command shares: `SUBSCRIBE` and the rest of its family,
+    /// `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH`, `MONITOR`, `SELECT`,
+    /// `AUTH`, `HELLO`, `RESET` and `QUIT`. The error names what to use
+    /// instead.
     pub async fn command<A: AsRef<[u8]>>(
         &self,
         name: &str,
         args: &[A],
     ) -> Result<RedisValue, FrameworkError> {
         let command = name.to_ascii_uppercase();
-        let retry = RETRYABLE.contains(&command.as_str()) || (command == "SET" && args.len() == 2);
+        if let Some(instead) = refused(&command) {
+            return Err(FrameworkError::internal(format!(
+                "the Redis connection '{}' does not send {command} through command: {instead}",
+                self.inner.name
+            )));
+        }
         let bytes: Vec<&[u8]> = args.iter().map(AsRef::as_ref).collect();
+        let blocks = BLOCKING.contains(&command.as_str())
+            || (matches!(command.as_str(), "XREAD" | "XREADGROUP")
+                && bytes.iter().any(|arg| arg.eq_ignore_ascii_case(b"BLOCK")));
+        if blocks {
+            return self.send_blocking(&command, &bytes).await.map(Into::into);
+        }
+        let retry = RETRYABLE.contains(&command.as_str()) || (command == "SET" && args.len() == 2);
         self.send(&command, &bytes, retry).await.map(Into::into)
     }
 
