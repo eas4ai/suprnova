@@ -59,7 +59,6 @@ PATH_RULES = {
     "framework/src/eloquent/attrs": "eloquent",
     "framework/src/eloquent/": "eloquent",
     "framework/src/error.rs": "errors",
-    "framework/src/error/report": "error-model",
     "framework/src/http/abort": "errors",
     "framework/src/events/": "events",
     "framework/src/factory/": "eloquent-factories",
@@ -77,7 +76,6 @@ PATH_RULES = {
     "framework/src/live/": "live",
     "framework/src/localization/": "localization",
     "framework/src/logging/": "logging",
-    "framework/src/process/": "processes",
     "framework/src/magnetar_integration/oauth": "oauth",
     "framework/src/magnetar_integration/passkey": "oauth",
     "framework/src/magnetar_integration/magic_link": "oauth",
@@ -93,7 +91,6 @@ PATH_RULES = {
     "framework/src/payments/": "payments",
     "framework/src/queue/": "queues",
     "framework/src/rate_limit/": "rate-limiting",
-    "framework/src/redis_facade/": "redis",
     "framework/src/render_cache/providers/": "render-cache-deployment",
     "framework/src/render_cache/ledger": "render-cache-deployment",
     "framework/src/render_cache/migration": "render-cache-deployment",
@@ -157,7 +154,6 @@ MACROS = {
     "view": "(no chapter) server-rendered views", "view_filter": "(no chapter) server-rendered views",
     "workflow": "workflows", "workflow_step": "workflows", "inertia_response": "frontend-inertia-responses",
     "InertiaProps": "frontend-typescript-types", "redirect": "responses",
-    "InputNames": "data", "authorize": "authorization",
 }
 # External crates re-exported by `suprnova`.
 EXTERNAL = {
@@ -166,7 +162,7 @@ EXTERNAL = {
     "hyper": "lifecycle", "tokio": "lifecycle", "opendal": "filesystem", "iso_currency": "payments",
     "fake": "eloquent-factories", "dummy": "eloquent-factories", "webauthn_rs": "oauth",
     "webauthn_rs_core": "oauth", "webauthn_rs_proto": "oauth", "opentelemetry_http": "observability",
-    "featureflag": "feature-flags", "secrecy": "encryption", "redis": "redis", "askama": "(no chapter) server-rendered views",
+    "featureflag": "feature-flags", "secrecy": "encryption", "askama": "(no chapter) server-rendered views",
     "chrono": "(no chapter) re-exported utility crates", "chrono_tz": "(no chapter) re-exported utility crates",
     "indexmap": "(no chapter) re-exported utility crates", "async_trait": "(no chapter) re-exported utility crates",
     "strum": "(no chapter) re-exported utility crates", "magnetar": "(no chapter) Magnetar engine API",
