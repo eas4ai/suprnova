@@ -941,6 +941,8 @@ let dt = NaiveDate::from_ymd_opt(2026, 8, 1)
 Lang::number(1_234_567.89);                          // en-US → 1,234,567.89
                                                      // de-DE → 1.234.567,89
 Lang::currency(19.99, "USD");                        // en-US → $19.99
+Lang::percentage(12.5, 1);                           // en → 12.5%, de → 12,5 %
+Lang::abbreviate(1_230_000.0, 2);                    // en → 1.23M, de → 1,23M
 Lang::date(&dt, DateStyle::Long);                    // en-US → August 1, 2026
 Lang::time(&dt, TimeStyle::Short);                   // en-US → 2:30 PM
 Lang::datetime(&dt, DateStyle::Medium, TimeStyle::Short);
@@ -953,6 +955,14 @@ The style enums: `DateStyle { Full, Long, Medium, Short }`,
 `RelativeUnit { Second, Minute, Hour, Day, Week, Month, Year }`.
 `Lang::relative` takes a signed amount - negative is the past
 ("3 days ago"), positive the future ("in 3 days").
+
+`Lang::percentage(value, precision)` takes the percentage itself, `10.0`
+for ten percent, as Laravel's `Number::percentage` does.
+`Lang::abbreviate(value, precision)` divides by the largest of a thousand,
+a million, a billion, a trillion, and a quadrillion the value reaches and
+adds `K`, `M`, `B`, `T`, or `Q`, as Laravel's `Number::abbreviate` does;
+the digits follow the locale, the suffixes do not, since the ICU4X
+release the framework uses has no compact number format.
 
 > Exact output comes from the CLDR data baked into ICU4X and can change
 > across an ICU upgrade, particularly for dates and currency. In your own
