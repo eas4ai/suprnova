@@ -11,7 +11,11 @@ fn english_words_inflect_and_keep_their_case() {
     assert_eq!(Str::plural("Car", 2), "Cars");
     assert_eq!(Str::plural("CAR", 2), "CARS");
     assert_eq!(Str::plural("Person", 3), "People");
-    assert_eq!(Str::plural("cars", 1), "cars", "a count of one leaves the word");
+    assert_eq!(
+        Str::plural("cars", 1),
+        "cars",
+        "a count of one leaves the word"
+    );
     assert_eq!(Str::plural("car", -1), "car");
     assert_eq!(Str::plural("car", 0), "cars");
     assert_eq!(Str::plural("quiz", 2), "quizzes");
@@ -46,7 +50,11 @@ mod languages {
         assert_eq!(in_locale("tr", "kitap").await, "kitaplar");
         assert_eq!(in_locale("tr", "ev").await, "evler");
         assert_eq!(in_locale("en-GB", "child").await, "children");
-        assert_eq!(in_locale("de", "car").await, "cars", "a language with no rules uses English");
+        assert_eq!(
+            in_locale("de", "car").await,
+            "cars",
+            "a language with no rules uses English"
+        );
     }
 
     #[tokio::test]
