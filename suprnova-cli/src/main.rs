@@ -275,8 +275,13 @@ enum Commands {
         /// Name of the task (e.g., CleanupLogs, SendReminders)
         name: String,
     },
-    /// Run all pending database migrations
-    Migrate,
+    /// Run all pending database migrations, after loading the schema dump
+    /// into a database that has run none
+    Migrate {
+        /// The schema dump to load instead of database/schema/<engine>-schema.sql
+        #[arg(long)]
+        schema_path: Option<String>,
+    },
     /// Rollback the last database migration(s)
     #[command(name = "migrate:rollback")]
     MigrateRollback {
@@ -295,6 +300,19 @@ enum Commands {
         /// the flag alone will not drop a production database.
         #[arg(long)]
         force: bool,
+        /// The schema dump to load instead of database/schema/<engine>-schema.sql
+        #[arg(long)]
+        schema_path: Option<String>,
+    },
+    /// Write the database's schema and migration ledger to a dump file
+    #[command(name = "schema:dump")]
+    SchemaDump {
+        /// Where to write the dump instead of database/schema/<engine>-schema.sql
+        #[arg(long)]
+        path: Option<String>,
+        /// Replace the migrations the dump records with PrunedMigration names
+        #[arg(long)]
+        prune: bool,
     },
     /// Sync database schema to entity files (runs migrations + generates entities)
     #[command(name = "db:sync")]
@@ -558,8 +576,8 @@ fn main() {
         Commands::MakeTask { name } => {
             commands::make_task::run(name);
         }
-        Commands::Migrate => {
-            commands::migrate::run();
+        Commands::Migrate { schema_path } => {
+            commands::migrate::run(schema_path);
         }
         Commands::MigrateRollback { step } => {
             commands::migrate_rollback::run(step);
@@ -567,8 +585,11 @@ fn main() {
         Commands::MigrateStatus => {
             commands::migrate_status::run();
         }
-        Commands::MigrateFresh { force } => {
-            commands::migrate_fresh::run(force);
+        Commands::MigrateFresh { force, schema_path } => {
+            commands::migrate_fresh::run(force, schema_path);
+        }
+        Commands::SchemaDump { path, prune } => {
+            commands::schema_dump::run(path, prune);
         }
         Commands::DbSync {
             skip_migrations,

@@ -8,6 +8,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Schema dumps.** `suprnova schema:dump` writes the database's schema
+  and its migration ledger to `database/schema/<engine>-schema.sql`, with
+  `pg_dump`, `mysqldump` or `mariadb-dump`, or straight from SQLite.
+  `migrate`, `migrate:fresh`, `serve` and `TestDatabase::fresh` load it
+  into a database that has run no migration, then run only the newer
+  migrations; `--schema-path` names another file. `--prune` deletes the
+  migrations the dump records and keeps each name as a
+  `PrunedMigration`, which fails with an error if a database ever needs
+  to run it.
 - **Strings and numbers.** `Str::slug`, `Str::mask`, `Str::limit`,
   `Str::limit_words` and `Str::excerpt` work in characters, never bytes.
   `Str::plural` and `Str::singular` follow the language of the current

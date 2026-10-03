@@ -117,6 +117,10 @@ Running migrations...
 Migrations completed successfully!
 ```
 
+A database that has run no migration loads the schema dump first, when
+one exists; `--schema-path <file>` names another file. See
+[Squashing migrations](migrations.md#squashing-migrations).
+
 The application's `serve` and `web:run` subcommands auto-run `migrate` before
 binding the socket unless you opt out with `--no-migrate` or set
 `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT=true` to keep going past a failure.
@@ -188,7 +192,8 @@ Database refreshed successfully!
 
 This destroys all data in the connected database. It is meant for local
 development and test setup, not for any environment where the data
-matters.
+matters. After the drop it loads the schema dump, when one exists, before
+it migrates; `--schema-path <file>` names another file.
 
 ### The production guard
 
@@ -218,6 +223,25 @@ table is dropped.
 The same gate applies to your application binary's own subcommand
 (`./app migrate:fresh --force`), which is the one a production deploy
 actually runs.
+
+## schema:dump
+
+Write the database's schema and its migration ledger to
+`database/schema/<engine>-schema.sql`, or to the file `--path` names:
+
+```bash
+suprnova schema:dump
+suprnova schema:dump --path database/schema/baseline.sql
+suprnova schema:dump --prune
+```
+
+```
+Database schema dumped to database/schema/postgres-schema.sql
+```
+
+The CLI runs `cargo run -- schema:dump` with the same flags. `--prune`
+also deletes the migrations the dump records and keeps each name as a
+`PrunedMigration`. See [Squashing migrations](migrations.md#squashing-migrations).
 
 ## db:sync
 
@@ -314,6 +338,7 @@ it without any wiring on your side. You can also run it with
 | `suprnova migrate:status` | Show applied/pending status |
 | `suprnova migrate:rollback [--step N]` | Roll back the last `N` migrations (default 1) |
 | `suprnova migrate:fresh` | Drop all tables and re-run every migration |
+| `suprnova schema:dump [--path <file>] [--prune]` | Write the schema and migration ledger to a dump file |
 | `suprnova db:sync [--skip-migrations] [--regenerate-models]` | Regenerate SeaORM entities from the live schema |
 | `suprnova db:seed [<seeder>]` | Run registered seeders, through the per-project `console` binary |
 

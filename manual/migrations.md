@@ -926,6 +926,66 @@ suprnova migrate:rollback  # Rollback
 suprnova migrate           # Apply again
 ```
 
+## Squashing migrations
+
+A project with years of migrations can replace them with one snapshot.
+`suprnova schema:dump` writes the database's schema and its migration
+ledger to `database/schema/<engine>-schema.sql`, where the engine is
+`sqlite`, `postgres`, `mysql`, or `mariadb`:
+
+```bash
+suprnova schema:dump            # writes database/schema/postgres-schema.sql
+suprnova schema:dump --prune    # and prunes the migrations the dump covers
+```
+
+Commit the dump. When `migrate`, `migrate:fresh`, or `serve` meets a
+database that has run no migration, it loads the dump first and then runs
+only the migrations newer than it. A database that has run a migration is
+never loaded. To load another file, pass `--schema-path <file>` to
+`migrate` or `migrate:fresh`. `TestDatabase::fresh` loads
+`database/schema/sqlite-schema.sql` the same way, so tests on SQLite need
+a SQLite dump.
+
+Postgres is dumped with `pg_dump` and loaded with `psql`, MySQL with
+`mysqldump` and `mysql`, and MariaDB with `mariadb-dump` and `mariadb`.
+SQLite needs no tool. These client tools must be on `PATH` wherever a
+dump is written or loaded, and `pg_dump` must be at least the server's
+major version. The password reaches them through `PGPASSWORD` or a
+private option file, never through their arguments. A dump that fails
+leaves the earlier file as it was, and a load that fails runs no
+migration.
+
+### Pruning
+
+`--prune` deletes each migration the dump's ledger records and keeps its
+name in your `Migrator`'s list:
+
+```rust
+vec![
+    Box::new(suprnova::PrunedMigration::new("m20250101_000001_create_users")),
+    Box::new(m20260301_120000_create_invoices::Migration),
+]
+```
+
+The name stays because a database that ran the migration records it, and
+SeaORM refuses a recorded migration it can't find. A database that would
+need the pruned migration's schema, such as an empty one with no dump to
+load, fails with an error that names the migration instead of skipping
+it. A migration the dump does not record stays as it is. Rebuild the app
+after pruning.
+
+### Why Suprnova diverges
+
+- **Pruning keeps what the dump does not cover.** Laravel's `--prune`
+  deletes every migration file, including any the dumped database never
+  ran. Here only the migrations the dump records go, and each keeps its
+  name.
+- **No schema events.** Laravel fires `SchemaDumped`, `SchemaLoaded`, and
+  `MigrationsPruned`. Suprnova's migration commands run before the
+  bootstrap registers listeners, so no listener would hear them.
+- **The file is named after the engine.** Laravel names it after the
+  connection; Suprnova migrates one connection, `DATABASE_URL`.
+
 ## CLI commands at a glance
 
 | Command | Description |
@@ -936,6 +996,8 @@ suprnova migrate           # Apply again
 | `suprnova migrate:rollback` | Rollback the last migration |
 | `suprnova migrate:rollback --step 3` | Rollback the last 3 migrations |
 | `suprnova migrate:fresh` | Drop all tables and re-run every migration |
+| `suprnova schema:dump` | Write the schema and migration ledger to `database/schema/` |
+| `suprnova schema:dump --prune` | Also replace the dumped migrations with their names |
 | `suprnova db:sync` | Run migrations and regenerate entity files |
 | `suprnova db:sync --skip-migrations` | Regenerate entity files without applying migrations |
 | `suprnova db:sync --regenerate-models` | Also overwrite user-editable model stubs |

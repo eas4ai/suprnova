@@ -38,7 +38,7 @@ use clap::{Parser, Subcommand};
 use sea_orm_migration::prelude::*;
 use std::env;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -128,8 +128,13 @@ enum Commands {
         #[arg(long)]
         no_migrate: bool,
     },
-    /// Run pending database migrations
-    Migrate,
+    /// Run pending database migrations, after loading the schema dump into
+    /// a database that has run none
+    Migrate {
+        /// The schema dump to load instead of database/schema/<engine>-schema.sql
+        #[arg(long)]
+        schema_path: Option<PathBuf>,
+    },
     /// Show migration status
     #[command(name = "migrate:status")]
     MigrateStatus,
@@ -146,6 +151,19 @@ enum Commands {
         /// Required in production, alongside a typed confirmation.
         #[arg(long)]
         force: bool,
+        /// The schema dump to load instead of database/schema/<engine>-schema.sql
+        #[arg(long)]
+        schema_path: Option<PathBuf>,
+    },
+    /// Write the database's schema and migration ledger to a dump file
+    #[command(name = "schema:dump")]
+    SchemaDump {
+        /// Where to write the dump instead of database/schema/<engine>-schema.sql
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Replace the migrations the dump records with PrunedMigration names
+        #[arg(long)]
+        prune: bool,
     },
     /// Run the scheduler daemon (checks every minute)
     #[command(name = "schedule:work")]
@@ -962,8 +980,8 @@ where
                 Self::run_server_internal(bootstrap_fn, http_bootstrap_fn, routes_fn, booted_fns)
                     .await;
             }
-            Some(Commands::Migrate) => {
-                Self::run_migrations::<M>().await;
+            Some(Commands::Migrate { schema_path }) => {
+                Self::run_migrations::<M>(schema_path).await;
             }
             Some(Commands::MigrateStatus) => {
                 Self::show_migration_status::<M>().await;
@@ -971,7 +989,7 @@ where
             Some(Commands::MigrateRollback { steps }) => {
                 Self::rollback_migrations::<M>(steps).await;
             }
-            Some(Commands::MigrateFresh { force }) => {
+            Some(Commands::MigrateFresh { force, schema_path }) => {
                 // The CLI's `suprnova migrate:fresh` gained this gate first,
                 // but production deploys run migrations through *this*
                 // binary, not the dev CLI - so without the same check here
@@ -986,7 +1004,10 @@ where
                     eprintln!("{message}");
                     std::process::exit(1);
                 }
-                Self::fresh_migrations::<M>().await;
+                Self::fresh_migrations::<M>(schema_path).await;
+            }
+            Some(Commands::SchemaDump { path, prune }) => {
+                Self::dump_schema::<M>(path, prune).await;
             }
             Some(Commands::ScheduleWork) => {
                 Self::run_scheduler_daemon_internal(bootstrap_fn, schedule_fn).await;
@@ -1121,6 +1142,18 @@ where
     }
 
     async fn get_database_connection() -> sea_orm::DatabaseConnection {
+        let database_url = Self::database_url();
+        sea_orm::Database::connect(crate::database::config::driver_url(&database_url).as_ref())
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("suprnova: failed to connect to the database: {e}");
+                std::process::exit(1);
+            })
+    }
+
+    /// `DATABASE_URL`, with a SQLite file created when it does not exist
+    /// yet. Exits when the variable is unset or the file cannot be made.
+    fn database_url() -> String {
         let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
             eprintln!(
                 "suprnova: DATABASE_URL is not set. \
@@ -1140,7 +1173,7 @@ where
         // `?cache=shared`) so the filesystem ops below run on the bare
         // file path, and rebuilds the connect URL with `mode=rwc` merged
         // exactly once instead of double-suffixing it.
-        let database_url = if database_url.starts_with("sqlite://") {
+        if database_url.starts_with("sqlite://") {
             let (path, connect_url) =
                 crate::database::connection::normalize_sqlite_url(&database_url);
 
@@ -1172,14 +1205,7 @@ where
             connect_url
         } else {
             database_url
-        };
-
-        sea_orm::Database::connect(crate::database::config::driver_url(&database_url).as_ref())
-            .await
-            .unwrap_or_else(|e| {
-                eprintln!("suprnova: failed to connect to the database: {e}");
-                std::process::exit(1);
-            })
+        }
     }
 
     /// Auto-migrate path for the default `serve` / `web:run` arms.
@@ -1207,8 +1233,11 @@ where
         }
         let best_effort =
             parse_auto_migrate_best_effort(env::var(AUTO_MIGRATE_BEST_EFFORT_ENV).ok().as_deref());
-        let db = Self::get_database_connection().await;
-        let outcome = Migrator::up(&db, None).await;
+        let url = Self::database_url();
+        let outcome = crate::SchemaDump::migrate::<Migrator>(&url, None)
+            .await
+            .map(|_| ())
+            .map_err(|e| sea_orm::DbErr::Custom(e.to_string()));
         if let Err(e) = resolve_auto_migration(outcome, best_effort) {
             eprintln!("suprnova: migration failed: {e}");
             eprintln!(
@@ -1220,12 +1249,19 @@ where
         }
     }
 
-    async fn run_migrations<Migrator: MigratorTrait>() {
+    async fn run_migrations<Migrator: MigratorTrait>(schema_path: Option<PathBuf>) {
         println!("Running migrations...");
-        let db = Self::get_database_connection().await;
-        if let Err(e) = Migrator::up(&db, None).await {
-            eprintln!("suprnova: migration failed: {e}");
-            std::process::exit(1);
+        let url = Self::database_url();
+        match crate::SchemaDump::migrate::<Migrator>(&url, schema_path.as_deref()).await {
+            Ok(loaded) => {
+                if let Some(path) = loaded {
+                    println!("Loaded the schema dump {}", path.display());
+                }
+            }
+            Err(e) => {
+                eprintln!("suprnova: migration failed: {e}");
+                std::process::exit(1);
+            }
         }
         println!("Migrations completed successfully!");
     }
@@ -1249,14 +1285,65 @@ where
         println!("Rollback completed successfully!");
     }
 
-    async fn fresh_migrations<Migrator: MigratorTrait>() {
+    async fn fresh_migrations<Migrator: MigratorTrait>(schema_path: Option<PathBuf>) {
         println!("WARNING: Dropping all tables and re-running migrations...");
-        let db = Self::get_database_connection().await;
-        if let Err(e) = Migrator::fresh(&db).await {
-            eprintln!("suprnova: database refresh failed: {e}");
-            std::process::exit(1);
+        let url = Self::database_url();
+        match crate::SchemaDump::fresh::<Migrator>(&url, schema_path.as_deref()).await {
+            Ok(loaded) => {
+                if let Some(path) = loaded {
+                    println!("Loaded the schema dump {}", path.display());
+                }
+            }
+            Err(e) => {
+                eprintln!("suprnova: database refresh failed: {e}");
+                std::process::exit(1);
+            }
         }
         println!("Database refreshed successfully!");
+    }
+
+    /// `schema:dump`: the schema and ledger to `path` or the engine's
+    /// default dump, then, with `prune`, the dumped migrations in
+    /// `src/migrations` replaced by their names.
+    async fn dump_schema<Migrator: MigratorTrait>(path: Option<PathBuf>, prune: bool) {
+        let url = Self::database_url();
+        let path = match path {
+            Some(path) => path,
+            None => crate::SchemaDump::default_path(&url)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("suprnova: schema dump failed: {e}");
+                    std::process::exit(1);
+                }),
+        };
+        let outcome = if prune {
+            crate::SchemaDump::dump_and_prune::<Migrator>(
+                &url,
+                &path,
+                &crate::base_path("src/migrations"),
+            )
+            .await
+            .map(Some)
+        } else {
+            crate::SchemaDump::dump::<Migrator>(&url, &path)
+                .await
+                .map(|()| None)
+        };
+        match outcome {
+            Ok(pruned) => {
+                println!("Database schema dumped to {}", path.display());
+                if let Some(pruned) = pruned {
+                    println!(
+                        "Pruned {} migration(s); rebuild the app before it migrates again",
+                        pruned.len()
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("suprnova: schema dump failed: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 
     /// `schedule:work`: run the scheduler as a long-lived daemon.

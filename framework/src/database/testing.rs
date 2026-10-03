@@ -65,8 +65,10 @@ pub struct TestDatabase {
 impl TestDatabase {
     /// Create a fresh test database with migrations applied
     ///
-    /// This creates an in-memory SQLite database, runs all migrations,
-    /// and registers the connection in the test container.
+    /// This creates an in-memory SQLite database, loads the project's
+    /// SQLite schema dump (`database/schema/sqlite-schema.sql`) when there
+    /// is one, runs the migrations the dump does not record, and registers
+    /// the connection in the test container.
     ///
     /// # Type Parameters
     ///
@@ -105,12 +107,22 @@ impl TestDatabase {
 
         let conn = DbConnection::connect(&config).await?;
 
-        // 3. Run migrations
+        // 3. Load the SQLite schema dump, when the project has one, so the
+        //    migrations it covers (pruned or not) are not run again.
+        let dump = crate::database_path("schema/sqlite-schema.sql");
+        if dump.is_file() {
+            let sql = std::fs::read_to_string(&dump).map_err(|e| {
+                FrameworkError::database(format!("could not read {}: {e}", dump.display()))
+            })?;
+            crate::database::schema_dump::load_sqlite(conn.inner(), &sql).await?;
+        }
+
+        // 4. Run migrations
         M::up(conn.inner(), None)
             .await
             .map_err(|e| FrameworkError::database(format!("Migration failed: {}", e)))?;
 
-        // 4. Register in TestContainer - this is the key integration!
+        // 5. Register in TestContainer - this is the key integration!
         // Any code calling DB::connection() or App::resolve::<DbConnection>()
         // will now get this test database
         TestContainer::singleton(conn.clone());

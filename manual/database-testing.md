@@ -14,7 +14,9 @@ constructors, two intents.
 
 ### `TestDatabase::fresh::<Migrator>()`
 
-Builds an in-memory SQLite database, runs your migrator end-to-end,
+Builds an in-memory SQLite database, loads your SQLite schema dump
+(`database/schema/sqlite-schema.sql`) when you have one, runs your
+migrator end-to-end,
 and registers the connection in the test container so any code
 calling `DB::connection()` or `App::resolve::<DbConnection>()`
 resolves to it. This is the right default for everything that touches
