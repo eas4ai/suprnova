@@ -114,8 +114,9 @@ suprnova serve
 ```
 
 `suprnova serve` runs the backend on `http://127.0.0.1:8765` and Vite
-on `http://127.0.0.1:5765`. Hit the backend URL - Vite is proxied so
-you don't need to visit it directly.
+on `http://127.0.0.1:5765`. Open the backend URL: the page it serves
+loads its scripts and styles from the Vite dev server, so you never
+need to visit Vite yourself.
 
 You should see the welcome page. Then visit `/register` to make an
 account and `/login` to log in.
