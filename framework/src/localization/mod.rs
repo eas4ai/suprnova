@@ -372,6 +372,42 @@ impl Lang {
         format::try_number(&Self::locale(), n)
     }
 
+    /// `value` as a percentage in the current locale, `10.0` being ten
+    /// percent, with `precision` fraction digits: `10%` in `en`, `10 %` in
+    /// `de`. Laravel's `Number::percentage`. Never panics - an ICU failure
+    /// logs a `tracing::warn!` and falls back to `{value}%`.
+    pub fn percentage(value: f64, precision: usize) -> String {
+        Self::try_percentage(value, precision).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Lang::percentage: ICU formatting failed, falling back to plain rendering");
+            format!("{value}%")
+        })
+    }
+
+    /// [`Lang::percentage`], but `Err` on an ICU formatting failure.
+    pub fn try_percentage(value: f64, precision: usize) -> Result<String, FrameworkError> {
+        format::try_percentage(&Self::locale(), value, precision)
+    }
+
+    /// `value` shortened as Laravel's `Number::abbreviate` does it, with
+    /// the current locale's digits: divided by the largest of a thousand, a
+    /// million, a billion, a trillion and a quadrillion it reaches, written
+    /// with `precision` fraction digits, and `K`, `M`, `B`, `T` or `Q`
+    /// after it. `1230000.0` with 2 is `1.23M` in `en` and `1,23M` in `de`;
+    /// a value under a thousand is written as it is. Never panics - an ICU
+    /// failure logs a `tracing::warn!` and falls back to `{value}`.
+    pub fn abbreviate(value: f64, precision: usize) -> String {
+        Self::try_abbreviate(value, precision).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Lang::abbreviate: ICU formatting failed, falling back to plain rendering");
+            format!("{value}")
+        })
+    }
+
+    /// [`Lang::abbreviate`], but `Err` on an ICU formatting failure or a
+    /// value that is not finite.
+    pub fn try_abbreviate(value: f64, precision: usize) -> Result<String, FrameworkError> {
+        format::try_abbreviate(&Self::locale(), value, precision)
+    }
+
     /// Locale-aware currency formatting. `iso_code` is a 3-letter ISO
     /// 4217 code (`"USD"`, `"EUR"`, ...), case-insensitive. Never panics -
     /// any ICU failure (including an invalid `iso_code`) logs a

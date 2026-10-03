@@ -51,6 +51,7 @@
     - [Notifications](notifications.md)
     - [Processes](processes.md)
     - [Web Push](web-push.md)
+    - [Strings](strings.md)
     - [Queues](queues.md)
     - [Command Bus](bus.md)
     - [Rate Limiting](rate-limiting.md)

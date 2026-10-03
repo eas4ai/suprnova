@@ -26,6 +26,9 @@ use icu_experimental::dimension::currency::CurrencyCode;
 use icu_experimental::dimension::currency::formatter::{
     CurrencyFormatter, CurrencyFormatterPreferences,
 };
+use icu_experimental::dimension::percent::formatter::{
+    PercentFormatter, PercentFormatterPreferences,
+};
 use icu_experimental::relativetime::{
     RelativeTimeFormatter, RelativeTimeFormatterOptions, RelativeTimeFormatterPreferences,
 };
@@ -137,6 +140,85 @@ pub(crate) fn try_number(locale: &Locale, n: f64) -> Result<String, FrameworkErr
     let decimal = Decimal::try_from_f64(n, FloatPrecision::RoundTrip)
         .map_err(|e| FrameworkError::internal(format!("`{n}` is not a formattable number: {e}")))?;
     Ok(formatter.format(&decimal).write_to_string().into_owned())
+}
+
+/// `n` rounded to `precision` fraction digits, with trailing zeros kept
+/// to that many.
+fn fixed(n: f64, precision: usize) -> Result<Decimal, FrameworkError> {
+    let mut decimal = Decimal::try_from_f64(n, FloatPrecision::RoundTrip)
+        .map_err(|e| FrameworkError::internal(format!("`{n}` is not a formattable number: {e}")))?;
+    let position = -(precision.min(i16::MAX as usize) as i16);
+    decimal.round(position);
+    decimal.absolute.pad_end(position);
+    Ok(decimal)
+}
+
+/// `n` in the locale's number format with `precision` fraction digits.
+pub(crate) fn try_number_with_precision(
+    locale: &Locale,
+    n: f64,
+    precision: usize,
+) -> Result<String, FrameworkError> {
+    let prefs: DecimalFormatterPreferences = icu_locale(locale)?.into();
+    let formatter = DecimalFormatter::try_new(prefs, Default::default())
+        .map_err(|e| FrameworkError::internal(format!("DecimalFormatter: {e}")))?;
+    Ok(formatter
+        .format(&fixed(n, precision)?)
+        .write_to_string()
+        .into_owned())
+}
+
+/// `n` as a percentage, `10` being ten percent, with `precision` fraction
+/// digits, as the locale writes one.
+pub(crate) fn try_percentage(
+    locale: &Locale,
+    n: f64,
+    precision: usize,
+) -> Result<String, FrameworkError> {
+    let prefs: PercentFormatterPreferences = icu_locale(locale)?.into();
+    let formatter = PercentFormatter::try_new(prefs, Default::default())
+        .map_err(|e| FrameworkError::internal(format!("PercentFormatter: {e}")))?;
+    Ok(formatter.format(&fixed(n, precision)?).to_string())
+}
+
+/// Laravel's `Number::abbreviate`: `n` divided by the largest power of a
+/// thousand it reaches, up to a quadrillion, in the locale's number format
+/// with `precision` fraction digits, and `K`, `M`, `B`, `T` or `Q` after it.
+pub(crate) fn try_abbreviate(
+    locale: &Locale,
+    n: f64,
+    precision: usize,
+) -> Result<String, FrameworkError> {
+    const UNITS: [(i32, &str); 5] = [(3, "K"), (6, "M"), (9, "B"), (12, "T"), (15, "Q")];
+    if !n.is_finite() {
+        return Err(FrameworkError::internal(format!(
+            "`{n}` cannot be abbreviated"
+        )));
+    }
+    if n == 0.0 {
+        return if precision > 0 {
+            try_number_with_precision(locale, 0.0, precision)
+        } else {
+            Ok("0".to_owned())
+        };
+    }
+    if n < 0.0 {
+        return Ok(format!("-{}", try_abbreviate(locale, -n, precision)?));
+    }
+    if n >= 1e15 {
+        return Ok(format!(
+            "{}Q",
+            try_number_with_precision(locale, n / 1e15, precision)?
+        ));
+    }
+    let exponent = n.log10().floor() as i32;
+    let display = exponent - exponent % 3;
+    let digits = try_number_with_precision(locale, n / 10f64.powi(display), precision)?;
+    let unit = UNITS
+        .iter()
+        .find(|(power, _)| *power == display)
+        .map_or("", |(_, unit)| unit);
+    Ok(format!("{digits}{unit}"))
 }
 
 /// Locale-aware currency formatting. `iso_code` is a 3-letter ISO 4217

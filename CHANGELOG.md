@@ -8,6 +8,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Strings and numbers.** `Str::slug`, `Str::mask`, `Str::limit`,
+  `Str::limit_words` and `Str::excerpt` work in characters, never bytes.
+  `Str::plural` and `Str::singular` follow the language of the current
+  locale with doctrine/inflector's rules for English, French, Norwegian
+  Bokmål, Portuguese, Spanish and Turkish, English for any other, and keep
+  the word's case. `Lang::percentage` writes a percentage as the locale
+  does, and `Lang::abbreviate` shortens a number to `1.23M` with the
+  locale's digits.
 - **A Redis facade.** `Redis::connection("default")` reaches `REDIS_URL`,
   and `Redis::define` names other connections in the bootstrap, or
   `Redis::define_client` with a client built elsewhere. A connection opens

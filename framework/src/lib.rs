@@ -108,6 +108,7 @@ pub(crate) mod signals;
 pub mod sse;
 /// Static file fallback serving.
 pub mod static_files;
+mod strings;
 pub mod supervisor;
 pub mod telemetry;
 pub mod testing;
@@ -427,6 +428,7 @@ pub use routing::{
     verify_signature,
 };
 pub use schedule::{CronExpression, DayOfWeek, Schedule, Task, TaskBuilder, TaskEntry, TaskResult};
+pub use strings::Str;
 // chrono-tz escape hatch, same principle as the opendal block above:
 // `TaskBuilder::timezone` takes a `chrono_tz::Tz` and `TaskEntry::timezone`
 // hands one back, so consumers need to name that type. Re-exporting `Tz` at
