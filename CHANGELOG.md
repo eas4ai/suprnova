@@ -379,6 +379,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **A workflow step can take an integer argument.** `#[workflow_step]`
+  handed the step's body to the workflow context in a closure that borrowed
+  its arguments, and the context needs one it can keep, so a step taking a
+  `Copy` argument such as `user_id: i64` failed to compile with E0373
+  ("closure may outlive the current function"). The closure now takes its
+  arguments by value.
+
 - **Workers wait for their queued listeners.** `queue:work`,
   `schedule:work` and `workflow:work` now wait, up to ten seconds, for the
   queued event listeners still running when they stop, as the server

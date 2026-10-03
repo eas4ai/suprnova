@@ -3,4 +3,5 @@
 
 pub mod claim_postgres;
 pub mod migrations;
+pub mod steps;
 pub mod worker_config;
