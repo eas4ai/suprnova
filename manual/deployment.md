@@ -199,13 +199,14 @@ this shape by construction with two dependency entries:
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0", default-features = false, features = [
     "filesystem", "database-sqlite", "database-postgres", "database-mysql",
     "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
+    "queue-sqs",
 ] }
 
 [dev-dependencies]
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0", features = ["testing"] }
 ```
 
-The production entry turns default features off and lists the nine that
+The production entry turns default features off and lists the ten that
 stay on (every default except `testing`). The dev-dependency turns
 `testing` back on - Cargo's feature resolver only pulls in a
 dev-dependency's features for `cargo test` and other `--tests` builds, so

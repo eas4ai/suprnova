@@ -24,6 +24,7 @@ path = "src/bin/console.rs"
 suprnova = { path = "../framework", default-features = false, features = [
     "filesystem", "database-sqlite", "database-postgres", "database-mysql",
     "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
+    "queue-sqs",
 ] }
 tokio = { version = "1", features = ["full"] }
 sea-orm-migration = { version = "2.0", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-postgres", "runtime-tokio-rustls"] }
