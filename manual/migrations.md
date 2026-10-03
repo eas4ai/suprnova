@@ -316,17 +316,52 @@ Schema::create(manager, "orders", |t| {
 
 A model reads an unsigned column into an unsigned field: the MySQL driver
 refuses to read an unsigned column into a signed type, `BIGINT UNSIGNED` into
-an `i64` included. `u64` reads any of them. Declare the key `u64`, and foreign
-key fields `u64` to match:
+an `i64` included. `u64` reads any of them. Declare the `id` field `u64`, and
+foreign key fields `u64` to match. The model's key takes the type of its `id`
+field, so it needs no `key_type`:
 
 ```rust
-#[model(table = "orders", key_type = "u64")]
+#[model(table = "orders")]
 pub struct Order {
     pub id: u64,
     pub user_id: u64,
     pub status: String,
 }
 ```
+
+#### Laravel's defaults for the whole application
+
+An application that shares a database with a Laravel application, or was
+ported from one, can make Laravel's column types the defaults in its own
+`Cargo.toml`, so that `id()`, `foreign_id()` and the models need nothing
+extra:
+
+```toml
+[package.metadata.suprnova.schema]
+unsigned_ids = true
+
+[package.metadata.suprnova.model]
+datetime_cast = "native"
+```
+
+- `unsigned_ids = true` makes `id()` create the column `unsigned_id()` creates
+  and `foreign_id(name)` the one `unsigned_foreign_id(name)` creates, as
+  Laravel's `id()` and `foreignId()` do: `bigint unsigned` on MySQL, the
+  signed type on Postgres and SQLite. `#[suprnova::main]` reads it, so it
+  applies to the migrations that the binaries `suprnova new` creates run.
+- `datetime_cast = "native"` gives every `DateTime<Utc>` field that declares
+  no cast `AsNativeDateTime`, and every `Option<DateTime<Utc>>` field
+  `AsOptionalNativeDateTime`, `created_at`, `updated_at` and `deleted_at`
+  included, so a model reads Laravel's `TIMESTAMP` columns on MySQL with no
+  `casts`. `"text"` is `AsDateTime`, the default. A cast declared on the
+  field wins.
+  `#[model]` reads it from the `Cargo.toml` of the crate that declares the
+  model. New tables then take `timestamps_tz()` or `datetimes()` (see
+  [Timestamps and soft deletes](#timestamps-and-soft-deletes)), since
+  `timestamps()` creates text columns.
+
+Both keys are optional, and without them nothing changes. A key with a value
+the table does not accept is a compile error that names the key.
 
 ### Modifiers
 
@@ -535,9 +570,10 @@ that an index, a unique constraint or a foreign key covers: record the
 ### Why Suprnova diverges
 
 - `id()` is a signed `BIGINT` on MySQL, where Laravel's is unsigned, because a
-  model's key is an `i64` by default and the MySQL driver will not read an
+  model's key is usually an `i64` and the MySQL driver will not read an
   unsigned column into it. `unsigned_id()` and `unsigned_foreign_id()` create
-  Laravel's types.
+  Laravel's types, and `unsigned_ids = true` makes them the defaults (see
+  [Laravel's defaults for the whole application](#laravels-defaults-for-the-whole-application)).
 - Laravel's `enum` is `enumeration`: `enum` is a Rust keyword.
 - `references(table, column)` takes both names in one call, where Laravel
   chains `->references($column)->on($table)`.

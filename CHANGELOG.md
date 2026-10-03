@@ -254,6 +254,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   the compile-time page check, and a missing page names the exact path the
   macro looked for. Without the table nothing changes. This landed on main
   after the `v3.0.0` tag (#129).
+- **Laravel's column defaults for the whole application.** A model's key
+  now takes the type of its primary-key field, so `pub id: u64` needs no
+  `key_type`; a declared `key_type` still wins. Two optional tables in the
+  application's `Cargo.toml` make Laravel's types the defaults:
+  `[package.metadata.suprnova.schema] unsigned_ids = true` makes `id()` and
+  `foreign_id()` create `BIGINT UNSIGNED` on MySQL, as Laravel's do, and
+  `[package.metadata.suprnova.model] datetime_cast = "native"` gives every
+  date-time field without a declared cast the native cast, so a model reads
+  Laravel's timestamp columns with no `casts`. Without the tables nothing
+  changes. This landed on main after the `v3.0.0` tag (#137).
 - **The queue fake can let jobs through and records raw pushes.**
   `Queue::fake_except` and `QueueFakeGuard::except` record every job but
   the named ones, which reach the real queue. `Queue::push_raw` pushes an
