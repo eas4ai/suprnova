@@ -440,3 +440,65 @@ MUST fail boot with an error that says so.
 Falsifier: a record reaches the socket with another priority than facility times 8 plus severity, or does not reach it; or an unknown facility boots.
 Mechanism: `par-log-channels`.
 Status: Agreed 2026-10-02
+
+## Redis facade
+
+The developer ruled on 2026-10-01 to build a thin managed Redis API:
+configuration, connection lifecycle, commands, pipelines and an escape
+hatch to the client, with dedicated connections for subscriptions and
+blocking commands. Redis Cluster is deferred, not refused. The funnel and
+throttle limiters stay unbuilt by the developer's ruling of 2026-09-30.
+
+[PAR-031] `Redis::connection(name)` MUST return the connection with that
+name: `default`, which reaches `REDIS_URL` (`redis://127.0.0.1:6379` when
+it is unset), or one the bootstrap gives with `Redis::define(name, url)`,
+which replaces any connection of that name. A connection MUST open on its
+first command, not before, and MUST open again after it is lost.
+`Redis::purge(name)` MUST forget the connection, which closes once no
+handle holds it, and `Redis::connections()` MUST list the names of the
+connections resolved and not purged. A name with no connection, or a URL
+that is not a Redis URL, MUST be an error that names the connection.
+Falsifier: the default connection reaches another server or database than `REDIS_URL` names, or than `redis://127.0.0.1:6379` when it is unset; a defined connection reaches another database than its URL's; resolving a connection to an address where nothing listens fails before a command is sent; after the server drops the connection, a read, or the write after it, fails although the server is up; `connections()` misses a resolved name or lists a purged one; a purged connection that no handle holds stays open; or an unknown name, a URL such as `http://x`, or such a `REDIS_URL`, is not an error naming the connection.
+Mechanism: `par-redis`.
+Rationale: Laravel's `RedisManager` and the `redis` connections of `config/database.php`; Suprnova names connections in the bootstrap instead of a config file.
+Status: Agreed 2026-10-03
+
+[PAR-032] A connection MUST run the common commands as typed methods
+(`get`, `set`, `set_ex`, `del`, `exists`, `incr`, `decr`, `expire`, `ttl`,
+`mget`, `hset`, `hget`, `hgetall`, `hdel`, `lpush`, `rpush`, `lpop`,
+`rpop`, `lrange`, `sadd`, `srem`, `smembers`, `zadd`, `zrange`,
+`zrangebyscore`, `publish`, `eval` and `scan`), any other command with
+`command(name, args)`, which returns the reply, and give the underlying
+`redis` client with `client()`. A read, typed or one of Laravel's
+retryable commands given to `command`, MUST be sent again after a lost
+connection: once, and once more for each retry `REDIS_COMMAND_RETRIES`
+adds; another command MUST NOT be. While `Redis::enable_events()` is in
+force, each command a connection runs outside a pipeline or a transaction
+MUST be reported to the listeners `Redis::listen` adds, with the
+connection's name, the command, its arguments and its duration, and each
+command that fails to the listeners `Redis::listen_for_failures` adds,
+with its error. Events are off until enabled.
+Falsifier: a typed command, or `command("LRANGE", ...)`, returns other than the server's reply; `client()` is not a client of the same server and database; a read fails after the server dropped the connection once; a write is applied twice after a lost connection; with events enabled a command is not reported, or is reported with the wrong connection name, command or arguments, or a failed command is not reported to the failure listeners; or a command is reported while events are off.
+Mechanism: `par-redis`.
+Rationale: Laravel's `Connection::command`, `client`, `listen`, `listenForFailures`, `CommandExecuted`, `CommandFailed` and `PhpRedisConnection::RETRYABLE_COMMANDS`.
+Status: Agreed 2026-10-03
+
+[PAR-033] `pipeline(|pipe| ...)` MUST send every command the closure
+queues before it reads a reply, and return the replies in order.
+`transaction(|pipe| ...)` MUST send them inside `MULTI` and `EXEC` and
+return their replies in order, so that when Redis rejects one of them as
+it is queued, none is applied.
+Falsifier: a pipeline waits for a reply before it sends its next command, or returns its replies out of order; or a transaction holding a command Redis rejects when it is queued applies any of the others, or returns its replies out of order.
+Mechanism: `par-redis`.
+Status: Agreed 2026-10-03
+
+[PAR-034] `subscribe(channels)` and `psubscribe(patterns)` MUST open a
+connection of their own and yield each message, with its channel, the
+pattern it matched if any, and its payload, until the subscription is
+dropped, which closes that connection. A blocking command (`blpop`,
+`brpop`, `blmove`, `brpoplpush`, `bzpopmin`, `bzpopmax`) MUST run on a
+connection of its own and wait as long as its timeout says, so a call
+that waits never delays another command and is never cut short.
+Falsifier: a published message is not yielded, or is yielded with the wrong channel, pattern or payload; a command on the connection waits while a subscription is open; a dropped subscription stays subscribed; a `get` waits behind a `blpop` on the same connection; or a `blpop` with a two-second timeout returns before the two seconds pass when nothing is pushed, or misses an element pushed while it waits.
+Mechanism: `par-redis`.
+Status: Agreed 2026-10-03

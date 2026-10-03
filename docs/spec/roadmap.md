@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: log-channels
+Current: redis-facade
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -259,6 +259,17 @@ Requirements: PAR-026, PAR-027, PAR-028, PAR-029, PAR-030
    on-demand channels, retention, and flushing on shutdown
    (`laravel-parity.md` PAR-026 to PAR-030, next-feature item
    `log-channels`). Done when the mechanism passes on a committed tree.
+
+## redis-facade
+
+Requirements: PAR-031, PAR-032, PAR-033, PAR-034
+
+23. redis-facade - `Redis::connection(name)` over named connections the
+   environment and the bootstrap define, with typed common commands, any
+   command, the client as an escape hatch, events, pipelines, transactions,
+   and dedicated connections for subscriptions and blocking commands
+   (`laravel-parity.md` PAR-031 to PAR-034, next-feature item
+   `redis-facade`). Done when the mechanism passes on a committed tree.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
