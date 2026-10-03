@@ -63,6 +63,12 @@
   ],
   "VEC_DISTANCE_EUCLIDEAN": [
    "framework/src/vector/mariadb.rs:153"
+  ],
+  "VERIFY_CA": [
+   "framework/src/database/schema_dump.rs:973"
+  ],
+  "VERIFY_IDENTITY": [
+   "framework/src/database/schema_dump.rs:973"
   ]
  },
  "rust_items_not_extracted": [
@@ -71,5 +77,5 @@
   "demo application code (app/), test-support crates and fixtures"
  ],
  "sibling_reexports_folded_into_aliases": 299,
- "source_rev": "9a0d6535"
+ "source_rev": "1ee8c25f"
 }
