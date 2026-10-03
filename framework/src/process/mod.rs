@@ -38,9 +38,9 @@
 //!
 //! # Fakes
 //!
-//! With the `testing` feature, [`Process::fake`] stops every process from
+//! With the `testing` feature, `Process::fake` stops every process from
 //! running while its guard lives and records each one for the assertions
-//! on [`ProcessFake`]. The fake is process-global, like `Storage::fake`,
+//! on `ProcessFake`. The fake is process-global, like `Storage::fake`,
 //! and the guard serializes the tests that take one.
 
 #[cfg(any(test, feature = "testing"))]

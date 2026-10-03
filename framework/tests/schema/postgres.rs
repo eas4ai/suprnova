@@ -43,6 +43,7 @@ async fn postgres_model_round_trip() {
     cases::model_round_trip(&connect_postgres().await).await;
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial]
 #[ignore = "requires disposable Postgres at PG_TEST_URL"]

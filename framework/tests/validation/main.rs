@@ -1,6 +1,9 @@
 //! Integration tests for the `validation` module: one binary per module,
 //! one former top-level test file per submodule (folded 2026-09-05).
 
+// The date rules are tested against the framework clock, which `TestClock`
+// moves; it exists with the `testing` feature only.
+#[cfg(feature = "testing")]
 pub mod dates;
 pub mod exists;
 pub mod password;

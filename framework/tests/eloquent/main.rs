@@ -38,6 +38,9 @@ pub mod macro_smoke_relations;
 pub mod mass_write_mysql;
 pub mod mass_write_postgres;
 pub mod model;
+// Its tests move the framework clock with `TestClock`, which exists with
+// the `testing` feature only.
+#[cfg(feature = "testing")]
 pub mod model_changes;
 pub mod observers;
 pub mod pagination;
@@ -72,6 +75,9 @@ pub mod serialization;
 pub mod serialization_eager_pivot;
 pub mod soft_delete_postgres;
 pub mod soft_deletes_relations;
+// Its tests move the framework clock with `TestClock`, which exists with
+// the `testing` feature only.
+#[cfg(feature = "testing")]
 pub mod sync_without_detaching;
 pub mod timestamps;
 pub mod typed_attrs;

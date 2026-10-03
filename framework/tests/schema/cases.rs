@@ -6,7 +6,9 @@ use chrono::{DateTime, Duration as TimeDelta, NaiveDate, NaiveTime, TimeZone, Ut
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, DbErr, Statement};
 use sea_orm_migration::prelude::*;
 use suprnova::schema::Schema;
-use suprnova::testing::{TestClock, TestContainer};
+#[cfg(feature = "testing")]
+use suprnova::testing::TestClock;
+use suprnova::testing::TestContainer;
 use suprnova::{DbConnection, Model, Touchable, attrs, model};
 
 use super::catalog;
@@ -470,6 +472,8 @@ fn assert_native_columns(columns: &[catalog::CatalogColumn], names: &[&str], fam
 ///
 /// The clock stands at whole seconds, so a MySQL `timestamp` of precision
 /// 0 holds each moment exactly.
+// `TestClock` exists with the `testing` feature only.
+#[cfg(feature = "testing")]
 pub async fn native_timestamps_round_trip(conn: &DatabaseConnection) {
     let manager = SchemaManager::new(conn);
     let backend = conn.get_database_backend();
