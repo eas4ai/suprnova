@@ -1500,6 +1500,10 @@ where
 
         println!("Running due scheduled tasks...");
         let (results, any_failed) = evaluate_due_once(&schedule).await;
+        // The tasks may have started queued listeners, and this process ends
+        // next, by returning or by the failure exit below, which would skip
+        // the drain the long-running workers get after the match.
+        crate::events::drain_queued_at_shutdown().await;
         if results.is_empty() {
             println!("No tasks were due.");
             return;

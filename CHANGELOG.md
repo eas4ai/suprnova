@@ -1151,7 +1151,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Workers wait for their queued listeners.** `queue:work`,
   `schedule:work` and `workflow:work` now wait, up to ten seconds, for the
   queued event listeners still running when they stop, as the server
-  does; returning dropped them part way.
+  does, and `schedule:run` does once its tasks have run; returning dropped
+  them part way.
 - **`Cache::bootstrap` keeps the cache store the application bound**, as
   the localization chapter says it does, instead of replacing it at boot.
 - **The event dispatcher forgets its finished queued listeners** as it

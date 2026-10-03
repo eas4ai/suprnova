@@ -71,32 +71,29 @@ pub fn live_component(snake: &str, pascal: &str, component_name: &str, view: &st
 }
 
 /// Replace each `{name}` placeholder of `template` with its value in one
-/// pass, into a string of exactly the output's length. A chain of
-/// `replace` calls copied the whole template once per placeholder.
+/// walk of the template, which collects the pieces of the output, borrowed
+/// from the template and the values, and joins them into a string of
+/// exactly the output's length. A chain of `replace` calls copied the
+/// whole template once per placeholder.
 fn render_placeholders(template: &str, values: &[(&str, &str)]) -> String {
-    fn walk(template: &str, values: &[(&str, &str)], mut emit: impl FnMut(&str)) {
-        let mut rest = template;
-        while let Some(at) = rest.find('{') {
-            emit(&rest[..at]);
-            let tail = &rest[at..];
-            match values.iter().find(|(key, _)| tail.starts_with(key)) {
-                Some((key, value)) => {
-                    emit(value);
-                    rest = &tail[key.len()..];
-                }
-                None => {
-                    emit("{");
-                    rest = &tail[1..];
-                }
+    let mut pieces: Vec<&str> = Vec::new();
+    let mut rest = template;
+    while let Some(at) = rest.find('{') {
+        pieces.push(&rest[..at]);
+        let tail = &rest[at..];
+        match values.iter().find(|(key, _)| tail.starts_with(key)) {
+            Some((key, value)) => {
+                pieces.push(value);
+                rest = &tail[key.len()..];
+            }
+            None => {
+                pieces.push("{");
+                rest = &tail[1..];
             }
         }
-        emit(rest);
     }
-    let mut length = 0;
-    walk(template, values, |piece| length += piece.len());
-    let mut out = String::with_capacity(length);
-    walk(template, values, |piece| out.push_str(piece));
-    out
+    pieces.push(rest);
+    pieces.concat()
 }
 
 /// `templates/live/<snake>.html` scaffolded by `live:make`.

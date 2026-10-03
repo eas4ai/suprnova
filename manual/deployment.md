@@ -298,7 +298,8 @@ indefinitely:
 
 Each of them then waits up to ten more seconds for the queued event
 listeners still running, so a listener a job or a request started is
-not cut off. See [Events](events.md#draining-on-shutdown).
+not cut off; so does `schedule:run` once its tasks have run. See
+[Events](events.md#draining-on-shutdown).
 
 **Size your platform's termination grace above these.** Docker defaults
 to 10 seconds, Kubernetes to 30. If the platform's window is shorter than

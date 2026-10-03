@@ -76,6 +76,9 @@ pub const PLAIN_TASK: &str = "bench:tick-plain";
 /// The task name recorded by the arm that calls `.on_one_server()`.
 pub const ONE_SERVER_TASK: &str = "bench:tick-one-server";
 
+/// The task that starts a queued listener; see `register`.
+pub const LISTENER_TASK: &str = "bench:queued-listener";
+
 /// Register the app's scheduled tasks.
 ///
 /// Two tasks, deliberately, running in the same window against the same
@@ -108,4 +111,26 @@ pub fn register(schedule: &mut Schedule) {
         .every_minute()
         .on_one_server();
     schedule.add(elected);
+
+    // The instrument for the claim that `schedule:run` waits for the queued
+    // listeners its tasks start: with `BENCH_LISTENER_PATH` set it fires the
+    // event whose listener writes that file after a pause, and without it
+    // the task does nothing.
+    let listener = schedule
+        .call(|| async {
+            let Ok(path) = std::env::var("BENCH_LISTENER_PATH") else {
+                return Ok(());
+            };
+            suprnova::EventFacade::dispatch(crate::jobs::bench::BenchListenerRan {
+                path,
+                millis: 1_500,
+            })
+            .await
+        })
+        .name(LISTENER_TASK)
+        .description(
+            "starts a queued listener that outlives the task, when BENCH_LISTENER_PATH is set",
+        )
+        .every_minute();
+    schedule.add(listener);
 }

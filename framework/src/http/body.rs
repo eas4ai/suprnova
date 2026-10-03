@@ -95,12 +95,14 @@ pub async fn collect_body_with_cap(
     // `Incoming: Unpin`, so `body.frame()` is callable on `&mut body` without
     // pinning.
     let mut body = body;
-    let mut total: usize = 0;
-    // The frames are held as they arrive and joined once the length is
-    // known, so the body is one allocation of exactly its size. Growing a
-    // buffer frame by frame left it up to twice the body, for as long as
-    // the handler kept the bytes.
-    let mut frames: Vec<Bytes> = Vec::new();
+    // Each frame is copied as it arrives and dropped, so what the body
+    // holds tracks its bytes, whatever number of frames the client chose to
+    // send them in; a frame also shares the connection's read buffer, which
+    // keeping it would keep. The buffer grows only with bytes that arrived,
+    // never with a declared length a client need not send, and the room
+    // left over is released once, so the body is held at its length for as
+    // long as the handler keeps it.
+    let mut buf: Vec<u8> = Vec::new();
     while let Some(frame) = body.frame().await {
         let frame = frame
             .map_err(|e| FrameworkError::internal(format!("Failed to read request body: {e}")))?;
@@ -108,20 +110,14 @@ pub async fn collect_body_with_cap(
         // `into_data` returns `Ok(Bytes)` for data frames and `Err(Frame)`
         // for trailer frames (which we ignore).
         if let Ok(data) = frame.into_data() {
-            total = total.saturating_add(data.len());
-            if total > max_bytes {
+            if data.len() > max_bytes - buf.len() {
                 return Err(over_limit(max_bytes));
             }
-            if !data.is_empty() {
-                frames.push(data);
-            }
+            buf.extend_from_slice(&data);
         }
     }
-    // Copied even when there is one frame: a frame shares the connection's
-    // read buffer, and holding it would hold that whole buffer.
-    let mut buf: Vec<u8> = Vec::with_capacity(total);
-    for frame in &frames {
-        buf.extend_from_slice(frame);
+    if buf.capacity() > buf.len() {
+        buf.shrink_to_fit();
     }
     Ok(Bytes::from(buf))
 }
