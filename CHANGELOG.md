@@ -17,7 +17,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   output callback, a timeout (60 seconds unless set) and an idle timeout
   are options. A timeout, an idle timeout, `stop`, or dropping a started
   process or the future of `run` kills the program with every process it
-  started. `start` returns the program running; `Process::pool()` runs
+  started: its process group on Unix, its tree for a `tty` process and on
+  Windows. A started process's timeouts hold whether or not anything waits
+  on it. Results keep the raw bytes as well as the text. `start` returns the program running; `Process::pool()` runs
   processes side by side with an optional concurrency limit, and
   `Process::pipe()` feeds each output to the next input. `Process::fake()`
   stops every process in a test, answers by pattern, `describe` and

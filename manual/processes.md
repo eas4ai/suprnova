@@ -53,7 +53,8 @@ whatever the line holds. Use `Process::command` for that.
 |---|---|
 | `successful()` / `failed()` | whether the exit code is 0 |
 | `exit_code()` | `Some(code)`, or `None` when a signal ended it |
-| `output()` / `error_output()` | everything written to standard output and standard error |
+| `output()` / `error_output()` | everything written to standard output and standard error, as text |
+| `output_bytes()` / `error_output_bytes()` | the same, byte for byte, for output that is not text |
 | `see_in_output(text)` / `see_in_error_output(text)` | whether the output contains `text` |
 | `command()` | the command line that ran |
 
@@ -78,11 +79,11 @@ Every option takes the builder and returns it:
 | `path(dir)` | the working directory |
 | `env(key, value)` | adds a variable to the environment the program inherits |
 | `input(bytes)` | writes to standard input, then closes it; without it, standard input is empty |
-| `timeout(duration)` | the longest it may run; 60 seconds unless set |
+| `timeout(duration)` | the longest it may run; 60 seconds unless set, and zero means none, as in Laravel |
 | `forever()` | no timeout |
 | `idle_timeout(duration)` | the longest it may go without writing output |
-| `quietly()` | captures no output and calls no output callback |
-| `tty()` | hands the program this terminal, for a program that talks to the user; nothing is captured. `Process::supports_tty()` says whether there is one |
+| `quietly()` | keeps no output: it is read and thrown away, and no output callback is called |
+| `tty()` | hands the program this terminal, for a program that talks to the user; nothing is captured, and an idle timeout is refused, since nothing can watch the terminal. `Process::supports_tty()` says whether there is a terminal |
 
 `run_with(callback)` calls the callback with each chunk of output as it
 arrives, marked `OutputKind::Out` or `OutputKind::Err`:
@@ -106,13 +107,22 @@ writes nothing for its idle timeout is killed the same way, with
 `ProcessError::IdleTimedOut`. Both errors carry the output written before
 the kill.
 
-On Unix each program gets a process group of its own, and a kill reaches
-the whole group: a script that started background jobs takes them with
-it. The same cleanup happens when the future of `run` is dropped before
-it completes, as `tokio::time::timeout` or a `select!` drops it, and when
-a started process is dropped. A program that exits by itself is waited on
-until its output closes, and nothing it left behind is killed. Elsewhere
-only the program itself is killed.
+A kill reaches everything the program started: a script that started
+background jobs takes them with it. On Unix each program gets a process
+group of its own, and the group is killed. A `tty()` program stays in the
+terminal's group, which it must share to read the terminal, so its
+descendants are found in the process table and killed one by one. On
+Windows `taskkill /T` ends the tree. The same cleanup happens when the
+future of `run` is dropped before it completes, as `tokio::time::timeout`
+or a `select!` drops it, and when a started process is dropped. A program
+that exits by itself is waited on until its output closes, and nothing it
+left behind is killed.
+
+A child in a group of its own does not get the `SIGINT` a terminal sends
+on Ctrl-C. The server and the workers end their children when they shut
+down; a console command that Ctrl-C kills outright leaves its children
+running unless it handles the signal, for instance with
+`tokio::signal::ctrl_c()` in a `select!` beside the run.
 
 ## Started processes
 
@@ -137,12 +147,13 @@ let result = worker.wait().await?;
 `output()` and `error_output()` return everything so far, and
 `latest_output()` and `latest_error_output()` what came since the last
 call. `signal(Signal::Term)` signals the program itself; `stop(grace)`
-sends a terminate signal to it and everything it started, then a kill
-after `grace`, and returns the result. `wait_until(|kind, chunk| ...)`
-waits until the callback returns `true` for a chunk of output. The timeout
-still applies to a started process: `wait` and `ensure_not_timed_out`
-enforce it. Call `start` inside a Tokio runtime: the output is read by
-tasks of its own.
+sends a terminate signal to it and everything it started, then a kill to
+whatever is left after `grace`, and returns the result.
+`wait_until(|kind, chunk| ...)` waits until the callback returns `true` for
+a chunk of output. The timeouts hold for a started process whether or not
+anything waits on it: a watchdog kills it at its timeout, and `wait` then
+returns the timeout error. Call `start` inside a Tokio runtime: the output
+is read by tasks of its own.
 
 ## Pools
 
@@ -169,10 +180,13 @@ if !results.successful() {
 
 `results.get(key)` returns that process's result, or its error when it
 could not run or was killed for its timeout. A failure stops nothing else.
+A pushed process is keyed by its position, or the next free number when a
+key already holds it, and adding a key twice replaces the first process.
 With `concurrency(n)` at most `n` run at once and the rest wait for a
 slot; without it every process starts at once. `start()` returns the pool
 running, as an `InvokedPool`, with `running`, `signal`, `stop` and
-`wait`.
+`wait`; each `running()` call starts waiting processes in the slots that
+freed, so a pool can be polled to the end.
 
 ## Pipes
 
@@ -190,7 +204,8 @@ let sorted = Process::pipe()
 ```
 
 The first process that fails ends the pipe and its result comes back; the
-processes after it do not run. Each process runs to its end before the
+processes after it do not run. The output passes byte for byte, so a pipe
+can carry an archive or an image. Each process runs to its end before the
 next starts, as in Laravel. For a streaming pipe, use `Process::shell`
 with `|`.
 
@@ -265,6 +280,8 @@ tests out of a binary whose tests fake, or mark them `#[serial]`.
   program; a background job it started keeps running.
 - **Pools take a concurrency limit.** Laravel starts every process in a
   pool at once.
+- **A started process's timeout holds without a wait.** Laravel checks it
+  only while something waits on the process.
 - **The fake is a guard.** `Process::fake()` returns the fake, and the
   assertions are its methods, so a test cannot assert against a fake it
   did not install.

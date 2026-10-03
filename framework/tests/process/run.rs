@@ -205,3 +205,80 @@ async fn a_shell_line_sees_the_environment_and_the_working_directory() {
 fn supports_tty_answers_without_running_anything() {
     let _ = Process::supports_tty();
 }
+
+// Review fixes.
+
+#[tokio::test]
+#[serial]
+async fn output_that_is_not_text_comes_back_byte_for_byte() {
+    let result = Process::command(["printf", "\\377\\376a"])
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(result.output_bytes(), [0xff, 0xfe, b'a']);
+
+    let piped = Process::pipe()
+        .push(Process::command(["printf", "\\377a"]))
+        .push(Process::command(["wc", "-c"]))
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(
+        piped.output().trim(),
+        "2",
+        "the pipe passed two bytes, not replacement text"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_panicking_callback_does_not_hang_the_run() {
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Process::command(sh("printf a; sleep 0.2; printf b"))
+            .forever()
+            .run_with(|_, _| panic!("a broken callback")),
+    )
+    .await
+    .expect("the run ends")
+    .expect("the process still gives its result");
+    assert_eq!(result.output(), "ab");
+}
+
+#[tokio::test]
+#[serial]
+async fn the_shell_is_found_by_its_path_not_by_path() {
+    let result = Process::shell("echo ok")
+        .env("PATH", "/suprnova-nowhere")
+        .run()
+        .await
+        .expect("/bin/sh runs whatever PATH says");
+    assert_eq!(result.output(), "ok\n");
+}
+
+#[tokio::test]
+#[serial]
+async fn quietly_keeps_no_output() {
+    let mut process = Process::command(sh("printf secret; printf noise >&2; sleep 0.3"))
+        .quietly()
+        .start()
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(process.running());
+    assert_eq!(process.output(), "");
+    let result = process.wait().await.unwrap();
+    assert_eq!((result.output(), result.error_output()), ("", ""));
+}
+
+#[tokio::test]
+#[serial]
+async fn tty_captures_nothing_a_process_writes() {
+    let result = Process::command(sh("printf out; printf err >&2"))
+        .tty()
+        .run()
+        .await
+        .unwrap();
+    assert!(result.successful());
+    assert_eq!(result.output(), "");
+    assert_eq!(result.error_output(), "");
+}

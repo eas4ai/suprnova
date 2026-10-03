@@ -183,3 +183,135 @@ async fn a_process_that_keeps_writing_runs_past_the_idle_timeout() {
     .expect("steady output keeps it alive");
     assert_eq!(result.output(), ".".repeat(15));
 }
+
+// Review fixes.
+
+#[tokio::test]
+#[serial]
+async fn a_tty_process_is_killed_with_everything_it_started() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pids");
+    let error = Process::command(sh(&parent_and_child(&file)))
+        .tty()
+        .timeout(Duration::from_secs(1))
+        .run()
+        .await
+        .expect_err("a tty process has a timeout too");
+    assert!(matches!(error, ProcessError::TimedOut { .. }), "{error:?}");
+    let pids = pids_in(&file, 2).await;
+    assert!(all_gone(&pids, Duration::from_secs(3)).await, "{pids:?}");
+}
+
+#[tokio::test]
+#[serial]
+async fn dropping_a_started_tty_process_kills_its_children() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pids");
+    let process = Process::command(sh(&parent_and_child(&file)))
+        .tty()
+        .start()
+        .unwrap();
+    let pids = pids_in(&file, 2).await;
+    drop(process);
+    assert!(all_gone(&pids, Duration::from_secs(3)).await, "{pids:?}");
+}
+
+#[tokio::test]
+#[serial]
+async fn an_idle_timeout_on_a_tty_process_is_refused() {
+    let error = Process::command(["true"])
+        .tty()
+        .idle_timeout(Duration::from_secs(1))
+        .run()
+        .await
+        .expect_err("nothing can watch a terminal's output");
+    assert!(
+        matches!(error, ProcessError::Unsupported { .. }),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("idle timeout"), "{error}");
+}
+
+#[tokio::test]
+#[serial]
+async fn stop_kills_a_child_that_outlives_its_parent_and_ignores_the_terminate_signal() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pids");
+    let process = Process::command(sh(&format!(
+        "echo $$ > '{f}'; (trap '' TERM; exec sleep 30) & echo $! >> '{f}'; wait",
+        f = file.display()
+    )))
+    .start()
+    .unwrap();
+    let pids = pids_in(&file, 2).await;
+
+    let started = Instant::now();
+    process
+        .stop(Duration::from_millis(300))
+        .await
+        .expect("stopped");
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "stop did not wait on the child: {:?}",
+        started.elapsed()
+    );
+    assert!(all_gone(&pids, Duration::from_secs(3)).await, "{pids:?}");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_started_process_is_killed_at_its_timeout_though_nothing_waits() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pids");
+    let mut process = Process::command(sh(&parent_and_child(&file)))
+        .timeout(Duration::from_secs(1))
+        .start()
+        .unwrap();
+    let pids = pids_in(&file, 2).await;
+
+    let started = Instant::now();
+    while process.running() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "still running past its timeout"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(all_gone(&pids, Duration::from_secs(3)).await, "{pids:?}");
+    let error = process.wait().await.expect_err("the timeout passed");
+    assert!(matches!(error, ProcessError::TimedOut { .. }), "{error:?}");
+}
+
+#[tokio::test]
+#[serial]
+async fn wait_until_survives_bytes_that_are_not_utf8() {
+    let mut process = Process::command(sh(
+        "printf '\\377'; sleep 0.2; printf '\\303'; sleep 0.2; printf '\\251 ready'",
+    ))
+    .start()
+    .unwrap();
+    let matched = process
+        .wait_until(|_, chunk| chunk.contains("é ready"))
+        .await
+        .expect("no panic, no skipped output");
+    assert!(matched);
+    assert!(process.wait().await.unwrap().successful());
+}
+
+#[tokio::test]
+#[serial]
+async fn a_zero_timeout_is_no_timeout_and_a_huge_one_does_not_panic() {
+    let zero = Process::command(["sleep", "0.3"])
+        .timeout(Duration::ZERO)
+        .run()
+        .await
+        .expect("zero means no timeout, as in Laravel");
+    assert!(zero.successful());
+    let huge = Process::command(["true"])
+        .timeout(Duration::MAX)
+        .idle_timeout(Duration::MAX)
+        .run()
+        .await
+        .expect("a timeout past what the clock holds is none");
+    assert!(huge.successful());
+}
