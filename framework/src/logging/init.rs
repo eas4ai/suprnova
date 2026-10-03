@@ -9,9 +9,8 @@
 //! emits a `tracing::warn!` so an operator can see when a fresh
 //! `LogConfig` was NOT applied.
 
-use super::config::{LogConfig, LogFormat};
+use super::config::LogConfig;
 use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -69,27 +68,16 @@ pub fn init_subscriber(config: LogConfig) {
 /// in place and emits a `tracing::warn!` through it so the operator can
 /// see that this `LogConfig` was not applied.
 pub(crate) fn install_base_subscriber(config: &LogConfig) -> bool {
-    let env_filter = build_env_filter(&config.level);
-    let result = match config.format {
-        LogFormat::Pretty => tracing_subscriber::registry()
-            .with(env_filter)
-            .with(
-                fmt::layer()
-                    .with_target(true)
-                    .with_thread_ids(false)
-                    .pretty(),
-            )
-            .try_init(),
-        LogFormat::Json => tracing_subscriber::registry()
-            .with(env_filter)
-            .with(
-                fmt::layer()
-                    .json()
-                    .with_target(true)
-                    .with_current_span(true),
-            )
-            .try_init(),
-    };
+    if let Err(error) = super::layer::check_channels() {
+        // The server and the workers check first and stop; anything else
+        // that installs a subscriber still gets its log, on stdout.
+        eprintln!("suprnova: {error}; logging to stdout instead");
+        let _ = super::facade::set_default("stdout");
+    }
+    let result = tracing_subscriber::registry()
+        .with(build_env_filter(&config.level))
+        .with(super::layer::output_layers(config))
+        .try_init();
     let installed = result.is_ok();
     if !installed {
         // A global subscriber is already installed (common in tests, or an

@@ -1077,6 +1077,9 @@ where
                 Self::run_up().await;
             }
         }
+        // Every command ends here; the file log channels buffer, and nothing
+        // a worker wrote before a clean exit may be lost.
+        crate::logging::Log::flush();
     }
 
     async fn run_server_internal(
@@ -1781,6 +1784,10 @@ where
     /// race ahead of `serve`'s telemetry one and cost OTel builds their
     /// layers.
     fn install_daemon_logging() {
+        if let Err(error) = crate::logging::check_channels() {
+            eprintln!("suprnova: {error}");
+            std::process::exit(1);
+        }
         crate::logging::init_subscriber(crate::logging::LogConfig::from_env());
     }
 

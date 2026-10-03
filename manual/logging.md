@@ -8,15 +8,16 @@ JSON object per line in production, and propagates a per-request id
 into every event a handler emits.
 
 This chapter covers the log surface itself: the subscriber, the
-formats, the levels, and the request-id correlation that makes a
-production log searchable. For the OpenTelemetry bridge and query
+formats, the levels, the channels the lines go to, and the request-id
+correlation that makes a production log searchable. For the OpenTelemetry bridge and query
 logging see [Observability](observability.md); for the request
 `Context` bag that emitters can read alongside the id see
 [Context](context.md).
 
 ## What gets logged where
 
-Two outputs by default:
+`tracing`'s events go to the default channel, `stdout` unless `LOG_CHANNEL`
+names another (see [Channels](#channels)). On `stdout`, two formats:
 
 | Where | Format | When |
 |---|---|---|
@@ -37,11 +38,98 @@ LOG_LEVEL=info,sqlx=warn,suprnova::queue=debug
 LOG_FORMAT=json     # optional; this is the prod default
 ```
 
-The framework only writes to `stdout`. In production point your
-container runtime, systemd journal, or log aggregator at it
-(`docker logs`, `kubectl logs`, `journalctl -u my-app`, a Loki/Vector
-agent, etc.). There is no rotating file appender - let the platform
-own log persistence.
+By default the framework writes to `stdout`. In a container, point the
+runtime, the systemd journal or a log aggregator at it (`docker logs`,
+`kubectl logs`, `journalctl -u my-app`, a Loki or Vector agent). Where
+there is no platform to keep the logs, write them to files with a
+[channel](#channels).
+
+## Channels
+
+A channel is where log lines go. `LOG_CHANNEL` names the default channel,
+the one `tracing`'s events go to:
+
+| Channel | Writes to |
+|---|---|
+| `stdout` | standard output, in the `LOG_FORMAT`; the default |
+| `stderr` (also `errorlog`) | standard error |
+| `single` | `storage/logs/suprnova.log`, appended to |
+| `daily` | `storage/logs/suprnova-2026-10-02.log`, a file a day, keeping the newest `LOG_DAILY_DAYS` (14) |
+| `monthly` | `storage/logs/suprnova-2026-10.log`, a file a month, keeping the newest 3 |
+| `syslog` | the local syslog socket, with the facility `LOG_SYSLOG_FACILITY` (`user`) |
+| `null` | nowhere |
+| `stack` | every channel `LOG_STACK` lists, `single` unless set |
+
+```env
+LOG_CHANNEL=stack
+LOG_STACK=daily,stdout
+LOG_DAILY_DAYS=30
+```
+
+A channel that does not exist stops the server and the workers at boot,
+with an error that names it. Dates are those of the framework clock, in
+UTC. File lines are text, one line a record, or JSON objects when
+`LOG_FORMAT=json`.
+
+Define your own channels in the bootstrap, and reach any channel with
+`Log`:
+
+```rust
+use serde_json::json;
+use suprnova::{Log, LogChannel, LogLevel};
+
+// bootstrap.rs
+Log::define("audit", LogChannel::daily("storage/logs/audit.log").days(90));
+Log::define("alerts", LogChannel::syslog().facility("local0").level(LogLevel::Error));
+
+// anywhere
+Log::channel("audit")?.info_with("user {id} signed in", json!({ "id": 42 }));
+Log::stack(&["audit", "alerts"])?.critical("payments are failing");
+Log::build(LogChannel::single("storage/logs/import.log"))?.notice("import done");
+```
+
+`Log::channel`, `Log::stack` and `Log::build` write to their channels
+only; `tracing`'s events go to the default channel. A logger has
+Laravel's eight levels, from `emergency` to `debug`, and the `*_with`
+methods take a JSON context: each `{key}` in the message is replaced with
+its value, and the context is written beside the message. A channel
+`.level(...)` keeps only the records at that level or above.
+
+A stack writes each record to every channel it lists, and a channel that
+cannot write, such as a file it cannot open, stops none of the others;
+the failure is reported once on stderr, and the code that logged never
+sees an error. `Log::channels()` lists the channels in use,
+`Log::forget_channel(name)` closes one, and `Log::default_channel()` and
+`Log::set_default_channel(name)` read and move the default.
+
+`Log::extend` adds a driver for anything else, such as Slack or a log
+service, with a `LogSink` that receives each `LogRecord`:
+
+```rust
+use std::sync::Arc;
+use suprnova::{Log, LogChannel, LogRecord, LogSink};
+
+struct Webhook;
+
+impl LogSink for Webhook {
+    fn write(&self, record: &LogRecord) -> std::io::Result<()> {
+        // send record.level, record.message and record.context
+        Ok(())
+    }
+}
+
+Log::extend("webhook", |_channel| Ok(Arc::new(Webhook) as Arc<dyn LogSink>));
+Log::define("ops", LogChannel::driver("webhook").option("url", "https://..."));
+```
+
+`MAIL_LOG_CHANNEL` names the channel the `log` mail transport writes to.
+
+### Flushing
+
+File channels buffer their lines. A record at `error` or above is written
+out at once, the rest within a second, and everything on `Log::flush()`,
+which the server and the workers call when they shut down. A record
+written before a clean exit is never lost.
 
 ## Emitting events
 
@@ -310,10 +398,12 @@ task-local spans: no plumbing, fields stay typed, and correlation is
 automatic because the request span is in scope for every event the
 chain emits.
 
-`stdout`-only output is also intentional. In containerised
-deployments (the only way Suprnova ships) the runtime, not the app,
-owns log persistence - file rotation, retention, and shipping all
-belong to the platform.
+Laravel's channels are here as `Log`, with three differences. The
+default channel is `stdout`, not a stack of files, because a container's
+runtime keeps its logs. Channels are configured from the environment and
+`Log::define` in the bootstrap, not a config file. And file channels
+buffer, flushing at once for errors, within a second otherwise, and on
+shutdown, where Monolog writes each record straight through.
 
 ## Next
 
@@ -323,5 +413,5 @@ belong to the platform.
   other contextual fields live
 - [Error Handling](errors.md) - how the framework's panic boundary
   and 5xx path emit their own structured events
-- [Environment Variables](env-vars.md) - `LOG_LEVEL`, `LOG_FORMAT`
-  reference
+- [Environment Variables](env-vars.md) - `LOG_LEVEL`, `LOG_FORMAT`,
+  `LOG_CHANNEL` and the channel variables

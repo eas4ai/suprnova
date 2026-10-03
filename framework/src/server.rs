@@ -384,6 +384,9 @@ impl Server {
         // when the `otel` feature is enabled + an endpoint is set).
         // The guard owns the SDK providers and flushes them on Ctrl-C
         // or SIGTERM. Idempotent across calls.
+        // A log channel that does not exist stops the boot here, before
+        // the subscriber would fall back to stdout.
+        crate::logging::check_channels()?;
         let guard = init_telemetry(LogConfig::from_env(), OtelConfig::from_env());
 
         // Register all #[policy] gates collected via inventory::submit!
