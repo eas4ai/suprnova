@@ -18,30 +18,35 @@ fn database() -> (tempfile::TempDir, String) {
 
 #[tokio::test]
 async fn the_dump_holds_the_schema_and_the_ledger() {
+    let _lock = cases::exclusive().await;
     let (dir, url) = database();
     cases::dump_holds_the_schema_and_the_ledger(&url, dir.path(), "sqlite").await;
 }
 
 #[tokio::test]
 async fn the_dump_loads_before_newer_migrations() {
+    let _lock = cases::exclusive().await;
     let (dir, url) = database();
     cases::the_dump_loads_before_newer_migrations(&url, dir.path()).await;
 }
 
 #[tokio::test]
 async fn only_an_empty_ledger_loads() {
+    let _lock = cases::exclusive().await;
     let (dir, url) = database();
     cases::only_an_empty_ledger_loads(&url, dir.path()).await;
 }
 
 #[tokio::test]
 async fn pruned_migrations_keep_their_names() {
+    let _lock = cases::exclusive().await;
     let (dir, url) = database();
     cases::pruned_migrations_keep_their_names(&url, dir.path()).await;
 }
 
 #[tokio::test]
 async fn migrate_finds_the_dump_at_its_default_path() {
+    let _lock = cases::exclusive().await;
     let (_dir, url) = database();
     SchemaDump::migrate::<cases::First>(&url, None)
         .await
@@ -74,6 +79,7 @@ async fn migrate_finds_the_dump_at_its_default_path() {
 #[cfg(feature = "testing")]
 #[tokio::test]
 async fn test_database_fresh_loads_the_sqlite_dump() {
+    let _lock = cases::exclusive().await;
     let (_dir, url) = database();
     SchemaDump::migrate::<cases::First>(&url, None)
         .await
@@ -95,13 +101,15 @@ async fn test_database_fresh_loads_the_sqlite_dump() {
 /// is looked up before any connection, so no server is needed.
 #[tokio::test]
 async fn a_missing_dump_tool_keeps_the_earlier_dump() {
+    let _lock = cases::exclusive().await;
     let dir = tempfile::tempdir().expect("a temporary directory");
     let path = dir.path().join("postgres-schema.sql");
     std::fs::write(&path, "-- an earlier dump\n").expect("write an earlier dump");
     let empty = dir.path().join("bin");
     std::fs::create_dir(&empty).expect("mkdir");
-    // SAFETY: nextest runs each test in its own process, so no other
-    // thread reads PATH while it changes.
+    let path_before = std::env::var_os("PATH");
+    // SAFETY: every test in this binary holds `cases::exclusive`, so no
+    // other test thread reads PATH while it changes.
     unsafe { std::env::set_var("PATH", &empty) };
 
     let err =
@@ -111,8 +119,52 @@ async fn a_missing_dump_tool_keeps_the_earlier_dump() {
     let message = err.to_string();
     assert!(message.contains("pg_dump"), "{message}");
     assert!(!message.contains("hunter2"), "{message}");
+    // SAFETY: as above.
+    unsafe { std::env::set_var("PATH", path_before.unwrap_or_default()) };
     assert_eq!(
         std::fs::read_to_string(&path).expect("read"),
         "-- an earlier dump\n"
     );
+}
+
+#[tokio::test]
+async fn tables_without_a_ledger_are_not_loaded_over() {
+    let _lock = cases::exclusive().await;
+    let (dir, url) = database();
+    cases::tables_without_a_ledger_are_not_loaded_over(&url, dir.path()).await;
+}
+
+#[tokio::test]
+async fn a_missing_schema_path_is_an_error() {
+    let _lock = cases::exclusive().await;
+    let (dir, url) = database();
+    cases::a_missing_schema_path_is_an_error(&url, dir.path()).await;
+}
+
+#[tokio::test]
+async fn fresh_reloads_views_and_routines() {
+    let _lock = cases::exclusive().await;
+    let (dir, url) = database();
+    cases::fresh_reloads_views_and_routines(&url, dir.path(), "sqlite").await;
+}
+
+/// A test with a Migrator the project's dump does not belong to runs that
+/// Migrator's migrations and loads nothing.
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn test_database_fresh_ignores_a_dump_of_another_migrator() {
+    let _lock = cases::exclusive().await;
+    let (_dir, url) = database();
+    SchemaDump::migrate::<cases::First>(&url, None)
+        .await
+        .expect("migrate");
+    SchemaDump::dump::<cases::First>(&url, &suprnova::database_path("schema/sqlite-schema.sql"))
+        .await
+        .expect("dump");
+
+    let test_db = suprnova::testing::TestDatabase::fresh::<cases::OnlyComments>()
+        .await
+        .expect("a Migrator that lists none of the dumped migrations");
+    assert!(cases::has_table(test_db.conn(), "sd_comments").await);
+    assert!(!cases::has_table(test_db.conn(), "sd_users").await);
 }
