@@ -26,8 +26,15 @@ use suprnova::Str;
 
 assert_eq!(Str::slug("Laravel 5 Framework", "-"), "laravel-5-framework");
 assert_eq!(Str::slug("Ünïcödé Straße", "-"), "unicode-strasse");
+assert_eq!(Str::slug("Привет мир", "-"), "privet-mir");
 assert_eq!(Str::slug("foo bar", "_"), "foo_bar");
 ```
+
+The ASCII spelling is Laravel's own: the replacement map of
+voku/portable-ascii, the package Laravel's `Str::ascii` uses, so a title
+gets the slug it gets in Laravel. That map spells Latin, Greek, Cyrillic,
+Arabic, and many other scripts, and drops what it can't spell, such as
+Han characters and emoji: `Str::slug("北京 city", "-")` is `city`.
 
 ## Masks
 
@@ -57,8 +64,9 @@ assert_eq!(Str::limit_words("The quick brown fox", 12, "..."), "The quick...");
 ```
 
 `Str::excerpt(text, phrase, radius, omission)` frames the first match of
-a phrase, ignoring case, with up to `radius` characters on each side. It
-returns `None` when the phrase is not there:
+a phrase, ignoring case, with up to `radius` characters on each side,
+in text of any number of lines. It returns `None` when the phrase is not
+there:
 
 ```rust
 use suprnova::Str;
@@ -72,10 +80,11 @@ assert_eq!(
 ## Plural and singular
 
 `Str::plural(word, count)` and `Str::singular(word)` inflect by the rules
-of the current locale's language, the ones Laravel's `Pluralizer` uses:
-English, French, Norwegian Bokmål, Portuguese, Spanish, and Turkish. Any
-other language uses the English rules. A count of 1 or -1 leaves the word
-as it is, and the result keeps the word's case:
+of the current locale's language, the ones Laravel's `Pluralizer` uses
+from doctrine/inflector 2.1.0, the release Laravel 13 installs: English,
+French, Norwegian Bokmål, Portuguese, Spanish, and Turkish. Any other
+language uses the English rules. A count of 1 or -1 leaves the word as it
+is, and the result keeps the word's case:
 
 ```rust
 use suprnova::Str;
@@ -90,6 +99,11 @@ In a request whose locale is `fr`, `Str::plural("cheval", 2)` is
 `chevaux`; in `es`, `Str::plural("ciudad", 2)` is `ciudades`. Without the
 `localization` feature, the rules are English.
 
+Both read the current locale, so a page that [RenderCache](render-cache.md)
+stores and that calls them must vary by it: add
+`.vary(VarianceDimension::Locale)` to the route's policy. Without it,
+RenderCache declines to store the page.
+
 To choose the form a reader sees in a translated message, use the plural
 categories of a Fluent message instead; see
 [Localization](localization.md). `Str::plural` is for words in your own
@@ -99,7 +113,10 @@ code, such as a table or a label built from a model's name.
 
 - **The language follows the locale.** Laravel sets the plural language
   for the whole process with `Pluralizer::useLanguage`; here the current
-  request's locale chooses it.
+  request's locale chooses it, for `Str::singular` as for `Str::plural`.
+- **An excerpt can span lines.** Laravel's pattern stops at a line break,
+  so `Str::excerpt` returns `null` for text with a line break inside it;
+  here it finds the phrase on any line.
 - **Counts are characters.** Laravel's `limit` counts display width, two
   for a wide East Asian character, and its word-preserving form also
   strips HTML tags.

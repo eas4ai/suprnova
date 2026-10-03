@@ -15,6 +15,31 @@ fn slug_spells_ascii_and_joins_words() {
     assert_eq!(Str::slug("", "-"), "");
 }
 
+/// Laravel 13.34.0 gave each of these, through voku/portable-ascii 2.1.1.
+#[test]
+fn slug_spells_every_script_as_laravel_does() {
+    for (title, slug) in [
+        ("北亰 city", "city"),
+        ("げんまい茶", ""),
+        ("بسم الله", "bsm-allh"),
+        ("I ❤ Rust", "i-rust"),
+        ("© 2026", "2026"),
+        ("™ brand", "brand"),
+        ("½ price", "price"),
+        ("ǅungla", "ungla"),
+        ("DŽungla", "dzungla"),
+        ("Ærøskøbing Straße", "aeroskobing-strasse"),
+        ("Ελληνικά νέα", "ellinika-nea"),
+        ("Привет мир", "privet-mir"),
+        ("Tiếng Việt", "tieng-viet"),
+        ("Ça va\tbien", "ca-va-bien"),
+        ("e\u{301}te\u{301}", "ete"),
+        ("Ⓐ ₀ ①", "0"),
+    ] {
+        assert_eq!(Str::slug(title, "-"), slug, "the slug of {title:?}");
+    }
+}
+
 #[test]
 fn mask_replaces_characters_from_an_index() {
     assert_eq!(
@@ -43,6 +68,16 @@ fn mask_replaces_characters_from_an_index() {
 }
 
 #[test]
+fn mask_with_a_huge_length_masks_to_the_end() {
+    assert_eq!(
+        Str::mask("taylor@example.com", '*', 3, Some(isize::MAX)),
+        "tay***************"
+    );
+    assert_eq!(Str::mask("abc", '*', isize::MIN, Some(isize::MIN)), "abc");
+    assert_eq!(Str::mask("abc", '*', isize::MAX, Some(isize::MAX)), "abc");
+}
+
+#[test]
 fn limit_cuts_at_a_character_count() {
     assert_eq!(
         Str::limit("The quick brown fox jumps over the lazy dog", 20, "..."),
@@ -62,6 +97,26 @@ fn limit_cuts_at_a_character_count() {
         Str::limit_words("The quick brown fox", 30, "..."),
         "The quick brown fox"
     );
+}
+
+/// Laravel 13.34.0 gave each of these.
+#[test]
+fn limit_words_breaks_lines_and_spaces_as_laravel_does() {
+    assert_eq!(
+        Str::limit_words("The quick\r\nbrown fox jumps", 14, "..."),
+        "The quick...",
+        "a CRLF is one space"
+    );
+    assert_eq!(
+        Str::limit_words("The quick\n\n\nbrown fox", 12, "..."),
+        "The quick..."
+    );
+    assert_eq!(
+        Str::limit_words("a\u{a0}bc d", 3, "..."),
+        "a\u{a0}b...",
+        "a no-break space is not a place to break"
+    );
+    assert_eq!(Str::limit_words("one\ttwo three", 6, "..."), "one...");
 }
 
 #[test]

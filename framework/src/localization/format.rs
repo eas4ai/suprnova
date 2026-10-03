@@ -16,7 +16,7 @@
 use super::locale::Locale;
 use crate::error::FrameworkError;
 use chrono::{Datelike, NaiveDateTime, Timelike};
-use fixed_decimal::{Decimal, FloatPrecision};
+use fixed_decimal::{Decimal, FloatPrecision, Sign};
 use icu_calendar::{Date, Iso};
 use icu_datetime::fieldsets::{T, YMD, YMDE};
 use icu_datetime::input::{DateTime, Time};
@@ -143,29 +143,25 @@ pub(crate) fn try_number(locale: &Locale, n: f64) -> Result<String, FrameworkErr
 }
 
 /// `n` rounded to `precision` fraction digits, with trailing zeros kept
-/// to that many.
+/// to that many. A value that rounds to zero loses its sign, as Laravel's
+/// `Number` helpers drop it, so `-0.4` is never written `-0`.
 fn fixed(n: f64, precision: usize) -> Result<Decimal, FrameworkError> {
     let mut decimal = Decimal::try_from_f64(n, FloatPrecision::RoundTrip)
         .map_err(|e| FrameworkError::internal(format!("`{n}` is not a formattable number: {e}")))?;
     let position = -(precision.min(i16::MAX as usize) as i16);
     decimal.round(position);
     decimal.absolute.pad_end(position);
+    if decimal.absolute.is_zero() {
+        decimal.set_sign(Sign::None);
+    }
     Ok(decimal)
 }
 
-/// `n` in the locale's number format with `precision` fraction digits.
-pub(crate) fn try_number_with_precision(
-    locale: &Locale,
-    n: f64,
-    precision: usize,
-) -> Result<String, FrameworkError> {
+/// The locale's plain decimal formatter.
+fn decimal_formatter(locale: &Locale) -> Result<DecimalFormatter, FrameworkError> {
     let prefs: DecimalFormatterPreferences = icu_locale(locale)?.into();
-    let formatter = DecimalFormatter::try_new(prefs, Default::default())
-        .map_err(|e| FrameworkError::internal(format!("DecimalFormatter: {e}")))?;
-    Ok(formatter
-        .format(&fixed(n, precision)?)
-        .write_to_string()
-        .into_owned())
+    DecimalFormatter::try_new(prefs, Default::default())
+        .map_err(|e| FrameworkError::internal(format!("DecimalFormatter: {e}")))
 }
 
 /// `n` as a percentage, `10` being ten percent, with `precision` fraction
@@ -181,9 +177,10 @@ pub(crate) fn try_percentage(
     Ok(formatter.format(&fixed(n, precision)?).to_string())
 }
 
-/// Laravel's `Number::abbreviate`: `n` divided by the largest power of a
-/// thousand it reaches, up to a quadrillion, in the locale's number format
-/// with `precision` fraction digits, and `K`, `M`, `B`, `T` or `Q` after it.
+/// Laravel's `Number::abbreviate`, which its `summarize` implements: `n`
+/// divided by the largest power of a thousand it reaches, up to a
+/// quadrillion, in the locale's number format with `precision` fraction
+/// digits, and `K`, `M`, `B`, `T` or `Q` after it.
 pub(crate) fn try_abbreviate(
     locale: &Locale,
     n: f64,
@@ -197,28 +194,48 @@ pub(crate) fn try_abbreviate(
     }
     if n == 0.0 {
         return if precision > 0 {
-            try_number_with_precision(locale, 0.0, precision)
+            write_decimal(locale, &fixed(0.0, precision)?)
         } else {
             Ok("0".to_owned())
         };
     }
     if n < 0.0 {
-        return Ok(format!("-{}", try_abbreviate(locale, -n, precision)?));
+        // A magnitude that rounds to zero is written without a sign.
+        let summary = try_abbreviate(locale, -n, precision)?;
+        return Ok(if summary == try_abbreviate(locale, 0.0, precision)? {
+            summary
+        } else {
+            format!("-{summary}")
+        });
     }
     if n >= 1e15 {
-        return Ok(format!(
-            "{}Q",
-            try_number_with_precision(locale, n / 1e15, precision)?
-        ));
+        // Laravel abbreviates the count of quadrillions too: 3e18 is 3KQ.
+        return Ok(format!("{}Q", try_abbreviate(locale, n / 1e15, precision)?));
     }
     let exponent = n.log10().floor() as i32;
-    let display = exponent - exponent % 3;
-    let digits = try_number_with_precision(locale, n / 10f64.powi(display), precision)?;
+    // A value under one is never multiplied up: the exponent stops at zero.
+    let mut display = (exponent - exponent % 3).max(0);
+    let mut number = n / 10f64.powi(display);
+    let mut decimal = fixed(number, precision)?;
+    // Rounding can reach the next unit: 999,999 is 1M, not 1,000K.
+    if decimal.absolute.nonzero_magnitude_start() >= 3 && display < 15 {
+        number /= 1000.0;
+        display += 3;
+        decimal = fixed(number, precision)?;
+    }
     let unit = UNITS
         .iter()
         .find(|(power, _)| *power == display)
         .map_or("", |(_, unit)| unit);
-    Ok(format!("{digits}{unit}"))
+    Ok(format!("{}{unit}", write_decimal(locale, &decimal)?))
+}
+
+/// `decimal` in the locale's number format.
+fn write_decimal(locale: &Locale, decimal: &Decimal) -> Result<String, FrameworkError> {
+    Ok(decimal_formatter(locale)?
+        .format(decimal)
+        .write_to_string()
+        .into_owned())
 }
 
 /// Locale-aware currency formatting. `iso_code` is a 3-letter ISO 4217
