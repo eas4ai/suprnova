@@ -962,7 +962,12 @@ for ten percent, as Laravel's `Number::percentage` does.
 a million, a billion, a trillion, and a quadrillion the value reaches and
 adds `K`, `M`, `B`, `T`, or `Q`, as Laravel's `Number::abbreviate` does;
 the digits follow the locale, the suffixes do not, since the ICU4X
-release the framework uses has no compact number format.
+release the framework uses has no compact number format. As in Laravel,
+rounding that reaches a thousand moves to the next unit, so
+`Lang::abbreviate(999_999.0, 0)` is `1M`, not `1,000K`; a count of
+quadrillions is itself abbreviated, so `3e18` is `3KQ`; and a value that
+rounds to zero, such as `-0.004` with two digits, is `0.00`, with no
+sign. Percentages drop that sign too.
 
 > Exact output comes from the CLDR data baked into ICU4X and can change
 > across an ICU upgrade, particularly for dates and currency. In your own

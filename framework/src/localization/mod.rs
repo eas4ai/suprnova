@@ -393,8 +393,12 @@ impl Lang {
     /// million, a billion, a trillion and a quadrillion it reaches, written
     /// with `precision` fraction digits, and `K`, `M`, `B`, `T` or `Q`
     /// after it. `1230000.0` with 2 is `1.23M` in `en` and `1,23M` in `de`;
-    /// a value under a thousand is written as it is. Never panics - an ICU
-    /// failure logs a `tracing::warn!` and falls back to `{value}`.
+    /// a value under a thousand is written as it is. When rounding reaches
+    /// a thousand of one unit, the next is used, so `999999.0` with 0 is
+    /// `1M`; past a quadrillion the count of quadrillions is shortened
+    /// too, so `3e18` is `3KQ`; and a value that rounds to zero has no
+    /// sign. Never panics - an ICU failure logs a `tracing::warn!` and
+    /// falls back to `{value}`.
     pub fn abbreviate(value: f64, precision: usize) -> String {
         Self::try_abbreviate(value, precision).unwrap_or_else(|e| {
             tracing::warn!(error = %e, "Lang::abbreviate: ICU formatting failed, falling back to plain rendering");

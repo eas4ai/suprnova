@@ -4,6 +4,7 @@
 //! Every count is in characters, never bytes, so a multibyte value is never
 //! cut inside a character.
 
+mod ascii_map;
 mod inflector;
 mod inflector_rules;
 
@@ -24,15 +25,17 @@ const UNCOUNTABLE: &[&str] = &["recommended", "related"];
 pub struct Str;
 
 impl Str {
-    /// A URL slug: the title spelled in ASCII and lower case, `@` written
-    /// as `at`, and each run of other characters between letters and digits
-    /// made one `separator`. `Œuvre d'art` becomes `oeuvre-dart`.
+    /// A URL slug: the title spelled in ASCII as Laravel spells it, lower
+    /// case, `@` written as `at`, and each run of other characters between
+    /// letters and digits made one `separator`. `Œuvre d'art` becomes
+    /// `oeuvre-dart`. A character Laravel's ASCII map does not know, such
+    /// as a Han character or an emoji, is dropped.
     pub fn slug(title: &str, separator: &str) -> String {
         let separators: Vec<char> = separator.chars().collect();
         let flip = if separator == "-" { '_' } else { '-' };
         let mut text = String::new();
         let mut in_flip = false;
-        for c in deunicode::deunicode(title).chars() {
+        for c in ascii(title).chars() {
             if c == flip && !separators.contains(&flip) {
                 if !in_flip {
                     text.push_str(separator);
@@ -82,35 +85,37 @@ impl Str {
         masked
     }
 
-    /// `value` cut to its first `limit` characters, less any whitespace the
-    /// cut leaves at the end, with `end` after it. A value no longer than
-    /// the limit is returned as it is.
+    /// `value` cut to its first `limit` characters, less any ASCII
+    /// whitespace the cut leaves at the end, with `end` after it. A value
+    /// no longer than the limit is returned as it is.
     pub fn limit(value: &str, limit: usize, end: &str) -> String {
         if value.chars().count() <= limit {
             return value.to_owned();
         }
         let kept: String = value.chars().take(limit).collect();
-        format!("{}{end}", kept.trim_end())
+        format!("{}{end}", kept.trim_end_matches(PHP_TRIM))
     }
 
-    /// As [`limit`](Self::limit), but the cut falls at the last whitespace
-    /// within the limit, so no word is broken. Line breaks count as spaces.
+    /// As [`limit`](Self::limit), but the cut falls at the last ASCII
+    /// whitespace within the limit, so no word is broken; a no-break space
+    /// is not a place to break. Each run of line breaks counts as one
+    /// space.
     pub fn limit_words(value: &str, limit: usize, end: &str) -> String {
         if value.chars().count() <= limit {
             return value.to_owned();
         }
-        let flat = value.replace(['\r', '\n'], " ");
-        let flat = flat.trim();
+        let flat = one_space_per_line_break(value);
+        let flat = flat.trim_matches(PHP_TRIM);
         let chars: Vec<char> = flat.chars().collect();
         if chars.len() <= limit {
             return flat.to_owned();
         }
         let kept: String = chars[..limit].iter().collect();
-        let kept = kept.trim_end();
+        let kept = kept.trim_end_matches(PHP_TRIM);
         if chars[limit] == ' ' {
             return format!("{kept}{end}");
         }
-        match kept.rfind(char::is_whitespace) {
+        match kept.rfind(|c: char| c.is_ascii_whitespace() || c == '\x0B') {
             Some(at) => format!("{}{end}", &kept[..at]),
             None => format!("{kept}{end}"),
         }
@@ -172,6 +177,73 @@ impl Str {
     }
 }
 
+/// The characters PHP's `trim` removes by default, which Laravel's `limit`
+/// trims with.
+const PHP_TRIM: &[char] = &[' ', '\t', '\n', '\r', '\0', '\x0B'];
+
+/// The longest key in [`ascii_map::MAP`], in characters.
+const LONGEST_KEY: usize = 5;
+
+/// `value` spelled in ASCII as Laravel's `Str::ascii` spells it, which is
+/// voku/portable-ascii's `to_ascii` with the language `en`: each sequence
+/// its map knows is replaced, the longest first, as PHP's `strtr` does,
+/// and every character still outside printable ASCII is dropped, a tab or
+/// line break becoming a space.
+fn ascii(value: &str) -> String {
+    let printable = |c: char| (' '..='~').contains(&c);
+    if value.chars().all(printable) {
+        return value.to_owned();
+    }
+    let mut replaced = String::with_capacity(value.len());
+    let mut rest = value;
+    'next: while let Some(first) = rest.chars().next() {
+        let ends: Vec<usize> = rest
+            .char_indices()
+            .take(LONGEST_KEY)
+            .map(|(at, c)| at + c.len_utf8())
+            .collect();
+        for &end in ends.iter().rev() {
+            if let Ok(found) = ascii_map::MAP.binary_search_by(|(key, _)| (*key).cmp(&rest[..end]))
+            {
+                replaced.push_str(ascii_map::MAP[found].1);
+                rest = &rest[end..];
+                continue 'next;
+            }
+        }
+        replaced.push(first);
+        rest = &rest[first.len_utf8()..];
+    }
+    if replaced.chars().all(printable) {
+        return replaced;
+    }
+    replaced
+        .replace("\r\n", " ")
+        .replace(['\n', '\r', '\t'], " ")
+        .chars()
+        // voku keeps these two control characters too; the slug drops them.
+        .filter(|&c| printable(c) || c == '\x10' || c == '\x13')
+        .collect()
+}
+
+/// `value` with each run of line breaks made one space, as Laravel's
+/// `limit` does before it looks for a word boundary.
+fn one_space_per_line_break(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut in_break = false;
+    for c in value.chars() {
+        if c == '\r' || c == '\n' {
+            if !in_break {
+                out.push(' ');
+            }
+            in_break = true;
+        } else {
+            out.push(c);
+            in_break = false;
+        }
+    }
+    out
+}
+
 /// The language whose rules apply: the current locale's.
 fn current_tongue() -> Tongue {
     #[cfg(feature = "localization")]
@@ -199,7 +271,7 @@ fn char_range(len: usize, index: isize, length: Option<isize>) -> Option<(usize,
     let end = match length {
         None => len_i,
         Some(length) if length < 0 => len_i + length,
-        Some(length) => (start + length).min(len_i),
+        Some(length) => start.saturating_add(length).min(len_i),
     };
     (end > start).then(|| (start as usize, (end - start) as usize))
 }
@@ -247,6 +319,24 @@ mod tests {
         assert_eq!(char_range(6, -10, Some(2)), Some((0, 2)));
         assert_eq!(char_range(6, 6, None), None);
         assert_eq!(char_range(6, 2, Some(-5)), None);
+    }
+
+    #[test]
+    fn the_ascii_map_is_sorted_with_short_keys() {
+        assert!(
+            ascii_map::MAP.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "the binary search needs the keys sorted and distinct"
+        );
+        assert!(
+            ascii_map::MAP
+                .iter()
+                .all(|(key, _)| (1..=LONGEST_KEY).contains(&key.chars().count()))
+        );
+        assert!(
+            ascii_map::MAP
+                .iter()
+                .all(|(_, ascii)| ascii.chars().all(|c| (' '..='~').contains(&c)))
+        );
     }
 
     #[test]
