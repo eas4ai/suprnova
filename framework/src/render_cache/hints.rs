@@ -490,7 +490,7 @@ impl HintChannel {
             config,
             super::providers::redis::RENDER_CACHE_REDIS_URL,
         )?;
-        let client = redis::Client::open(config.url.as_str()).map_err(|error| {
+        let client = crate::redis_client::open(config.url.as_str()).map_err(|error| {
             tracing::warn!(
                 target: "suprnova::render_cache",
                 kind = ?error.kind(),

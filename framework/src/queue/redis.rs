@@ -1661,7 +1661,7 @@ impl RedisQueueDriver {
         // Validate the direct-command backend before the producer creates any
         // queue state. One manager is reserved for blocking XREADGROUP; the
         // other remains available for claims, settlement, and inspection.
-        let client = redis::Client::open(url)
+        let client = crate::redis_client::open(url)
             .map_err(|e| FrameworkError::internal(format!("redis client open: {e}")))?;
         let redis_db = redis_db_from_url(url)?;
         let conn = ConnectionManager::new(client.clone())

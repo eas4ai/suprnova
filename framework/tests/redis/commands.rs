@@ -1,7 +1,7 @@
 //! PAR-032: typed commands, any command, the client, retried reads, and
 //! the command events.
 
-use crate::support::{client_id, connection, kill_client, unique};
+use crate::support::{client_id, connection, cutting_proxy, kill_client, unique};
 use serial_test::serial;
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::{Command, Stdio};
@@ -222,20 +222,75 @@ async fn a_read_is_sent_again_after_a_lost_connection() {
     redis.del(&[key.as_str()]).await.unwrap();
 }
 
+/// A connection through a proxy that drops it once, after the server has
+/// run the command that names `marker`.
+async fn cut_once(marker: &str) -> (suprnova::RedisConnection, crate::support::CuttingProxy) {
+    let proxy = cutting_proxy(marker).await;
+    let name = unique("cut");
+    Redis::define(&name, &proxy.url).unwrap();
+    let redis = Redis::connection(&name).unwrap();
+    redis.command("PING", &[] as &[&str]).await.unwrap();
+    (redis, proxy)
+}
+
 #[tokio::test]
 #[ignore = "needs Redis: set REDIS_TEST_URL"]
 #[serial]
-async fn a_write_is_not_applied_twice_after_a_lost_connection() {
-    let redis = connection("write");
+async fn a_write_the_server_applied_is_not_sent_again_when_its_reply_is_lost() {
+    let reader = connection("cut-reader");
+
     let counter = unique("counter");
-    kill_client(client_id(&redis).await).await;
+    let (redis, proxy) = cut_once(&counter).await;
     let _ = redis.incr(&counter, 1).await;
-    let value = redis.get(&counter).await.unwrap();
-    assert!(
-        value.is_none() || value.as_deref() == Some("1"),
-        "the INCR was applied at most once, got {value:?}"
+    assert_eq!(proxy.times_sent(), 1, "INCRBY was sent again");
+    assert_eq!(reader.get(&counter).await.unwrap().as_deref(), Some("1"));
+
+    let key = unique("typed-set");
+    let (redis, proxy) = cut_once(&key).await;
+    let _ = redis.set(&key, "once").await;
+    assert_eq!(proxy.times_sent(), 1, "the typed SET was sent again");
+
+    for name in ["SET", "MSET", "HMSET"] {
+        let key = unique(name);
+        let (redis, proxy) = cut_once(&key).await;
+        let args: Vec<&str> = match name {
+            "HMSET" => vec![key.as_str(), "field", "value"],
+            _ => vec![key.as_str(), "value"],
+        };
+        let _ = redis.command(name, &args).await;
+        assert_eq!(
+            proxy.times_sent(),
+            1,
+            "{name} given to command was sent again"
+        );
+        reader.del(&[key.as_str()]).await.unwrap();
+    }
+    reader.del(&[counter.as_str(), key.as_str()]).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+async fn a_read_whose_reply_is_lost_is_sent_again() {
+    let reader = connection("cut-read-setup");
+    let key = unique("read");
+    reader.set(&key, "there").await.unwrap();
+
+    let (redis, proxy) = cut_once(&key).await;
+    assert_eq!(redis.get(&key).await.unwrap().as_deref(), Some("there"));
+    assert_eq!(proxy.times_sent(), 2, "the GET was sent once more");
+
+    let (redis, proxy) = cut_once(&key).await;
+    assert_eq!(
+        redis.command("GET", &[key.as_str()]).await.unwrap(),
+        RedisValue::Bytes(b"there".to_vec())
     );
-    redis.del(&[counter.as_str()]).await.unwrap();
+    assert_eq!(
+        proxy.times_sent(),
+        2,
+        "GET given to command was sent once more"
+    );
+    reader.del(&[key.as_str()]).await.unwrap();
 }
 
 type Seen<T> = Arc<Mutex<Vec<T>>>;
@@ -362,4 +417,53 @@ async fn child_runs_a_command_with_events_never_enabled() {
         executed.lock().unwrap().is_empty(),
         "no event before enable_events"
     );
+}
+
+#[tokio::test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+async fn subscriptions_and_unreadable_replies_are_reported() {
+    let redis = connection("event-edges");
+    let channel = unique("channel");
+    let key = unique("binary");
+    redis
+        .command("SET", &[key.as_bytes(), b"\xff\xfe".as_slice()])
+        .await
+        .unwrap();
+    let executed = record_executed();
+    let failed = record_failed();
+    Redis::enable_events();
+
+    let _subscription = redis.subscribe(&[channel.as_str()]).await.unwrap();
+    let error = redis.get(&key).await.expect_err("the value is not UTF-8");
+
+    Redis::disable_events();
+    let executed: Vec<RedisCommandExecuted> = executed
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.connection == redis.name())
+        .cloned()
+        .collect();
+    let failed: Vec<RedisCommandFailed> = failed
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.connection == redis.name())
+        .cloned()
+        .collect();
+    assert!(
+        executed
+            .iter()
+            .any(|event| event.command == "SUBSCRIBE" && event.arguments == vec![channel.clone()]),
+        "{executed:?}"
+    );
+    assert!(
+        !executed.iter().any(|event| event.command == "GET"),
+        "a GET whose reply could not be read is not reported as run: {executed:?}"
+    );
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].command, "GET");
+    assert!(!error.to_string().is_empty());
+    redis.del(&[key.as_str()]).await.unwrap();
 }

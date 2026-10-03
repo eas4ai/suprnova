@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use redis::{
-    AsyncCommands, Client,
+    AsyncCommands,
     aio::{ConnectionManager, ConnectionManagerConfig},
 };
 use std::time::Duration;
@@ -124,7 +124,7 @@ pub struct RedisCache {
 impl RedisCache {
     /// Create a new Redis cache connection
     pub async fn connect(config: &CacheConfig) -> Result<Self, FrameworkError> {
-        let client = Client::open(config.url.as_str())
+        let client = crate::redis_client::open(config.url.as_str())
             .map_err(|e| FrameworkError::internal(format!("Redis connection error: {}", e)))?;
 
         // Bound the initial-connect budget so an unreachable Redis fails

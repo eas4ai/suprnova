@@ -1,7 +1,7 @@
 //! PAR-034: subscriptions and blocking commands on connections of their
 //! own.
 
-use crate::support::{connection, unique};
+use crate::support::{connection, kill_client, unique};
 use serial_test::serial;
 use std::time::{Duration, Instant};
 use suprnova::{RedisSide, RedisValue};
@@ -269,4 +269,140 @@ async fn command_refuses_what_would_change_the_shared_connection() {
         Some("still shared")
     );
     redis.del(&[key.as_str()]).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+async fn command_refuses_client_reply() {
+    let redis = connection("client-reply");
+    for mode in ["OFF", "SKIP", "ON"] {
+        let error = redis
+            .command("client", &["REPLY", mode])
+            .await
+            .expect_err("refused before it is sent");
+        assert!(
+            error.to_string().contains("does not send"),
+            "{mode}: {error}"
+        );
+    }
+    assert_eq!(
+        redis.command("PING", &[] as &[&str]).await.unwrap(),
+        RedisValue::Status("PONG".into())
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+async fn a_pipeline_or_transaction_refuses_what_command_refuses_and_sends_nothing() {
+    let redis = connection("pipeline-refusals");
+    let key = unique("never-set");
+    let list = unique("empty-list");
+
+    let selected = redis
+        .pipeline(|pipe| {
+            pipe.set(&key, "1");
+            pipe.command("SELECT", &["0"]);
+        })
+        .await;
+    assert!(selected.is_err(), "SELECT in a pipeline: {selected:?}");
+
+    let blocked = redis
+        .pipeline(|pipe| {
+            pipe.command("BLPOP", &[list.as_str(), "1"]);
+        })
+        .await;
+    assert!(blocked.is_err(), "BLPOP in a pipeline: {blocked:?}");
+
+    let nested = redis
+        .transaction(|pipe| {
+            pipe.set(&key, "1");
+            pipe.command("MULTI", &[] as &[&str]);
+        })
+        .await;
+    assert!(nested.is_err(), "MULTI in a transaction: {nested:?}");
+
+    let reply_off = redis
+        .transaction(|pipe| {
+            pipe.command("CLIENT", &["REPLY", "OFF"]);
+        })
+        .await;
+    assert!(
+        reply_off.is_err(),
+        "CLIENT REPLY in a transaction: {reply_off:?}"
+    );
+
+    assert_eq!(redis.get(&key).await.unwrap(), None, "nothing was sent");
+}
+
+#[tokio::test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+async fn wait_runs_on_the_shared_connection_whose_writes_it_waits_for() {
+    let redis = connection("wait");
+    let key = unique("key");
+    redis.set(&key, "written").await.unwrap();
+
+    // No replica will acknowledge, so WAIT holds its connection for 300 ms.
+    let waiting = redis.clone();
+    let wait = tokio::spawn(async move { waiting.command("WAIT", &["1", "300"]).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let start = Instant::now();
+    redis.get(&key).await.unwrap();
+    assert!(
+        start.elapsed() >= Duration::from_millis(150),
+        "the GET did not wait behind the WAIT ({:?}), so the WAIT ran on another connection",
+        start.elapsed()
+    );
+    assert_eq!(wait.await.unwrap().unwrap(), RedisValue::Int(0));
+    redis.del(&[key.as_str()]).await.unwrap();
+}
+
+/// The ids of the server's Pub/Sub clients.
+async fn pubsub_clients(redis: &suprnova::RedisConnection) -> Vec<i64> {
+    let listed = match redis
+        .command("CLIENT", &["LIST", "TYPE", "pubsub"])
+        .await
+        .unwrap()
+    {
+        RedisValue::Bytes(bytes) => String::from_utf8(bytes).unwrap(),
+        other => panic!("CLIENT LIST replied {other:?}"),
+    };
+    listed
+        .lines()
+        .filter_map(|line| line.strip_prefix("id="))
+        .filter_map(|rest| rest.split(' ').next()?.parse().ok())
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+async fn a_subscription_the_server_closes_subscribes_again() {
+    let redis = connection("resubscribe");
+    let channel = unique("channel");
+    let before = pubsub_clients(&redis).await;
+    let mut subscription = redis.subscribe(&[channel.as_str()]).await.unwrap();
+    let ours: Vec<i64> = pubsub_clients(&redis)
+        .await
+        .into_iter()
+        .filter(|id| !before.contains(id))
+        .collect();
+    assert_eq!(ours.len(), 1, "one new Pub/Sub client: {ours:?}");
+    kill_client(ours[0]).await;
+
+    // A task waits on the subscription, as an application's listener does.
+    let listener = tokio::spawn(async move { subscription.next().await });
+    let start = Instant::now();
+    while redis.publish(&channel, "after the restart").await.unwrap() == 0 {
+        assert!(start.elapsed() < WAIT, "the subscription never came back");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let message = tokio::time::timeout(WAIT, listener)
+        .await
+        .expect("a message after the server closed the connection")
+        .unwrap()
+        .expect("the subscription is still open");
+    assert_eq!(message.payload, b"after the restart");
 }

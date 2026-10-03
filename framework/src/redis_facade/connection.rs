@@ -3,7 +3,7 @@
 
 use super::events::{self, RedisCommandExecuted, RedisCommandFailed};
 use super::pipeline::{RedisPipeline, with_key};
-use super::subscription::RedisSubscription;
+use super::subscription::{self, RedisSubscription};
 use super::value::RedisValue;
 use crate::error::FrameworkError;
 use crate::redis_retry::retry_read;
@@ -19,9 +19,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// on connections of their own, without this limit.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The commands Laravel's `PhpRedisConnection::RETRYABLE_COMMANDS` lists:
-/// safe to send again after a lost connection. `SET` with no options is
-/// retryable too.
+/// The reads among the commands Laravel's
+/// `PhpRedisConnection::RETRYABLE_COMMANDS` lists, which `command` sends
+/// again after a lost connection. Laravel's list also holds three writes,
+/// `MSET`, `HMSET` and `SET` with no options; they are left out, since the
+/// server may have applied a write whose reply was lost, and a second one
+/// would undo a write another client made in between.
 const RETRYABLE: &[&str] = &[
     "BITCOUNT",
     "BITPOS",
@@ -41,7 +44,6 @@ const RETRYABLE: &[&str] = &[
     "HKEYS",
     "HLEN",
     "HMGET",
-    "HMSET",
     "HSTRLEN",
     "HVALS",
     "KEYS",
@@ -50,7 +52,6 @@ const RETRYABLE: &[&str] = &[
     "LPOS",
     "LRANGE",
     "MGET",
-    "MSET",
     "PING",
     "PTTL",
     "RANDOMKEY",
@@ -82,7 +83,9 @@ const RETRYABLE: &[&str] = &[
 ];
 
 /// The blocking commands, which `command` sends on a connection of their
-/// own. `XREAD` and `XREADGROUP` block too when given `BLOCK`.
+/// own. `XREAD` and `XREADGROUP` block too when given `BLOCK`. `WAIT` and
+/// `WAITAOF` are not among them: they wait for the writes their own
+/// connection made, so they run on the shared one.
 const BLOCKING: &[&str] = &[
     "BLPOP",
     "BRPOP",
@@ -92,14 +95,28 @@ const BLOCKING: &[&str] = &[
     "BZPOPMAX",
     "BLMPOP",
     "BZMPOP",
-    "WAIT",
-    "WAITAOF",
 ];
 
-/// Why `command` refuses a command that would change the shared
-/// connection for every task that uses it, and what to use instead.
-fn refused(command: &str) -> Option<&'static str> {
+/// Whether `command` with `args` blocks the connection it runs on.
+fn blocks(command: &str, args: &[&[u8]]) -> bool {
+    BLOCKING.contains(&command)
+        || (matches!(command, "XREAD" | "XREADGROUP")
+            && args.iter().any(|arg| arg.eq_ignore_ascii_case(b"BLOCK")))
+}
+
+/// Why `command`, a pipeline and a transaction refuse a command that would
+/// change the shared connection for every task that uses it, and what to
+/// use instead.
+fn refused(command: &str, args: &[&[u8]]) -> Option<&'static str> {
+    let subcommand = |name: &[u8]| {
+        args.first()
+            .is_some_and(|arg| arg.eq_ignore_ascii_case(name))
+    };
     match command {
+        "CLIENT" if subcommand(b"REPLY") || subcommand(b"TRACKING") => Some(
+            "it changes which replies the shared connection gets: open a connection of your own \
+             with suprnova::redis::Client",
+        ),
         "SUBSCRIBE" | "PSUBSCRIBE" | "SSUBSCRIBE" | "UNSUBSCRIBE" | "PUNSUBSCRIBE"
         | "SUNSUBSCRIBE" => {
             Some("use subscribe or psubscribe, which open a connection of their own")
@@ -150,11 +167,18 @@ pub struct RedisConnection {
 struct Inner {
     name: String,
     client: redis::Client,
-    /// Made on the first command, since it starts a task on the runtime.
-    /// Once that runtime is gone, as each `#[tokio::test]`'s is when the
-    /// test ends, the manager opens a new connection on the runtime of the
-    /// next command.
-    manager: Mutex<Option<ConnectionManager>>,
+    manager: Mutex<Option<Bound>>,
+}
+
+/// The connection, and the runtime it was opened on. The connection's task
+/// runs on that runtime; once the runtime is gone, as each
+/// `#[tokio::test]`'s is when the test ends, the connection is dead, so the
+/// next command opens a new one on its own runtime. `runtime_alive` is
+/// closed when the task holding its receiver, spawned on that runtime, is
+/// dropped with it.
+struct Bound {
+    manager: ConnectionManager,
+    runtime_alive: tokio::sync::oneshot::Sender<()>,
 }
 
 impl std::fmt::Debug for RedisConnection {
@@ -203,8 +227,10 @@ impl RedisConnection {
             .manager
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Some(manager) = slot.as_ref() {
-            return Ok(manager.clone());
+        if let Some(bound) = slot.as_ref()
+            && !bound.runtime_alive.is_closed()
+        {
+            return Ok(bound.manager.clone());
         }
         if tokio::runtime::Handle::try_current().is_err() {
             return Err(FrameworkError::internal(format!(
@@ -219,7 +245,14 @@ impl RedisConnection {
             .set_max_delay(Duration::from_millis(500));
         let manager = ConnectionManager::new_lazy_with_config(self.inner.client.clone(), config)
             .map_err(|error| self.error("connect", error))?;
-        *slot = Some(manager.clone());
+        let (runtime_alive, on_runtime) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = on_runtime.await;
+        });
+        *slot = Some(Bound {
+            manager: manager.clone(),
+            runtime_alive,
+        });
         Ok(manager)
     }
 
@@ -233,99 +266,134 @@ impl RedisConnection {
         )
     }
 
-    /// Send `command` with `args` on the shared connection, again after a
-    /// lost connection when `retry` says it is safe, and report it.
-    async fn send(
+    fn refusal(&self, command: &str, instead: &str) -> FrameworkError {
+        FrameworkError::internal(format!(
+            "the Redis connection '{}' does not send {command} through command, a pipeline or a \
+             transaction: {instead}",
+            self.inner.name
+        ))
+    }
+
+    /// Send `command` with `args`, on a connection of its own when
+    /// `blocking`, and on the shared one otherwise, again after a lost
+    /// connection when `retry` says it is safe. Nothing is reported yet; the
+    /// outer error, outside a Tokio runtime, is from before anything was
+    /// sent.
+    async fn exchange(
         &self,
         command: &str,
         args: &[&[u8]],
         retry: bool,
-    ) -> Result<redis::Value, FrameworkError> {
-        let manager = self.client()?;
+        blocking: bool,
+    ) -> Result<(redis::RedisResult<redis::Value>, Duration), FrameworkError> {
+        let shared = if blocking { None } else { Some(self.client()?) };
         let mut cmd = redis::cmd(command);
         for arg in args {
             cmd.arg(*arg);
         }
         let start = Instant::now();
-        let result = if retry {
-            retry_read(command, || {
-                let mut manager = manager.clone();
-                let cmd = cmd.clone();
-                async move { cmd.query_async::<redis::Value>(&mut manager).await }
-            })
-            .await
-        } else {
-            let mut manager = manager;
-            cmd.query_async::<redis::Value>(&mut manager).await
-        };
-        self.report(command, args, start.elapsed(), result)
-    }
-
-    /// Send `command` on a connection of its own, which waits for as long
-    /// as the command does.
-    async fn send_blocking(
-        &self,
-        command: &str,
-        args: &[&[u8]],
-    ) -> Result<redis::Value, FrameworkError> {
-        let config = AsyncConnectionConfig::new()
-            .set_connection_timeout(Some(CONNECT_TIMEOUT))
-            .set_response_timeout(None);
-        let mut cmd = redis::cmd(command);
-        for arg in args {
-            cmd.arg(*arg);
-        }
-        let start = Instant::now();
-        let result = match self
-            .inner
-            .client
-            .get_multiplexed_async_connection_with_config(&config)
-            .await
-        {
-            Ok(mut connection) => cmd.query_async::<redis::Value>(&mut connection).await,
-            Err(error) => Err(error),
-        };
-        self.report(command, args, start.elapsed(), result)
-    }
-
-    fn report(
-        &self,
-        command: &str,
-        args: &[&[u8]],
-        duration: Duration,
-        result: redis::RedisResult<redis::Value>,
-    ) -> Result<redis::Value, FrameworkError> {
-        if events::enabled() {
-            let arguments = args.iter().map(|arg| printable(arg)).collect();
-            match &result {
-                Ok(_) => events::executed(&RedisCommandExecuted {
-                    connection: self.inner.name.clone(),
-                    command: command.to_owned(),
-                    arguments,
-                    duration,
-                }),
-                Err(error) => events::failed(&RedisCommandFailed {
-                    connection: self.inner.name.clone(),
-                    command: command.to_owned(),
-                    arguments,
-                    error: error.to_string(),
-                    duration,
-                }),
+        let result = match shared {
+            // A connection of its own, which waits for as long as the
+            // command does.
+            None => {
+                let config = AsyncConnectionConfig::new()
+                    .set_connection_timeout(Some(CONNECT_TIMEOUT))
+                    .set_response_timeout(None);
+                match self
+                    .inner
+                    .client
+                    .get_multiplexed_async_connection_with_config(&config)
+                    .await
+                {
+                    Ok(mut connection) => cmd.query_async::<redis::Value>(&mut connection).await,
+                    Err(error) => Err(error),
+                }
             }
-        }
-        result.map_err(|error| self.error(command, error))
+            Some(manager) if retry => {
+                retry_read(command, || {
+                    let mut manager = manager.clone();
+                    let cmd = cmd.clone();
+                    async move { cmd.query_async::<redis::Value>(&mut manager).await }
+                })
+                .await
+            }
+            Some(mut manager) => cmd.query_async::<redis::Value>(&mut manager).await,
+        };
+        Ok((result, start.elapsed()))
     }
 
-    /// Send a command and convert its reply.
+    /// Tell the listeners how `command` went, while events are enabled.
+    fn report(&self, command: &str, args: &[&[u8]], duration: Duration, error: Option<String>) {
+        if !events::enabled() {
+            return;
+        }
+        let arguments = args.iter().map(|arg| printable(arg)).collect();
+        match error {
+            None => events::executed(&RedisCommandExecuted {
+                connection: self.inner.name.clone(),
+                command: command.to_owned(),
+                arguments,
+                duration,
+            }),
+            Some(error) => events::failed(&RedisCommandFailed {
+                connection: self.inner.name.clone(),
+                command: command.to_owned(),
+                arguments,
+                error,
+                duration,
+            }),
+        }
+    }
+
+    /// Send a command, report it, and give its reply as it came.
+    async fn run(
+        &self,
+        command: &str,
+        args: &[&[u8]],
+        retry: bool,
+        blocking: bool,
+    ) -> Result<RedisValue, FrameworkError> {
+        let (result, duration) = self.exchange(command, args, retry, blocking).await?;
+        self.report(
+            command,
+            args,
+            duration,
+            result.as_ref().err().map(ToString::to_string),
+        );
+        result
+            .map(Into::into)
+            .map_err(|error| self.error(command, error))
+    }
+
+    /// Send a command, convert its reply, and report it: a reply that does
+    /// not convert is a failure, as the caller sees it.
+    async fn typed_on<T: FromRedisValue>(
+        &self,
+        command: &str,
+        args: &[&str],
+        retry: bool,
+        blocking: bool,
+    ) -> Result<T, FrameworkError> {
+        let bytes: Vec<&[u8]> = args.iter().map(|arg| arg.as_bytes()).collect();
+        let (result, duration) = self.exchange(command, &bytes, retry, blocking).await?;
+        let converted = result
+            .and_then(|value| redis::from_redis_value::<T>(value).map_err(redis::RedisError::from));
+        self.report(
+            command,
+            &bytes,
+            duration,
+            converted.as_ref().err().map(ToString::to_string),
+        );
+        converted.map_err(|error| self.error(command, error))
+    }
+
     async fn typed<T: FromRedisValue>(
         &self,
         command: &str,
         args: &[&str],
         retry: bool,
     ) -> Result<T, FrameworkError> {
-        let bytes: Vec<&[u8]> = args.iter().map(|arg| arg.as_bytes()).collect();
-        let value = self.send(command, &bytes, retry).await?;
-        self.convert(command, value)
+        self.typed_on(command, args, retry, false).await
     }
 
     async fn typed_blocking<T: FromRedisValue>(
@@ -333,17 +401,7 @@ impl RedisConnection {
         command: &str,
         args: &[&str],
     ) -> Result<T, FrameworkError> {
-        let bytes: Vec<&[u8]> = args.iter().map(|arg| arg.as_bytes()).collect();
-        let value = self.send_blocking(command, &bytes).await?;
-        self.convert(command, value)
-    }
-
-    fn convert<T: FromRedisValue>(
-        &self,
-        command: &str,
-        value: redis::Value,
-    ) -> Result<T, FrameworkError> {
-        redis::from_redis_value(value).map_err(|error| self.error(command, error.into()))
+        self.typed_on(command, args, false, true).await
     }
 
     /// Run any command and return its reply. A read Laravel lists as
@@ -358,29 +416,21 @@ impl RedisConnection {
     /// anything is sent, for a command that would change the connection
     /// every other command shares: `SUBSCRIBE` and the rest of its family,
     /// `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH`, `MONITOR`, `SELECT`,
-    /// `AUTH`, `HELLO`, `RESET` and `QUIT`. The error names what to use
-    /// instead.
+    /// `AUTH`, `HELLO`, `RESET`, `QUIT`, and `CLIENT REPLY` and
+    /// `CLIENT TRACKING`. The error names what to use instead.
     pub async fn command<A: AsRef<[u8]>>(
         &self,
         name: &str,
         args: &[A],
     ) -> Result<RedisValue, FrameworkError> {
         let command = name.to_ascii_uppercase();
-        if let Some(instead) = refused(&command) {
-            return Err(FrameworkError::internal(format!(
-                "the Redis connection '{}' does not send {command} through command: {instead}",
-                self.inner.name
-            )));
-        }
         let bytes: Vec<&[u8]> = args.iter().map(AsRef::as_ref).collect();
-        let blocks = BLOCKING.contains(&command.as_str())
-            || (matches!(command.as_str(), "XREAD" | "XREADGROUP")
-                && bytes.iter().any(|arg| arg.eq_ignore_ascii_case(b"BLOCK")));
-        if blocks {
-            return self.send_blocking(&command, &bytes).await.map(Into::into);
+        if let Some(instead) = refused(&command, &bytes) {
+            return Err(self.refusal(&command, instead));
         }
-        let retry = RETRYABLE.contains(&command.as_str()) || (command == "SET" && args.len() == 2);
-        self.send(&command, &bytes, retry).await.map(Into::into)
+        let blocking = blocks(&command, &bytes);
+        let retry = !blocking && RETRYABLE.contains(&command.as_str());
+        self.run(&command, &bytes, retry, blocking).await
     }
 
     /// `GET`: the value, or `None` when the key does not exist.
@@ -393,9 +443,9 @@ impl RedisConnection {
         self.typed("GET", &[key], true).await
     }
 
-    /// `SET`.
+    /// `SET`. A write, so it is not sent again after a lost connection.
     pub async fn set(&self, key: &str, value: &str) -> Result<(), FrameworkError> {
-        self.typed("SET", &[key, value], true).await
+        self.typed("SET", &[key, value], false).await
     }
 
     /// `SETEX`: set the value to expire after `seconds`.
@@ -566,7 +616,7 @@ impl RedisConnection {
         all.extend_from_slice(keys);
         all.extend_from_slice(args);
         let bytes: Vec<&[u8]> = all.iter().map(|arg| arg.as_bytes()).collect();
-        self.send("EVAL", &bytes, false).await.map(Into::into)
+        self.run("EVAL", &bytes, false, false).await
     }
 
     /// Every key matching `pattern`, by `SCAN` from the first cursor to the
@@ -632,6 +682,22 @@ impl RedisConnection {
         if queued.commands.is_empty() {
             return Ok(Vec::new());
         }
+        // Checked before anything is sent, as command checks them: these
+        // would change the connection every task shares. A blocking command
+        // would hold it up, except inside MULTI, where Redis never blocks.
+        for (name, args) in &queued.commands {
+            let args: Vec<&[u8]> = args.iter().map(Vec::as_slice).collect();
+            if let Some(instead) = refused(name, &args) {
+                return Err(self.refusal(name, instead));
+            }
+            if !atomic && blocks(name, &args) {
+                return Err(self.refusal(
+                    name,
+                    "a blocking command would hold up the shared connection: run it with \
+                     command, or inside a transaction, where it does not block",
+                ));
+            }
+        }
         let mut pipe = redis::pipe();
         if atomic {
             pipe.atomic();
@@ -675,22 +741,22 @@ impl RedisConnection {
         patterns: bool,
     ) -> Result<RedisSubscription, FrameworkError> {
         let what = if patterns { "PSUBSCRIBE" } else { "SUBSCRIBE" };
-        let mut pubsub = self
-            .inner
-            .client
-            .get_async_pubsub()
-            .await
-            .map_err(|error| self.error(what, error))?;
-        for name in names {
-            let subscribed = if patterns {
-                pubsub.psubscribe(*name).await
-            } else {
-                pubsub.subscribe(*name).await
-            };
-            subscribed.map_err(|error| self.error(what, error))?;
-        }
+        let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+        let start = Instant::now();
+        let opened = subscription::open(&self.inner.client, &names, patterns).await;
+        let bytes: Vec<&[u8]> = names.iter().map(String::as_bytes).collect();
+        self.report(
+            what,
+            &bytes,
+            start.elapsed(),
+            opened.as_ref().err().map(ToString::to_string),
+        );
+        let stream = opened.map_err(|error| self.error(what, error))?;
         Ok(RedisSubscription {
-            stream: pubsub.into_on_message(),
+            stream,
+            client: self.inner.client.clone(),
+            names,
+            patterns,
         })
     }
 

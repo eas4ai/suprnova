@@ -20,7 +20,7 @@ impl RedisRateLimiter {
     /// Open a connection to `url` and return a limiter that scopes
     /// every key under `prefix`.
     pub async fn connect(url: &str, prefix: &str) -> Result<Self, FrameworkError> {
-        let client = redis::Client::open(url)
+        let client = crate::redis_client::open(url)
             .map_err(|e| FrameworkError::internal(format!("redis open: {e}")))?;
         let conn = ConnectionManager::new(client)
             .await

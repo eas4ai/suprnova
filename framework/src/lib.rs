@@ -90,6 +90,7 @@ pub mod process;
 pub mod queue;
 pub mod rate_limit;
 pub mod rbac;
+pub(crate) mod redis_client;
 mod redis_facade;
 pub(crate) mod redis_retry;
 pub mod render_cache;

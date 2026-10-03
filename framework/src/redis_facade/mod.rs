@@ -50,10 +50,11 @@ fn client_for(url: &str, what: &str) -> Result<redis::Client, FrameworkError> {
         Some("redis" | "rediss" | "redis+unix" | "unix" | "valkey" | "valkeys" | "valkey+unix")
     ) {
         return Err(FrameworkError::internal(format!(
-            "{what}: the URL is not a Redis URL (redis://, rediss:// or unix://)"
+            "{what}: the URL is not a Redis URL (redis:// or unix://, or rediss:// with a TLS \
+             feature of the redis crate)"
         )));
     }
-    redis::Client::open(url).map_err(|error| {
+    crate::redis_client::open(url).map_err(|error| {
         FrameworkError::from_external_with(format!("{what}: the URL is not usable: {error}"), error)
     })
 }
@@ -75,17 +76,16 @@ pub struct Redis;
 impl Redis {
     /// Give the connection `name` the server at `url`, replacing any
     /// connection of that name, `default` included. Call it in the
-    /// bootstrap. A connection already resolved under the name is forgotten,
-    /// so the next [`connection`](Self::connection) reaches the new URL.
+    /// bootstrap. A name already resolved stays resolved, on the new URL:
+    /// the next [`connection`](Self::connection) reaches it, while handles
+    /// taken before keep the server they had.
     ///
     /// # Errors
     ///
     /// When `url` is not a Redis URL.
     pub fn define(name: &str, url: &str) -> Result<(), FrameworkError> {
         let client = client_for(url, &format!("the Redis connection '{name}'"))?;
-        let mut registry = registry();
-        registry.defined.insert(name.to_owned(), client);
-        registry.resolved.remove(name);
+        Self::define_client(name, client);
         Ok(())
     }
 
@@ -93,9 +93,13 @@ impl Redis {
     /// URL cannot say: TLS with certificates of your own, or a server a
     /// Sentinel names. Otherwise as [`define`](Self::define).
     pub fn define_client(name: &str, client: redis::Client) {
+        crate::redis_client::ensure_crypto_provider();
         let mut registry = registry();
+        if registry.resolved.contains_key(name) {
+            let replaced = RedisConnection::new(name, client.clone());
+            registry.resolved.insert(name.to_owned(), replaced);
+        }
         registry.defined.insert(name.to_owned(), client);
-        registry.resolved.remove(name);
     }
 
     /// The connection named `name`. Resolving it sends nothing: the
