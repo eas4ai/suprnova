@@ -153,3 +153,59 @@ async fn mem_audit_process_output_is_held_once() {
         "capturing {SIZE} bytes peaked at {peak} bytes"
     );
 }
+
+/// MEM-005: on a prose manual, the docs builder's peak is one chapter's
+/// work plus the catalog it writes and returns, whose search index holds
+/// every chapter's text by design: a 40-chapter build peaks within the
+/// catalog's size, twice over, of a one-chapter build. Keeping every
+/// chapter's HTML, as the builder did, adds 39 chapters to that.
+#[tokio::test]
+async fn mem_audit_the_docs_builder_peaks_at_one_chapter_and_the_catalog() {
+    let _lock = exclusive().await;
+    let paragraph = "The framework renders the page, and the **browser** keeps the \
+                     `state` it was given, as the [guide](guide.md) describes. "
+        .repeat(12);
+    let mut chapter = String::from("# Chapter\n\n");
+    for section in 0..40 {
+        chapter.push_str(&format!("## Section {section}\n\n{paragraph}\n\n"));
+    }
+
+    let mut peaks = Vec::new();
+    let mut catalog_json = 0;
+    for chapters in [1, 40] {
+        let dir = tempfile::tempdir().expect("a directory");
+        let source = dir.path().join("manual");
+        let output = dir.path().join("out");
+        std::fs::create_dir_all(&source).expect("mkdir");
+        let mut toc = String::from("# Documentation\n\n");
+        for n in 0..chapters {
+            std::fs::write(source.join(format!("chapter-{n}.md")), &chapter)
+                .expect("write a chapter");
+            toc.push_str(&format!("- [Chapter {n}](chapter-{n}.md)\n"));
+        }
+        let toc_file = source.join("documentation.md");
+        std::fs::write(&toc_file, toc).expect("write the toc");
+
+        let heap = Heap::start();
+        let start = heap.live();
+        let catalog = build_docs(DocsBuildConfig {
+            source_dir: source,
+            output_dir: output.clone(),
+            toc_file,
+        })
+        .await
+        .expect("the docs build");
+        peaks.push(heap.peak() - start);
+        drop(catalog);
+        drop(heap);
+        catalog_json = std::fs::metadata(output.join("catalog.json"))
+            .expect("the catalog")
+            .len() as usize;
+    }
+    assert!(
+        peaks[1] < peaks[0] + 2 * catalog_json,
+        "40 chapters peaked at {} bytes, one at {}, and the catalog is {catalog_json}",
+        peaks[1],
+        peaks[0]
+    );
+}
