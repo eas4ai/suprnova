@@ -551,3 +551,62 @@ Falsifier: in `en` `Lang::percentage(10.0, 0)` is not `10%`, or `Lang::percentag
 Mechanism: `par-strings`.
 Rationale: Laravel's `Number::percentage` and `Number::abbreviate`; ICU4X writes the percentage, and its compact format is not in the ICU4X release the framework uses, so the suffixes are Laravel's.
 Status: Agreed 2026-10-03
+
+## Schema dump
+
+The developer ruled on 2026-10-01 to build `schema:dump`, at lower
+priority: it writes a schema snapshot and its migration baseline, loads
+it before newer migrations, prunes only when asked, and is tested on each
+supported database. Laravel's `SchemaDumped`, `SchemaLoaded` and
+`MigrationsPruned` events are not built: the migration commands run
+before the bootstrap registers any listener, so none could hear them.
+
+[PAR-038] `schema:dump` on the app binary MUST write the schema of the
+`DATABASE_URL` database to `database/schema/<engine>-schema.sql`, where
+the engine is `sqlite`, `postgres`, `mysql` or `mariadb`, or to the file
+`--path` names: the statements that create every table, index, view and
+constraint the database holds, without any table's rows, followed by one
+`INSERT` for each row of the Migrator's ledger table (`seaql_migrations`
+unless the Migrator names another). Postgres MUST be dumped with
+`pg_dump`, MySQL with `mysqldump` and MariaDB with `mariadb-dump`, each
+given the password through its environment or a file only the current
+user can read, never as an argument; SQLite MUST be read through its own
+connection. When the tool is missing or fails, the command MUST exit with
+an error that names the tool, and an earlier dump file MUST stay as it
+was. The developer CLI's `suprnova schema:dump` MUST run the app
+binary's.
+Falsifier: on any of SQLite, Postgres, MySQL and MariaDB, after `migrate` the dump file is absent, holds a row of a table other than the ledger, lacks a table or index the migrations created, or lacks an applied migration's ledger row; the password appears in the dump tool's arguments; or with the tool missing the command exits zero or changes an earlier dump file.
+Mechanism: `par-schema-dump`.
+Rationale: Laravel's `schema:dump` and its `SchemaState` classes, which run the same tools; the ledger is written by Suprnova, the same `INSERT` statements on every engine.
+Status: Agreed 2026-10-03
+
+[PAR-039] When the migration ledger records no migration and a dump file
+exists for the engine, or `--schema-path` names one, `migrate`,
+`migrate:fresh` and the migration `serve` runs MUST load the file into
+the database before any migration runs, and then run only the
+migrations the loaded ledger does not record. `TestDatabase::fresh` MUST
+load `database/schema/sqlite-schema.sql` the same way. Postgres MUST be
+loaded with `psql`, MySQL with `mysql`, MariaDB with `mariadb`, and
+SQLite through its own connection. A failed load MUST stop the command
+with an error before any migration runs. A database whose ledger records
+a migration MUST NOT be loaded.
+Falsifier: on any of SQLite, Postgres, MySQL and MariaDB, an empty database migrated with a dump of the first migrations and one newer migration lacks a table from the dump, runs one of the dumped migrations again, or lacks the newer migration's table; a database with an applied migration is loaded; or a failing load lets a migration run.
+Mechanism: `par-schema-dump`.
+Rationale: Laravel's `MigrateCommand::loadSchemaState`, which loads only when no migration has run.
+Status: Agreed 2026-10-03
+
+[PAR-040] `schema:dump --prune`, on the app binary and through the
+developer CLI, MUST, after the dump succeeds, delete the file of each
+migration in `src/migrations/` whose name the dump's ledger records,
+remove its `mod` line from `mod.rs`, and replace its entry in the
+Migrator's list with `PrunedMigration::new("<name>")`, which keeps the
+name without the code. A migration the ledger does not record MUST stay.
+Without `--prune`, and when the dump fails, no file changes. A
+`PrunedMigration` that has to run, up or down, MUST fail with an error
+that names it and `database/schema`, so a database never skips a pruned
+migration's schema; a database whose ledger records it migrates as
+before.
+Falsifier: after `--prune`, an applied migration's file remains, a pending migration's file is gone, or `mod.rs` still declares a deleted module; `migrate` fails against a database that applied the pruned migrations; `migrate` succeeds on an empty database with no dump file; or a failed dump pruned a file.
+Mechanism: `par-schema-dump`.
+Rationale: Laravel's `--prune` deletes every migration file, applied or not; Suprnova keeps the ones the dump does not cover, and keeps each pruned name, because SeaORM refuses a ledger row whose migration is not in the list.
+Status: Agreed 2026-10-03

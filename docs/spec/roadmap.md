@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: str-number-subset
+Current: schema-dump
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -281,6 +281,19 @@ Requirements: PAR-035, PAR-036, PAR-037
    `Lang::abbreviate` (`laravel-parity.md` PAR-035 to PAR-037, next-feature
    item `str-number-subset`). Done when the mechanism passes on a
    committed tree.
+
+## schema-dump
+
+Requirements: PAR-038, PAR-039, PAR-040
+
+25. schema-dump - `schema:dump` writes the schema and the migration ledger
+   with each engine's own tool, `migrate`, `migrate:fresh`, `serve` and
+   `TestDatabase::fresh` load it into a database with no applied
+   migration before newer migrations run, and `--prune` replaces the
+   dumped migrations with `PrunedMigration` names
+   (`laravel-parity.md` PAR-038 to PAR-040, next-feature item
+   `schema-dump`). Done when the mechanism passes on a committed tree,
+   against SQLite, Postgres, MySQL and MariaDB.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
