@@ -7,12 +7,12 @@
 
 ![Suprnova - A Laravel-inspired web framework for Rust](manual/suprnova_header.jpg)
 
-Suprnova is a full-stack Rust web framework with Laravel 13's developer
-experience and Tokio's runtime model. Familiar API surfaces - `Auth::login`,
-`Cache::remember`, `Mail::to`, `Event::dispatch`, Eloquent-style models,
-`#[handler]`, `#[command]`, `routes!` - sit on top of a hyper / SeaORM /
-async-trait stack designed for long-lived connections, in-process workers,
-and concurrent IO. No request-per-process compromise.
+Suprnova is a full-stack Rust web framework with Laravel's developer
+experience on Tokio's runtime. The API reads like Laravel - `Auth::login`,
+`Cache::remember`, `Mail::to`, `EventFacade::dispatch`, Eloquent-style
+models, `#[handler]`, `#[command]`, `routes!` - on top of hyper, SeaORM and
+Tokio, so one long-lived process serves requests, runs queue workers and
+the scheduler, and holds WebSocket connections.
 
 Current `main` requires Rust 1.94.0 or newer. The tagged v3.0.0 release has
 the same Rust 1.94.0 floor.
@@ -24,96 +24,208 @@ cd myapp
 suprnova serve
 ```
 
-Your app is now serving at `http://localhost:8765`, with a Vite dev server
-proxied for the frontend.
+`suprnova serve` starts your app at `http://localhost:8765` and the Vite dev
+server for the frontend beside it, and rebuilds when your Rust changes. The
+frontend can be Svelte 5, React 19 or Vue 3.5 (`--frontend svelte`,
+`react` or `vue`).
 
 ## Quick taste
 
-If you've used Laravel, this should feel like home - only typed.
+If you've used Laravel, this should feel familiar - only typed. A model, its
+routes and three handlers:
 
 ```rust
 use std::time::Duration;
-use suprnova::{handler, routes, attrs, inertia_response, json_response, Response};
-use suprnova::{Auth, Cache, Event, RouteParam};
-use crate::models::Post;
-use crate::events::PostCreated;
-use crate::requests::CreatePostRequest;
+
+use suprnova::{
+    attrs, get, handler, inertia_response, json_response, model, post, request, routes, Cache,
+    Collection, InertiaProps, Model, Redirect, Request, Response, RouteParam,
+};
+
+#[model(table = "posts", fillable = ["title", "body"])]
+pub struct Post {
+    pub id: i64,
+    pub title: String,
+    pub body: String,
+    pub views: i64,
+}
 
 routes! {
-    get!("/",             home),
+    get!("/", home),
     get!("/posts/{post}", show),
-    post!("/posts",       store).middleware(Authenticate),
+    post!("/posts", store),
+}
+
+#[derive(InertiaProps)]
+pub struct HomeProps {
+    pub posts: Collection<Post>,
 }
 
 #[handler]
-async fn home() -> Response {
-    let popular = Cache::remember(
-        "posts.popular",
-        Some(Duration::from_secs(60)),
-        || async { Post::query().db_where_op("views", ">", 1000).get().await },
-    )
-    .await?;
-    Ok(inertia_response!("Home", { "posts": popular }))
-}
-
-#[handler]
-async fn show(RouteParam(post): RouteParam<Post>) -> Response {
-    Ok(json_response!({ "post": post }))
-}
-
-#[handler]
-async fn store(req: CreatePostRequest) -> Response {
-    let post = Post::create(attrs! {
-        user_id: Auth::id().ok_or_else(|| FrameworkError::Unauthorized)?,
-        title:   req.title,
-        body:    req.body,
+pub async fn home(req: Request) -> Response {
+    let posts = Cache::remember("posts.popular", Some(Duration::from_secs(60)), || async {
+        Post::query().filter_op("views", ">", 1000).get().await
     })
     .await?;
-    Event::dispatch(PostCreated { post: post.clone() }).await?;
-    Ok(inertia_response!("Posts/Created", { "post": post }))
+    inertia_response!(&req, "Home", HomeProps { posts })
+}
+
+#[handler]
+pub async fn show(RouteParam(post): RouteParam<Post>) -> Response {
+    json_response!({ "post": post })
+}
+
+#[request]
+pub struct StorePostRequest {
+    #[validate(length(min = 1, max = 200))]
+    pub title: String,
+    pub body: String,
+}
+
+#[handler]
+pub async fn store(form: StorePostRequest) -> Response {
+    let post = Post::create(attrs! { title: form.title, body: form.body }).await?;
+    Redirect::to(format!("/posts/{}", post.id)).into()
 }
 ```
 
-`RouteParam<Post>` applies the model's global scopes and soft-delete
-filter automatically. `Post::query()` is the Eloquent builder
-(`db_where_op` is the Laravel-side alias of `filter_op` for arbitrary
-SQL operators). The `#[handler]` macro pulls FormRequests out of the
-body, route params out of the URI, and authenticated users out of the
-session - all type-checked.
+`#[model]` generates the SeaORM entity and the Eloquent-style API on the
+struct itself. `RouteParam<Post>` loads the model named in the URI, applying
+its global scopes, and answers 404 when there is none. `#[request]` makes a
+validated form request: the handler only runs when the body passes its
+rules. `inertia_response!` checks at compile time that the page component
+exists in `frontend/src/pages/`.
 
 ## What's in the box
 
-The Laravel-13 parity surface plus the Rust-native wins:
-
-| Layer | What ships |
+| Area | What ships |
 |---|---|
-| **HTTP & routing** | `Router`, named routes, route groups & prefixes, parameter binding, resource routing, signed URLs, redirect helpers (`Redirect::to`/`back`/`route`/`with_errors`/…), `#[handler]` macro, 100% type-checked |
-| **Middleware** | CORS, CSRF, session, request-timeout, request-id, throttle / login-throttle, signed-URL verify, authenticated, email-verified, brute-force, custom global/group/per-route |
-| **Inertia 3 bridge** | `InertiaProps` derive + TypeScript codegen, partial reloads, deferred / lazy props, version mismatch handling, SSR loopback, `#[handler]` integration, three starters: **Svelte 5 / React 19 / Vue 3.5** |
-| **Eloquent ORM** | `#[suprnova::model]` macro, 11 relation kinds (hasMany / belongsToMany / morph / polymorphic / through), eager loading, soft deletes, observers, global & local scopes, casts, 16 lifecycle events, factories + seeders, `Collection<M>`, 3 paginators, chunk/lazy/cursor iteration, multi-connection R/W split, transactions + savepoints + retry-on-deadlock |
-| **Auth** | `Auth::user`/`login`/`once`/`check`, named guards via `AuthManager`, remember-me, 2FA TOTP with recovery codes, email verification, password reset, brute-force lockout, login throttle, role/permission gates, `#[policy]` registration |
-| **Database** | SeaORM-backed migrations + entity codegen, four databases: **SQLite / Postgres / MySQL / MariaDB** (MariaDB rides the MySQL driver and adds a native vector driver), `DB::transaction` with savepoints, query logging, multi-connection registry |
-| **Cache** | Memory, file, Redis - `Cache::remember` + lock-based `Cache::lock` + tags + atomic Redis Retry-After |
-| **Queues & jobs** | Memory, sync, Redis, database - queue routing (`Queue::route`, `Job::queue`, `queue:work --queue=billing`), middleware pipeline, batches, chains, retry schedules, failed-job store, unique jobs |
-| **Events & bus** | `Event::dispatch`, `Listener`/`Subscriber`, queued listeners, panic-isolated dispatcher, command/query bus |
-| **Notifications** | Mail / database / broadcast / Web Push channels, anonymous notifications, deferred dispatch |
-| **Mail** | SMTP, Mailgun, Postmark, SendGrid, Resend, SES, log + in-memory transports, Markdown templates via Tera, fake() helper, queued mail |
-| **Broadcasting & WebSocket** | Channels (public / private / presence), `BroadcastHub` trait, sea-streamer fanout adapter, JSON-envelope protocol, supervised heartbeats with auto-restart |
-| **Filesystem** | Local + S3 (R2 / B2 / RustFS / MinIO compatible) via OpenDAL, path-traversal guard, atomic copy |
-| **Vector** | Memory, **Qdrant**, **Pinecone**, **MariaDB native `VECTOR(N)`** (HNSW + cosine/euclid/L1/L2) - first-class trait + drivers, no Postgres-only gatekeeping |
-| **Payments** | Generic `Payment` / `Subscription` / `CustomerStore` / `WebhookHandler` traits + DB mirror; **Stripe** and **Paddle** reference adapters; webhook UNIQUE idempotency |
-| **Validation** | `Required`, `Email`, `Min`/`Max`/`Between`, `RequiredIf`/`With`/`WithAll`/`Unless`, `Unique` (async), `Confirmed`, custom rules via traits, `validator` derive integration |
-| **Scheduling** | `Schedule::call` / `command` / `job`, cron expressions, `runInBackground`, `withoutOverlapping`, supervised execution |
-| **Workflows** | Durable steps via `#[workflow_step]`, `#[workflow]` orchestration, panic-recovery on the queue, exponential backoff with strict caps |
-| **Console** | Per-project `console` binary (the Rust analogue of `php artisan`), `#[command]` + `#[derive(Command)]` typed args, `make:*` generators, `db:seed` |
-| **Observability** | Structured `tracing` everywhere, request IDs end-to-end, OpenTelemetry support, DB query logging via `QueryExecuted` events |
-| **Testing** | `#[suprnova_test]`, in-memory SQLite via `TestDatabase`, fakes (`Mail::fake()`, `Queue::fake()`, `Event::fake()`, `BroadcastHub` recorder), `expect!` macro, `handle_request` in-process driver |
-| **Feature flags** | `DatabaseEvaluator` + `CachedEvaluator` + admin CRUD + sub-second propagation via `FeatureSync` |
-| **Idempotency, rate-limit, CORS, CSRF, sessions, hashing, crypto** | First-class; each subsystem ships fail-open vs fail-closed as an explicit policy choice |
+| **HTTP and routing** | `Router`, `routes!`, `group!`, named routes, resource controllers, route model binding with `RouteParam`, signed URLs (`sign_route`, `verify_signature`), `Redirect`, file and download responses (`HttpResponse::download`), `#[handler]`, `#[authorize]` |
+| **Middleware** | `CsrfMiddleware`, `CorsMiddleware`, `SessionMiddleware`, `TimeoutMiddleware`, `RequestIdMiddleware`, `ThrottleRequestsMiddleware`, `AuthMiddleware`, `GuestMiddleware`, `EnsureEmailVerifiedMiddleware`, `MaintenanceMiddleware`, `LocaleMiddleware`, and your own global, group or per-route middleware |
+| **Inertia 3** | `#[derive(InertiaProps)]` with TypeScript generation, partial reloads, deferred and once props, merge strategies, SSR, three starters: Svelte 5, React 19 and Vue 3.5 |
+| **Eloquent models** | `#[model]`, relations from `HasMany` to `MorphedByMany`, eager loading, soft deletes, observers, global and local scopes, casts (`AsJson`, `AsNativeDateTime` and more), model events, factories and seeders, `Collection`, paginators, chunked and lazy iteration, joins |
+| **Database** | SQLite, Postgres, MySQL and MariaDB; SeaORM migrations with a Laravel-style `Schema` builder; `DB::transaction` with savepoints and `DB::after_commit`; read and write connections; `suprnova schema:dump` |
+| **Cache** | `Cache::remember`, `Cache::lock`, tags; `InMemoryCache` and `RedisCache` stores |
+| **Queues and jobs** | `Queue`, `Job`, batches, chains, job middleware, failed-job store, unique jobs; `MemoryQueueDriver`, `SyncQueueDriver`, `DatabaseQueueDriver`, `RedisQueueDriver`, `SqsQueueDriver`, `NullQueueDriver` and `FailoverQueueDriver` |
+| **Events and bus** | `EventFacade::dispatch`, `Listener`, `QueuedListener`, `Subscriber`, the command `Bus` |
+| **Notifications** | `Notify` with `MailChannel`, `DatabaseChannel`, `BroadcastChannel` and `WebPushChannel`, anonymous notifiables |
+| **Mail** | `Mail::to`, `Mailable`, queued mail; SMTP, Mailgun, Postmark, SendGrid, Resend and SES transports, plus log, file and in-memory ones for development |
+| **Broadcasting and WebSockets** | Public, private and presence channels, `BroadcastHub`, `InMemoryBroadcastHub`, `PusherBroadcastHub` for Pusher, Soketi and Reverb, `SeaStreamerBroadcastHub` behind the `broadcasting-fanout` feature |
+| **Filesystem** | `Storage` over OpenDAL: local, memory, S3 and S3-compatible stores (R2, B2, RustFS, MinIO), Azure and GCS behind features; a default disk from `FILESYSTEM_DISK` |
+| **HTTP client** | `Http` with retries and `Http::fake` |
+| **Vector search** | `Vector` with `MemoryVectorDriver`, `QdrantVectorDriver`, `MariaDbVectorDriver` and `PineconeVectorDriver` |
+| **Payments** | `Checkout`, `Subscription`, `CustomerStore` and `WebhookHandler` traits, with adapter crates for Stripe, Paddle and NOWPayments |
+| **Validation and data** | `#[request]` form requests, rules such as `Unique`, `Exists`, `Confirmed`, `RequiredIf` and `DateFormat`, `#[derive(Data)]` data objects, JSON:API resources |
+| **Auth** | `Auth::login`, `Auth::user`, named guards, remember-me, email verification, password reset, two-factor with recovery codes, brute-force lockout, gates and `#[policy]`; passwords, OAuth (Apple, Facebook, Google, TikTok, X), passkeys and magic links through `Auth::password`, `Auth::oauth`, `Auth::passkey` and `Auth::magic_link` |
+| **Scheduling** | `Schedule::call`, `Schedule::command`, cron expressions, time zones, `suprnova schedule:work` |
+| **Workflows** | Durable steps with `#[workflow_step]` and `#[workflow]`, `suprnova workflow:work` |
+| **Console** | Your app's `console` binary, `#[command]` and `#[derive(Command)]`, `make:*` generators, `db:seed` |
+| **Processes** | `Process::command` and `Process::shell` with timeouts, pools and pipes, and `Process::fake` |
+| **Redis** | `Redis::connection` with commands, pipelines, transactions and pub/sub |
+| **Logging and observability** | `Log` channels (`LOG_CHANNEL`: stdout, single, daily, syslog, stack and more), request IDs, `tracing` throughout, OpenTelemetry behind the `otel` feature, `Metrics` |
+| **Errors** | In debug mode, a failing route shows the development error page in the browser; in tests, a failing response carries an `ErrorReport` |
+| **Localization and strings** | `Lang` with Fluent catalogs and locale-aware formatting, `Str::slug`, `Str::plural` and friends |
+| **Images** | `Image` transformations through the OxideAV or ImageMagick driver |
+| **Feature flags** | `Feature`, database-backed and cached evaluators |
+| **Testing** | `#[suprnova_test]`, `TestDatabase`, in-process requests with `handle_request`, `expect!`, and fakes: `Mail::fake`, `Queue::fake`, `EventFacade::fake`, `Notify::fake`, `Bus::fake`, `Storage::fake`, `Http::fake`, `Process::fake` |
+| **Heap profiling** | The `heap-profiling` feature writes a dhat heap profile when the process ends, to the file `SUPRNOVA_HEAP_PROFILE` names |
+
+Every subsystem with more than one plausible backend is a trait with
+drivers, chosen by configuration. A new backend is a new driver, not a fork.
+
+## Suprnova Live
+
+Live components are server-rendered and interactive without a frontend
+framework. A component is a Rust struct with `#[derive(LiveComponent)]`, an
+Askama view and `#[action]` methods the browser calls. State travels in a
+signed snapshot, uploads and async updates (over SSE or WebSockets, with a
+polling fallback) are built in. Separately, `RenderCache` can serve a GET or HEAD
+route you opt in from a stored copy of its response, without running the
+handler, when it can prove the copy is safe to share.
+
+The shipped library has 58 components - forms, overlays, feedback,
+navigation and data display. Each one installs into your app with
+`suprnova live:add <name>`, so you own and can edit its view, styles and
+script. `suprnova live:check` checks your views' markup, accessibility and
+live directives. See the [Live chapter](./manual/live.md).
+
+## End-to-end type safety
+
+Define props in Rust once and use them in TypeScript with autocomplete:
+
+```rust
+use suprnova::{handler, inertia_response, InertiaProps, Request, Response};
+
+#[derive(InertiaProps)]
+pub struct DashboardProps {
+    pub title: String,
+    pub user: UserDto,
+}
+
+#[derive(InertiaProps)]
+pub struct UserDto {
+    pub name: String,
+    pub email: String,
+}
+
+#[handler]
+pub async fn dashboard(req: Request) -> Response {
+    inertia_response!(
+        &req,
+        "Dashboard",
+        DashboardProps {
+            title: "Welcome!".into(),
+            user: UserDto {
+                name: "Ada".into(),
+                email: "ada@example.com".into(),
+            },
+        }
+    )
+}
+```
+
+Run `suprnova generate-types` and `frontend/src/types/inertia-props.ts`
+mirrors the Rust shape. `suprnova serve` regenerates it as you edit. Change a
+field and the TypeScript compiler points at every component that uses it.
+
+## Durable workflows
+
+Workflow steps record their results, so a workflow resumes where it stopped
+after a restart, and a failed step is retried. The worker runs on Postgres:
+
+```rust
+use suprnova::{start_workflow, workflow, workflow_step, FrameworkError, WorkflowHandle};
+
+#[workflow_step]
+async fn fetch_user(user_id: i64) -> Result<String, FrameworkError> {
+    Ok(format!("user-{user_id}"))
+}
+
+#[workflow_step]
+async fn send_welcome_email(user: String) -> Result<(), FrameworkError> {
+    let _ = user;
+    Ok(())
+}
+
+#[workflow]
+async fn welcome_flow(user_id: i64) -> Result<(), FrameworkError> {
+    let user = fetch_user(user_id).await?;
+    send_welcome_email(user).await?;
+    Ok(())
+}
+
+pub async fn on_signup(user_id: i64) -> Result<WorkflowHandle, FrameworkError> {
+    start_workflow!(welcome_flow, user_id).await
+}
+```
+
+```bash
+suprnova workflow:work
+```
 
 ## Starter kits
 
-Don't start from an empty scaffold (unless you want to o_O) - fork a kit:
+Don't start from an empty scaffold unless you want to - fork a kit:
 
 - **[Nebula](https://github.com/eas4ai/Nebula)** - authentication
   (Breeze-tier): register, email verification, login with remember-me, password
@@ -130,95 +242,32 @@ Don't start from an empty scaffold (unless you want to o_O) - fork a kit:
 See **[Starter Kits](./manual/starter-kits.md)** for the full rundown, or run
 `suprnova new` for the plain scaffold on any of the three frontends.
 
-## End-to-end type safety
-
-Define props in Rust once; use them in TypeScript with full autocomplete.
-
-```rust
-use suprnova::{handler, InertiaProps, inertia_response, Response};
-
-#[derive(InertiaProps)]
-pub struct HomeProps {
-    pub title: String,
-    pub user: UserDto,
-}
-
-#[derive(InertiaProps)]
-pub struct UserDto {
-    pub name: String,
-    pub email: String,
-}
-
-#[handler]
-pub async fn index() -> Response {
-    Ok(inertia_response!("Home", HomeProps {
-        title: "Welcome!".into(),
-        user: UserDto {
-            name: "Ada".into(),
-            email: "ada@example.com".into(),
-        },
-    }))
-}
-```
-
-Run `suprnova generate-types` and your `frontend/src/types/inertia-props.ts`
-mirrors the Rust shape exactly. Change a field, regenerate, the compiler
-points at every component that needs to update.
-
-## Durable workflows
-
-Workflow steps survive process restarts and retry with exponential backoff
-+ jitter (strict cap, no doubling past it):
-
-```rust
-use suprnova::{workflow, workflow_step, start_workflow, FrameworkError};
-
-#[workflow_step]
-async fn fetch_user(user_id: i64) -> Result<String, FrameworkError> { ... }
-
-#[workflow_step]
-async fn send_welcome_email(user: String) -> Result<(), FrameworkError> { ... }
-
-#[workflow]
-async fn welcome_flow(user_id: i64) -> Result<(), FrameworkError> {
-    let user = fetch_user(user_id).await?;
-    send_welcome_email(user).await?;
-    Ok(())
-}
-
-// Enqueue & run the worker:
-let handle = start_workflow!(welcome_flow, 123).await?;
-```
-
-```bash
-suprnova workflow:work
-```
-
 ## Documentation
 
-- **[Manual](./manual/README.md)** - 100+ chapters, every public subsystem.
-  Pick a reading path: [From Laravel](./manual/from-laravel.md) (if you
-  know `Auth::user()` / Eloquent / Blade) or
-  [From Rust Web](./manual/from-rust-web.md) (if you know Axum / Actix / Rocket).
-- **[Quickstart](./manual/quickstart.md)** - small app end-to-end.
-- **[CHANGELOG.md](./CHANGELOG.md)** - keep-a-changelog format.
-- **[Introduction](./manual/introduction.md)** - the design principles the
-  framework is built on, including why every backend-bearing subsystem is a
-  trait with drivers rather than one blessed implementation.
+- **[Manual](./manual/README.md)** - every public subsystem. Pick a reading
+  path: [From Laravel](./manual/from-laravel.md) (if you know
+  `Auth::user()`, Eloquent and Blade) or
+  [From Rust Web](./manual/from-rust-web.md) (if you know Axum, Actix or Rocket).
+- **[Quickstart](./manual/quickstart.md)** - a small app end to end.
+- **[Laravel parity](./manual/parity.md)** - where Suprnova matches Laravel
+  13, and where it diverges on purpose.
+- **[CHANGELOG.md](./CHANGELOG.md)** - what changed in each version.
+- **[Introduction](./manual/introduction.md)** - the design principles,
+  including why every backend-bearing subsystem is a trait with drivers.
 - **[Contributing](./manual/contributions.md)** - the working agreement:
-  **full implementations only, well tested, production-ready.** A feature
-  ships when it's done, not when it has a prototype.
+  **full implementations only, well tested, production-ready.**
 
 ## Distribution model
 
-Suprnova distributes via git, not crates.io. Generated apps depend on
-`suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0" }`;
-the CLI installs via `cargo install --git`. Adapter crates
+Suprnova is distributed through git tags, not crates.io. A generated app
+depends on
+`suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.0.0" }`,
+and the CLI installs with `cargo install --git`. The adapter crates
 (`suprnova-payments-stripe`, `suprnova-payments-paddle`,
-`suprnova-web-push`) follow the same model. The tag *is* the release:
-an app moves versions by editing one `tag =` line, each version's
-[CHANGELOG](./CHANGELOG.md) section is its release record, and as of
-v1.0.0 breaking changes land only behind a version bump that says so.
+`suprnova-payments-nowpayments` and `suprnova-web-push`) follow the same
+model. The tag *is* the release: an app moves versions by editing one
+`tag =` line, and each version's [CHANGELOG](./CHANGELOG.md) section is its
+release record, with what to check when you upgrade.
 
 ## License
 
