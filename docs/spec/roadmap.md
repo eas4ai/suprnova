@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: process-facade
+Current: log-channels
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -248,6 +248,17 @@ Requirements: PAR-021, PAR-022, PAR-023, PAR-024, PAR-025
    concurrency and pipes, and fakes every process in tests
    (`laravel-parity.md` PAR-021 to PAR-025, next-feature item
    `process-facade`). Done when the mechanism passes on a committed tree.
+
+## log-channels
+
+Requirements: PAR-026, PAR-027, PAR-028, PAR-029, PAR-030
+
+22. log-channels - `LOG_CHANNEL` picks the channel log events go to,
+   stdout unless set, among stdout, stderr, single and rotating files,
+   syslog, null and stacks, with a `Log` facade for channels, stacks and
+   on-demand channels, retention, and flushing on shutdown
+   (`laravel-parity.md` PAR-026 to PAR-030, next-feature item
+   `log-channels`). Done when the mechanism passes on a committed tree.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

@@ -376,3 +376,67 @@ Falsifier: with a fake installed, a command that creates a file creates it; a ma
 Mechanism: `par-process`.
 Rationale: Laravel's `Process::fake` with pattern handlers, `describe`, `sequence`, `preventStrayProcesses` and the assertions.
 Status: Agreed 2026-10-02
+
+## Log channels
+
+The developer ruled on 2026-10-01 to build log channels: files, rotation,
+retention, flushing on shutdown and several outputs at once, with stdout
+the default. Slack and the other vendor sinks are deferred, not refused.
+
+[PAR-026] `LOG_CHANNEL` MUST name the channel the application's log
+events go to, and `stdout` when it is not set, writing what the framework
+writes today. The built-in channels are `stdout`, `stderr` (also named
+`errorlog`), `single`, `daily`, `monthly`, `syslog`, `null`, and `stack`,
+which writes to every channel `LOG_STACK` lists (`single` when it is not
+set). `Log::define(name, channel)` in the bootstrap MUST add a channel
+under a name, and `Log::extend(driver, factory)` MUST add a driver a
+defined channel can use. A `LOG_CHANNEL` or `LOG_STACK` that names no
+channel MUST fail boot with an error that names it.
+Falsifier: with `LOG_CHANNEL` unset, an `info!` event is not written to stdout; with `LOG_CHANNEL=single` the event is not in the file, or is also on stdout; a defined channel, or one on an extended driver, does not receive the events of the default channel it is; or boot succeeds with `LOG_CHANNEL=nosuch`, or its error does not name `nosuch`.
+Mechanism: `par-log-channels`.
+Rationale: Laravel's `config/logging.php` channels and `LOG_CHANNEL`, with stdout as the default the developer kept.
+Status: Agreed 2026-10-02
+
+[PAR-027] `single` MUST append each record to one file, `logs/suprnova.log`
+under the storage directory unless the channel sets a path, creating the
+directories. `daily` MUST write to a file named for the day
+(`suprnova-2026-10-02.log`) and keep the newest `LOG_DAILY_DAYS` (14)
+files, deleting older ones; `monthly` MUST write to a file named for the
+month (`suprnova-2026-10.log`) and keep the newest 3. The day and the month
+are those of the framework clock, in UTC.
+Falsifier: a record is not appended to the single file, or its directory is not created; a record written after midnight goes to the previous day's file; with 20 dated files and `LOG_DAILY_DAYS=14`, other than the 14 newest remain after a write; or a monthly channel keeps other than the 3 newest months.
+Mechanism: `par-log-channels`.
+Status: Agreed 2026-10-02
+
+[PAR-028] A `stack` MUST write each record to every channel it lists, and
+a channel that fails, such as a file it cannot open, MUST NOT stop the
+others. `Log::channel(name)` MUST return a logger that writes to that
+channel only, `Log::stack(names)` one that writes to each, and
+`Log::build(channel)` one for a channel that has no name, each with the
+eight levels from `emergency` to `debug` and a context. A `{key}` in a
+message MUST be replaced with the context's value under `key`.
+`Log::channels`, `Log::forget_channel`, `Log::default_channel` and
+`Log::set_default_channel` MUST report and change the channels in use and
+the default. `MAIL_LOG_CHANNEL` MUST name the channel the `log` mail
+transport writes to.
+Falsifier: a stacked channel misses a record, or an unwritable one stops another; `Log::channel("daily")` writes to the default channel too, or a stack or a built channel misses a record; `"user {id}"` with the context `id = 7` is not written as `user 7`; `Log::set_default_channel` does not move the events that follow; or with `MAIL_LOG_CHANNEL` set a logged mail is not written to that channel.
+Mechanism: `par-log-channels`.
+Rationale: Laravel's `Log::channel`, `Log::stack`, `Log::build`, `LogManager` and `replace_placeholders`.
+Status: Agreed 2026-10-02
+
+[PAR-029] File channels MAY buffer, but MUST flush: when `Log::flush` is
+called, at once for a record at `error` or above, within one second of a
+write otherwise, and when the server or a worker shuts down, so that no
+record written before a clean exit is lost.
+Falsifier: after `Log::flush`, a record written before it is not in the file; an `error` record is not in the file as soon as the call that wrote it returns; an `info` record is not in the file two seconds after it was written; or a record written before a clean shutdown is not in the file after it.
+Mechanism: `par-log-channels`.
+Status: Agreed 2026-10-02
+
+[PAR-030] `syslog` MUST send each record as an RFC 3164 datagram to the
+local syslog socket (`LOG_SYSLOG_SOCKET`, `/dev/log` unless set, or
+`/var/run/syslog` on macOS), with the facility `LOG_SYSLOG_FACILITY`
+(`user` unless set) and the severity of the record's level. Off Unix it
+MUST fail boot with an error that says so.
+Falsifier: a record reaches the socket with another priority than facility times 8 plus severity, or does not reach it; or an unknown facility boots.
+Mechanism: `par-log-channels`.
+Status: Agreed 2026-10-02
