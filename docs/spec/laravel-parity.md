@@ -502,3 +502,52 @@ that waits never delays another command and is never cut short.
 Falsifier: a published message is not yielded, or is yielded with the wrong channel, pattern or payload; a command on the connection waits while a subscription is open; a dropped subscription stays subscribed; a `get` waits behind a `blpop` on the same connection; or a `blpop` with a two-second timeout returns before the two seconds pass when nothing is pushed, or misses an element pushed while it waits.
 Mechanism: `par-redis`.
 Status: Agreed 2026-10-03
+
+## Str and Number subset
+
+The developer ruled on 2026-10-01 to build a useful subset of `Str` and
+`Number`, not the whole `Stringable`: slug, mask, excerpt and limit;
+pluralization that is language-specific; percentage and abbreviate
+through `Lang`.
+
+[PAR-035] `Str::slug(title, separator)` MUST spell the title in ASCII,
+lower-case it, write `@` as `at`, and join its runs of letters and digits
+with the separator, as Laravel's `Str::slug` does. `Str::mask(value,
+character, index, length)` MUST replace the characters from `index`
+(counted from the end when negative) for `length` characters (to the end
+when `None`) with `character`. `Str::limit(value, limit, end)` MUST keep
+the first `limit` characters and append `end` when it cut, and
+`Str::limit_words(value, limit, end)` MUST cut at the last space within
+the limit. `Str::excerpt(text, phrase, radius, omission)` MUST return the
+first match of the phrase, case-insensitive, with up to `radius`
+characters on each side and `omission` where it cut, or `None` when the
+phrase is absent. Every count is in characters, not bytes.
+Falsifier: `Str::slug("Laravel 5 Framework", "-")` is not `laravel-5-framework`, `Str::slug("Œuvre d'art_2 @home", "-")` is not `oeuvre-dart-2-at-home`, or `Str::slug("foo bar", "_")` is not `foo_bar`; `Str::mask("taylor@example.com", '*', 3, None)` is not `tay***************`, or `Str::mask("taylor@example.com", '*', -15, Some(3))` is not `tay***@example.com`; `Str::limit("The quick brown fox jumps over the lazy dog", 20, "...")` is not `The quick brown fox...`, or `Str::limit_words("The quick brown fox", 12, "...")` is not `The quick...`; `Str::excerpt("This is my name", "my", 3, "...")` is not `Some("...is my na...")`; or a multibyte value is cut inside a character.
+Mechanism: `par-strings`.
+Rationale: Laravel's `Str::slug`, `mask`, `limit` and `excerpt`.
+Status: Agreed 2026-10-03
+
+[PAR-036] `Str::plural(word, count)` and `Str::singular(word)` MUST
+inflect the word by the rules of the language of the current `Lang`
+locale: English, French, Norwegian Bokmål, Portuguese, Spanish or
+Turkish, as Laravel's `Pluralizer` does with doctrine/inflector, and by
+the English rules for any other language. A count of 1 or -1 MUST leave
+the word as it is, and the result MUST keep the word's case: lower,
+upper, first letter capital, or each word capital.
+Falsifier: in English `car` is not `cars`, `child` is not `children`, `person` is not `people`, `sheep` is not `sheep`, `Car` is not `Cars`, `CAR` is not `CARS`, `cars` with a count of 1 is not `cars`, or `Str::singular("people")` is not `person`; in French `cheval` is not `chevaux`; in Spanish `ciudad` is not `ciudades`; in Portuguese `cão` is not `cães`; in Norwegian Bokmål `bil` is not `biler`; in Turkish `kitap` is not `kitaplar`; or under a locale with none of these languages `car` is not `cars`.
+Mechanism: `par-strings`.
+Rationale: Laravel's `Str::plural`, `Str::singular` and `Pluralizer::useLanguage`; Suprnova takes the language from the request's locale instead of a process-wide setting.
+Status: Agreed 2026-10-03
+
+[PAR-037] `Lang::percentage(value, precision)` MUST format `value` as a
+percentage, `10` as ten percent, with `precision` fraction digits, the
+way the current locale writes one. `Lang::abbreviate(value, precision)`
+MUST divide the value by the largest of a thousand, a million, a
+billion, a trillion and a quadrillion that it reaches, write it with
+`precision` fraction digits in the current locale's number format, and
+append `K`, `M`, `B`, `T` or `Q`, as Laravel's `Number::abbreviate` does;
+a value under a thousand is written as it is.
+Falsifier: in `en` `Lang::percentage(10.0, 0)` is not `10%`, or `Lang::percentage(12.345, 1)` is not `12.3%`; in `de` `Lang::percentage(10.0, 0)` is not `10 %` with the locale's space; in `en` `Lang::abbreviate(1000.0, 0)` is not `1K`, `Lang::abbreviate(489939.0, 0)` is not `490K`, `Lang::abbreviate(1230000.0, 2)` is not `1.23M`, `Lang::abbreviate(-2500.0, 1)` is not `-2.5K`, or `Lang::abbreviate(999.0, 0)` is not `999`; or in `de` `Lang::abbreviate(1230000.0, 2)` is not `1,23M`.
+Mechanism: `par-strings`.
+Rationale: Laravel's `Number::percentage` and `Number::abbreviate`; ICU4X writes the percentage, and its compact format is not in the ICU4X release the framework uses, so the suffixes are Laravel's.
+Status: Agreed 2026-10-03

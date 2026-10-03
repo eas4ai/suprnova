@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: redis-facade
+Current: str-number-subset
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -270,6 +270,17 @@ Requirements: PAR-031, PAR-032, PAR-033, PAR-034
    and dedicated connections for subscriptions and blocking commands
    (`laravel-parity.md` PAR-031 to PAR-034, next-feature item
    `redis-facade`). Done when the mechanism passes on a committed tree.
+
+## str-number-subset
+
+Requirements: PAR-035, PAR-036, PAR-037
+
+24. str-number-subset - `Str::slug`, `mask`, `limit`, `limit_words` and
+   `excerpt`; `Str::plural` and `singular` by the language of the current
+   locale, with doctrine/inflector's six rule sets; `Lang::percentage` and
+   `Lang::abbreviate` (`laravel-parity.md` PAR-035 to PAR-037, next-feature
+   item `str-number-subset`). Done when the mechanism passes on a
+   committed tree.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
