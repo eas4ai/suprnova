@@ -8,6 +8,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **A Redis facade.** `Redis::connection("default")` reaches `REDIS_URL`,
+  and `Redis::define` names other connections in the bootstrap, or
+  `Redis::define_client` with a client built elsewhere. A connection opens
+  on its first command and opens again after the server drops it;
+  `Redis::purge` and `Redis::connections` manage them. The common commands
+  are typed methods (`get`, `set`, `incr`, `hgetall`, `lrange`, `zadd`,
+  `scan` and the rest), `command` runs any other and returns a `RedisValue`,
+  refusing those that would change the shared connection (`SUBSCRIBE`,
+  `MULTI`, `SELECT` and the like), and `client()` gives the `redis` crate's
+  connection, now re-exported as `suprnova::redis`. Reads are sent again
+  after a lost connection, as `REDIS_COMMAND_RETRIES` says; writes never
+  are. `pipeline` sends its commands before reading a reply and
+  `transaction` wraps them in `MULTI` and `EXEC`. `subscribe`, `psubscribe`
+  and the blocking commands (`blpop`, `brpop`, `blmove`, `brpoplpush`,
+  `bzpopmin`, `bzpopmax`) each run on a connection of their own. With
+  `Redis::enable_events`, `Redis::listen` and `Redis::listen_for_failures`
+  hear every command outside a pipeline or a transaction.
 - **Log channels.** `LOG_CHANNEL` names the channel `tracing`'s events go
   to, still `stdout` unless set: `stderr` (or `errorlog`), `single`
   (`storage/logs/suprnova.log`), `daily` (a file a day, keeping

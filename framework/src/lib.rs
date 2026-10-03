@@ -90,6 +90,7 @@ pub mod process;
 pub mod queue;
 pub mod rate_limit;
 pub mod rbac;
+mod redis_facade;
 pub(crate) mod redis_retry;
 pub mod render_cache;
 pub mod resources;
@@ -373,6 +374,10 @@ pub use rate_limit::{
     identity_key, names_identity,
 };
 pub use rbac::{GateBridgeMiddleware, HasRoles, PermissionMiddleware, RoleMiddleware};
+pub use redis_facade::{
+    Redis, RedisCommandExecuted, RedisCommandFailed, RedisConnection, RedisMessage, RedisPipeline,
+    RedisSide, RedisSubscription, RedisValue,
+};
 pub use render_cache::RenderCache;
 pub use resources::{
     AsRelationshipValue, DEFAULT_MAX_RELATIONSHIP_DEPTH, IncludeResolutionError, IncludeTree,
@@ -612,6 +617,11 @@ pub use serde_json;
 
 // Re-export serde for InertiaProps derive macro
 pub use serde;
+
+// Re-export the `redis` client so code that reaches past the facade with
+// `RedisConnection::client` can name its commands and types without adding
+// `redis` to its own `[dependencies]`.
+pub use redis;
 
 // Re-export chrono so macros (e.g. the `#[suprnova::model]` timestamp
 // injection in T9) can emit `::suprnova::chrono::Utc::now()` without

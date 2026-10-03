@@ -17,7 +17,13 @@ fn is_child() -> bool {
 fn run_child(name: &str, redis_url: Option<&str>, extra: &[(&str, &str)]) {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
-        .args(["--exact", name, "--nocapture", "--ignored", "--test-threads=1"])
+        .args([
+            "--exact",
+            name,
+            "--nocapture",
+            "--ignored",
+            "--test-threads=1",
+        ])
         .env(CHILD, "1")
         .env_remove("REDIS_URL")
         .env_remove("REDIS_COMMAND_RETRIES")
@@ -50,7 +56,11 @@ async fn client_info(connection: &suprnova::RedisConnection) -> String {
 /// The test URL with its database index replaced by `db`.
 fn url_with_database(db: i64) -> String {
     let base = url();
-    let host = base.trim_start_matches("redis://").split('/').next().unwrap();
+    let host = base
+        .trim_start_matches("redis://")
+        .split('/')
+        .next()
+        .unwrap();
     format!("redis://{host}/{db}")
 }
 
@@ -70,7 +80,11 @@ async fn a_defined_connection_reaches_its_urls_database() {
         .await
         .unwrap();
     assert_eq!(value.as_deref(), Some("here"));
-    assert!(client_info(&redis).await.contains(&format!(" db={} ", database())));
+    assert!(
+        client_info(&redis)
+            .await
+            .contains(&format!(" db={} ", database()))
+    );
     redis.del(&[key.as_str()]).await.unwrap();
 }
 
@@ -82,12 +96,18 @@ async fn define_replaces_a_connection_of_that_name() {
     let other = if database() == 15 { 14 } else { database() + 1 };
     Redis::define(&name, &url()).unwrap();
     let first = Redis::connection(&name).unwrap();
-    assert!(client_info(&first).await.contains(&format!(" db={} ", database())));
+    assert!(
+        client_info(&first)
+            .await
+            .contains(&format!(" db={} ", database()))
+    );
 
     Redis::define(&name, &url_with_database(other)).unwrap();
     let second = Redis::connection(&name).unwrap();
     assert!(
-        client_info(&second).await.contains(&format!(" db={other} ")),
+        client_info(&second)
+            .await
+            .contains(&format!(" db={other} ")),
         "the second define replaces the first"
     );
 }
@@ -103,7 +123,10 @@ async fn the_default_connection_reaches_redis_url() {
         &[("SUPRNOVA_REDIS_KEY", &key)],
     );
     let redis = connection("default-reader");
-    assert_eq!(redis.get(&key).await.unwrap().as_deref(), Some("from the child"));
+    assert_eq!(
+        redis.get(&key).await.unwrap().as_deref(),
+        Some("from the child")
+    );
     redis.del(&[key.as_str()]).await.unwrap();
 }
 
@@ -161,7 +184,7 @@ async fn child_resolves_a_bad_redis_url() {
     if !is_child() {
         return;
     }
-    let error = Redis::connection("default").err().expect("an http URL is no Redis URL");
+    let error = Redis::connection("default").expect_err("an http URL is no Redis URL");
     assert!(error.to_string().contains("REDIS_URL"), "{error}");
 }
 
@@ -191,8 +214,15 @@ async fn a_dropped_connection_opens_again() {
 
     assert_eq!(redis.get(&key).await.unwrap().as_deref(), Some("kept"));
     redis.set(&key, "written after").await.unwrap();
-    assert_eq!(redis.get(&key).await.unwrap().as_deref(), Some("written after"));
-    assert_ne!(client_id(&redis).await, before, "a new client replaced the dropped one");
+    assert_eq!(
+        redis.get(&key).await.unwrap().as_deref(),
+        Some("written after")
+    );
+    assert_ne!(
+        client_id(&redis).await,
+        before,
+        "a new client replaced the dropped one"
+    );
     redis.del(&[key.as_str()]).await.unwrap();
 }
 
@@ -209,10 +239,17 @@ async fn purge_forgets_a_connection_and_it_closes_when_no_handle_holds_it() {
     drop(redis);
     Redis::purge(&name);
 
-    assert!(!Redis::connections().contains(&name), "a purged name is not listed");
+    assert!(
+        !Redis::connections().contains(&name),
+        "a purged name is not listed"
+    );
     assert!(!client_open(id).await, "the purged connection closed");
     let again = Redis::connection(&name).expect("the definition outlives the purge");
-    assert_ne!(client_id(&again).await, id, "resolving again opens a new connection");
+    assert_ne!(
+        client_id(&again).await,
+        id,
+        "resolving again opens a new connection"
+    );
 }
 
 #[tokio::test]
@@ -220,7 +257,7 @@ async fn purge_forgets_a_connection_and_it_closes_when_no_handle_holds_it() {
 #[serial]
 async fn an_unknown_name_is_an_error_naming_it() {
     let name = unique("never-defined");
-    let error = Redis::connection(&name).err().expect("no connection has this name");
+    let error = Redis::connection(&name).expect_err("no connection has this name");
     assert!(error.to_string().contains(&name), "{error}");
 }
 
@@ -229,6 +266,53 @@ async fn an_unknown_name_is_an_error_naming_it() {
 #[serial]
 async fn a_url_that_is_not_a_redis_url_is_an_error_naming_the_connection() {
     let name = unique("http");
-    let error = Redis::define(&name, "http://x").err().expect("http is no Redis scheme");
+    let error = Redis::define(&name, "http://x").expect_err("http is no Redis scheme");
     assert!(error.to_string().contains(&name), "{error}");
+}
+
+#[test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+fn a_connection_opens_again_on_the_next_runtime() {
+    let redis = connection("two-runtimes");
+    let key = unique("two-runtimes-key");
+    let runtime = || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    };
+
+    runtime().block_on(async {
+        redis.set(&key, "first").await.unwrap();
+    });
+    // The first runtime, and the connection's task on it, are gone; the
+    // next command, write or read, opens the connection on this one.
+    runtime().block_on(async {
+        redis.set(&key, "second").await.unwrap();
+        assert_eq!(redis.get(&key).await.unwrap().as_deref(), Some("second"));
+        redis.del(&[key.as_str()]).await.unwrap();
+    });
+}
+
+#[tokio::test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+async fn define_client_gives_a_connection_a_client_built_elsewhere() {
+    let name = unique("own-client");
+    let client = suprnova::redis::Client::open(url()).unwrap();
+    Redis::define_client(&name, client);
+    let redis = Redis::connection(&name).unwrap();
+    let key = unique("own-client-key");
+    redis.set(&key, "through the given client").await.unwrap();
+    assert_eq!(
+        redis.get(&key).await.unwrap().as_deref(),
+        Some("through the given client")
+    );
+    assert!(
+        client_info(&redis)
+            .await
+            .contains(&format!(" db={} ", database()))
+    );
+    redis.del(&[key.as_str()]).await.unwrap();
 }
