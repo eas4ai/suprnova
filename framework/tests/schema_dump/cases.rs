@@ -96,6 +96,24 @@ impl MigratorTrait for Pruned {
     }
 }
 
+/// Only the newer migration: a Migrator a project's dump does not belong to.
+pub struct OnlyComments;
+
+#[async_trait::async_trait]
+impl MigratorTrait for OnlyComments {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![Box::new(CreateComments)]
+    }
+}
+
+/// Every test in this binary holds this while it runs: they change PATH,
+/// HOME and the database path, which belong to the whole process, and
+/// `cargo test` runs them as threads of one process.
+pub async fn exclusive() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    LOCK.lock().await
+}
+
 /// No migrations: its `fresh` drops every table.
 struct Nothing;
 
@@ -156,6 +174,10 @@ pub async fn dump_holds_the_schema_and_the_ledger(url: &str, dir: &Path, engine:
     assert!(
         !sql.contains("kept-out@example.com"),
         "a table's rows stay out of the dump"
+    );
+    assert!(
+        !sql.to_ascii_uppercase().contains("DROP TABLE"),
+        "a dump never drops a table it is loaded over:\n{sql}"
     );
     let inserts: Vec<&str> = sql
         .lines()
@@ -272,7 +294,7 @@ pub async fn pruned_migrations_keep_their_names(url: &str, dir: &Path) {
     assert!(err.to_string().contains(POSTS), "{err}");
 
     wipe(&db).await;
-    let err = SchemaDump::migrate::<Pruned>(url, Some(&dir.join("absent.sql")))
+    let err = SchemaDump::migrate::<Pruned>(url, None)
         .await
         .expect_err("a pruned migration with no dump to load fails");
     let message = err.to_string();
@@ -280,4 +302,118 @@ pub async fn pruned_migrations_keep_their_names(url: &str, dir: &Path) {
         message.contains(USERS) && message.contains("database/schema"),
         "{message}"
     );
+}
+
+/// PAR-039: a database whose ledger is missing but which holds tables is
+/// never loaded over: its rows stay.
+pub async fn tables_without_a_ledger_are_not_loaded_over(url: &str, dir: &Path) {
+    let db = Database::connect(url).await.expect("connect");
+    wipe(&db).await;
+    SchemaDump::migrate::<First>(url, None)
+        .await
+        .expect("migrate");
+    let path = dir.join("dump.sql");
+    SchemaDump::dump::<First>(url, &path).await.expect("dump");
+
+    wipe(&db).await;
+    db.execute_unprepared(
+        "CREATE TABLE sd_users (id INTEGER PRIMARY KEY, email VARCHAR(190) NOT NULL)",
+    )
+    .await
+    .expect("a table from elsewhere");
+    db.execute_unprepared("INSERT INTO sd_users (id, email) VALUES (7, 'kept@example.com')")
+        .await
+        .expect("a row");
+    let err = SchemaDump::migrate::<Newer>(url, Some(&path))
+        .await
+        .expect_err("a database with tables is not loaded");
+    assert!(err.to_string().contains("sd_users"), "{err}");
+    let rows = db
+        .query_all_raw(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT email FROM sd_users",
+        ))
+        .await
+        .expect("the table is still there");
+    assert_eq!(rows.len(), 1, "its row stays");
+    db.execute_unprepared("DROP TABLE sd_users")
+        .await
+        .expect("clean up");
+}
+
+/// PAR-039: `--schema-path` naming a file that is not there is an error,
+/// before any migration runs.
+pub async fn a_missing_schema_path_is_an_error(url: &str, dir: &Path) {
+    let db = Database::connect(url).await.expect("connect");
+    wipe(&db).await;
+    let absent = dir.join("absent.sql");
+    let err = SchemaDump::migrate::<First>(url, Some(&absent))
+        .await
+        .expect_err("a schema path that names no file");
+    assert!(err.to_string().contains("absent.sql"), "{err}");
+    assert!(!has_table(&db, "sd_users").await, "no migration ran");
+}
+
+/// PAR-039: `fresh` reloads a dump holding a view and a routine, twice,
+/// because it drops what the dump creates and not only the tables.
+pub async fn fresh_reloads_views_and_routines(url: &str, dir: &Path, engine: &str) {
+    let db = Database::connect(url).await.expect("connect");
+    wipe(&db).await;
+    SchemaDump::migrate::<First>(url, None)
+        .await
+        .expect("migrate");
+    db.execute_unprepared("CREATE VIEW sd_emails AS SELECT email FROM sd_users")
+        .await
+        .expect("a view");
+    let routine = match engine {
+        "postgres" => Some((
+            "CREATE FUNCTION sd_one() RETURNS integer LANGUAGE sql AS 'SELECT 1'",
+            "DROP FUNCTION sd_one()",
+        )),
+        "mysql" | "mariadb" => Some((
+            "CREATE PROCEDURE sd_one() SELECT 1",
+            "DROP PROCEDURE sd_one",
+        )),
+        _ => Some((
+            "CREATE TRIGGER sd_emails_insert INSTEAD OF INSERT ON sd_emails BEGIN SELECT 1; END",
+            "DROP TRIGGER sd_emails_insert",
+        )),
+    };
+    if let Some((create, _)) = routine {
+        db.execute_unprepared(create).await.expect("a routine");
+    }
+    if engine == "postgres" {
+        db.execute_unprepared("CREATE SEQUENCE sd_counter")
+            .await
+            .expect("a sequence no table owns");
+    }
+    let path = dir.join("dump.sql");
+    SchemaDump::dump::<First>(url, &path).await.expect("dump");
+
+    for round in 1..=2 {
+        SchemaDump::fresh::<Newer>(url, Some(&path))
+            .await
+            .unwrap_or_else(|e| panic!("fresh round {round}: {e}"));
+        db.query_all_raw(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT email FROM sd_emails",
+        ))
+        .await
+        .expect("the view is back");
+        assert!(has_table(&db, "sd_comments").await);
+    }
+
+    if engine == "postgres" {
+        db.execute_unprepared("DROP SEQUENCE sd_counter")
+            .await
+            .expect("clean up");
+    }
+    if let Some((_, drop)) = routine
+        && engine != "sqlite"
+    {
+        db.execute_unprepared(drop).await.expect("clean up");
+    }
+    db.execute_unprepared("DROP VIEW sd_emails")
+        .await
+        .expect("clean up");
 }

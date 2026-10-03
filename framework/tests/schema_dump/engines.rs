@@ -2,55 +2,103 @@
 //! names. Ignored by default; the `par-schema-dump` mechanism runs them.
 
 use crate::cases;
+use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// The URL in `var`; a run that asks for these tests must provide it.
-fn url(var: &str) -> String {
-    std::env::var(var).unwrap_or_else(|_| panic!("{var} must name a throwaway database"))
+/// The URL in `var` with `tls` added to its query; a run that asks for
+/// these tests must provide the URL.
+fn url(var: &str, tls: &str) -> String {
+    let url = std::env::var(var).unwrap_or_else(|_| panic!("{var} must name a throwaway database"));
+    let joiner = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{joiner}{tls}")
 }
 
-/// Puts a wrapper for `tool` first on PATH that writes its arguments to
-/// `args.log` and then runs the real tool, and returns the log's path.
-fn record_arguments(dir: &Path, tool: &str) -> std::path::PathBuf {
-    let real = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {tool}"))
-        .output()
-        .expect("look up the tool");
-    let real = String::from_utf8(real.stdout)
-        .expect("a path")
-        .trim()
-        .to_owned();
-    assert!(!real.is_empty(), "{tool} must be installed");
+/// PATH and HOME as they were, put back on drop.
+struct Environment {
+    path: Option<OsString>,
+    home: Option<OsString>,
+}
+
+impl Drop for Environment {
+    fn drop(&mut self) {
+        // SAFETY: every test in this binary holds `cases::exclusive`, so no
+        // other test thread reads the environment while it changes.
+        unsafe {
+            match &self.path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+            match &self.home {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}
+
+/// Puts a wrapper for each tool first on PATH that appends its arguments
+/// to `args.log` and its `PG*` environment to `env.log`, then runs the
+/// real tool; and points HOME at a directory whose `.my.cnf` holds a wrong
+/// password, which the tools must not prefer to the URL's.
+fn record_tools(dir: &Path, tools: &[&str]) -> (Environment, PathBuf, PathBuf) {
+    let saved = Environment {
+        path: std::env::var_os("PATH"),
+        home: std::env::var_os("HOME"),
+    };
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).expect("mkdir");
-    let log = dir.join("args.log");
-    let wrapper = bin.join(tool);
+    let args = dir.join("args.log");
+    let env = dir.join("env.log");
+    for tool in tools {
+        let real = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("command -v {tool}"))
+            .output()
+            .expect("look up the tool");
+        let real = String::from_utf8(real.stdout)
+            .expect("a path")
+            .trim()
+            .to_owned();
+        assert!(!real.is_empty(), "{tool} must be installed");
+        let wrapper = bin.join(tool);
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nenv | grep '^PG' >> '{}'\nexec '{real}' \"$@\"\n",
+                args.display(),
+                env.display()
+            ),
+        )
+        .expect("write the wrapper");
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("mkdir");
     std::fs::write(
-        &wrapper,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nexec '{real}' \"$@\"\n",
-            log.display()
-        ),
+        home.join(".my.cnf"),
+        "[client]\npassword=not-the-password\n",
     )
-    .expect("write the wrapper");
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    .expect("write .my.cnf");
     let path = format!(
         "{}:{}",
         bin.display(),
-        std::env::var("PATH").unwrap_or_default()
+        saved.path.clone().unwrap_or_default().to_string_lossy()
     );
-    // SAFETY: nextest runs each test in its own process, so no other
-    // thread reads PATH while it changes.
-    unsafe { std::env::set_var("PATH", path) };
-    log
+    // SAFETY: every test in this binary holds `cases::exclusive`, so no
+    // other test thread reads the environment while it changes.
+    unsafe {
+        std::env::set_var("PATH", path);
+        std::env::set_var("HOME", &home);
+    }
+    (saved, args, env)
 }
 
-async fn every_case(url: &str, engine: &str, tool: &str) {
+async fn every_case(url: &str, engine: &str, tools: &[&str]) {
+    let _lock = cases::exclusive().await;
     let dir = tempfile::tempdir().expect("a temporary directory");
     suprnova::use_database_path(dir.path());
-    let log = record_arguments(dir.path(), tool);
+    let (_environment, args, env) = record_tools(dir.path(), tools);
 
     cases::dump_holds_the_schema_and_the_ledger(url, dir.path(), engine).await;
     let password = url::Url::parse(url)
@@ -58,31 +106,61 @@ async fn every_case(url: &str, engine: &str, tool: &str) {
         .password()
         .map(str::to_owned)
         .expect("the test URL has a password");
-    let arguments = std::fs::read_to_string(&log).expect("the tool ran");
+    let arguments = std::fs::read_to_string(&args).expect("the tool ran");
     assert!(
         !arguments.contains(&password),
-        "the password stays out of {tool}'s arguments"
+        "the password stays out of the tools' arguments"
     );
+    if engine == "postgres" {
+        let environment = std::fs::read_to_string(&env).expect("the tool ran");
+        assert!(
+            environment.contains("PGSSLMODE=require"),
+            "the URL's sslmode reaches pg_dump: {environment}"
+        );
+    } else {
+        assert!(
+            arguments.lines().any(|a| a.starts_with("--ssl")),
+            "the URL's ssl-mode reaches the tool: {arguments}"
+        );
+    }
 
     cases::the_dump_loads_before_newer_migrations(url, dir.path()).await;
     cases::only_an_empty_ledger_loads(url, dir.path()).await;
     cases::pruned_migrations_keep_their_names(url, dir.path()).await;
+    cases::tables_without_a_ledger_are_not_loaded_over(url, dir.path()).await;
+    cases::a_missing_schema_path_is_an_error(url, dir.path()).await;
+    cases::fresh_reloads_views_and_routines(url, dir.path(), engine).await;
 }
 
 #[tokio::test]
 #[ignore = "needs PG_TEST_URL"]
 async fn postgres_dumps_loads_and_prunes() {
-    every_case(&url("PG_TEST_URL"), "postgres", "pg_dump").await;
+    every_case(
+        &url("PG_TEST_URL", "sslmode=require"),
+        "postgres",
+        &["pg_dump", "psql"],
+    )
+    .await;
 }
 
 #[tokio::test]
 #[ignore = "needs MYSQL_TEST_URL, a MySQL server"]
 async fn mysql_dumps_loads_and_prunes() {
-    every_case(&url("MYSQL_TEST_URL"), "mysql", "mysqldump").await;
+    every_case(
+        &url("MYSQL_TEST_URL", "ssl-mode=REQUIRED"),
+        "mysql",
+        &["mysqldump", "mysql"],
+    )
+    .await;
 }
 
 #[tokio::test]
 #[ignore = "needs MARIADB_TEST_URL, a MariaDB server"]
 async fn mariadb_dumps_loads_and_prunes() {
-    every_case(&url("MARIADB_TEST_URL"), "mariadb", "mariadb-dump").await;
+    every_case(
+        &url("MARIADB_TEST_URL", "ssl-mode=REQUIRED"),
+        "mariadb",
+        &["mariadb-dump", "mariadb"],
+    )
+    .await;
 }

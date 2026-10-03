@@ -79,3 +79,41 @@ fn migrate_passes_the_schema_path_on() {
     );
     assert_eq!(app_arguments(&dir, &["migrate"]), ["migrate"]);
 }
+
+#[test]
+fn migrate_fresh_passes_the_schema_path_on() {
+    let dir = project();
+    assert_eq!(
+        app_arguments(&dir, &["migrate:fresh", "--schema-path", "db/schema.sql"]),
+        ["migrate:fresh", "--schema-path", "db/schema.sql"]
+    );
+}
+
+/// The scaffolded images auto-migrate, so they carry the schema dumps and
+/// a client that can load one.
+#[test]
+fn the_docker_images_carry_the_dumps_and_a_client() {
+    for (name, template) in [
+        (
+            "Dockerfile.tpl",
+            include_str!("../src/templates/files/docker/Dockerfile.tpl"),
+        ),
+        (
+            "Dockerfile.api.tpl",
+            include_str!("../src/templates/files/docker/Dockerfile.api.tpl"),
+        ),
+    ] {
+        let runtime = template
+            .split("AS runtime")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{name} has a runtime stage"));
+        assert!(
+            runtime.contains("./database/schema"),
+            "{name}'s runtime stage copies database/schema"
+        );
+        assert!(
+            runtime.contains("ARG DB_CLIENT=postgresql-client") && runtime.contains("${DB_CLIENT}"),
+            "{name}'s runtime stage installs the database client"
+        );
+    }
+}

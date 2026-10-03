@@ -45,6 +45,15 @@ RUN cargo build --release \
 # Copy actual source code
 COPY src/ ./src/
 
+# Schema dumps (`suprnova schema:dump`), when the project has any, for the
+# runtime stage. `databas[e]` matches nothing in a project without a
+# database directory, and Cargo.toml gives the COPY a source either way;
+# .dockerignore keeps everything in database/ but schema/ out.
+COPY Cargo.toml databas[e] ./database-context/
+RUN mkdir -p database/schema \
+    && if [ -d database-context/schema ]; then cp -R database-context/schema/. database/schema/; fi \
+    && rm -rf database-context
+
 # Build the application (single unified binary)
 RUN rm ./target/release/deps/{package_name}* 2>/dev/null || true && cargo build --release
 
@@ -55,10 +64,17 @@ FROM debian:bookworm-slim AS runtime
 
 WORKDIR /app
 
+# The client the auto-migration loads a schema dump with, into a database
+# that has run no migration: postgresql-client for Postgres (the database
+# docker-compose.yml runs), mariadb-client for MySQL or MariaDB, or empty
+# for SQLite. Change it with `--build-arg DB_CLIENT=...`.
+ARG DB_CLIENT=postgresql-client
+
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
+    ${DB_CLIENT} \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -66,6 +82,10 @@ RUN useradd -m -u 1000 appuser
 
 # Copy the compiled binary
 COPY --from=backend-builder /app/{package_name}/target/release/{package_name} ./app
+
+# Schema dumps, loaded into an empty database before the migrations newer
+# than them run
+COPY --from=backend-builder /app/{package_name}/database/schema ./database/schema
 
 # No `public/` copy: an API project serves no static assets.
 

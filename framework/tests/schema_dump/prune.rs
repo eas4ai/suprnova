@@ -39,6 +39,7 @@ async fn dump(root: &Path) -> std::path::PathBuf {
 
 #[tokio::test]
 async fn prune_replaces_the_dumped_migrations_and_keeps_the_rest() {
+    let _lock = cases::exclusive().await;
     let root = tempfile::tempdir().expect("a temporary directory");
     let dir = migrations(root.path());
     let dump = dump(root.path()).await;
@@ -71,6 +72,7 @@ async fn prune_replaces_the_dumped_migrations_and_keeps_the_rest() {
 
 #[tokio::test]
 async fn a_dump_with_no_ledger_prunes_nothing() {
+    let _lock = cases::exclusive().await;
     let root = tempfile::tempdir().expect("a temporary directory");
     let dir = migrations(root.path());
     let before = fs::read_to_string(dir.join("mod.rs")).expect("read mod.rs");
@@ -89,13 +91,15 @@ async fn a_dump_with_no_ledger_prunes_nothing() {
 
 #[tokio::test]
 async fn a_failed_dump_prunes_nothing() {
+    let _lock = cases::exclusive().await;
     let root = tempfile::tempdir().expect("a temporary directory");
     let dir = migrations(root.path());
     let before = fs::read_to_string(dir.join("mod.rs")).expect("read mod.rs");
     let empty = root.path().join("bin");
     fs::create_dir(&empty).expect("mkdir");
-    // SAFETY: nextest runs each test in its own process, so no other
-    // thread reads PATH while it changes.
+    let path_before = std::env::var_os("PATH");
+    // SAFETY: every test in this binary holds `cases::exclusive`, so no
+    // other test thread reads PATH while it changes.
     unsafe { std::env::set_var("PATH", &empty) };
 
     SchemaDump::dump_and_prune::<cases::First>(
@@ -105,6 +109,8 @@ async fn a_failed_dump_prunes_nothing() {
     )
     .await
     .expect_err("no pg_dump on PATH");
+    // SAFETY: as above.
+    unsafe { std::env::set_var("PATH", path_before.unwrap_or_default()) };
     assert_eq!(
         fs::read_to_string(dir.join("mod.rs")).expect("read"),
         before
@@ -112,4 +118,71 @@ async fn a_failed_dump_prunes_nothing() {
     for name in [USERS, POSTS, COMMENTS] {
         assert!(dir.join(format!("{name}.rs")).exists());
     }
+}
+
+/// A recorded migration with no file of its name, and no `PrunedMigration`
+/// entry, is one whose `name()` differs from its file: prune refuses and
+/// changes nothing rather than leaving it behind.
+#[tokio::test]
+async fn a_recorded_migration_without_its_file_stops_the_prune() {
+    let _lock = cases::exclusive().await;
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let dir = migrations(root.path());
+    fs::rename(
+        dir.join(format!("{POSTS}.rs")),
+        dir.join("m20260101_000002_posts_named_otherwise.rs"),
+    )
+    .expect("rename");
+    let before = fs::read_to_string(dir.join("mod.rs")).expect("read mod.rs");
+    let dump = dump(root.path()).await;
+
+    let err = SchemaDump::prune(&dir, &dump).expect_err("a recorded name with no file");
+    assert!(err.to_string().contains(POSTS), "{err}");
+    assert_eq!(
+        fs::read_to_string(dir.join("mod.rs")).expect("read"),
+        before
+    );
+    assert!(
+        dir.join(format!("{USERS}.rs")).exists(),
+        "nothing was pruned"
+    );
+}
+
+/// A second prune leaves the names an earlier one kept.
+#[tokio::test]
+async fn a_second_prune_keeps_the_earlier_names() {
+    let _lock = cases::exclusive().await;
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let dir = migrations(root.path());
+    let dump = dump(root.path()).await;
+    SchemaDump::prune(&dir, &dump).expect("the first prune");
+    let after_first = fs::read_to_string(dir.join("mod.rs")).expect("read");
+
+    assert!(
+        SchemaDump::prune(&dir, &dump)
+            .expect("the second prune")
+            .is_empty()
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("mod.rs")).expect("read"),
+        after_first
+    );
+}
+
+/// A migration written as a directory module is pruned with its directory.
+#[tokio::test]
+async fn a_directory_module_is_pruned_with_its_directory() {
+    let _lock = cases::exclusive().await;
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let dir = migrations(root.path());
+    fs::remove_file(dir.join(format!("{USERS}.rs"))).expect("remove");
+    fs::create_dir(dir.join(USERS)).expect("mkdir");
+    fs::write(dir.join(USERS).join("mod.rs"), "// a migration\n").expect("write");
+    let dump = dump(root.path()).await;
+
+    assert_eq!(
+        SchemaDump::prune(&dir, &dump).expect("prune"),
+        [USERS, POSTS]
+    );
+    assert!(!dir.join(USERS).exists());
 }
