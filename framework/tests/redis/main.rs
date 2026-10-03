@@ -12,3 +12,4 @@ pub mod connections;
 pub mod pipelines;
 pub mod subscriptions;
 pub mod support;
+pub mod tls;

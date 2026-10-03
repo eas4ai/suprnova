@@ -176,3 +176,97 @@ async fn relay(client: TcpStream, server: TcpStream, markers: Vec<String>, held:
     }
     upstream.abort();
 }
+
+/// A TCP proxy in front of the test server that, the first time a client
+/// sends `marker`, forwards the command, waits for the server's reply, and
+/// closes the connection without relaying it: the server applied the
+/// command, and the client never heard. Every later connection is relayed
+/// as it is. `times_sent` counts how often clients sent `marker`.
+pub struct CuttingProxy {
+    pub url: String,
+    sent: Arc<AtomicU64>,
+}
+
+impl CuttingProxy {
+    pub fn times_sent(&self) -> u64 {
+        self.sent.load(Ordering::SeqCst)
+    }
+}
+
+pub async fn cutting_proxy(marker: &str) -> CuttingProxy {
+    let target = url()
+        .trim_start_matches("redis://")
+        .split('/')
+        .next()
+        .unwrap()
+        .to_owned();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let sent = Arc::new(AtomicU64::new(0));
+    let cut = Arc::new(AtomicBool::new(false));
+    let (counter, marker) = (sent.clone(), marker.to_owned());
+    tokio::spawn(async move {
+        loop {
+            let Ok((client, _)) = listener.accept().await else {
+                return;
+            };
+            let server = TcpStream::connect(&target).await.unwrap();
+            tokio::spawn(cut_relay(
+                client,
+                server,
+                marker.clone(),
+                cut.clone(),
+                counter.clone(),
+            ));
+        }
+    });
+    CuttingProxy {
+        url: format!("redis://{address}/{}", database()),
+        sent,
+    }
+}
+
+async fn cut_relay(
+    client: TcpStream,
+    server: TcpStream,
+    marker: String,
+    cut: Arc<AtomicBool>,
+    sent: Arc<AtomicU64>,
+) {
+    let (mut client_read, mut client_write) = client.into_split();
+    let (mut server_read, mut server_write) = server.into_split();
+    let armed = Arc::new(AtomicBool::new(false));
+    let arm = armed.clone();
+    let upstream = tokio::spawn(async move {
+        let mut buffer = [0u8; 8192];
+        while let Ok(n) = client_read.read(&mut buffer).await {
+            if n == 0 {
+                return;
+            }
+            let chunk = &buffer[..n];
+            let count = chunk
+                .windows(marker.len())
+                .filter(|window| *window == marker.as_bytes())
+                .count() as u64;
+            if count > 0 {
+                sent.fetch_add(count, Ordering::SeqCst);
+                if !cut.swap(true, Ordering::SeqCst) {
+                    arm.store(true, Ordering::SeqCst);
+                }
+            }
+            if server_write.write_all(chunk).await.is_err() {
+                return;
+            }
+        }
+    });
+    let mut buffer = [0u8; 8192];
+    while let Ok(n) = server_read.read(&mut buffer).await {
+        if n == 0 || armed.load(Ordering::SeqCst) {
+            break;
+        }
+        if client_write.write_all(&buffer[..n]).await.is_err() {
+            break;
+        }
+    }
+    upstream.abort();
+}

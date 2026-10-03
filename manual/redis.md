@@ -33,14 +33,36 @@ pub async fn register() {
 ```
 
 `Redis::define` takes `redis://`, `rediss://`, and `unix://` URLs, with a
-user and password when the server needs them. It replaces any connection of
-that name, `default` included. A URL that is not a Redis URL is an error
-that names the connection, never the URL, since the URL may hold a
-password.
+user and password when the server needs them. A `rediss://` URL connects
+over TLS and trusts the certificate authorities of the system; so do the
+cache, queue, and rate limiter URLs. `Redis::define` replaces any
+connection of that name, `default` included. A name already resolved stays
+resolved, on the new URL, while the handles taken before keep the server
+they had. A URL that is not a Redis URL is an error that names the
+connection, never the URL, since the URL may hold a password.
 
-For what a URL cannot say, such as TLS with certificates of your own or a
-server a Sentinel names, build the client with the re-exported `redis`
-crate and give it to `Redis::define_client(name, client)`.
+For what a URL cannot say, such as a private certificate authority, a
+client certificate, or a server a Sentinel names, build the client with
+the re-exported `redis` crate and give it to
+`Redis::define_client(name, client)`:
+
+```rust
+use suprnova::Redis;
+use suprnova::redis::{Client, TlsCertificates};
+
+let client = Client::build_with_tls(
+    "rediss://cache.internal:6380/0",
+    TlsCertificates {
+        client_tls: None,
+        root_cert: Some(std::fs::read("/etc/ssl/private-ca.pem")?),
+    },
+)?;
+Redis::define_client("cache", client);
+```
+
+TLS uses rustls. The framework installs `ring` as rustls's crypto provider
+before the first Redis client opens, unless your application installed one
+first.
 
 `Redis::connection(name)` returns the connection. Resolving it sends
 nothing: the connection opens on its first command, and opens again on its
@@ -94,12 +116,17 @@ if let RedisValue::Int(count) = redis.command("PFCOUNT", &["visitors"]).await? {
 ```
 
 `command` sends a blocking command, such as `BLMPOP` or `XREAD` with
-`BLOCK`, on a connection of its own, as the typed blocking methods do. It
-refuses the commands that would change the connection every other command
-shares, and the error names what to use instead: `subscribe` for
-`SUBSCRIBE` and its family, `transaction` for `MULTI` and `EXEC`, the URL
-for `SELECT` and `AUTH`, and a connection of your own from
-`suprnova::redis::Client` for `WATCH` and `MONITOR`.
+`BLOCK`, on a connection of its own, as the typed blocking methods do.
+`WAIT` and `WAITAOF` wait for the writes of the connection that sends them,
+so they run on the shared connection and hold it while they wait; keep
+their timeouts short.
+
+`command` refuses the commands that would change the connection every
+other command shares, and the error names what to use instead:
+`subscribe` for `SUBSCRIBE` and its family, `transaction` for `MULTI` and
+`EXEC`, the URL for `SELECT` and `AUTH`, and a connection of your own from
+`suprnova::redis::Client` for `WATCH`, `MONITOR`, `CLIENT REPLY`, and
+`CLIENT TRACKING`. A pipeline and a transaction refuse them too.
 
 A `RedisValue` is `Nil`, `Int`, `Bytes` for a bulk string, `Status` for
 a reply such as `OK`, `Array`, or, from a server speaking RESP3, `Map`,
@@ -130,12 +157,15 @@ blocks for longer belongs on a connection of its own; see
 
 When the server drops the connection, a read is sent again on the new
 connection: once, and once more for each retry `REDIS_COMMAND_RETRIES`
-adds. The typed reads retry, and so do the commands Laravel lists as safe
-to retry when they go through `command`: `GET`, `MGET`, `HGETALL`,
-`LRANGE`, `SMEMBERS`, `ZRANGE`, `TTL`, `EXISTS`, and the rest. A write is
-never sent again, since the server may have applied it before the
-connection dropped; it returns the error, and the next command reaches the
-new connection.
+adds. The typed reads retry, and so do the reads Laravel lists as safe to
+retry when they go through `command`: `GET`, `MGET`, `HGETALL`, `LRANGE`,
+`SMEMBERS`, `ZRANGE`, `TTL`, `EXISTS`, and the rest. Laravel's list also
+holds three writes, `MSET`, `HMSET`, and `SET` without options; Suprnova
+leaves them out. A write is never sent again, since the server may have
+applied it before the connection dropped, and a second one would undo a
+write another client made in between. It returns the error, and the next
+command reaches the new connection. A reply that takes longer than the
+five-second limit counts as a lost one too.
 
 ## Pipelines and transactions
 
@@ -174,7 +204,9 @@ let replies = redis
 
 The closure queues with `command` and with these typed methods: `set`,
 `set_ex`, `get`, `del`, `incr`, `decr`, `expire`, `hset`, `lpush`, `rpush`,
-`sadd`, `zadd`, and `publish`.
+`sadd`, `zadd`, and `publish`. A pipeline refuses a blocking command, which
+would hold up the shared connection; inside a transaction Redis runs one
+without blocking. Neither is sent again after a lost connection.
 
 ## Subscriptions
 
@@ -198,7 +230,12 @@ redis.publish("orders.created", "42").await?;
 ```
 
 The shared connection keeps running commands while a subscription is open.
-Dropping the subscription closes its connection.
+Dropping the subscription closes its connection. When the server closes
+it instead, on a restart, a `CLIENT KILL`, or a full output buffer, `next`
+opens a new connection and subscribes again, waiting for the server as
+long as it takes. Messages published in between are lost, since Pub/Sub
+keeps none. `next` returns `None` only when the server refuses the new
+subscription.
 
 ## Blocking commands
 
@@ -242,7 +279,10 @@ Redis::listen_for_failures(|event| {
 Redis::enable_events();
 ```
 
-A listener runs on the task that sent the command, so keep it quick.
+`SUBSCRIBE` and `PSUBSCRIBE` are reported too. A command whose reply the
+typed method cannot read, such as a `GET` of a value that is not UTF-8,
+reaches the failure listeners, since the caller sees an error. A listener
+runs on the task that sent the command, so keep it quick.
 
 ## Testing
 
@@ -277,8 +317,13 @@ in one test's runtime opens again in the next test's, so every
   that, so a prefix would apply to some commands and not others. Put the
   prefix in the key: `format!("myapp:{key}")`.
 - **Only reads retry.** With `command_retries` set, Laravel sends any
-  command again after a lost connection, writes included. Suprnova never
-  sends a write twice.
+  command again after a lost connection, writes included, and its list of
+  retryable commands holds three writes. Suprnova never sends a write
+  twice.
+- **Some commands are refused.** Every task shares one connection, so
+  `SELECT`, `MULTI`, `WATCH`, `SUBSCRIBE`, `CLIENT REPLY`, and the like would
+  change it for all of them. Laravel runs them on the connection of the
+  process that sends them.
 - **A subscription is a value.** Laravel's `subscribe` takes a callback and
   blocks the process; here it returns a subscription that a task reads.
 - **Blocking commands get their own connection.** In Laravel they block

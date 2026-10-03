@@ -335,6 +335,8 @@ pub struct T13OptionalStamped {
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+// `TestClock` exists with the `testing` feature only.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn persisting_a_replica_stamps_its_timestamps() {
     use chrono::TimeZone;

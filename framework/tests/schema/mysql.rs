@@ -42,6 +42,7 @@ async fn mysql_model_round_trip() {
     cases::model_round_trip(&connect_mysql().await).await;
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial]
 #[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]

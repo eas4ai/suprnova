@@ -284,13 +284,13 @@ fn a_connection_opens_again_on_the_next_runtime() {
     };
 
     runtime().block_on(async {
-        redis.set(&key, "first").await.unwrap();
+        redis.del(&[key.as_str()]).await.unwrap();
     });
     // The first runtime, and the connection's task on it, are gone; the
-    // next command, write or read, opens the connection on this one.
+    // next command opens the connection on this one, even a write that is
+    // never sent twice.
     runtime().block_on(async {
-        redis.set(&key, "second").await.unwrap();
-        assert_eq!(redis.get(&key).await.unwrap().as_deref(), Some("second"));
+        assert_eq!(redis.incr(&key, 1).await.unwrap(), 1);
         redis.del(&[key.as_str()]).await.unwrap();
     });
 }
@@ -315,4 +315,20 @@ async fn define_client_gives_a_connection_a_client_built_elsewhere() {
             .contains(&format!(" db={} ", database()))
     );
     redis.del(&[key.as_str()]).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+async fn a_resolved_name_stays_listed_when_it_is_defined_again() {
+    let name = unique("redefined");
+    Redis::define(&name, &url()).unwrap();
+    let first = Redis::connection(&name).unwrap();
+    first.command("PING", &[] as &[&str]).await.unwrap();
+
+    Redis::define(&name, &url()).unwrap();
+    assert!(
+        Redis::connections().contains(&name),
+        "the name was resolved and never purged"
+    );
 }

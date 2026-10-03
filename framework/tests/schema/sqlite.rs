@@ -30,6 +30,7 @@ async fn sqlite_model_round_trip() {
     cases::model_round_trip(&connect_sqlite().await).await;
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn sqlite_native_timestamps_round_trip() {
     cases::native_timestamps_round_trip(&connect_sqlite().await).await;

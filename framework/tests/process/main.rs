@@ -7,6 +7,8 @@
 
 #![cfg(unix)]
 
+// `Process::fake` exists with the `testing` feature only.
+#[cfg(feature = "testing")]
 pub mod fake;
 pub mod pool;
 pub mod run;

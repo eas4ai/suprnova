@@ -15,11 +15,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `Redis::purge` and `Redis::connections` manage them. The common commands
   are typed methods (`get`, `set`, `incr`, `hgetall`, `lrange`, `zadd`,
   `scan` and the rest), `command` runs any other and returns a `RedisValue`,
-  refusing those that would change the shared connection (`SUBSCRIBE`,
-  `MULTI`, `SELECT` and the like), and `client()` gives the `redis` crate's
-  connection, now re-exported as `suprnova::redis`. Reads are sent again
-  after a lost connection, as `REDIS_COMMAND_RETRIES` says; writes never
-  are. `pipeline` sends its commands before reading a reply and
+  refusing, as pipelines and transactions do, those that would change the
+  shared connection (`SUBSCRIBE`, `MULTI`, `SELECT`, `CLIENT REPLY` and the
+  like), and `client()` gives the `redis` crate's connection, now
+  re-exported as `suprnova::redis`. Reads are sent again after a lost
+  connection, as `REDIS_COMMAND_RETRIES` says; writes never are. A
+  subscription the server closes subscribes again. `rediss://` URLs connect
+  over TLS, for the facade and for the cache, queue and rate limiter URLs;
+  the framework installs rustls's `ring` provider unless the application
+  installed one. `pipeline` sends its commands before reading a reply and
   `transaction` wraps them in `MULTI` and `EXEC`. `subscribe`, `psubscribe`
   and the blocking commands (`blpop`, `brpop`, `blmove`, `brpoplpush`,
   `bzpopmin`, `bzpopmax`) each run on a connection of their own. With
