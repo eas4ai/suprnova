@@ -41,3 +41,7 @@ LICENSE
 
 # Test files
 tests/
+
+# Local databases; the image takes only the schema dumps
+database/*
+!database/schema

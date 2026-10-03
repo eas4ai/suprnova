@@ -107,14 +107,23 @@ impl TestDatabase {
 
         let conn = DbConnection::connect(&config).await?;
 
-        // 3. Load the SQLite schema dump, when the project has one, so the
-        //    migrations it covers (pruned or not) are not run again.
+        // 3. Load the SQLite schema dump, when the project has one and it
+        //    belongs to `M` (every migration its ledger records is in `M`'s
+        //    list), so the migrations it covers are not run again. A test
+        //    with a Migrator of its own runs that Migrator from scratch.
         let dump = crate::database_path("schema/sqlite-schema.sql");
         if dump.is_file() {
             let sql = std::fs::read_to_string(&dump).map_err(|e| {
                 FrameworkError::database(format!("could not read {}: {e}", dump.display()))
             })?;
-            crate::database::schema_dump::load_sqlite(conn.inner(), &sql).await?;
+            let listed: std::collections::HashSet<String> = M::migrations()
+                .iter()
+                .map(|migration| migration.name().to_owned())
+                .collect();
+            let recorded = crate::database::schema_dump::ledger_versions(&sql);
+            if !recorded.is_empty() && recorded.iter().all(|version| listed.contains(version)) {
+                crate::database::schema_dump::load_sqlite(conn.inner(), &sql).await?;
+            }
         }
 
         // 4. Run migrations

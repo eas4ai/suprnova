@@ -941,19 +941,36 @@ suprnova schema:dump --prune    # and prunes the migrations the dump covers
 Commit the dump. When `migrate`, `migrate:fresh`, or `serve` meets a
 database that has run no migration, it loads the dump first and then runs
 only the migrations newer than it. A database that has run a migration is
-never loaded. To load another file, pass `--schema-path <file>` to
-`migrate` or `migrate:fresh`. `TestDatabase::fresh` loads
-`database/schema/sqlite-schema.sql` the same way, so tests on SQLite need
-a SQLite dump.
+never loaded. Neither is a database that already holds tables while its
+migration ledger is missing or empty, such as one ported from Laravel:
+that is an error, and its tables stay as they were. To load another file,
+pass `--schema-path <file>` to `migrate` or `migrate:fresh`; a path that
+names no file is an error. `migrate:fresh` drops the views, routines,
+sequences, and types of the current schema as well as its tables before
+it loads a dump; objects in other Postgres schemas are yours to drop.
+
+`TestDatabase::fresh` loads `database/schema/sqlite-schema.sql` the same
+way when every migration the dump records is in the test's `Migrator`, so
+tests on SQLite need a SQLite dump. A test with a `Migrator` of its own
+runs that `Migrator` from scratch.
 
 Postgres is dumped with `pg_dump` and loaded with `psql`, MySQL with
 `mysqldump` and `mysql`, and MariaDB with `mariadb-dump` and `mariadb`.
 SQLite needs no tool. These client tools must be on `PATH` wherever a
 dump is written or loaded, and `pg_dump` must be at least the server's
-major version. The password reaches them through `PGPASSWORD` or a
-private option file, never through their arguments. A dump that fails
+major version. They reach the database the way your app does: the URL's
+TLS settings (`sslmode`, `sslrootcert`, `sslcert`, and `sslkey` for
+Postgres; `ssl-mode`, `ssl-ca`, `ssl-cert`, and `ssl-key` for MySQL and
+MariaDB) and its socket go with them. The password reaches them through
+`PGPASSWORD` or a private option file, never through their arguments,
+and a password in `~/.my.cnf` does not replace it. A dump that fails
 leaves the earlier file as it was, and a load that fails runs no
-migration.
+migration, even with `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT` set.
+
+The image `suprnova docker:init` writes carries `database/schema` and
+the Postgres client, so a new environment can start from the dump. For
+MySQL or MariaDB, build it with `--build-arg DB_CLIENT=mariadb-client`;
+for SQLite, with `--build-arg DB_CLIENT=`.
 
 ### Pruning
 
@@ -971,8 +988,10 @@ The name stays because a database that ran the migration records it, and
 SeaORM refuses a recorded migration it can't find. A database that would
 need the pruned migration's schema, such as an empty one with no dump to
 load, fails with an error that names the migration instead of skipping
-it. A migration the dump does not record stays as it is. Rebuild the app
-after pruning.
+it. A migration the dump does not record stays as it is. A migration
+whose `name()` differs from its file name can't be matched to its file,
+so `--prune` stops and changes nothing; rename the file or prune it by
+hand. Rebuild the app after pruning.
 
 ### Why Suprnova diverges
 
@@ -980,6 +999,10 @@ after pruning.
   deletes every migration file, including any the dumped database never
   ran. Here only the migrations the dump records go, and each keeps its
   name.
+- **A dump never loads over tables.** Laravel loads a dump into any
+  database whose migrations table is empty, and a MySQL dump drops each
+  table it creates. Here the dump has no `DROP TABLE`, and a database that
+  already holds tables is an error.
 - **No schema events.** Laravel fires `SchemaDumped`, `SchemaLoaded`, and
   `MigrationsPruned`. Suprnova's migration commands run before the
   bootstrap registers listeners, so no listener would hear them.

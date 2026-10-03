@@ -92,26 +92,46 @@ impl SchemaDump {
     /// `M::up`, after loading the dump when `M`'s ledger records no
     /// migration: the file `schema` names, or else the engine's default
     /// dump when it exists. Returns the file it loaded. A database whose
-    /// ledger records a migration is never loaded, and a failed load runs
-    /// no migration.
+    /// ledger records a migration is never loaded; nor is one that holds
+    /// tables while its ledger is missing or empty, which is an error, as
+    /// is a `schema` that names no file. A failed load runs no migration.
     pub async fn migrate<M: MigratorTrait>(
         url: &str,
         schema: Option<&Path>,
     ) -> Result<Option<PathBuf>, FrameworkError> {
-        let db = connect(url).await?;
-        let loaded = load_when_empty::<M>(url, &db, schema).await?;
+        let (db, loaded) = Self::prepare::<M>(url, schema).await?;
         M::up(&db, None).await.map_err(migration_failed)?;
         Ok(loaded)
     }
 
+    /// The connection and the load [`migrate`](Self::migrate) makes before
+    /// it runs `M::up`, for a caller that runs the migrations itself.
+    pub(crate) async fn prepare<M: MigratorTrait>(
+        url: &str,
+        schema: Option<&Path>,
+    ) -> Result<(DatabaseConnection, Option<PathBuf>), FrameworkError> {
+        require_named_file(schema)?;
+        let db = connect(url).await?;
+        let loaded = load_when_empty::<M>(url, &db, schema).await?;
+        Ok((db, loaded))
+    }
+
     /// `M::fresh` with the dump: every table dropped, the dump loaded as
-    /// [`migrate`](Self::migrate) loads it, then `M::up`.
+    /// [`migrate`](Self::migrate) loads it, then `M::up`. When there is a
+    /// dump to load, the views, routines, sequences and types the dump
+    /// would create again are dropped too.
     pub async fn fresh<M: MigratorTrait>(
         url: &str,
         schema: Option<&Path>,
     ) -> Result<Option<PathBuf>, FrameworkError> {
+        require_named_file(schema)?;
         let db = connect(url).await?;
+        let engine = Engine::of(&db).await?;
+        let dump = schema.map_or_else(|| engine.default_path(), Path::to_path_buf);
         Emptied::<M>::fresh(&db).await.map_err(migration_failed)?;
+        if dump.is_file() {
+            drop_the_rest(&db, engine).await?;
+        }
         let loaded = load_when_empty::<M>(url, &db, schema).await?;
         M::up(&db, None).await.map_err(migration_failed)?;
         Ok(loaded)
@@ -130,12 +150,14 @@ impl SchemaDump {
 
     /// Prunes the migrations in `migrations` (a project's `src/migrations`)
     /// whose names the ledger rows of the dump at `dump` record: deletes
-    /// each one's file, removes its `mod` line from `mod.rs`, and puts
-    /// [`PrunedMigration`] in place of its entry in the list, so the name
-    /// stays without the code. A migration the dump does not record stays.
-    /// Returns the pruned names; `mod.rs` and the files are changed only
-    /// when every pruned migration is declared the way
-    /// `suprnova make:migration` writes it.
+    /// each one's file (or directory module), removes its `mod` line from
+    /// `mod.rs`, and puts [`PrunedMigration`] in place of its entry in the
+    /// list, so the name stays without the code. A migration the dump does
+    /// not record stays, and so does a name an earlier prune kept. Returns
+    /// the pruned names. Nothing changes when a recorded name has neither a
+    /// file nor a `PrunedMigration` entry, as for a migration whose
+    /// `name()` differs from its file name, or when a pruned migration is
+    /// not declared and listed the way `suprnova make:migration` writes it.
     pub fn prune(migrations: &Path, dump: &Path) -> Result<Vec<String>, FrameworkError> {
         let sql = read(dump)?;
         let module_path = migrations.join("mod.rs");
@@ -143,12 +165,23 @@ impl SchemaDump {
         let mut lines: Vec<String> = module.lines().map(str::to_owned).collect();
         let mut pruned = Vec::new();
         for name in ledger_versions(&sql) {
-            let is_module = !name.is_empty()
-                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                && migrations.join(format!("{name}.rs")).is_file();
-            if !is_module {
+            let identifier =
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            let marker = format!("Box::new(suprnova::PrunedMigration::new(\"{name}\"))");
+            if identifier && lines.iter().any(|line| line.contains(&marker)) {
                 continue;
             }
+            let Some(code) = identifier
+                .then(|| migration_code(migrations, &name))
+                .flatten()
+            else {
+                return Err(FrameworkError::internal(format!(
+                    "the dump records `{name}`, but {} has no file of that name and mod.rs \
+                     does not list it as pruned; a migration whose name() differs from its \
+                     file name cannot be pruned for you, so nothing was pruned",
+                    migrations.display()
+                )));
+            };
             let declarations = [
                 format!("mod {name};"),
                 format!("pub mod {name};"),
@@ -166,27 +199,52 @@ impl SchemaDump {
                     migrations.display()
                 )));
             }
-            let marker = format!("Box::new(suprnova::PrunedMigration::new(\"{name}\"))");
             for line in &mut lines {
                 *line = line.replace(&entry, &marker);
             }
-            pruned.push(name);
+            pruned.push((name, code));
         }
         if pruned.is_empty() {
-            return Ok(pruned);
+            return Ok(Vec::new());
         }
         let mut text = lines.join("\n");
         if module.ends_with('\n') {
             text.push('\n');
         }
         write(&module_path, &text)?;
-        for name in &pruned {
-            let file = migrations.join(format!("{name}.rs"));
-            std::fs::remove_file(&file).map_err(|e| {
-                FrameworkError::internal(format!("could not delete {}: {e}", file.display()))
+        for (_, code) in &pruned {
+            let removed = if code.is_dir() {
+                std::fs::remove_dir_all(code)
+            } else {
+                std::fs::remove_file(code)
+            };
+            removed.map_err(|e| {
+                FrameworkError::internal(format!("could not delete {}: {e}", code.display()))
             })?;
         }
-        Ok(pruned)
+        Ok(pruned.into_iter().map(|(name, _)| name).collect())
+    }
+}
+
+/// The code of the migration called `name` in `migrations`: its file, or
+/// its directory module.
+fn migration_code(migrations: &Path, name: &str) -> Option<PathBuf> {
+    let file = migrations.join(format!("{name}.rs"));
+    if file.is_file() {
+        return Some(file);
+    }
+    let directory = migrations.join(name);
+    directory.join("mod.rs").is_file().then_some(directory)
+}
+
+/// A schema path the caller named must name a file.
+fn require_named_file(schema: Option<&Path>) -> Result<(), FrameworkError> {
+    match schema {
+        Some(path) if !path.is_file() => Err(FrameworkError::database(format!(
+            "the schema dump {} does not exist",
+            path.display()
+        ))),
+        _ => Ok(()),
     }
 }
 
@@ -354,6 +412,22 @@ async fn load_when_empty<M: MigratorTrait>(
     if !path.is_file() {
         return Ok(None);
     }
+    // A load runs into an empty database only: a dump loaded over tables
+    // would collide with them, or on MySQL replace them.
+    let ledger = table.to_string();
+    let occupied: Vec<String> = relations(db, engine)
+        .await?
+        .into_iter()
+        .filter(|name| *name != ledger)
+        .collect();
+    if !occupied.is_empty() {
+        return Err(FrameworkError::database(format!(
+            "the database holds {} while its migration ledger records no migration, so the \
+             schema dump {} was not loaded over them",
+            occupied.join(", "),
+            path.display()
+        )));
+    }
     if has_ledger {
         manager
             .drop_table(Table::drop().table(table).to_owned())
@@ -389,13 +463,160 @@ async fn load_into(
         }
         _ => {
             let options = target.mysql_option_file()?;
-            let mut args = vec![format!("--defaults-extra-file={}", options.path.display())];
-            args.extend(target.mysql_args());
+            let mut args = vec![format!("--defaults-file={}", options.path.display())];
+            args.extend(target.mysql_args(is_mariadb_client(&tool_path).await));
             args.push(format!("--database={}", target.database));
             run_tool(&tool_path, tool, &args, &[], Some(path)).await?;
         }
     }
     Ok(())
+}
+
+/// The tables and views of the database's current schema.
+async fn relations(db: &DatabaseConnection, engine: Engine) -> Result<Vec<String>, FrameworkError> {
+    let sql = match engine {
+        Engine::Sqlite => {
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'"
+        }
+        Engine::Postgres => {
+            "SELECT table_name::text AS name FROM information_schema.tables \
+             WHERE table_schema = current_schema()"
+        }
+        Engine::Mysql | Engine::Mariadb => {
+            "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE()"
+        }
+    };
+    Ok(rows_of(db, sql, &["name"])
+        .await?
+        .into_iter()
+        .map(|mut row| row.remove(0))
+        .collect())
+}
+
+/// After SeaORM's `fresh`, which drops tables and enum types, drops what
+/// else a dump creates in the current schema: views, triggers, routines,
+/// sequences and the other types, leaving the objects of extensions.
+async fn drop_the_rest(db: &DatabaseConnection, engine: Engine) -> Result<(), FrameworkError> {
+    let mut statements = Vec::new();
+    match engine {
+        Engine::Sqlite => {
+            for row in rows_of(
+                db,
+                "SELECT type AS kind, name FROM sqlite_master WHERE type IN ('view', 'trigger') \
+                 AND name NOT LIKE 'sqlite_%' ORDER BY type DESC",
+                &["kind", "name"],
+            )
+            .await?
+            {
+                let kind = if row[0] == "view" { "VIEW" } else { "TRIGGER" };
+                statements.push(format!(
+                    "DROP {kind} IF EXISTS {}",
+                    quote_identifier(engine, &row[1])
+                ));
+            }
+        }
+        Engine::Postgres => {
+            let queries = [
+                (
+                    "SELECT 'VIEW' AS kind, table_name::text AS name FROM information_schema.views \
+                     WHERE table_schema = current_schema()",
+                    true,
+                ),
+                (
+                    "SELECT 'MATERIALIZED VIEW' AS kind, matviewname::text AS name FROM pg_matviews \
+                     WHERE schemaname = current_schema()",
+                    true,
+                ),
+                (
+                    "SELECT CASE p.prokind WHEN 'a' THEN 'AGGREGATE' ELSE 'ROUTINE' END AS kind, \
+                     p.oid::regprocedure::text AS name FROM pg_proc p \
+                     JOIN pg_namespace n ON n.oid = p.pronamespace \
+                     WHERE n.nspname = current_schema() AND NOT EXISTS \
+                     (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')",
+                    false,
+                ),
+                (
+                    "SELECT 'SEQUENCE' AS kind, sequence_name::text AS name \
+                     FROM information_schema.sequences WHERE sequence_schema = current_schema()",
+                    true,
+                ),
+                (
+                    "SELECT CASE t.typtype WHEN 'd' THEN 'DOMAIN' ELSE 'TYPE' END AS kind, \
+                     t.typname::text AS name FROM pg_type t \
+                     JOIN pg_namespace n ON n.oid = t.typnamespace \
+                     WHERE n.nspname = current_schema() AND t.typtype IN ('c', 'd', 'e', 'r') \
+                     AND (t.typrelid = 0 OR (SELECT c.relkind FROM pg_class c WHERE c.oid = t.typrelid) = 'c') \
+                     AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = t.oid AND d.deptype = 'e')",
+                    true,
+                ),
+            ];
+            for (sql, quote) in queries {
+                for row in rows_of(db, sql, &["kind", "name"]).await? {
+                    // A routine's name is already its quoted signature.
+                    let name = if quote {
+                        quote_identifier(engine, &row[1])
+                    } else {
+                        row[1].clone()
+                    };
+                    statements.push(format!("DROP {} IF EXISTS {name} CASCADE", row[0]));
+                }
+            }
+        }
+        Engine::Mysql | Engine::Mariadb => {
+            for row in rows_of(
+                db,
+                "SELECT 'VIEW' AS kind, table_name AS name FROM information_schema.views \
+                 WHERE table_schema = DATABASE() \
+                 UNION ALL SELECT routine_type AS kind, routine_name AS name \
+                 FROM information_schema.routines WHERE routine_schema = DATABASE()",
+                &["kind", "name"],
+            )
+            .await?
+            {
+                statements.push(format!(
+                    "DROP {} IF EXISTS {}",
+                    row[0],
+                    quote_identifier(engine, &row[1])
+                ));
+            }
+        }
+    }
+    for statement in statements {
+        db.execute_unprepared(&statement)
+            .await
+            .map_err(database_error)?;
+    }
+    Ok(())
+}
+
+/// The text of `columns` in each row `sql` returns.
+async fn rows_of(
+    db: &DatabaseConnection,
+    sql: &str,
+    columns: &[&str],
+) -> Result<Vec<Vec<String>>, FrameworkError> {
+    db.query_all_raw(Statement::from_string(db.get_database_backend(), sql))
+        .await
+        .map_err(database_error)?
+        .iter()
+        .map(|row| {
+            columns
+                .iter()
+                .map(|column| row.try_get::<String>("", column).map_err(database_error))
+                .collect()
+        })
+        .collect()
+}
+
+/// Whether the MySQL client at `tool` is MariaDB's, whose TLS options
+/// differ from Oracle's.
+async fn is_mariadb_client(tool: &Path) -> bool {
+    tokio::process::Command::new(tool)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("MariaDB"))
 }
 
 /// Runs a SQLite dump through the connection, in one transaction.
@@ -461,11 +682,14 @@ async fn mysql_schema(url: &str, engine: Engine) -> Result<String, FrameworkErro
     let tool = find_tool(name)?;
     let target = Target::parse(url)?;
     let options = target.mysql_option_file()?;
-    let mut args = vec![format!("--defaults-extra-file={}", options.path.display())];
-    args.extend(target.mysql_args());
+    let mut args = vec![format!("--defaults-file={}", options.path.display())];
+    args.extend(target.mysql_args(is_mariadb_client(&tool).await));
     args.extend(
         [
             "--no-data",
+            // Without it each CREATE TABLE comes after a DROP TABLE, and a
+            // load would empty a table of the same name.
+            "--skip-add-drop-table",
             "--routines",
             "--no-tablespaces",
             "--skip-add-locks",
@@ -573,7 +797,7 @@ async fn ledger_inserts<M: MigratorTrait>(
 }
 
 /// The versions the ledger rows of a dump record, in order.
-fn ledger_versions(sql: &str) -> Vec<String> {
+pub(crate) fn ledger_versions(sql: &str) -> Vec<String> {
     sql.lines()
         .skip_while(|line| line.trim() != LEDGER_MARKER)
         .filter(|line| line.trim_start().starts_with("INSERT"))
@@ -614,15 +838,29 @@ fn quote_string(engine: Engine, value: &str) -> String {
     }
 }
 
-/// What a client tool needs from a database URL.
+/// What a client tool needs from a database URL, the query parameters the
+/// framework's own connection honors included, so the tools reach the same
+/// server the same way: TLS settings, a socket, a password given as a
+/// parameter.
 struct Target {
     host: String,
     port: Option<u16>,
     user: String,
     password: Option<String>,
     database: String,
-    sslmode: Option<String>,
+    params: Vec<(String, String)>,
 }
+
+/// Postgres URL parameters and the libpq variables that carry them.
+const POSTGRES_PARAMETERS: [(&str, &str); 7] = [
+    ("sslmode", "PGSSLMODE"),
+    ("sslrootcert", "PGSSLROOTCERT"),
+    ("sslcert", "PGSSLCERT"),
+    ("sslkey", "PGSSLKEY"),
+    ("hostaddr", "PGHOSTADDR"),
+    ("application_name", "PGAPPNAME"),
+    ("options", "PGOPTIONS"),
+];
 
 impl Target {
     fn parse(url: &str) -> Result<Self, FrameworkError> {
@@ -645,57 +883,107 @@ impl Target {
             user: decode(parsed.username()),
             password: parsed.password().map(decode),
             database: decode(parsed.path().trim_start_matches('/')),
-            sslmode: parsed
+            params: parsed
                 .query_pairs()
-                .find(|(key, _)| key == "sslmode")
-                .map(|(_, value)| value.into_owned()),
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect(),
         })
+    }
+
+    fn param(&self, key: &str) -> Option<&str> {
+        self.params
+            .iter()
+            .rev()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
     }
 
     fn postgres_args(&self) -> Vec<String> {
         let mut args = Vec::new();
-        if !self.host.is_empty() {
-            args.push(format!("--host={}", self.host));
+        let host = self.param("host").unwrap_or(&self.host);
+        if !host.is_empty() {
+            args.push(format!("--host={host}"));
         }
-        if let Some(port) = self.port {
-            args.push(format!("--port={port}"));
+        match self.param("port") {
+            Some(port) => args.push(format!("--port={port}")),
+            None => {
+                if let Some(port) = self.port {
+                    args.push(format!("--port={port}"));
+                }
+            }
         }
-        if !self.user.is_empty() {
-            args.push(format!("--username={}", self.user));
+        let user = self.param("user").unwrap_or(&self.user);
+        if !user.is_empty() {
+            args.push(format!("--username={user}"));
         }
         args.push("--no-password".to_owned());
-        args.push(format!("--dbname={}", self.database));
+        args.push(format!(
+            "--dbname={}",
+            self.param("dbname").unwrap_or(&self.database)
+        ));
         args
     }
 
     fn postgres_env(&self) -> Vec<(&'static str, String)> {
         let mut env = Vec::new();
-        if let Some(password) = &self.password {
-            env.push(("PGPASSWORD", password.clone()));
+        if let Some(password) = self.password.as_deref().or(self.param("password")) {
+            env.push(("PGPASSWORD", password.to_owned()));
         }
-        if let Some(sslmode) = &self.sslmode {
-            env.push(("PGSSLMODE", sslmode.clone()));
+        for (key, variable) in POSTGRES_PARAMETERS {
+            if let Some(value) = self.param(key) {
+                env.push((variable, value.to_owned()));
+            }
         }
         env
     }
 
-    fn mysql_args(&self) -> Vec<String> {
+    /// The connection arguments for a MySQL client: the socket, or the host
+    /// and port; the user; and the URL's TLS settings in the client's own
+    /// options, MariaDB's client having no `--ssl-mode`.
+    fn mysql_args(&self, mariadb_client: bool) -> Vec<String> {
         let mut args = Vec::new();
-        if !self.host.is_empty() {
-            args.push(format!("--host={}", self.host));
-        }
-        if let Some(port) = self.port {
-            args.push(format!("--port={port}"));
+        if let Some(socket) = self.param("socket") {
+            args.push(format!("--socket={socket}"));
+        } else {
+            if !self.host.is_empty() {
+                args.push(format!("--host={}", self.host));
+            }
+            if let Some(port) = self.port {
+                args.push(format!("--port={port}"));
+            }
         }
         if !self.user.is_empty() {
             args.push(format!("--user={}", self.user));
+        }
+        for key in ["ssl-ca", "ssl-cert", "ssl-key"] {
+            if let Some(value) = self.param(key) {
+                args.push(format!("--{key}={value}"));
+            }
+        }
+        if let Some(mode) = self.param("ssl-mode") {
+            let mode = mode.to_ascii_uppercase().replace('-', "_");
+            if !mariadb_client {
+                args.push(format!("--ssl-mode={mode}"));
+            } else {
+                match mode.as_str() {
+                    "DISABLED" => args.push("--skip-ssl".to_owned()),
+                    "REQUIRED" => {
+                        args.extend(["--ssl", "--skip-ssl-verify-server-cert"].map(str::to_owned))
+                    }
+                    "VERIFY_CA" | "VERIFY_IDENTITY" => {
+                        args.extend(["--ssl", "--ssl-verify-server-cert"].map(str::to_owned))
+                    }
+                    _ => {}
+                }
+            }
         }
         args
     }
 
     /// An option file holding the password, readable only by this user,
-    /// deleted when the returned value drops. MySQL's and MariaDB's tools
-    /// read it before any other option.
+    /// deleted when the returned value drops. The tools are given it with
+    /// `--defaults-file`, so it is the only option file they read and a
+    /// password in `~/.my.cnf` cannot take the URL's place.
     fn mysql_option_file(&self) -> Result<OptionFile, FrameworkError> {
         let dir = tempfile::tempdir().map_err(|e| {
             FrameworkError::internal(format!(
@@ -865,6 +1153,43 @@ mod tests {
                    INSERT INTO \"seaql_migrations\" (\"version\", \"applied_at\") VALUES ('m1_a', 1);\n\
                    INSERT INTO `seaql_migrations` (`version`, `applied_at`) VALUES ('m2_it''s\\\\b', 2);\n";
         assert_eq!(ledger_versions(sql), ["m1_a", "m2_it's\\b"]);
+    }
+
+    #[test]
+    fn url_parameters_reach_the_tools() {
+        let pg = Target::parse(
+            "postgres://app@localhost/shop?host=/run/postgresql&password=s3cret&sslrootcert=/ca.pem&sslmode=verify-full",
+        )
+        .expect("a URL");
+        assert_eq!(
+            pg.postgres_args().join(" "),
+            "--host=/run/postgresql --username=app --no-password --dbname=shop"
+        );
+        assert_eq!(
+            pg.postgres_env(),
+            [
+                ("PGPASSWORD", "s3cret".to_owned()),
+                ("PGSSLMODE", "verify-full".to_owned()),
+                ("PGSSLROOTCERT", "/ca.pem".to_owned()),
+            ]
+        );
+        let my =
+            Target::parse("mysql://app:pw@db:3306/shop?ssl-mode=verify_identity&ssl-ca=/ca.pem")
+                .expect("a URL");
+        assert_eq!(
+            my.mysql_args(false).join(" "),
+            "--host=db --port=3306 --user=app --ssl-ca=/ca.pem --ssl-mode=VERIFY_IDENTITY"
+        );
+        assert_eq!(
+            my.mysql_args(true).join(" "),
+            "--host=db --port=3306 --user=app --ssl-ca=/ca.pem --ssl --ssl-verify-server-cert"
+        );
+        let socket =
+            Target::parse("mysql://app@localhost/shop?socket=/run/mysqld.sock").expect("a URL");
+        assert_eq!(
+            socket.mysql_args(true).join(" "),
+            "--socket=/run/mysqld.sock --user=app"
+        );
     }
 
     #[test]

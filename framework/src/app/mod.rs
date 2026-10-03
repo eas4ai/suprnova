@@ -1234,10 +1234,21 @@ where
         let best_effort =
             parse_auto_migrate_best_effort(env::var(AUTO_MIGRATE_BEST_EFFORT_ENV).ok().as_deref());
         let url = Self::database_url();
-        let outcome = crate::SchemaDump::migrate::<Migrator>(&url, None)
-            .await
-            .map(|_| ())
-            .map_err(|e| sea_orm::DbErr::Custom(e.to_string()));
+        // Connecting and loading a schema dump fail closed whatever the
+        // best-effort setting says: it covers a failing migration, not a
+        // database that cannot be reached or a dump that did not load.
+        let db = match crate::SchemaDump::prepare::<Migrator>(&url, None).await {
+            Ok((db, _)) => db,
+            Err(e) => {
+                eprintln!("suprnova: migration failed: {e}");
+                eprintln!(
+                    "suprnova: refusing to start the server: the database could not be reached \
+                     or its schema dump did not load."
+                );
+                std::process::exit(1);
+            }
+        };
+        let outcome = Migrator::up(&db, None).await;
         if let Err(e) = resolve_auto_migration(outcome, best_effort) {
             eprintln!("suprnova: migration failed: {e}");
             eprintln!(

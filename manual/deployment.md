@@ -151,9 +151,14 @@ This writes a `Dockerfile` with three stages:
    per your scaffold choice).
 2. **Backend build** - `rust:1.94.0-slim-bookworm`, compiles your crate in
    release mode with dependency caching.
-3. **Runtime** - `debian:bookworm-slim`, copies the compiled binary
-   and Vite output, runs as a non-root `appuser`, exposes port 8765,
-   and runs `CMD ["./app"]` (the auto-migrating server).
+3. **Runtime** - `debian:bookworm-slim`, copies the compiled binary,
+   the Vite output, and your schema dumps (`database/schema`), installs
+   the database client the `DB_CLIENT` build argument names
+   (`postgresql-client` unless you change it), runs as a non-root
+   `appuser`, exposes port 8765, and runs `CMD ["./app"]` (the
+   auto-migrating server). The client lets the server load a schema dump
+   into a new, empty database; see
+   [Squashing migrations](migrations.md#squashing-migrations).
 
 Current `main` also upgrades the database stack to SeaORM 2.0, SeaQuery 1.0,
 and SQLx 0.9. Direct SeaORM code must import `ExprTrait` for expression methods
