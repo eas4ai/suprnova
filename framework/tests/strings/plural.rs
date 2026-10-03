@@ -26,6 +26,19 @@ fn english_words_inflect_and_keep_their_case() {
     assert_eq!(Str::singular("cars"), "car");
 }
 
+/// doctrine/inflector 2.1.0, the release Laravel 13.34.0 installs.
+#[test]
+fn english_follows_the_inflector_laravel_installs() {
+    assert_eq!(Str::plural("die", 2), "dice");
+    assert_eq!(Str::plural("stadium", 2), "stadiums");
+    assert_eq!(Str::plural("alga", 2), "algae");
+    assert_eq!(Str::plural("nursery", 2), "nurseries");
+    assert_eq!(Str::plural("medium", 2), "media");
+    assert_eq!(Str::singular("dice"), "die");
+    assert_eq!(Str::singular("algae"), "alga");
+    assert_eq!(Str::singular("stadiums"), "stadium");
+}
+
 #[cfg(feature = "localization")]
 mod languages {
     use suprnova::{Lang, Locale, Str, scope_locale};
@@ -65,5 +78,15 @@ mod languages {
         })
         .await;
         assert_eq!(singular, "cheval");
+    }
+
+    #[tokio::test]
+    async fn french_follows_the_inflector_laravel_installs() {
+        let singulars = scope_locale(Locale::parse("fr").unwrap(), async {
+            ["locaux", "bois", "mas"].map(Str::singular)
+        })
+        .await;
+        assert_eq!(singulars, ["local", "bois", "mas"]);
+        assert_eq!(in_locale("fr", "bois").await, "bois");
     }
 }
