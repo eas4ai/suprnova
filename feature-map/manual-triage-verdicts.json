@@ -17,6 +17,10 @@
    "class": "verified",
    "evidence": "A real Data derive struct attribute: suprnova-macros/src/data.rs:209 parses `after_validation_async = \"path\"` and data.rs:154 documents it."
   },
+  "#[global_allocator]": {
+   "class": "noise",
+   "evidence": "Rust's own `#[global_allocator]` attribute, named in deployment.md as the reason an application with its own allocator cannot turn on `heap-profiling`, which installs one (framework/src/profiling.rs); not a Suprnova item."
+  },
   "#[global_scope]": {
    "class": "noise",
    "evidence": "The manual states these do NOT exist, which is correct."
