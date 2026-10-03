@@ -120,12 +120,15 @@ impl Canvas {
         }
     }
 
-    fn frame(&self) -> VideoFrame {
+    /// The canvas as a one-plane RGBA frame. The pixels move into the
+    /// frame: a step that turns a canvas into a frame no longer needs the
+    /// canvas, and copying them doubled every step's peak.
+    fn into_frame(self) -> VideoFrame {
         VideoFrame {
             pts: Some(0),
             planes: vec![VideoPlane {
                 stride: self.width as usize * 4,
-                data: self.pixels.clone(),
+                data: self.pixels,
             }],
         }
     }
@@ -151,10 +154,11 @@ impl Canvas {
     /// RGBA, `stride / 4` and `len / stride` recover it exactly - which is
     /// what lets rotate grow the canvas without the caller predicting by how
     /// much.
-    fn from_frame(frame: &VideoFrame) -> Result<Self, FrameworkError> {
+    fn from_frame(frame: VideoFrame) -> Result<Self, FrameworkError> {
         let plane = frame
             .planes
-            .first()
+            .into_iter()
+            .next()
             .ok_or_else(|| FrameworkError::internal("image filter returned no plane"))?;
         if plane.stride == 0 || plane.stride % 4 != 0 {
             return Err(FrameworkError::internal(format!(
@@ -172,7 +176,7 @@ impl Canvas {
         Ok(Self {
             width,
             height,
-            pixels: plane.data.clone(),
+            pixels: plane.data,
         })
     }
 }
@@ -293,9 +297,11 @@ impl OxideAvImageDriver {
         Ok(canvas)
     }
 
+    /// Encode `canvas`, which the encoder consumes: its pixels move into
+    /// the frame the encoder takes.
     fn encode(
         &self,
-        canvas: &Canvas,
+        canvas: Canvas,
         format: OutputFormat,
         quality: u8,
     ) -> Result<Vec<u8>, FrameworkError> {
@@ -308,28 +314,29 @@ impl OxideAvImageDriver {
             return encode_lossy_webp(canvas, quality);
         }
 
+        let (width, height) = (canvas.width, canvas.height);
         let (codec, frame, pixel_format) = match format {
             // The MJPEG encoder rejects RGBA outright, so the conversion is
             // mandatory rather than an optimisation.
             OutputFormat::Jpeg => (
                 "mjpeg",
-                convert_frame(&canvas.frame(), canvas, PixelFormat::Rgb24)?,
+                convert_frame(&canvas.into_frame(), width, height, PixelFormat::Rgb24)?,
                 PixelFormat::Rgb24,
             ),
-            OutputFormat::Png => ("png", canvas.frame(), PixelFormat::Rgba),
+            OutputFormat::Png => ("png", canvas.into_frame(), PixelFormat::Rgba),
             // The VP8L (lossless) encoder is the only WebP encoder in the
             // registry; codec id "webp" has a decoder but no encoder. `WebP`
             // reaches this arm only when `webp_is_lossy` says no.
             OutputFormat::WebP | OutputFormat::WebPLossless => {
-                ("webp_vp8l", canvas.frame(), PixelFormat::Rgba)
+                ("webp_vp8l", canvas.into_frame(), PixelFormat::Rgba)
             }
             OutputFormat::Gif => ("gif", quantise_for_gif(canvas)?, PixelFormat::Rgba),
-            OutputFormat::Bmp => ("bmp", canvas.frame(), PixelFormat::Rgba),
+            OutputFormat::Bmp => ("bmp", canvas.into_frame(), PixelFormat::Rgba),
         };
 
         let mut params = CodecParameters::video(CodecId::new(codec));
-        params.width = Some(canvas.width);
-        params.height = Some(canvas.height);
+        params.width = Some(width);
+        params.height = Some(height);
         params.pixel_format = Some(pixel_format);
         // Only JPEG has a quality knob that does anything here. Passing the
         // option to PNG is not merely useless, it is fatal: that encoder
@@ -367,7 +374,7 @@ impl ImageDriver for OxideAvImageDriver {
             // Only reachable if a format was recognised on the way in and has
             // no encoder counterpart, which cannot happen for these five.
             .unwrap_or(OutputFormat::Png);
-        self.encode(&canvas, target, pipeline.quality)
+        self.encode(canvas, target, pipeline.quality)
     }
 
     fn dimensions(&self, contents: &[u8]) -> Result<(u32, u32), FrameworkError> {
@@ -646,9 +653,9 @@ fn sharpen_strength(amount: u32) -> Option<f32> {
 fn filter(canvas: Canvas, image_filter: &dyn ImageFilter) -> Result<Canvas, FrameworkError> {
     let params = canvas.stream_params();
     let out = image_filter
-        .apply(&canvas.frame(), params)
+        .apply(&canvas.into_frame(), params)
         .map_err(|e| FrameworkError::param(format!("image transformation failed: {e}")))?;
-    Canvas::from_frame(&out)
+    Canvas::from_frame(out)
 }
 
 /// Resize, re-applying the decode caps to the *target*.
@@ -768,10 +775,11 @@ fn cover(
 
 fn convert_frame(
     frame: &VideoFrame,
-    canvas: &Canvas,
+    width: u32,
+    height: u32,
     target: PixelFormat,
 ) -> Result<VideoFrame, FrameworkError> {
-    let info = FrameInfo::new(PixelFormat::Rgba, canvas.width, canvas.height);
+    let info = FrameInfo::new(PixelFormat::Rgba, width, height);
     pix_convert(frame, info, target, &ConvertOptions::default())
         .map_err(|e| FrameworkError::internal(format!("image pixel conversion failed: {e}")))
 }
@@ -801,7 +809,7 @@ fn webp_is_lossy(width: u32, height: u32, opaque: bool) -> bool {
 /// it, so the encoder is built directly instead of looked up in the
 /// registry. It is built before the pixels are converted, so a parameter
 /// the factory refuses costs no conversion.
-fn encode_lossy_webp(canvas: &Canvas, quality: u8) -> Result<Vec<u8>, FrameworkError> {
+fn encode_lossy_webp(canvas: Canvas, quality: u8) -> Result<Vec<u8>, FrameworkError> {
     let codec = oxideav_webp::CODEC_ID_VP8;
     let mut params = CodecParameters::video(CodecId::new(codec));
     params.width = Some(canvas.width);
@@ -825,7 +833,7 @@ fn encode_lossy_webp(canvas: &Canvas, quality: u8) -> Result<Vec<u8>, FrameworkE
 /// a partial macroblock. The encoder is still told the true size, so it
 /// reads no padded luma, and each edge chroma sample is the average of the
 /// real pixels it covers.
-fn yuv420_frame(canvas: &Canvas) -> Result<VideoFrame, FrameworkError> {
+fn yuv420_frame(canvas: Canvas) -> Result<VideoFrame, FrameworkError> {
     let even = |side: u32| {
         side.checked_next_multiple_of(2).ok_or_else(|| {
             FrameworkError::internal("image dimensions overflow the addressable pixel buffer")
@@ -833,9 +841,9 @@ fn yuv420_frame(canvas: &Canvas) -> Result<VideoFrame, FrameworkError> {
     };
     let (width, height) = (even(canvas.width)?, even(canvas.height)?);
     let frame = if width == canvas.width && height == canvas.height {
-        canvas.frame()
+        canvas.into_frame()
     } else {
-        edge_extended_frame(canvas, width, height)?
+        edge_extended_frame(&canvas, width, height)?
     };
     let info = FrameInfo::new(PixelFormat::Rgba, width, height);
     pix_convert(
@@ -887,9 +895,10 @@ fn edge_extended_frame(
 /// generated explicitly, the frame is mapped through it with Floyd-Steinberg
 /// dithering, and mapped straight back to RGBA - which now holds at most 256
 /// distinct colours and encodes cleanly.
-fn quantise_for_gif(canvas: &Canvas) -> Result<VideoFrame, FrameworkError> {
-    let frame = canvas.frame();
-    let info = FrameInfo::new(PixelFormat::Rgba, canvas.width, canvas.height);
+fn quantise_for_gif(canvas: Canvas) -> Result<VideoFrame, FrameworkError> {
+    let (width, height) = (canvas.width, canvas.height);
+    let frame = canvas.into_frame();
+    let info = FrameInfo::new(PixelFormat::Rgba, width, height);
     let palette = generate_palette(&[(&frame, info)], &PaletteGenOptions::default())
         .map_err(|e| FrameworkError::internal(format!("gif palette generation failed: {e}")))?;
 
@@ -901,7 +910,7 @@ fn quantise_for_gif(canvas: &Canvas) -> Result<VideoFrame, FrameworkError> {
     let indexed = pix_convert(&frame, info, PixelFormat::Pal8, &to_indexed)
         .map_err(|e| FrameworkError::internal(format!("gif quantisation failed: {e}")))?;
 
-    let indexed_info = FrameInfo::new(PixelFormat::Pal8, canvas.width, canvas.height);
+    let indexed_info = FrameInfo::new(PixelFormat::Pal8, width, height);
     let from_indexed = ConvertOptions {
         palette: Some(palette),
         ..Default::default()
@@ -909,8 +918,8 @@ fn quantise_for_gif(canvas: &Canvas) -> Result<VideoFrame, FrameworkError> {
     let reduced = pix_convert(&indexed, indexed_info, PixelFormat::Rgba, &from_indexed)
         .map_err(|e| FrameworkError::internal(format!("gif quantisation failed: {e}")))?;
 
-    let tight = canvas.width as usize * 4;
-    let pixels = pack_tight(&reduced, tight, canvas.height as usize)?;
+    let tight = width as usize * 4;
+    let pixels = pack_tight(&reduced, tight, height as usize)?;
     Ok(VideoFrame {
         pts: Some(0),
         planes: vec![VideoPlane {
@@ -1259,7 +1268,7 @@ mod tests {
         };
         let driver = OxideAvImageDriver::new();
         let out = driver
-            .encode(&source, OutputFormat::Gif, 70)
+            .encode(source, OutputFormat::Gif, 70)
             .expect("quantised gif");
         assert!(out.starts_with(b"GIF"), "expected a GIF file");
     }
@@ -1295,7 +1304,7 @@ mod tests {
         // what lets a 5x3 image reach the lossy encoder at all.
         let driver = OxideAvImageDriver::new();
         let out = driver
-            .encode(&canvas(5, 3, [200, 120, 40, 255]), OutputFormat::WebP, 70)
+            .encode(canvas(5, 3, [200, 120, 40, 255]), OutputFormat::WebP, 70)
             .expect("lossy webp");
         assert!(out.starts_with(b"RIFF"), "expected a WebP file");
         assert_eq!(&out[12..16], b"VP8 ", "an opaque canvas must encode lossy");
@@ -1330,7 +1339,7 @@ mod tests {
         let mut source = canvas(4, 2, [10, 20, 30, 255]);
         source.pixels[3] = 0;
         let out = driver
-            .encode(&source, OutputFormat::WebP, 70)
+            .encode(source, OutputFormat::WebP, 70)
             .expect("lossless webp");
         // VP8L with alpha is written in the extended layout: a VP8X header
         // chunk first, then the VP8L bitstream.
@@ -1340,7 +1349,7 @@ mod tests {
 
         let lossless = driver
             .encode(
-                &canvas(4, 2, [10, 20, 30, 255]),
+                canvas(4, 2, [10, 20, 30, 255]),
                 OutputFormat::WebPLossless,
                 70,
             )

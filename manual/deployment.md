@@ -296,6 +296,10 @@ indefinitely:
 | `schedule:work` | `.run_in_background()` tasks | 30s |
 | `workflow:work` | in-flight workflow steps | until they return |
 
+Each of them then waits up to ten more seconds for the queued event
+listeners still running, so a listener a job or a request started is
+not cut off. See [Events](events.md#draining-on-shutdown).
+
 **Size your platform's termination grace above these.** Docker defaults
 to 10 seconds, Kubernetes to 30. If the platform's window is shorter than
 the work takes, it sends SIGKILL and you are back to losing in-flight
@@ -515,6 +519,56 @@ Rules of thumb:
 
 Blank, unparseable, or zero values are silently treated as unset so a
 typo does not prevent the server from starting.
+
+## Heap profiling
+
+To see where a deployment's memory goes, build it with the framework's
+`heap-profiling` feature. The framework then installs [dhat]'s
+allocator for the whole process, and `#[suprnova::main]` starts its
+profiler before anything else runs. A new application has the feature
+already, passed through to the framework:
+
+```toml
+[features]
+heap-profiling = ["suprnova/heap-profiling"]
+```
+
+Build it with the `profiling` profile, the release profile with debug
+symbols, so the profile's stacks name your functions:
+
+```bash
+cargo build --profile profiling --features heap-profiling
+SUPRNOVA_HEAP_PROFILE=/tmp/heap.json ./target/profiling/app serve
+```
+
+When the process ends normally - a command that finishes, or a server
+or worker you stop with SIGTERM or Ctrl-C - it writes the profile and
+prints the totals:
+
+```text
+dhat: Total:     533,023,630 bytes in 1,144,769 blocks
+dhat: At t-gmax: 949,716 bytes in 4,412 blocks
+dhat: At t-end:  492,592 bytes in 2,417 blocks
+```
+
+The total is everything the process allocated, `t-gmax` the heap at
+its peak, and `t-end` what was still allocated when it ended. Open the
+file in DHAT's viewer (`dh_view.html`) to see which call stacks
+allocated what. Without `SUPRNOVA_HEAP_PROFILE` the file is
+`dhat-heap.json` in the working directory.
+
+A profile is written only when the process ends normally: a process
+that is killed, or that calls `std::process::exit`, writes none. The
+profiler records a backtrace for every allocation, so the process runs
+slower while it measures; build a profiling binary for the
+investigation, not for production. An application with its own
+`#[global_allocator]` cannot turn the feature on, since a process has
+only one allocator.
+
+The `profiling` profile on its own also suits a sampling profiler such
+as `samply` or `perf`.
+
+[dhat]: https://docs.rs/dhat
 
 ## Per-platform walkthroughs
 

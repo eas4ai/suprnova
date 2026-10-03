@@ -142,9 +142,19 @@ impl<E: Broadcastable> Listener<E> for BroadcastListener<E> {
         // log any subsequent ones at warn. The first error is then returned
         // so EventFacade::dispatch still surfaces fanout loss to the caller.
         let mut first_error: Option<FrameworkError> = None;
-        for channel in channels {
-            let mut envelope =
-                BroadcastEnvelope::new(channel.clone(), event_name.clone(), data.clone());
+        // Each channel but the last gets a copy of the payload, and the last
+        // takes the payload itself: a broadcast on one channel copies
+        // nothing, where it used to copy the payload once per channel.
+        let last = channels.len() - 1;
+        let mut data = Some(data);
+        for (index, channel) in channels.into_iter().enumerate() {
+            let payload = if index == last {
+                data.take()
+            } else {
+                data.clone()
+            }
+            .unwrap_or(serde_json::Value::Null);
+            let mut envelope = BroadcastEnvelope::new(channel.clone(), event_name.clone(), payload);
             envelope.except = except.clone();
             if let Err(e) = self.hub.publish(envelope).await {
                 if first_error.is_none() {

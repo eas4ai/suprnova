@@ -88,7 +88,7 @@ impl ExceptRule {
     /// `method = None` matches any method; otherwise the verb is
     /// stored upper-cased for case-insensitive comparison.
     fn compile(pattern: String, method: Option<String>) -> Self {
-        let normalized = normalize_pattern(&pattern);
+        let normalized = normalize_pattern(&pattern).to_owned();
         let regex = if normalized.contains('*') {
             // Translate Laravel-style `*` globs into a regex. We
             // `regex::escape` the literal pieces first, then put back
@@ -125,7 +125,7 @@ impl ExceptRule {
         }
         let candidate = normalize_pattern(path);
         match &self.regex {
-            Some(re) => re.is_match(&candidate),
+            Some(re) => re.is_match(candidate),
             None => self.pattern == candidate,
         }
     }
@@ -135,15 +135,19 @@ impl ExceptRule {
 /// leading slash so `/webhooks/*` and `webhooks/*` compare the same.
 /// The root path `/` is preserved literally so users can still
 /// blanket-exempt it.
-fn normalize_pattern(pattern: &str) -> String {
+///
+/// Returns a slice of its input: every state-changing request runs each
+/// path through this once per rule, and a copy of the path per rule per
+/// request bought nothing.
+fn normalize_pattern(pattern: &str) -> &str {
     if pattern == "/" {
-        return "/".to_string();
+        return pattern;
     }
     // Strip only the LEADING slash. Stripping the trailing slash too would
     // make an exact exempt rule (`/api/webhook`) also exempt its trailing-
     // slash sibling (`/api/webhook/`) - an over-broad exemption an attacker
     // could ride to bypass CSRF on the unintended path.
-    pattern.trim_start_matches('/').to_string()
+    pattern.trim_start_matches('/')
 }
 
 /// CSRF protection middleware

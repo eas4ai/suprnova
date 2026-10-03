@@ -870,5 +870,5 @@ fn random_hex<const N: usize>() -> String {
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::storage::hex_lower(bytes)
 }

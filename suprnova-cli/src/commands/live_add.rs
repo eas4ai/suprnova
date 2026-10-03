@@ -340,14 +340,11 @@ fn install(
 ) -> Result<Vec<(String, Outcome)>, String> {
     let target = project.join("templates").join(&source.manifest.root);
     secure_fs::ensure_contained(project, &target)?;
-    let mut planned: Vec<(String, String)> = Vec::with_capacity(source.files.len() + 1);
-    planned.push(("manifest.json".to_owned(), source.manifest_source.clone()));
-    planned.extend(source.files.iter().cloned());
     let record_path = target.join(INSTALL_RECORD);
     secure_fs::ensure_contained(project, &record_path)?;
     let mut record = read_record(&record_path)?;
-    let mut outcomes = Vec::with_capacity(planned.len());
-    for (file, content) in &planned {
+    let mut outcomes = Vec::with_capacity(source.files.len() + 1);
+    for (file, content) in plan(source) {
         let path = target.join(file);
         secure_fs::ensure_contained(project, &path)?;
         let outcome = match fs::read(&path) {
@@ -366,7 +363,7 @@ fn install(
             outcome,
             Outcome::Written | Outcome::Replaced | Outcome::Unchanged
         ) {
-            record.insert(file.clone(), digest(content.as_bytes()));
+            record.insert(file.to_owned(), digest(content.as_bytes()));
         }
         if !dry_run && matches!(outcome, Outcome::Written | Outcome::Replaced) {
             fs::create_dir_all(&target)
@@ -387,6 +384,17 @@ fn install(
         write_record(&record_path, &record)?;
     }
     Ok(outcomes)
+}
+
+/// The files an install writes, the manifest first, borrowed from the
+/// source: copying every file into a plan doubled what `live:add` held.
+fn plan(source: &Source) -> impl Iterator<Item = (&str, &str)> {
+    std::iter::once(("manifest.json", source.manifest_source.as_str())).chain(
+        source
+            .files
+            .iter()
+            .map(|(file, content)| (file.as_str(), content.as_str())),
+    )
 }
 
 fn write_record(path: &Path, record: &BTreeMap<String, String>) -> Result<(), String> {

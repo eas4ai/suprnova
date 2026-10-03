@@ -459,17 +459,23 @@ impl Context {
                         return;
                     }
                 };
-                store
-                    .data
-                    .entry(key)
-                    .and_modify(|existing| {
+                // The value, and a scalar promoted to an array, are moved
+                // in: cloning them made every push copy what it added and
+                // every promotion copy what was already stored.
+                match store.data.entry(key) {
+                    dashmap::mapref::entry::Entry::Occupied(mut slot) => {
+                        let existing = slot.get_mut();
                         if let Value::Array(arr) = existing {
-                            arr.push(new_val.clone());
+                            arr.push(new_val);
                         } else {
-                            *existing = Value::Array(vec![existing.clone(), new_val.clone()]);
+                            let scalar = std::mem::take(existing);
+                            *existing = Value::Array(vec![scalar, new_val]);
                         }
-                    })
-                    .or_insert_with(|| Value::Array(vec![new_val]));
+                    }
+                    dashmap::mapref::entry::Entry::Vacant(slot) => {
+                        slot.insert(Value::Array(vec![new_val]));
+                    }
+                }
             })
             .is_err()
         {

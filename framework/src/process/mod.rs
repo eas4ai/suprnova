@@ -387,10 +387,48 @@ impl PendingProcess {
 pub struct ProcessResult {
     pub(crate) command: String,
     pub(crate) exit_code: Option<i32>,
-    pub(crate) output: String,
-    pub(crate) error_output: String,
-    pub(crate) output_bytes: Vec<u8>,
-    pub(crate) error_output_bytes: Vec<u8>,
+    output: Captured,
+    error_output: Captured,
+}
+
+/// One stream a process wrote, held once.
+///
+/// Output that is valid UTF-8, nearly all of it, is its own text, so the
+/// bytes and the text are one buffer. Only output that is not keeps the
+/// bytes beside the text with the invalid sequences replaced. Holding both
+/// for every result doubled what a large capture kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Captured {
+    /// Valid UTF-8: the bytes are the text.
+    Text(String),
+    /// Not UTF-8: the bytes as written, and the text with replacements.
+    Lossy { bytes: Vec<u8>, text: String },
+}
+
+impl Captured {
+    fn new(bytes: Vec<u8>) -> Self {
+        match String::from_utf8(bytes) {
+            Ok(text) => Self::Text(text),
+            Err(invalid) => {
+                let bytes = invalid.into_bytes();
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                Self::Lossy { bytes, text }
+            }
+        }
+    }
+
+    fn text(&self) -> &str {
+        match self {
+            Self::Text(text) | Self::Lossy { text, .. } => text,
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Text(text) => text.as_bytes(),
+            Self::Lossy { bytes, .. } => bytes,
+        }
+    }
 }
 
 impl ProcessResult {
@@ -403,10 +441,8 @@ impl ProcessResult {
         Self {
             command,
             exit_code,
-            output: String::from_utf8_lossy(&output).into_owned(),
-            error_output: String::from_utf8_lossy(&error_output).into_owned(),
-            output_bytes: output,
-            error_output_bytes: error_output,
+            output: Captured::new(output),
+            error_output: Captured::new(error_output),
         }
     }
 
@@ -434,33 +470,33 @@ impl ProcessResult {
     /// are not UTF-8 are replaced; [`output_bytes`](Self::output_bytes) has
     /// them as they were.
     pub fn output(&self) -> &str {
-        &self.output
+        self.output.text()
     }
 
     /// Everything the process wrote to standard error, as text.
     pub fn error_output(&self) -> &str {
-        &self.error_output
+        self.error_output.text()
     }
 
     /// Everything the process wrote to standard output, byte for byte, for
     /// output that is not text: an image, an archive, a dump.
     pub fn output_bytes(&self) -> &[u8] {
-        &self.output_bytes
+        self.output.bytes()
     }
 
     /// Everything the process wrote to standard error, byte for byte.
     pub fn error_output_bytes(&self) -> &[u8] {
-        &self.error_output_bytes
+        self.error_output.bytes()
     }
 
     /// Whether standard output contains `text`.
     pub fn see_in_output(&self, text: &str) -> bool {
-        self.output.contains(text)
+        self.output().contains(text)
     }
 
     /// Whether standard error contains `text`.
     pub fn see_in_error_output(&self, text: &str) -> bool {
-        self.error_output.contains(text)
+        self.error_output().contains(text)
     }
 
     /// The result when it succeeded.
@@ -528,8 +564,8 @@ pub enum ProcessError {
         "the process \"{}\" failed with {}\n\nOutput:\n{}\n\nError output:\n{}",
         result.command,
         describe_exit(result.exit_code),
-        result.output,
-        result.error_output
+        result.output(),
+        result.error_output()
     )]
     Failed {
         /// The failed result.

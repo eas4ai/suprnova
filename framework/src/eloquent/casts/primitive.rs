@@ -217,6 +217,13 @@ impl DynCast for AsStringDyn {
         Ok(v.clone())
     }
 
+    fn from_storage_json_owned(
+        &self,
+        v: serde_json::Value,
+    ) -> Result<serde_json::Value, FrameworkError> {
+        Ok(v)
+    }
+
     fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         Ok(v.clone())
     }

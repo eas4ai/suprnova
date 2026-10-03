@@ -89,6 +89,18 @@ pub trait DynCast: Send + Sync {
     fn from_storage_json(&self, v: &serde_json::Value)
     -> Result<serde_json::Value, FrameworkError>;
 
+    /// [`from_storage_json`](Self::from_storage_json) for a stored value
+    /// the caller no longer needs, which a read with runtime casts always
+    /// has. A cast whose in-memory shape is the stored value itself
+    /// returns it unchanged rather than copying it; the default converts
+    /// from a borrow, as `from_storage_json` does.
+    fn from_storage_json_owned(
+        &self,
+        v: serde_json::Value,
+    ) -> Result<serde_json::Value, FrameworkError> {
+        self.from_storage_json(&v)
+    }
+
     /// Convert an in-memory value into its storage shape (e.g. encode
     /// a `serde_json::Value` back into a JSON string for the
     /// underlying TEXT column).

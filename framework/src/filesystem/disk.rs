@@ -368,11 +368,19 @@ impl DiskExt for Operator {
         separator: &str,
     ) -> Result<(), FrameworkError> {
         if self.file_exists(path).await? {
-            let existing = self.get(path).await?;
+            let existing = self
+                .read(path)
+                .await
+                .map_err(|e| FrameworkError::internal(format!("storage read({path}): {e}")))?;
+            // The file is copied once, from what the read returned into a
+            // buffer of the final size. Reading it into a vector first and
+            // joining that into a second copied it twice.
             let mut out = Vec::with_capacity(data.len() + separator.len() + existing.len());
             out.extend_from_slice(data.as_bytes());
             out.extend_from_slice(separator.as_bytes());
-            out.extend_from_slice(&existing);
+            for chunk in existing {
+                out.extend_from_slice(&chunk);
+            }
             self.put(path, out).await
         } else {
             self.put(path, data.as_bytes().to_vec()).await
@@ -390,9 +398,15 @@ impl DiskExt for Operator {
         separator: &str,
     ) -> Result<(), FrameworkError> {
         if self.file_exists(path).await? {
-            let existing = self.get(path).await?;
+            let existing = self
+                .read(path)
+                .await
+                .map_err(|e| FrameworkError::internal(format!("storage read({path}): {e}")))?;
+            // Copied once, as in `prepend_with_separator`.
             let mut out = Vec::with_capacity(existing.len() + separator.len() + data.len());
-            out.extend_from_slice(&existing);
+            for chunk in existing {
+                out.extend_from_slice(&chunk);
+            }
             out.extend_from_slice(separator.as_bytes());
             out.extend_from_slice(data.as_bytes());
             self.put(path, out).await

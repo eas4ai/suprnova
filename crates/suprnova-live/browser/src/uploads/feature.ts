@@ -127,7 +127,11 @@ async function boundedResponse(response: Response): Promise<UploadTransportRespo
   }
   const reader = response.body?.getReader();
   if (reader === undefined) throw new UploadHttpError("upload_transport_failed");
-  const bytes = new Uint8Array(MAX_UPLOAD_RESPONSE_BYTES);
+  // The chunks are kept as they arrive and joined only when there are several,
+  // into an array of exactly their length. A control response is a few
+  // hundred bytes, almost always one chunk, and allocating the 16 KiB limit for
+  // every one of them was the limit's worth of memory per request.
+  const chunks: Uint8Array[] = [];
   let length = 0;
   for (;;) {
     const item = await reader.read();
@@ -136,14 +140,24 @@ async function boundedResponse(response: Response): Promise<UploadTransportRespo
       await reader.cancel();
       throw new UploadHttpError("upload_transport_failed");
     }
-    bytes.set(item.value, length);
+    chunks.push(item.value);
     length += item.value.byteLength;
+  }
+  const [only] = chunks;
+  let bytes: Uint8Array;
+  if (chunks.length === 1 && only !== undefined) {
+    bytes = only;
+  } else {
+    bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
   }
   let value: unknown;
   try {
-    value = JSON.parse(
-      new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, length)),
-    ) as unknown;
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
   } catch {
     throw new UploadHttpError("upload_transport_failed");
   }

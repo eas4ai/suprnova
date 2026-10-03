@@ -91,14 +91,21 @@ impl Cache {
     /// it from env). The bootstrap dispatches on `CacheConfig::driver`:
     ///
     /// - [`CacheDriver::Memory`] - bind an `InMemoryCache` derived from
-    ///   the prefix and default TTL. Always succeeds.
+    ///   the prefix and default TTL, swept every
+    ///   [`CacheConfig::sweep_interval`] seconds. Always succeeds.
     /// - [`CacheDriver::Redis`] - connect to `REDIS_URL` and bind the
     ///   resulting `RedisCache`. **Fails closed** if the URL is
     ///   unreachable so a misconfigured production deployment never
     ///   silently downgrades to a per-process cache.
     ///
+    /// A `dyn CacheStore` the application already bound, in its
+    /// `bootstrap_fn` or a test, is kept: an app override always wins.
+    ///
     /// Called automatically by `Server::run()` and `App` boot helpers.
     pub(crate) async fn bootstrap() -> Result<(), FrameworkError> {
+        if App::has_binding::<dyn CacheStore>() {
+            return Ok(());
+        }
         let config = match Config::get::<CacheConfig>() {
             Some(c) => c,
             None => CacheConfig::from_env()?,
@@ -106,8 +113,11 @@ impl Cache {
 
         match config.driver {
             CacheDriver::Memory => {
-                let memory_cache = InMemoryCache::with_config(&config);
-                App::bind::<dyn CacheStore>(Arc::new(memory_cache));
+                let memory_cache = InMemoryCache::with_periodic_sweep(
+                    &config,
+                    Duration::from_secs(config.sweep_interval),
+                );
+                App::bind::<dyn CacheStore>(memory_cache);
             }
             CacheDriver::Redis => {
                 // No silent downgrade - surface the connection failure

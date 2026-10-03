@@ -207,6 +207,7 @@ boots with the framework's embedded English validation catalog.
 | `REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | The `Redis` facade's `default` connection, and the cache's Redis server when `CACHE_DRIVER=redis`. A `rediss://` URL connects over TLS. See [Redis](redis.md). |
 | `REDIS_PREFIX` | `"suprnova_cache:"` | `String` | Key prefix for cache entries (collision-avoidance for shared Redis). |
 | `CACHE_DEFAULT_TTL` | `3600` (seconds) | `u64` | Default TTL in seconds. `0` means "no expiration". Applied to `Cache::put(None)` / `Cache::tags_put(None)`; `Cache::forever` and `Cache::remember_forever` always bypass. |
+| `CACHE_SWEEP_INTERVAL` | `60` (seconds) | `u64` | Seconds between sweeps of the in-memory cache, which remove every expired entry, including the ones nothing reads again. `0` turns the sweep off. Redis expires keys itself and ignores this. See [Cache](cache.md#in-memory-expiration). |
 | `REDIS_COMMAND_RETRIES` | `0` | `u32` | Extra retries for read-shaped Redis commands, on top of the one every read already gets. Applies to the cache, queue, and rate-limit drivers, and to the reads of the `Redis` facade. Writes never retry at any value. Budget it in seconds: a retry against a dropped connection waits for the reconnect, so it costs the driver's whole connect and response budget - up to 3 connect retries at most 500 ms apart, each capped at 2 s, plus a 5 s response timeout on the cache driver; up to 6 connect retries with an uncapped exponential delay, each capped at 1 s, plus a 500 ms response timeout on the queue and rate-limit drivers. The clamp of `10` bounds attempts, not seconds: at that setting one read makes 12 attempts. A timeout counts as transient too, so during a stall each wrapped read issues up to that many commands. An unparseable value falls back to `0`. |
 
 ## Queue
@@ -490,6 +491,12 @@ repeats the endpoint, which can carry a password or a token. The exporters need
 the `otel` cargo feature. The other standard OTLP variables
 (`OTEL_EXPORTER_OTLP_HEADERS`, `_PROTOCOL`, `_TIMEOUT`) are read by the
 OpenTelemetry exporter directly.
+
+## Heap profiling
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `SUPRNOVA_HEAP_PROFILE` | `dhat-heap.json` in the working directory | `String` (path) | The file the heap profile is written to when the process ends normally. Read only by a build with the `heap-profiling` feature. See [Deployment](deployment.md#heap-profiling). |
 
 ## CLI / dev server
 

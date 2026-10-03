@@ -85,6 +85,53 @@ impl Write for BoundedWriter {
     }
 }
 
+/// Counts what the canonical serializer writes, against the same limit as
+/// [`BoundedWriter`], without keeping it.
+struct CountingWriter {
+    written: usize,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if buffer.len() > self.limit.saturating_sub(self.written) {
+            self.exceeded = true;
+            return Err(io::Error::other("canonical_output_limit"));
+        }
+        self.written += buffer.len();
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Checks `value` as [`to_canonical_bytes`] does, the same errors for the
+/// same values, without keeping the bytes. A caller that only needs to know
+/// the value fits its limits then never holds a canonical copy of it.
+pub(crate) fn check_canonical(
+    value: &CanonicalValue,
+    limits: &InputLimits,
+) -> Result<(), CanonicalError> {
+    validate_value(value, limits, 0, &mut 0)?;
+    let mut writer = CountingWriter {
+        written: 0,
+        limit: limits.max_bytes(),
+        exceeded: false,
+    };
+    if serde_json_canonicalizer::to_writer(value, &mut writer).is_err() {
+        let kind = if writer.exceeded {
+            CanonicalErrorKind::TooLarge
+        } else {
+            CanonicalErrorKind::SerializationFailed
+        };
+        return Err(CanonicalError::new(kind));
+    }
+    Ok(())
+}
+
 /// Serializes a validated value to deterministic RFC 8785-compatible UTF-8.
 pub fn to_canonical_bytes(
     value: &CanonicalValue,

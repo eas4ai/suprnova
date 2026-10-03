@@ -616,7 +616,7 @@ impl InvokedProcess {
             real.signal_all(Signal::Kill);
         }
         real.finish_bounded(&command).await?;
-        Ok(real.result(&command))
+        Ok(real.take_result(&command))
     }
 }
 
@@ -729,9 +729,11 @@ impl Real {
             }
         }
         self.finish_bounded(command).await?;
-        Ok(self.result(command))
+        Ok(self.take_result(command))
     }
 
+    /// The result so far, copied: the process may still be asked for its
+    /// output after a timeout a `wait_until` reports.
     fn result(&self, command: &str) -> ProcessResult {
         let state = self.captured.lock();
         ProcessResult::new(
@@ -739,6 +741,22 @@ impl Real {
             self.status.and_then(|status| status.code()),
             state.out.clone(),
             state.err.clone(),
+        )
+    }
+
+    /// The result of a process that is finished with: the captured output
+    /// moves into it rather than being copied. Only the calls that consume
+    /// the process, `wait` and `stop`, take it.
+    fn take_result(&mut self, command: &str) -> ProcessResult {
+        let mut state = self.captured.lock();
+        let out = std::mem::take(&mut state.out);
+        let err = std::mem::take(&mut state.err);
+        drop(state);
+        ProcessResult::new(
+            command.to_owned(),
+            self.status.and_then(|status| status.code()),
+            out,
+            err,
         )
     }
 }

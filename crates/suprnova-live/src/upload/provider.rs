@@ -1931,28 +1931,41 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
                 (expected_bytes - request.offset).min(request.maximum_bytes as u64),
             )
             .map_err(|_| UploadError::new(UploadErrorKind::InputTooLarge))?;
-            let mut output = Vec::with_capacity(target);
-            while output.len() < target {
+            // A store that answers the whole read at once, as the file store
+            // does, has its bytes returned as they are; only a read the store
+            // answers in parts is joined into a buffer of the target size.
+            let mut joined: Option<Vec<u8>> = None;
+            let mut read = 0usize;
+            while read < target {
                 if cancellation.is_canceled() || self.resources.cancellation().is_canceled() {
                     return Err(UploadError::new(UploadErrorKind::TransferCanceled));
                 }
                 let offset = request
                     .offset
-                    .checked_add(output.len() as u64)
+                    .checked_add(read as u64)
                     .ok_or_else(|| UploadError::new(UploadErrorKind::InvalidField))?;
                 let operation = self.supervise_store_operation(request.handle, &object, || {
-                    self.store.read_at(&object, offset, target - output.len())
+                    self.store.read_at(&object, offset, target - read)
                 })?;
                 let bytes = admission.wait_store(operation).await?;
-                if bytes.is_empty() || bytes.len() > target - output.len() {
+                if bytes.is_empty() || bytes.len() > target - read {
                     return Err(UploadError::new(UploadErrorKind::IncompleteTransfer));
                 }
-                output.extend_from_slice(&bytes);
+                if read == 0 && bytes.len() == target {
+                    if cancellation.is_canceled() || self.resources.cancellation().is_canceled() {
+                        return Err(UploadError::new(UploadErrorKind::TransferCanceled));
+                    }
+                    return Ok(bytes);
+                }
+                joined
+                    .get_or_insert_with(|| Vec::with_capacity(target))
+                    .extend_from_slice(&bytes);
+                read += bytes.len();
             }
             if cancellation.is_canceled() || self.resources.cancellation().is_canceled() {
                 return Err(UploadError::new(UploadErrorKind::TransferCanceled));
             }
-            Ok(QuarantineBytes::from(output))
+            Ok(QuarantineBytes::from(joined.unwrap_or_default()))
         })
     }
 

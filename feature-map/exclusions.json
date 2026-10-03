@@ -22,6 +22,7 @@
  },
  "demo_app_commands": [
   "bench:enqueue-abort",
+  "bench:enqueue-listener",
   "bench:enqueue-records",
   "bench:enqueue-sleep",
   "bench:password-hash",
@@ -77,5 +78,5 @@
   "demo application code (app/), test-support crates and fixtures"
  ],
  "sibling_reexports_folded_into_aliases": 299,
- "source_rev": "1ee8c25f"
+ "source_rev": "83b74978"
 }

@@ -1228,7 +1228,11 @@ pub(crate) async fn build_composite_entry(
         .collect();
     cuts.sort_by_key(|(start, _, _)| *start);
     let mut segments = Vec::new();
-    let mut shell = Vec::with_capacity(body.len());
+    // The shell is the body less its cuts, which never overlap: holes lie
+    // outside every island. Sizing it to that keeps a stored entry from
+    // reserving the island and nonce bytes it never holds.
+    let cut_bytes: usize = cuts.iter().map(|(start, end, _)| end - start).sum();
+    let mut shell = Vec::with_capacity(body.len().saturating_sub(cut_bytes));
     let mut slots = Vec::new();
     let mut cursor = 0usize;
     let mut slot_index: u16 = 0;
@@ -1353,8 +1357,10 @@ fn collect_holes(
 /// whether something occurs more than once gets the honest count rather
 /// than a count that silently skipped a second, overlapping occurrence.
 ///
-/// `limit` bounds the returned vector before it is allocated, so no caller
-/// depends on the body's own size for its bound. An empty needle never
+/// `limit` bounds the returned vector, so no caller depends on the body's
+/// own size for its bound. The vector grows with what the scan finds and
+/// never past `limit`: reserving `limit` up front made every scan of a
+/// page with one nonce allocate for the most a page may hold. An empty needle never
 /// matches and a zero limit collects nothing, so the scan always
 /// terminates. Each step skips ahead to the next byte equal to the
 /// needle's first, which keeps the scan linear on any realistic body.
@@ -1362,7 +1368,7 @@ fn find_all(haystack: &[u8], needle: &[u8], limit: usize) -> Vec<usize> {
     if needle.is_empty() || needle.len() > haystack.len() || limit == 0 {
         return Vec::new();
     }
-    let mut found = Vec::with_capacity(limit);
+    let mut found = Vec::new();
     let first = needle[0];
     // Never underflows: `needle.len() <= haystack.len()` was just checked.
     let last_start = haystack.len() - needle.len();
@@ -1376,6 +1382,12 @@ fn find_all(haystack: &[u8], needle: &[u8], limit: usize) -> Vec<usize> {
         };
         at += offset;
         if haystack[at..].starts_with(needle) {
+            if found.len() == found.capacity() {
+                // Doubling, from four, but never past `limit`: the loop
+                // stops at `limit`, so `room` is at least one here.
+                let room = limit - found.len();
+                found.reserve_exact(found.capacity().max(4).min(room));
+            }
             found.push(at);
             if found.len() >= limit {
                 break;

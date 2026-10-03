@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 
 use futures_util::lock::Mutex;
 
@@ -25,16 +25,16 @@ use futures_util::lock::Mutex;
 /// freshly committed result on its very first storage read) rather than
 /// racing storage independently.
 ///
-/// Per-key entries are never evicted: memory grows with the number of
-/// distinct `record_id`/M2M-cache keys ever seen by this process, not with
-/// call volume. Acceptable for a broker whose key space is bounded by
-/// linked accounts and M2M client/scope combinations; a host with an
-/// unusually large or unbounded key space should disable
-/// [`super::BrokerConfig::single_flight`] instead of relying on eviction
-/// this type does not do.
+/// A key is held only while a caller holds or waits on its lock: the last
+/// caller to leave, whether it finished, failed or was cancelled while it
+/// waited, removes the key. The map therefore grows with the keys in use
+/// at once, not with every key the process has seen.
 #[derive(Default)]
 pub struct SingleFlight {
-    locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// The per-key locks. A plain mutex: it is held only to look up, add
+    /// or remove a key, never across an `.await`, and a caller leaving
+    /// must reach it from a destructor, which cannot await.
+    locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl SingleFlight {
@@ -44,10 +44,16 @@ impl SingleFlight {
         Self::default()
     }
 
+    fn locks(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<Mutex<()>>>> {
+        // A panic while the map was locked cannot leave it half-updated:
+        // each critical section is one lookup, insert or remove.
+        self.locks.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// The keys the map holds right now.
     #[cfg(test)]
     async fn tracked_keys(&self) -> usize {
-        self.locks.lock().await.len()
+        self.locks().len()
     }
 
     /// Run `task` while holding the exclusive in-process lock for `key`.
@@ -55,15 +61,46 @@ impl SingleFlight {
     where
         Fut: Future<Output = T>,
     {
-        let lock = {
-            let mut locks = self.locks.lock().await;
-            locks
+        let lock = Arc::clone(
+            self.locks()
                 .entry(key.to_owned())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        );
+        let caller = Caller {
+            flight: self,
+            key,
+            lock: Some(lock),
+        };
+        let Some(lock) = caller.lock.as_ref() else {
+            return task.await;
         };
         let _permit = lock.lock().await;
         task.await
+    }
+}
+
+/// One caller of a key, from taking its lock out of the map until it is
+/// done with it, however it ends.
+struct Caller<'a> {
+    flight: &'a SingleFlight,
+    key: &'a str,
+    /// Always `Some` until `drop` takes it.
+    lock: Option<Arc<Mutex<()>>>,
+}
+
+impl Drop for Caller<'_> {
+    fn drop(&mut self) {
+        let mut locks = self.flight.locks();
+        // This caller's reference is released under the map lock, so two
+        // callers leaving at once cannot each see the other's and both
+        // keep the key: the last one sees only the map's.
+        drop(self.lock.take());
+        if locks
+            .get(self.key)
+            .is_some_and(|lock| Arc::strong_count(lock) == 1)
+        {
+            locks.remove(self.key);
+        }
     }
 }
 

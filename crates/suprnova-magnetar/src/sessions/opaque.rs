@@ -220,16 +220,11 @@ fn active(session: StoredSession, now: DateTime<Utc>) -> Result<VerifiedSession>
 fn new_id() -> String {
     let mut bytes = [0_u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::storage::hex_lower(&bytes)
 }
 
 fn new_token() -> SecretString {
     let mut bytes = [0_u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    SecretString::from(
-        bytes
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
-    )
+    SecretString::from(crate::storage::hex_lower(&bytes))
 }

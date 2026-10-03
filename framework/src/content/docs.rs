@@ -86,7 +86,10 @@ pub async fn build_docs(config: DocsBuildConfig) -> ContentResult<DocsCatalog> {
 
     tokio::fs::create_dir_all(&config.output_dir).await?;
 
-    let mut chapters = Vec::with_capacity(entries.len());
+    // Each chapter is written and dropped before the next is read. Only
+    // the catalog and the search index, which are a chapter's summary, are
+    // kept for the whole corpus; keeping every chapter's HTML too made the
+    // build's peak grow with the manual.
     let mut catalog_entries = Vec::with_capacity(entries.len());
     let mut search_entries = Vec::with_capacity(entries.len());
 
@@ -137,7 +140,6 @@ pub async fn build_docs(config: DocsBuildConfig) -> ContentResult<DocsCatalog> {
             headings: chapter.headings.clone(),
             plain_text: rendered.plain_text,
         });
-        chapters.push(chapter);
     }
 
     let catalog = DocsCatalog {

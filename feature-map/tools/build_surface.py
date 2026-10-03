@@ -26,6 +26,7 @@ REV = sys.argv[5]
 # Source-file prefix -> chapter (longest prefix wins).
 PATH_RULES = {
     "framework/src/app/maintenance": "deployment",
+    "framework/src/profiling": "deployment",
     "framework/src/app/paths": "structure",
     "framework/src/app/": "bootstrap",
     "framework/src/boot": "bootstrap",

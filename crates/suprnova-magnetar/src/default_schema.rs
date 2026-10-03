@@ -762,7 +762,7 @@ pub mod sql_stores {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};
 
     fn hex(bytes: [u8; 32]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        crate::storage::hex_lower(&bytes)
     }
 
     fn unhex(value: &str) -> [u8; 32] {

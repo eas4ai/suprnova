@@ -965,6 +965,14 @@ where
             config_fn();
         }
 
+        // The long-running workers dispatch events from jobs, tasks and
+        // workflows, and a queued listener runs as a task of its own; see
+        // the drain after the match.
+        let worker = matches!(
+            cli.command,
+            Some(Commands::ScheduleWork | Commands::WorkflowWork | Commands::QueueWork { .. })
+        );
+
         match cli.command {
             None
             | Some(Commands::Serve { no_migrate: false })
@@ -1097,6 +1105,12 @@ where
             Some(Commands::Up) => {
                 Self::run_up().await;
             }
+        }
+        // A worker waits for its queued listeners as the server does at the
+        // end of its graceful shutdown: returning drops the runtime, and
+        // every listener still running would end with it.
+        if worker {
+            crate::events::drain_queued_at_shutdown().await;
         }
         // Every command ends here; the file log channels buffer, and nothing
         // a worker wrote before a clean exit may be lost.

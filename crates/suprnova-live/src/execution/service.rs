@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 
 use crate::action::{ActionOutcome, ActionResult, RawActionArguments};
@@ -1611,7 +1610,7 @@ impl ExecutionService {
                         document_key: presentation.document_key,
                         protocol_minimum: presentation.protocol_minimum,
                         runtime_contract: 1,
-                        snapshot: Bytes::from(signed_snapshot.clone()),
+                        snapshot: &signed_snapshot,
                         snapshot_form: IslandSnapshotForm::Instance,
                         instance_id: Some(authority.instance_id.clone()),
                         revision: successor_revision,

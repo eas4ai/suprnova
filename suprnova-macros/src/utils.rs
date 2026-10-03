@@ -1,5 +1,8 @@
 /// Calculate Levenshtein distance between two strings
 /// Used for fuzzy matching suggestions in error messages
+///
+/// Each row of the edit-distance table depends only on the row above it,
+/// so two rows are kept rather than the whole table.
 pub fn levenshtein_distance(a: &str, b: &str) -> usize {
     let a_chars: Vec<char> = a.chars().collect();
     let b_chars: Vec<char> = b.chars().collect();
@@ -13,30 +16,26 @@ pub fn levenshtein_distance(a: &str, b: &str) -> usize {
         return len_a;
     }
 
-    let mut matrix: Vec<Vec<usize>> = vec![vec![0; len_b + 1]; len_a + 1];
-
-    for (i, row) in matrix.iter_mut().enumerate().take(len_a + 1) {
-        row[0] = i;
-    }
-    for (j, cell) in matrix[0].iter_mut().enumerate().take(len_b + 1) {
-        *cell = j;
-    }
+    let mut previous: Vec<usize> = (0..=len_b).collect();
+    let mut current: Vec<usize> = vec![0; len_b + 1];
 
     for i in 1..=len_a {
+        current[0] = i;
         for j in 1..=len_b {
             let cost = if a_chars[i - 1] == b_chars[j - 1] {
                 0
             } else {
                 1
             };
-            matrix[i][j] = std::cmp::min(
-                std::cmp::min(matrix[i - 1][j] + 1, matrix[i][j - 1] + 1),
-                matrix[i - 1][j - 1] + cost,
+            current[j] = std::cmp::min(
+                std::cmp::min(previous[j] + 1, current[j - 1] + 1),
+                previous[j - 1] + cost,
             );
         }
+        std::mem::swap(&mut previous, &mut current);
     }
 
-    matrix[len_a][len_b]
+    previous[len_b]
 }
 
 #[cfg(test)]

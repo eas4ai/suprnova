@@ -318,9 +318,13 @@ pub struct SqsQueueDriver {
 struct Held {
     queue_url: String,
     receipt: String,
-    /// The envelope as it was delivered, with the attempts it carried
-    /// before the worker's own count.
-    envelope: Envelope,
+    /// The message body as SQS delivered it, taken out of the reply rather
+    /// than copied. The worker owns the decoded envelope; the rare path
+    /// that sends the message on without it decodes this again.
+    body: String,
+    /// The attempts the delivered envelope carried, before the worker's
+    /// own count.
+    attempts: u32,
     /// The overflow payload the message points at, if it does.
     pointer: Option<String>,
     /// When the message was received, by the framework clock.
@@ -597,11 +601,13 @@ impl SqsQueueDriver {
     /// Post one action, trying again after a throttled request, a fault of
     /// the service, or no answer, up to three tries in all.
     async fn request(&self, action: &str, body: &Value) -> Result<Value, Failure> {
-        let payload = serde_json::to_vec(body).map_err(|error| {
+        // Serialized once; each try sends the same shared bytes rather than
+        // a copy of them.
+        let payload = bytes::Bytes::from(serde_json::to_vec(body).map_err(|error| {
             Failure::NotSent(FrameworkError::internal(format!(
                 "SQS {action}: encode: {error}"
             )))
-        })?;
+        })?);
         let mut tries = 0;
         loop {
             tries += 1;
@@ -621,7 +627,7 @@ impl SqsQueueDriver {
         }
     }
 
-    async fn request_once(&self, action: &str, payload: &[u8]) -> Result<Value, Failure> {
+    async fn request_once(&self, action: &str, payload: &bytes::Bytes) -> Result<Value, Failure> {
         let hash = hex::encode(Sha256::digest(payload));
         let (mut parts, ()) = http::Request::builder()
             .method(http::Method::POST)
@@ -646,7 +652,7 @@ impl SqsQueueDriver {
             .client
             .request(parts.method, parts.uri.to_string())
             .headers(parts.headers)
-            .body(payload.to_vec())
+            .body(payload.clone())
             .send()
             .await
             .map_err(|error| {
@@ -925,14 +931,22 @@ impl SqsQueueDriver {
 
     /// The envelope a message body carries, reading it from the overflow
     /// disk when the body points there.
+    ///
+    /// A body that is an envelope, which every inline message is, is parsed
+    /// once, straight into the envelope. Only a body that is not one is
+    /// parsed again to look for an overflow pointer, which a pointer body
+    /// cannot be mistaken for: it has none of an envelope's required
+    /// fields. Every error reads as it always has.
     async fn decode(&self, body: &str) -> Result<(Envelope, Option<String>), FrameworkError> {
+        let envelope_error = match Envelope::from_json(body) {
+            Ok(envelope) => return Ok((envelope, None)),
+            Err(error) => error,
+        };
         let value: Value = serde_json::from_str(body).map_err(|error| {
             FrameworkError::internal(format!("SQS: the message is not a job: {error}"))
         })?;
         let Some(path) = value.get(POINTER_KEY).and_then(Value::as_str) else {
-            let envelope = Envelope::from_json(body)
-                .map_err(|error| FrameworkError::internal(format!("SQS: {error}")))?;
-            return Ok((envelope, None));
+            return Err(FrameworkError::internal(format!("SQS: {envelope_error}")));
         };
         let overflow = self.overflow.as_ref().ok_or_else(|| {
             FrameworkError::internal(format!(
@@ -945,12 +959,13 @@ impl SqsQueueDriver {
                 "SQS: could not read the overflow payload '{path}': {error}"
             ))
         })?;
-        let text = String::from_utf8(bytes.to_vec()).map_err(|error| {
+        let bytes = bytes.to_bytes();
+        let text = std::str::from_utf8(&bytes).map_err(|error| {
             FrameworkError::internal(format!(
                 "SQS: the overflow payload '{path}' is not text: {error}"
             ))
         })?;
-        let envelope = Envelope::from_json(&text)
+        let envelope = Envelope::from_json(text)
             .map_err(|error| FrameworkError::internal(format!("SQS: {error}")))?;
         Ok((envelope, Some(path.to_owned())))
     }
@@ -980,7 +995,7 @@ impl SqsQueueDriver {
         visibility_timeout: Duration,
     ) -> Result<Option<Reservation>, FrameworkError> {
         let visibility = seconds(visibility_timeout, MAX_VISIBILITY_SECS);
-        let reply = self
+        let mut reply = self
             .call(
                 "ReceiveMessage",
                 json!({
@@ -995,8 +1010,8 @@ impl SqsQueueDriver {
             .await?;
         let received_at = crate::clock::now();
         let Some(message) = reply["Messages"]
-            .as_array()
-            .and_then(|messages| messages.first())
+            .as_array_mut()
+            .and_then(|messages| messages.first_mut())
         else {
             return Ok(None);
         };
@@ -1006,34 +1021,36 @@ impl SqsQueueDriver {
                 FrameworkError::internal("SQS ReceiveMessage: a message has no receipt handle")
             })?
             .to_owned();
-        let body = message["Body"]
-            .as_str()
-            .ok_or_else(|| FrameworkError::internal("SQS ReceiveMessage: a message has no body"))?;
+        let Value::String(body) = message["Body"].take() else {
+            return Err(FrameworkError::internal(
+                "SQS ReceiveMessage: a message has no body",
+            ));
+        };
         let receives: u32 = message["Attributes"]["ApproximateReceiveCount"]
             .as_str()
             .and_then(|count| count.parse().ok())
             .unwrap_or(1);
-        let (mut envelope, pointer) = self.decode(body).await?;
+        let (mut envelope, pointer) = self.decode(&body).await?;
         envelope.attempts = envelope.attempts.saturating_add(receives.saturating_sub(1));
         let held = Held {
             queue_url: queue_url.to_owned(),
             receipt,
-            envelope,
+            body,
+            attempts: envelope.attempts,
             pointer,
             received_at,
             deadline: received_at + chrono::Duration::seconds(visibility as i64),
         };
 
-        if held.envelope.available_at > crate::clock::now() {
+        if envelope.available_at > crate::clock::now() {
             // Received before its time, which only a delay over 15 minutes
             // allows: send it on with what is left and drop this copy.
-            self.send(queue_url, &held.envelope).await?;
+            self.send(queue_url, &envelope).await?;
             self.delete_held(&held, true).await?;
             return Ok(None);
         }
 
         let token = ReservationToken(Uuid::new_v4());
-        let envelope = held.envelope.clone();
         self.held_map()?.insert(token.clone(), held);
         Ok(Some(Reservation { envelope, token }))
     }
@@ -1182,8 +1199,8 @@ impl QueueDriver for SqsQueueDriver {
         if wait > left {
             // Longer than SQS can still hide this message: send a copy that
             // counts the attempt and waits out the delay, and drop this one.
-            let mut copy = held.envelope.clone();
-            copy.attempts = copy.attempts.saturating_add(1);
+            let (mut copy, _) = self.decode(&held.body).await?;
+            copy.attempts = held.attempts.saturating_add(1);
             copy.available_at = crate::clock::now()
                 + chrono::Duration::from_std(requeue_delay)
                     .unwrap_or_else(|_| chrono::Duration::zero());
@@ -1212,7 +1229,7 @@ impl QueueDriver for SqsQueueDriver {
             return Ok(());
         };
         let mut copy = env.clone();
-        copy.attempts = held.envelope.attempts;
+        copy.attempts = held.attempts;
         copy.available_at = crate::clock::now()
             + chrono::Duration::from_std(delay).unwrap_or_else(|_| chrono::Duration::zero());
         self.send(&held.queue_url, &copy).await?;

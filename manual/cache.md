@@ -65,6 +65,7 @@ sees a boot failure instead of a half-working app.
 | `REDIS_URL` | Redis URL (consulted only when `driver=redis`) | `redis://127.0.0.1:6379` |
 | `REDIS_PREFIX` | Key prefix applied to every store operation | `suprnova_cache:` |
 | `CACHE_DEFAULT_TTL` | Default TTL in seconds for `Cache::put(None)`; `0` means no default | `3600` |
+| `CACHE_SWEEP_INTERVAL` | Seconds between sweeps of the in-memory cache's expired entries; `0` turns the sweep off | `60` |
 
 Unset `CACHE_DRIVER` parses to `Memory`; any other value (case-
 insensitive, trimmed) that isn't `memory`/`in-memory`/`inmemory`/`redis`
@@ -348,11 +349,29 @@ below.
 `has`, and `add_raw` purge an entry the first time they observe it
 expired. Re-accessed keys never accumulate corpses.
 
-A workload that writes a high-cardinality set of short-lived keys and
-never reads them back has no such trigger. Call
-`InMemoryCache::purge_expired()` from a periodic task in that case -
-it returns the count of entries removed. Redis handles its own
-expiration server-side; the equivalent isn't needed there.
+A key that expires and is never read again has no such trigger, so the
+cache the framework binds also **sweeps**: every `CACHE_SWEEP_INTERVAL`
+seconds, 60 unless you set it, it removes every expired entry. `0`
+turns the sweep off. The sweep runs on a task that holds the cache
+weakly and ends with it.
+
+A cache you build yourself is swept only if you build it to be. Build it
+inside the runtime, in your bootstrap for instance, since the sweep is a
+task on it:
+
+```rust
+use std::time::Duration;
+use suprnova::{CacheConfig, InMemoryCache};
+
+let cache = InMemoryCache::with_periodic_sweep(&CacheConfig::default(), Duration::from_secs(30));
+```
+
+`InMemoryCache::new()` is not swept; call `purge_expired()`, which
+returns the count of entries removed, when you want one. Redis handles
+its own expiration server-side; the equivalent isn't needed there.
+
+A `dyn CacheStore` that your bootstrap binds is kept: the framework's
+boot binds its own store only when none is bound.
 
 ### Redis TTL precision
 

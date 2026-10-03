@@ -59,11 +59,44 @@ pub fn commands_mod_rs() -> &'static str {
 
 /// `src/live/<snake>.rs` scaffolded by `live:make`.
 pub fn live_component(snake: &str, pascal: &str, component_name: &str, view: &str) -> String {
-    include_str!("files/backend/live/component.rs.tpl")
-        .replace("{snake}", snake)
-        .replace("{pascal}", pascal)
-        .replace("{component_name}", component_name)
-        .replace("{view}", view)
+    render_placeholders(
+        include_str!("files/backend/live/component.rs.tpl"),
+        &[
+            ("{snake}", snake),
+            ("{pascal}", pascal),
+            ("{component_name}", component_name),
+            ("{view}", view),
+        ],
+    )
+}
+
+/// Replace each `{name}` placeholder of `template` with its value in one
+/// pass, into a string of exactly the output's length. A chain of
+/// `replace` calls copied the whole template once per placeholder.
+fn render_placeholders(template: &str, values: &[(&str, &str)]) -> String {
+    fn walk(template: &str, values: &[(&str, &str)], mut emit: impl FnMut(&str)) {
+        let mut rest = template;
+        while let Some(at) = rest.find('{') {
+            emit(&rest[..at]);
+            let tail = &rest[at..];
+            match values.iter().find(|(key, _)| tail.starts_with(key)) {
+                Some((key, value)) => {
+                    emit(value);
+                    rest = &tail[key.len()..];
+                }
+                None => {
+                    emit("{");
+                    rest = &tail[1..];
+                }
+            }
+        }
+        emit(rest);
+    }
+    let mut length = 0;
+    walk(template, values, |piece| length += piece.len());
+    let mut out = String::with_capacity(length);
+    walk(template, values, |piece| out.push_str(piece));
+    out
 }
 
 /// `templates/live/<snake>.html` scaffolded by `live:make`.

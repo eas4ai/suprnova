@@ -253,16 +253,16 @@ pub fn emit_event_dispatch_impl(struct_ident: &Ident) -> TokenStream {
             async fn __dispatch_created(
                 model: &Self,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                ::suprnova::eloquent::events::dispatch_after(
-                    #module_name::events::Created { model: ::core::clone::Clone::clone(model) },
+                ::suprnova::eloquent::events::dispatch_after_with(
+                    || #module_name::events::Created { model: ::core::clone::Clone::clone(model) },
                 ).await
             }
 
             async fn __dispatch_saved(
                 model: &Self,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                ::suprnova::eloquent::events::dispatch_after(
-                    #module_name::events::Saved { model: ::core::clone::Clone::clone(model) },
+                ::suprnova::eloquent::events::dispatch_after_with(
+                    || #module_name::events::Saved { model: ::core::clone::Clone::clone(model) },
                 ).await
             }
 
@@ -270,8 +270,8 @@ pub fn emit_event_dispatch_impl(struct_ident: &Ident) -> TokenStream {
                 previous: &Self,
                 attrs: ::std::sync::Arc<::tokio::sync::Mutex<::suprnova::eloquent::Attrs>>,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                ::suprnova::eloquent::events::dispatch_cancellable(
-                    #module_name::events::Updating {
+                ::suprnova::eloquent::events::dispatch_cancellable_with(
+                    || #module_name::events::Updating {
                         previous: ::core::clone::Clone::clone(previous),
                         attrs,
                     },
@@ -282,8 +282,8 @@ pub fn emit_event_dispatch_impl(struct_ident: &Ident) -> TokenStream {
                 previous: &Self,
                 current: &Self,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                ::suprnova::eloquent::events::dispatch_after(
-                    #module_name::events::Updated {
+                ::suprnova::eloquent::events::dispatch_after_with(
+                    || #module_name::events::Updated {
                         previous: ::core::clone::Clone::clone(previous),
                         current: ::core::clone::Clone::clone(current),
                     },
@@ -294,8 +294,8 @@ pub fn emit_event_dispatch_impl(struct_ident: &Ident) -> TokenStream {
                 model: &Self,
                 is_force: bool,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                ::suprnova::eloquent::events::dispatch_cancellable(
-                    #module_name::events::Deleting {
+                ::suprnova::eloquent::events::dispatch_cancellable_with(
+                    || #module_name::events::Deleting {
                         model: ::core::clone::Clone::clone(model),
                         is_force,
                     },
@@ -306,8 +306,8 @@ pub fn emit_event_dispatch_impl(struct_ident: &Ident) -> TokenStream {
                 model: &Self,
                 is_force: bool,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                ::suprnova::eloquent::events::dispatch_after(
-                    #module_name::events::Deleted {
+                ::suprnova::eloquent::events::dispatch_after_with(
+                    || #module_name::events::Deleted {
                         model: ::core::clone::Clone::clone(model),
                         is_force,
                     },
@@ -317,32 +317,32 @@ pub fn emit_event_dispatch_impl(struct_ident: &Ident) -> TokenStream {
             async fn __dispatch_trashed(
                 model: &Self,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                ::suprnova::eloquent::events::dispatch_after(
-                    #module_name::events::Trashed { model: ::core::clone::Clone::clone(model) },
+                ::suprnova::eloquent::events::dispatch_after_with(
+                    || #module_name::events::Trashed { model: ::core::clone::Clone::clone(model) },
                 ).await
             }
 
             async fn __dispatch_restoring(
                 model: &Self,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                ::suprnova::eloquent::events::dispatch_cancellable(
-                    #module_name::events::Restoring { model: ::core::clone::Clone::clone(model) },
+                ::suprnova::eloquent::events::dispatch_cancellable_with(
+                    || #module_name::events::Restoring { model: ::core::clone::Clone::clone(model) },
                 ).await
             }
 
             async fn __dispatch_restored(
                 model: &Self,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                ::suprnova::eloquent::events::dispatch_after(
-                    #module_name::events::Restored { model: ::core::clone::Clone::clone(model) },
+                ::suprnova::eloquent::events::dispatch_after_with(
+                    || #module_name::events::Restored { model: ::core::clone::Clone::clone(model) },
                 ).await
             }
 
             async fn __dispatch_force_deleting(
                 model: &Self,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                ::suprnova::eloquent::events::dispatch_after(
-                    #module_name::events::ForceDeleting {
+                ::suprnova::eloquent::events::dispatch_after_with(
+                    || #module_name::events::ForceDeleting {
                         model: ::core::clone::Clone::clone(model),
                     },
                 ).await
@@ -351,8 +351,8 @@ pub fn emit_event_dispatch_impl(struct_ident: &Ident) -> TokenStream {
             async fn __dispatch_force_deleted(
                 model: &Self,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                ::suprnova::eloquent::events::dispatch_after(
-                    #module_name::events::ForceDeleted {
+                ::suprnova::eloquent::events::dispatch_after_with(
+                    || #module_name::events::ForceDeleted {
                         model: ::core::clone::Clone::clone(model),
                     },
                 ).await
@@ -362,8 +362,8 @@ pub fn emit_event_dispatch_impl(struct_ident: &Ident) -> TokenStream {
                 source: &Self,
                 replica: ::std::sync::Arc<::tokio::sync::Mutex<Self>>,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                ::suprnova::eloquent::events::dispatch_after(
-                    #module_name::events::Replicating {
+                ::suprnova::eloquent::events::dispatch_after_with(
+                    || #module_name::events::Replicating {
                         source: ::core::clone::Clone::clone(source),
                         replica,
                     },
@@ -380,8 +380,8 @@ pub fn emit_event_dispatch_impl(struct_ident: &Ident) -> TokenStream {
             async fn __dispatch_retrieved(
                 model: &Self,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                ::suprnova::eloquent::events::dispatch_after(
-                    #module_name::events::Retrieved {
+                ::suprnova::eloquent::events::dispatch_after_with(
+                    || #module_name::events::Retrieved {
                         model: ::core::clone::Clone::clone(model),
                     },
                 ).await

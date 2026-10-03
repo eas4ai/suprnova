@@ -150,12 +150,15 @@ fn main_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
     // this macro crate, so it records the application's own
     // `CARGO_PKG_VERSION` rather than the framework's - what
     // `RenderCacheConfig::from_env`'s default build id is supposed to
-    // track.
+    // track. The heap profile starts after `load_env` so `.env` can name
+    // its file, and is declared before the runtime so it drops after it:
+    // locals drop in reverse order, and the profile is written on drop.
     let expanded = quote! {
         #(#attrs)*
         #vis fn #name() #output {
             ::suprnova::boot::load_env_or_exit();
             ::suprnova::boot::set_default_build_id(::core::env!("CARGO_PKG_VERSION"));
+            let __suprnova_heap_profile = ::suprnova::profiling::start();
 
             let __suprnova_runtime = #builder
                 #worker_threads

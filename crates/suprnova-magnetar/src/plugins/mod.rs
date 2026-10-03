@@ -149,11 +149,7 @@ mod shared {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(identity.as_bytes());
-        let digest = hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let digest = crate::storage::hex_lower(&hasher.finalize());
         format!("{purpose}:{digest}")
     }
 

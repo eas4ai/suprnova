@@ -87,7 +87,20 @@ pub(crate) fn random_id() -> String {
 pub(crate) fn random_token() -> String {
     let mut bytes = [0_u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    hex_lower(&bytes)
+}
+
+/// Lowercase hex of `bytes`, written into one buffer of exactly its length.
+/// Formatting each byte with `format!` allocated a string per byte, and
+/// collecting them grew the result by doubling.
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        hex.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        hex.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    hex
 }
 
 /// Convert a secret wrapper into its plaintext representation only inside the
@@ -175,11 +188,13 @@ mod mem_audit {
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
             &mut files,
         );
+        // Built from two pieces so this test's own source does not match.
+        let per_byte = concat!(":02", "x}");
         let mut offenders = Vec::new();
         for file in files {
             let text = std::fs::read_to_string(&file).expect("a source");
             for (number, line) in text.lines().enumerate() {
-                if line.contains(".map(") && line.contains(":02x}") {
+                if line.contains(".map(") && line.contains(per_byte) {
                     offenders.push(format!("{}:{}", file.display(), number + 1));
                 }
             }

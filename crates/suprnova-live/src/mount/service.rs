@@ -254,7 +254,10 @@ impl PrivateMountService {
                 expected.slot().clone(),
                 expected.component().name().clone(),
                 MountSnapshotKind::Instance,
-                Bytes::from(signed_snapshot.clone()),
+                // Moved, not cloned, and shrunk to its length: the writer
+                // that produced it grew by doubling, and the metadata is
+                // held until the document renders.
+                Bytes::from(signed_snapshot.into_boxed_slice()),
             )
             .map_err(|error| MountError::caused_by(MountErrorKind::MetadataTooLarge, &error))?;
             let assembled = assemble_island_root(
@@ -265,7 +268,7 @@ impl PrivateMountService {
                     document_key: request.key.as_str().to_owned(),
                     protocol_minimum: context.mount().minimum_protocol(),
                     runtime_contract: 1,
-                    snapshot: Bytes::from(signed_snapshot.clone()),
+                    snapshot: metadata.signed_snapshot(),
                     snapshot_form: IslandSnapshotForm::Instance,
                     instance_id: Some(instance_id.clone()),
                     revision,

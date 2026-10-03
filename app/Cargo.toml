@@ -41,6 +41,10 @@ futures = { version = "0.3", default-features = false, features = ["std", "async
 url = "2.5.8"
 tokio-util = "0.7.18"
 
+[features]
+# Heap profiling with dhat; see manual/deployment.md, "Heap profiling".
+heap-profiling = ["suprnova/heap-profiling"]
+
 [dev-dependencies]
 # Turns `testing` back on for `cargo test -p app` and every `--tests`
 # build only; it never reaches the `app` or `console` binaries built

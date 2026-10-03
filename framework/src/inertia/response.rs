@@ -2218,9 +2218,36 @@ fn to_value_or_err<V: Serialize>(key: &str, value: &V) -> Result<Value, Framewor
 }
 
 fn build_json_response(page: &Value) -> HttpResponse {
-    HttpResponse::json(page.clone())
+    // Serialized from the borrowed page, the same bytes `HttpResponse::json`
+    // writes, without first cloning the whole page to hand it over.
+    let body = serde_json::to_vec(page).unwrap_or_else(|_| b"{}".to_vec());
+    HttpResponse::bytes_body(body, "application/json")
         .header("X-Inertia", "true")
         .header("Vary", "X-Inertia")
+}
+
+/// Writes JSON into a buffer with every `/` backslash-escaped, so a
+/// `</script>` inside a string field cannot close the page's script tag.
+///
+/// Escaping byte by byte is sound: in UTF-8 the byte `0x2F` only ever
+/// encodes `/` itself, never part of a longer character.
+struct SlashEscaping<'a>(&'a mut Vec<u8>);
+
+impl std::io::Write for SlashEscaping<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut rest = bytes;
+        while let Some(at) = rest.iter().position(|byte| *byte == b'/') {
+            self.0.extend_from_slice(&rest[..at]);
+            self.0.extend_from_slice(b"\\/");
+            rest = &rest[at + 1..];
+        }
+        self.0.extend_from_slice(rest);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn build_html_response(
@@ -2255,16 +2282,6 @@ fn build_html_response(
     //   literal `</script>` substring inside a string field can't
     //   terminate the tag - this matches `buildSSRBody`'s escape.
     let ssr_head = ssr.map(|s| s.head.join("\n")).unwrap_or_default();
-    let mount_block = if let Some(ssr) = ssr {
-        ssr.body.clone()
-    } else {
-        let page_json = serde_json::to_string(page).unwrap_or_else(|_| "{}".to_string());
-        let page_script = page_json.replace('/', "\\/");
-        format!(
-            "<script type=\"application/json\" data-page=\"app\">{page_script}</script>\n\
-             <div id=\"app\"></div>",
-        )
-    };
 
     // A page that renders its own `<title>` through Inertia's `Head`
     // component sends it back in the SSR head, which is injected verbatim
@@ -2273,34 +2290,47 @@ fn build_html_response(
     // browsers, crawlers and the pre-hydration tab read, so the page's
     // real title would never be seen. The page's own head wins, which is
     // exactly what `default_title` documents itself as: a default.
-    let title_line = if contains_title_element(&ssr_head) {
-        String::new()
-    } else {
-        format!("<title>{title_html}</title>\n")
-    };
+    let title_line = !contains_title_element(&ssr_head);
 
-    let html = format!(
-        "<!DOCTYPE html>\n\
-         <html lang=\"{lang}\">\n\
-         <head>\n\
-         <meta charset=\"UTF-8\">\n\
+    // The document is written into one buffer, the page JSON serialized
+    // straight into it. Serializing to a string, escaping that into a
+    // second, and formatting both into a third and a fourth made an
+    // initial visit allocate its page four times over.
+    let mut html = String::new();
+    html.push_str("<!DOCTYPE html>\n<html lang=\"");
+    html.push_str(&document_language_attr());
+    html.push_str(
+        "\">\n<head>\n<meta charset=\"UTF-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n\
-         <meta name=\"csrf-token\" content=\"{csrf}\">\n\
-         {title_line}\
-         {ssr_head}\
-         {head}\
-         </head>\n\
-         <body>\n\
-         {mount_block}\n\
-         </body>\n\
-         </html>",
-        lang = document_language_attr(),
-        csrf = csrf_attr,
-        title_line = title_line,
-        ssr_head = ssr_head,
-        head = head_extras,
-        mount_block = mount_block,
+         <meta name=\"csrf-token\" content=\"",
     );
+    html.push_str(&csrf_attr);
+    html.push_str("\">\n");
+    if title_line {
+        html.push_str("<title>");
+        html.push_str(&title_html);
+        html.push_str("</title>\n");
+    }
+    html.push_str(&ssr_head);
+    html.push_str(&head_extras);
+    html.push_str("</head>\n<body>\n");
+    let html = if let Some(ssr) = ssr {
+        html.push_str(&ssr.body);
+        html.push_str("\n</body>\n</html>");
+        html
+    } else {
+        let mut html = html.into_bytes();
+        html.extend_from_slice(b"<script type=\"application/json\" data-page=\"app\">");
+        let page_at = html.len();
+        if serde_json::to_writer(SlashEscaping(&mut html), page).is_err() {
+            html.truncate(page_at);
+            html.extend_from_slice(b"{}");
+        }
+        html.extend_from_slice(b"</script>\n<div id=\"app\"></div>\n</body>\n</html>");
+        // Only UTF-8 was written: the JSON serializer's output and ASCII.
+        String::from_utf8(html)
+            .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned())
+    };
 
     HttpResponse::html(html).header("Vary", "X-Inertia")
 }

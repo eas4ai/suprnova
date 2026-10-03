@@ -2011,10 +2011,14 @@ impl DB {
     /// Drop every captured entry from the query log. The log stays
     /// enabled - new queries will still be appended. Mirrors Laravel's
     /// `DB::flushQueryLog`.
+    ///
+    /// The log's buffer is released too, not only emptied: a long run of
+    /// queries grows it, and a cleared `Vec` keeps that capacity for the
+    /// life of the process.
     pub fn flush_query_log() -> Result<(), FrameworkError> {
         let observation = crate::database::events::current_observation();
         let mut log = crate::lock::lock(&observation.log, "query_log")?;
-        log.entries.clear();
+        log.entries = Vec::new();
         Ok(())
     }
 }

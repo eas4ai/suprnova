@@ -250,8 +250,11 @@ Four `OrderUpdated` events for order 55 enqueue four jobs and run one. See
 ## Draining on shutdown
 
 Queued in-process listeners spawn into a `JoinSet` tracked by the
-dispatcher. The server's graceful-shutdown sequence calls
-`EventFacade::drain_queued(timeout)` to wait for them:
+dispatcher, which lets go of each one as it finishes. The server's
+graceful shutdown, and `queue:work`, `schedule:work` and `workflow:work`
+when they stop, wait up to ten seconds for the listeners still running:
+returning from `main` would end them part way. A process of your own
+calls `EventFacade::drain_queued(timeout)` to do the same:
 
 ```rust
 let still_running = EventFacade::drain_queued(Duration::from_secs(30)).await;

@@ -225,6 +225,7 @@ pub(crate) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("migrate:status", "Show migration status"),
             ("migrate:rollback", "Rollback last migration(s)"),
             ("migrate:fresh", "Drop all tables & re-migrate"),
+            ("schema:dump", "Dump the schema and migration ledger"),
             ("db:sync", "Sync schema → entity files"),
             ("db:seed [name]", "Run the seeders, or the one named"),
             (

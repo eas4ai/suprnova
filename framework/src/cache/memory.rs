@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use super::config::CacheConfig;
@@ -87,11 +87,13 @@ impl CacheEntry {
 /// Expired entries are evicted lazily: a read path that observes an
 /// expired entry (`get_raw` / `has` / `add_raw`'s existence check)
 /// removes it from the store as part of that call, so re-accessed keys
-/// do not accumulate. Keys that expire and are never touched again
-/// stay in the map until the entire cache is flushed or until a tagged
-/// flush walks them - call [`InMemoryCache::purge_expired`] from a
-/// periodic task if a workload writes many short-lived keys that are
-/// never re-read.
+/// do not accumulate. A key that expires and is never touched again
+/// stays in the map until something sweeps it: the cache the framework
+/// binds is built with [`InMemoryCache::with_periodic_sweep`], which
+/// sweeps every `CACHE_SWEEP_INTERVAL` seconds. A cache built with
+/// [`InMemoryCache::new`] is not swept; call
+/// [`InMemoryCache::purge_expired`] yourself if it holds short-lived keys
+/// that are never read again.
 ///
 /// # Example
 ///
@@ -150,6 +152,40 @@ impl InMemoryCache {
             prefix: config.prefix.clone(),
             default_ttl,
         }
+    }
+
+    /// Create from a `CacheConfig`, with a task that removes the expired
+    /// entries every `interval` (none when `interval` is zero).
+    ///
+    /// The task holds the cache weakly and ends once the last `Arc` to it
+    /// is dropped. It needs a Tokio runtime; called outside one, the cache
+    /// is returned without a sweep.
+    pub fn with_periodic_sweep(config: &CacheConfig, interval: Duration) -> Arc<Self> {
+        let cache = Arc::new(Self::with_config(config));
+        if interval.is_zero() {
+            return cache;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                "the in-memory cache was built outside a Tokio runtime and is not swept"
+            );
+            return cache;
+        };
+        let weak = Arc::downgrade(&cache);
+        runtime.spawn(async move {
+            let mut ticks = tokio::time::interval(interval);
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick completes at once, and there is nothing to sweep yet.
+            ticks.tick().await;
+            loop {
+                ticks.tick().await;
+                let Some(cache) = weak.upgrade() else { break };
+                if let Err(e) = cache.purge_expired() {
+                    tracing::warn!(error = %e, "the in-memory cache sweep failed");
+                }
+            }
+        });
+        cache
     }
 
     fn prefixed_key(&self, key: &str) -> String {
@@ -223,8 +259,11 @@ impl InMemoryCache {
     /// expired entry the first time they observe it, so the typical
     /// hot-key workload does not accumulate corpses. Workloads that
     /// write many short-lived keys and never read them back have no
-    /// such trigger - wire `purge_expired` into a periodic task in
-    /// that case. Returns the number of entries removed.
+    /// such trigger; [`InMemoryCache::with_periodic_sweep`] calls this
+    /// on a timer. Returns the number of entries removed.
+    ///
+    /// The walk removes in place, so it allocates nothing however many
+    /// entries have expired.
     pub fn purge_expired(&self) -> Result<usize, FrameworkError> {
         let mut store = self
             .store
@@ -235,23 +274,23 @@ impl InMemoryCache {
             .write()
             .map_err(|_| FrameworkError::internal("Tag index poisoned"))?;
 
-        let dead: Vec<(String, Vec<String>)> = store
-            .iter()
-            .filter(|(_, e)| e.is_expired())
-            .map(|(k, e)| (k.clone(), e.tags.iter().cloned().collect()))
-            .collect();
-        let removed = dead.len();
-        for (k, tags) in dead {
-            store.remove(&k);
-            for t in &tags {
+        let now = Instant::now();
+        let mut removed = 0;
+        store.retain(|k, e| {
+            if !e.expires_at.is_some_and(|t| now > t) {
+                return true;
+            }
+            for t in &e.tags {
                 if let Some(set) = idx.get_mut(t) {
-                    set.remove(&k);
+                    set.remove(k);
                     if set.is_empty() {
                         idx.remove(t);
                     }
                 }
             }
-        }
+            removed += 1;
+            false
+        });
         Ok(removed)
     }
 

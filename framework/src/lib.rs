@@ -87,6 +87,7 @@ pub mod pagination;
 pub mod payments;
 pub mod prelude;
 pub mod process;
+pub mod profiling;
 pub mod queue;
 pub mod rate_limit;
 pub mod rbac;

@@ -59,6 +59,29 @@ pub use morph_registry::{MorphTypeEntry, find_morph_type, find_morph_type_by_id,
 pub use morph_to_many::{MorphToMany, MorphedByMany};
 pub use through::{HasManyThrough, HasOneThrough};
 
+/// One column of a row, for the keys the `#[suprnova::model]` eager
+/// loaders group related rows by. Not part of the public API.
+///
+/// `field` is what the row's
+/// [`Model::field_value`](crate::eloquent::Model::field_value) returned for
+/// `column`, the generated code's own call: it serializes that field
+/// alone. Serializing the whole row to read one key copied every row's
+/// every column on every eager load. Only when `field_value` does not know
+/// the column, on a model not built by the macro or a raw-identifier field
+/// serde names differently, is the whole row serialized, which gives what
+/// the loaders always read.
+#[doc(hidden)]
+pub fn eager_row_column<T: serde::Serialize>(
+    row: &T,
+    field: Option<serde_json::Value>,
+    column: &str,
+) -> Option<serde_json::Value> {
+    field.or_else(|| match serde_json::to_value(row) {
+        Ok(serde_json::Value::Object(mut map)) => map.remove(column),
+        _ => None,
+    })
+}
+
 // Domain 8 audit D8-A - SQL identifier contract (security).
 //
 // Every relation kind extends the same trust model as the core

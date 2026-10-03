@@ -28,6 +28,7 @@ async fn store_put_raw_none_ttl_means_no_expiration_in_memory() {
         url: "unused".into(),
         prefix: "test-forever:".into(),
         default_ttl: 1,
+        sweep_interval: 0,
     };
     let store: Arc<dyn CacheStore> = Arc::new(InMemoryCache::with_config(&config));
 
@@ -58,6 +59,7 @@ async fn store_exposes_default_ttl_for_facade_consumption() {
         url: "unused".into(),
         prefix: "test-default:".into(),
         default_ttl: 42,
+        sweep_interval: 0,
     };
     let store: Arc<dyn CacheStore> = Arc::new(InMemoryCache::with_config(&config));
     assert_eq!(store.default_ttl(), Some(Duration::from_secs(42)));

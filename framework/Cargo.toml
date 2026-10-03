@@ -233,6 +233,9 @@ oxideav-webp = { version = "=0.2.3", optional = true }
 oxideav-gif = { version = "=0.0.11", optional = true }
 oxideav-bmp = { version = "=0.1.6", optional = true }
 crypto_secretbox = "0.1.1"
+# Heap profiling behind `heap-profiling`; see `src/profiling.rs`. The
+# allocation tests also use it as a dev-dependency.
+dhat = { version = "0.3", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # Signals for the Process facade: a kill reaches the process group a
@@ -392,6 +395,12 @@ broadcasting-fanout = []
 # with it. Dropping that SDK removed all four; see the driver's module
 # docs and `manual/vector.md`.
 vector-pinecone = []
+# Heap profiling for an administrator measuring a deployment's memory:
+# installs dhat's allocator for the whole process, and `#[suprnova::main]`
+# writes the profile when the process ends normally. Off by default,
+# because dhat's allocator records a backtrace for every allocation and
+# slows the process it measures. See `manual/deployment.md`.
+heap-profiling = ["dep:dhat"]
 
 [dev-dependencies]
 # Heap profiling for the allocation tests (MEM-001 to MEM-005).
