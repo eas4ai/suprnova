@@ -112,13 +112,17 @@ fn read_confirmation_from_stdin() -> Result<String, String> {
 }
 
 /// Hand the drop-and-migrate over to the project's own binary.
-fn spawn_migrator() -> Result<(), String> {
-    let status = crate::commands::cargo_run(&["migrate:fresh"]).status();
+fn spawn_migrator(schema_path: Option<&str>) -> Result<(), String> {
+    let mut args = vec!["migrate:fresh"];
+    if let Some(path) = schema_path {
+        args.extend(["--schema-path", path]);
+    }
+    let status = crate::commands::cargo_run(&args).status();
 
     interpret_cargo_status(status, "migrate:fresh", false)
 }
 
-pub fn run(force: bool) {
+pub fn run(force: bool, schema_path: Option<String>) {
     // Load `.env` so APP_ENV resolves to what the app itself would see.
     let _ = dotenvy::dotenv();
     let app_env = std::env::var("APP_ENV").unwrap_or_else(|_| "local".to_string());
@@ -130,7 +134,9 @@ pub fn run(force: bool) {
         stdin_is_tty: std::io::stdin().is_terminal(),
     };
 
-    let result = run_inner(&ctx, &mut read_confirmation_from_stdin, &mut spawn_migrator);
+    let result = run_inner(&ctx, &mut read_confirmation_from_stdin, &mut || {
+        spawn_migrator(schema_path.as_deref())
+    });
 
     if let Err(e) = result {
         ui::error(&e);

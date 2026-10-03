@@ -30,6 +30,7 @@ pub mod queue_failed;
 pub mod schedule_list;
 pub mod schedule_run;
 pub mod schedule_work;
+pub mod schema_dump;
 pub mod serve;
 pub mod ssr_check;
 pub mod ssr_start;

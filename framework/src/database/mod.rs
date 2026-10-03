@@ -90,6 +90,7 @@ pub mod __macro_support {
 }
 pub mod query_builder;
 pub mod route_binding;
+pub mod schema_dump;
 pub mod testing;
 pub mod transaction;
 
@@ -110,6 +111,7 @@ pub use model::{EntityExt, EntityExtMut};
 pub use monitor::ConnectionCount;
 pub use query_builder::QueryBuilder;
 pub use route_binding::{AutoRouteBinding, RouteBinding, RouteParam};
+pub use schema_dump::{PrunedMigration, SchemaDump};
 pub use testing::TestDatabase;
 pub use transaction::{Transaction, TxHandle};
 
