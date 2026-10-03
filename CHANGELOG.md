@@ -4,7 +4,7 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
-## 3.0.0 - 2026-09-29
+## 3.1.0 - 2026-10-03
 
 ### Added
 
@@ -342,6 +342,257 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   code is outside that transaction. This landed on main after the `v3.0.0`
   tag (#128).
 
+### Changed
+
+- **Less memory for the same work.** Model events are built only when a
+  listener, a fake or a deferral will see them, so a query no longer
+  copies every row it reads for a `Retrieved` event nobody hears. Eager
+  loading reads each key from its field instead of serializing the whole
+  row, and a runtime cast converts its column where it sits. The first
+  Inertia page is written into one buffer, a file download reads each
+  chunk straight into the bytes it sends, a body sent in several frames
+  is held at its length, CORS path patterns are compiled once per
+  configuration, and a broadcast's last channel takes the payload instead
+  of a copy. A queue job receives its envelope's payload, the SQS driver
+  parses a message once, sends a retried request's bytes without copying
+  them and holds a reservation's body rather than a second envelope.
+  `Context::push`, image transformations and encoding, filesystem
+  `append` and `prepend`, `Collection::pluck`, the in-memory vector search,
+  the feature-flag snapshot, Mailgun's form, composite render-cache shells
+  and the docs builder each keep or copy less. A process result holds its
+  output once when the output is valid UTF-8. In the Live engine a mount
+  no longer copies its signed snapshot, action arguments are kept once,
+  a full upload read returns the store's bytes, and the resource queue
+  compacts in place. The Live browser runtime reads a server-sent event
+  stream without copying what it already holds for every chunk, and an
+  upload control response no longer allocates 16 KiB. Magnetar writes hex
+  into one buffer, and its single-flight map holds a key only while a
+  caller holds or waits on it. Every response, file, digest and snapshot
+  is byte for byte what it was.
+- **`CacheConfig` has a `sweep_interval` field.** Code that builds a
+  `CacheConfig` as a struct literal has to set it, or use
+  `CacheConfig::builder()`, which defaults it to 60.
+- **`DynCast` has a `from_storage_json_owned` method** that converts a
+  stored value the caller no longer needs. Its default calls
+  `from_storage_json`; a cast whose in-memory value is the stored value
+  returns it without copying.
+
+### Fixed
+
+- **Workers wait for their queued listeners.** `queue:work`,
+  `schedule:work` and `workflow:work` now wait, up to ten seconds, for the
+  queued event listeners still running when they stop, as the server
+  does, and `schedule:run` does once its tasks have run; returning dropped
+  them part way.
+- **`Cache::bootstrap` keeps the cache store the application bound**, as
+  the localization chapter says it does, instead of replacing it at boot.
+- **The event dispatcher forgets its finished queued listeners** as it
+  starts new ones; it kept every one until shutdown.
+- **`DB::flush_query_log` releases the log's buffer** rather than keeping
+  its capacity.
+- **The in-memory vector search no longer panics on a NaN score**; such
+  an item ranks below every other.
+- **A `#[json_resource]` keeps its attributes in declaration order** when
+  it drops a missing one; the last attribute used to move into its place.
+- **The brute-force lockout map sweeps once each time it doubles.** With
+  more than 1,024 current lockouts it swept on every new lockout.
+- **The toast region lets go of toasts a morph removed**, which it timed
+  and later dismissed for the life of the page, and resumes its timers
+  when the focused toast is removed or the pointer has left it without the
+  region hearing it.
+- **The Live browser runtime reads a network chunk larger than one record**
+  when the chunk holds only complete records; it ended the stream.
+
+- **The Live chart follows the document's theme.** `render_chart` drew its
+  SVG with charts-rs's light theme, a white background and fixed colors and
+  font, so in a dark document the chart showed as a white box. The SVG now
+  has a transparent background and no color or font of its own: its text,
+  axis, grid and series carry classes that the chart component's
+  stylesheet colors from `--sn-` tokens, and the chart's text takes the
+  `--sn-font-sans` font. Series take the new `--sn-color-chart-1` to
+  `--sn-color-chart-6` palette in order, defined for light and dark and
+  mapped in the Tailwind preset, and a seventh series starts the palette
+  again. An application that vendored the chart keeps its old stylesheet,
+  which has no rule for these classes, so every series, axis and grid line
+  draws in the text color. Run `suprnova live:add chart` to take the fix
+  into it. This fix landed on main after the `v3.0.0` tag.
+- **A cached render whose COMMIT fails answers 500 without a panic.** When
+  a cache-miss render's handler ran and the database then refused the
+  render transaction's COMMIT (a deferred constraint, a dropped
+  connection), the render cache took the failure for a transaction that
+  never opened: a debug build panicked, and the log said nothing about the
+  commit. It now logs the database error under `suprnova::database` and
+  answers the same 500, because the handler's writes rolled back and the
+  rendered page would claim they landed. A render transaction that cannot
+  open still renders uncached, as before. This fix landed on main after the
+  `v3.0.0` tag.
+- **A savepoint can be named with a reserved word.** `tx.savepoint("inner")`
+  failed with a syntax error on PostgreSQL and MySQL, because the validated
+  name went into the statement unquoted. Savepoint names are now quoted for
+  the backend; they stay case-insensitive. This fix landed on main after the
+  `v3.0.0` tag.
+- **The sync queue driver runs a whole chain.** `SyncQueueDriver` ran a
+  chain's first job and dropped every later link. It now runs the chain
+  inline, link by link, as Laravel's sync queue does; a link that fails
+  returns its error and the rest of the chain does not run. This fix
+  landed on main after the `v3.0.0` tag.
+- **`authorize_resource` checks the user of the route's guard.** On a route
+  whose `AuthMiddleware` names a guard other than the default,
+  `authorize_resource` checked the default guard's user instead of the one
+  the route authenticated, so that user was refused. It now checks the
+  route guard's user, as Laravel's `can` middleware does. This fix landed
+  on main after the `v3.0.0` tag (#127).
+- **A cached page that reads through a raw fragment is never served
+  stale.** A `select_raw`, `where_raw`, `filter_raw` or `order_by_raw` on a
+  model query can read a table the query doesn't name, but the render
+  cache stored the page anyway, so a write to that table left it stale. A
+  query carrying a raw fragment now keeps the page out of the cache, as raw
+  `DB::select` does; the page is still served. A `select_raw` that is a
+  bare number, such as `select_raw("1")`, doesn't count. This fix landed
+  on main after the `v3.0.0` tag.
+- **A destructured route parameter binds.** A handler parameter written
+  `RouteParam(user): RouteParam<User>`, as the `RouteParam` docs show, looked
+  up a route parameter named `param` and answered 400 to every request. It
+  now reads the parameter its binding names, and a pattern with no single
+  binding is a compile error. This fix landed on main after the `v3.0.0` tag.
+- **SQLite rows keep computed columns.** An aggregate or `select_raw`
+  expression came back missing from `DB::table` and `DB::select` rows on
+  SQLite, because SQLite declares no type for a computed column. Such a
+  column is now read by its value's runtime type. This fix landed on main
+  after the `v3.0.0` tag.
+- **A union arm keeps its soft-delete and scope filters.** A union of model
+  queries rendered each arm's `WHERE` without its scopes, so soft-deleted
+  rows came back. This fix landed on main after the `v3.0.0` tag.
+- **A page cached from `where_has` sees writes to the related table.**
+  `has`, `where_has`, `doesnt_have` and `where_relation` did not record the
+  related or pivot table for the render cache, so a write there left the
+  cached page stale. This fix landed on main after the `v3.0.0` tag.
+- **The notifications table ships as a migration.** The manual said
+  `suprnova migrate` creates it, but the schema was a SQL file only the
+  framework's own tests loaded, so the database channel failed on its
+  first write in a fresh app. Register
+  `suprnova::notifications::migrations::CreateNotificationsTable` in your
+  `Migrator`: it creates the same table and indexes, and running it over a
+  table you created by hand from the old SQL file is safe on every engine.
+  The SQL file is gone. This fix landed on main after the `v3.0.0` tag
+  (#134).
+- **Nullable JSON columns have casts.** `AsJson`, `AsArray`, `AsObject`,
+  `AsCollection` and `AsArrayObject` store a non-null string, so
+  `AsJson<Option<T>>` wrote the text `null` instead of SQL `NULL`, and a
+  row whose column was `NULL` failed to load. `AsOptionalJson`,
+  `AsOptionalArray`, `AsOptionalObject`, `AsOptionalCollection` and
+  `AsOptionalArrayObject` map `None` to `NULL` and back, and store a value
+  exactly as their non-optional cast does. This fix landed on main after
+  the `v3.0.0` tag (#133).
+- **`SESSION_TABLE` names the session table.** `SessionConfig::table_name`
+  was read and then ignored: the database session driver always used
+  `sessions`. The driver now reads and writes the configured table,
+  `DatabaseSessionDriver::with_table` builds one over another table, and
+  `Config::init` refuses a name that is not 1 to 63 ASCII letters, digits
+  or underscores starting with a letter or underscore. What you have to
+  change: an app that already set `SESSION_TABLE` now stores its sessions
+  in that table, which its migration must create, and an empty
+  `SESSION_TABLE` now fails boot. The driver also stops logging a session
+  id when it skips a write, and the content of a stored payload it cannot
+  parse. This fix landed on main after the `v3.0.0` tag (#132).
+- **Re-running a framework migration no longer fails on an existing index.**
+  The workflow and RenderCache migrations relied on `IF NOT EXISTS`, which
+  MySQL and MariaDB drop from `CREATE INDEX`, and the payments, features and
+  RBAC migrations created their indexes without it, so running one over
+  tables that already existed failed with a duplicate index and blocked
+  every migration after it. Each framework migration now creates an index
+  only when it is missing, with the same columns and uniqueness as before.
+  This fix landed on main after the `v3.0.0` tag (#136).
+- **A `Data` object with a route-parameter field answers 422 for a body
+  that does not fit.** Its extractor answered 400 where the default
+  extractor answers 422 for the same malformed or unknown-key body. This
+  fix landed on main after the `v3.0.0` tag.
+- **A `Data` field may be named `key` or `map`.** The generated
+  `Deserialize` named its locals after the fields, so such a field
+  shadowed the visitor's own variables and the struct failed to compile.
+  This fix landed on main after the `v3.0.0` tag.
+- **`has`, `where_has` and `where_relation` work through a `BelongsTo`
+  relation.** The existence query compared the related table's key with
+  the foreign key as if the relation were a `HasMany`, so every existence
+  query through a `BelongsTo` failed with an unknown column. It now joins
+  the related row's owner key to the parent's foreign key. This fix landed
+  on main after the `v3.0.0` tag.
+- **A model declared beside `use sea_orm_migration::prelude::*` compiles.**
+  That prelude brings `ExprTrait` into scope, whose `max` and `is_null`
+  took over calls the `#[model]` macro emitted for relation counts and
+  `MorphTo` relations. The macro now names those methods by path. This fix
+  landed on main after the `v3.0.0` tag.
+- **Persisting a replica stamps its timestamps.** `replicate` resets
+  `created_at` and `updated_at` for the insert to fill, but `persist`
+  wrote them as built: 1970-01-01, or NULL for an optional field. It now
+  stamps a timestamp its builder left unset, as `create` does, and keeps
+  one the builder set, so a factory can still backdate a row. This fix
+  landed on main after the `v3.0.0` tag.
+- **Touching an owner writes the owner's own date-time storage.** The
+  `touches` cascade bound the time as RFC 3339 text whatever the owner's
+  `updated_at` cast stored, which Postgres refuses for a native date-time
+  column. It now stores the time through the owner's cast. This fix landed
+  on main after the `v3.0.0` tag.
+- **The temporal casts' documentation said Postgres accepts RFC 3339 text
+  for a native column.** It refuses a text parameter for `timestamp` and
+  `timestamp with time zone`; the module documentation now says so and
+  points to the native casts. This fix landed on main after the `v3.0.0`
+  tag.
+- **`Unique` and `Exists` keep database errors out of the response.** A
+  database rule that could not run returned the driver's error as its
+  validation message, and a validation message is rendered into the 422
+  body, so a client could read table names, column types and SQL. The rule
+  now logs the cause under the `suprnova::validation` target and fails the
+  field with `validation-unchecked`. This fix landed on main after the
+  `v3.0.0` tag.
+- **Precognition keeps the errors of an array's elements.** A
+  `Precognition-Validate-Only` header naming `tag_ids` dropped the errors
+  reported under `tag_ids.0`, `tag_ids.1` and so on, so a form validating
+  the field saw success for an invalid array. A field now keeps the errors
+  nested under it, and `tag_ids.*` matches the elements as Laravel's rule
+  key does. This fix landed on main after the `v3.0.0` tag.
+- **The date picker, upload, account menu and notification bell follow the
+  theme.** Their stylesheets read `--sn-color-accent` and
+  `--sn-color-on-accent`, which the token stylesheet never defined, so the
+  selected day, the upload progress bar, the avatar and the unread count fell
+  back to inherited colors and ignored every theme. The token stylesheet now
+  defines both, from `--sn-color-primary` and `--sn-color-primary-contrast`,
+  and the Tailwind preset maps them as `accent` and `on-accent`. An
+  application that vendored these components with `live:add` needs no change:
+  the framework serves the corrected stylesheet. This fix landed on main after
+  the `v3.0.0` tag.
+- **A first `live:model` edit on a public seed promotes it.** The browser
+  runtime sends an immediate `live:model` edit on a public-seed island as a
+  model synchronization with no action, and the action endpoint promoted a seed
+  only for an action, so the first keystroke in such an island answered `500`.
+  The endpoint now promotes the seed on that request, applies the proposals as
+  it does on an instance, and runs no action. This fix landed on main after the
+  `v3.0.0` tag.
+- **The date picker's "Pick the parts" toggle no longer looks like a second
+  field.** The base layer draws every `details` as a bordered surface for the
+  collapsible, and the date picker's disclosure inherited it, so an empty box
+  sat under the date input. The disclosure is now a plain toggle; the year,
+  month and day strips keep their borders. Run `suprnova live:add date-picker`
+  to take the fix into an application that vendored the component. This fix
+  landed on main after the `v3.0.0` tag.
+- **`suprnova generate-types` names and omits plain-struct keys the way serde
+  does.** A struct a prop reaches that derives serde's `Serialize` sends the
+  keys its `#[serde(...)]` attributes give it, but the generator declared every
+  field under its Rust name. It now leaves out `skip` and `skip_serializing`
+  fields, declares `skip_serializing_if` fields optional, names keys by
+  `rename` and `rename_all` (and their `serialize = ...` forms), and drops the
+  `r#` of a raw identifier. Other serde attributes, such as `flatten` and
+  `transparent`, are still not read. A key that is not an identifier is now
+  quoted, which also makes a raw identifier on a derived struct valid
+  TypeScript (`"r#type"`, the key its derive sends). `#[derive(Data)]` and
+  `#[derive(InertiaProps)]` structs keep their Rust names: their own
+  `Serialize` never reads `#[serde(...)]`. This fix landed on main after the
+  `v3.0.0` tag.
+
+## 3.0.0 - 2026-09-29
+
+### Added
+
 - **`FrameworkError::Timeout` tells a passed deadline from a failure.**
   `WorkflowHandle::wait_with_timeout` documented a timeout error that did not
   exist and returned `FrameworkError::Internal`, so a caller could not tell a
@@ -561,8 +812,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   configuration for a disk with a name of your own, and
   `filesystem::bootstrap_from_env()` is the function the server calls; the
   console binary boots no driver of the environment, so an application whose
-  commands use the disk calls it in its own bootstrap, after it registers its
-  disks. `FILESYSTEM_DISK` names the default disk; see the entry above.
+  commands use the disk calls it in its own bootstrap. There is still no
+  default disk, and `FILESYSTEM_DISK` is not read.
 - **`Storage::url(disk, path)` returns the public URL of a file.** Storage had
   presigned links that expire, `temporary_url` and `temporary_upload_url`, and
   nothing for a file that is meant to be public, so applications built those
@@ -882,39 +1133,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
-- **Less memory for the same work.** Model events are built only when a
-  listener, a fake or a deferral will see them, so a query no longer
-  copies every row it reads for a `Retrieved` event nobody hears. Eager
-  loading reads each key from its field instead of serializing the whole
-  row, and a runtime cast converts its column where it sits. The first
-  Inertia page is written into one buffer, a file download reads each
-  chunk straight into the bytes it sends, a body sent in several frames
-  is held at its length, CORS path patterns are compiled once per
-  configuration, and a broadcast's last channel takes the payload instead
-  of a copy. A queue job receives its envelope's payload, the SQS driver
-  parses a message once, sends a retried request's bytes without copying
-  them and holds a reservation's body rather than a second envelope.
-  `Context::push`, image transformations and encoding, filesystem
-  `append` and `prepend`, `Collection::pluck`, the in-memory vector search,
-  the feature-flag snapshot, Mailgun's form, composite render-cache shells
-  and the docs builder each keep or copy less. A process result holds its
-  output once when the output is valid UTF-8. In the Live engine a mount
-  no longer copies its signed snapshot, action arguments are kept once,
-  a full upload read returns the store's bytes, and the resource queue
-  compacts in place. The Live browser runtime reads a server-sent event
-  stream without copying what it already holds for every chunk, and an
-  upload control response no longer allocates 16 KiB. Magnetar writes hex
-  into one buffer, and its single-flight map holds a key only while a
-  caller holds or waits on it. Every response, file, digest and snapshot
-  is byte for byte what it was.
-- **`CacheConfig` has a `sweep_interval` field.** Code that builds a
-  `CacheConfig` as a struct literal has to set it, or use
-  `CacheConfig::builder()`, which defaults it to 60.
-- **`DynCast` has a `from_storage_json_owned` method** that converts a
-  stored value the caller no longer needs. Its default calls
-  `from_storage_json`; a cast whose in-memory value is the stored value
-  returns it without copying.
-
 - **Magnetar's `CeremonyStore` takes a named request for its atomic
   transition.** `transition_and_consume` and `transition_and_consume_exact`
   took six and seven positional strings, so a transposed selector or state
@@ -1148,215 +1366,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
-- **Workers wait for their queued listeners.** `queue:work`,
-  `schedule:work` and `workflow:work` now wait, up to ten seconds, for the
-  queued event listeners still running when they stop, as the server
-  does, and `schedule:run` does once its tasks have run; returning dropped
-  them part way.
-- **`Cache::bootstrap` keeps the cache store the application bound**, as
-  the localization chapter says it does, instead of replacing it at boot.
-- **The event dispatcher forgets its finished queued listeners** as it
-  starts new ones; it kept every one until shutdown.
-- **`DB::flush_query_log` releases the log's buffer** rather than keeping
-  its capacity.
-- **The in-memory vector search no longer panics on a NaN score**; such
-  an item ranks below every other.
-- **A `#[json_resource]` keeps its attributes in declaration order** when
-  it drops a missing one; the last attribute used to move into its place.
-- **The brute-force lockout map sweeps once each time it doubles.** With
-  more than 1,024 current lockouts it swept on every new lockout.
-- **The toast region lets go of toasts a morph removed**, which it timed
-  and later dismissed for the life of the page, and resumes its timers
-  when the focused toast is removed or the pointer has left it without the
-  region hearing it.
-- **The Live browser runtime reads a network chunk larger than one record**
-  when the chunk holds only complete records; it ended the stream.
-
-- **The Live chart follows the document's theme.** `render_chart` drew its
-  SVG with charts-rs's light theme, a white background and fixed colors and
-  font, so in a dark document the chart showed as a white box. The SVG now
-  has a transparent background and no color or font of its own: its text,
-  axis, grid and series carry classes that the chart component's
-  stylesheet colors from `--sn-` tokens, and the chart's text takes the
-  `--sn-font-sans` font. Series take the new `--sn-color-chart-1` to
-  `--sn-color-chart-6` palette in order, defined for light and dark and
-  mapped in the Tailwind preset, and a seventh series starts the palette
-  again. An application that vendored the chart keeps its old stylesheet,
-  which has no rule for these classes, so every series, axis and grid line
-  draws in the text color. Run `suprnova live:add chart` to take the fix
-  into it. This fix landed on main after the `v3.0.0` tag.
-- **A cached render whose COMMIT fails answers 500 without a panic.** When
-  a cache-miss render's handler ran and the database then refused the
-  render transaction's COMMIT (a deferred constraint, a dropped
-  connection), the render cache took the failure for a transaction that
-  never opened: a debug build panicked, and the log said nothing about the
-  commit. It now logs the database error under `suprnova::database` and
-  answers the same 500, because the handler's writes rolled back and the
-  rendered page would claim they landed. A render transaction that cannot
-  open still renders uncached, as before. This fix landed on main after the
-  `v3.0.0` tag.
-- **A savepoint can be named with a reserved word.** `tx.savepoint("inner")`
-  failed with a syntax error on PostgreSQL and MySQL, because the validated
-  name went into the statement unquoted. Savepoint names are now quoted for
-  the backend; they stay case-insensitive. This fix landed on main after the
-  `v3.0.0` tag.
-- **The sync queue driver runs a whole chain.** `SyncQueueDriver` ran a
-  chain's first job and dropped every later link. It now runs the chain
-  inline, link by link, as Laravel's sync queue does; a link that fails
-  returns its error and the rest of the chain does not run. This fix
-  landed on main after the `v3.0.0` tag.
-- **`authorize_resource` checks the user of the route's guard.** On a route
-  whose `AuthMiddleware` names a guard other than the default,
-  `authorize_resource` checked the default guard's user instead of the one
-  the route authenticated, so that user was refused. It now checks the
-  route guard's user, as Laravel's `can` middleware does. This fix landed
-  on main after the `v3.0.0` tag (#127).
-- **A cached page that reads through a raw fragment is never served
-  stale.** A `select_raw`, `where_raw`, `filter_raw` or `order_by_raw` on a
-  model query can read a table the query doesn't name, but the render
-  cache stored the page anyway, so a write to that table left it stale. A
-  query carrying a raw fragment now keeps the page out of the cache, as raw
-  `DB::select` does; the page is still served. A `select_raw` that is a
-  bare number, such as `select_raw("1")`, doesn't count. This fix landed
-  on main after the `v3.0.0` tag.
-- **A destructured route parameter binds.** A handler parameter written
-  `RouteParam(user): RouteParam<User>`, as the `RouteParam` docs show, looked
-  up a route parameter named `param` and answered 400 to every request. It
-  now reads the parameter its binding names, and a pattern with no single
-  binding is a compile error. This fix landed on main after the `v3.0.0` tag.
-- **SQLite rows keep computed columns.** An aggregate or `select_raw`
-  expression came back missing from `DB::table` and `DB::select` rows on
-  SQLite, because SQLite declares no type for a computed column. Such a
-  column is now read by its value's runtime type. This fix landed on main
-  after the `v3.0.0` tag.
-- **A union arm keeps its soft-delete and scope filters.** A union of model
-  queries rendered each arm's `WHERE` without its scopes, so soft-deleted
-  rows came back. This fix landed on main after the `v3.0.0` tag.
-- **A page cached from `where_has` sees writes to the related table.**
-  `has`, `where_has`, `doesnt_have` and `where_relation` did not record the
-  related or pivot table for the render cache, so a write there left the
-  cached page stale. This fix landed on main after the `v3.0.0` tag.
-- **The notifications table ships as a migration.** The manual said
-  `suprnova migrate` creates it, but the schema was a SQL file only the
-  framework's own tests loaded, so the database channel failed on its
-  first write in a fresh app. Register
-  `suprnova::notifications::migrations::CreateNotificationsTable` in your
-  `Migrator`: it creates the same table and indexes, and running it over a
-  table you created by hand from the old SQL file is safe on every engine.
-  The SQL file is gone. This fix landed on main after the `v3.0.0` tag
-  (#134).
-- **Nullable JSON columns have casts.** `AsJson`, `AsArray`, `AsObject`,
-  `AsCollection` and `AsArrayObject` store a non-null string, so
-  `AsJson<Option<T>>` wrote the text `null` instead of SQL `NULL`, and a
-  row whose column was `NULL` failed to load. `AsOptionalJson`,
-  `AsOptionalArray`, `AsOptionalObject`, `AsOptionalCollection` and
-  `AsOptionalArrayObject` map `None` to `NULL` and back, and store a value
-  exactly as their non-optional cast does. This fix landed on main after
-  the `v3.0.0` tag (#133).
-- **`SESSION_TABLE` names the session table.** `SessionConfig::table_name`
-  was read and then ignored: the database session driver always used
-  `sessions`. The driver now reads and writes the configured table,
-  `DatabaseSessionDriver::with_table` builds one over another table, and
-  `Config::init` refuses a name that is not 1 to 63 ASCII letters, digits
-  or underscores starting with a letter or underscore. What you have to
-  change: an app that already set `SESSION_TABLE` now stores its sessions
-  in that table, which its migration must create, and an empty
-  `SESSION_TABLE` now fails boot. The driver also stops logging a session
-  id when it skips a write, and the content of a stored payload it cannot
-  parse. This fix landed on main after the `v3.0.0` tag (#132).
-- **Re-running a framework migration no longer fails on an existing index.**
-  The workflow and RenderCache migrations relied on `IF NOT EXISTS`, which
-  MySQL and MariaDB drop from `CREATE INDEX`, and the payments, features and
-  RBAC migrations created their indexes without it, so running one over
-  tables that already existed failed with a duplicate index and blocked
-  every migration after it. Each framework migration now creates an index
-  only when it is missing, with the same columns and uniqueness as before.
-  This fix landed on main after the `v3.0.0` tag (#136).
-- **A `Data` object with a route-parameter field answers 422 for a body
-  that does not fit.** Its extractor answered 400 where the default
-  extractor answers 422 for the same malformed or unknown-key body. This
-  fix landed on main after the `v3.0.0` tag.
-- **A `Data` field may be named `key` or `map`.** The generated
-  `Deserialize` named its locals after the fields, so such a field
-  shadowed the visitor's own variables and the struct failed to compile.
-  This fix landed on main after the `v3.0.0` tag.
-- **`has`, `where_has` and `where_relation` work through a `BelongsTo`
-  relation.** The existence query compared the related table's key with
-  the foreign key as if the relation were a `HasMany`, so every existence
-  query through a `BelongsTo` failed with an unknown column. It now joins
-  the related row's owner key to the parent's foreign key. This fix landed
-  on main after the `v3.0.0` tag.
-- **A model declared beside `use sea_orm_migration::prelude::*` compiles.**
-  That prelude brings `ExprTrait` into scope, whose `max` and `is_null`
-  took over calls the `#[model]` macro emitted for relation counts and
-  `MorphTo` relations. The macro now names those methods by path. This fix
-  landed on main after the `v3.0.0` tag.
-- **Persisting a replica stamps its timestamps.** `replicate` resets
-  `created_at` and `updated_at` for the insert to fill, but `persist`
-  wrote them as built: 1970-01-01, or NULL for an optional field. It now
-  stamps a timestamp its builder left unset, as `create` does, and keeps
-  one the builder set, so a factory can still backdate a row. This fix
-  landed on main after the `v3.0.0` tag.
-- **Touching an owner writes the owner's own date-time storage.** The
-  `touches` cascade bound the time as RFC 3339 text whatever the owner's
-  `updated_at` cast stored, which Postgres refuses for a native date-time
-  column. It now stores the time through the owner's cast. This fix landed
-  on main after the `v3.0.0` tag.
-- **The temporal casts' documentation said Postgres accepts RFC 3339 text
-  for a native column.** It refuses a text parameter for `timestamp` and
-  `timestamp with time zone`; the module documentation now says so and
-  points to the native casts. This fix landed on main after the `v3.0.0`
-  tag.
-- **`Unique` and `Exists` keep database errors out of the response.** A
-  database rule that could not run returned the driver's error as its
-  validation message, and a validation message is rendered into the 422
-  body, so a client could read table names, column types and SQL. The rule
-  now logs the cause under the `suprnova::validation` target and fails the
-  field with `validation-unchecked`. This fix landed on main after the
-  `v3.0.0` tag.
-- **Precognition keeps the errors of an array's elements.** A
-  `Precognition-Validate-Only` header naming `tag_ids` dropped the errors
-  reported under `tag_ids.0`, `tag_ids.1` and so on, so a form validating
-  the field saw success for an invalid array. A field now keeps the errors
-  nested under it, and `tag_ids.*` matches the elements as Laravel's rule
-  key does. This fix landed on main after the `v3.0.0` tag.
-- **The date picker, upload, account menu and notification bell follow the
-  theme.** Their stylesheets read `--sn-color-accent` and
-  `--sn-color-on-accent`, which the token stylesheet never defined, so the
-  selected day, the upload progress bar, the avatar and the unread count fell
-  back to inherited colors and ignored every theme. The token stylesheet now
-  defines both, from `--sn-color-primary` and `--sn-color-primary-contrast`,
-  and the Tailwind preset maps them as `accent` and `on-accent`. An
-  application that vendored these components with `live:add` needs no change:
-  the framework serves the corrected stylesheet. This fix landed on main after
-  the `v3.0.0` tag.
-- **A first `live:model` edit on a public seed promotes it.** The browser
-  runtime sends an immediate `live:model` edit on a public-seed island as a
-  model synchronization with no action, and the action endpoint promoted a seed
-  only for an action, so the first keystroke in such an island answered `500`.
-  The endpoint now promotes the seed on that request, applies the proposals as
-  it does on an instance, and runs no action. This fix landed on main after the
-  `v3.0.0` tag.
-- **The date picker's "Pick the parts" toggle no longer looks like a second
-  field.** The base layer draws every `details` as a bordered surface for the
-  collapsible, and the date picker's disclosure inherited it, so an empty box
-  sat under the date input. The disclosure is now a plain toggle; the year,
-  month and day strips keep their borders. Run `suprnova live:add date-picker`
-  to take the fix into an application that vendored the component. This fix
-  landed on main after the `v3.0.0` tag.
-- **`suprnova generate-types` names and omits plain-struct keys the way serde
-  does.** A struct a prop reaches that derives serde's `Serialize` sends the
-  keys its `#[serde(...)]` attributes give it, but the generator declared every
-  field under its Rust name. It now leaves out `skip` and `skip_serializing`
-  fields, declares `skip_serializing_if` fields optional, names keys by
-  `rename` and `rename_all` (and their `serialize = ...` forms), and drops the
-  `r#` of a raw identifier. Other serde attributes, such as `flatten` and
-  `transparent`, are still not read. A key that is not an identifier is now
-  quoted, which also makes a raw identifier on a derived struct valid
-  TypeScript (`"r#type"`, the key its derive sends). `#[derive(Data)]` and
-  `#[derive(InertiaProps)]` structs keep their Rust names: their own
-  `Serialize` never reads `#[serde(...)]`. This fix landed on main after the
-  `v3.0.0` tag.
 - **Magnetar logs a lockout status failure before the sign-in fails closed.**
   The password plugin answered `503` when the lockout store could not report
   an identity's status and logged nothing, while the failed-attempt path
