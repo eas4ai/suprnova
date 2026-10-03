@@ -38,6 +38,10 @@ that name, `default` included. A URL that is not a Redis URL is an error
 that names the connection, never the URL, since the URL may hold a
 password.
 
+For what a URL cannot say, such as TLS with certificates of your own or a
+server a Sentinel names, build the client with the re-exported `redis`
+crate and give it to `Redis::define_client(name, client)`.
+
 `Redis::connection(name)` returns the connection. Resolving it sends
 nothing: the connection opens on its first command, and opens again on its
 own after the server drops it. Every clone of a connection shares the one

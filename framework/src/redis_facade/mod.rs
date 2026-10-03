@@ -89,6 +89,15 @@ impl Redis {
         Ok(())
     }
 
+    /// Give the connection `name` a client you built yourself, for what a
+    /// URL cannot say: TLS with certificates of your own, or a server a
+    /// Sentinel names. Otherwise as [`define`](Self::define).
+    pub fn define_client(name: &str, client: redis::Client) {
+        let mut registry = registry();
+        registry.defined.insert(name.to_owned(), client);
+        registry.resolved.remove(name);
+    }
+
     /// The connection named `name`. Resolving it sends nothing: the
     /// connection opens on its first command.
     ///

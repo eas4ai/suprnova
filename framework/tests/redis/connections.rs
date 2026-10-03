@@ -294,3 +294,25 @@ fn a_connection_opens_again_on_the_next_runtime() {
         redis.del(&[key.as_str()]).await.unwrap();
     });
 }
+
+#[tokio::test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+async fn define_client_gives_a_connection_a_client_built_elsewhere() {
+    let name = unique("own-client");
+    let client = suprnova::redis::Client::open(url()).unwrap();
+    Redis::define_client(&name, client);
+    let redis = Redis::connection(&name).unwrap();
+    let key = unique("own-client-key");
+    redis.set(&key, "through the given client").await.unwrap();
+    assert_eq!(
+        redis.get(&key).await.unwrap().as_deref(),
+        Some("through the given client")
+    );
+    assert!(
+        client_info(&redis)
+            .await
+            .contains(&format!(" db={} ", database()))
+    );
+    redis.del(&[key.as_str()]).await.unwrap();
+}
