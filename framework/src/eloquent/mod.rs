@@ -90,7 +90,8 @@ pub trait EloquentModel: Sized {
     /// Column enum for this model (`<inner_mod>::Column`).
     type Column;
     /// The Rust type of this model's primary key - whatever
-    /// `#[model(key_type = "...")]` names (default `i64`).
+    /// `#[model(key_type = "...")]` names, by default the primary-key
+    /// field's type (`i64` when the struct has no such field).
     ///
     /// Declared on the trait rather than derived from the SeaORM entity
     /// so a terminal that projects the key can name the type the

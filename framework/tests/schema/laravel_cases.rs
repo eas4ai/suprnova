@@ -1118,19 +1118,52 @@ async fn integers(conn: &DatabaseConnection, table: &str, column: &str) -> Vec<O
 /// leaks off MySQL (sea-query would widen it on Postgres) or the key does
 /// not hold.
 pub async fn unsigned_keys_everywhere(conn: &DatabaseConnection) {
+    unsigned_keys(conn, false).await;
+}
+
+/// Turns `unsigned_ids` back off when a case ends, even on a panic.
+struct ResetUnsignedIds;
+
+impl Drop for ResetUnsignedIds {
+    fn drop(&mut self) {
+        suprnova::boot::set_unsigned_ids(false);
+    }
+}
+
+/// With `unsigned_ids = true` in the application's manifest, `id` and
+/// `foreign_id` make the columns `unsigned_id` and `unsigned_foreign_id`
+/// make, as Laravel's `id()` and `foreignId()` do: unsigned on MySQL only.
+/// It fails when the default does not reach either method. The flag is
+/// process-wide, so only the serial MySQL and Postgres runs call it.
+pub async fn unsigned_ids_default_everywhere(conn: &DatabaseConnection) {
+    suprnova::boot::set_unsigned_ids(true);
+    let _reset = ResetUnsignedIds;
+    unsigned_keys(conn, true).await;
+}
+
+async fn unsigned_keys(conn: &DatabaseConnection, by_default: bool) {
     let backend = conn.get_database_backend();
     let manager = SchemaManager::new(conn);
     drop_tables(conn, &["schema_uk_children", "schema_uk_parents"]).await;
     Schema::create(&manager, "schema_uk_parents", |t| {
-        t.unsigned_id();
+        if by_default {
+            t.id();
+        } else {
+            t.unsigned_id();
+        }
     })
     .await
     .expect("create schema_uk_parents");
     Schema::create(&manager, "schema_uk_children", |t| {
-        t.unsigned_id();
-        t.unsigned_foreign_id("parent_id")
-            .constrained("schema_uk_parents")
-            .cascade_on_delete();
+        if by_default {
+            t.id();
+            t.foreign_id("parent_id")
+        } else {
+            t.unsigned_id();
+            t.unsigned_foreign_id("parent_id")
+        }
+        .constrained("schema_uk_parents")
+        .cascade_on_delete();
     })
     .await
     .expect("create schema_uk_children");
@@ -1186,10 +1219,10 @@ pub struct SchemaUUser {
     pub name: String,
 }
 
-/// An order pointing at [`SchemaUUser`] through an unsigned key.
+/// An order pointing at [`SchemaUUser`] through an unsigned key. Its key
+/// type comes from the `id` field, with no `key_type`.
 #[model(
     table = "schema_u_orders",
-    key_type = "u64",
     fillable = ["schema_u_user_id", "status"],
     relations = {
         user: BelongsTo<SchemaUUser> { fk = "schema_u_user_id" },

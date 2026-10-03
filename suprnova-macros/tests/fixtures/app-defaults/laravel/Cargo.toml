@@ -1,0 +1,19 @@
+[package]
+name = "app-defaults-laravel"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+suprnova.workspace = true
+serde.workspace = true
+chrono.workspace = true
+sea-orm.workspace = true
+tokio.workspace = true
+
+# The defaults that read a database Laravel created on MySQL.
+[package.metadata.suprnova.model]
+datetime_cast = "native"
+
+[package.metadata.suprnova.schema]
+unsigned_ids = true

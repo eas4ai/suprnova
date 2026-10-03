@@ -27,10 +27,22 @@ pub mod prunable;
 mod relations;
 mod serialization;
 
-use parse::ModelInput;
+use parse::{ModelDefaults, ModelInput};
 
 pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
-    let mut input = ModelInput::parse(attr, item)?;
+    let (manifest, table) = crate::manifest::read("model")
+        .map_err(|message| syn::Error::new(proc_macro2::Span::call_site(), message))?;
+    let defaults = match &table {
+        Some(table) => ModelDefaults::from_table(table).map_err(|problem| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("[package.metadata.suprnova.model] in Cargo.toml: {problem}"),
+            )
+        })?,
+        None => ModelDefaults::default(),
+    };
+    let track_manifest = crate::manifest::track(manifest.as_deref());
+    let mut input = ModelInput::parse_with(attr, item, &defaults)?;
 
     // Inject derives on the user's struct itself. Without these, the
     // user-facing API breaks:
@@ -101,6 +113,8 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let observe_shim = observers::emit_per_model_observe_shim(struct_ident);
 
     Ok(quote! {
+        #track_manifest
+
         #struct_def
 
         #[allow(non_snake_case, non_camel_case_types, missing_docs)]

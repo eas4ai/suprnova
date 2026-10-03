@@ -232,8 +232,11 @@ month, date arithmetic, `NOW()` comparisons - work on it:
 | `AsOptionalNaiveDateTime` | `Option<DateTime<Utc>>` | the same, nullable |
 
 A `DateTime<Utc>` field defaults to `AsDateTime`, so declare these per
-field. The model's automatic timestamps, `touch()`, soft deletes and the
-touch of an owner all store through the declared cast.
+field, or make one the default for every model with `datetime_cast` in the
+application's `Cargo.toml` (see
+[Laravel's defaults for the whole application](migrations.md#laravels-defaults-for-the-whole-application)).
+The model's automatic timestamps, `touch()`, soft deletes and the touch of an
+owner all store through the declared cast.
 
 ```rust
 #[model(

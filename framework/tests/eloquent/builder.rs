@@ -892,11 +892,17 @@ async fn collection_model_keys_matches_the_builder_terminal() {
 }
 
 // A second model over the same physical table, deliberately declaring
-// its primary key as a TEXT column (`email`) while leaving `key_type`
-// at its default `i64`. `model_keys` has no way to notice that
+// its primary key as a TEXT column (`email`) while declaring
+// `key_type = "i64"`. Without `key_type` the key would follow the
+// `String` field; `model_keys` has no way to notice the declared
 // mismatch at compile time - the whole point of this fixture is to
 // drive the runtime decode path into failure.
-#[model(table = "t5_users", primary_key = "email", timestamps = false)]
+#[model(
+    table = "t5_users",
+    primary_key = "email",
+    key_type = "i64",
+    timestamps = false
+)]
 pub struct T5UserKeyedByEmail {
     pub id: i64,
     pub email: String,

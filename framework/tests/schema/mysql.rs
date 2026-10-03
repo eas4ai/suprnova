@@ -195,3 +195,10 @@ async fn mysql_action_shorthands() {
 async fn mysql_unsigned_keys_everywhere() {
     laravel_cases::unsigned_keys_everywhere(&connect_mysql().await).await;
 }
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_unsigned_ids_default_everywhere() {
+    laravel_cases::unsigned_ids_default_everywhere(&connect_mysql().await).await;
+}

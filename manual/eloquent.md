@@ -99,7 +99,7 @@ configuration.
 |-----------|------|---------|-------|
 | `table` | string | snake_case-plural of struct name | Override the table name |
 | `primary_key` | string | `"id"` | Override the PK column name |
-| `key_type` | type | `i64` | PK type - `String` for UUID, `i32` for legacy schemas |
+| `key_type` | type | the PK field's type, else `i64` | PK type - needed only when it differs from the field's |
 | `auto_increment` | bool | `true` | Disable for UUID PKs |
 | `connection` | string | `"default"` | Multi-connection apps name a non-default connection |
 | `fillable` | list of strings | (default = `guarded = ["id"]`) | Mass-assignment allowlist |

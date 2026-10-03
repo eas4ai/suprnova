@@ -1,0 +1,14 @@
+[package]
+name = "app-defaults-plain"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+suprnova.workspace = true
+serde.workspace = true
+chrono.workspace = true
+sea-orm.workspace = true
+tokio.workspace = true
+
+# No `[package.metadata.suprnova.*]` tables: today's defaults.
