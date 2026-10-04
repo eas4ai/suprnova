@@ -73,8 +73,8 @@ right-hand side, which covers `i64`, `String`, `&str`, `bool`, `f64`,
 column type the backend understands.
 
 A `u64` above `i64::MAX` compares as the number it is, whatever the
-column's type, so the count is the database's own count for the stored
-rows. Postgres has no unsigned integers, so it receives the value as a
+column's type, in a filter and in a raw fragment's bindings alike, so the
+count is the database's own count for the stored rows. Postgres has no unsigned integers, so it receives the value as a
 `numeric`: a `bigint` column matches no row, and a `numeric` or `double
 precision` column compares exactly. SQLite receives its digits and applies
 the column's affinity, as it does to a literal. MySQL receives an

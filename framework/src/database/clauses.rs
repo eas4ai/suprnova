@@ -398,11 +398,10 @@ fn render_condition(
             format!("{} IS {not}NULL", quote_identifier(backend, column))
         }
         Condition::Raw { sql, bindings } => {
-            let rendered = rewrite_raw_placeholders(backend, sql, bindings.len(), *n)?;
-            for value in bindings {
-                *n += 1;
-                values.push(exact(backend, value));
-            }
+            let bound: Vec<SeaValue> = bindings.iter().map(|value| exact(backend, value)).collect();
+            let rendered = rewrite_raw_placeholders(backend, sql, &bound, *n)?;
+            *n += bound.len();
+            values.extend(bound);
             rendered
         }
         Condition::Exists { query, negated } => {

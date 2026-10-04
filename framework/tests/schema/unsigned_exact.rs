@@ -80,9 +80,12 @@ async fn stored(conn: &DatabaseConnection, column: &str, label: &str) -> Option<
 /// Comparisons with a value above `i64::MAX` on a numeric, a double and an
 /// integer column through `DB::table`, a raw fragment and a model's own
 /// column give the engine's own count. On SQLite an INTEGER column can hold
-/// a REAL above `i64::MAX`, and the count includes it. It fails while the
-/// framework settles the comparison from the value alone, as if every
-/// column were a signed integer one.
+/// a REAL above `i64::MAX`, and the count includes it. A raw fragment
+/// whose text was sent before with an integer parameter still answers. It
+/// fails while the framework settles the comparison from the value alone,
+/// as if every column were a signed integer one, and on Postgres while a
+/// raw fragment's `numeric` parameter reuses the statement its text was
+/// first prepared as.
 pub async fn comparisons_match_the_engine(conn: &DatabaseConnection) {
     create_amounts(conn).await;
     let _guard = TestContainer::fake();
@@ -107,6 +110,17 @@ pub async fn comparisons_match_the_engine(conn: &DatabaseConnection) {
         .expect("insert a REAL into an INTEGER column");
     }
     let amounts = || DB::table("ux_amounts");
+    // A raw fragment's text, first sent with an integer parameter. A value
+    // above i64::MAX sent with the same text must not reuse that statement.
+    assert_eq!(
+        amounts()
+            .where_raw("small = ?", vec![Value::from(5i64)])
+            .count()
+            .await
+            .expect("a raw fragment of a small value"),
+        1,
+        "where_raw small = 5"
+    );
     let cases: Vec<(&str, u64, Result<u64, suprnova::FrameworkError>)> = vec![
         (
             "big = 18446744073709551615",
@@ -146,6 +160,14 @@ pub async fn comparisons_match_the_engine(conn: &DatabaseConnection) {
                 .count()
                 .await,
         ),
+        (
+            "where_raw small = ?, after small = 5",
+            truth(conn, "small = 18446744073709551615").await,
+            amounts()
+                .where_raw("small = ?", vec![Value::from(u64::MAX)])
+                .count()
+                .await,
+        ),
     ];
     for (condition, expected, framework) in cases {
         assert_eq!(
@@ -159,9 +181,11 @@ pub async fn comparisons_match_the_engine(conn: &DatabaseConnection) {
 }
 
 /// A model column of a joined table, which the model's binder does not
-/// know, compares with a value above `i64::MAX` as the engine does. It
-/// fails while the value binds as text, which Postgres refuses to compare
-/// with an integer column.
+/// know, compares with a value above `i64::MAX` as the engine does, and so
+/// does a raw fragment whose text was sent before with an integer
+/// parameter. It fails while the value binds as text, which Postgres
+/// refuses to compare with an integer column, and while Postgres reuses the
+/// raw fragment's integer statement for a `numeric` parameter.
 pub async fn a_joined_column_compares_as_the_engine_does(conn: &DatabaseConnection) {
     create_tables(conn).await;
     let _guard = TestContainer::fake();
@@ -175,6 +199,16 @@ pub async fn a_joined_column_compares_as_the_engine_does(conn: &DatabaseConnecti
             "uk_orders.uk_customer_id",
         )
     };
+    // The raw fragment's text, first sent with an integer parameter.
+    assert_eq!(
+        UkOrder::query()
+            .where_raw("quantity < ?", vec![5u64.into()])
+            .count()
+            .await
+            .expect("a raw fragment of a small value"),
+        1,
+        "where_raw 5"
+    );
     for beyond in BEYOND {
         assert_eq!(
             joined()

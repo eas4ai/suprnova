@@ -715,15 +715,29 @@ fn skip_dollar_quoted_sql(bytes: &[u8], start: usize) -> Option<usize> {
     Some(bytes.len())
 }
 
+/// `sql`, a raw fragment, with its bind markers in the statement's form:
+/// on Postgres each marker becomes its ordinal after `preceding_bindings`,
+/// and a marker whose value in `bindings` is a `numeric` is cast as
+/// `typed_placeholder` casts it, so a fragment whose text was sent before
+/// with an integer parameter does not reuse that statement.
 pub(crate) fn rewrite_raw_placeholders(
     backend: DbBackend,
     sql: &str,
-    binding_count: usize,
+    bindings: &[SeaValue],
     preceding_bindings: usize,
 ) -> Result<String, FrameworkError> {
-    if binding_count == 0 {
+    if bindings.is_empty() {
         return Ok(sql.to_owned());
     }
+    // The marker of the fragment's `local`-th (1-based) binding.
+    let marker = |local: usize| match bindings.get(local.saturating_sub(1)) {
+        Some(value) => crate::database::placeholder::typed_placeholder(
+            backend,
+            preceding_bindings + local,
+            value,
+        ),
+        None => placeholder(backend, preceding_bindings + local),
+    };
     let scan = scan_raw_placeholders(sql);
     let mut replacements = scan
         .escaped_questions
@@ -736,13 +750,7 @@ pub(crate) fn rewrite_raw_placeholders(
                 scan.portable
                     .iter()
                     .enumerate()
-                    .map(|(offset, position)| {
-                        Ok((
-                            *position,
-                            position + 1,
-                            placeholder(backend, preceding_bindings + offset + 1)?,
-                        ))
-                    })
+                    .map(|(offset, position)| Ok((*position, position + 1, marker(offset + 1)?)))
                     .collect::<Result<Vec<_>, FrameworkError>>()?,
             );
         } else {
@@ -761,11 +769,7 @@ pub(crate) fn rewrite_raw_placeholders(
                             .binary_search(number)
                             .expect("scanned numbered placeholder")
                             + 1;
-                        Ok((
-                            *start,
-                            *end,
-                            placeholder(backend, preceding_bindings + local_position)?,
-                        ))
+                        Ok((*start, *end, marker(local_position)?))
                     })
                     .collect::<Result<Vec<_>, FrameworkError>>()?,
             );
@@ -3332,11 +3336,10 @@ pub(crate) fn render_subquery_term(
         }
         WhereTerm::Column(a, b) => format!("{} = {}", q(a), q(b)),
         WhereTerm::Raw(sql, bindings) => {
-            let rendered = rewrite_raw_placeholders(backend, sql, bindings.len(), *n)?;
-            for v in bindings {
-                *n += 1;
-                values.push(untyped_value(backend, v));
-            }
+            let bound: Vec<SeaValue> = bindings.iter().map(|v| untyped_value(backend, v)).collect();
+            let rendered = rewrite_raw_placeholders(backend, sql, &bound, *n)?;
+            *n += bound.len();
+            values.extend(bound);
             rendered
         }
         WhereTerm::JsonContains(col, v) => {
@@ -3595,11 +3598,11 @@ impl<M> Builder<M> {
             }
             WhereTerm::Column(a, b) => format!("{a} = {b}"),
             WhereTerm::Raw(sql, bindings) => {
-                let rendered = rewrite_raw_placeholders(backend, sql, bindings.len(), *n)?;
-                for v in bindings {
-                    *n += 1;
-                    values.push(untyped_value(backend, v));
-                }
+                let bound: Vec<SeaValue> =
+                    bindings.iter().map(|v| untyped_value(backend, v)).collect();
+                let rendered = rewrite_raw_placeholders(backend, sql, &bound, *n)?;
+                *n += bound.len();
+                values.extend(bound);
                 rendered
             }
             WhereTerm::JsonContains(col, v) => {
@@ -6645,7 +6648,8 @@ mod tests {
                    AND payload ?? 'flag' AND age >= ? -- ?\n/* ? */";
 
         validate_raw_placeholders(sql, 1).unwrap();
-        let rendered = rewrite_raw_placeholders(DbBackend::Postgres, sql, 1, 4).unwrap();
+        let rendered =
+            rewrite_raw_placeholders(DbBackend::Postgres, sql, &[SeaValue::from(1i64)], 4).unwrap();
 
         assert!(rendered.contains("note = '?'"));
         assert!(rendered.contains("body = $tag$?$tag$"));
@@ -6660,16 +6664,47 @@ mod tests {
         let sql = "age >= $1 AND role = $2";
         validate_raw_placeholders(sql, 2).unwrap();
 
+        let two = [SeaValue::from(1i64), SeaValue::from("admin")];
         assert_eq!(
-            rewrite_raw_placeholders(DbBackend::Postgres, sql, 2, 3).unwrap(),
+            rewrite_raw_placeholders(DbBackend::Postgres, sql, &two, 3).unwrap(),
             "age >= $4 AND role = $5"
         );
 
         let absolute = "age >= $7 AND role = $9 AND fallback_role = $9";
         validate_raw_placeholders(absolute, 2).unwrap();
         assert_eq!(
-            rewrite_raw_placeholders(DbBackend::Postgres, absolute, 2, 3).unwrap(),
+            rewrite_raw_placeholders(DbBackend::Postgres, absolute, &two, 3).unwrap(),
             "age >= $4 AND role = $5 AND fallback_role = $5"
+        );
+    }
+
+    /// A `numeric` binding of a raw fragment is cast on Postgres, as
+    /// `typed_placeholder` casts one, so the fragment's text differs from
+    /// the text it has with an integer binding. Elsewhere markers stay `?`.
+    #[test]
+    fn a_numeric_raw_binding_is_cast_on_postgres() {
+        let numeric = [
+            SeaValue::Decimal(Some(rust_decimal::Decimal::from(u64::MAX))),
+            SeaValue::from(1i64),
+        ];
+        assert_eq!(
+            rewrite_raw_placeholders(DbBackend::Postgres, "big = ? AND id = ?", &numeric, 1)
+                .unwrap(),
+            "big = CAST($2 AS NUMERIC) AND id = $3"
+        );
+        assert_eq!(
+            rewrite_raw_placeholders(
+                DbBackend::Postgres,
+                "big = $1 OR $1 IS NULL",
+                &numeric[..1],
+                0
+            )
+            .unwrap(),
+            "big = CAST($1 AS NUMERIC) OR CAST($1 AS NUMERIC) IS NULL"
+        );
+        assert_eq!(
+            rewrite_raw_placeholders(DbBackend::Sqlite, "big = ? AND id = ?", &numeric, 1).unwrap(),
+            "big = ? AND id = ?"
         );
     }
 
