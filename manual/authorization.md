@@ -669,6 +669,10 @@ user.has_permission_to("posts.publish").await?;  // true, through the role
 user.has_permission_to("posts.delete").await?;   // true, held directly
 ```
 
+The helpers that create and grant are idempotent. A second call leaves the
+one row the first call wrote, and so do two requests that make the same
+grant at once: both succeed, on SQLite, Postgres and MySQL alike.
+
 For a route, `RoleMiddleware::<User>::new("editor")` and
 `PermissionMiddleware::<User>::new("posts.publish")` require the role or the
 permission. Put them after `AuthMiddleware`. A user who lacks it gets a `403`,
