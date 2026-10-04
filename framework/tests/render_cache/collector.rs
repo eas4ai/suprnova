@@ -1477,3 +1477,154 @@ async fn relation_counts_aggregates_and_through_loads_observe_every_table_they_r
         }
     }
 }
+
+#[model(table = "ctm_posts", morph_type = "ctm_post", timestamps = false, relations = {
+    images: MorphMany<CtmImage> { name = "imageable" },
+    labels: MorphToMany<CtmLabel, CtmLabelable> { name = "labelable" },
+})]
+pub struct CtmPost {
+    pub id: i64,
+    pub title: String,
+    pub score: f64,
+}
+
+#[model(table = "ctm_images", timestamps = false, relations = {
+    imageable: MorphTo { targets = [CtmPost] },
+})]
+pub struct CtmImage {
+    pub id: i64,
+    pub imageable_id: i64,
+    pub imageable_type: String,
+    pub size: f64,
+}
+
+#[model(table = "ctm_labels", timestamps = false, relations = {
+    posts: MorphedByMany<CtmPost, CtmLabelable> {
+        name = "labelable",
+        target_morph_type = "ctm_post",
+    },
+})]
+pub struct CtmLabel {
+    pub id: i64,
+    pub name: String,
+    pub weight: f64,
+}
+
+#[model(table = "ctm_labelables", primary_key = "id", timestamps = false)]
+pub struct CtmLabelable {
+    pub id: i64,
+    pub ctm_label_id: i64,
+    pub labelable_id: i64,
+    pub labelable_type: String,
+}
+
+/// DATA-033, the polymorphic arms: `MorphMany`, `MorphToMany` and
+/// `MorphedByMany` counts and aggregates run their own raw reads, and each
+/// must record the child, pivot and related tables it read.
+#[tokio::test]
+#[serial]
+async fn morph_relation_counts_and_aggregates_observe_every_table_they_read() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    for sql in [
+        "CREATE TABLE ctm_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         title TEXT NOT NULL, score REAL NOT NULL)",
+        "CREATE TABLE ctm_images (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         imageable_id INTEGER NOT NULL, imageable_type TEXT NOT NULL, size REAL NOT NULL)",
+        "CREATE TABLE ctm_labels (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         name TEXT NOT NULL, weight REAL NOT NULL)",
+        "CREATE TABLE ctm_labelables (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         ctm_label_id INTEGER NOT NULL, labelable_id INTEGER NOT NULL, \
+         labelable_type TEXT NOT NULL)",
+    ] {
+        db.execute_unprepared(sql).await.expect("create table");
+    }
+    let post = CtmPost::create(attrs!(title: "p", score: 5.0))
+        .await
+        .expect("post");
+    CtmImage::create(attrs!(imageable_id: post.id, imageable_type: "ctm_post", size: 2.0))
+        .await
+        .expect("image");
+    let label = CtmLabel::create(attrs!(name: "l", weight: 3.0))
+        .await
+        .expect("label");
+    CtmLabelable::create(attrs!(
+        ctm_label_id: label.id,
+        labelable_id: post.id,
+        labelable_type: "ctm_post",
+    ))
+    .await
+    .expect("pivot");
+
+    let posts = DependencyIdentity::table("ctm_posts");
+    let images = DependencyIdentity::table("ctm_images");
+    let labels = DependencyIdentity::table("ctm_labels");
+    let pivot = DependencyIdentity::table("ctm_labelables");
+
+    let cases: Vec<(&str, Vec<DependencyIdentity>, Vec<&DependencyIdentity>)> = vec![
+        (
+            "MorphMany count",
+            observed_by(async {
+                let _ = CtmPost::with_count(["images"]).get().await.expect("count");
+            })
+            .await,
+            vec![&images],
+        ),
+        (
+            "MorphMany sum",
+            observed_by(async {
+                let _ = CtmPost::with_sum(("images", "size"))
+                    .get()
+                    .await
+                    .expect("sum");
+            })
+            .await,
+            vec![&images],
+        ),
+        (
+            "MorphToMany count",
+            observed_by(async {
+                let _ = CtmPost::with_count(["labels"]).get().await.expect("count");
+            })
+            .await,
+            vec![&pivot],
+        ),
+        (
+            "MorphToMany sum",
+            observed_by(async {
+                let _ = CtmPost::with_sum(("labels", "weight"))
+                    .get()
+                    .await
+                    .expect("sum");
+            })
+            .await,
+            vec![&pivot, &labels],
+        ),
+        (
+            "MorphedByMany count",
+            observed_by(async {
+                let _ = CtmLabel::with_count(["posts"]).get().await.expect("count");
+            })
+            .await,
+            vec![&pivot],
+        ),
+        (
+            "MorphedByMany sum",
+            observed_by(async {
+                let _ = CtmLabel::with_sum(("posts", "score"))
+                    .get()
+                    .await
+                    .expect("sum");
+            })
+            .await,
+            vec![&pivot, &posts],
+        ),
+    ];
+    for (read, observed, expected) in cases {
+        for table in expected {
+            assert!(
+                observed.contains(table),
+                "{read} must record {table:?}, got {observed:?}"
+            );
+        }
+    }
+}

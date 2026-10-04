@@ -403,6 +403,32 @@ async fn release_applies_the_requested_delay() {
     );
 }
 
+/// A release or nack delayed past every date the queue can store is an
+/// error naming the delay, not an integer overflow, and the job stays
+/// reserved.
+#[tokio::test]
+async fn a_requeue_delay_too_long_for_a_date_is_an_error() {
+    let db = fresh_db().await;
+    let d = std::sync::Arc::new(DatabaseQueueDriver::new(db, "jobs".to_string()).unwrap());
+    d.push(env("A")).await.unwrap();
+    let res = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+
+    let (driver, token, envelope) = (d.clone(), res.token.clone(), res.envelope.clone());
+    let released =
+        tokio::spawn(async move { driver.release(&token, &envelope, Duration::MAX).await }).await;
+    let (driver, token) = (d.clone(), res.token.clone());
+    let nacked = tokio::spawn(async move { driver.nack(&token, Duration::MAX).await }).await;
+    for (call, outcome) in [("release", &released), ("nack", &nacked)] {
+        assert!(
+            matches!(outcome, Ok(Err(error)) if error.to_string().contains("delay")),
+            "a {call} delayed Duration::MAX must return an error, got {outcome:?}"
+        );
+    }
+    d.release(&res.token, &res.envelope, Duration::ZERO)
+        .await
+        .expect("the job is still reserved and releases normally");
+}
+
 /// A zero delay makes the job immediately available again - the
 /// `WithoutOverlapping`-style "someone else holds the lock, try again" case.
 #[tokio::test]

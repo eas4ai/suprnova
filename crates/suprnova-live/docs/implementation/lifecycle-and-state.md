@@ -55,9 +55,26 @@ original proposals or action.
 
 Only `Public` is eligible for reusable public seeds. Instanced snapshots may
 contain `State`, `Public`, `Model`, and `Locked` values. `ServerOnly`, `Session`,
-`Computed`, `Transient`, and `Secret` never dehydrate. Session access uses a
-registered field and typed `SessionPort`; no raw cookie or session secret enters
-component state or diagnostics.
+`Computed`, `Transient`, and `Secret` never dehydrate.
+
+A `Session` field reaches the component through two generated hooks on
+`GeneratedComponentState`. The engine's generated adapter calls
+`load_session_state` after a mount or a reconstruction and
+`store_session_state` after the `#[dehydrate]` hook, and only when the render
+context has an instance: a public seed is shared between viewers, so it never
+reads or writes a session. The derive generates both hooks for a component that
+declares session fields. They call the framework's session bridge,
+`suprnova::live::__private::session`, which reads the field from the current
+Suprnova session under one key per component name and field, and stages the
+value it is handed. The framework writes staged values only after the request's
+outcome is accepted: the Live endpoint after its response completion commits,
+and an identity-bound document mount after the mount succeeds. A failed action
+or commit leaves the session as it was, and a value equal to the stored one is
+not written again. A stored value that no longer decodes as the field's type
+reads as absent. No raw cookie or session secret enters component state or
+diagnostics. The engine's `SessionPort`, `SessionField`, and `SessionIntent`
+types are host-neutral utilities; the framework host does not use them for this
+path.
 
 ## Model binding
 

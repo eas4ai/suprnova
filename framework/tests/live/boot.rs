@@ -86,6 +86,31 @@ impl ValidatedComponent {
     }
 }
 
+/// Validates action arguments and has no component `#[validate]` hook.
+#[derive(LiveComponent)]
+#[live(
+    name = "tests.argument-validated",
+    view = "live/tests/argument-validated.html"
+)]
+pub struct ArgumentValidated {
+    name: String,
+    argument_validations: u64,
+}
+
+#[live]
+impl ArgumentValidated {
+    #[action(validate = "arguments")]
+    pub fn rename(&mut self, email: String) {
+        self.name = email;
+    }
+
+    #[validate(action = "rename")]
+    pub fn validate_rename(&mut self, email: String) -> Result<(), validator::ValidationErrors> {
+        self.argument_validations += 1;
+        ActionEmail { email }.validate()
+    }
+}
+
 #[derive(Validate)]
 struct ActionEmail {
     #[validate(email)]
@@ -587,4 +612,31 @@ fn server_new_child_rejects_invalid_live_mount_before_socket_binding() {
             .contains("Live mount catalog was rejected")
     );
     assert!(!error.to_string().contains("invalid server host"));
+}
+
+#[tokio::test]
+async fn argument_validation_runs_without_a_component_validation_hook() {
+    let registry = LiveRegistry::builder()
+        .register::<ArgumentValidated>()
+        .expect("a component with only an argument hook registers")
+        .build();
+    let harness = LiveValidationHarness::from_registry(registry);
+    let mut component = ArgumentValidated {
+        name: String::new(),
+        argument_validations: 0,
+    };
+    let issues = harness
+        .validate_string_action_target(
+            "tests.argument-validated",
+            "rename",
+            [("email", "not-an-email")],
+            &mut component,
+        )
+        .await
+        .expect("generated typed action-argument validation callback");
+    assert_eq!(
+        issues,
+        vec![("email".to_owned(), "validation.email".to_owned())]
+    );
+    assert_eq!(component.argument_validations, 1);
 }

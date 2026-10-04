@@ -52,14 +52,17 @@ pub fn evaluate_conditional(
 /// shell is what the server caches, never what a downstream cache may
 /// share.
 ///
-/// A [`RepresentationClass::PrivateCached`] response is `private, no-cache`.
-/// Its key carries principal or tenant material the browser never sees: the
-/// browser's own cache keys a response by method and URL alone, so any
-/// `max-age` would let it replay one account's body to the next account
-/// signed in on the same machine without asking the server, past both the
-/// route's auth guard and the private key (DATA-042). `no-cache` keeps the
-/// right to store and makes every reuse a revalidation, which the strong
-/// validator answers with a cheap 304 for the same principal.
+/// Only a [`RepresentationClass::PublicShared`] route with
+/// [`SharedCachePolicy::SMaxAge`] carries a lifetime. Every other response is
+/// `private, no-cache`: the browser may store it, and asks before every
+/// reuse. A private `max-age` let the browser reuse a page for the whole
+/// window without asking, past a write that had already invalidated the
+/// stored entry. For a [`RepresentationClass::PrivateCached`] response it
+/// also let the browser, whose cache keys a response by method and URL
+/// alone, replay one account's body to the next account signed in on the
+/// same machine, past both the route's auth guard and the private key
+/// (DATA-042). The strong validator answers each revalidation with a cheap
+/// 304 while the stored entry is unchanged.
 ///
 /// This is the only place the directive text is formed.
 /// [`cache_control_value`] is this function over a `String`, and the hot
@@ -72,24 +75,23 @@ pub(super) fn write_cache_control(
     freshness: &FreshnessPolicy,
     seed_remaining_ms: Option<u64>,
 ) -> core::fmt::Result {
-    let mut max_age = freshness.fresh_ms() / 1_000;
-    if let Some(remaining) = seed_remaining_ms {
-        max_age = max_age.min(remaining / 1_000);
-    }
     match (class, shared) {
         (RepresentationClass::PublicShared, SharedCachePolicy::SMaxAge { seconds }) => {
+            let mut max_age = freshness.fresh_ms() / 1_000;
+            if let Some(remaining) = seed_remaining_ms {
+                max_age = max_age.min(remaining / 1_000);
+            }
             let s_maxage =
                 seed_remaining_ms.map_or(u64::from(seconds), |r| u64::from(seconds).min(r / 1_000));
             write!(out, "public, max-age={max_age}, s-maxage={s_maxage}")
         }
-        (RepresentationClass::PrivateCached, _) => out.write_str("private, no-cache"),
-        _ => write!(out, "private, max-age={max_age}"),
+        _ => out.write_str("private, no-cache"),
     }
 }
 
 /// `Cache-Control` for a class, shared policy, freshness, and optional seed
 /// deadline (milliseconds remaining), as an owned `String`; private classes
-/// are never public, and an identity-keyed `PrivateCached` response is
+/// are never public, and every response without shared-cache permission is
 /// `private, no-cache` so the browser revalidates before every reuse.
 /// Shell-stitched responses are assembled per request and take the private
 /// treatment by definition: the shared shell is what the server caches,

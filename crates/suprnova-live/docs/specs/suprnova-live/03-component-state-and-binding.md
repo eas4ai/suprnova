@@ -1,7 +1,7 @@
 # Suprnova Live -- 03 Component State and Binding
 
 Status: Normative design specification
-Last revised: 2026-09-16
+Last revised: 2026-10-04
 
 ## Scope
 
@@ -239,6 +239,15 @@ bytes, browser paths, and trusted metadata never enter that batch.
 - State is bounded and evolvable without sticky server objects.
 
 ## Decisions and revisions
+
+- 2026-10-04 -- Session-backed fields now read and write through the Suprnova
+  session as the acceptance criterion above requires. A field is read whenever
+  a component is mounted or reconstructed for one viewer and staged before
+  dehydration; the host writes it only after the request's outcome is accepted,
+  so a failed action or commit leaves the session unchanged. A public seed is
+  shared between viewers and renders session fields with their defaults: it
+  never reads or writes a session. Before this, a `#[session]` field always
+  started from its default and was never written back.
 
 - 2026-09-16 -- A declared debounce is one of the durations the directive
   grammar lists: 100, 250, or 500 milliseconds (LIVE-026). The model macro and

@@ -67,9 +67,12 @@ impl TokenPurpose {
 ///
 /// - `id`         BIGINT PK auto-increment - matches `Model::id: i64`
 /// - `user_id`    TEXT not null - opaque string id (String-everywhere)
-/// - `token_hash` TEXT not null UNIQUE - SHA-256 hash of the plaintext
-///   token; the UNIQUE constraint gives `check`/`consume` an indexed
-///   equality lookup and backs the single-use guarantee at the DB level
+/// - `token_hash` VARCHAR(64) not null UNIQUE - SHA-256 hex digest of the
+///   plaintext token; the UNIQUE constraint gives `check`/`consume` an
+///   indexed equality lookup and backs the single-use guarantee at the DB
+///   level. A bounded type because MySQL refuses a UNIQUE key on `TEXT`
+///   (error 1170); tables an older builder created with `TEXT` on MariaDB,
+///   Postgres or SQLite work unchanged
 /// - `purpose`    TEXT not null - [`TokenPurpose::as_str`] discriminator
 /// - `expires_at` DATETIME not null - token TTL boundary
 /// - `used_at`    DATETIME null - set atomically on single-use consume
@@ -98,7 +101,7 @@ pub fn create_auth_flow_tokens_table() -> sea_orm::sea_query::TableCreateStateme
         .col(ColumnDef::new(AuthFlowTokens::UserId).text().not_null())
         .col(
             ColumnDef::new(AuthFlowTokens::TokenHash)
-                .text()
+                .string_len(64)
                 .not_null()
                 .unique_key(),
         )
@@ -172,6 +175,11 @@ impl TokenStore {
     /// `ttl` is added to the current time to compute `expires_at`; a
     /// non-positive `ttl` yields an already-expired row (useful for
     /// tests and a harmless no-op in production).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] when the expiry falls outside the dates
+    /// the clock can hold, or when the database refuses the row.
     pub async fn issue(
         user_id: &str,
         purpose: TokenPurpose,
@@ -210,7 +218,11 @@ impl TokenStore {
     ) -> Result<String, FrameworkError> {
         let token_hash = hash_token(&plaintext);
         let now = crate::clock::now().naive_utc();
-        let expires_at = now + ttl;
+        let expires_at = now.checked_add_signed(ttl).ok_or_else(|| {
+            FrameworkError::internal(format!(
+                "auth-flow token lifetime of {ttl} runs past the dates the clock can hold"
+            ))
+        })?;
 
         let conn = DB::connection()?;
         let backend = conn.inner().get_database_backend();
@@ -218,9 +230,9 @@ impl TokenStore {
             user_id: Set(user_id.to_string()),
             token_hash: Set(token_hash),
             purpose: Set(purpose.as_str().to_string()),
-            expires_at: Set(storable_expiry(backend, expires_at)),
+            expires_at: Set(storable_expiry(backend, expires_at).into()),
             used_at: Set(None),
-            created_at: Set(now),
+            created_at: Set(now.into()),
             ..Default::default()
         };
 
@@ -393,10 +405,8 @@ impl TokenStore {
 /// The owner of the live, unused token of `purpose` whose hash is
 /// `token_hash`, as a query that reads only `user_id`.
 ///
-/// It leaves the time columns out of the row on purpose: in a table an
-/// older builder created they are `TIMESTAMP` on MySQL and MariaDB (see
-/// [`create_auth_flow_tokens_table`]), which the entity's `NaiveDateTime`
-/// fields cannot decode there.
+/// The time columns are left out: the query filters on them in SQL and
+/// never needs their values.
 fn live_token_owner(
     token_hash: &str,
     purpose: TokenPurpose,
@@ -419,16 +429,17 @@ fn live_token_owner(
 ///
 /// - `id`         BIGINT PK auto-increment
 /// - `user_id`    TEXT not null - opaque string id
-/// - `token_hash` TEXT not null UNIQUE - SHA-256 hash of the plaintext token
+/// - `token_hash` VARCHAR(64) not null UNIQUE - SHA-256 hex digest of the plaintext token
 /// - `purpose`    TEXT not null - [`TokenPurpose::as_str`] discriminator
 /// - `expires_at` DATETIME not null - token TTL boundary
 /// - `used_at`    DATETIME null - set on single-use consume
 /// - `created_at` DATETIME not null
 ///
-/// `Model`'s `NaiveDateTime` fields decode only from `DATETIME` on MySQL
-/// and `timestamp` on Postgres, so reading whole rows through this entity
-/// fails on the `TIMESTAMP` columns an older builder created on MySQL and
-/// MariaDB. [`TokenStore`] reads only `user_id`.
+/// An older builder created the time columns as `TIMESTAMP` on MySQL and
+/// MariaDB. The fields are [`StoredDateTime`](crate::database::StoredDateTime),
+/// which reads those as well as `DATETIME`, `timestamp`, `timestamptz` and
+/// SQLite text, so a whole-row read through this entity works on every
+/// table a migration made.
 pub mod entity {
     use sea_orm::entity::prelude::*;
 
@@ -447,11 +458,11 @@ pub mod entity {
         /// What the row authorizes; the stable string from [`super::TokenPurpose::as_str`].
         pub purpose: String,
         /// TTL boundary; the token is rejected once `now > expires_at`.
-        pub expires_at: chrono::NaiveDateTime,
+        pub expires_at: crate::database::StoredDateTime,
         /// Set atomically when the token is consumed; single-use is enforced by this column.
-        pub used_at: Option<chrono::NaiveDateTime>,
+        pub used_at: Option<crate::database::StoredDateTime>,
         /// Wall-clock time the token row was created.
-        pub created_at: chrono::NaiveDateTime,
+        pub created_at: crate::database::StoredDateTime,
     }
 
     /// SeaORM relation enum - `auth_flow_tokens` is a leaf table with no
@@ -465,6 +476,25 @@ pub mod entity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lifetime no date can hold is an error, not a panic.
+    #[tokio::test]
+    async fn issue_refuses_a_lifetime_no_date_can_hold() {
+        for ttl in [Duration::MAX, Duration::MIN] {
+            let outcome = tokio::spawn(TokenStore::issue(
+                "overflow-user",
+                TokenPurpose::PasswordReset,
+                ttl,
+            ))
+            .await;
+            // The error names the lifetime: no database is registered here,
+            // so any other error would come from a later step.
+            assert!(
+                matches!(&outcome, Ok(Err(error)) if error.to_string().contains("lifetime")),
+                "a ttl of {ttl} must return an error, got {outcome:?}"
+            );
+        }
+    }
 
     #[test]
     fn purpose_strings_are_stable() {

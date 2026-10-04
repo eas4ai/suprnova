@@ -1600,7 +1600,7 @@ mod tests {
         // Request A runs in the last second of step S, request B in the
         // first second of step S+1. Both submit the code of step S, which
         // the skew window accepts at either time.
-        let step = Utc::now().timestamp() / 30;
+        let step = crate::clock::now().timestamp() / 30;
         let a_time = step * 30 + 29;
         let b_time = (step + 1) * 30;
         // Enroll and confirm two steps earlier: a confirmation uses its

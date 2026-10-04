@@ -70,8 +70,8 @@ where
     parent_key_value: Option<serde_json::Value>,
     /// FK column name on the child table.
     foreign_key: String,
-    /// PK column name on the parent table (defaults to `"id"`,
-    /// configurable via `lk = "..."` at the macro declaration site).
+    /// Key column on the parent table: the `lk = "..."` the macro
+    /// declaration names, else the parent model's primary key.
     owner_key: String,
     /// Builder-rewrite hook applied at lookup time. `None` means the
     /// parent's `query()` global scope decides what's visible (which,

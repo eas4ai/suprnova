@@ -242,10 +242,15 @@ pub struct CleanupClaim {
     lease_expires_at: UnixMillis,
     failed_attempts: u32,
     orphaned: bool,
+    after_finalization: bool,
 }
 
 impl CleanupClaim {
     /// Constructs a claim after the ledger atomically proves terminal eligibility.
+    ///
+    /// The claim is for an upload whose finalization never began, so cleanup
+    /// deletes its provider bytes. A ledger claims a record that ever entered
+    /// `Finalizing` with [`Self::from_store_after_finalization`] instead.
     pub fn from_store(
         record: &UploadRecord,
         retained_bytes: u64,
@@ -263,7 +268,57 @@ impl CleanupClaim {
         ) {
             return Err(UploadError::new(UploadErrorKind::InvalidTransition));
         }
-        Ok(Self {
+        Ok(Self::new(
+            record,
+            retained_bytes,
+            lease_id,
+            lease_expires_at,
+            failed_attempts,
+            orphaned,
+            false,
+        ))
+    }
+
+    /// Constructs a claim for an upload whose finalization began, after the
+    /// ledger proves the record left its retention window.
+    ///
+    /// That is a `Finalized` record at its expiry, or a record that failed
+    /// after entering `Finalizing`. Finalization may have made the provider
+    /// bytes durable output, so cleanup retires them through
+    /// [`UploadProvider::retire_after_finalization`] and never through
+    /// [`UploadProvider::cleanup`].
+    pub fn from_store_after_finalization(
+        record: &UploadRecord,
+        retained_bytes: u64,
+        lease_id: CleanupLeaseId,
+        lease_expires_at: UnixMillis,
+        failed_attempts: u32,
+        orphaned: bool,
+    ) -> Result<Self, UploadError> {
+        if !matches!(record.state(), UploadState::Finalized | UploadState::Failed) {
+            return Err(UploadError::new(UploadErrorKind::InvalidTransition));
+        }
+        Ok(Self::new(
+            record,
+            retained_bytes,
+            lease_id,
+            lease_expires_at,
+            failed_attempts,
+            orphaned,
+            true,
+        ))
+    }
+
+    fn new(
+        record: &UploadRecord,
+        retained_bytes: u64,
+        lease_id: CleanupLeaseId,
+        lease_expires_at: UnixMillis,
+        failed_attempts: u32,
+        orphaned: bool,
+        after_finalization: bool,
+    ) -> Self {
+        Self {
             handle: record.authority().handle().clone(),
             revision: record.revision(),
             created_at: record.created_at(),
@@ -272,7 +327,8 @@ impl CleanupClaim {
             lease_expires_at,
             failed_attempts,
             orphaned,
-        })
+            after_finalization,
+        }
     }
 
     /// Returns the temporary upload identity.
@@ -323,6 +379,13 @@ impl CleanupClaim {
         self.orphaned
     }
 
+    /// Returns whether the upload's finalization began, so its provider bytes
+    /// are retired rather than deleted.
+    #[must_use]
+    pub const fn after_finalization(&self) -> bool {
+        self.after_finalization
+    }
+
     fn accounted_bytes(&self) -> usize {
         CLAIM_ACCOUNTING_OVERHEAD
     }
@@ -337,6 +400,7 @@ impl fmt::Debug for CleanupClaim {
             .field("lease_expires_at", &self.lease_expires_at)
             .field("failed_attempts", &self.failed_attempts)
             .field("orphaned", &self.orphaned)
+            .field("after_finalization", &self.after_finalization)
             .finish_non_exhaustive()
     }
 }
@@ -423,7 +487,9 @@ pub enum CleanupLedgerDisposition {
 
 /// Host-owned cleanup authority colocated with the upload ledger.
 pub trait UploadCleanupLedger: Send + Sync {
-    /// Atomically expires eligible active uploads and leases a bounded terminal batch.
+    /// Atomically expires eligible active uploads, fails `Finalizing` uploads
+    /// that expired, and leases a bounded batch of terminal records, including
+    /// `Finalized` records whose upload expired.
     fn claim_cleanup<'a>(
         &'a self,
         request: CleanupBatchRequest,
@@ -634,11 +700,22 @@ impl UploadCleanupService {
                     continue;
                 }
             };
-            let provider = run_upload_future(
-                || self.provider.cleanup(claim.handle()),
-                UploadErrorKind::ProviderUnavailable,
-            )
-            .await;
+            // Finalization may have committed the bytes of an upload whose
+            // finalization began, so only the provider may decide to delete
+            // them (ROOT-16).
+            let provider = if claim.after_finalization() {
+                run_upload_future(
+                    || self.provider.retire_after_finalization(claim.handle()),
+                    UploadErrorKind::ProviderUnavailable,
+                )
+                .await
+            } else {
+                run_upload_future(
+                    || self.provider.cleanup(claim.handle()),
+                    UploadErrorKind::ProviderUnavailable,
+                )
+                .await
+            };
             let reclaimed = if provider.is_ok() {
                 run_upload_future(
                     || self.validation_store.remove(claim.handle()),

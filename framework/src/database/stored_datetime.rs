@@ -17,17 +17,96 @@
 //! `TIMESTAMP`, which [`storable_expiry`] handles.
 
 use chrono::{DateTime, NaiveDateTime, Utc};
-use sea_orm::{ColIdx, DatabaseBackend, QueryResult, TryGetError, TryGetable};
+use sea_orm::sea_query::{ArrayType, ColumnType, Nullable, ValueType, ValueTypeErr};
+use sea_orm::{ColIdx, DatabaseBackend, QueryResult, TryGetError, TryGetable, Value};
 
-/// A UTC wall-clock time read from a `DATETIME`, `TIMESTAMP`, `timestamp`
-/// or `timestamptz` column, or from SQLite text.
+/// A UTC wall-clock time stored in a date-time column of any type: the
+/// field type of the framework's own entities for the session,
+/// remember-me, auth-flow token and ceremony tables.
 ///
 /// The decode tries `NaiveDateTime` first, the type every store writes,
 /// then `DateTime<Utc>`, which MySQL decodes from `TIMESTAMP` and Postgres
 /// from `timestamptz`. Both sessions run in UTC (see the module docs), so
-/// the second path reads the same wall clock the store wrote.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct StoredDateTime(pub(crate) NaiveDateTime);
+/// the second path reads the same wall clock the store wrote. Written back,
+/// it binds as a `NaiveDateTime`, which every one of those column types
+/// stores as the same UTC wall clock.
+///
+/// A `NaiveDateTime` field could not be read whole from a `TIMESTAMP` or
+/// `timestamptz` column, the types older scaffolds created; this type
+/// reads both shapes, so a whole-row read through the entity works on
+/// every table those migrations made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StoredDateTime(pub(crate) NaiveDateTime);
+
+impl StoredDateTime {
+    /// The stored time as the UTC wall clock.
+    pub fn naive_utc(self) -> NaiveDateTime {
+        self.0
+    }
+
+    /// The stored time in UTC.
+    pub fn and_utc(self) -> DateTime<Utc> {
+        self.0.and_utc()
+    }
+}
+
+impl From<NaiveDateTime> for StoredDateTime {
+    fn from(value: NaiveDateTime) -> Self {
+        Self(value)
+    }
+}
+
+impl From<DateTime<Utc>> for StoredDateTime {
+    fn from(value: DateTime<Utc>) -> Self {
+        Self(value.naive_utc())
+    }
+}
+
+impl From<StoredDateTime> for NaiveDateTime {
+    fn from(value: StoredDateTime) -> Self {
+        value.0
+    }
+}
+
+impl From<StoredDateTime> for DateTime<Utc> {
+    fn from(value: StoredDateTime) -> Self {
+        value.and_utc()
+    }
+}
+
+impl From<StoredDateTime> for Value {
+    fn from(value: StoredDateTime) -> Self {
+        Value::ChronoDateTime(Some(value.0))
+    }
+}
+
+impl Nullable for StoredDateTime {
+    fn null() -> Value {
+        Value::ChronoDateTime(None)
+    }
+}
+
+impl ValueType for StoredDateTime {
+    fn try_from(value: Value) -> Result<Self, ValueTypeErr> {
+        match value {
+            Value::ChronoDateTime(Some(at)) => Ok(Self(at)),
+            Value::ChronoDateTimeUtc(Some(at)) => Ok(Self(at.naive_utc())),
+            _ => Err(ValueTypeErr),
+        }
+    }
+
+    fn type_name() -> String {
+        "StoredDateTime".to_owned()
+    }
+
+    fn array_type() -> ArrayType {
+        ArrayType::ChronoDateTime
+    }
+
+    fn column_type() -> ColumnType {
+        ColumnType::DateTime
+    }
+}
 
 impl TryGetable for StoredDateTime {
     fn try_get_by<I: ColIdx>(res: &QueryResult, index: I) -> Result<Self, TryGetError> {
@@ -92,6 +171,32 @@ mod tests {
         let far = at(2046, 5, 1, 0, 0, 0);
         assert_eq!(storable_expiry(DatabaseBackend::Postgres, far), far);
         assert_eq!(storable_expiry(DatabaseBackend::Sqlite, far), far);
+    }
+
+    #[test]
+    fn it_binds_as_the_utc_wall_clock_and_converts_back() {
+        let wall = at(2026, 10, 4, 12, 30, 5);
+        let stored = StoredDateTime::from(wall);
+        assert_eq!(Value::from(stored), Value::ChronoDateTime(Some(wall)));
+        assert_eq!(
+            <StoredDateTime as Nullable>::null(),
+            Value::ChronoDateTime(None)
+        );
+        assert_eq!(
+            <StoredDateTime as ValueType>::try_from(Value::ChronoDateTime(Some(wall))).ok(),
+            Some(stored)
+        );
+        assert_eq!(
+            <StoredDateTime as ValueType>::try_from(Value::ChronoDateTimeUtc(Some(wall.and_utc())))
+                .ok(),
+            Some(stored)
+        );
+        assert!(
+            <StoredDateTime as ValueType>::try_from(Value::String(Some("2026".into()))).is_err()
+        );
+        assert_eq!(stored.naive_utc(), wall);
+        assert_eq!(DateTime::<Utc>::from(stored), wall.and_utc());
+        assert_eq!(StoredDateTime::from(wall.and_utc()), stored);
     }
 
     #[tokio::test]

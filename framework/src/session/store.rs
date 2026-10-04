@@ -172,6 +172,25 @@ impl SessionData {
         );
     }
 
+    /// Signs the guard `guard` in on this session as `user_id`, with the
+    /// Magnetar binding a real sign-in records when one is given. Tests that
+    /// seed a session store directly use it to stand for a sign-in that
+    /// happened on an earlier request; applications sign guards in through
+    /// [`crate::Auth`] and [`crate::StatefulGuard`].
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn set_auth_guard_for_test(
+        &mut self,
+        guard: &str,
+        user_id: &str,
+        binding: Option<magnetar::sessions::WebSessionBinding>,
+    ) {
+        self.set_auth_guard_id(guard, user_id);
+        if let Some(binding) = binding {
+            self.set_auth_guard_magnetar_binding(guard, binding);
+        }
+    }
+
     pub(crate) fn auth_guard_names(&self) -> Vec<String> {
         self.data
             .get(AUTH_GUARDS_KEY)

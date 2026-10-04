@@ -135,9 +135,22 @@ async fn enrolled(id: &str) -> (FakeUser, suprnova::auth_flows::EnrollmentRespon
     (user, resp)
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn failed_2fa_verifies_lock_the_second_factor() {
+    crate::own_process::run_alone(
+        "two_factor_brute_force_integration::failed_2fa_verifies_lock_the_second_factor_child",
+    );
+}
+
 #[test]
 #[serial]
-fn failed_2fa_verifies_lock_the_second_factor() {
+fn failed_2fa_verifies_lock_the_second_factor_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -154,9 +167,22 @@ fn failed_2fa_verifies_lock_the_second_factor() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn failed_recovery_code_consumes_lock_the_second_factor() {
+    crate::own_process::run_alone(
+        "two_factor_brute_force_integration::failed_recovery_code_consumes_lock_the_second_factor_child",
+    );
+}
+
 #[test]
 #[serial]
-fn failed_recovery_code_consumes_lock_the_second_factor() {
+fn failed_recovery_code_consumes_lock_the_second_factor_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -175,9 +201,22 @@ fn failed_recovery_code_consumes_lock_the_second_factor() {
     });
 }
 
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn successful_2fa_verify_resets_failed_attempts() {
+    crate::own_process::run_alone(
+        "two_factor_brute_force_integration::successful_2fa_verify_resets_failed_attempts_child",
+    );
+}
+
 #[test]
 #[serial]
-fn successful_2fa_verify_resets_failed_attempts() {
+fn successful_2fa_verify_resets_failed_attempts_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -206,9 +245,23 @@ fn successful_2fa_verify_resets_failed_attempts() {
 /// instead of evaluating it. The manual gates login on `verify`, so without
 /// this the TOTP space is guessable at request rate by anyone who knows the
 /// password.
+///
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn verify_refuses_a_valid_code_once_the_account_is_locked() {
+    crate::own_process::run_alone(
+        "two_factor_brute_force_integration::verify_refuses_a_valid_code_once_the_account_is_locked_child",
+    );
+}
+
 #[test]
 #[serial]
-fn verify_refuses_a_valid_code_once_the_account_is_locked() {
+fn verify_refuses_a_valid_code_once_the_account_is_locked_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -235,9 +288,23 @@ fn verify_refuses_a_valid_code_once_the_account_is_locked() {
 
 /// The recovery-code primitive shares the lock: once wrong recovery codes
 /// lock the account, a valid code is refused with 429 and stays unconsumed.
+///
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn consume_recovery_code_refuses_a_valid_code_once_the_account_is_locked() {
+    crate::own_process::run_alone(
+        "two_factor_brute_force_integration::consume_recovery_code_refuses_a_valid_code_once_the_account_is_locked_child",
+    );
+}
+
 #[test]
 #[serial]
-fn consume_recovery_code_refuses_a_valid_code_once_the_account_is_locked() {
+fn consume_recovery_code_refuses_a_valid_code_once_the_account_is_locked_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {
@@ -269,9 +336,23 @@ fn consume_recovery_code_refuses_a_valid_code_once_the_account_is_locked() {
 /// A wrong code at the threshold is refused before evaluation as well, so
 /// the counter cannot be pushed past the lock by parallel guesses that each
 /// read "unlocked": every attempt is reserved before its code is read.
+///
+/// Runs in its own process: it installs the process-wide test engine of
+/// `magnetar_auth::install`, which the tests of this binary that run without an
+/// engine must not see.
+#[test]
+fn verify_admits_no_more_guesses_than_the_threshold() {
+    crate::own_process::run_alone(
+        "two_factor_brute_force_integration::verify_admits_no_more_guesses_than_the_threshold_child",
+    );
+}
+
 #[test]
 #[serial]
-fn verify_admits_no_more_guesses_than_the_threshold() {
+fn verify_admits_no_more_guesses_than_the_threshold_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Lazy::force(&SETUP);
 
     RT.block_on(async {

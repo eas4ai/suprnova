@@ -4451,4 +4451,56 @@ mod tests {
         let capacity = shell.try_into_mut().expect("the only owner").capacity();
         assert_eq!(capacity, expected, "the shell reserved the whole body");
     }
+
+    /// DATA-045, across nodes: a background refresh renders only as the
+    /// key's leader. Here another node leads the key's rebuild and its
+    /// waiter room is spent, so the coordinator answers `Bypass`. The
+    /// refresh used to run the handler then, uncached, for a response no
+    /// client receives; the stale entry was already served.
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn a_background_refresh_that_is_not_the_leader_renders_nothing() {
+        let coordinator = Arc::new(LocalRebuildCoordinator::new(LocalCoordinatorLimits {
+            lease_ms: 30_000,
+            max_waiters: 0,
+        }));
+        let mut runtime = lookup_only_runtime(test_keys());
+        runtime.coordinator = Arc::clone(&coordinator) as Arc<dyn RebuildCoordinator>;
+        let runtime = Arc::new(runtime);
+        let policy = lookup_only_policy();
+        let input =
+            key_input_for_test(&runtime, "/refresh", &[], None, &policy).expect("key input");
+        let key = RenderKey::derive(&input, &runtime.keys).expect("key");
+        let job = RenderJob::new(input, key.clone());
+
+        let other_node = coordinator
+            .admit(&key, job.epoch(), runtime.now_ms())
+            .await
+            .expect("the other node's admission");
+        assert!(
+            matches!(other_node, RebuildAdmission::Lead(_)),
+            "the other node leads the rebuild"
+        );
+
+        let renders = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&renders);
+        let next: Next = Arc::new(move |_request| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(HttpResponse::text("rendered")) })
+        });
+        refresh_in_background(
+            &runtime,
+            Request::for_test("GET", "/refresh"),
+            next,
+            &policy,
+            job,
+        )
+        .await;
+
+        assert_eq!(
+            renders.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a refresh that is not the leader renders nothing"
+        );
+    }
 }

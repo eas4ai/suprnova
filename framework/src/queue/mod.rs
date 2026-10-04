@@ -477,10 +477,13 @@ impl Queue {
     }
 
     /// Convenience: push with a delay from `now`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] when `delay` runs past the dates the clock
+    /// can hold, or when the push fails.
     pub async fn later<J: Job>(delay: std::time::Duration, job: J) -> Result<(), FrameworkError> {
-        let available_at = crate::clock::now()
-            + chrono::Duration::from_std(delay)
-                .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
+        let available_at = crate::queue::driver::available_after(delay)?;
         Self::push_later(job, available_at).await
     }
 
@@ -504,9 +507,7 @@ impl Queue {
         job: J,
         overrides: EnvelopeOverrides,
     ) -> Result<(), FrameworkError> {
-        let available_at = crate::clock::now()
-            + chrono::Duration::from_std(delay)
-                .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
+        let available_at = crate::queue::driver::available_after(delay)?;
         Self::dispatch_push(job, AvailableAt::Fixed(available_at), overrides, None).await
     }
 
@@ -778,9 +779,7 @@ impl Queue {
         delay: std::time::Duration,
         job: J,
     ) -> Result<bool, FrameworkError> {
-        let available_at = crate::clock::now()
-            + chrono::Duration::from_std(delay)
-                .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
+        let available_at = crate::queue::driver::available_after(delay)?;
         Self::push_unique_at::<J>(job, AvailableAt::Fixed(available_at)).await
     }
 
@@ -1994,11 +1993,14 @@ fn resolve_job_delay<J: Job>(
     base: chrono::DateTime<chrono::Utc>,
 ) -> Result<chrono::DateTime<chrono::Utc>, FrameworkError> {
     match J::delay() {
-        Some(delay) => {
-            let delta = chrono::Duration::from_std(delay)
-                .map_err(|e| FrameworkError::internal(format!("Job::delay() overflow: {e}")))?;
-            Ok(base + delta)
-        }
+        Some(delay) => chrono::Duration::from_std(delay)
+            .ok()
+            .and_then(|delta| base.checked_add_signed(delta))
+            .ok_or_else(|| {
+                FrameworkError::internal(format!(
+                    "Job::delay() of {delay:?} runs past the dates the clock can hold"
+                ))
+            }),
         None => Ok(base),
     }
 }

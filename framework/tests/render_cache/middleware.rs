@@ -159,6 +159,61 @@ async fn a_rebuild_that_fails_after_the_stale_on_error_window_closed_serves_the_
     assert_ne!(served.body, first.body);
 }
 
+/// DATA-041, the singleflight waiter path: a request that waited behind a
+/// failed leader re-admits and rebuilds itself, and its own failed rebuild
+/// is judged when it returns too. The waiter used to judge its fallback at
+/// the instant it woke, so a rebuild that outlasted the stale-on-error window
+/// still served the Dead entry as a 200.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_waiter_whose_rebuild_fails_after_the_window_closed_serves_the_failure() {
+    let harness = boot_with_render_cache().await;
+    let first = dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1);
+
+    // Age 130_000: inside the stale-on-error band, which ends at 180_000.
+    clock(&harness).advance_ms(130_000);
+    counting_route::fail_next_render(&harness);
+    counting_route::hold_next_render(&harness);
+    let leader = tokio::spawn({
+        let harness = harness.clone();
+        async move { dispatch_get(&harness, "/stale/1", &[]).await }
+    });
+    counting_route::wait_until_rendering_count(&harness, 2).await;
+    let waiter = tokio::spawn({
+        let harness = harness.clone();
+        async move { dispatch_get(&harness, "/stale/1", &[]).await }
+    });
+    counting_route::wait_until_waiting(&harness, 1).await;
+
+    // The leader fails inside the window and serves the stale entry. The
+    // waiter wakes to a StaleOnError entry and rebuilds as the next leader;
+    // that rebuild is held.
+    counting_route::hold_next_render(&harness);
+    counting_route::release_render(&harness);
+    let led = leader.await.expect("leader");
+    assert_eq!(
+        led.status,
+        StatusCode::OK,
+        "the leader failed inside the window"
+    );
+    counting_route::wait_until_rendering_count(&harness, 3).await;
+
+    // The window closes while the waiter's rebuild runs, and then it fails.
+    counting_route::fail_next_render(&harness);
+    clock(&harness).advance_ms(60_000);
+    counting_route::release_render(&harness);
+    let waited = waiter.await.expect("waiter");
+
+    assert_eq!(
+        waited.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the entry was Dead when the waiter's rebuild failed, so the failure is served"
+    );
+    assert_ne!(waited.body, first.body);
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn a_second_request_is_an_l0_hit_that_runs_no_handler_and_carries_validators() {
@@ -168,7 +223,7 @@ async fn a_second_request_is_an_l0_hit_that_runs_no_handler_and_carries_validato
     assert_eq!(counting_route::renders(), 1);
     let etag = first.header("etag").expect("etag").to_owned();
     assert!(etag.starts_with("\"sha256-"));
-    assert_eq!(first.header("cache-control"), Some("private, max-age=60"));
+    assert_eq!(first.header("cache-control"), Some("private, no-cache"));
 
     let second = dispatch_get(&harness, "/cached/1", &[]).await;
     assert_eq!(second.status, StatusCode::OK);

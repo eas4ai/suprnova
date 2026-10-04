@@ -175,10 +175,13 @@ plus the exact Ready revision and an idempotency key.
    succeeded but the upload ledger did not record it.
 
 Only a coherent Ready/Finalizing/Finalized revision may enter that sequence.
-The begin transition commits `Finalizing` before the finalizer port runs. A
-prepare error propagates while the upload remains `Finalizing`; it does not call
-`compensate`. That state permits a later retry to reconcile first and then
-prepare again when no durable outcome exists.
+A finalizer whose `can_finalize` answers `false`, a placeholder that can make
+nothing durable, is refused before the sequence starts, so the upload stays
+`Ready` and expires. The begin transition commits `Finalizing` before the
+finalizer port runs. A prepare error propagates while the upload remains
+`Finalizing`; it does not call `compensate`. That state permits a later retry
+to reconcile first and then prepare again when no durable outcome exists, until
+the upload expires and cleanup fails the record.
 
 Compensation is attempted only for an invalid prepared result or a commit
 failure. If that compensation cannot be confirmed, the engine returns
@@ -231,8 +234,17 @@ timers, permits, and queue entries. `CleanupTimedOut` preserves the unfinished
 obligation for later cleanup rather than dropping it.
 
 Finalized application data follows host retention policy, not temporary-upload
-cleanup. The engine can clean the temporary quarantine object and authority
-record only after durable commit/reconciliation makes that safe. Metrics expose
+cleanup. A `Finalized` authority record is kept until its upload expires,
+which is its idempotency window: from then on no operation on the upload is
+admitted. A `Finalizing` record still open at that expiry is failed by the
+claim, because its finalization can no longer commit. Both are claimed with
+`CleanupClaim::from_store_after_finalization`, and cleanup retires their bytes
+through `UploadProvider::retire_after_finalization` instead of deleting them
+through `cleanup`: finalization may have committed those bytes as durable
+output. The default keeps them; `QuarantinedFileProvider` deletes its
+quarantine object, which is temporary by contract. Cleanup cannot reconcile a
+stalled finalization before claiming it, because the ledger keeps neither the
+action nor the logical idempotency key `reconcile` needs. Metrics expose
 bounded counts and lifecycle/error categories. Browser resource observers key
 per-transfer buffer accounting with bounded document-local numeric slots, not
 handles; the slots are stable only for the local entry lifetime and carry no
