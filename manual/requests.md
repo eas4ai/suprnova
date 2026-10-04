@@ -550,7 +550,11 @@ Built-in validators in `suprnova::http::upload::validators`:
   (Named after Laravel's own rule; the plain `Image` name belongs to the
   image-manipulation pipeline - see [Images](images.md).)
 - `MimeType<L>` - accepts a fixed allowlist provided by your own
-  `MimeAllowlist` type.
+  `MimeAllowlist` type. The type is detected from the file's magic bytes.
+  The client's `Content-Type` counts only for bytes that carry no magic
+  (`text/csv`, `application/json`), never for a type that has some: bytes
+  that aren't a PNG don't pass as `image/png` whatever the header claims.
+  Markup and script text is refused before the header is read.
 - `()` - no-op; `UploadedFile<()>` accepts any bytes.
 
 Validators compose as tuples: `(ImageFile, MaxSize<5_242_880>)` runs both,
