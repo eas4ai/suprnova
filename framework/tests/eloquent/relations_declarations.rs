@@ -927,3 +927,229 @@ async fn factory_rows_join_the_surrounding_transaction() {
         "the rollback removed them"
     );
 }
+
+// ---- The existence engine reads the declared keys -----------------------
+
+#[model(table = "rd_keyed_parents", primary_key = "uid", relations = {
+    kids: HasMany<RdKeyedKid> { fk = "parent_uid" },
+})]
+pub struct RdKeyedParent {
+    pub uid: i64,
+    pub name: String,
+}
+
+#[model(table = "rd_keyed_kids")]
+pub struct RdKeyedKid {
+    pub id: i64,
+    pub parent_uid: i64,
+    pub label: String,
+}
+
+/// `has` and `where_has` correlate a has-family relation on the parent's
+/// primary key, whatever its name. They used to name a column `id`.
+#[tokio::test]
+async fn has_and_where_has_correlate_on_the_parents_primary_key() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for sql in [
+        "CREATE TABLE rd_keyed_parents (uid INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        "CREATE TABLE rd_keyed_kids (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            parent_uid INTEGER NOT NULL, label TEXT NOT NULL)",
+        "INSERT INTO rd_keyed_parents (uid, name) VALUES (1, 'with a kid'), (2, 'without')",
+        "INSERT INTO rd_keyed_kids (parent_uid, label) VALUES (1, 'tall')",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+
+    let with_kids = RdKeyedParent::query().has("kids").get().await.unwrap();
+    assert_eq!(
+        labels(with_kids.iter().map(|p| &p.name)),
+        vec!["with a kid"]
+    );
+    let with_tall_kids = RdKeyedParent::query()
+        .where_has::<RdKeyedKid, _>("kids", |q| q.filter("label", "tall"))
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(
+        labels(with_tall_kids.iter().map(|p| &p.name)),
+        vec!["with a kid"]
+    );
+    let without = RdKeyedParent::query()
+        .doesnt_have("kids")
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(labels(without.iter().map(|p| &p.name)), vec!["without"]);
+}
+
+/// `has` on a many-to-many joins the pivot's related key to the declared
+/// `related_key`, as the relation reads do, not to the related model's
+/// primary key.
+#[tokio::test]
+async fn has_on_a_many_to_many_joins_the_declared_related_key() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for sql in [
+        "CREATE TABLE rd_members (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE rd_medals (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL, \
+            label TEXT NOT NULL)",
+        "CREATE TABLE rd_member_medal (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            rd_member_id INTEGER NOT NULL, medal_code TEXT NOT NULL)",
+        "INSERT INTO rd_members (id, name) VALUES (1, 'decorated'), (2, 'plain')",
+        "INSERT INTO rd_medals (id, code, label) VALUES (1, 'gold', 'Gold'), (2, 'silver', 'Silver')",
+        "INSERT INTO rd_member_medal (rd_member_id, medal_code) VALUES (1, 'silver')",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+    let decorated = RdMember::query().has("medals").get().await.unwrap();
+    assert_eq!(labels(decorated.iter().map(|m| &m.name)), vec!["decorated"]);
+}
+
+// ---- The lazy through read applies the target's scopes ------------------
+
+#[model(table = "rd_regions", relations = {
+    reports: HasManyThrough<RdResident, RdReport>,
+})]
+pub struct RdRegion {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "rd_residents")]
+pub struct RdResident {
+    pub id: i64,
+    pub rd_region_id: i64,
+    pub name: String,
+}
+
+#[model(table = "rd_reports")]
+pub struct RdReport {
+    pub id: i64,
+    pub rd_resident_id: i64,
+    pub visible: i64,
+    pub words: i64,
+}
+
+/// Hides the reports that are not visible.
+pub struct RdVisibleReports;
+
+impl GlobalScope<RdReport> for RdVisibleReports {
+    fn apply(&self, query: Builder<RdReport>) -> Builder<RdReport> {
+        query.filter("visible", 1_i64)
+    }
+}
+
+/// `region.reports().get()` and `.count()` apply the target model's
+/// global scopes, as the eager load and `with_count` do.
+#[tokio::test]
+async fn lazy_through_reads_apply_the_targets_global_scopes() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for sql in [
+        "CREATE TABLE rd_regions (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE rd_residents (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            rd_region_id INTEGER NOT NULL, name TEXT NOT NULL)",
+        "CREATE TABLE rd_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            rd_resident_id INTEGER NOT NULL, visible INTEGER NOT NULL, words INTEGER NOT NULL)",
+        "INSERT INTO rd_regions (id, name) VALUES (1, 'north')",
+        "INSERT INTO rd_residents (id, rd_region_id, name) VALUES (1, 1, 'resident')",
+        "INSERT INTO rd_reports (rd_resident_id, visible, words) VALUES (1, 1, 10), (1, 0, 99)",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+    ScopeRegistry::register::<RdReport, _>(RdVisibleReports);
+
+    let region = RdRegion::find(1).await.unwrap().unwrap();
+    let lazy: Vec<i64> = region
+        .reports()
+        .get()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.words)
+        .collect();
+    assert_eq!(lazy, vec![10], "the hidden report is not read");
+    assert_eq!(region.reports().count().await.unwrap(), 1);
+
+    let eager = RdRegion::query()
+        .with(["reports"])
+        .with_count(["reports"])
+        .get()
+        .await
+        .unwrap();
+    let words: Vec<i64> = eager[0].reports_loaded().iter().map(|r| r.words).collect();
+    assert_eq!(words, vec![10], "the eager load agrees with the lazy read");
+    assert_eq!(eager[0].reports_count(), 1);
+}
+
+// ---- A pivot model's own scopes do not filter the relation --------------
+
+#[model(table = "rd_clubs", relations = {
+    people: BelongsToMany<RdPerson, RdClubPerson>,
+})]
+pub struct RdClub {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "rd_people")]
+pub struct RdPerson {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "rd_club_person", timestamps = false)]
+pub struct RdClubPerson {
+    pub id: i64,
+    pub rd_club_id: i64,
+    pub rd_person_id: i64,
+    pub active: i64,
+}
+
+/// Hides the memberships that are not active, when `RdClubPerson` is
+/// queried as a model of its own.
+pub struct RdActiveMemberships;
+
+impl GlobalScope<RdClubPerson> for RdActiveMemberships {
+    fn apply(&self, query: Builder<RdClubPerson>) -> Builder<RdClubPerson> {
+        query.filter("active", 1_i64)
+    }
+}
+
+/// A relation reads the pivot table itself, as Laravel's `using(Pivot)`
+/// relation does: the pivot model's global scopes apply when that model
+/// is queried on its own, not to the attachments of the relation. Every
+/// attached person loads, lazy and eager, each with its pivot row.
+#[tokio::test]
+async fn a_pivot_models_scopes_do_not_filter_the_relation() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for sql in [
+        "CREATE TABLE rd_clubs (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE rd_people (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE rd_club_person (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            rd_club_id INTEGER NOT NULL, rd_person_id INTEGER NOT NULL, active INTEGER NOT NULL)",
+        "INSERT INTO rd_clubs (id, name) VALUES (1, 'club')",
+        "INSERT INTO rd_people (id, name) VALUES (1, 'active'), (2, 'lapsed')",
+        "INSERT INTO rd_club_person (rd_club_id, rd_person_id, active) VALUES (1, 1, 1), (1, 2, 0)",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+    ScopeRegistry::register::<RdClubPerson, _>(RdActiveMemberships);
+    // The scope does apply to the pivot model queried on its own.
+    assert_eq!(RdClubPerson::query().count().await.unwrap(), 1);
+
+    let pivots = |people: &[RdPerson]| {
+        let mut active: Vec<(String, i64)> = people
+            .iter()
+            .map(|p| (p.name.clone(), p.pivot::<RdClubPerson>().active))
+            .collect();
+        active.sort();
+        active
+    };
+    let expected = vec![("active".to_string(), 1), ("lapsed".to_string(), 0)];
+
+    let eager = RdClub::query().with(["people"]).get().await.unwrap();
+    assert_eq!(pivots(eager[0].people_loaded()), expected);
+
+    let club = RdClub::find(1).await.unwrap().unwrap();
+    assert_eq!(pivots(&club.people().get().await.unwrap()), expected);
+    assert_eq!(club.people().count().await.unwrap(), 2);
+}

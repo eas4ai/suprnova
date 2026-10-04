@@ -7,23 +7,24 @@
 //! model whose FK column points at `A`, and `C` is the final target
 //! whose FK column points at `B`.
 //!
-//! ## Soft-delete interaction
+//! ## Scopes and soft deletes
 //!
 //! Through relations use raw `INNER JOIN` SQL rather than the
-//! `Builder<C>` pipeline, so the global scope `Builder<C>` would
-//! install isn't reachable through that path. The JOIN renderer
-//! still stitches in the per-model soft-delete filter directly,
-//! reading [`EloquentModel::SOFT_DELETES_COLUMN`] for both `B` and
-//! `C`:
+//! `Builder<C>` pipeline, but the target side of the join is `C`'s own
+//! scoped query: `C`'s soft-delete filter and its registered global
+//! scopes apply, as they apply to `C::query()`, to the eager load, and
+//! to `with_count`. The intermediate `B` is filtered by its soft-delete
+//! column only, reading [`EloquentModel::SOFT_DELETES_COLUMN`]:
 //!
 //! - Empty `SOFT_DELETES_COLUMN` (the trait default for models that
 //!   don't opt into `#[model(soft_deletes)]`) emits no clause.
 //! - Non-empty column appends `AND <table>.<col> IS NULL` to the
 //!   `WHERE` clause.
 //!
-//! This matches Laravel's `hasManyThrough` behaviour, which filters
-//! both the intermediate `B` and the target `C` by `deleted_at IS
-//! NULL` when those models declare `SoftDeletes`.
+//! This matches Laravel's `hasManyThrough`, whose query is the target
+//! model's builder - so its global scopes apply - joined to the
+//! intermediate, which is filtered by `deleted_at IS NULL` when it
+//! declares `SoftDeletes`.
 //!
 //! Callers that need to *include* trashed rows in a Through traversal
 //! (the inverse of the default - Laravel's `->withTrashed()`) fall
@@ -68,6 +69,7 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
 use crate::database::transaction::ExecutorChoice;
 use crate::eloquent::EloquentModel;
+use crate::eloquent::builder::Builder;
 use crate::eloquent::collection::Collection;
 use crate::eloquent::lazy_loading::LazyLoadGuard;
 use crate::eloquent::model::{Model, json_value_to_sea_value};
@@ -214,7 +216,7 @@ where
     }
 
     /// Validate the three SQL identifiers that flow unquoted into the
-    /// JOIN SQL rendered by `render_select_sql` / `render_count_sql`.
+    /// JOIN SQL rendered by `render_join_sql`.
     /// Called at the top of every terminal method.
     fn validate_meta(&self) -> Result<(), FrameworkError> {
         crate::database::validate_identifier(&self.first_key)?;
@@ -229,13 +231,15 @@ where
     ///
     /// ```sql
     /// SELECT c.*
-    ///   FROM <C> c
+    ///   FROM <C's scoped rows> c
     ///  INNER JOIN <B> b
     ///     ON c.<second_key> = b.<second_local_key>
     ///  WHERE b.<first_key> = ?
     ///    AND b.<B::SOFT_DELETES_COLUMN> IS NULL  -- if B opts in
-    ///    AND c.<C::SOFT_DELETES_COLUMN> IS NULL  -- if C opts in
     /// ```
+    ///
+    /// `C`'s scoped rows are `C::query()`'s: its soft-delete filter and
+    /// its global scopes apply, as they do to the eager load.
     ///
     /// Backend-aware placeholders (`?` for sqlite / mysql, `$1` for
     /// postgres) match the rest of the framework's raw-SQL paths.
@@ -257,11 +261,8 @@ where
         )
         .await?;
         let backend = exec.backend();
-        let stmt = Statement::from_sql_and_values(
-            backend,
-            self.render_select_sql(backend),
-            vec![json_value_to_sea_value(&self.parent_key_value)],
-        );
+        let (sql, values) = self.render_join_sql(backend, "SELECT {c}.*")?;
+        let stmt = Statement::from_sql_and_values(backend, sql, values);
         use sea_orm::EntityTrait;
         let find = <C as EloquentModel>::Entity::find().from_raw_sql(stmt);
         let rows = match &exec {
@@ -285,8 +286,8 @@ where
     /// Returns `i64` to match [`crate::eloquent::HasMany::count`] and
     /// [`crate::eloquent::BelongsToMany::count`]. Routes through
     /// [`ExecutorChoice::resolve_read`](crate::database::transaction::ExecutorChoice::resolve_read)
-    /// on the same terms as [`Self::get`], including the same
-    /// soft-delete filtering for `B` and `C`.
+    /// on the same terms as [`Self::get`], over the same rows: `C`'s
+    /// scopes and soft-delete filter, and `B`'s soft-delete filter.
     pub async fn count(self) -> Result<i64, FrameworkError> {
         self.validate_meta()?;
         let exec = ExecutorChoice::resolve_read(
@@ -296,11 +297,8 @@ where
         )
         .await?;
         let backend = exec.backend();
-        let stmt = Statement::from_sql_and_values(
-            backend,
-            self.render_count_sql(backend),
-            vec![json_value_to_sea_value(&self.parent_key_value)],
-        );
+        let (sql, values) = self.render_join_sql(backend, "SELECT COUNT(*) AS __sn_count")?;
+        let stmt = Statement::from_sql_and_values(backend, sql, values);
         let row = match &exec {
             ExecutorChoice::Tx(t, _) => t.query_one_raw(stmt).await,
             ExecutorChoice::Pool(c, _) => c.inner().query_one_raw(stmt).await,
@@ -311,70 +309,46 @@ where
             .unwrap_or(0))
     }
 
-    /// Render the SELECT JOIN SQL with backend-aware placeholder and
-    /// auto-applied soft-delete filters for `B` and `C`. Extracted
-    /// from `get` / `count` so both terminals share the soft-delete
-    /// stitching - appending `AND <tbl>.<col> IS NULL` whenever the
-    /// model's `EloquentModel::SOFT_DELETES_COLUMN` is non-empty.
-    fn render_select_sql(&self, backend: DatabaseBackend) -> String {
-        let ph = match backend {
-            DatabaseBackend::Postgres => "$1",
-            _ => "?",
-        };
+    /// Render the JOIN statement both terminals run, `projection`
+    /// first, and the values it binds.
+    ///
+    /// ```sql
+    /// <projection>
+    ///   FROM <C's scoped rows> c
+    ///  INNER JOIN <B> b
+    ///     ON c.<second_key> = b.<second_local_key>
+    ///  WHERE b.<first_key> = ?
+    ///    AND b.<B::SOFT_DELETES_COLUMN> IS NULL  -- if B opts in
+    /// ```
+    ///
+    /// `C`'s side is `C`'s own scoped query, aliased with its table
+    /// name, so its soft-delete filter and global scopes apply and its
+    /// binds come first. `{c}` in `projection` names that alias.
+    fn render_join_sql(
+        &self,
+        backend: DatabaseBackend,
+        projection: &str,
+    ) -> Result<(String, Vec<sea_orm::Value>), FrameworkError> {
         let b_table = <B as EloquentModel>::TABLE;
         let c_table = <C as EloquentModel>::TABLE;
-        let b_soft = <B as EloquentModel>::SOFT_DELETES_COLUMN;
-        let c_soft = <C as EloquentModel>::SOFT_DELETES_COLUMN;
+        let (c_source, mut values) = Builder::<C>::__relation_source(backend, c_table)?;
+        values.push(json_value_to_sea_value(&self.parent_key_value));
+        let ph = crate::database::__macro_support::placeholder(backend, values.len())?;
         let mut sql = format!(
-            "SELECT {c}.* FROM {c} INNER JOIN {b} \
+            "{projection} FROM {c_source} INNER JOIN {b} \
              ON {c}.{second_key} = {b}.{second_local_key} \
              WHERE {b}.{first_key} = {ph}",
+            projection = projection.replace("{c}", c_table),
             c = c_table,
             b = b_table,
             second_key = self.second_key,
             second_local_key = self.second_local_key,
             first_key = self.first_key,
-            ph = ph,
         );
-        if !b_soft.is_empty() {
-            sql.push_str(&format!(" AND {b_table}.{b_soft} IS NULL"));
-        }
-        if !c_soft.is_empty() {
-            sql.push_str(&format!(" AND {c_table}.{c_soft} IS NULL"));
-        }
-        sql
-    }
-
-    /// Same shape as [`Self::render_select_sql`] but `SELECT COUNT(*)` -
-    /// split so both terminals can append the soft-delete clauses
-    /// from one place.
-    fn render_count_sql(&self, backend: DatabaseBackend) -> String {
-        let ph = match backend {
-            DatabaseBackend::Postgres => "$1",
-            _ => "?",
-        };
-        let b_table = <B as EloquentModel>::TABLE;
-        let c_table = <C as EloquentModel>::TABLE;
-        let b_soft = <B as EloquentModel>::SOFT_DELETES_COLUMN;
-        let c_soft = <C as EloquentModel>::SOFT_DELETES_COLUMN;
-        let mut sql = format!(
-            "SELECT COUNT(*) AS __sn_count FROM {c} INNER JOIN {b} \
-             ON {c}.{second_key} = {b}.{second_local_key} \
-             WHERE {b}.{first_key} = {ph}",
-            c = c_table,
-            b = b_table,
-            second_key = self.second_key,
-            second_local_key = self.second_local_key,
-            first_key = self.first_key,
-            ph = ph,
-        );
-        if !b_soft.is_empty() {
-            sql.push_str(&format!(" AND {b_table}.{b_soft} IS NULL"));
-        }
-        if !c_soft.is_empty() {
-            sql.push_str(&format!(" AND {c_table}.{c_soft} IS NULL"));
-        }
-        sql
+        sql.push_str(&crate::eloquent::relations::__soft_delete_guard::<B>(
+            b_table,
+        ));
+        Ok((sql, values))
     }
 }
 

@@ -10,6 +10,8 @@ mod magnetar_auth;
 mod own_process;
 
 pub mod abuse_limiter;
+#[cfg(feature = "testing")]
+pub mod api_starter_users;
 pub mod atomic_install;
 pub mod binding;
 #[cfg(feature = "testing")]

@@ -2186,6 +2186,8 @@ where
     ///
     /// On a model declared with `soft_deletes` the row is tombstoned, as
     /// [`Self::delete`] does, and a row that is already trashed is a 404.
+    /// Like [`Self::delete`], it touches the owners `#[model(touches)]`
+    /// names, in the same transaction.
     async fn delete_or_fail(self) -> Result<(), FrameworkError> {
         if crate::database::after_commit::in_transaction() {
             return delete_one_or_fail::<Self>(self, None).await;
@@ -2603,6 +2605,10 @@ fn is_record_missing(err: &FrameworkError) -> bool {
 /// [`EloquentModel::__soft_delete_stamp`]; the concrete `delete()` it
 /// mirrors is an inherent method generic dispatch never reaches.
 ///
+/// Like `delete()`, it then touches the owners `#[model(touches)]`
+/// names, in the same transaction, as Laravel's `deleteOrFail` runs
+/// `delete()`'s `touchOwners` inside its transaction.
+///
 /// When `tx` is `Some` the DELETE is pinned to the supplied
 /// transaction (the `delete_or_fail` no-ambient-tx path uses this
 /// after opening its own `DB::transaction`). When `tx` is `None` the
@@ -2627,9 +2633,10 @@ where
         Send + Into<sea_orm::Value>,
 {
     M::__dispatch_deleting(&model, false).await?;
+    let touch_plan = M::__plan_touches(Some(&model), &Attrs::new())?;
 
     if let Some(stamp) = M::__soft_delete_stamp()? {
-        return trash_one_or_fail(model, tx, stamp).await;
+        return trash_one_or_fail(model, tx, stamp, touch_plan).await;
     }
 
     let snapshot = model.clone();
@@ -2672,7 +2679,33 @@ where
     }
 
     M::__dispatch_deleted(&snapshot, false).await?;
-    Ok(())
+    touch_owners_after_delete(&snapshot, tx, &touch_plan).await
+}
+
+/// Touch the owners `plan` names after a `delete_or_fail`, on its
+/// transaction: the explicit one when it opened its own, the ambient
+/// one otherwise.
+async fn touch_owners_after_delete<M>(
+    model: &M,
+    tx: Option<&crate::database::Transaction>,
+    plan: &TouchPlan,
+) -> Result<(), FrameworkError>
+where
+    M: Model,
+    M: From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    match tx {
+        Some(t) => model.__touch_planned_with_tx(t, plan).await,
+        None => model.__touch_planned(plan).await,
+    }
 }
 
 /// The soft-delete branch of [`delete_one_or_fail`]: tombstone `model`'s
@@ -2682,6 +2715,7 @@ async fn trash_one_or_fail<M>(
     model: M,
     tx: Option<&crate::database::Transaction>,
     stamp: crate::eloquent::SoftDeleteStamp,
+    touch_plan: TouchPlan,
 ) -> Result<(), FrameworkError>
 where
     M: Model,
@@ -2759,5 +2793,5 @@ where
 
     M::__dispatch_trashed(&model).await?;
     M::__dispatch_deleted(&model, false).await?;
-    Ok(())
+    touch_owners_after_delete(&model, tx, &touch_plan).await
 }

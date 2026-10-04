@@ -535,8 +535,12 @@ pub mod sessions {
         pub payload: String,
         /// Per-session CSRF token rotated when the session id rotates.
         pub csrf_token: String,
-        /// Wall-clock time of the last activity on this session, used for sliding TTL.
-        pub last_activity: chrono::NaiveDateTime,
+        /// UTC time of the last activity on this session, used for sliding
+        /// TTL. A [`StoredDateTime`](crate::database::StoredDateTime) reads
+        /// `DATETIME` and the `TIMESTAMP` older scaffolds created on MySQL
+        /// and MariaDB, `timestamp` and `timestamptz` on Postgres, and SQLite
+        /// text, so a whole-row read works on every one.
+        pub last_activity: crate::database::StoredDateTime,
     }
 
     /// SeaORM relation enum - `sessions` is a leaf table with no declared
