@@ -15,12 +15,15 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use serial_test::serial;
+use suprnova::cache::{CacheStore, InMemoryCache};
+use suprnova::container::testing::TestContainer;
 use suprnova::http::text;
 use suprnova::middleware::{
     clear_all_middleware_aliases_for_test, clear_all_middleware_groups_for_test,
     register_middleware_alias, register_middleware_alias_with_args, register_middleware_group,
     resolve_middleware_alias, try_resolve_middleware_alias,
 };
+use suprnova::rate_limit::ThrottleRequestsMiddleware;
 use suprnova::{
     FrameworkError, Middleware, MiddlewareRegistry, Next, Request, Response, Router, handle_request,
 };
@@ -70,6 +73,13 @@ fn register_the_usual_names() {
 }
 
 async fn run(router: impl Into<Router>, path: &str) -> Vec<String> {
+    let (status, ran) = run_status(router, path).await;
+    assert_eq!(status, 200);
+    ran
+}
+
+/// [`run`], returning the status instead of requiring 200.
+async fn run_status(router: impl Into<Router>, path: &str) -> (u16, Vec<String>) {
     let router = Arc::new(router.into());
     let registry = Arc::new(MiddlewareRegistry::new());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -108,9 +118,9 @@ async fn run(router: impl Into<Router>, path: &str) -> Vec<String> {
         .await
         .expect("the request timed out")
         .expect("the request failed");
-    assert_eq!(response.status().as_u16(), 200);
+    let status = response.status().as_u16();
     let _ = response.into_body().collect().await.unwrap();
-    RAN.lock().unwrap().clone()
+    (status, RAN.lock().unwrap().clone())
 }
 
 #[tokio::test]
@@ -221,4 +231,51 @@ fn a_group_may_list_an_alias_with_arguments() {
     let resolved = suprnova::middleware::resolve_named_middleware("admins").unwrap();
 
     assert_eq!(resolved.len(), 3, "auth, verified and role:admin");
+}
+
+/// A group that two sibling groups both include is a diamond. Its
+/// middleware must appear once in the expanded chain, keeping the first
+/// occurrence, as Laravel's `uniqueMiddleware` does: a throttle in the
+/// shared group would otherwise count each request twice, and a limit of
+/// one would refuse the very first request.
+#[tokio::test]
+#[serial]
+async fn a_throttle_in_a_shared_group_counts_one_hit_per_request() {
+    let _names = Names::none();
+    let _cache = TestContainer::fake();
+    TestContainer::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+    register_the_usual_names();
+    register_middleware_alias_with_args("throttle", ThrottleRequestsMiddleware::from_alias_args);
+    register_middleware_group("base", ["throttle:1,1".to_string()]);
+    register_middleware_group("read", ["base".to_string(), "auth".to_string()]);
+    register_middleware_group(
+        "write",
+        [
+            "base".to_string(),
+            "verified".to_string(),
+            "auth".to_string(),
+        ],
+    );
+    register_middleware_group("api", ["read".to_string(), "write".to_string()]);
+
+    let router = || {
+        Router::new()
+            .get("/reports", |_req: Request| async { text("ok") })
+            .middleware_named("api")
+    };
+
+    let (status, ran) = run_status(router(), "/reports").await;
+    assert_eq!(status, 200, "a limit of one admits the first request");
+    assert_eq!(
+        ran,
+        ["auth", "verified"],
+        "each middleware runs once, in the order it was first named"
+    );
+
+    RAN.lock().unwrap().clear();
+    let (status, _) = run_status(router(), "/reports").await;
+    assert_eq!(
+        status, 429,
+        "the one throttle still counts the request it saw"
+    );
 }

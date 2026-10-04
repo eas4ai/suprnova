@@ -367,13 +367,21 @@ impl std::error::Error for MiddlewareResolveError {}
 /// registered group is recursively expanded. Cycle detection prevents
 /// infinite recursion on a misconfigured definition; a group reused by
 /// several branches (`api = [read, write]`, both including `base`) is
-/// expanded in each of them.
+/// not a cycle.
+///
+/// The list holds each middleware once, at its first occurrence, as
+/// Laravel's `Router::uniqueMiddleware` keeps it. Without that, a group
+/// reached through two branches put its middleware in the chain twice,
+/// and a throttle in it counted every request twice. A middleware is
+/// identified by its alias and arguments: `"throttle:60,1"` twice is one
+/// throttle, `"throttle:30,1"` beside it is another.
 pub fn resolve_middleware_group(
     name: &str,
 ) -> Result<Vec<BoxedMiddleware>, MiddlewareResolveError> {
     let mut ancestors: Vec<String> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     let mut out: Vec<BoxedMiddleware> = Vec::new();
-    resolve_group_inner(name, &mut ancestors, &mut out)?;
+    resolve_group_inner(name, &mut ancestors, &mut seen, &mut out)?;
     Ok(out)
 }
 
@@ -385,9 +393,14 @@ pub fn resolve_middleware_group(
 /// diamond and expands normally. Each group pops itself off when its
 /// expansion completes. An error abandons the whole resolution, so the
 /// early returns leave the path as it was.
+///
+/// `seen` holds the [`alias_identity`] of every middleware already in
+/// `out`, across the whole resolution, so a repeat is skipped before its
+/// factory runs.
 fn resolve_group_inner(
     name: &str,
     ancestors: &mut Vec<String>,
+    seen: &mut Vec<String>,
     out: &mut Vec<BoxedMiddleware>,
 ) -> Result<(), MiddlewareResolveError> {
     if ancestors.iter().any(|v| v == name) {
@@ -416,7 +429,7 @@ fn resolve_group_inner(
         // same way).
         if is_registered_group(&entry) {
             // Recurse - but pass through any UnknownAlias / nested error.
-            resolve_group_inner(&entry, ancestors, out).map_err(|e| match e {
+            resolve_group_inner(&entry, ancestors, seen, out).map_err(|e| match e {
                 MiddlewareResolveError::UnknownGroup(missing) => {
                     MiddlewareResolveError::UnknownNestedGroup {
                         group: name.to_string(),
@@ -427,16 +440,33 @@ fn resolve_group_inner(
             })?;
             continue;
         }
+        let identity = alias_identity(&entry);
+        if seen.contains(&identity) {
+            continue;
+        }
         let resolved = resolve_middleware_alias(&entry).ok_or_else(|| {
             MiddlewareResolveError::UnknownAlias {
                 group: name.to_string(),
                 missing: entry.clone(),
             }
         })?;
+        seen.push(identity);
         out.push(resolved);
     }
     ancestors.pop();
     Ok(())
+}
+
+/// What a group entry is deduplicated by: the alias name and its
+/// arguments, normalised the way [`split_alias`] reads them, so
+/// `"throttle:60, 1"` and `"throttle:60,1"` are one middleware.
+fn alias_identity(spec: &str) -> String {
+    let (name, arguments) = split_alias(spec);
+    if arguments.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}:{}", arguments.join(","))
+    }
 }
 
 fn is_registered_group(name: &str) -> bool {
@@ -734,14 +764,18 @@ mod tests {
         let mws = resolve_middleware_group("api").expect("a diamond of groups must resolve");
         assert_eq!(
             mws.len(),
-            4,
-            "each branch expands its own copy of base: auth, throttle, auth, cors"
+            3,
+            "base's auth appears once, where it was first reached: auth, throttle, cors"
         );
 
-        // Listing the same group twice in one group is the same shape.
-        register_middleware_group("twice", ["base".to_string(), "base".to_string()]);
+        // Listing the same group, or the same alias, twice in one group is
+        // the same shape.
+        register_middleware_group(
+            "twice",
+            ["base".to_string(), "base".to_string(), "auth".to_string()],
+        );
         let mws = resolve_middleware_group("twice").expect("a repeated group must resolve");
-        assert_eq!(mws.len(), 2);
+        assert_eq!(mws.len(), 1);
 
         // A real cycle below the root is still refused.
         register_middleware_group("loop_a", ["loop_b".to_string()]);
@@ -751,6 +785,30 @@ mod tests {
             Err(MiddlewareResolveError::CycleDetected { group }) => assert_eq!(group, "loop_b"),
             other => panic!("expected CycleDetected for loop_b, got {:?}", other.err()),
         }
+    }
+
+    /// Duplicates are found by alias and arguments, as Laravel compares
+    /// the full `name:args` string: the same throttle spelled with other
+    /// spacing is one middleware, a throttle with other limits is another.
+    #[test]
+    fn a_group_keeps_one_of_each_alias_and_argument_list() {
+        let _guard = SERIAL_TEST_LOCK.lock().unwrap();
+        reset_all();
+
+        register_middleware_alias_with_args("limit", |_arguments: &[&str]| {
+            Ok::<_, FrameworkError>(ThrottleMw)
+        });
+        register_middleware_group(
+            "limited",
+            [
+                "limit:60,1".to_string(),
+                "limit: 60, 1".to_string(),
+                "limit:30,1".to_string(),
+            ],
+        );
+
+        let mws = resolve_middleware_group("limited").expect("limited resolves");
+        assert_eq!(mws.len(), 2, "limit:60,1 once, and limit:30,1");
     }
 
     #[test]
