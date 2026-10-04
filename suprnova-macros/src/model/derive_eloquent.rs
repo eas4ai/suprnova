@@ -696,7 +696,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // The key binds through its cast too: a `u64` key above `i64::MAX`
     // then binds as an unsigned number rather than as text, which
     // Postgres refuses to compare with its `BIGINT`.
-    let cast_arms: Vec<TokenStream> = input
+    let mut cast_arms: Vec<TokenStream> = input
         .casts
         .iter()
         .map(|(ident, ty)| {
@@ -706,6 +706,21 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             }
         })
         .collect();
+    // An integer field without a cast binds a `u64` above `i64::MAX` as the
+    // unsigned number it is, so the builder settles a comparison with it
+    // (no such column holds it) and refuses to write it, where as text
+    // Postgres refused the comparison and SQLite stored a rounded real.
+    cast_arms.extend(fields.iter().filter_map(|field| {
+        let ident = field.ident.as_ref()?;
+        let has_cast = input.casts.iter().any(|(cast, _)| cast == ident);
+        if has_cast || !super::parse::is_integer_below_u64(&field.ty) {
+            return None;
+        }
+        let name = ident.to_string();
+        Some(quote! {
+            #name => ::suprnova::eloquent::casts::__bind_integer(value),
+        })
+    }));
     let bind_column_impl = if cast_arms.is_empty() {
         quote! {}
     } else {

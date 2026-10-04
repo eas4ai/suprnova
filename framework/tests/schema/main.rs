@@ -25,6 +25,7 @@ mod laravel_cases;
 mod laravel_defaults;
 mod mysql;
 mod postgres;
+mod signed_columns;
 mod sqlite;
 mod unsigned_keys;
 mod unsigned_keyset;

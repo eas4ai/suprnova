@@ -980,6 +980,11 @@ the value: `find` returns `None` and `find_many` skips it. In a filter,
 match every row whose column is not NULL. MySQL gives the same answer for
 rows that all hold smaller values.
 
+The same holds on every database for a column of a narrower integer field
+such as `i64` or `i32`, which can't hold a `u64` above `i64::MAX` either. A
+mass update that writes such a value to one is refused on Postgres and
+SQLite before anything is sent.
+
 `to_sql` returns the parameterised SQL the next terminal would emit -
 useful for debugging or building views. The bindings are
 accessible via `.to_sql_with_bindings() -> (String, Vec<Value>)`.

@@ -255,7 +255,7 @@ pub(crate) fn refuse_unsigned_overflow(
                 format!("`{table}.{column}`")
             };
             Err(format!(
-                "{column}: {n} is above {}, the largest value a {backend:?} BIGINT \
+                "{column}: {n} is above {}, the largest integer a {backend:?} column \
                  holds; {backend:?} has no unsigned integers, so a u64 column stores \
                  0 to {} there",
                 i64::MAX,
@@ -300,6 +300,20 @@ fn unsigned_bind(value: &serde_json::Value) -> Option<Value> {
         .as_u64()
         .filter(|n| *n > i64::MAX as u64)
         .map(|n| Value::BigUnsigned(Some(n)))
+}
+
+/// How a value compared with, or written to, an integer field without a
+/// cast binds: a `u64` above `i64::MAX` as an unsigned number, anything
+/// else as it is (`None`). No integer column narrower than
+/// `BIGINT UNSIGNED` holds such a value, so seeing it as the number it is
+/// lets the query builder settle a comparison and refuse a write, where as
+/// text Postgres refused the comparison and SQLite stored a rounded real.
+///
+/// **Not part of the public API.** It is `pub` because the code
+/// `#[suprnova::model]` generates for a model's column binder calls it.
+#[doc(hidden)]
+pub fn __bind_integer(value: &serde_json::Value) -> Option<Value> {
+    unsigned_bind(value)
 }
 
 impl IntoDynCast for AsU64 {
