@@ -66,7 +66,9 @@
 //! any more: after SQS refused the send that would have carried it, or after
 //! a delete of its message on a reservation that had not expired. A payload
 //! whose fate the driver cannot know, such as one whose send timed out, is
-//! left on the disk.
+//! left on the disk, and so is one whose send was refused after an earlier
+//! try timed out or met a fault of the service: that try may have left a
+//! message in the queue.
 
 use crate::error::FrameworkError;
 use crate::filesystem::Storage;
@@ -405,10 +407,32 @@ enum Failure {
     Garbled(FrameworkError),
 }
 
+/// What [`SqsQueueDriver::request_tracked`] saw across its tries.
+struct Attempted {
+    /// The outcome of the last try.
+    outcome: Result<Value, Failure>,
+    /// Whether any try, the last included, may have been carried out by SQS:
+    /// it had no answer, or a fault of the service answered it.
+    maybe_acted: bool,
+}
+
 impl Failure {
     /// Whether SQS did not act on the request.
     fn is_definite(&self) -> bool {
         matches!(self, Failure::NotSent(_) | Failure::Refused(_))
+    }
+
+    /// Whether SQS may have carried out the request although it failed:
+    /// no answer came, or the service answered with a fault of its own
+    /// (5xx), which does not say the request was not carried out. A
+    /// refusal of the request itself (4xx, throttling included) says it
+    /// was not.
+    fn may_have_acted(&self) -> bool {
+        match self {
+            Failure::NotSent(_) => false,
+            Failure::Refused(error) => error.status >= 500,
+            Failure::Unknown(_) | Failure::Garbled(_) => true,
+        }
     }
 
     fn into_error(self, action: &str) -> FrameworkError {
@@ -601,24 +625,45 @@ impl SqsQueueDriver {
     /// Post one action, trying again after a throttled request, a fault of
     /// the service, or no answer, up to three tries in all.
     async fn request(&self, action: &str, body: &Value) -> Result<Value, Failure> {
+        self.request_tracked(action, body).await.outcome
+    }
+
+    /// [`Self::request`], also reporting whether any try may have been
+    /// carried out by SQS without the driver learning it. A send that ends
+    /// in a refusal after such a try may still have left a message in the
+    /// queue, so a payload it points at must stay.
+    async fn request_tracked(&self, action: &str, body: &Value) -> Attempted {
         // Serialized once; each try sends the same shared bytes rather than
         // a copy of them.
-        let payload = bytes::Bytes::from(serde_json::to_vec(body).map_err(|error| {
-            Failure::NotSent(FrameworkError::internal(format!(
-                "SQS {action}: encode: {error}"
-            )))
-        })?);
+        let payload = match serde_json::to_vec(body) {
+            Ok(payload) => bytes::Bytes::from(payload),
+            Err(error) => {
+                return Attempted {
+                    outcome: Err(Failure::NotSent(FrameworkError::internal(format!(
+                        "SQS {action}: encode: {error}"
+                    )))),
+                    maybe_acted: false,
+                };
+            }
+        };
         let mut tries = 0;
+        let mut maybe_acted = false;
         loop {
             tries += 1;
             let outcome = self.request_once(action, &payload).await;
+            if let Err(failure) = &outcome {
+                maybe_acted |= failure.may_have_acted();
+            }
             let again = match &outcome {
                 Err(Failure::Refused(error)) => error.is_retryable(),
                 Err(Failure::Unknown(_)) => true,
                 _ => false,
             };
             if !again || tries >= MAX_TRIES {
-                return outcome;
+                return Attempted {
+                    outcome,
+                    maybe_acted,
+                };
             }
             // 100 ms, then 200 ms, each with up to 50 ms of jitter so workers
             // throttled together do not retry together.
@@ -759,9 +804,9 @@ impl SqsQueueDriver {
         if message.delay > 0 {
             request["DelaySeconds"] = json!(message.delay);
         }
-        let outcome = self
-            .request("SendMessage", &request)
-            .await
+        let attempted = self.request_tracked("SendMessage", &request).await;
+        let outcome = attempted
+            .outcome
             .and_then(|reply| match reply["MessageId"].as_str() {
                 Some(_) => Ok(()),
                 None => Err(Failure::Garbled(FrameworkError::internal(
@@ -772,19 +817,22 @@ impl SqsQueueDriver {
         match outcome {
             Ok(()) => Ok(()),
             Err(failure) => {
-                self.discard(&message, &failure).await;
+                self.discard(&message, &failure, attempted.maybe_acted)
+                    .await;
                 Err(failure.into_error("SendMessage"))
             }
         }
     }
 
     /// Delete the payload of a message whose send failed, when SQS is known
-    /// not to have taken it.
-    async fn discard(&self, message: &Outgoing, failure: &Failure) {
+    /// not to have taken it: the last try was refused and no try may have
+    /// been carried out. A refusal after a try that had no answer does not
+    /// say the earlier try left no message.
+    async fn discard(&self, message: &Outgoing, failure: &Failure, maybe_acted: bool) {
         let Some(path) = &message.pointer else {
             return;
         };
-        if failure.is_definite() {
+        if failure.is_definite() && !maybe_acted {
             self.delete_payload(path).await;
         } else {
             tracing::warn!(
@@ -878,45 +926,57 @@ impl SqsQueueDriver {
                 })
                 .collect();
             let request = json!({ "QueueUrl": queue_url, "Entries": entries });
+            let Attempted {
+                outcome,
+                maybe_acted,
+            } = self.request_tracked("SendMessageBatch", &request).await;
             // The messages of this batch SQS did not take, and the failure.
-            let (unsent, failure): (Vec<&Outgoing>, Failure) =
-                match self.request("SendMessageBatch", &request).await {
-                    Ok(reply) => {
-                        if !reply["Successful"].is_array() && !reply["Failed"].is_array() {
-                            let failure = Failure::Garbled(FrameworkError::internal(
-                                "SQS SendMessageBatch: the reply lists no messages; check that \
+            // After a try that may have been carried out, an entry the last
+            // try rejected may be in the queue from that earlier try, so no
+            // message of this batch counts as not taken.
+            let (unsent, failure): (Vec<&Outgoing>, Failure) = match outcome {
+                Ok(reply) => {
+                    if !reply["Successful"].is_array() && !reply["Failed"].is_array() {
+                        let failure = Failure::Garbled(FrameworkError::internal(
+                            "SQS SendMessageBatch: the reply lists no messages; check that \
                                  SQS_ENDPOINT is an SQS endpoint",
-                            ));
-                            (Vec::new(), failure)
-                        } else {
-                            let failed = reply["Failed"].as_array().cloned().unwrap_or_default();
-                            let Some(first) = failed.first() else {
-                                continue;
-                            };
-                            let rejected: Vec<usize> = failed
-                                .iter()
-                                .filter_map(|entry| entry["Id"].as_str()?.parse().ok())
-                                .collect();
-                            let failure = Failure::NotSent(FrameworkError::internal(format!(
-                                "SQS SendMessageBatch rejected {} of {} messages. First \
+                        ));
+                        (Vec::new(), failure)
+                    } else {
+                        let failed = reply["Failed"].as_array().cloned().unwrap_or_default();
+                        let Some(first) = failed.first() else {
+                            continue;
+                        };
+                        let rejected: Vec<usize> = failed
+                            .iter()
+                            .filter_map(|entry| entry["Id"].as_str()?.parse().ok())
+                            .collect();
+                        let failure = Failure::NotSent(FrameworkError::internal(format!(
+                            "SQS SendMessageBatch rejected {} of {} messages. First \
                                  failure {}: {}",
-                                failed.len(),
-                                chunk.len(),
-                                first["Code"].as_str().unwrap_or("Unknown"),
-                                first["Message"].as_str().unwrap_or_default()
-                            )));
-                            let unsent = chunk
+                            failed.len(),
+                            chunk.len(),
+                            first["Code"].as_str().unwrap_or("Unknown"),
+                            first["Message"].as_str().unwrap_or_default()
+                        )));
+                        let unsent = if maybe_acted {
+                            Vec::new()
+                        } else {
+                            chunk
                                 .iter()
                                 .enumerate()
                                 .filter(|(index, _)| rejected.contains(index))
                                 .map(|(_, message)| message)
-                                .collect();
-                            (unsent, failure)
-                        }
+                                .collect()
+                        };
+                        (unsent, failure)
                     }
-                    Err(failure) if failure.is_definite() => (chunk.iter().collect(), failure),
-                    Err(failure) => (Vec::new(), failure),
-                };
+                }
+                Err(failure) if failure.is_definite() && !maybe_acted => {
+                    (chunk.iter().collect(), failure)
+                }
+                Err(failure) => (Vec::new(), failure),
+            };
             // The later batches were never sent.
             let later = chunks.iter().skip(number + 1).flatten();
             for message in unsent.into_iter().chain(later) {

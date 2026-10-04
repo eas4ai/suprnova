@@ -903,6 +903,116 @@ async fn a_refused_send_deletes_its_payload_and_an_unanswered_one_keeps_it() {
     );
 }
 
+/// SQS took the message on the first try but the reply was lost; the next
+/// tries are refused. The message that try left in SQS points at the
+/// payload, so the payload must stay and the job must still run.
+#[tokio::test]
+async fn a_refusal_after_an_unanswered_send_keeps_the_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script_accept_then_drop("AmazonSQS.SendMessage");
+    for _ in 0..2 {
+        fake.script(
+            "AmazonSQS.SendMessage",
+            400,
+            r#"{"__type":"com.amazonaws.sqs#RequestThrottled","message":"slow down"}"#,
+        );
+    }
+    let sent = large_envelope();
+    driver
+        .push(sent.clone())
+        .await
+        .expect_err("the last try was refused");
+    assert_eq!(fake.sends().len(), 3, "three tries");
+    assert_eq!(
+        fake.messages(&url("default")).len(),
+        1,
+        "the first try left a message in SQS"
+    );
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "that message points at the payload, so the payload stays"
+    );
+    let reservation = driver
+        .pop(VISIBILITY)
+        .await
+        .expect("the message can be read")
+        .expect("the message is there");
+    assert_eq!(reservation.envelope.payload, sent.payload);
+}
+
+/// A fault of the service (5xx) does not say SQS did not take the message,
+/// so a send that ends in one keeps its payload.
+#[tokio::test]
+async fn a_send_that_ends_in_a_service_fault_keeps_the_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+    for _ in 0..3 {
+        fake.script(
+            "AmazonSQS.SendMessage",
+            500,
+            r#"{"__type":"com.amazonaws.sqs#InternalError","message":"oops"}"#,
+        );
+    }
+    driver
+        .push(large_envelope())
+        .await
+        .expect_err("three faults");
+    assert_eq!(stored_payloads().await, 1);
+}
+
+/// The batch form of the same sequence: the first `SendMessageBatch` was
+/// taken and its reply lost, the second rejects an entry. That entry may be
+/// in SQS from the first try, so its payload stays.
+#[tokio::test]
+async fn a_batch_entry_rejected_after_an_unanswered_batch_keeps_its_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script_accept_then_drop("AmazonSQS.SendMessageBatch");
+    fake.script(
+        "AmazonSQS.SendMessageBatch",
+        200,
+        r#"{"Successful":[],"Failed":[{"Id":"0","Code":"InternalError","Message":"oops","SenderFault":false}]}"#,
+    );
+    let sent = large_envelope();
+    driver
+        .bulk_push(vec![sent.clone()])
+        .await
+        .expect_err("the entry was rejected on the last try");
+    assert_eq!(fake.messages(&url("default")).len(), 1);
+    assert_eq!(stored_payloads().await, 1);
+    let reservation = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    assert_eq!(reservation.envelope.payload, sent.payload);
+}
+
+#[tokio::test]
+async fn a_batch_refused_after_an_unanswered_batch_keeps_its_payloads() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script_accept_then_drop("AmazonSQS.SendMessageBatch");
+    for _ in 0..2 {
+        fake.script(
+            "AmazonSQS.SendMessageBatch",
+            400,
+            r#"{"__type":"com.amazonaws.sqs#RequestThrottled","message":"slow down"}"#,
+        );
+    }
+    driver
+        .bulk_push(vec![large_envelope(), large_envelope()])
+        .await
+        .expect_err("the last try was refused");
+    assert_eq!(fake.messages(&url("default")).len(), 2);
+    assert_eq!(stored_payloads().await, 2);
+}
+
 #[tokio::test]
 async fn a_delay_sent_on_keeps_one_payload_with_delete_after_processing_off() {
     let (_env, _restore, fake) = setup!("default");
@@ -1176,7 +1286,6 @@ mod fake {
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use std::collections::{HashMap, VecDeque};
-    use std::convert::Infallible;
     use std::sync::{Arc, Mutex};
 
     /// The secret key every test signs with.
@@ -1187,6 +1296,10 @@ mod fake {
 
     /// The longest SQS hides a message, counted from its receive.
     const MAX_VISIBILITY: u64 = 43_200;
+
+    /// The scripted status that acts on the request and then drops the
+    /// connection without a reply. No HTTP status is zero.
+    const ACCEPT_THEN_DROP: u16 = 0;
 
     #[derive(Clone, Debug)]
     pub struct Message {
@@ -1244,7 +1357,13 @@ mod fake {
                     tokio::spawn(async move {
                         let service = service_fn(move |request: hyper::Request<Incoming>| {
                             let state = Arc::clone(&state);
-                            async move { Ok::<_, Infallible>(serve(&state, request).await) }
+                            async move {
+                                // No response: hyper closes the connection
+                                // without writing one.
+                                serve(&state, request).await.ok_or_else(|| {
+                                    std::io::Error::other("the reply was dropped on purpose")
+                                })
+                            }
                         });
                         let _ = hyper::server::conn::http1::Builder::new()
                             .serve_connection(TokioIo::new(stream), service)
@@ -1258,6 +1377,13 @@ mod fake {
         /// Move the fake's clock on by `seconds`.
         pub fn advance(&self, seconds: u64) {
             self.state.lock().unwrap().now += seconds;
+        }
+
+        /// Act on the next request for `target` as SQS would, then close the
+        /// connection without a reply: SQS took the message and the answer
+        /// was lost, which the driver sees as no answer.
+        pub fn script_accept_then_drop(&self, target: &str) {
+            self.script(target, ACCEPT_THEN_DROP, "");
         }
 
         /// Answer the next request for `target` with `status` and `body`.
@@ -1330,7 +1456,7 @@ mod fake {
     async fn serve(
         state: &Mutex<State>,
         request: hyper::Request<Incoming>,
-    ) -> hyper::Response<Full<Bytes>> {
+    ) -> Option<hyper::Response<Full<Bytes>>> {
         let method = request.method().as_str().to_owned();
         let path = request.uri().path().to_owned();
         let query = request.uri().query().unwrap_or_default().to_owned();
@@ -1364,6 +1490,10 @@ mod fake {
             body: body.clone(),
         });
         let scripted = state.script.get_mut(&target).and_then(VecDeque::pop_front);
+        if matches!(scripted, Some((ACCEPT_THEN_DROP, _))) {
+            let _ = act(&mut state, &target, &body);
+            return None;
+        }
         let (status, reply) = if let Some((status, reply)) = scripted {
             (status, reply)
         } else if let Err(reason) = signature {
@@ -1379,11 +1509,13 @@ mod fake {
             let (status, reply) = act(&mut state, &target, &body);
             (status, reply.to_string())
         };
-        hyper::Response::builder()
-            .status(status)
-            .header("content-type", "application/x-amz-json-1.0")
-            .body(Full::new(Bytes::from(reply)))
-            .unwrap()
+        Some(
+            hyper::Response::builder()
+                .status(status)
+                .header("content-type", "application/x-amz-json-1.0")
+                .body(Full::new(Bytes::from(reply)))
+                .unwrap(),
+        )
     }
 
     fn hmac(key: &[u8], data: &str) -> Vec<u8> {
