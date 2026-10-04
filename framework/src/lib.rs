@@ -625,6 +625,13 @@ pub use indexmap;
 #[doc(hidden)]
 pub use serde_json;
 
+// The `#[derive(Data)]` route-param extractor parses form bodies with
+// `form_urlencoded`. Naming it through this crate means an application that
+// depends only on `suprnova` compiles that code; `::url::...` resolved only
+// in crates that happened to depend on `url` themselves.
+#[doc(hidden)]
+pub use ::url::form_urlencoded as __form_urlencoded;
+
 // Re-export serde for InertiaProps derive macro
 pub use serde;
 

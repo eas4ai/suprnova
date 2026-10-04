@@ -669,7 +669,7 @@ fn build_form_request(ctx: &DataCodegen<'_>, struct_opts: &StructOptions) -> Tok
                                 // Form-urlencoded: flatten pairs into a JSON object
                                 // (last value wins on duplicate keys, matching Laravel).
                                 let mut obj = ::suprnova::serde_json::Map::new();
-                                for (k, v) in ::url::form_urlencoded::parse(&body_bytes) {
+                                for (k, v) in ::suprnova::__form_urlencoded::parse(&body_bytes) {
                                     obj.insert(
                                         k.into_owned(),
                                         ::suprnova::serde_json::Value::String(v.into_owned()),
