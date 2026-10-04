@@ -61,7 +61,8 @@ async fn prepare(
 /// fault this function catches before making any network call, matching
 /// dossier facts such as Facebook's non-RFC-6749 refresh shape
 /// (`docs/specs/suprnova-magnetar/10-providers.md`). Otherwise propagates
-/// provider/network failure classes from [`super::execute_token_request`].
+/// provider/network failure classes from the shared token-request helper,
+/// `execute_token_request`.
 pub async fn execute(
     provider: &dyn OAuthProvider,
     transport: &dyn HttpTransport,

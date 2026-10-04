@@ -4,18 +4,19 @@
 //! State IS the ceremony selector (adapted in behavior, not code, from
 //! `torii_integration/oauth.rs`'s `begin`/`verify_and_consume_ceremony`):
 //! `begin` mints `(state, verifier, provider, intent, binding)` into 02's
-//! [`CeremonyStore`] under [`OAUTH_AUTHORIZATION_KIND`]; `complete` consumes
-//! it atomically by selector, giving exactly one callback winner. Unlike
-//! Suprnova's framework-session lookup, the session-binding check here
-//! compares an opaque 32-byte digest supplied by the caller at both ends
+//! [`CeremonyStore`](crate::storage::CeremonyStore) under
+//! [`OAUTH_AUTHORIZATION_KIND`]; `complete` consumes it atomically by
+//! selector, giving exactly one callback winner. Unlike Suprnova's
+//! framework-session lookup, the session-binding check here compares an
+//! opaque 32-byte digest supplied by the caller at both ends
 //! ([`CeremonyBinding::HostSessionDigest`]) -- Magnetar has no ambient
 //! session of its own to consult. A web adapter supplies its initiating
 //! data session's digest at `begin`; an API/standalone adapter opts out
 //! explicitly with [`CeremonyBinding::StateOnly`]. The digest check runs
 //! *before* the atomic consume, so a mismatch never mutates ceremony state.
-//! Code exchange (Task 4) and identity resolution ([`super::identity`]) are
-//! deliberately not composed here -- `complete` returns the consumed
-//! [`OAuthCeremony`] and stops.
+//! Code exchange (Task 4) and identity resolution
+//! ([`crate::oauth::identity`]) are deliberately not composed here --
+//! `complete` returns the consumed [`OAuthCeremony`] and stops.
 
 use std::sync::Arc;
 use std::time::Duration as StdDuration;

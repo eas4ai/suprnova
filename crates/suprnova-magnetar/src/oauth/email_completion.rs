@@ -4,23 +4,24 @@
 //!
 //! [`EmailCompletionService::resend`] (the only mail-emitting entry point --
 //! [`request`](EmailCompletionService::request) is a thin gated alias) mints
-//! a fresh [`TokenStore`] token per attempt, keyed by the pending record's
-//! stable `sibling_key` in its `user_id` slot so that consuming any one of
-//! them stamps every other outstanding token for that pending identity as
-//! used (`TokenStore`'s sibling invalidation, restored deliberately -- see
-//! the doc comment on [`EmailCompletionService::resend`]). `sibling_key` is
-//! a separate, decimal-numeric handle from `pending_id` -- `pending_id`
-//! itself is a high-entropy, caller-visible hex selector unsuitable for a
-//! numeric-FK `user_id` column (see [`super::identity::PendingIdentityPayload::sibling_key`]).
+//! a fresh [`TokenStore`](crate::storage::TokenStore) token per attempt,
+//! keyed by the pending record's stable `sibling_key` in its `user_id` slot
+//! so that consuming any one of them stamps every other outstanding token
+//! for that pending identity as used (`TokenStore`'s sibling invalidation,
+//! restored deliberately -- see the doc comment on
+//! [`EmailCompletionService::resend`]). `sibling_key` is a separate,
+//! decimal-numeric handle from `pending_id` -- `pending_id` itself is a
+//! high-entropy, caller-visible hex selector unsuitable for a numeric-FK
+//! `user_id` column (see `PendingIdentityPayload::sibling_key`).
 //!
 //! The submitted email is bound to a specific token via an encrypted
-//! [`CeremonyStore`] record keyed by the token's own `token_id` -- not a
-//! client-supplied link parameter, which would let an attacker mail
-//! themselves a real token and then swap in a victim's address before
-//! consuming it. `consume` finalizes atomically: the token, then the email
-//! binding, then the pending identity are each consumed exactly once, so a
-//! stale second click always fails generically once the pending identity is
-//! gone -- nothing is ever created twice.
+//! [`CeremonyStore`](crate::storage::CeremonyStore) record keyed by the
+//! token's own `token_id` -- not a client-supplied link parameter, which
+//! would let an attacker mail themselves a real token and then swap in a
+//! victim's address before consuming it. `consume` finalizes atomically:
+//! the token, then the email binding, then the pending identity are each
+//! consumed exactly once, so a stale second click always fails generically
+//! once the pending identity is gone -- nothing is ever created twice.
 
 use std::sync::Arc;
 use std::time::Duration as StdDuration;

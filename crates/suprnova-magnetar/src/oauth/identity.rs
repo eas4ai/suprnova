@@ -10,7 +10,8 @@
 //! no provider-name branch.
 //!
 //! Five distinct outcomes ([`IdentityOutcome`]): known `(provider, subject)`
-//! resolves to `SignIn` with a bare [`VerifiedPrincipal`] -- passing it
+//! resolves to `SignIn` with a bare
+//! [`VerifiedPrincipal`](crate::auth::VerifiedPrincipal) -- passing it
 //! through [`crate::auth::FactorGate`] is the caller's job, not this
 //! module's, so identity resolution stays testable without session
 //! machinery. Unknown identity with a *provider-verified* matching email
