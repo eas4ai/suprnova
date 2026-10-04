@@ -92,6 +92,10 @@ function resolve(root: HTMLElement, entry: MorphIdentityEntry): Element | null {
 export function prepareMorphTransitions(plan: MorphPlan): MorphTransitions {
   const before: TransitionTarget[] = [];
   const after: PendingTransition[] = [];
+  // A set, not `moved.includes` per entry: a reorder of every row moves every
+  // entry, and scanning the moved list for each one was quadratic in the
+  // island's keyed elements.
+  const moved = new Set(plan.identity.moved);
   for (const entry of plan.identity.entries) {
     if (entry.kind === "nested_island") continue;
     let kind: TransitionKind;
@@ -102,7 +106,7 @@ export function prepareMorphTransitions(plan: MorphPlan): MorphTransitions {
     } else if (entry.replacement === null) {
       kind = "leave";
       parsed = parseTransition(entry.current);
-    } else if (plan.identity.moved.includes(identityLabel(entry))) {
+    } else if (moved.has(identityLabel(entry))) {
       kind = "move";
       parsed = parseTransition(entry.replacement) ?? parseTransition(entry.current);
     } else if (changed(entry)) {
