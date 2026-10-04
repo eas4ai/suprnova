@@ -2430,6 +2430,60 @@ async fn a_locale_declared_route_still_caches_when_nothing_switches() {
     );
 }
 
+/// DRIVERS-077: a render that read the locale depends on the catalog
+/// (`DependencyIdentity::Locale`). Reloading a catalog whose text changed
+/// must make the entries rendered from the old text miss, the same way a
+/// row write makes the renders that read the row miss.
+///
+/// Verified failing with the reload made through `Translator::reload`, the
+/// production reload the docs named before `Lang::reload` existed: the
+/// third dispatch was a hit, `left: 1, right: 2`.
+#[cfg(feature = "localization")]
+#[tokio::test]
+#[serial_test::serial]
+async fn a_catalog_reload_that_changes_its_text_makes_localized_entries_miss() {
+    let harness = boot_with_render_cache().await;
+    let lang = tempfile::tempdir().expect("lang dir");
+    let catalog = lang.path().join("en").join("app.ftl");
+    std::fs::create_dir_all(lang.path().join("en")).expect("en dir");
+    std::fs::write(&catalog, "greeting = Hello\n").expect("write catalog");
+    let en = suprnova::Locale::parse("en").expect("en");
+    let config = suprnova::LocalizationConfig {
+        default_locale: en.clone(),
+        fallback_locale: en,
+        use_isolating: false,
+        detection: Vec::new(),
+        session_key: "locale".into(),
+        cookie_name: "locale".into(),
+        parents: Default::default(),
+    };
+    let translator =
+        suprnova::FluentTranslator::from_dir(lang.path(), &config).expect("load catalog");
+    suprnova::container::App::bind::<dyn suprnova::Translator>(std::sync::Arc::new(translator));
+
+    dispatch_get(&harness, "/late-locale/1", &[]).await;
+    let after_first = counting_route::renders();
+    dispatch_get(&harness, "/late-locale/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first,
+        "precondition: the localized entry is a hit before the catalog changes"
+    );
+
+    std::fs::write(&catalog, "greeting = Hi\n").expect("edit catalog");
+    assert!(
+        suprnova::Lang::reload().await.expect("reload catalog"),
+        "the catalog's text changed"
+    );
+
+    dispatch_get(&harness, "/late-locale/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        after_first + 1,
+        "an entry rendered from the old catalog is a miss after the reload"
+    );
+}
+
 /// Fix round 8, finding 5. `observe_identity` used to record an axis only
 /// when the ambient context actually carried a field for it, so an
 /// **anonymous** reader of an identity-scoped flag recorded nothing at all:

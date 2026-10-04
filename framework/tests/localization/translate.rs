@@ -202,6 +202,76 @@ fn reload_if_stale_detects_a_deleted_file() {
     assert!(t.translate(&en, "w", &TranslateArgs::new()).is_err());
 }
 
+/// DRIVERS-026: a message with attributes and no value has nothing
+/// `translate` can render, so `has` must not report it as translatable.
+#[test]
+fn has_is_false_for_a_message_with_attributes_but_no_value() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(
+        tmp.path(),
+        "en",
+        "app.ftl",
+        "login-button =\n    .title = Sign in\nplain = Plain\n",
+    );
+    let t = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
+    let en = Locale::parse("en").unwrap();
+    assert!(
+        t.translate(&en, "login-button", &TranslateArgs::new())
+            .is_err(),
+        "precondition: an attribute-only message has no value to translate"
+    );
+    assert!(!t.has(&en, "login-button"));
+    assert!(t.has(&en, "plain"));
+}
+
+/// DRIVERS-027: Fluent keeps terms (`-brand`) and messages (`brand`) in
+/// separate namespaces, and so does the catalog merge, but the runtime
+/// bundle keys both by the bare name. Both must still resolve, in either
+/// order, and a term must not hide a built-in function of the same name.
+/// The catalog served to the browser keeps the author's names.
+#[test]
+fn a_term_and_a_message_with_one_name_both_resolve() {
+    for ftl in [
+        "-brand = Suprnova\nbrand = Brand settings\nabout = About { -brand }\n",
+        "brand = Brand settings\n-brand = Suprnova\nabout = About { -brand }\n",
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        write_lang(tmp.path(), "en", "app.ftl", ftl);
+        let t = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
+        let en = Locale::parse("en").unwrap();
+        let args = TranslateArgs::new();
+        assert_eq!(
+            t.translate(&en, "brand", &args).unwrap(),
+            "Brand settings",
+            "{ftl}"
+        );
+        assert_eq!(
+            t.translate(&en, "about", &args).unwrap(),
+            "About Suprnova",
+            "{ftl}"
+        );
+        assert!(t.has(&en, "brand"));
+        let served = t.catalog(&en).unwrap().text;
+        assert!(
+            served.contains("-brand = Suprnova") && served.contains("about = About { -brand }"),
+            "the served catalog keeps the term's own name: {served}"
+        );
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(
+        tmp.path(),
+        "en",
+        "app.ftl",
+        "-NUMBER = items\ncount = { NUMBER($n) } { -NUMBER }\n",
+    );
+    let t = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
+    let en = Locale::parse("en").unwrap();
+    let mut args = TranslateArgs::new();
+    args.insert("n".into(), serde_json::json!(3));
+    assert_eq!(t.translate(&en, "count", &args).unwrap(), "3 items");
+}
+
 /// `Lang` facade + `__!` macro tests. These bind a process-global
 /// container binding (`App::bind::<dyn Translator>`), and tests within
 /// one integration-test binary run concurrently by default - a later
@@ -251,6 +321,26 @@ mod lang_facade {
             Lang::set_locale(Locale::parse("es").unwrap());
             assert_eq!(Lang::locale().as_str(), "es");
             assert_eq!(Lang::get("greet"), "Hola");
+        })
+        .await;
+    }
+
+    /// DRIVERS-026: `Lang::has` promises `Lang::get` would return a real
+    /// translation; an attribute-only message only ever returns its key.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn lang_has_is_false_for_an_attribute_only_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        super::write_lang(
+            tmp.path(),
+            "en",
+            "app.ftl",
+            "login-button =\n    .title = Sign in\n",
+        );
+        bind_translator(tmp.path());
+        scope_locale(Locale::parse("en").unwrap(), async {
+            assert_eq!(Lang::get("login-button"), "login-button");
+            assert!(!Lang::has("login-button"));
         })
         .await;
     }

@@ -64,12 +64,14 @@ impl fmt::Display for Locale {
 
 /// Negotiate the best available locale for an `Accept-Language` header.
 ///
-/// Uses fluent-langneg filtering: requested locales in q-order against available,
-/// first match wins, `None` when nothing matches. Handles q-values and malformed
-/// segments transparently.
+/// The requested languages are ranked by their q-values, highest first,
+/// with equal weights keeping the header's order; a language with `q=0` is
+/// refused and never chosen. The ranked list is matched against `available`
+/// with fluent-langneg filtering: the first requested language with a match
+/// wins, and `None` means nothing matched. A segment that is not a language
+/// tag is skipped, so a malformed header can only fail to match.
 pub fn negotiate(accept_language: &str, available: &[Locale]) -> Option<Locale> {
-    // fluent_langneg's Accept-Language parser handles q-values and malformed segments
-    let requested = fluent_langneg::accepted_languages::parse(accept_language);
+    let requested = ranked_languages(accept_language);
 
     // Convert available locales to fluent_langneg's LanguageIdentifier for matching
     let avail: Vec<fluent_langneg::LanguageIdentifier> = available
@@ -83,6 +85,54 @@ pub fn negotiate(accept_language: &str, available: &[Locale]) -> Option<Locale> 
     // Find the best matched locale from our available list
     let best = matched.first()?.to_string();
     available.iter().find(|l| l.as_str() == best).cloned()
+}
+
+/// The language tags of an `Accept-Language` header, most preferred first.
+///
+/// fluent-langneg's own parser drops everything after `;`, so it keeps the
+/// header's order and ignores the weights the client actually sent. Weights
+/// are compared in thousandths, the precision RFC 9110 allows, so `0.001`
+/// still outranks `0`. A weight that does not parse counts as `0`: the
+/// client did not say it accepts the language.
+fn ranked_languages(header: &str) -> Vec<fluent_langneg::LanguageIdentifier> {
+    let mut weighted: Vec<(u16, fluent_langneg::LanguageIdentifier)> = header
+        .split(',')
+        .filter_map(|segment| {
+            let mut parts = segment.split(';');
+            let tag = parts.next()?.trim();
+            let weight = parts
+                .filter_map(|parameter| {
+                    let (name, value) = parameter.split_once('=')?;
+                    name.trim()
+                        .eq_ignore_ascii_case("q")
+                        .then(|| thousandths(value.trim()))
+                })
+                .next()
+                .unwrap_or(1000);
+            if weight == 0 {
+                return None;
+            }
+            tag.parse().ok().map(|language| (weight, language))
+        })
+        .collect();
+    // A stable sort keeps the header's order among equal weights.
+    weighted.sort_by_key(|(weight, _)| std::cmp::Reverse(*weight));
+    weighted.into_iter().map(|(_, language)| language).collect()
+}
+
+/// An RFC 9110 qvalue (`0` to `1`, at most three decimals) in thousandths,
+/// or `0` when it is not one.
+fn thousandths(raw: &str) -> u16 {
+    let (whole, fraction) = raw.split_once('.').unwrap_or((raw, ""));
+    if fraction.len() > 3 || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+        return 0;
+    }
+    let digits = format!("{fraction:0<3}");
+    match (whole, digits.parse::<u16>()) {
+        ("0", Ok(fraction)) => fraction,
+        ("1", Ok(0)) => 1000,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -103,6 +153,19 @@ mod tests {
         let got = negotiate("fr-CH, es;q=0.8, en;q=0.5", &available).unwrap();
         assert_eq!(got.as_str(), "es");
         assert!(negotiate("zh, ja;q=0.9", &available).is_none());
+    }
+
+    #[test]
+    fn qvalues_parse_to_thousandths() {
+        assert_eq!(thousandths("1"), 1000);
+        assert_eq!(thousandths("1.000"), 1000);
+        assert_eq!(thousandths("0.5"), 500);
+        assert_eq!(thousandths("0.001"), 1);
+        assert_eq!(thousandths("0"), 0);
+        assert_eq!(thousandths("1.5"), 0);
+        assert_eq!(thousandths("0.0001"), 0);
+        assert_eq!(thousandths("abc"), 0);
+        assert_eq!(thousandths(""), 0);
     }
 
     #[test]

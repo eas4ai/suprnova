@@ -164,6 +164,12 @@ stored rules changed and tells the cached evaluator which ones those were. A
 flag the table does not hold records nothing: that render depended on the
 default compiled into `is_enabled!`, not on stored state.
 
+**Translation catalogs.** A render that calls `Lang::locale()` - every
+translation does - observes the catalog's generation. `Lang::reload()`, and
+the per-request hot reload in `local` and `development`, advance it when a
+catalog's text changed, so the pages rendered from the old text miss.
+`Translator::reload` on its own advances nothing.
+
 **The write side.** Every process whose configuration enables RenderCache and
 whose database holds the RenderCache migration advances generations, so a
 write made by a queue worker, a scheduled task, or a console command

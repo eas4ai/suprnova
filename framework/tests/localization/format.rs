@@ -119,6 +119,38 @@ async fn datetime_fluent_function_formats_inside_a_message() {
     .await;
 }
 
+/// DRIVERS-024: `DATETIME()` formats in the locale of the catalog the
+/// message came from - the one the caller asked the translator for - not
+/// in the ambient `Lang::locale()`, so a message never mixes two
+/// languages.
+#[tokio::test]
+#[serial_test::serial]
+async fn datetime_fluent_function_formats_in_the_requested_catalogs_locale() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ftl = r#"published = { DATETIME($when, dateStyle: "long") }"#;
+    write_lang(tmp.path(), "en", "app.ftl", ftl);
+    write_lang(tmp.path(), "es", "app.ftl", ftl);
+    let translator = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
+    let (en, es) = (Locale::parse("en").unwrap(), Locale::parse("es").unwrap());
+    let dt = chrono::NaiveDate::from_ymd_opt(2026, 8, 1)
+        .unwrap()
+        .and_hms_opt(14, 30, 0)
+        .unwrap();
+    let spanish = scope_locale(es.clone(), async { Lang::date(&dt, DateStyle::Long) }).await;
+    let english = scope_locale(en.clone(), async { Lang::date(&dt, DateStyle::Long) }).await;
+    assert_ne!(
+        spanish, english,
+        "precondition: the two locales format differently"
+    );
+
+    let mut args = suprnova::TranslateArgs::new();
+    args.insert("when".into(), serde_json::json!("2026-08-01T14:30:00"));
+    let got = scope_locale(en, async { translator.translate(&es, "published", &args) })
+        .await
+        .unwrap();
+    assert_eq!(got, spanish, "the es catalog formats its date in es");
+}
+
 /// `DATETIME($when, ...)` also accepts `$when` as an epoch-milliseconds
 /// number, not just an ISO-8601 string - the other half of the
 /// documented `$value` contract, previously untested.

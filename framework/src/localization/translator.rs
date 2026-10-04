@@ -32,7 +32,11 @@ pub trait Translator: Send + Sync {
         args: &TranslateArgs,
     ) -> Result<String, FrameworkError>;
 
-    /// Whether `locale`'s catalog defines `key`.
+    /// Whether `locale`'s catalog defines `key` with a value
+    /// [`translate`](Self::translate) can render. `Lang::has` relies on it to
+    /// promise a real translation rather than the bare key, so a key that
+    /// exists without a value (a Fluent message with only attributes) is not
+    /// one.
     fn has(&self, locale: &Locale, key: &str) -> bool;
 
     /// Locales with a loaded catalog.
@@ -47,6 +51,11 @@ pub trait Translator: Send + Sync {
     fn catalog(&self, locale: &Locale) -> Option<CatalogSource>;
 
     /// Re-read catalogs from disk (dev hot-reload).
+    ///
+    /// This reloads the driver alone. Cached RenderCache entries rendered
+    /// from the old catalogs stay valid until something advances the locale
+    /// generation; [`Lang::reload`](super::Lang::reload) reloads and does
+    /// that, and is the call to make from a deploy hook.
     fn reload(&self) -> Result<(), FrameworkError>;
 
     /// Re-read catalogs from disk only if they changed since the last

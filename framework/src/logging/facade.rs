@@ -2,7 +2,8 @@
 
 use super::channel::{ChannelKind, LogChannel, LogLevel, LogRecord, LogSink, facility_number};
 use super::sinks::{
-    FileSink, Rotation, StreamSink, flush_all, register_flushable, replace_placeholders,
+    FileSink, ReportedSink, Rotation, StreamSink, flush_all, register_flushable,
+    replace_placeholders,
 };
 use crate::error::FrameworkError;
 use std::collections::{BTreeMap, HashMap};
@@ -19,6 +20,28 @@ pub(crate) enum Leaf {
     Stdout(Option<LogLevel>),
     Stderr(Option<LogLevel>),
     Sink(Arc<dyn LogSink>, Option<LogLevel>),
+}
+
+impl Leaf {
+    /// The same leaf, keeping only what both its own lowest level and
+    /// `outer`, the level of a stack that lists it, keep.
+    fn within(self, outer: Option<LogLevel>) -> Self {
+        let narrowed = |own: Option<LogLevel>| match (own, outer) {
+            (Some(own), Some(outer)) => Some(own.min(outer)),
+            (own, None) => own,
+            (None, outer) => outer,
+        };
+        match self {
+            Leaf::Stdout(level) => Leaf::Stdout(narrowed(level)),
+            Leaf::Stderr(level) => Leaf::Stderr(narrowed(level)),
+            Leaf::Sink(sink, level) => Leaf::Sink(sink, narrowed(level)),
+        }
+    }
+
+    /// Whether this leaf writes to `sink`.
+    fn writes_to(&self, sink: &Arc<dyn LogSink>) -> bool {
+        matches!(self, Leaf::Sink(own, _) if Arc::ptr_eq(own, sink))
+    }
 }
 
 #[derive(Default)]
@@ -156,9 +179,16 @@ fn build(channel: &LogChannel, depth: u8) -> Result<Vec<Leaf>, FrameworkError> {
                     "log stacks nest more than eight deep; a stack probably lists itself",
                 ));
             }
+            // The stack's own level applies on top of each channel's, so a
+            // stack at `Warning` drops info even in a channel that keeps
+            // every level.
             let mut leaves = Vec::new();
             for name in names {
-                leaves.extend(resolve_named(name, depth + 1)?);
+                leaves.extend(
+                    resolve_named(name, depth + 1)?
+                        .into_iter()
+                        .map(|leaf| leaf.within(level)),
+                );
             }
             leaves
         }
@@ -168,7 +198,9 @@ fn build(channel: &LogChannel, depth: u8) -> Result<Vec<Leaf>, FrameworkError> {
                     "the log driver '{driver}' does not exist: add it with Log::extend"
                 ))
             })?;
-            let sink = factory(channel)?;
+            // The driver's failures are reported for it, as the `LogSink`
+            // contract asks of its caller.
+            let sink: Arc<dyn LogSink> = Arc::new(ReportedSink::new(factory(channel)?, driver));
             // A driver may buffer, so it is flushed with the files.
             register_flushable(&sink);
             vec![Leaf::Sink(sink, level)]
@@ -205,14 +237,34 @@ fn level_code(level: Option<LogLevel>) -> u8 {
     level.map_or(8, LogLevel::severity)
 }
 
+/// The lowest level any of the standard-stream leaves keeps, as the
+/// `tracing` formatter's threshold for that stream: `None` when no leaf is
+/// that stream, `Some(None)` when one keeps every level.
+///
+/// `tracing` writes an event to a stream once however many channels in the
+/// default stack name it, so the event goes when any of them keeps its
+/// level, whichever comes first in the stack.
+fn stream_minimum(
+    leaves: &[Leaf],
+    of_stream: impl Fn(&Leaf) -> Option<Option<LogLevel>>,
+) -> Option<Option<LogLevel>> {
+    leaves
+        .iter()
+        .filter_map(of_stream)
+        .reduce(|kept, level| match (kept, level) {
+            (Some(kept), Some(level)) => Some(kept.max(level)),
+            _ => None,
+        })
+}
+
 /// Make `name` the default channel: the one `tracing` events go to.
 pub(crate) fn set_default(name: &str) -> Result<(), FrameworkError> {
     let leaves = resolve_named(name, 0)?;
-    let stdout = leaves.iter().find_map(|leaf| match leaf {
+    let stdout = stream_minimum(&leaves, |leaf| match leaf {
         Leaf::Stdout(level) => Some(*level),
         _ => None,
     });
-    let stderr = leaves.iter().find_map(|leaf| match leaf {
+    let stderr = stream_minimum(&leaves, |leaf| match leaf {
         Leaf::Stderr(level) => Some(*level),
         _ => None,
     });
@@ -394,15 +446,39 @@ impl Log {
     /// closing its files. It is resolved again the next time it is used,
     /// the default channel by the next `tracing` event, which reopens its
     /// file, as Laravel's `forgetChannel` does after a file was rotated
-    /// away.
+    /// away. A stack that lists the channel is dropped with it, the
+    /// default channel among them, so the stack reopens the file too
+    /// rather than writing on into the rotated one. A [`Logger`] taken
+    /// before keeps the sinks it holds.
     pub fn forget_channel(name: &str) {
-        let removed = write().resolved.remove(name);
-        for leaf in removed.into_iter().flatten() {
-            if let Leaf::Sink(sink, _) = leaf {
-                let _ = sink.flush();
-            }
+        let (forgotten, default_affected) = {
+            let mut registry = write();
+            let forgotten: Vec<Arc<dyn LogSink>> = registry
+                .resolved
+                .remove(name)
+                .into_iter()
+                .flatten()
+                .filter_map(|leaf| match leaf {
+                    Leaf::Sink(sink, _) => Some(sink),
+                    _ => None,
+                })
+                .collect();
+            let shares_a_sink = |leaves: &[Leaf]| {
+                leaves
+                    .iter()
+                    .any(|leaf| forgotten.iter().any(|sink| leaf.writes_to(sink)))
+            };
+            registry.resolved.retain(|_, leaves| !shares_a_sink(leaves));
+            let default_affected = registry.default.as_deref() == Some(name)
+                || shares_a_sink(&registry.default_leaves);
+            (forgotten, default_affected)
+        };
+        // Flushed outside the registry lock: a driver's flush may log.
+        for sink in &forgotten {
+            // A failure is reported by the sink, or by its `ReportedSink`.
+            let _ = sink.flush();
         }
-        if read().default.as_deref() == Some(name) {
+        if default_affected {
             DEFAULT_FORGOTTEN.store(true, Ordering::Relaxed);
         }
     }
@@ -461,6 +537,9 @@ impl Logger {
             context,
         };
         for leaf in &self.leaves {
+            // Every sink reports its own failure once on stderr, a driver's
+            // through its `ReportedSink`, so the result is not needed here:
+            // logging never fails its caller.
             let _ = match leaf {
                 Leaf::Stdout(minimum) if level.passes(*minimum) => {
                     StreamSink::stdout().write(&record)

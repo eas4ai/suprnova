@@ -106,7 +106,11 @@ The rules:
 - **In `local` and `development`, catalogs hot-reload.** Each request
   stats `lang/` and reparses only when something actually changed, so
   editing a `.ftl` shows up on the next refresh. Production never
-  re-stats; catalogs are read once at boot.
+  re-stats; catalogs are read once at boot. A deploy hook that ships new
+  catalogs to a running process calls `Lang::reload().await`. Both reloads
+  also make the [RenderCache](render-cache.md) entries rendered from the
+  old text miss; `Translator::reload` alone swaps the catalogs and leaves
+  those entries valid until they expire.
 
 ## FTL in five minutes
 
@@ -218,10 +222,11 @@ locale**, which the middleware bound for this request.
 | `Lang::get_with(key, args)` | `String` | Same, with arguments |
 | `Lang::try_get(key)` | `Result<String, FrameworkError>` | Errors instead of degrading |
 | `Lang::try_get_with(key, args)` | `Result<String, FrameworkError>` | Same, with arguments |
-| `Lang::has(key)` | `bool` | Whether the key resolves for the current locale, or anywhere along its fallback chain |
+| `Lang::has(key)` | `bool` | Whether the key resolves for the current locale, or anywhere along its fallback chain. A message with attributes and no value does not count |
 | `Lang::locale()` | `Locale` | The current locale |
 | `Lang::set_locale(locale)` | `()` | Change it for the rest of this request |
 | `Lang::available_locales()` | `Vec<Locale>` | Every locale with a loaded catalog |
+| `Lang::reload()` | `Result<bool, FrameworkError>` (async) | Re-reads the catalogs and invalidates the cached pages built from them; `true` when a catalog's text changed |
 
 ```rust
 use suprnova::{Lang, Locale, TranslateArgs};
@@ -479,7 +484,8 @@ to messages only - a child term always supplies a value, and that
 value always wins. Attribute merge-by-name, whole-pattern replacement
 for the value, and parent-wins comments all apply to terms exactly as
 to messages. Terms are tracked in their own namespace - overriding
-`-brand` can never shadow a message also named `brand`.
+`-brand` can never shadow a message also named `brand`, on the server
+as in the browser.
 
 ### Why Suprnova diverges
 
@@ -515,7 +521,9 @@ wins**:
    choice made before signing in isn't lost.
 3. **`Accept-Language`** - negotiated against `available_locales()` with
    `fluent-langneg`, honouring q-values. `fr-CH, es;q=0.8, en;q=0.5`
-   against catalogs `en` + `es` resolves to `es`.
+   against catalogs `en` + `es` resolves to `es`. The weights rank the
+   languages, not their order in the header, so `en;q=0.1, es` also
+   resolves to `es`, and a language sent with `q=0` is never chosen.
 4. **`APP_LOCALE`** - the configured default, when nothing above hit.
 
 A candidate that doesn't parse, or names a locale with no catalog, is
@@ -995,7 +1003,10 @@ fraction-digit control inside the message. `DATETIME()` is Suprnova's:
 `dateStyle` / `timeStyle` take the same names as the Rust enums, lower
 case. A value it cannot parse passes through verbatim with a `warn!` -
 a Fluent function cannot return an error, and a rendered page with one
-odd-looking date beats a 500.
+odd-looking date beats a 500. Both functions format in the locale of the
+catalog the message came from, so a message is never half one language:
+a `Translator::translate` call that names `es` gets Spanish dates whatever
+`Lang::locale()` is.
 
 When you want ICU4X's full formatting rather than what a Fluent function
 exposes, format in Rust and pass the finished string in:
