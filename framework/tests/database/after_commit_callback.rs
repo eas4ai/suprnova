@@ -441,11 +441,15 @@ async fn push_after_commit_with_tx_pushes_only_after_the_handle_commits() {
 // ---- Live engines -------------------------------------------------------
 
 async fn connect_live(env: &str) -> (TestContainerGuard, DbConnection) {
+    connect_live_pool(env, 1).await
+}
+
+async fn connect_live_pool(env: &str, connections: u32) -> (TestContainerGuard, DbConnection) {
     let url = std::env::var(env).expect("explicit disposable database URL required");
     let guard = TestContainer::fake();
     let config = DatabaseConfig::builder()
         .url(url)
-        .max_connections(1)
+        .max_connections(connections)
         .min_connections(1)
         .logging(false)
         .build();
@@ -551,4 +555,98 @@ async fn postgres_after_commit_waits_for_the_outermost_commit() {
 #[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
 async fn mysql_after_commit_waits_for_the_outermost_commit() {
     live_after_commit("MYSQL_TEST_URL").await;
+}
+
+#[model(table = "ac_slow_commit_notes", timestamps = false, fillable = ["body"])]
+pub struct AcSlowCommitNote {
+    pub id: i64,
+    pub body: String,
+}
+
+/// DATA-001: a caller cancelled while its manual COMMIT is in flight, by a
+/// client disconnect or a timeout, must not take the after-commit work with
+/// it. The COMMIT lands on the server either way, so the rows persist; before
+/// the fix the queued job and the callback were dropped with no log.
+///
+/// A deferred constraint trigger sleeps inside COMMIT, so the timeout below
+/// cancels the caller while the server is still committing.
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
+async fn postgres_a_cancelled_manual_commit_still_runs_its_after_commit_work() {
+    use sea_orm::ConnectionTrait;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    let (guard, database) = connect_live_pool("PG_TEST_URL", 2).await;
+    for statement in [
+        "DROP TABLE IF EXISTS ac_slow_commit_notes",
+        "CREATE TABLE ac_slow_commit_notes (id BIGSERIAL PRIMARY KEY, body TEXT NOT NULL)",
+        "CREATE OR REPLACE FUNCTION ac_slow_commit_sleep() RETURNS trigger AS $$ \
+         BEGIN PERFORM pg_sleep(1); RETURN NULL; END $$ LANGUAGE plpgsql",
+        "CREATE CONSTRAINT TRIGGER ac_slow_commit_delay AFTER INSERT ON ac_slow_commit_notes \
+         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ac_slow_commit_sleep()",
+    ] {
+        database
+            .inner()
+            .execute_unprepared(statement)
+            .await
+            .expect("set up the slow-commit table");
+    }
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let tx = DB::begin_transaction().await.unwrap();
+    AcSlowCommitNote::create_with_tx(&tx, attrs! { body: "committed while cancelled" })
+        .await
+        .unwrap();
+    Queue::push_after_commit_with_tx(&tx, NoteWritten)
+        .await
+        .unwrap();
+    let ran = Arc::new(AtomicBool::new(false));
+    let flag = ran.clone();
+    tx.after_commit(move || async move {
+        flag.store(true, Ordering::SeqCst);
+        Ok(())
+    });
+
+    let cancelled = tokio::time::timeout(Duration::from_millis(100), tx.commit()).await;
+    assert!(
+        cancelled.is_err(),
+        "the COMMIT outlived the caller's timeout"
+    );
+
+    let finished = tokio::time::timeout(Duration::from_secs(10), async {
+        while !ran.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert_eq!(
+        AcSlowCommitNote::all().await.unwrap().len(),
+        1,
+        "the COMMIT landed on the server"
+    );
+    assert!(
+        finished.is_ok(),
+        "the after-commit callback of a committed transaction was dropped"
+    );
+    assert_eq!(
+        driver.size().await.unwrap(),
+        1,
+        "the job pushed after the commit was dropped"
+    );
+
+    database
+        .inner()
+        .execute_unprepared("DROP TABLE ac_slow_commit_notes")
+        .await
+        .unwrap();
+    database
+        .inner()
+        .execute_unprepared("DROP FUNCTION ac_slow_commit_sleep()")
+        .await
+        .unwrap();
+    drop(guard);
+    database.inner().clone().close().await.unwrap();
 }

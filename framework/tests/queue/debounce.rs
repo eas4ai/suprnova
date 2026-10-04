@@ -279,7 +279,7 @@ impl QueueDriver for RefusingQueueDriver {
 
 #[tokio::test]
 #[serial]
-async fn a_push_that_fails_after_arming_lets_the_window_lapse() {
+async fn a_push_that_fails_after_arming_leaves_the_window_to_the_queued_dispatch() {
     cache_init();
     SYNC_ORDER_RUNS.store(0, Ordering::SeqCst);
     SYNC_ORDER_LAST_REVISION.store(0, Ordering::SeqCst);
@@ -293,9 +293,12 @@ async fn a_push_that_fails_after_arming_lets_the_window_lapse() {
     })
     .await
     .expect("first");
+    let window = Cache::get::<String>("queue-debounce:queue_debounce::SyncOrder:900")
+        .await
+        .expect("cache");
 
-    // The second dispatch arms the window - overwriting the first dispatch's
-    // token - and then fails to enqueue anything to carry it.
+    // The second dispatch arms the window and then fails to enqueue anything
+    // to carry it.
     Queue::set_driver(Arc::new(RefusingQueueDriver));
     Queue::push(SyncOrder {
         order_id: 900,
@@ -304,13 +307,13 @@ async fn a_push_that_fails_after_arming_lets_the_window_lapse() {
     .await
     .expect_err("the driver refused the write");
 
-    assert!(
+    assert_eq!(
         Cache::get::<String>("queue-debounce:queue_debounce::SyncOrder:900")
             .await
-            .expect("cache")
-            .is_none(),
-        "a window whose envelope never reached the queue must lapse, not stand as \
-         an owner nothing can satisfy"
+            .expect("cache"),
+        window,
+        "a dispatch whose envelope never reached the queue must not name the \
+         window's owner: nothing could ever satisfy it"
     );
 
     Queue::set_driver(driver.clone());
@@ -796,12 +799,12 @@ impl CacheStore for StampBrokenCache {
     }
 }
 
-/// The owner token is written before the max-wait bookkeeping runs, so an
-/// arming that fails halfway would otherwise leave a token in the cache that no
-/// envelope carries - and every earlier envelope of the burst, whose own push
-/// returned `Ok`, would be dropped at the worker as superseded by a dispatch
-/// that never completed. Only jobs declaring `max_debounce_wait` reach that
-/// bookkeeping at all, which is the manual's headline example.
+/// An arming that fails halfway, in the max-wait bookkeeping, must leave no
+/// token in the cache that no envelope carries - or every earlier envelope of
+/// the burst, whose own push returned `Ok`, would be dropped at the worker as
+/// superseded by a dispatch that never completed. Only jobs declaring
+/// `max_debounce_wait` reach that bookkeeping at all, which is the manual's
+/// headline example.
 #[tokio::test]
 #[serial]
 async fn an_arming_that_fails_halfway_hands_the_window_back() {
@@ -820,8 +823,7 @@ async fn an_arming_that_fails_halfway_hands_the_window_back() {
     Queue::push(CompactLedger).await.expect("first");
 
     {
-        // B writes its owner token over A's, then fails reading the timestamp
-        // key.
+        // B arms, then fails reading the timestamp key.
         let real = Cache::store().expect("cache store");
         let _container = TestContainer::fake();
         TestContainer::bind::<dyn CacheStore>(Arc::new(StampBrokenCache { inner: real }));
@@ -841,8 +843,8 @@ async fn an_arming_that_fails_halfway_hands_the_window_back() {
     assert_eq!(
         COMPACT_RUNS.load(Ordering::SeqCst),
         1,
-        "an arming that could not complete must hand its window back, so the \
-         envelope already on the queue still runs"
+        "an arming that could not complete must leave the window to the \
+         envelope already on the queue, which still runs"
     );
 }
 
@@ -876,9 +878,8 @@ impl QueueDriver for GatedFailingQueueDriver {
     }
 }
 
-/// Handing a window back has to be owner-checked, or the cleanup becomes the
-/// opposite bug: a dispatch whose write fails slowly tears down a window a
-/// newer dispatch has since armed and filled, and the whole burst un-collapses.
+/// A dispatch whose write fails slowly must leave alone a window a newer
+/// dispatch has since armed and filled, or the whole burst un-collapses.
 #[tokio::test]
 #[serial]
 async fn a_failed_push_never_tears_down_a_newer_dispatch_window() {
@@ -914,7 +915,8 @@ async fn a_failed_push_never_tears_down_a_newer_dispatch_window() {
     });
     entered.notified().await;
 
-    // C arms over B's token and is enqueued. B's cleanup must not touch it.
+    // C arms and is enqueued while B's write is still failing. B's failure
+    // must not touch C's window.
     Queue::set_driver(driver.clone());
     Queue::push(SyncOrder {
         order_id: 800,
@@ -940,8 +942,8 @@ async fn a_failed_push_never_tears_down_a_newer_dispatch_window() {
     assert_eq!(
         SYNC_ORDER_RUNS.load(Ordering::SeqCst),
         1,
-        "an unconditional cleanup would delete the live owner token, and every \
-         queued envelope of the burst would fail open and run"
+        "a failed dispatch that deleted the live owner token would let every \
+         queued envelope of the burst fail open and run"
     );
     assert_eq!(
         SYNC_ORDER_LAST_REVISION.load(Ordering::SeqCst),
@@ -1130,4 +1132,426 @@ async fn a_debounced_listener_collapses_a_burst_of_events() {
         1,
         "four events on one order must reindex once"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The window names only a dispatch that reached the queue (DRIVERS-050, -051)
+// ---------------------------------------------------------------------------
+
+/// Gates `JobQueueing` while `GATE_QUEUEING` is set: the dispatch that emits
+/// it parks after arming its window and before its driver write.
+static GATE_QUEUEING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct ParkQueueing {
+    entered: Arc<Notify>,
+}
+
+#[async_trait]
+impl suprnova::events::Listener<suprnova::queue::events::JobQueueing> for ParkQueueing {
+    async fn handle(
+        &self,
+        _event: &suprnova::queue::events::JobQueueing,
+    ) -> Result<(), FrameworkError> {
+        if GATE_QUEUEING.load(Ordering::SeqCst) {
+            self.entered.notify_one();
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    }
+}
+
+/// DRIVERS-051: the owner token was written when the window was armed, before
+/// the push. A dispatch cancelled between the two - a client disconnect drops
+/// an HTTP handler's future - left a token no envelope carries, and the
+/// worker dropped the earlier, successfully queued envelope as superseded.
+#[tokio::test]
+#[serial]
+async fn a_dispatch_cancelled_before_its_push_does_not_supersede_queued_work() {
+    cache_init();
+    SYNC_ORDER_RUNS.store(0, Ordering::SeqCst);
+    SYNC_ORDER_LAST_REVISION.store(0, Ordering::SeqCst);
+    register_job::<SyncOrder>();
+    GATE_QUEUEING.store(false, Ordering::SeqCst);
+    let entered = Arc::new(Notify::new());
+    EventFacade::listen::<suprnova::queue::events::JobQueueing, _>(Arc::new(ParkQueueing {
+        entered: entered.clone(),
+    }))
+    .await;
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::push(SyncOrder {
+        order_id: 610,
+        revision: 1,
+    })
+    .await
+    .expect("the first dispatch is queued");
+
+    GATE_QUEUEING.store(true, Ordering::SeqCst);
+    let cancelled = tokio::spawn(async {
+        Queue::push(SyncOrder {
+            order_id: 610,
+            revision: 2,
+        })
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("the second dispatch armed its window and parked before its push");
+    cancelled.abort();
+    assert!(cancelled.await.expect_err("aborted").is_cancelled());
+    GATE_QUEUEING.store(false, Ordering::SeqCst);
+    EventFacade::forget::<suprnova::queue::events::JobQueueing>();
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        worker_cfg(),
+        CancellationToken::new(),
+    ));
+    settle(|| SYNC_ORDER_RUNS.load(Ordering::SeqCst) > 0).await;
+    handle.abort();
+    assert_eq!(
+        SYNC_ORDER_RUNS.load(Ordering::SeqCst),
+        1,
+        "the queued dispatch was dropped as superseded by one that never reached \
+         the queue"
+    );
+    assert_eq!(SYNC_ORDER_LAST_REVISION.load(Ordering::SeqCst), 1);
+}
+
+/// DRIVERS-051, as recorded: A is queued and available; B arms and parks in a
+/// driver write that will fail; a worker pops A meanwhile. A must run, since
+/// B's push never succeeds.
+#[tokio::test]
+#[serial]
+async fn queued_work_runs_while_a_newer_dispatch_is_still_pushing() {
+    cache_init();
+    SYNC_ORDER_RUNS.store(0, Ordering::SeqCst);
+    SYNC_ORDER_LAST_REVISION.store(0, Ordering::SeqCst);
+    register_job::<SyncOrder>();
+    let options = || DebounceOptions::new(Duration::ZERO).id("611");
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::push_debounced(
+        SyncOrder {
+            order_id: 611,
+            revision: 1,
+        },
+        options(),
+    )
+    .await
+    .expect("A is queued and available at once");
+
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    Queue::set_driver(Arc::new(GatedFailingQueueDriver {
+        entered: entered.clone(),
+        release: release.clone(),
+    }));
+    let parked = tokio::spawn(async move {
+        Queue::push_debounced(
+            SyncOrder {
+                order_id: 611,
+                revision: 2,
+            },
+            options(),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("B armed its window and is inside its driver write");
+
+    Queue::set_driver(driver.clone());
+    let cfg = WorkerConfig {
+        max_jobs: Some(1),
+        ..worker_cfg()
+    };
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        run_worker(driver.clone(), cfg, CancellationToken::new()),
+    )
+    .await
+    .expect("the worker settled A");
+    release.notify_one();
+    parked
+        .await
+        .expect("join")
+        .expect_err("B's driver write failed");
+
+    assert_eq!(
+        SYNC_ORDER_RUNS.load(Ordering::SeqCst),
+        1,
+        "A was acknowledged as superseded by B, whose push then failed: neither ran"
+    );
+    assert_eq!(SYNC_ORDER_LAST_REVISION.load(Ordering::SeqCst), 1);
+}
+
+/// Delegates to the in-memory cache, records the TTL of every write to a
+/// first-dispatch stamp, and can park the first `forget` of one key.
+struct ObservedCache {
+    inner: InMemoryCache,
+    stamp_ttls: std::sync::Mutex<Vec<Option<Duration>>>,
+    gated_key: Option<String>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    gate_used: std::sync::atomic::AtomicBool,
+}
+
+impl ObservedCache {
+    fn new(gated_key: Option<&str>) -> Self {
+        Self {
+            inner: InMemoryCache::new(),
+            stamp_ttls: std::sync::Mutex::new(Vec::new()),
+            gated_key: gated_key.map(str::to_owned),
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            gate_used: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait]
+impl CacheStore for ObservedCache {
+    async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError> {
+        self.inner.get_raw(key).await
+    }
+    async fn put_raw(
+        &self,
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<(), FrameworkError> {
+        if is_stamp(key) {
+            self.stamp_ttls.lock().unwrap().push(ttl);
+        }
+        self.inner.put_raw(key, value, ttl).await
+    }
+    async fn has(&self, key: &str) -> Result<bool, FrameworkError> {
+        self.inner.has(key).await
+    }
+    async fn forget(&self, key: &str) -> Result<bool, FrameworkError> {
+        if self.gated_key.as_deref() == Some(key) && !self.gate_used.swap(true, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.forget(key).await
+    }
+    async fn flush(&self) -> Result<(), FrameworkError> {
+        self.inner.flush().await
+    }
+    async fn increment(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+        self.inner.increment(key, amount).await
+    }
+    async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+        self.inner.decrement(key, amount).await
+    }
+    async fn tagged_put_raw(
+        &self,
+        tags: &[&str],
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<(), FrameworkError> {
+        self.inner.tagged_put_raw(tags, key, value, ttl).await
+    }
+    async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError> {
+        self.inner.flush_tags(tags).await
+    }
+    async fn acquire_lock(
+        &self,
+        key: &str,
+        ttl: Duration,
+    ) -> Result<Option<String>, FrameworkError> {
+        self.inner.acquire_lock(key, ttl).await
+    }
+    async fn release_lock(&self, key: &str, token: &str) -> Result<bool, FrameworkError> {
+        self.inner.release_lock(key, token).await
+    }
+    async fn refresh_lock(
+        &self,
+        key: &str,
+        token: &str,
+        ttl: Duration,
+    ) -> Result<bool, FrameworkError> {
+        self.inner.refresh_lock(key, token, ttl).await
+    }
+    async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
+        self.inner.touch(key, ttl).await
+    }
+}
+
+/// DRIVERS-050: handing a failed dispatch's window back read the owner, then
+/// forgot the key in a second step. A newer dispatch that armed and queued in
+/// between lost its token, so the burst's earlier envelope failed open and
+/// ran beside the newest one.
+#[tokio::test]
+#[serial]
+async fn a_failed_dispatch_cannot_clear_a_window_a_newer_one_armed_meanwhile() {
+    SYNC_ORDER_RUNS.store(0, Ordering::SeqCst);
+    SYNC_ORDER_LAST_REVISION.store(0, Ordering::SeqCst);
+    register_job::<SyncOrder>();
+    let key = "queue-debounce:queue_debounce::SyncOrder:612";
+    let cache = Arc::new(ObservedCache::new(Some(key)));
+    let (entered, release) = (cache.entered.clone(), cache.release.clone());
+    let _container = TestContainer::fake();
+    TestContainer::bind::<dyn CacheStore>(cache);
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::push(SyncOrder {
+        order_id: 612,
+        revision: 1,
+    })
+    .await
+    .expect("first");
+
+    Queue::set_driver(Arc::new(RefusingQueueDriver));
+    let mut failing = tokio::spawn(async {
+        Queue::push(SyncOrder {
+            order_id: 612,
+            revision: 2,
+        })
+        .await
+    });
+    // A dispatch that hands its window back parks inside that cleanup; one
+    // that never claimed the window has nothing to clean up and just fails.
+    let cleanup_parked = tokio::select! {
+        () = entered.notified() => true,
+        result = &mut failing => {
+            result.expect("join").expect_err("the driver refused the write");
+            false
+        }
+    };
+
+    Queue::set_driver(driver.clone());
+    Queue::push(SyncOrder {
+        order_id: 612,
+        revision: 3,
+    })
+    .await
+    .expect("third");
+    if cleanup_parked {
+        release.notify_one();
+        failing
+            .await
+            .expect("join")
+            .expect_err("the driver refused the write");
+    }
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        worker_cfg(),
+        CancellationToken::new(),
+    ));
+    settle(|| SYNC_ORDER_RUNS.load(Ordering::SeqCst) > 0).await;
+    handle.abort();
+    assert_eq!(
+        SYNC_ORDER_RUNS.load(Ordering::SeqCst),
+        1,
+        "the failed dispatch's cleanup deleted the newer dispatch's window, so the \
+         burst ran twice"
+    );
+    assert_eq!(SYNC_ORDER_LAST_REVISION.load(Ordering::SeqCst), 3);
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct LongBurstJob;
+
+#[async_trait]
+impl Job for LongBurstJob {
+    fn job_name() -> &'static str {
+        "queue_debounce::LongBurstJob"
+    }
+    fn debounce_for() -> Option<Duration> {
+        Some(Duration::from_secs(5))
+    }
+    fn max_debounce_wait() -> Option<Duration> {
+        Some(Duration::from_secs(600))
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+/// DRIVERS-052: the first-dispatch stamp lived `max(window * 10, 300s)`, so a
+/// 600-second max wait outlasted it. A continuous burst renewed its owner
+/// token on every dispatch while the stamp expired and was re-created, and
+/// the forced run never came.
+#[tokio::test]
+#[serial]
+async fn the_first_dispatch_stamp_outlives_the_max_wait() {
+    let cache = Arc::new(ObservedCache::new(None));
+    let _container = TestContainer::fake();
+    TestContainer::bind::<dyn CacheStore>(cache.clone());
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Queue::push(LongBurstJob).await.expect("push");
+
+    let ttls = cache.stamp_ttls.lock().unwrap().clone();
+    assert_eq!(ttls.len(), 1, "the first dispatch stamps the burst");
+    let ttl = ttls[0].expect("the stamp has a TTL");
+    assert!(
+        ttl > Duration::from_secs(600),
+        "the stamp expires after {ttl:?}, before the 600-second max wait can be \
+         measured against it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Queue::bulk honors a declared window (DRIVERS-064)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+async fn bulk_collapses_a_debounced_burst_onto_its_last_job() {
+    cache_init();
+    SYNC_ORDER_RUNS.store(0, Ordering::SeqCst);
+    SYNC_ORDER_LAST_REVISION.store(0, Ordering::SeqCst);
+    register_job::<SyncOrder>();
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::bulk(
+        (1..=3)
+            .map(|revision| SyncOrder {
+                order_id: 613,
+                revision,
+            })
+            .collect(),
+    )
+    .await
+    .expect("bulk");
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        worker_cfg(),
+        CancellationToken::new(),
+    ));
+    settle(|| SYNC_ORDER_RUNS.load(Ordering::SeqCst) > 0).await;
+    handle.abort();
+    assert_eq!(
+        SYNC_ORDER_RUNS.load(Ordering::SeqCst),
+        1,
+        "a debounced job pushed in bulk ran every copy"
+    );
+    assert_eq!(SYNC_ORDER_LAST_REVISION.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+#[serial]
+async fn bulk_refuses_a_job_declaring_debounce_and_uniqueness() {
+    cache_init();
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let err = Queue::bulk(vec![ConfusedJob, ConfusedJob])
+        .await
+        .expect_err("bulk must refuse the conflicting declarations too");
+    assert!(
+        err.to_string().contains("debounce_for") && err.to_string().contains("unique_id"),
+        "{err}"
+    );
+    assert_eq!(driver.size().await.expect("size"), 0);
 }

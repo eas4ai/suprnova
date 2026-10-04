@@ -54,22 +54,29 @@ struct Target {
 }
 
 impl Target {
-    /// Send `signal` to the program and everything it started.
-    /// `leader_reaped` says the program has been waited on, so its id may
-    /// belong to another process now; `streams_open` says something still
-    /// holds its output, so members of its group are alive.
-    fn signal_all(&self, signal: Signal, leader_reaped: bool, streams_open: bool) {
+    /// Send `signal` to the program and everything it started, unless the
+    /// program has been reaped: from then on its id - and, for a group, the
+    /// group's id, which is the same number - may belong to another process.
+    ///
+    /// Nothing short of the unreaped program proves a group id is still
+    /// ours. A process holding the program's output may have left the group,
+    /// so an open pipe says nothing about the group having a member, and an
+    /// empty group's id is free for reuse once the program is reaped. So the
+    /// program is not reaped while its output is open (see
+    /// `Real::may_reap`): until then, the program, even exited, keeps its id
+    /// and the group's pinned to it.
+    fn signal_all(&self, signal: Signal, leader_reaped: bool) {
         let Some(pid) = self.pid else {
             return;
         };
+        if leader_reaped {
+            return;
+        }
         match self.reach {
-            // A group id cannot be reused while the group has a member, so
-            // signalling it is safe while anything holds the output.
-            Reach::Group if !leader_reaped || streams_open => {
+            Reach::Group => {
                 let _ = send_signal(pid, true, signal);
             }
-            Reach::Tree if !leader_reaped => signal_tree(pid, signal),
-            _ => {}
+            Reach::Tree => signal_tree(pid, signal),
         }
     }
 }
@@ -414,11 +421,20 @@ impl InvokedProcess {
     }
 
     /// Whether the process is still running.
+    ///
+    /// On a platform that cannot look at an exit without collecting it
+    /// (macOS, for one), a program that exits while something it started
+    /// still holds its output counts as running until that output closes:
+    /// collecting it any earlier would free its id for reuse while its
+    /// group may still be signalled.
     pub fn running(&mut self) -> bool {
         match &mut self.inner {
             Inner::Real(real) => {
                 if real.status.is_some() {
                     return false;
+                }
+                if !real.may_reap() {
+                    return !real.exited_unreaped();
                 }
                 match real.child.try_wait() {
                     Ok(Some(status)) => {
@@ -486,7 +502,7 @@ impl InvokedProcess {
     pub fn signal(&self, signal: Signal) -> Result<(), ProcessError> {
         match &self.inner {
             Inner::Real(real) => match real.target.pid {
-                Some(pid) if real.status.is_none() => {
+                Some(pid) if real.status.is_none() && !real.exited_unreaped() => {
                     send_signal(pid, false, signal).map_err(|message| ProcessError::Signal {
                         command: self.command.clone(),
                         message,
@@ -600,8 +616,9 @@ impl InvokedProcess {
                 return Ok((!out.is_empty() && until(OutputKind::Out, &out))
                     || (!err.is_empty() && until(OutputKind::Err, &err)));
             }
+            let reap = real.status.is_none() && real.may_reap();
             tokio::select! {
-                status = real.child.wait(), if real.status.is_none() => {
+                status = real.child.wait(), if reap => {
                     real.record(status.map_err(|source| ProcessError::Io {
                         command: command.clone(),
                         source,
@@ -651,10 +668,54 @@ impl Real {
         self.captured.lock().open_streams > 0
     }
 
+    /// Whether the program may be reaped now: not while its output is open.
+    ///
+    /// Reaping frees the program's id, and the id of the group it leads.
+    /// While something holds its output, the group may still have to be
+    /// signalled, and only the unreaped program keeps that id from being
+    /// handed to an unrelated process. On Windows the child's handle keeps
+    /// its id, so reaping is never early there.
+    fn may_reap(&self) -> bool {
+        cfg!(not(unix)) || !self.streams_open()
+    }
+
+    /// Whether the program has exited, found without reaping it.
+    #[cfg(any(
+        target_os = "android",
+        target_os = "freebsd",
+        all(target_os = "linux", not(target_env = "uclibc")),
+    ))]
+    fn exited_unreaped(&self) -> bool {
+        use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid};
+        let Some(pid) = self.target.pid.and_then(|pid| nix_pid(pid).ok()) else {
+            return false;
+        };
+        // `WNOWAIT` leaves the exit to be collected later, so the id stays
+        // pinned. An error means there is no such child to wait on any more.
+        !matches!(
+            waitid(
+                Id::Pid(pid),
+                WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+            ),
+            Ok(WaitStatus::StillAlive)
+        )
+    }
+
+    /// Whether the program has exited, found without reaping it. This
+    /// platform cannot tell without reaping, so the answer waits for the
+    /// reap, which waits for the program's output to close.
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "freebsd",
+        all(target_os = "linux", not(target_env = "uclibc")),
+    )))]
+    fn exited_unreaped(&self) -> bool {
+        false
+    }
+
     fn signal_all(&mut self, signal: Signal) {
-        let streams_open = self.streams_open();
-        self.target
-            .signal_all(signal, self.status.is_some(), streams_open);
+        let reaped = self.captured.lock().reaped;
+        self.target.signal_all(signal, reaped);
         if signal == Signal::Kill && self.status.is_none() {
             let _ = self.child.start_kill();
         }
@@ -682,8 +743,9 @@ impl Real {
             if self.status.is_some() && !self.streams_open() {
                 return Ok(());
             }
+            let reap = self.status.is_none() && self.may_reap();
             tokio::select! {
-                status = self.child.wait(), if self.status.is_none() => {
+                status = self.child.wait(), if reap => {
                     self.record(status.map_err(|source| ProcessError::Io {
                         command: command.to_owned(),
                         source,
@@ -697,6 +759,11 @@ impl Real {
     /// Reap a killed program and give its output readers a bounded time to
     /// finish, for a process that left its group and holds the pipes.
     async fn finish_bounded(&mut self, command: &str) -> Result<(), ProcessError> {
+        // The watchdog goes before the reap: once the program is reaped, its
+        // id is no longer ours to signal.
+        if let Some(watchdog) = self.watchdog.take() {
+            watchdog.abort();
+        }
         if self.status.is_none() {
             let status = self.child.wait().await.map_err(|source| ProcessError::Io {
                 command: command.to_owned(),
@@ -709,9 +776,6 @@ impl Real {
             if tokio::time::timeout(READER_GRACE, reader).await.is_err() {
                 abort.abort();
             }
-        }
-        if let Some(watchdog) = self.watchdog.take() {
-            watchdog.abort();
         }
         self.finished = true;
         Ok(())
@@ -739,8 +803,9 @@ impl Real {
             if self.status.is_some() && closed {
                 break;
             }
+            let reap = self.status.is_none() && self.may_reap();
             tokio::select! {
-                status = self.child.wait(), if self.status.is_none() => {
+                status = self.child.wait(), if reap => {
                     self.record(status.map_err(|source| ProcessError::Io {
                         command: command.to_owned(),
                         source,
@@ -816,10 +881,10 @@ async fn watchdog(captured: Arc<Captured>, target: Target) {
             if due.is_some() {
                 state.expired = due;
             }
-            due.map(|_| (state.reaped, state.open_streams > 0))
+            due.map(|_| state.reaped)
         };
-        if let Some((reaped, streams_open)) = expired {
-            target.signal_all(Signal::Kill, reaped, streams_open);
+        if let Some(reaped) = expired {
+            target.signal_all(Signal::Kill, reaped);
             captured.changed.notify_one();
             return;
         }

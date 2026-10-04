@@ -1202,11 +1202,30 @@ pub fn current_repository() -> Option<Arc<dyn BatchRepository>> {
     REPO.read().ok().and_then(|g| g.clone())
 }
 
-pub(crate) fn ensure_default_repository() {
-    let installed = REPO.read().ok().and_then(|g| g.clone()).is_some();
-    if !installed {
-        install_repository(Arc::new(MemoryBatchRepository::new()));
+/// The installed repository, installing the in-memory default first when
+/// there is none.
+pub(crate) fn ensure_default_repository() -> Result<Arc<dyn BatchRepository>, FrameworkError> {
+    ensure_default_in(&REPO, || Arc::new(MemoryBatchRepository::new()))
+}
+
+/// Return the repository in `slot`, installing `make()` when it holds none.
+///
+/// The check and the install happen under one write lock. Two first
+/// dispatches that each saw an empty slot and installed would otherwise
+/// both win, and the second install would replace the repository the first
+/// had already stored its batch in, so that batch's jobs could no longer
+/// find it and its callbacks would never fire.
+fn ensure_default_in(
+    slot: &RwLock<Option<Arc<dyn BatchRepository>>>,
+    make: impl FnOnce() -> Arc<dyn BatchRepository>,
+) -> Result<Arc<dyn BatchRepository>, FrameworkError> {
+    if let Some(repo) = slot.read().ok().and_then(|g| g.clone()) {
+        return Ok(repo);
     }
+    let mut g = slot
+        .write()
+        .map_err(|_| FrameworkError::internal("batch repository registry lock poisoned"))?;
+    Ok(Arc::clone(g.get_or_insert_with(make)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1377,8 +1396,9 @@ impl PendingBatch {
     /// there. Cancellation makes [`SkipIfBatchCancelled`] drop the rest, so
     /// pending still reaches zero and the terminal callbacks still fire.
     ///
-    /// If nothing was pushed at all there is no worker left to drive that last
-    /// settlement, so the callbacks fire here.
+    /// When that bookkeeping is the batch's last settlement - nothing was
+    /// pushed, or every job that was pushed has already settled - no worker
+    /// is left to drive it, so the callbacks fire here.
     ///
     /// The caller gets the original push error either way.
     ///
@@ -1431,9 +1451,7 @@ impl PendingBatch {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
-        ensure_default_repository();
-        let repo = current_repository()
-            .ok_or_else(|| FrameworkError::internal("batch repository not initialized"))?;
+        let repo = ensure_default_repository()?;
 
         let id = Uuid::new_v4().to_string();
         let total = self.envelopes.len() as u64;
@@ -1464,7 +1482,6 @@ impl PendingBatch {
         }
 
         let mut remaining = envelopes.into_iter().zip(drivers);
-        let mut pushed = 0usize;
         while let Some((env, driver)) = remaining.next() {
             // A job the fake records is recorded in place of its push, as it
             // is in the `Queue::push` funnel: a faked test has no driver to
@@ -1480,13 +1497,42 @@ impl PendingBatch {
                 let orphans: Vec<Uuid> = std::iter::once(undispatched)
                     .chain(remaining.map(|(e, _)| e.id))
                     .collect();
-                settle_undispatched(repo.as_ref(), &id, &orphans, pushed == 0).await;
+                settle_undispatched(repo.as_ref(), &id, &orphans).await;
                 return Err(e);
             }
-            pushed += 1;
         }
         Ok(id)
     }
+}
+
+/// Settle a batch job that ran outside any worker, as the
+/// [`SyncQueueDriver`](crate::queue::SyncQueueDriver) runs every job: record
+/// its outcome, cancel the batch on a failure it does not allow, and fire the
+/// terminal callbacks when it was the batch's last pending job.
+///
+/// A worker does exactly this when it settles a job; a job that runs inline
+/// has no worker, so without it a batch dispatched to the sync driver stays
+/// pending forever and its callbacks never fire. A job outside any batch, or
+/// with no repository installed, has nothing to settle.
+pub(crate) async fn settle_inline(env: &Envelope, succeeded: bool) -> Result<(), FrameworkError> {
+    let (Some(batch_id), Some(repo)) = (env.batch_id.as_deref(), current_repository()) else {
+        return Ok(());
+    };
+    let counts = if succeeded {
+        repo.record_successful_job(batch_id, env.id).await?
+    } else {
+        repo.record_failed_job(batch_id, env.id).await?
+    };
+    let Some(batch) = repo.find(batch_id).await? else {
+        return Ok(());
+    };
+    if !succeeded && !batch.options.allow_failures && !batch.cancelled() {
+        repo.cancel(batch_id).await?;
+    }
+    if counts.pending_jobs == 0 {
+        crate::queue::worker::claim_and_fire_terminal_callbacks(repo.as_ref(), batch).await?;
+    }
+    Ok(())
 }
 
 /// Close out the jobs a failed [`PendingBatch::dispatch`] never enqueued.
@@ -1494,12 +1540,7 @@ impl PendingBatch {
 /// Repository errors here are logged, never returned: the caller needs the
 /// original push error, and a bookkeeping failure on top of it is a second
 /// fact, not a replacement for the first.
-async fn settle_undispatched(
-    repo: &dyn BatchRepository,
-    id: &str,
-    orphans: &[Uuid],
-    nothing_was_pushed: bool,
-) {
+async fn settle_undispatched(repo: &dyn BatchRepository, id: &str, orphans: &[Uuid]) {
     for job_id in orphans {
         if let Err(e) = repo.record_failed_job(id, *job_id).await {
             tracing::warn!(
@@ -1518,32 +1559,34 @@ async fn settle_undispatched(
         );
     }
 
-    // With at least one job in the queue, a worker settles the last one and
-    // fires the callbacks on the normal path. With none, this is the last
-    // chance anything runs them.
-    if nothing_was_pushed {
-        match repo.find(id).await {
-            Ok(Some(batch)) => {
-                if let Err(e) =
-                    crate::queue::worker::claim_and_fire_terminal_callbacks(repo, batch).await
-                {
-                    tracing::warn!(
-                        batch_id = %id,
-                        error = %e,
-                        "queue batch dispatch: could not claim terminal callbacks"
-                    );
-                }
+    // Whoever settles the batch's last job fires its callbacks. While a job
+    // is still pending, that is a worker. When this bookkeeping settled the
+    // last one - nothing was pushed, or every job that was pushed has
+    // already been settled by a worker - nothing else will, so it fires them
+    // here. The claim is atomic, so a worker settling at the same moment
+    // cannot fire them a second time.
+    match repo.find(id).await {
+        Ok(Some(batch)) if batch.pending_jobs > 0 => {}
+        Ok(Some(batch)) => {
+            if let Err(e) =
+                crate::queue::worker::claim_and_fire_terminal_callbacks(repo, batch).await
+            {
+                tracing::warn!(
+                    batch_id = %id,
+                    error = %e,
+                    "queue batch dispatch: could not claim terminal callbacks"
+                );
             }
-            Ok(None) => tracing::warn!(
-                batch_id = %id,
-                "queue batch dispatch: batch vanished before its callbacks could fire"
-            ),
-            Err(e) => tracing::warn!(
-                batch_id = %id,
-                error = %e,
-                "queue batch dispatch: could not load the batch to fire its callbacks"
-            ),
         }
+        Ok(None) => tracing::warn!(
+            batch_id = %id,
+            "queue batch dispatch: batch vanished before its callbacks could fire"
+        ),
+        Err(e) => tracing::warn!(
+            batch_id = %id,
+            error = %e,
+            "queue batch dispatch: could not load the batch to fire its callbacks"
+        ),
     }
 }
 
@@ -1725,6 +1768,32 @@ mod tests {
             third.pending_jobs, 0,
             "three distinct jobs settle the batch - the idempotency guard \
              must key on the job id, not suppress every repeat call"
+        );
+    }
+
+    /// DRIVERS-056: two first dispatches could both find no repository and
+    /// both install one, the second replacing the first and every batch the
+    /// first had stored in it. The closure stands in for the other dispatch,
+    /// completing its install between this one's check and its own.
+    #[test]
+    fn a_concurrent_first_install_is_never_replaced() {
+        let slot: RwLock<Option<Arc<dyn BatchRepository>>> = RwLock::new(None);
+        let concurrent: Arc<dyn BatchRepository> = Arc::new(MemoryBatchRepository::new());
+        let ours: Arc<dyn BatchRepository> = Arc::new(MemoryBatchRepository::new());
+        let mut raced = false;
+        let _installed = ensure_default_in(&slot, || {
+            if let Ok(mut other) = slot.try_write() {
+                *other = Some(Arc::clone(&concurrent));
+                raced = true;
+            }
+            Arc::clone(&ours)
+        });
+        let installed = slot.read().unwrap().clone().expect("installed");
+        let survivor = if raced { &concurrent } else { &ours };
+        assert!(
+            Arc::ptr_eq(&installed, survivor),
+            "a repository another dispatch had installed, and stored its batch \
+             in, was replaced"
         );
     }
 }

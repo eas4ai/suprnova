@@ -3,8 +3,9 @@
 //! Mirrors Laravel's `SyncQueue`. The envelope runs inline through the
 //! worker's middleware pipeline (`run_through_middleware`) before `push`
 //! returns, and so does every later link of a chain, until one does not
-//! complete. There is no background worker, no retry, and no delayed-job
-//! support - `push` for an
+//! complete. A batch job is settled in its batch as a worker would settle it,
+//! so a batch on this driver finishes and fires its callbacks. There is no
+//! background worker, no retry, and no delayed-job support - `push` for an
 //! envelope with `available_at` in the future runs immediately anyway, just
 //! like Laravel's sync driver (a "fake" queue for development).
 //!
@@ -55,9 +56,26 @@ impl QueueDriver for SyncQueueDriver {
         // returns here with the rest of the chain unrun, and a link that
         // middleware released, failed or deleted ends the chain. The queue
         // fake decides for each later link, as it does on a worker.
+        //
+        // Each job that belongs to a batch is settled in it as a worker would
+        // settle it: a completed or deleted job as a success, a failed one as
+        // a failure. A released job is left pending, as Laravel's sync queue
+        // leaves it: a worker would run it again later, and nothing runs it
+        // here.
         let mut current = Some(env);
         while let Some(env) = current.take() {
-            let outcome = run_through_middleware(env.clone()).await?;
+            let outcome = match run_through_middleware(env.clone()).await {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    settle_batch_job(&env, false).await;
+                    return Err(e);
+                }
+            };
+            match outcome {
+                JobOutcome::Completed | JobOutcome::Deleted => settle_batch_job(&env, true).await,
+                JobOutcome::Failed { .. } => settle_batch_job(&env, false).await,
+                JobOutcome::Released { .. } => {}
+            }
             if !matches!(outcome, JobOutcome::Completed) {
                 break;
             }
@@ -129,6 +147,21 @@ impl QueueDriver for SyncQueueDriver {
 
     fn name(&self) -> &'static str {
         "sync"
+    }
+}
+
+/// Settle `env` in its batch, logging a bookkeeping failure rather than
+/// returning it: the job has already run, and an `Err` from `push` would tell
+/// the caller it had not.
+async fn settle_batch_job(env: &Envelope, succeeded: bool) {
+    if let Err(e) = crate::queue::batch::settle_inline(env, succeeded).await {
+        tracing::warn!(
+            job = %env.job_name,
+            id = %env.id,
+            batch_id = ?env.batch_id,
+            error = %e,
+            "sync queue: could not settle an inline batch job in its batch"
+        );
     }
 }
 

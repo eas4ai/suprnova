@@ -251,9 +251,10 @@ async fn release_unique_lock_if_held(env: &Envelope) {
 /// Fails **open** at every uncertainty: an envelope with no token was not
 /// debounced, a window whose key is gone (evicted, expired) is not evidence
 /// that somebody else owns it, and a cache error is not evidence of anything.
-/// Only a token that is present and different means "a newer dispatch owns this
-/// window", which is the one case where dropping the job is correct. Getting
-/// this backwards would silently discard work.
+/// Only a token claimed by a dispatch from a later place in the burst means "a
+/// newer dispatch owns this window", which is the one case where dropping the
+/// job is correct - see `debounce::supersedes`.
+/// Getting this backwards would silently discard work.
 async fn envelope_was_superseded(env: &Envelope) -> bool {
     let Some(owner) = env
         .debounce_owner
@@ -264,7 +265,7 @@ async fn envelope_was_superseded(env: &Envelope) -> bool {
     };
     let key = crate::queue::debounce_key(&env.job_name, env.debounce_id.as_deref());
     match crate::queue::debounce::current_owner(&key).await {
-        Ok(Some(current)) => current != owner,
+        Ok(Some(current)) => crate::queue::debounce::supersedes(&current, owner),
         Ok(None) => false,
         Err(e) => {
             tracing::warn!(
@@ -1665,10 +1666,16 @@ async fn handle_dead_letter(
         settlement_failure(driver, env, "ack", outcome, &ack_err);
     }
 
-    // 4. Observation only - never gates the settlement.
+    // 4. Observation only - never gates the settlement. `JobAttempted` fires
+    // for every terminal settlement, a failure and a timeout as much as a
+    // success, so an observer accounting for settled attempts sees this one.
     let _ = EventFacade::dispatch(queue_events::JobFailed {
         job: queue_events::JobIdentity::from_env(env, connection),
         exception: reason.to_string(),
+    })
+    .await;
+    let _ = EventFacade::dispatch(queue_events::JobAttempted {
+        job: queue_events::JobIdentity::from_env(env, connection),
     })
     .await;
 }

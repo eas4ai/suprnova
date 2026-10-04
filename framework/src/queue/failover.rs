@@ -54,9 +54,10 @@ struct ReservationOrigin {
 /// Expired or unknown aggregate tokens are treated as stale and never sent to
 /// an arbitrary connection.
 ///
-/// Counters and listings aggregate every configured connection in configured
-/// order, and `clear` attempts every connection. The observable backlog thus
-/// matches the work this aggregate driver can consume.
+/// Counters and listings aggregate every configured backend once, in
+/// configured order, and `clear` attempts every connection. The observable
+/// backlog thus matches the work this aggregate driver can consume: a driver
+/// configured under two labels holds each job once, so it is counted once.
 ///
 /// # What `bulk_push` guarantees
 ///
@@ -351,6 +352,24 @@ impl FailoverQueueDriver {
         }
     }
 
+    /// Each backend once, at the first slot that names it.
+    ///
+    /// The same driver may sit in several slots under different labels. Its
+    /// jobs exist once, and a pop can take each only once, so counting or
+    /// listing it per slot would report every job as many times as it has
+    /// labels.
+    fn distinct_backends(&self) -> impl Iterator<Item = &Arc<Connection>> {
+        self.connections
+            .iter()
+            .enumerate()
+            .filter(|(index, connection)| {
+                !self.connections[..*index]
+                    .iter()
+                    .any(|earlier| Arc::ptr_eq(&earlier.driver, &connection.driver))
+            })
+            .map(|(_, connection)| connection)
+    }
+
     fn add_count(total: u64, additional: u64, operation: &str) -> Result<u64, FrameworkError> {
         total.checked_add(additional).ok_or_else(|| {
             FrameworkError::internal(format!(
@@ -598,7 +617,7 @@ impl QueueDriver for FailoverQueueDriver {
 
     async fn size(&self) -> Result<u64, FrameworkError> {
         let mut total = 0;
-        for connection in &self.connections {
+        for connection in self.distinct_backends() {
             total = Self::add_count(total, connection.driver.size().await?, "size")?;
         }
         Ok(total)
@@ -606,7 +625,7 @@ impl QueueDriver for FailoverQueueDriver {
 
     async fn pending_size(&self) -> Result<u64, FrameworkError> {
         let mut total = 0;
-        for connection in &self.connections {
+        for connection in self.distinct_backends() {
             total = Self::add_count(
                 total,
                 connection.driver.pending_size().await?,
@@ -618,7 +637,7 @@ impl QueueDriver for FailoverQueueDriver {
 
     async fn delayed_size(&self) -> Result<u64, FrameworkError> {
         let mut total = 0;
-        for connection in &self.connections {
+        for connection in self.distinct_backends() {
             total = Self::add_count(
                 total,
                 connection.driver.delayed_size().await?,
@@ -630,7 +649,7 @@ impl QueueDriver for FailoverQueueDriver {
 
     async fn reserved_size(&self) -> Result<u64, FrameworkError> {
         let mut total = 0;
-        for connection in &self.connections {
+        for connection in self.distinct_backends() {
             total = Self::add_count(
                 total,
                 connection.driver.reserved_size().await?,
@@ -642,7 +661,7 @@ impl QueueDriver for FailoverQueueDriver {
 
     async fn pending_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
         let mut jobs = Vec::new();
-        for connection in &self.connections {
+        for connection in self.distinct_backends() {
             jobs.extend(connection.driver.pending_jobs(queue).await?);
         }
         Ok(jobs)
@@ -650,7 +669,7 @@ impl QueueDriver for FailoverQueueDriver {
 
     async fn delayed_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
         let mut jobs = Vec::new();
-        for connection in &self.connections {
+        for connection in self.distinct_backends() {
             jobs.extend(connection.driver.delayed_jobs(queue).await?);
         }
         Ok(jobs)
@@ -661,7 +680,7 @@ impl QueueDriver for FailoverQueueDriver {
         queue: Option<&str>,
     ) -> Result<Vec<InspectedJob>, FrameworkError> {
         let mut jobs = Vec::new();
-        for connection in &self.connections {
+        for connection in self.distinct_backends() {
             jobs.extend(connection.driver.reserved_jobs(queue).await?);
         }
         Ok(jobs)
@@ -755,5 +774,47 @@ mod tests {
             Arc::ptr_eq(&driver.connections[0].gate, &driver.connections[1].gate),
             "duplicate slots for one driver must share the pop/clear gate"
         );
+    }
+
+    /// DRIVERS-061: one backend registered under two labels was counted and
+    /// listed once per slot, although a pop can take each job only once.
+    #[tokio::test]
+    async fn a_backend_in_two_slots_is_counted_and_listed_once() {
+        let shared = Arc::new(MemoryQueueDriver::new()) as Arc<dyn QueueDriver>;
+        let driver = FailoverQueueDriver::new(vec![
+            ("one".to_string(), Arc::clone(&shared)),
+            ("two".to_string(), shared),
+        ])
+        .expect("duplicate connection slots remain supported");
+        driver
+            .push(Envelope {
+                schema_version: crate::queue::CURRENT_SCHEMA_VERSION,
+                id: Uuid::new_v4(),
+                job_name: "drivers-061".into(),
+                queue: None,
+                payload: serde_json::json!({}),
+                dispatched_at: crate::clock::now(),
+                available_at: crate::clock::now(),
+                attempts: 0,
+                max_tries: 3,
+                backoff: crate::queue::BackoffSchedule::default(),
+                timeout_secs: None,
+                fail_on_timeout: false,
+                idempotency_key: None,
+                unique_lock_owner: None,
+                debounce_id: None,
+                debounce_owner: None,
+                batch_id: None,
+                chain_remaining: Vec::new(),
+                context: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(driver.size().await.unwrap(), 1);
+        assert_eq!(driver.pending_size().await.unwrap(), 1);
+        assert_eq!(driver.pending_jobs(None).await.unwrap().len(), 1);
+        assert_eq!(driver.delayed_size().await.unwrap(), 0);
+        assert_eq!(driver.reserved_size().await.unwrap(), 0);
     }
 }

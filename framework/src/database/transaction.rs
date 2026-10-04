@@ -1290,34 +1290,25 @@ impl Transaction {
     pub async fn commit(self) -> Result<(), FrameworkError> {
         let conn_name = self.connection_name.to_string();
         let (after_commit, on_rollback) = take_own_callbacks(self.registry);
-        let tx = match Arc::try_unwrap(self.inner) {
-            Ok(tx) => tx,
-            Err(_) => {
-                super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
-                    .compensate()
-                    .await;
-                return Err(FrameworkError::internal(
-                    "Transaction::commit: TxHandle clones still alive; \
-                     drop them before commit so no further writes can race",
-                ));
-            }
-        };
-        if let Err(error) = tx.commit().await {
-            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
-                .compensate()
-                .await;
-            return Err(FrameworkError::database(error.to_string()));
-        }
-        drop(on_rollback);
-        // Armed before any listener runs, as in `finish_transaction`: a
-        // listener panic must not discard a callback of a committed
-        // transaction.
-        let callbacks = super::after_commit::GuardedCallbacks::after_commit(after_commit);
-        emit_tx_event(super::events::TransactionCommitted {
-            connection_name: conn_name,
-        })
-        .await;
-        callbacks.run_after_commit().await
+        // The COMMIT and everything it releases run on a task of their own,
+        // as the closure form's finalization does. A caller cancelled while
+        // the COMMIT is in flight - a client disconnect, a timeout around
+        // this call - cannot take the callbacks with it: the server may
+        // already have committed, and the rows would then stand without the
+        // jobs and callbacks that were waiting for them.
+        super::after_commit::spawn_owned(commit_owned(
+            self.inner,
+            conn_name,
+            after_commit,
+            on_rollback,
+        ))
+        .await
+        .map_err(|error| {
+            FrameworkError::internal(format!(
+                "Transaction::commit: the commit task ended without a result; the \
+                 database outcome is unknown and must not be retried: {error}"
+            ))
+        })?
     }
 
     /// Roll back the manual transaction returned by
@@ -1330,30 +1321,90 @@ impl Transaction {
     pub async fn rollback(self) -> Result<(), FrameworkError> {
         let conn_name = self.connection_name.to_string();
         let (after_commit, on_rollback) = take_own_callbacks(self.registry);
-        // Whatever happens below, this transaction does not commit.
-        let callbacks =
-            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback);
-        let tx = match Arc::try_unwrap(self.inner) {
-            Ok(tx) => tx,
-            Err(_) => {
-                callbacks.compensate().await;
-                return Err(FrameworkError::internal(
-                    "Transaction::rollback: TxHandle clones still alive; \
-                     drop them before rollback so no further writes can race",
-                ));
-            }
-        };
-        if let Err(error) = tx.rollback().await {
-            callbacks.compensate().await;
-            return Err(FrameworkError::database(error.to_string()));
-        }
-        emit_tx_event(super::events::TransactionRolledBack {
-            connection_name: conn_name,
-        })
-        .await;
-        callbacks.compensate().await;
-        Ok(())
+        // Owned by its own task for the reason `commit` gives: the
+        // compensations release what the transaction held, such as a deferred
+        // `push_unique`'s dedupe lock, and run only once the ROLLBACK has
+        // landed, whatever happens to the caller meanwhile.
+        super::after_commit::spawn_owned(rollback_owned(
+            self.inner,
+            conn_name,
+            after_commit,
+            on_rollback,
+        ))
+        .await
+        .map_err(|error| {
+            FrameworkError::internal(format!(
+                "Transaction::rollback: the rollback task ended without a result: {error}"
+            ))
+        })?
     }
+}
+
+/// The body of [`Transaction::commit`], on the task that owns it.
+async fn commit_owned(
+    inner: Arc<DatabaseTransaction>,
+    conn_name: String,
+    after_commit: Vec<super::after_commit::AfterCommitCallback>,
+    on_rollback: Vec<super::after_commit::AfterCommitCallback>,
+) -> Result<(), FrameworkError> {
+    let tx = match Arc::try_unwrap(inner) {
+        Ok(tx) => tx,
+        Err(_) => {
+            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
+                .compensate()
+                .await;
+            return Err(FrameworkError::internal(
+                "Transaction::commit: TxHandle clones still alive; \
+                 drop them before commit so no further writes can race",
+            ));
+        }
+    };
+    if let Err(error) = tx.commit().await {
+        super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
+            .compensate()
+            .await;
+        return Err(FrameworkError::database(error.to_string()));
+    }
+    drop(on_rollback);
+    // Armed before any listener runs, as in `finish_transaction`: a listener
+    // panic must not discard a callback of a committed transaction.
+    let callbacks = super::after_commit::GuardedCallbacks::after_commit(after_commit);
+    emit_tx_event(super::events::TransactionCommitted {
+        connection_name: conn_name,
+    })
+    .await;
+    callbacks.run_after_commit().await
+}
+
+/// The body of [`Transaction::rollback`], on the task that owns it.
+async fn rollback_owned(
+    inner: Arc<DatabaseTransaction>,
+    conn_name: String,
+    after_commit: Vec<super::after_commit::AfterCommitCallback>,
+    on_rollback: Vec<super::after_commit::AfterCommitCallback>,
+) -> Result<(), FrameworkError> {
+    // Whatever happens below, this transaction does not commit.
+    let callbacks = super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback);
+    let tx = match Arc::try_unwrap(inner) {
+        Ok(tx) => tx,
+        Err(_) => {
+            callbacks.compensate().await;
+            return Err(FrameworkError::internal(
+                "Transaction::rollback: TxHandle clones still alive; \
+                 drop them before rollback so no further writes can race",
+            ));
+        }
+    };
+    if let Err(error) = tx.rollback().await {
+        callbacks.compensate().await;
+        return Err(FrameworkError::database(error.to_string()));
+    }
+    emit_tx_event(super::events::TransactionRolledBack {
+        connection_name: conn_name,
+    })
+    .await;
+    callbacks.compensate().await;
+    Ok(())
 }
 
 /// The callbacks a handle may finish itself, taken out of its registry.

@@ -679,11 +679,22 @@ is what makes the surviving run carry the newest payload rather than the oldest.
 If the token has expired or been evicted, the job runs - debouncing fails open,
 because a lost token is not evidence that somebody else owns the window.
 
+A dispatch claims the window only once the driver has accepted its envelope.
+A push that fails, or a dispatch cancelled before its push - an HTTP handler
+whose client disconnects - leaves the window to the last dispatch that reached
+the queue, so the work already queued still runs.
+
 The [`sync` driver](#drivers) has no worker, so it runs every dispatch inline
 and nothing is ever collapsed. Laravel's sync driver behaves the same way.
-`Queue::bulk` pushes at the driver level and does not arm a window either, so a
-debounced job pushed in bulk runs every copy. Laravel's `Queue::bulk` skips its
-own debounce acquisition for the same reason.
+`Queue::bulk` arms each job's window in order and claims it once the driver
+accepts the batch, so a debounced burst pushed in one call collapses onto its
+last job, as separate pushes do.
+
+#### Why Suprnova diverges
+
+Laravel's `Queue::bulk` skips debouncing, so a debounced job pushed in bulk
+runs every copy. In Suprnova the window is a property of the job, declared by
+`debounce_for`, so it holds however the job reaches the queue.
 
 Set the window at the call site instead when it belongs to the caller:
 
@@ -1622,6 +1633,16 @@ Each worker settles its job against the batch, and when `pending_jobs`
 hits zero the worker fires the registered `then`/`catch`/`finally`
 callbacks. By default the first failure cancels the batch;
 `.allow_failures()` keeps remaining jobs going.
+
+When a push fails part way through `dispatch()`, the jobs that never reached
+the queue are recorded as failed and the batch is cancelled. If that leaves
+nothing pending, because the jobs that were queued have already settled,
+`dispatch()` fires the callbacks itself before it returns the push error.
+
+The [`sync` driver](#drivers) runs each job inline inside `dispatch()` and
+settles it against the batch as a worker would, so a batch on `sync` finishes
+and fires its callbacks before `dispatch()` returns. A job that a middleware
+releases is left pending: nothing runs it again on `sync`, as in Laravel.
 
 ### Durable batches
 

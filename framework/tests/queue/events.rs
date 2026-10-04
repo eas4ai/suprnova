@@ -9,7 +9,7 @@ use std::time::Duration;
 use suprnova::error::FrameworkError;
 use suprnova::events::dispatched;
 use suprnova::events::{EventFacade, Listener};
-use suprnova::queue::events::JobTimedOut;
+use suprnova::queue::events::{JobAttempted, JobFailed, JobTimedOut};
 use suprnova::queue::events::{JobProcessed, JobProcessing, JobQueued, WorkerStarting};
 use suprnova::queue::{
     Job, MemoryQueueDriver, Queue,
@@ -162,4 +162,59 @@ async fn job_timed_out_event_carries_the_jobs_timeout_budget() {
         "the event must report the budget the job declared, not a default"
     );
     assert_eq!(timed_out[0].job.job_name, "queue_events::SlowJob");
+    // DRIVERS-054: a timed-out attempt that settles terminally is an attempt.
+    let attempted = dispatched::<JobAttempted>(|_| true);
+    assert_eq!(
+        attempted.len(),
+        1,
+        "a dead-lettered timeout must fire JobAttempted"
+    );
+    assert_eq!(attempted[0].job.job_name, "queue_events::SlowJob");
+}
+
+// ---- JobAttempted fires for every terminal settlement (DRIVERS-054) -------
+
+#[derive(Serialize, Deserialize, Clone)]
+struct AlwaysFailsJob;
+
+#[async_trait]
+impl Job for AlwaysFailsJob {
+    fn job_name() -> &'static str {
+        "queue_events::AlwaysFailsJob"
+    }
+    fn max_tries() -> u32 {
+        1
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal("this job always fails"))
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn job_attempted_fires_when_a_job_fails_terminally() {
+    register_job::<AlwaysFailsJob>();
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let _events = EventFacade::fake();
+    Queue::push(AlwaysFailsJob).await.unwrap();
+
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(30),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(1),
+        queues: Vec::new(),
+    };
+    run_worker(driver, cfg, CancellationToken::new()).await;
+
+    assert_eq!(dispatched::<JobFailed>(|_| true).len(), 1, "dead-lettered");
+    let attempted = dispatched::<JobAttempted>(|_| true);
+    assert_eq!(
+        attempted.len(),
+        1,
+        "a terminal failure is a settled attempt and must fire JobAttempted"
+    );
+    assert_eq!(attempted[0].job.job_name, "queue_events::AlwaysFailsJob");
 }
