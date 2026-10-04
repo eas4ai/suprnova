@@ -754,7 +754,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   any other 4xx or 5xx, gets no `XSRF-TOKEN` and writes no session row, so
   it no longer turns into a 500 when the session store is unavailable. A
   cookieless JSON or `HEAD` bootstrap that succeeds still gets its token
-  with its session. This landed after the `v3.1.0` tag.
+  with its session. `SessionMiddleware` marks every session that
+  `SessionStore::read` returns as loaded from the store, so a custom store
+  that builds its sessions with `SessionData::new` no longer gets a write
+  on each successful request through `CsrfMiddleware`. This landed after
+  the `v3.1.0` tag.
 - **Live uploads, private responses and tooling.** Finalized uploads free
   their pending slots when finalization commits, so a session no longer
   runs out of upload capacity until restart, and are reclaimed when they
