@@ -231,7 +231,11 @@ all valid wrappers around a step body.
 ## Determinism contract
 
 Workflows must be deterministic across replays. Each step is keyed by
-`(step_name, step_index)`, and the framework caches its serialized
+`(step_name, step_index)`, where `#[workflow_step]` names a step by its
+module path and function name (`app::billing::charge`): two steps
+called `charge` in two modules are two steps. A run recorded before the
+module was part of the name stored the bare function name, and it
+replays under that name. The framework caches each step's serialized
 input alongside the output. When a step at the same index is replayed
 with a different serialized input, the framework returns an error rather
 than masking the corruption by returning the cached output from the
@@ -248,7 +252,8 @@ In practice this means:
   Put branching logic inside a step.
 - Don't change step argument shapes between deploys without renaming
   the step. Renaming changes `step_name`, which restarts caching from
-  scratch for that step.
+  scratch for that step. Moving a step to another module renames it
+  too.
 
 ## Waiting on results
 

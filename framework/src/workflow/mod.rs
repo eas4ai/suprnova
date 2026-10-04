@@ -1189,6 +1189,109 @@ mod tests {
         }
     }
 
+    /// Two steps with one bare name, in two modules.
+    pub mod charges_v1 {
+        use super::*;
+
+        pub static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        #[workflow_step]
+        pub async fn charge(amount: i32) -> Result<i32, FrameworkError> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(amount)
+        }
+    }
+
+    pub mod charges_v2 {
+        use super::*;
+
+        pub static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        #[workflow_step]
+        pub async fn charge(amount: i32) -> Result<i32, FrameworkError> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(amount * 100)
+        }
+    }
+
+    /// A fresh context on the claimed run, as a replay after a restart has.
+    async fn claim_context(workflow_id: i64) -> WorkflowContext {
+        let claimed = store::mark_running(workflow_id, "test-worker", Duration::from_secs(30))
+            .await
+            .expect("mark running");
+        WorkflowContext::new(
+            workflow_id,
+            Duration::from_secs(30),
+            claimed.worker_id.clone(),
+            claimed.attempts,
+        )
+    }
+
+    /// Two steps with one bare name in two modules are two steps. The step
+    /// identity used to be the bare function name, so a replay that reached
+    /// `charges_v2::charge` where the run had recorded `charges_v1::charge`
+    /// reused the old step's output and never ran the new body: the
+    /// name-mismatch guard could not see the difference.
+    #[tokio::test]
+    async fn a_step_is_identified_by_its_module_as_well_as_its_name() {
+        let _db = setup_db().await;
+        charges_v2::CALLS.store(0, Ordering::SeqCst);
+        let handle = store::insert_workflow("step-identity", "{}", 3)
+            .await
+            .expect("workflow insert");
+
+        let recorded = claim_context(handle.id())
+            .await
+            .enter(async { charges_v1::charge(5).await })
+            .await
+            .expect("the first run records its step");
+        assert_eq!(recorded, 5);
+
+        let replayed = claim_context(handle.id())
+            .await
+            .enter(async { charges_v2::charge(5).await })
+            .await;
+        let err = replayed.expect_err("another step at the same index must fail the replay");
+        assert!(err.to_string().contains("step mismatch"), "got: {err}");
+        assert_eq!(charges_v2::CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    /// A run recorded before steps carried their module still replays: a
+    /// step stored under its bare name is the step of that name at that
+    /// index, as it was when the run recorded it.
+    #[tokio::test]
+    async fn a_step_recorded_under_its_bare_name_still_replays() {
+        let _db = setup_db().await;
+        let handle = store::insert_workflow("legacy-step-name", "{}", 3)
+            .await
+            .expect("workflow insert");
+
+        let ctx = claim_context(handle.id()).await;
+        let recorder = ctx.clone();
+        ctx.enter(async move {
+            recorder
+                .run_step_with_input("charge", serde_json::to_string(&(&5,)).unwrap(), || async {
+                    Ok::<_, FrameworkError>(5)
+                })
+                .await
+        })
+        .await
+        .expect("the old shape records its step");
+
+        let calls_before = charges_v1::CALLS.load(Ordering::SeqCst);
+        let replayed = claim_context(handle.id())
+            .await
+            .enter(async { charges_v1::charge(5).await })
+            .await
+            .expect("the step recorded under its bare name replays");
+        assert_eq!(replayed, 5);
+        assert_eq!(
+            charges_v1::CALLS.load(Ordering::SeqCst),
+            calls_before,
+            "the recorded output is reused, the body does not run again"
+        );
+    }
+
     #[tokio::test]
     async fn test_name_normalization() {
         let _db = setup_db().await;
@@ -1362,9 +1465,11 @@ mod tests {
                     panic!("step row never appeared with status='running'");
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                let step = store::load_step(workflow_id, 0, "slow_step")
-                    .await
-                    .expect("load step");
+                // A step's identity is its module path and name.
+                let step =
+                    store::load_step(workflow_id, 0, &format!("{}::slow_step", module_path!()))
+                        .await
+                        .expect("load step");
                 if let Some(s) = step
                     && s.status == StepStatus::Running.as_str()
                     && s.started_at.is_some()
