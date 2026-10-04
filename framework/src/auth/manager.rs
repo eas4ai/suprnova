@@ -60,15 +60,15 @@ type RequestResolver = dyn for<'r> Fn(&'r Request) -> RequestUserFuture<'r> + Se
 /// driver names that start with it, so the two can never collide.
 const VIA_REQUEST_PREFIX: &str = "via_request:";
 
-/// The refusal of a guard name that contains `:`. The principal a guard of
-/// the application attests is `<guard>:<id>`, so a `:` in the name would let
-/// two guards attest the same principal. The text names the rule, never the
-/// name.
+/// The refusal of a guard name that contains `:`. Every guard but a default
+/// session or token guard attests the principal `<guard>:<id>`, so a `:` in
+/// its name would let two guards attest the same principal. The text names
+/// the rule, never the name.
 fn colon_in_guard_name() -> FrameworkError {
     FrameworkError::internal(
-        "The name of a guard of the application cannot contain ':': the principal it \
-         attests is '<guard>:<id>', and a ':' in the name would let two guards attest \
-         the same principal.",
+        "The name of a guard other than the default session or token guard cannot \
+         contain ':': the principal it attests is '<guard>:<id>', and a ':' in the name \
+         would let two guards attest the same principal.",
     )
 }
 
@@ -306,6 +306,19 @@ impl AuthManager {
         matches!(config.driver, GuardDriver::Custom(_))
     }
 
+    /// The provider that the configuration of the guard `name` names.
+    ///
+    /// A check that runs for the route's guard, such as the verified gate,
+    /// asks this provider about the route's user, never the default guard's
+    /// provider.
+    pub(crate) fn guard_provider(
+        &self,
+        name: &str,
+    ) -> Result<Arc<dyn UserProvider>, FrameworkError> {
+        let config = self.guard_config(name)?;
+        self.provider(&config.provider)
+    }
+
     /// Look up a registered provider by name.
     fn provider(&self, name: &str) -> Result<Arc<dyn UserProvider>, FrameworkError> {
         let map = self.providers.read().unwrap_or_else(|e| e.into_inner());
@@ -330,7 +343,7 @@ impl AuthManager {
         let provider = self.provider(&config.provider)?;
         Ok(match &config.driver {
             GuardDriver::Session => Arc::new(SessionGuard::named(name, provider)) as Arc<dyn Guard>,
-            GuardDriver::Token => Arc::new(TokenGuard::new(provider)) as Arc<dyn Guard>,
+            GuardDriver::Token => Arc::new(TokenGuard::named(name, provider)) as Arc<dyn Guard>,
             GuardDriver::Custom(driver) => {
                 let inner = if driver.starts_with(VIA_REQUEST_PREFIX) {
                     self.request_guard(name, driver, provider)?
@@ -338,7 +351,10 @@ impl AuthManager {
                     let factory = self.factory(name, driver)?;
                     factory(name, provider)?
                 };
-                Arc::new(ObservedGuard { inner }) as Arc<dyn Guard>
+                Arc::new(ObservedGuard {
+                    name: name.to_owned(),
+                    inner,
+                }) as Arc<dyn Guard>
             }
         })
     }
@@ -394,9 +410,10 @@ impl AuthManager {
 
     /// The configuration of the guard `name`.
     ///
-    /// Every resolution reads it here, so this is where a guard of the
-    /// application whose name contains `:` is refused, before anything is
-    /// built or attested under it.
+    /// Every resolution reads it here, so this is where a guard whose name
+    /// contains `:` is refused, before anything is built or attested under
+    /// it: a guard of the application, or any guard but the default guard,
+    /// attests `<guard>:<id>`.
     fn guard_config(&self, name: &str) -> Result<super::config::GuardConfig, FrameworkError> {
         let config = self.config.guard_config(name).cloned().ok_or_else(|| {
             FrameworkError::internal(format!(
@@ -404,7 +421,9 @@ impl AuthManager {
                  (e.g. AuthConfig::new(\"web\").guard(\"{name}\", GuardConfig::session(\"users\")))."
             ))
         })?;
-        if matches!(config.driver, GuardDriver::Custom(_)) && name.contains(':') {
+        let attests_its_name =
+            matches!(config.driver, GuardDriver::Custom(_)) || name != self.config.default_guard;
+        if attests_its_name && name.contains(':') {
             return Err(colon_in_guard_name());
         }
         Ok(config)
@@ -416,9 +435,13 @@ impl AuthManager {
 /// Records every identity the guard reveals for the render cache, as the
 /// built-in guards record theirs through the request-scoped auth state: a
 /// render that read the principal is then keyed by it, so a body built for
-/// one identity is never served to another. The guard decides everything
-/// else; this only observes its answers.
+/// one identity is never served to another. The identity is recorded under
+/// the guard's name (see [`Auth::guard_principal`](super::guard::Auth::guard_principal)),
+/// so this guard's user `7` never matches a key built from web user `7`.
+/// The guard decides everything else; this only observes its answers.
 struct ObservedGuard {
+    /// The guard's name, which qualifies every identity it reveals.
+    name: String,
     /// The guard the application's factory returned.
     inner: Arc<dyn Guard>,
 }
@@ -433,8 +456,17 @@ impl ObservedGuard {
             return;
         }
         match self.inner.id().await {
-            Ok(Some(id)) => collector::observe_principal_value(&id),
+            Ok(Some(id)) => self.observe(&id),
             _ => collector::observe_unobservable_read(),
+        }
+    }
+
+    /// Records `id` as this guard's principal.
+    fn observe(&self, id: &str) {
+        if collector::is_active() {
+            collector::observe_principal_value(&super::guard::Auth::guard_principal(
+                &self.name, id,
+            ));
         }
     }
 }
@@ -445,7 +477,7 @@ impl Guard for ObservedGuard {
         collector::observe_principal_read();
         let user = self.inner.user().await?;
         if let Some(user) = &user {
-            collector::observe_principal_value(&user.get_auth_identifier());
+            self.observe(&user.get_auth_identifier());
         }
         Ok(user)
     }
@@ -454,7 +486,7 @@ impl Guard for ObservedGuard {
         collector::observe_principal_read();
         let id = self.inner.id().await?;
         if let Some(id) = &id {
-            collector::observe_principal_value(id);
+            self.observe(id);
         }
         Ok(id)
     }
@@ -817,7 +849,13 @@ mod tests {
         collector::Collector::scope(async {
             assert!(guard.check().await.unwrap());
             let report = collector::current_report().expect("in scope");
-            assert!(report.gate.context.principal_material.contains("api-7"));
+            assert!(
+                report
+                    .gate
+                    .context
+                    .principal_material
+                    .contains("partner:api-7")
+            );
             assert!(!report.context.overflowed);
         })
         .await;
@@ -893,12 +931,31 @@ mod tests {
         assert!(m.stateful_guard("a:b").is_err());
     }
 
+    // A guard other than the default attests `<guard>:<id>`, whatever its
+    // driver, so a `:` in its name is refused too. The default session or
+    // token guard attests the bare id, so its name may hold one.
     #[test]
-    fn a_colon_in_a_session_guard_name_is_not_refused() {
-        let config = AuthConfig::new("web").guard("a:b", GuardConfig::session("users"));
+    fn a_colon_is_refused_in_every_guard_name_but_the_default_built_in_guard() {
+        let config = AuthConfig::new("a:b")
+            .guard("a:b", GuardConfig::session("users"))
+            .guard("c:d", GuardConfig::session("users"))
+            .guard("e:f", GuardConfig::token("users"));
         let m = AuthManager::new(config);
         m.register_provider("users", Arc::new(FakeProvider));
         assert!(m.guard("a:b").is_ok());
+        assert!(m.stateful_guard("a:b").is_ok());
+        for refused in ["c:d", "e:f"] {
+            let message = m
+                .guard(refused)
+                .err()
+                .expect("expected a refusal")
+                .to_string();
+            assert!(message.contains("cannot contain ':'"), "got: {message}");
+            assert!(
+                !message.contains(refused),
+                "the name is not echoed: {message}"
+            );
+        }
     }
 
     #[test]

@@ -177,7 +177,15 @@ where
         <S::User as EntityBinding>::Entity::insert(model)
             .exec(self.database())
             .await
-            .map_err(db_error)?;
+            .map_err(|error| match error.sql_err() {
+                // A unique email index refused the row: another sign-up
+                // created this address's account after the caller's lookup.
+                Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => Error::Conflict {
+                    resource: "user".to_owned(),
+                    message: "an account with this email address already exists".to_owned(),
+                },
+                _ => db_error(error),
+            })?;
         self.find_by_id(&user_id)
             .await?
             .ok_or_else(|| Error::Internal {

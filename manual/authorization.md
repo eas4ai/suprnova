@@ -399,9 +399,11 @@ so a client can tell "log in" from "not allowed".
 In Laravel, `auth:api` makes `api` the default guard for the rest of the
 request, so `Auth::user()` and the `can` middleware both read the `api`
 user. In Suprnova, `AuthMiddleware::for_guard("api")` doesn't change the
-default guard: `Auth::user()` still reads the default guard, and only the
-`#[authorize]` check follows the route's guard. To read the same user in
-the handler body, call `Auth::guard("api")?.user()`.
+default guard: `Auth::user()` still reads the default guard. The route
+checks follow the route's guard: `#[authorize]`,
+`EnsureEmailVerifiedMiddleware`, `RoleMiddleware` and
+`PermissionMiddleware`. To read the same user in the handler body, call
+`Auth::guard("api")?.user()`.
 
 Laravel tells a model class from a route parameter by the backslash in
 `Post::class`. Rust has no class strings, so Suprnova uses Rust's naming
@@ -672,6 +674,34 @@ For a route, `RoleMiddleware::<User>::new("editor")` and
 permission. Put them after `AuthMiddleware`. A user who lacks it gets a `403`,
 or a redirect if you build the middleware with `redirect_to`. A failed
 database read also refuses the request.
+
+Both check the user of the route's guard, the guard the last
+`AuthMiddleware` to pass the request on checked, as `#[authorize]` does.
+Behind the default guard, they read the grants the `HasRoles` methods write.
+Behind another guard, they read that guard's grants, the ones the
+`*_on_guard` helpers write:
+
+```rust
+use suprnova::rbac::assign_role_to_model_on_guard;
+use suprnova::{AuthMiddleware, FrameworkError, HasRoles, RoleMiddleware, Router};
+
+// Grant `editor` on the `admin` guard, for example in a seeder.
+async fn grant_editor(admin: &User) -> Result<(), FrameworkError> {
+    let model_type = admin.rbac_model_type();
+    assign_role_to_model_on_guard(&model_type, &admin.rbac_model_id(), "editor", "admin").await
+}
+
+pub fn routes() -> Router {
+    Router::new()
+        .get("/admin/posts", controllers::admin::posts)
+        .middleware(AuthMiddleware::new().for_guard("admin"))
+        .middleware(RoleMiddleware::<User>::new("editor"))
+        .into()
+}
+```
+
+A default-guard user signed in on the same session never passes for the
+admin route's user, whatever roles that user holds.
 
 ### Answering the gate with permissions
 

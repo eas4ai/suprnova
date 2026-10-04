@@ -313,3 +313,75 @@ async fn verify_rejects_garbage_token() {
         "an unknown token must be rejected"
     );
 }
+
+/// Reload user 1 by id: the tests below change its address, so a lookup by
+/// email would miss it.
+async fn reload_user_one() -> TestUser {
+    let user = EloquentUserProvider::<TestUser>::new()
+        .retrieve_by_id("1")
+        .await
+        .expect("by id")
+        .expect("user 1 exists");
+    user.as_any()
+        .downcast_ref::<TestUser>()
+        .expect("TestUser")
+        .clone()
+}
+
+/// Verify `token` as signed-in user 1.
+async fn verify_as_user_one(token: &str) -> Result<String, suprnova::FrameworkError> {
+    let slot = suprnova::session::new_session_slot_for_test();
+    suprnova::session::session_scope_for_test(slot, async {
+        suprnova::session::set_auth_user("1");
+        EmailVerification::verify(token).await
+    })
+    .await
+}
+
+/// IDENTITY-023: a verification link proves ownership of the mailbox it was
+/// sent to, and of no other. The account's address changes to an unproven
+/// mailbox while the link is live; redeeming the link must not mark the new
+/// mailbox verified. Restoring the address shows the link itself is intact.
+#[tokio::test]
+#[serial]
+async fn a_link_sent_to_one_mailbox_never_verifies_another() {
+    use sea_orm::ConnectionTrait;
+
+    let _env = crate::env_lock::lock_env_async().await;
+    let h = setup().await;
+    let user = reload_user_one().await;
+
+    let fake = suprnova::mail::Mail::fake();
+    EmailVerification::send_link(&user, "https://app.test/verify")
+        .await
+        .expect("send_link");
+    fake.assert_sent_to("ada@x.com");
+    let captured = fake.captured();
+    let text = captured[0].text.as_deref().expect("text body");
+    let link = text
+        .lines()
+        .find(|l| l.contains("token="))
+        .expect("token link");
+    let token = link.rsplit("token=").next().expect("token").trim();
+
+    h._db
+        .conn()
+        .execute_unprepared("UPDATE users SET email = 'unproven@x.com' WHERE id = 1")
+        .await
+        .expect("change the address");
+    assert!(
+        verify_as_user_one(token).await.is_err(),
+        "a link sent to ada@x.com must not verify unproven@x.com"
+    );
+    assert!(!reload_user_one().await.is_email_verified());
+
+    h._db
+        .conn()
+        .execute_unprepared("UPDATE users SET email = 'ada@x.com' WHERE id = 1")
+        .await
+        .expect("restore the address");
+    verify_as_user_one(token)
+        .await
+        .expect("the link verifies the mailbox it was sent to");
+    assert!(reload_user_one().await.is_email_verified());
+}

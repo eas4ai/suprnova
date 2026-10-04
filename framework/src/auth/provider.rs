@@ -175,6 +175,17 @@ pub trait UserProvider: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// The address a user's email verification is for, looked up by id.
+    ///
+    /// [`crate::auth_flows::EmailVerification::verify`] compares it with
+    /// the address a link was sent to, so a link never verifies an address
+    /// it was not sent to. Default: the email of
+    /// [`flow_user_by_id`](Self::flow_user_by_id). Override it when the
+    /// verification address is not that one.
+    async fn verification_email(&self, id: &str) -> Result<Option<String>, FrameworkError> {
+        Ok(self.flow_user_by_id(id).await?.map(|user| user.email))
+    }
+
     /// Mark a user's email verified. Default: unsupported.
     async fn mark_email_verified(&self, _id: &str) -> Result<(), FrameworkError> {
         Err(FrameworkError::internal(

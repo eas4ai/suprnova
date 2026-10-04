@@ -320,12 +320,30 @@ token belonging to another account returns the same invalid-token response and
 remains unused. On success, the provider marks the authenticated owner verified
 and the facade fires `EmailVerified`.
 
+A link proves the mailbox it was sent to, and no other. The token carries a
+digest of that address, and `verify` compares it with the account's current
+verification address, which the provider's `verification_email` reports.
+When the account changed its address after the link was sent, `verify`
+returns the same invalid-token response, leaves the token unused, and marks
+nothing verified. A link sent before an upgrade to this behavior carries no
+address and is refused the same way, so the user asks for a new one.
+`EloquentUserProvider` reports the `MustVerifyEmail` address. A custom
+provider reports the email of `flow_user_by_id` unless it implements
+`verification_email`.
+
 ### Verified-only routes: `EnsureEmailVerifiedMiddleware`
 
 `EnsureEmailVerifiedMiddleware` gates routes on the authenticated
 user's `email_verified_at`. Compose it after `AuthMiddleware` and the
 chain blocks any request whose user has not yet completed the verify
 step.
+
+The user it checks is the user of the route's guard: the guard the last
+`AuthMiddleware` to pass the request on checked, or the default guard when
+none names one. It asks that guard's provider. Behind
+`AuthMiddleware::new().for_guard("admin")`, the gate checks the admin user
+through the `admin` guard's provider, and a verified default-guard user
+signed in on the same session does not pass it.
 
 The choice between **403 JSON** and **302 HTML redirect** is made at
 route-registration time via the constructor - there is no

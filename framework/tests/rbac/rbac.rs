@@ -572,3 +572,108 @@ async fn middleware_redirects_inertia_denials_with_conflict_location() {
     })
     .await;
 }
+
+// ── The route's guard (IDENTITY-010) ────────────────────────────────────
+
+/// Resolves nobody: the tests below sign their users in through
+/// `set_user`, which the guard's request cache serves back.
+struct NoLookups;
+
+#[async_trait::async_trait]
+impl suprnova::UserProvider for NoLookups {
+    async fn retrieve_by_id(
+        &self,
+        _id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        Ok(None)
+    }
+}
+
+/// Registers a manager with the session guards `web` (the default) and
+/// `admin`, in the test database's container.
+fn install_web_and_admin_guards() {
+    let config =
+        suprnova::AuthConfig::new("web").guard("admin", suprnova::GuardConfig::session("admins"));
+    suprnova::testing::TestContainer::singleton(suprnova::AuthManager::new(config));
+    Auth::register_provider("users", Arc::new(NoLookups)).unwrap();
+    Auth::register_provider("admins", Arc::new(NoLookups)).unwrap();
+}
+
+/// Signs `user` in on `guard` for the rest of the request.
+async fn sign_in(guard: &str, user: User) {
+    Auth::guard(guard).unwrap().set_user(Arc::new(user)).await;
+}
+
+/// `AuthMiddleware::new().for_guard("admin")` followed by `check`, the way a
+/// route composes them. Returns the status the chain answered with.
+async fn behind_admin_guard(check: impl Middleware + 'static) -> u16 {
+    let check = Arc::new(check);
+    let next: Next = Arc::new(move |request| {
+        let check = check.clone();
+        Box::pin(async move { check.handle(request, next_ok()).await })
+    });
+    match suprnova::AuthMiddleware::new()
+        .for_guard("admin")
+        .handle(request("/admin").await, next)
+        .await
+    {
+        Ok(response) | Err(response) => response.status_code(),
+    }
+}
+
+/// IDENTITY-010: the role and permission middleware check the user the
+/// route's guard authenticated, in that guard's namespace. Web user 7 holds
+/// `author` on the `web` guard; admin 9 holds nothing, so a session signed
+/// in as both never passes the admin route on web user 7's grants.
+#[tokio::test]
+#[serial]
+async fn rbac_middleware_checks_the_route_guards_user_not_the_default_guards() {
+    let _db = setup().await;
+    install_web_and_admin_guards();
+
+    request_state_scope_for_test(async {
+        sign_in("web", User { id: 7 }).await;
+        sign_in("admin", User { id: 9 }).await;
+
+        let role = behind_admin_guard(RoleMiddleware::<User>::new("author")).await;
+        assert_eq!(
+            role, 403,
+            "admin 9 holds no role; web user 7's role must not count"
+        );
+        let permission =
+            behind_admin_guard(PermissionMiddleware::<User>::new("articles.create")).await;
+        assert_eq!(permission, 403, "admin 9 holds no permission");
+    })
+    .await;
+}
+
+/// The other half of IDENTITY-010: admin 9's grant on the `admin` guard
+/// passes the admin route with no default-guard user signed in, and a grant
+/// on the `web` guard alone does not.
+#[tokio::test]
+#[serial]
+async fn rbac_middleware_reads_grants_in_the_route_guards_namespace() {
+    let _db = setup().await;
+    install_web_and_admin_guards();
+    let model_type = User { id: 9 }.rbac_model_type();
+    suprnova::rbac::assign_role_to_model_on_guard(&model_type, "9", "editor", "admin")
+        .await
+        .unwrap();
+    suprnova::rbac::give_permission_to_model(&model_type, "9", "articles.publish")
+        .await
+        .unwrap();
+
+    request_state_scope_for_test(async {
+        sign_in("admin", User { id: 9 }).await;
+
+        let role = behind_admin_guard(RoleMiddleware::<User>::new("editor")).await;
+        assert_eq!(role, 200, "admin 9 holds editor on the admin guard");
+        let web_only =
+            behind_admin_guard(PermissionMiddleware::<User>::new("articles.publish")).await;
+        assert_eq!(
+            web_only, 403,
+            "a grant on the web guard is not a grant on the admin guard"
+        );
+    })
+    .await;
+}

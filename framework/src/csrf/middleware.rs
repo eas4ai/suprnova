@@ -529,11 +529,24 @@ impl CsrfMiddleware {
     /// Attach the `XSRF-TOKEN` cookie to the response, if policy
     /// allows and a session token exists. Mirrors Laravel's
     /// `addCookieToResponse` running inside the `tap()` after `next`.
+    /// A session created by this request is marked for storage, so the
+    /// browser gets the session the token belongs to.
     fn maybe_attach_xsrf_cookie(&self, response: Response) -> Response {
         if !self.should_attach_xsrf_cookie() {
             return response;
         }
-        let Some(token) = get_csrf_token() else {
+        // The token is good only with the session that holds it. A session
+        // this request created is stored only when something changed it, and
+        // handing out its token is such a change: a cookieless JSON or HEAD
+        // bootstrap would otherwise receive a token whose session is never
+        // stored, and its next unsafe request would meet a new session and a
+        // 419. A session loaded from the store is left as it is.
+        let Some(token) = crate::session::session_mut(|session| {
+            if !session.loaded_from_store {
+                session.dirty = true;
+            }
+            session.csrf_token.clone()
+        }) else {
             return response;
         };
         let cookie = self.build_xsrf_cookie(&token);

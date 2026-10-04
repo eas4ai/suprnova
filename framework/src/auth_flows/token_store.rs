@@ -173,7 +173,37 @@ impl TokenStore {
         purpose: TokenPurpose,
         ttl: Duration,
     ) -> Result<String, FrameworkError> {
-        let plaintext = generate_plaintext()?;
+        Self::store(user_id, purpose, ttl, generate_plaintext()?).await
+    }
+
+    /// Mint a token whose plaintext also carries what it is bound to:
+    /// `<random>.<binding>`, where `bind` computes the binding from the
+    /// random part.
+    ///
+    /// The stored hash covers the whole plaintext, so the binding cannot be
+    /// changed without making the token unknown. The flow that issued it
+    /// checks the binding again when the token is redeemed. The random part
+    /// is URL-safe base64 and never holds a `.`, so the binding is the text
+    /// after the last `.`.
+    pub(crate) async fn issue_bound(
+        user_id: &str,
+        purpose: TokenPurpose,
+        ttl: Duration,
+        bind: impl FnOnce(&str) -> String,
+    ) -> Result<String, FrameworkError> {
+        let random = generate_plaintext()?;
+        let binding = bind(&random);
+        Self::store(user_id, purpose, ttl, format!("{random}.{binding}")).await
+    }
+
+    /// Store the hash of `plaintext` for `user_id` with `purpose` and
+    /// expiry, and return the plaintext.
+    async fn store(
+        user_id: &str,
+        purpose: TokenPurpose,
+        ttl: Duration,
+        plaintext: String,
+    ) -> Result<String, FrameworkError> {
         let token_hash = hash_token(&plaintext);
         let now = crate::clock::now().naive_utc();
         let expires_at = now + ttl;

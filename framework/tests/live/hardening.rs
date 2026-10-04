@@ -252,6 +252,93 @@ async fn plain_logout_ends_delivery() {
     );
 }
 
+/// IDENTITY-036: a session that loses its signed-in user to the session
+/// authority check ends that user's memberships on this node, as a plain
+/// logout does (LIVE-021). The browser session holds alice with no Magnetar
+/// binding. Once an engine that owns session authority is installed, that
+/// identity no longer holds: the next ordinary request clears it, the same
+/// path a revoked opaque session takes. The session row survives, so only
+/// the revocation hook can end the stream.
+///
+/// Runs in its own process: installing the Magnetar engine is process-wide
+/// and would change how every other test's session validates.
+#[cfg(feature = "testing")]
+#[test]
+fn invalidated_session_authority_ends_delivery() {
+    crate::own_process::run_alone("hardening::invalidated_session_authority_ends_delivery_child");
+}
+
+#[cfg(feature = "testing")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalidated_session_authority_ends_delivery_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let (router, _runtime) = router_and_runtime();
+    let store = Arc::new(MemorySessionStore::default());
+    let server = spawn_server_with_sessions(router, Arc::clone(&store)).await;
+    let session_id = "livesessionauthority000000000000000000a1".to_owned();
+    assert_eq!(session_id.len(), 40, "a store-shaped session id");
+    let mut session = SessionData::new(session_id.clone(), "csrf-token".to_owned());
+    session.user_id = Some("alice".to_owned());
+    store.seed(session);
+    let cookie_name = suprnova::session::SessionConfig::default().cookie_name;
+    let cookie = suprnova::http::cookie::Cookie::encrypted(&cookie_name, &session_id)
+        .expect("encrypt the session cookie");
+    let alice = Identity::alice().with_cookie(&format!("{cookie_name}={}", cookie.value()));
+
+    let issued = issue(
+        server.port,
+        &alice,
+        orders_issue_body("sse", "doc-instance-0001"),
+    )
+    .await;
+    let credential = issued.credential.clone().expect("an SSE credential");
+    let mut stream = SseClient::open(server.port, &alice, &credential, 1, &[]).await;
+    assert_eq!(stream.status.as_u16(), 200);
+    let ack = subscribe(
+        server.port,
+        &alice,
+        &credential,
+        &issued,
+        "nonce-subscribe-0001",
+        1,
+    )
+    .await;
+    assert_eq!(ack.status.as_u16(), 200);
+
+    crate::magnetar_auth::install().await;
+    let touch = send(
+        server.port,
+        &alice,
+        Method::GET,
+        "/session/touch",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(touch.status.as_u16(), 200);
+    assert!(
+        store.contains(&session_id),
+        "the session row survives; only its signed-in user is cleared"
+    );
+
+    LiveStreams::resolve()
+        .expect("the Live streams facade resolves")
+        .event::<OrdersUpdated>(
+            "orders",
+            LiveEventTarget::Island,
+            CanonicalValue::String("post-authority-loss".into()),
+        )
+        .await
+        .expect("publishing to a topic with no live member is not an error");
+
+    assert!(
+        !stream_carries(&mut stream, "post-authority-loss").await,
+        "an event published after the session lost its user reached the old stream"
+    );
+}
+
 /// LIVE-020: a session destroyed behind the runtime, as another node's
 /// logout does, stops delivery within the re-verification interval. The
 /// session row is removed from the shared store directly, the clock passes

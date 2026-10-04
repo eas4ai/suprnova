@@ -192,13 +192,28 @@ impl PasswordAuthProvider for PasswordAuthService {
                 user_id: existing.user_id,
             });
         }
-        let created = self
+        let created = match self
             .users
             .create_user(NewUser {
                 email: email.clone(),
                 password_hash: Some(hash),
             })
-            .await?;
+            .await
+        {
+            Ok(created) => created,
+            // A concurrent registration created the account between the
+            // lookup above and this insert, and the store refused a second
+            // one. Answer as for any known address.
+            Err(conflict @ Error::Conflict { .. }) => {
+                return match self.users.find_by_email(&email).await? {
+                    Some(existing) => Ok(RegistrationOutcome::Existing {
+                        user_id: existing.user_id,
+                    }),
+                    None => Err(conflict),
+                };
+            }
+            Err(error) => return Err(error),
+        };
         Ok(RegistrationOutcome::Created {
             user_id: created.user_id,
             email,

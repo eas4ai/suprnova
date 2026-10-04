@@ -1413,11 +1413,23 @@ impl SessionMiddleware {
                     _ => None,
                 };
                 if session.user_id.is_some() && valid_user_id.is_none() {
-                    session.user_id = None;
+                    let lost_user_id = session.user_id.take();
                     session.remove_auth_guard(&default_guard_name);
                     session.clear_magnetar_web_binding();
                     session.dirty = true;
                     crate::auth::request_state::clear_guard_user(&default_guard_name);
+                    // The session survives and loses its user, as a plain
+                    // logout does, so the Live memberships it opened for
+                    // that user end here on this node (LIVE-021). Without
+                    // this, they kept receiving events until their
+                    // subscription expired.
+                    if let Some(principal) = lost_user_id {
+                        crate::live::revocation::session_deauthenticated(
+                            session.id.as_bytes(),
+                            &principal,
+                        )
+                        .await;
+                    }
                 } else if let Some(valid_user_id) = valid_user_id {
                     session.set_auth_guard_id(&default_guard_name, valid_user_id);
                 } else if session.user_id.is_none() && binding_key_present {
@@ -2395,6 +2407,7 @@ pub fn is_authenticated() -> bool {
 /// these two variants, and adding a third means editing this enum and the
 /// match below, where the reclassification is exactly what a reviewer is
 /// looking at.
+#[derive(Clone, Copy)]
 enum SessionIdentityField<'a> {
     /// The default guard's `SessionData::user_id`.
     DefaultGuardUser,
@@ -2459,7 +2472,19 @@ fn session_identity(field: SessionIdentityField<'_>) -> Option<String> {
         .ok()
         .flatten();
     if let Some(identity) = &identity {
-        crate::render_cache::collector::observe_principal_value(identity);
+        match field {
+            SessionIdentityField::DefaultGuardUser => {
+                crate::render_cache::collector::observe_principal_value(identity);
+            }
+            // Another guard's identifier is that guard's principal, not the
+            // default guard's: the key is built from the default guard, so
+            // a page built from another guard's user must never match it.
+            SessionIdentityField::Guard(guard_name) => {
+                crate::render_cache::collector::observe_principal_value(
+                    &crate::auth::Auth::guard_principal(guard_name, identity),
+                );
+            }
+        }
     }
     identity
 }

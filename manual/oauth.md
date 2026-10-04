@@ -218,6 +218,11 @@ The returned `OAuthKickoff` contains:
 - `authorization_url`, the URL to send to the browser.
 - `state`, the single-use selector bound to the initiating session.
 
+`begin` marks that session for storage, so the start response always sets
+the session cookie. The start can be the browser's first request to your
+application, and it can be a JSON or `POST` request; the callback still
+arrives under the session the ceremony is bound to.
+
 Magnetar owns state generation, PKCE policy, ceremony persistence, provider
 exchange, identity verification, and abuse limiting. The host controller owns
 the HTTP redirect and callback route.
