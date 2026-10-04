@@ -162,7 +162,11 @@ challenge (`Auth::factor()`), but under a key of their own for each user, not
 the email that password sign-in counts against. A correct password therefore
 does not clear second-factor failures, and wrong codes do not lock password
 sign-in. A password reset proves the mailbox, not the second factor, so it
-leaves a second-factor lock in place until the window passes.
+leaves a second-factor lock in place until the window passes. Confirming an
+enrollment, rotating the secret, and regenerating recovery codes count their
+wrong codes under the same key. Each of these paths reserves its attempt before
+it reads the code, so parallel guesses never get past the limit, and a failure
+the lockout store can't record is returned as an error instead of a wrong code.
 
 Password reset normalizes an unknown or provider-backed unverified address to
 `Ok(())` only after the abuse-limiter, mail configuration, provider/engine, and

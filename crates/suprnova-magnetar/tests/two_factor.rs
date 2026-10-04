@@ -48,6 +48,7 @@ struct CoordinatedAttemptStore {
     attempts: Mutex<Vec<CoordinatedAttempt>>,
     preflight: Option<Barrier>,
     fail_records: bool,
+    fail_finalize: bool,
 }
 
 struct CoordinatedAttempt {
@@ -62,6 +63,7 @@ impl CoordinatedAttemptStore {
             attempts: Mutex::new(Vec::new()),
             preflight: Some(Barrier::new(parties)),
             fail_records: false,
+            fail_finalize: false,
         }
     }
 
@@ -70,6 +72,17 @@ impl CoordinatedAttemptStore {
             attempts: Mutex::new(Vec::new()),
             preflight: None,
             fail_records: true,
+            fail_finalize: false,
+        }
+    }
+
+    /// Admits attempts but cannot record a failed one.
+    fn failing_finalize() -> Self {
+        Self {
+            attempts: Mutex::new(Vec::new()),
+            preflight: None,
+            fail_records: true,
+            fail_finalize: true,
         }
     }
 
@@ -121,7 +134,7 @@ impl LockoutStore for CoordinatedAttemptStore {
         window_start: DateTime<Utc>,
         max_attempts: u32,
     ) -> magnetar::Result<AttemptReservation> {
-        if self.fail_records {
+        if self.fail_records && !self.fail_finalize {
             return Err(magnetar::Error::Internal {
                 message: "forced attempt persistence failure".to_owned(),
             });
@@ -193,6 +206,11 @@ impl LockoutStore for CoordinatedAttemptStore {
         window_start: DateTime<Utc>,
         _max_attempts: u32,
     ) -> magnetar::Result<AttemptFinalization> {
+        if self.fail_finalize {
+            return Err(magnetar::Error::Internal {
+                message: "forced attempt finalization failure".to_owned(),
+            });
+        }
         let mut attempts = self.attempts.lock();
         let Some(attempt) = attempts
             .iter_mut()
@@ -374,13 +392,13 @@ impl LockoutStore for FailingResetLockout {
 
     async fn reset_admitted_attempts(
         &self,
-        identity: &str,
-        reservation_id: &str,
-        context: Option<&str>,
+        _identity: &str,
+        _reservation_id: &str,
+        _context: Option<&str>,
     ) -> magnetar::Result<u64> {
-        self.inner
-            .reset_admitted_attempts(identity, reservation_id, context)
-            .await
+        Err(magnetar::Error::Internal {
+            message: "forced lockout reset failure".to_owned(),
+        })
     }
 
     async fn attempt_stats(
@@ -1283,19 +1301,19 @@ async fn stale_regenerate_wrong_and_valid_proofs_are_indistinguishable() {
 }
 
 #[tokio::test]
-#[tracing_test::traced_test]
-async fn a_failed_attempt_that_cannot_be_recorded_is_logged() {
+async fn a_failed_attempt_that_cannot_be_recorded_refuses_with_the_storage_error() {
     let world = factor_world().await;
     let user_id = registered_user(&world).await;
     let actor = credential_actor(&world, &user_id).await;
     world.two_factor.enroll(&actor).await.unwrap();
-    // Refuse exactly the row a rejected confirmation records.
+    // Refuse exactly the write that turns a rejected confirmation's
+    // reservation into a counted failure.
     world
         .db
         .execute_unprepared(
-            "CREATE TRIGGER fail_two_factor_attempt_insert \
-             BEFORE INSERT ON storage_lockouts \
-             WHEN NEW.reason = 'two-factor confirm' \
+            "CREATE TRIGGER fail_two_factor_attempt_finalize \
+             BEFORE UPDATE ON storage_lockouts \
+             WHEN NEW.reason LIKE '%two-factor confirm' AND NEW.reason <> OLD.reason \
              BEGIN \
                  SELECT RAISE(ABORT, 'injected failed-attempt write failure'); \
              END",
@@ -1307,18 +1325,16 @@ async fn a_failed_attempt_that_cannot_be_recorded_is_logged() {
         .two_factor
         .confirm(&actor, "000000")
         .await
-        .expect_err("a wrong code is rejected whether or not it can be recorded");
+        .expect_err("a wrong code is never accepted");
 
-    assert!(matches!(error, magnetar::Error::InvalidInput { .. }));
     assert!(
-        logs_contain(
-            "lockout failed-attempt accounting failed after a rejected two-factor confirmation"
-        ),
-        "the accounting failure is in the log"
+        matches!(&error, magnetar::Error::Internal { message } if message.contains("injected failed-attempt write failure")),
+        "the uncounted failure surfaces instead of reading as a plain wrong code: {error:?}"
     );
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
 async fn re_enroll_returns_artifacts_after_lockout_reset_failure() {
     let world = factor_world().await;
     let user_id = registered_user(&world).await;
@@ -1335,6 +1351,10 @@ async fn re_enroll_returns_artifacts_after_lockout_reset_failure() {
         .re_enroll(&actor, &totp_code_now(&enrollment.otpauth_url))
         .await
         .expect("committed rotation still returns its one-time artifacts");
+    assert!(
+        logs_contain("lockout reset failed after a committed two-factor change"),
+        "the reset failure is in the log"
+    );
 
     let row = storage_schema::sql_two_factor::SqlTwoFactorStore(world.db.clone())
         .find_enrollment(&user_id)
@@ -1361,6 +1381,7 @@ async fn re_enroll_returns_artifacts_after_lockout_reset_failure() {
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
 async fn regenerate_returns_artifacts_after_lockout_reset_failure() {
     let world = factor_world().await;
     let user_id = registered_user(&world).await;
@@ -1377,6 +1398,10 @@ async fn regenerate_returns_artifacts_after_lockout_reset_failure() {
         .regenerate_recovery_codes(&actor, &enrollment.recovery_codes[0])
         .await
         .expect("committed recovery rotation still returns its one-time artifacts");
+    assert!(
+        logs_contain("lockout reset failed after a committed two-factor change"),
+        "the reset failure is in the log"
+    );
 
     let row = storage_schema::sql_two_factor::SqlTwoFactorStore(world.db.clone())
         .find_enrollment(&user_id)
@@ -1835,4 +1860,301 @@ async fn every_primary_provider_promotes_through_one_gate() {
     .await;
     assert_eq!(stale.status, 400);
     assert!(stale.grant.is_none());
+}
+
+// ---- Reserve-before-evaluate on the enrollment proof paths -----------------
+//
+// confirm, re_enroll and regenerate_recovery_codes check a code like the
+// challenge does, so each reserves an attempt on the second-factor key before
+// reading the proof. A status read followed by a later record let parallel
+// guesses all pass the read, and a swallowed record let them go uncounted.
+
+/// Which enrollment proof path a test drives.
+#[derive(Clone, Copy, Debug)]
+enum ProofPath {
+    Confirm,
+    ReEnroll,
+    Regenerate,
+}
+
+/// Prepare the user for `path`: a pending enrollment for `confirm`, a
+/// confirmed one for the rotations. Returns the actor and the enrollment.
+async fn prepared_for(
+    world: &FactorWorld,
+    user_id: &str,
+    path: ProofPath,
+) -> (CredentialActor, magnetar::two_factor::EnrollmentResponse) {
+    let actor = credential_actor(world, user_id).await;
+    let enrollment = world.two_factor.enroll(&actor).await.unwrap();
+    if !matches!(path, ProofPath::Confirm) {
+        world
+            .two_factor
+            .confirm(&actor, &totp_code_now(&enrollment.otpauth_url))
+            .await
+            .unwrap();
+    }
+    (actor, enrollment)
+}
+
+/// Run `path` once with `proof` through `service`; `Ok(())` when accepted.
+async fn submit(
+    service: &TwoFactorService,
+    actor: &CredentialActor,
+    path: ProofPath,
+    proof: &str,
+) -> magnetar::Result<()> {
+    match path {
+        ProofPath::Confirm => service.confirm(actor, proof).await,
+        ProofPath::ReEnroll => service.re_enroll(actor, proof).await.map(|_| ()),
+        ProofPath::Regenerate => service
+            .regenerate_recovery_codes(actor, proof)
+            .await
+            .map(|_| ()),
+    }
+}
+
+fn is_rejected_proof(outcome: &magnetar::Result<()>) -> bool {
+    matches!(outcome, Err(magnetar::Error::InvalidInput { field, .. }) if field == "proof" || field == "code")
+}
+
+fn is_lockout(outcome: &magnetar::Result<()>) -> bool {
+    matches!(outcome, Err(magnetar::Error::Conflict { resource, .. }) if resource == "account lockout")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_wrong_proofs_on_each_enrollment_path_evaluate_at_most_the_threshold() {
+    const ATTEMPT_LIMIT: usize = 2;
+    const PARALLEL: usize = 4;
+    let mut problems = Vec::new();
+    for path in [
+        ProofPath::Confirm,
+        ProofPath::ReEnroll,
+        ProofPath::Regenerate,
+    ] {
+        let world = factor_world().await;
+        let user_id = registered_user(&world).await;
+        let (actor, _) = prepared_for(&world, &user_id, path).await;
+        let service = service_with_attempt_store(
+            &world,
+            Arc::new(CoordinatedAttemptStore::racing(PARALLEL)),
+            ATTEMPT_LIMIT as u32,
+        );
+
+        let mut tasks = Vec::new();
+        for index in 0..PARALLEL {
+            let service = service.clone();
+            let actor = actor.clone();
+            tasks.push(tokio::spawn(async move {
+                submit(&service, &actor, path, &format!("wrong-proof-{index}")).await
+            }));
+        }
+        let mut outcomes = Vec::new();
+        for task in tasks {
+            outcomes.push(task.await.expect("proof task joins"));
+        }
+
+        let evaluated = outcomes
+            .iter()
+            .filter(|outcome| is_rejected_proof(outcome))
+            .count();
+        let refused = outcomes
+            .iter()
+            .filter(|outcome| is_lockout(outcome))
+            .count();
+        if evaluated != ATTEMPT_LIMIT || refused != PARALLEL - ATTEMPT_LIMIT {
+            problems.push(format!(
+                "{path:?}: {evaluated} proofs evaluated and {refused} refused before evaluation, \
+                 expected {ATTEMPT_LIMIT} and {}: {outcomes:?}",
+                PARALLEL - ATTEMPT_LIMIT
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[tokio::test]
+async fn an_attempt_store_that_cannot_reserve_refuses_even_a_valid_proof() {
+    let mut problems = Vec::new();
+    for path in [
+        ProofPath::Confirm,
+        ProofPath::ReEnroll,
+        ProofPath::Regenerate,
+    ] {
+        let world = factor_world().await;
+        let user_id = registered_user(&world).await;
+        let (actor, enrollment) = prepared_for(&world, &user_id, path).await;
+        let store = storage_schema::sql_two_factor::SqlTwoFactorStore(world.db.clone());
+        let before = store.find_enrollment(&user_id).await.unwrap().unwrap();
+        let service =
+            service_with_attempt_store(&world, Arc::new(CoordinatedAttemptStore::failing()), 5);
+        let proof = match path {
+            ProofPath::Regenerate => enrollment.recovery_codes[0].clone(),
+            ProofPath::Confirm | ProofPath::ReEnroll => totp_code_now(&enrollment.otpauth_url),
+        };
+
+        let outcome = submit(&service, &actor, path, &proof).await;
+
+        if !matches!(&outcome, Err(magnetar::Error::Internal { message }) if message == "forced attempt persistence failure")
+        {
+            problems.push(format!("{path:?}: not refused: {outcome:?}"));
+        }
+        let after = store.find_enrollment(&user_id).await.unwrap().unwrap();
+        if after != before {
+            problems.push(format!(
+                "{path:?}: the enrollment changed without a reservation"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[tokio::test]
+async fn a_wrong_proof_whose_failure_cannot_be_recorded_surfaces_the_error() {
+    let mut problems = Vec::new();
+    for path in [
+        ProofPath::Confirm,
+        ProofPath::ReEnroll,
+        ProofPath::Regenerate,
+    ] {
+        let world = factor_world().await;
+        let user_id = registered_user(&world).await;
+        let (actor, _) = prepared_for(&world, &user_id, path).await;
+        let service = service_with_attempt_store(
+            &world,
+            Arc::new(CoordinatedAttemptStore::failing_finalize()),
+            5,
+        );
+
+        let outcome = submit(&service, &actor, path, "wrong-proof").await;
+
+        if !matches!(&outcome, Err(magnetar::Error::Internal { message }) if message == "forced attempt finalization failure")
+        {
+            problems.push(format!(
+                "{path:?}: the uncounted failure was not surfaced: {outcome:?}"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// A two-factor store where a concurrent request always claims the proof
+/// first: every rotation reports the lost claim.
+struct ClaimLostTwoFactorStore {
+    inner: Arc<dyn TwoFactorStore>,
+}
+
+#[async_trait]
+impl TwoFactorStore for ClaimLostTwoFactorStore {
+    async fn find_enrollment(&self, user_id: &str) -> magnetar::Result<Option<TwoFactorRow>> {
+        self.inner.find_enrollment(user_id).await
+    }
+
+    async fn begin_enrollment(
+        &self,
+        actor: &CredentialActor,
+        secret: &[u8],
+        recovery_codes: Option<&[u8]>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .begin_enrollment(actor, secret, recovery_codes)
+            .await
+    }
+
+    async fn set_confirmed(
+        &self,
+        actor: &CredentialActor,
+        at: DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
+        self.inner.set_confirmed(actor, at).await
+    }
+
+    async fn claim_timestep(&self, user_id: &str, matched_step: i64) -> magnetar::Result<bool> {
+        self.inner.claim_timestep(user_id, matched_step).await
+    }
+
+    async fn swap_recovery_codes(
+        &self,
+        user_id: &str,
+        expected: &[u8],
+        next: Option<&[u8]>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .swap_recovery_codes(user_id, expected, next)
+            .await
+    }
+
+    async fn rotate_enrollment(
+        &self,
+        _actor: &CredentialActor,
+        _claim: TwoFactorProofClaim,
+        _secret: &[u8],
+        _recovery_codes: Option<&[u8]>,
+    ) -> magnetar::Result<bool> {
+        Ok(false)
+    }
+
+    async fn regenerate_recovery_codes(
+        &self,
+        _actor: &CredentialActor,
+        _claim: TwoFactorProofClaim,
+        _next: &[u8],
+    ) -> magnetar::Result<bool> {
+        Ok(false)
+    }
+
+    async fn delete_enrollment(&self, actor: &CredentialActor) -> magnetar::Result<bool> {
+        self.inner.delete_enrollment(actor).await
+    }
+}
+
+#[tokio::test]
+async fn a_valid_proof_that_loses_its_claim_is_not_counted_but_a_wrong_one_is() {
+    let mut problems = Vec::new();
+    for path in [ProofPath::ReEnroll, ProofPath::Regenerate] {
+        let world = factor_world().await;
+        let user_id = registered_user(&world).await;
+        let (actor, enrollment) = prepared_for(&world, &user_id, path).await;
+        let attempts = Arc::new(CoordinatedAttemptStore::racing(1));
+        let service = TwoFactorService::new(
+            Arc::new(ClaimLostTwoFactorStore {
+                inner: Arc::new(storage_schema::sql_two_factor::SqlTwoFactorStore(
+                    world.db.clone(),
+                )),
+            }),
+            world.storage.clone(),
+            Arc::new(LockoutService::new(
+                attempts.clone(),
+                world.storage.clone(),
+                LockoutConfig::default(),
+            )),
+            Arc::new(AeadEncryptor::new([21; 32])),
+            TwoFactorConfig::default(),
+        );
+        let valid = match path {
+            ProofPath::Regenerate => enrollment.recovery_codes[0].clone(),
+            ProofPath::Confirm | ProofPath::ReEnroll => totp_code_now(&enrollment.otpauth_url),
+        };
+
+        let lost = submit(&service, &actor, path, &valid).await;
+        let left_after_lost = attempts.attempts.lock().len();
+        let wrong = submit(&service, &actor, path, "wrong-proof").await;
+        let counted_after_wrong = attempts
+            .attempts
+            .lock()
+            .iter()
+            .filter(|attempt| !attempt.pending)
+            .count();
+
+        if !is_rejected_proof(&lost) || left_after_lost != 0 {
+            problems.push(format!(
+                "{path:?}: a lost claim left {left_after_lost} attempts: {lost:?}"
+            ));
+        }
+        if !is_rejected_proof(&wrong) || counted_after_wrong != 1 {
+            problems.push(format!(
+                "{path:?}: a wrong proof left {counted_after_wrong} counted failures: {wrong:?}"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
 }

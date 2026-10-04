@@ -25,7 +25,7 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::auth::{FactorVerifier, PreparedFactorProof};
 use crate::crypto::{CryptoPurpose, Encryptor};
-use crate::password::{AttemptAdmission, LockoutService, normalize_email};
+use crate::password::{AttemptAdmission, LockoutService, LockoutStatus, normalize_email};
 use crate::storage::{CredentialActor, UserStore};
 use crate::{Error, Result};
 
@@ -112,6 +112,19 @@ enum PreparedTwoFactorClaim {
         expected_ciphertext: Vec<u8>,
         next_ciphertext: Option<Vec<u8>>,
     },
+}
+
+/// How a proof read under a reserved attempt ended; it decides what
+/// happens to the reservation.
+enum Evaluated<T> {
+    /// The proof was accepted and its effect is committed: the reservation
+    /// and the prior failures are cleared.
+    Accepted(T),
+    /// The proof was wrong: the reservation becomes a counted failure.
+    Rejected(Error),
+    /// The proof was valid but a concurrent request claimed it first: the
+    /// reservation is released, since a wrong guess cannot get here.
+    Superseded(Error),
 }
 
 /// Redacted claim material prepared by [`TwoFactorService`] for the factor
@@ -202,76 +215,55 @@ impl TwoFactorService {
                 message: "no confirmed 2FA enrollment to rotate; enroll first".to_owned(),
             });
         }
-        let identity = self.lockout_identity(user_id).await?;
-        self.require_unlocked(&identity).await?;
-        let claim = self.prepare_proof(user_id, proof).await?;
-        let prepared = self.prepare_enrollment(user_id).await?;
-        if !self
-            .store
-            .rotate_enrollment(
-                actor,
-                claim,
-                &prepared.secret_ciphertext,
-                Some(&prepared.recovery_ciphertext),
-            )
-            .await?
-        {
-            if let Err(error) = self
-                .lockout
-                .record_failed_attempt(&identity, Some("two-factor re-enroll"))
-                .await
-            {
-                tracing::warn!(
-                    error = %error,
-                    "lockout failed-attempt accounting failed after a rejected two-factor re-enrollment"
-                );
-            }
-            return Err(invalid_proof("re-enrollment"));
-        }
-        if self.lockout.reset_attempts(&identity).await.is_err() {
-            tracing::warn!("lockout reset failed after committed two-factor rotation");
-        }
-        Ok(prepared.response)
+        self.with_reserved_attempt(user_id, "two-factor re-enroll", async {
+            let claim = self.prepare_proof(user_id, proof).await?;
+            let presented = !matches!(claim, TwoFactorProofClaim::Invalid);
+            let prepared = self.prepare_enrollment(user_id).await?;
+            let rotated = self
+                .store
+                .rotate_enrollment(
+                    actor,
+                    claim,
+                    &prepared.secret_ciphertext,
+                    Some(&prepared.recovery_ciphertext),
+                )
+                .await?;
+            Ok(settled(
+                rotated,
+                presented,
+                prepared.response,
+                "re-enrollment",
+            ))
+        })
+        .await
     }
 
     /// Confirm a pending enrollment with a live code; 2FA is inactive
     /// until this succeeds.
     pub async fn confirm(&self, actor: &CredentialActor, code: &str) -> Result<()> {
         let user_id = actor.user_id();
-        let identity = self.lockout_identity(user_id).await?;
-        self.require_unlocked(&identity).await?;
-        let Some(row) = self.store.find_enrollment(user_id).await? else {
-            return Err(Error::InvalidInput {
-                field: "enrollment".to_owned(),
-                message: "no pending 2FA enrollment".to_owned(),
-            });
-        };
-        let secret = self.decrypt_secret(&row)?;
-        if totp::matched_step(&secret, code, Utc::now())?.is_none() {
-            if let Err(error) = self
-                .lockout
-                .record_failed_attempt(&identity, Some("two-factor confirm"))
-                .await
-            {
-                tracing::warn!(
-                    error = %error,
-                    "lockout failed-attempt accounting failed after a rejected two-factor confirmation"
-                );
+        self.with_reserved_attempt(user_id, "two-factor confirm", async {
+            let Some(row) = self.store.find_enrollment(user_id).await? else {
+                return Err(Error::InvalidInput {
+                    field: "enrollment".to_owned(),
+                    message: "no pending 2FA enrollment".to_owned(),
+                });
+            };
+            let secret = self.decrypt_secret(&row)?;
+            if totp::matched_step(&secret, code, Utc::now())?.is_none() {
+                return Ok(Evaluated::Rejected(Error::InvalidInput {
+                    field: "code".to_owned(),
+                    message: "invalid 2FA code".to_owned(),
+                }));
             }
-            return Err(Error::InvalidInput {
-                field: "code".to_owned(),
-                message: "invalid 2FA code".to_owned(),
-            });
-        }
-        if !self.store.set_confirmed(actor, Utc::now()).await? {
-            return Err(Error::Internal {
-                message: "two-factor enrollment vanished mid-confirm".to_owned(),
-            });
-        }
-        if self.lockout.reset_attempts(&identity).await.is_err() {
-            tracing::warn!("lockout reset failed after committed two-factor confirmation");
-        }
-        Ok(())
+            if !self.store.set_confirmed(actor, Utc::now()).await? {
+                return Err(Error::Internal {
+                    message: "two-factor enrollment vanished mid-confirm".to_owned(),
+                });
+            }
+            Ok(Evaluated::Accepted(()))
+        })
+        .await
     }
 
     /// Silent matched-step verification: no lockout accounting. The claim
@@ -358,35 +350,26 @@ impl TwoFactorService {
                 message: "no confirmed 2FA enrollment; cannot regenerate recovery codes".to_owned(),
             });
         }
-        let identity = self.lockout_identity(user_id).await?;
-        self.require_unlocked(&identity).await?;
-        let claim = self.prepare_proof(user_id, proof).await?;
-        let codes = recovery::generate(recovery::RECOVERY_CODE_COUNT);
-        let ciphertext = self.encryptor.encrypt(
-            CryptoPurpose::TwoFactorRecovery,
-            codes.join("\n").as_bytes(),
-        )?;
-        if !self
-            .store
-            .regenerate_recovery_codes(actor, claim, &ciphertext)
-            .await?
-        {
-            if let Err(error) = self
-                .lockout
-                .record_failed_attempt(&identity, Some("two-factor recovery-rotate"))
-                .await
-            {
-                tracing::warn!(
-                    error = %error,
-                    "lockout failed-attempt accounting failed after a rejected two-factor recovery-code rotation"
-                );
-            }
-            return Err(invalid_proof("recovery-code regeneration"));
-        }
-        if self.lockout.reset_attempts(&identity).await.is_err() {
-            tracing::warn!("lockout reset failed after committed recovery-code rotation");
-        }
-        Ok(codes)
+        self.with_reserved_attempt(user_id, "two-factor recovery-rotate", async {
+            let claim = self.prepare_proof(user_id, proof).await?;
+            let presented = !matches!(claim, TwoFactorProofClaim::Invalid);
+            let codes = recovery::generate(recovery::RECOVERY_CODE_COUNT);
+            let ciphertext = self.encryptor.encrypt(
+                CryptoPurpose::TwoFactorRecovery,
+                codes.join("\n").as_bytes(),
+            )?;
+            let rotated = self
+                .store
+                .regenerate_recovery_codes(actor, claim, &ciphertext)
+                .await?;
+            Ok(settled(
+                rotated,
+                presented,
+                codes,
+                "recovery-code regeneration",
+            ))
+        })
+        .await
     }
 
     /// Clear the user's second-factor failures, ending a lock before its
@@ -567,18 +550,70 @@ impl TwoFactorService {
             })
     }
 
-    async fn require_unlocked(&self, identity: &str) -> Result<()> {
-        let status = self.lockout.guarded_status(identity).await?;
-        if status.is_locked {
-            return Err(Error::Conflict {
-                resource: "account lockout".to_owned(),
-                message: format!(
-                    "account is locked due to too many failed attempts; retry in {} seconds",
-                    status.retry_after_seconds().unwrap_or(0)
-                ),
-            });
+    /// Reserve one attempt on the user's second-factor key, then read the
+    /// proof, then settle the reservation by what the proof turned out to be.
+    ///
+    /// The reservation comes first so parallel proofs cannot all pass a
+    /// lock check that only counts settled failures: past the threshold, a
+    /// proof is refused before it is read. Every accounting error is
+    /// returned, so a failure the store could not count is never reported
+    /// as an ordinary wrong proof. The one exception is the reset after a
+    /// committed change: the change already happened and its one-time
+    /// artifacts exist nowhere else, so that error is logged and the
+    /// reservation stays counted until its window passes.
+    async fn with_reserved_attempt<T>(
+        &self,
+        user_id: &str,
+        operation: &'static str,
+        evaluate: impl Future<Output = Result<Evaluated<T>>>,
+    ) -> Result<T> {
+        let identity = self.lockout_identity(user_id).await?;
+        let admission = self
+            .lockout
+            .admit_attempt(&identity, Some(operation))
+            .await?;
+        if !admission.admitted {
+            return Err(locked_out(&admission.status));
         }
-        Ok(())
+        match evaluate.await {
+            Ok(Evaluated::Accepted(value)) => {
+                if let Err(error) = self
+                    .lockout
+                    .reset_admitted_attempts(&identity, &admission)
+                    .await
+                {
+                    tracing::error!(
+                        error = %error,
+                        operation,
+                        "lockout reset failed after a committed two-factor change; its attempt stays counted until the window passes"
+                    );
+                }
+                Ok(value)
+            }
+            Ok(Evaluated::Rejected(rejection)) => {
+                self.lockout
+                    .finalize_failed_attempt(&identity, &admission)
+                    .await?;
+                Err(rejection)
+            }
+            Ok(Evaluated::Superseded(rejection)) => {
+                self.lockout.cancel_attempt(&identity, &admission).await?;
+                Err(rejection)
+            }
+            Err(evaluation_error) => {
+                if let Err(cancel_error) = self.lockout.cancel_attempt(&identity, &admission).await
+                {
+                    tracing::error!(
+                        error = %cancel_error,
+                        original_error = %evaluation_error,
+                        operation,
+                        "failed to cancel two-factor attempt after evaluation aborted"
+                    );
+                    return Err(cancel_error);
+                }
+                Err(evaluation_error)
+            }
+        }
     }
 }
 
@@ -604,13 +639,7 @@ impl FactorVerifier for TwoFactorService {
             .admit_attempt(&identity, Some("two-factor challenge"))
             .await?;
         if !admission.admitted {
-            return Err(Error::Conflict {
-                resource: "account lockout".to_owned(),
-                message: format!(
-                    "account is locked due to too many failed attempts; retry in {} seconds",
-                    admission.status.retry_after_seconds().unwrap_or(0)
-                ),
-            });
+            return Err(locked_out(&admission.status));
         }
         match self
             .prepare_factor_proof(user_id, code, identity.clone(), admission.clone())
@@ -700,6 +729,30 @@ impl FactorVerifier for TwoFactorService {
         self.lockout
             .cancel_attempt(&proof.lockout_identity, &proof.admission)
             .await
+    }
+}
+
+/// The refusal for a proof that arrives past the attempt threshold.
+fn locked_out(status: &LockoutStatus) -> Error {
+    Error::Conflict {
+        resource: "account lockout".to_owned(),
+        message: format!(
+            "account is locked due to too many failed attempts; retry in {} seconds",
+            status.retry_after_seconds().unwrap_or(0)
+        ),
+    }
+}
+
+/// Classify a rotation's store result. `presented` is whether the proof was
+/// a valid code when read; only a valid code can lose its claim to a
+/// concurrent request, so a refused wrong proof always counts.
+fn settled<T>(rotated: bool, presented: bool, value: T, operation: &str) -> Evaluated<T> {
+    if rotated {
+        Evaluated::Accepted(value)
+    } else if presented {
+        Evaluated::Superseded(invalid_proof(operation))
+    } else {
+        Evaluated::Rejected(invalid_proof(operation))
     }
 }
 
