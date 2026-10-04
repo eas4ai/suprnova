@@ -352,6 +352,38 @@ async fn json_containment() {
     );
 }
 
+/// A cursor bounds the whole union, on every page and in both directions.
+/// It used to filter the first query only, so the page after 1 and 2 of
+/// `b UNION a` was 1 and 2 again: the arm holding them was never bounded.
+#[cfg(feature = "testing")]
+async fn cursor_pages_walk_the_whole_union() {
+    use suprnova::context::Context;
+
+    crate::key_ring::rotation_keys();
+    Context::test_clear_query();
+    let b_or_a = || items().filter("grp", "b").union(items().filter("grp", "a"));
+    let page = |name: &'static str| async move {
+        b_or_a()
+            .cursor_paginate(2)
+            .await
+            .unwrap_or_else(|e| panic!("{name} of a union: {e}"))
+    };
+
+    let first = page("the first page").await;
+    assert_eq!(ids(&first.data), vec![1, 2]);
+    Context::test_set_query("cursor", first.next_cursor.clone().expect("a next cursor"));
+    let second = page("the second page").await;
+    assert_eq!(ids(&second.data), vec![3, 4], "the cursor bounds every arm");
+    assert!(second.next_cursor.is_none(), "nothing lies after 4");
+    Context::test_set_query(
+        "cursor",
+        second.prev_cursor.clone().expect("a previous cursor"),
+    );
+    let back = page("the page before").await;
+    assert_eq!(ids(&back.data), vec![1, 2]);
+    Context::test_clear_query();
+}
+
 // ---------- SQLite ------------------------------------------------------------
 
 async fn seeded_sqlite() -> Fixture {
@@ -388,6 +420,13 @@ async fn sqlite_aggregates_ignore_the_projection() {
 async fn sqlite_create_or_first_inside_a_transaction() {
     let _fx = seeded_sqlite().await;
     create_or_first_inside_a_transaction().await;
+}
+
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn sqlite_cursor_pages_walk_the_whole_union() {
+    let _fx = seeded_sqlite().await;
+    cursor_pages_walk_the_whole_union().await;
 }
 
 // ---------- Live engines ----------------------------------------------------
@@ -493,5 +532,23 @@ async fn mysql_create_or_first_inside_a_transaction() {
 async fn mysql_json_containment() {
     let fx = live("MYSQL_TEST_URL", DatabaseBackend::MySql).await;
     json_containment().await;
+    finish(fx).await;
+}
+
+#[cfg(feature = "testing")]
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
+async fn postgres_cursor_pages_walk_the_whole_union() {
+    let fx = live("PG_TEST_URL", DatabaseBackend::Postgres).await;
+    cursor_pages_walk_the_whole_union().await;
+    finish(fx).await;
+}
+
+#[cfg(feature = "testing")]
+#[tokio::test]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_cursor_pages_walk_the_whole_union() {
+    let fx = live("MYSQL_TEST_URL", DatabaseBackend::MySql).await;
+    cursor_pages_walk_the_whole_union().await;
     finish(fx).await;
 }

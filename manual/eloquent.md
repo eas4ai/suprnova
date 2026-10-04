@@ -1071,9 +1071,9 @@ let users  = first.union_all(second).get().await?;
 
 As in Laravel, an ordering, a limit, or an offset belongs to the whole
 union when you add it after `union`, and to the first query alone when
-you add it before. `paginate`, `simple_paginate`, `first`, and `count`
-all come after `union`, so they page, take, and count the rows of the
-union:
+you add it before. `paginate`, `simple_paginate`, `cursor_paginate`,
+`first`, and `count` all come after `union`, so they page, take, and
+count the rows of the union; a cursor bounds the rows of every arm:
 
 ```rust
 let page = User::filter("active", true)

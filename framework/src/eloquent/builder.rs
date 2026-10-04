@@ -538,6 +538,11 @@ pub struct Builder<M> {
     /// union; `orders`, `limit` and `offset` then belong to the whole
     /// union. See [`UnionHead`].
     pub(crate) union_head: UnionHead,
+    /// Conditions on the rows of the whole union, set by
+    /// [`Self::cursor_paginate`]: the union is written as a derived table
+    /// and filtered there, so a cursor bounds every arm's rows and not the
+    /// first query's alone.
+    pub(crate) union_filters: Vec<WhereTerm>,
     pub(crate) runtime_casts:
         HashMap<&'static str, std::sync::Arc<dyn crate::eloquent::casts::DynCast>>,
     pub(crate) global_scopes_disabled: Vec<&'static str>,
@@ -639,6 +644,7 @@ impl<M> Clone for Builder<M> {
             distinct: self.distinct,
             unions: self.unions.clone(),
             union_head: self.union_head.clone(),
+            union_filters: self.union_filters.clone(),
             runtime_casts: self.runtime_casts.clone(),
             global_scopes_disabled: self.global_scopes_disabled.clone(),
             excluded_scopes: self.excluded_scopes.clone(),
@@ -1102,7 +1108,12 @@ impl<M> Builder<M> {
         for c in &self.group_by {
             validate_identifier(c)?;
         }
-        for term in self.where_terms.iter().chain(self.having_terms.iter()) {
+        for term in self
+            .where_terms
+            .iter()
+            .chain(&self.having_terms)
+            .chain(&self.union_filters)
+        {
             validate_where_term(term)?;
         }
         for o in self.orders.iter().chain(&self.union_head.orders) {
@@ -1141,6 +1152,7 @@ impl<M> Builder<M> {
             distinct: false,
             unions: Vec::new(),
             union_head: UnionHead::default(),
+            union_filters: Vec::new(),
             runtime_casts: HashMap::new(),
             global_scopes_disabled: Vec::new(),
             excluded_scopes: Vec::new(),
@@ -2399,7 +2411,12 @@ impl<M> Builder<M> {
         for join in &self.joins {
             join_tables(join, out);
         }
-        for term in self.where_terms.iter().chain(&self.having_terms) {
+        for term in self
+            .where_terms
+            .iter()
+            .chain(&self.having_terms)
+            .chain(&self.union_filters)
+        {
             where_term_tables(term, out);
         }
         for (other, _is_all) in &self.unions {
@@ -4065,10 +4082,23 @@ impl<M> Builder<M> {
             sql.push_str(&other.render_union_arm(backend, table, column_expr, values, n)?);
         }
 
-        if this.orders.is_empty() && this.limit.is_none() && this.offset.is_none() {
+        if this.orders.is_empty()
+            && this.limit.is_none()
+            && this.offset.is_none()
+            && this.union_filters.is_empty()
+        {
             return Ok(sql);
         }
         let mut whole = format!("SELECT * FROM ({sql}) AS {UNION_ALIAS}");
+        if !this.union_filters.is_empty() {
+            let parts: Vec<String> = this
+                .union_filters
+                .iter()
+                .map(|t| Self::render_where_term(backend, t, values, n, this.binder, None))
+                .collect::<Result<Vec<_>, _>>()?;
+            whole.push_str(" WHERE ");
+            whole.push_str(&parts.join(" AND "));
+        }
         whole.push_str(&this.render_orders(backend, values, n)?);
         whole.push_str(&render_limit_offset(backend, this.limit, this.offset));
         Ok(whole)
@@ -5367,6 +5397,10 @@ where
     /// cursor; every later page starts at its cursor, so the offset
     /// never skips rows between two pages.
     ///
+    /// On a union the cursor bounds the rows of the whole union, written
+    /// as a derived table, and the order is the union's; the first query
+    /// keeps an ordering and a limit it had before `union`.
+    ///
     /// ## Errors
     ///
     /// - `per_page == 0` → `FrameworkError::param("per_page")` (400).
@@ -5392,7 +5426,8 @@ where
         // over the keyset column. A page reached by a cursor starts at
         // the cursor alone: an offset kept there would skip rows again
         // on every page.
-        let mut q = self.reorder();
+        let mut q = self;
+        q.orders.clear();
         if from_cursor {
             q.offset = None;
         }
@@ -5407,7 +5442,15 @@ where
             // in the renderer. Every PK variant we care about (Int /
             // BigInt / Uuid / String) round-trips losslessly.
             let boundary_json = crate::eloquent::model::sea_value_to_json_loose(boundary);
-            q = q.filter_op(pk, op, boundary_json);
+            if q.unions.is_empty() {
+                q = q.filter_op(pk, op, boundary_json);
+            } else {
+                // On the first query alone, the cursor would leave every
+                // other arm unbounded, and their rows before the cursor
+                // would come back on every page.
+                q.union_filters
+                    .push(WhereTerm::Op(pk.to_string(), op.to_string(), boundary_json));
+            }
         }
 
         let mut rows: Vec<M> = q.limit(per_page + 1).get().await?.into_vec();
