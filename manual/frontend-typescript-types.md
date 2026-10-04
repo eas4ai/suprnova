@@ -361,6 +361,10 @@ The helpers build the same URLs the backend's `route()` helper builds:
   or `#` in a value cannot start a query string or a fragment.
 - A catch-all parameter (`{*rest}`) is named `rest` and keeps its slashes.
   Each segment is encoded on its own.
+- An optional parameter (`{year?}`) is an optional key. Without a value it
+  is left out with its segment, so `/archive/{year?}` with no year is
+  `/archive`. A helper whose parameters are all optional can be called with
+  no argument.
 - A route inside `group!` gets the group's path prefix and its `.name(...)`
   prefix, nested groups included. A bare handler name inside
   `group!(..., controller = ..., { ... })` resolves to that controller.
