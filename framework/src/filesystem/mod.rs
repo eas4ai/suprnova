@@ -42,7 +42,7 @@ pub mod streaming;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
-pub use disk::{ChecksumAlgorithm, DiskExt};
+pub use disk::{ChecksumAlgorithm, DiskExt, TemporaryUploadUrl};
 pub use streaming::copy_between_disks;
 
 use crate::FrameworkError;

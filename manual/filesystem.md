@@ -265,15 +265,24 @@ production backends.
 ### Pre-signed URLs
 
 ```rust,ignore
-let read_url   = disk.temporary_url("uploads/a.pdf", Duration::from_secs(900)).await?;
-let upload_url = disk.temporary_upload_url("uploads/new.pdf", Duration::from_secs(900)).await?;
+let read_url = disk.temporary_url("uploads/a.pdf", Duration::from_secs(900)).await?;
+let upload = disk.temporary_upload_url("uploads/new.pdf", Duration::from_secs(900)).await?;
+// upload.url, upload.method ("PUT"), upload.headers
 ```
 
-`temporary_url` and `temporary_upload_url` return the URL as a `String` for
-Laravel parity. They are backed by `Operator::presign_read` /
-`presign_write`, so they error with an `Unsupported` message on backends
-that do not implement presigning (the in-memory and local-filesystem
-drivers fall in this bucket; S3, Azure Blob, and GCS support it).
+`temporary_url` returns the URL as a `String`. `temporary_upload_url` returns
+a `TemporaryUploadUrl` with the URL, the HTTP method, and the headers the
+signature covers. Send the upload with that method and every one of those
+headers: some backends refuse an upload without them. Azure Blob requires
+`x-ms-blob-type`, and an S3 bucket set up for server-side encryption requires
+its encryption headers. The value serializes to
+`{ "url": .., "method": .., "headers": { .. } }`, so a handler can return it to
+the browser as JSON, the shape Laravel's `temporaryUploadUrl` returns.
+
+Both are backed by `Operator::presign_read` and `presign_write`, so they error
+with an `Unsupported` message on backends that do not implement presigning
+(the in-memory and local-filesystem drivers fall in this bucket; S3, Azure
+Blob, and GCS support it).
 
 ### Public URLs
 
