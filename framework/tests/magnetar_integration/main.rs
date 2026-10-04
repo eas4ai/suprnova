@@ -8,6 +8,8 @@ mod env_lock;
 mod magnetar_auth;
 #[path = "../support/own_process.rs"]
 mod own_process;
+#[path = "../support/own_process_async.rs"]
+mod own_process_async;
 
 pub mod abuse_limiter;
 pub mod atomic_install;

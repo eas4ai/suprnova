@@ -18,6 +18,14 @@ async fn setup() {
 #[tokio::test]
 #[serial]
 async fn password_register_and_authenticate_round_trip() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "password_register_and_authenticate_round_trip",
+    )
+    .await
+    {
+        return;
+    }
     setup().await;
     let user = Auth::password()
         .register("parity@example.test", "correct-password")
@@ -45,6 +53,11 @@ async fn password_register_and_authenticate_round_trip() {
 #[tokio::test]
 #[serial]
 async fn wrong_password_fails_authentication() {
+    if crate::own_process_async::delegate(module_path!(), "wrong_password_fails_authentication")
+        .await
+    {
+        return;
+    }
     setup().await;
     Auth::password()
         .register("wrong-password@example.test", "correct-password")
@@ -67,6 +80,14 @@ async fn wrong_password_fails_authentication() {
 #[tokio::test]
 #[serial]
 async fn magic_link_is_single_use_and_issues_a_session() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "magic_link_is_single_use_and_issues_a_session",
+    )
+    .await
+    {
+        return;
+    }
     setup().await;
     let token = Auth::magic_link()
         .send(
@@ -89,6 +110,14 @@ async fn magic_link_is_single_use_and_issues_a_session() {
 #[tokio::test]
 #[serial]
 async fn direct_user_lookup_uses_the_installed_engine() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "direct_user_lookup_uses_the_installed_engine",
+    )
+    .await
+    {
+        return;
+    }
     setup().await;
     let user = Auth::password()
         .register("lookup@example.test", "lookup-password")

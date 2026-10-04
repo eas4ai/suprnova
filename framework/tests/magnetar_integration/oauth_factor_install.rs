@@ -363,6 +363,14 @@ async fn request(cookie: Option<&str>) -> suprnova::Request {
 
 #[tokio::test]
 async fn atomic_custom_oauth_and_factor_install_completes_a_cookie_round_trip() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "atomic_custom_oauth_and_factor_install_completes_a_cookie_round_trip",
+    )
+    .await
+    {
+        return;
+    }
     Crypt::init(EncryptionKey::generate());
     let factor = FactorEngine::default();
     let completion_calls = Arc::new(AtomicUsize::new(0));
