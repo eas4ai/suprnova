@@ -1458,7 +1458,17 @@ impl SessionMiddleware {
             )
         } else {
             match self.store.read(&session_id).await {
-                Ok(Some(s)) => (s, false, None),
+                // The middleware records that its own read returned this
+                // session rather than trusting the store to say so. The
+                // database driver sets the flag itself; a custom store that
+                // builds its sessions with `SessionData::new` does not, and
+                // every session it returned looked new: the CSRF middleware
+                // then marked it for storage on every successful request and
+                // the store was written once per request.
+                Ok(Some(mut s)) => {
+                    s.loaded_from_store = true;
+                    (s, false, None)
+                }
                 Ok(None) => (
                     SessionData::new(generate_session_id(), generate_csrf_token()),
                     true,
