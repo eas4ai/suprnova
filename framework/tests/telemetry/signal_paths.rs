@@ -73,7 +73,7 @@ fn config_for(base: String) -> OtelConfig {
 /// the gate runs the tests, every test is a process of its own and the
 /// answer is yes. In a process that another test had first, the metrics
 /// are what this test can see: the meter provider is set again by every
-/// `init_telemetry`.
+/// `init_telemetry` that runs once the guard before it is gone.
 async fn emit_and_shut_down(config: OtelConfig) -> bool {
     let has_the_subscriber = !tracing::dispatcher::has_been_set();
     // Named, and not read from the environment: with `LOG_LEVEL=warn` in

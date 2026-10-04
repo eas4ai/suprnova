@@ -77,7 +77,8 @@ pub(crate) fn unpack_map(map: serde_json::Map<String, Value>) -> serde_json::Map
 /// Laravel's `Arr::get($array, $key, $default)` (`Arr.php:487-514`), minus
 /// the default - callers get `Option` and choose their own fallback.
 /// `root` must be a JSON object; anything else returns `None` (`Arr::get`'s
-/// `! static::accessible($array)` branch).
+/// `! static::accessible($array)` branch). Below the root, a segment walks
+/// into an object by key or into an array by index.
 ///
 /// Tries an exact top-level match first - `Arr::get`'s
 /// `static::exists($array, $key)` check - so a literal dotted key (one
@@ -94,7 +95,21 @@ pub(crate) fn arr_get(root: &Value, key: &str) -> Option<Value> {
     }
     let mut current = root;
     for segment in key.split('.') {
-        current = current.as_object()?.get(segment)?;
+        // `Arr::get` walks lists as well as maps: a numeric segment is a
+        // list index, so `users.0.name` reaches into a shared list. Only the
+        // canonical spelling is an index, as only it is an integer key in
+        // PHP: `01` and `+1` are not.
+        current = match current {
+            Value::Object(map) => map.get(segment)?,
+            Value::Array(items) => {
+                let index = segment.parse::<usize>().ok()?;
+                if index.to_string() != segment {
+                    return None;
+                }
+                items.get(index)?
+            }
+            _ => return None,
+        };
     }
     Some(current.clone())
 }

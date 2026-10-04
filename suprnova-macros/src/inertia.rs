@@ -223,8 +223,9 @@ fn render_inertia_response_expansion(input: &InertiaResponseInput) -> proc_macro
                     __se,
                 )))?
         },
-        PropsKind::Json(tokens) => quote! {
-            ::suprnova::serde_json::json!({#tokens})
+        PropsKind::Json(tokens) => match json_object_tokens(tokens, &component_name) {
+            Ok(object) => object,
+            Err(error) => return error.to_compile_error(),
         },
     };
 
@@ -267,6 +268,141 @@ fn render_inertia_response_expansion(input: &InertiaResponseInput) -> proc_macro
     }};
 
     expanded
+}
+
+/// One value of the JSON-like props syntax.
+enum JsonNode {
+    Null,
+    Array(Vec<JsonNode>),
+    Object(Vec<(Expr, JsonNode)>),
+    Expr(Expr),
+}
+
+/// Whether a value that is one token group ends where it starts: at a
+/// comma or at the end of its container. `[1, 2]` alone is a JSON array;
+/// `[1, 2].len()` is a Rust expression.
+fn stands_alone(input: ParseStream) -> bool {
+    let fork = input.fork();
+    if fork.parse::<proc_macro2::TokenTree>().is_err() {
+        return false;
+    }
+    fork.is_empty() || fork.peek(Token![,])
+}
+
+fn parse_json_value(input: ParseStream) -> syn::Result<JsonNode> {
+    if input.peek(syn::token::Bracket) && stands_alone(input) {
+        let content;
+        syn::bracketed!(content in input);
+        let mut elements = Vec::new();
+        while !content.is_empty() {
+            elements.push(parse_json_value(&content)?);
+            if content.is_empty() {
+                break;
+            }
+            content.parse::<Token![,]>()?;
+        }
+        return Ok(JsonNode::Array(elements));
+    }
+    if input.peek(syn::token::Brace) && stands_alone(input) {
+        let content;
+        syn::braced!(content in input);
+        return parse_json_entries(&content).map(JsonNode::Object);
+    }
+    if input.peek(syn::Ident) && stands_alone(input) {
+        let fork = input.fork();
+        if fork.parse::<syn::Ident>()? == "null" {
+            input.parse::<syn::Ident>()?;
+            return Ok(JsonNode::Null);
+        }
+    }
+    input.parse::<Expr>().map(JsonNode::Expr)
+}
+
+fn parse_json_entries(input: ParseStream) -> syn::Result<Vec<(Expr, JsonNode)>> {
+    let mut entries = Vec::new();
+    while !input.is_empty() {
+        let key: Expr = input.parse()?;
+        input.parse::<Token![:]>()?;
+        entries.push((key, parse_json_value(input)?));
+        if input.is_empty() {
+            break;
+        }
+        input.parse::<Token![,]>()?;
+    }
+    Ok(entries)
+}
+
+/// Build the props object of the JSON-like syntax without
+/// `serde_json::json!`.
+///
+/// `json!` serializes every interpolated expression with
+/// `to_value(..).unwrap()`, so a `Serialize` impl that fails, or a map with
+/// keys JSON cannot hold, panics the request. Here each expression is
+/// serialized on its own and a failure returns `FrameworkError::internal`
+/// naming the prop, the same as the typed branch.
+fn json_object_tokens(
+    tokens: &proc_macro2::TokenStream,
+    component_name: &str,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let entries = syn::parse::Parser::parse2(parse_json_entries, tokens.clone())?;
+    Ok(json_node_tokens(
+        &JsonNode::Object(entries),
+        component_name,
+        "",
+    ))
+}
+
+fn json_node_tokens(node: &JsonNode, component_name: &str, path: &str) -> proc_macro2::TokenStream {
+    match node {
+        JsonNode::Null => quote!(::suprnova::serde_json::Value::Null),
+        JsonNode::Array(elements) => {
+            let elements = elements.iter().enumerate().map(|(index, element)| {
+                json_node_tokens(element, component_name, &format!("{path}[{index}]"))
+            });
+            quote!(::suprnova::serde_json::Value::Array(
+                ::std::vec![#(#elements),*]
+            ))
+        }
+        JsonNode::Object(entries) => {
+            let object = syn::Ident::new("__suprnova_props_object", Span::mixed_site());
+            let inserts = entries.iter().map(|(key, value)| {
+                let label = match key {
+                    Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(literal),
+                        ..
+                    }) => literal.value(),
+                    _ => "<computed key>".to_owned(),
+                };
+                let child = if path.is_empty() {
+                    label
+                } else {
+                    format!("{path}.{label}")
+                };
+                let value = json_node_tokens(value, component_name, &child);
+                quote! {
+                    #object.insert(
+                        ::std::convert::Into::<::std::string::String>::into(#key),
+                        #value,
+                    );
+                }
+            });
+            quote! {{
+                let mut #object = ::suprnova::serde_json::Map::new();
+                #(#inserts)*
+                ::suprnova::serde_json::Value::Object(#object)
+            }}
+        }
+        JsonNode::Expr(expr) => quote! {
+            ::suprnova::serde_json::to_value(&(#expr)).map_err(|__se| {
+                ::suprnova::FrameworkError::internal(::std::format!(
+                    "inertia_response!({}): prop `{}` failed to serialize: {}",
+                    #component_name,
+                    #path,
+                    __se,
+                ))
+            })?
+        },
+    }
 }
 
 /// Checks the component against the crate's page lookup and returns the
@@ -377,6 +513,53 @@ mod tests {
         assert!(
             rendered.contains("resolve") && rendered.contains("map_err"),
             "block must end in resolve(...).map_err(...) shape; got: {rendered}"
+        );
+    }
+
+    /// JSON-syntax props must not go through `serde_json::json!`, which
+    /// unwraps every interpolated value's serialization: each value is
+    /// serialized on its own and a failure is a `FrameworkError` naming the
+    /// prop.
+    #[test]
+    fn json_props_branch_returns_serialize_failures_instead_of_panicking() {
+        let parsed: InertiaResponseInput = parse_quote! {
+            &req, "Home", {
+                "title": title,
+                "items": [1, null, { "deep": flag }],
+                "user": { "name": user.name },
+            }
+        };
+        let rendered = render_inertia_response_expansion(&parsed).to_string();
+        assert!(
+            !rendered.contains("json !"),
+            "the JSON branch must not expand through json!; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("unwrap"),
+            "the JSON branch must not unwrap; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("FrameworkError :: internal"),
+            "a failing value must become a FrameworkError; got: {rendered}"
+        );
+        for path in ["\"title\"", "\"items[2].deep\"", "\"user.name\""] {
+            assert!(
+                rendered.contains(path),
+                "the error names the prop {path}; got: {rendered}"
+            );
+        }
+        assert!(rendered.contains("Value :: Null"), "null stays JSON null");
+    }
+
+    #[test]
+    fn json_props_syntax_errors_are_compile_errors() {
+        let parsed: InertiaResponseInput = parse_quote! {
+            &req, "Home", { "title" }
+        };
+        let rendered = render_inertia_response_expansion(&parsed).to_string();
+        assert!(
+            rendered.contains("compile_error"),
+            "a key without a value must not compile; got: {rendered}"
         );
     }
 

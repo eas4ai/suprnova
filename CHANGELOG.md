@@ -414,6 +414,37 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **Magnetar rotations and second-factor lockouts.** Magnetar's
+  `re_enroll` keeps the confirmed second factor gating sign-in until a code
+  from the new secret confirms the rotation; the rotation waits in new
+  `auth_two_factor` columns, `pending_secret` and `pending_recovery_codes`,
+  which `default_schema::migrate` adds. `TwoFactorRow` gains those two
+  fields, and a custom `TwoFactorStore` implements the new
+  `confirm_rotation`. A second-factor lock or unlock never touches an
+  `app_users` row (`LockoutFields::IDENTITY_IS_EMAIL`,
+  `LockoutService::without_user_lock`), so an account registered as
+  `two-factor:{id}` is never locked or unlocked by it. An account holds the
+  framework's TOTP or a Magnetar second factor, never both: enrolling or
+  confirming either answers 409 while the other exists, and disabling
+  either one recovers an account that already has both. A custom host
+  attaches `FrameworkTotpEnrollment` to its `TwoFactorService` through
+  `with_other_second_factor`. This landed after the `v3.1.0` tag.
+- **Live field and argument names must be ASCII and at most 128 bytes**,
+  and a view-visible field named `component` is a compile error. Such
+  names used to panic at registration or fail later. This landed after the
+  `v3.1.0` tag.
+- **Cron steps count from the first value.** `*/N` in the day-of-month and
+  month fields counts from 1, as cron and Laravel do, so `*/2` means odd
+  days and schedules using it shift; the timezone display now agrees with
+  the scheduler. Ranges with steps (`1-15/7`) and mixed lists parse. This
+  landed after the `v3.1.0` tag.
+- **Workflow steps are named by module path and function name**, so
+  same-named steps in different modules are different steps. Runs recorded
+  with bare names still replay. This landed after the `v3.1.0` tag.
+- **`TestContainerGuard` can no longer be built directly**; use
+  `TestContainer::fake()`. `dispatch_argv_with_init` boots the process and
+  waits for queued listeners after the command; `dispatch_argv` does
+  neither. This landed after the `v3.1.0` tag.
 - **`save` and `update` refuse a model that was never inserted.** A
   replica, or a new model from `first_or_new` or `find_or_new`, still has
   its reset key, and `save` updated the row with key 0. It now returns an
@@ -518,8 +549,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   already does, and `u64`, which they now read on SQLite and Postgres
   too. A generic caller bound by `TryGetable` needs `ColumnValue`
   instead. `avg` reads an `f64` or a `rust_decimal::Decimal` (the new
-  `AvgValue` trait), a decimal column's average exactly; another type no
-  longer compiles. `pluck`, `pluck_keyed` and `value` used to drop a row whose
+  `AvgValue` trait); another type no longer compiles. Postgres and MySQL
+  average exactly, so a `Decimal` average is exact there. SQLite averages
+  as a REAL, so there the `Decimal` holds the shortest decimal that
+  round-trips SQLite's floating-point answer. `pluck`, `pluck_keyed` and `value` used to drop a row whose
   value did not decode, so `pluck::<u64>` returned an empty list; they
   still skip a NULL, and any other value that does not decode is an error
   naming the column. This landed after the `v3.1.0` tag (#137).
@@ -688,6 +721,59 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Generated routes and types, Inertia props and JSON:API.**
+  `generate-types --routes` applies `group!` path and name prefixes, gives
+  each repeated-handler alias its own helper, percent-encodes path values
+  like `route()`, and uses serde's input keys in request interfaces;
+  helpers for a second route of one handler get a new params interface
+  name. An SSR exclusion glob such as `**/foo/*` matches where `**` spans a
+  repeated literal. The redirect back for an empty Inertia response keeps
+  the handler's cookies, security headers and error report. Replacing a
+  lazy prop drops its `?include=` gate, a later dotted prop wins over an
+  earlier lazy parent, and `App::inertia_shared("users.0.name")` reads into
+  shared lists. A JSON-style `inertia_response!` prop that fails to
+  serialize returns an error instead of panicking. JSON:API documents no
+  longer repeat primary resources in `included`, an empty collection
+  refuses unknown includes with 400, a requested include always returns an
+  `included` array, and error pointers are escaped per RFC 6901. `i128` and
+  `u128` route-parameter fields in Data DTOs extract instead of answering
+  422, and DTOs with route-parameter fields compile without a direct `url`
+  dependency. Live route intents can target resource routes, and `route()`
+  and `try_route()` fill a catch-all `{*rest}` by the name `rest`, keeping
+  its slashes. Numeric `expect!` matchers fail on NaN and other unordered
+  values. Schema dump and load accept every TLS parameter spelling the
+  application's connection accepts and pass the Postgres password through
+  `password=`. The `Idempotency::remember` example key includes the
+  authenticated user. Live component names, views and action text that
+  mention development crate names compile, action arguments named `target`
+  or `request` no longer break generated code, and `#[session]` Live fields
+  load from and persist to the visitor's session once the action's outcome
+  is accepted (they need `SessionMiddleware`). This landed after the
+  `v3.1.0` tag.
+- **Workers, the console and process lifecycle.** Queue, schedule and
+  workflow workers, the `queue:*` commands and console commands boot the
+  `#[injectable]` and `#[service]` inventory, so a job or command that
+  resolves an action no longer fails with `ServiceNotFound`. The console
+  also boots the runtime drivers and `#[policy]` gates, warns on stderr and
+  goes on when a driver cannot boot, and waits for queued listeners before
+  it exits; `down`, `up` and `schedule:list` run the application's
+  bootstrap hook. `schedule:work` stops on SIGTERM while an inline task
+  runs, stopping a task still running after the 30-second grace. A
+  panicking `Terminable` hook no longer skips the hooks after it, and a
+  graceful shutdown waits up to 5 seconds for hooks still running.
+  `Context::get` and `Context::hidden_get` no longer deadlock when a custom
+  `Deserialize` writes to the context. A `TestContainerGuard` or
+  `TestQueryGuard` dropped on another thread clears only what it installed.
+  Binding an `#[injectable]` by hand before boot no longer requires the
+  dependencies only its generated constructor reads. `db:seed
+  --class=<Name>` fails with not-found on an empty registry, and a
+  poisoned registry fails instead of reporting nothing to run. A
+  supervisor spawned during or after shutdown no longer starts outside the
+  drain. A second `init_telemetry` while the first guard lives no longer
+  takes over the global meter provider. `start_workflow!` accepts
+  imported, re-exported, `crate::`, `self::` and `super::` paths, and
+  `workflow:work` on a database other than Postgres exits with an error at
+  startup instead of retrying forever. This landed after the `v3.1.0` tag.
 - **Relations and soft deletes.** `destroy`, `delete_quietly`,
   `delete_or_fail` and trait-dispatched `delete` permanently deleted
   soft-delete rows; they now tombstone them, and `delete_or_fail` on an
@@ -816,8 +902,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   concurrent miss and holds at most 4096 entries. Read-through promotions
   stream into the primary instead of holding the object in memory,
   unpromoted reads fetch only their range, a delete or move during a
-  promotion is not undone within one process, versioned and conditional
-  reads reach the fallback, and a refused move keeps the fallback copy.
+  promotion is not undone, on the same node or another one (a promotion
+  re-checks the fallback after publishing and withdraws its own copy),
+  versioned and conditional reads reach the fallback, and a refused move
+  keeps the fallback copy. Ranged reads stop at the requested range: a
+  server that ignores `Range` can no longer make a small read buffer the
+  whole object, and S3, Azure Blob and GCS refuse a response that is not
+  the requested range before reading its body, open-ended ranges included.
   This landed after the `v3.1.0` tag.
 - **Queues, events and processes.** Cancelling `Transaction::commit()`
   while its COMMIT was in flight could drop its `after_commit` callbacks and
@@ -1246,6 +1337,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **Input-only relationships stay out of JSON:API output.** A relationship
+  marked `#[data(input_only, allow_include)]` was linked and includable in
+  responses; it is now never sent. This landed after the `v3.1.0` tag.
+- **The environment is written only where that is sound.** `Config::init`
+  and `config::load_dotenv` refuse to write the process environment inside
+  a Tokio runtime or after `#[suprnova::main]` loaded it, where another
+  thread could read it mid-write. A failed load restores the real system
+  values and registers no config. This landed after the `v3.1.0` tag.
 - **Route bindings and pivot extras respect what models declare.**
   `RouteParam<Model>` ignored global scopes on models without
   `soft_deletes`, so a guessed id of another tenant's row bound to the

@@ -949,3 +949,93 @@ async fn repeated_match_on_accumulates_into_match_props_on() {
         vec!["posts.id".to_string(), "posts.slug".to_string()]
     );
 }
+
+// ---- replacement and precedence ----
+
+#[tokio::test]
+async fn replacing_an_owned_lazy_prop_drops_its_include_gate() {
+    // `prop_lazy_with_owner` ties the key to a DTO's `?include=` gate.
+    // A later builder call under the same key replaces the prop, so the
+    // gate must go with it: the replacement is an ordinary lazy prop and
+    // must be sent on a standard visit with no `?include=` at all.
+    let resp = InertiaResponse::new("Stats")
+        .prop_lazy_with_owner(
+            "StatsPage",
+            "stats",
+            Prop::lazy(|| async { json!("owned") }),
+        )
+        .lazy("stats", || async { Ok::<_, FrameworkError>("plain") })
+        .resolve(&MockReq::new("/stats").inertia())
+        .await
+        .unwrap();
+    let page = page_of(resp).await;
+
+    assert_eq!(
+        page["props"]["stats"],
+        json!("plain"),
+        "the replacement prop must not inherit the old owner's include gate; got {page}"
+    );
+}
+
+#[tokio::test]
+async fn a_later_dotted_key_wins_over_an_earlier_lazy_parent() {
+    // Dotted keys compose in registration order, like sequential
+    // `Arr::set` calls. Whether the parent is eager or resolver-backed
+    // must not change which write wins.
+    let lazy_parent = InertiaResponse::new("Profile")
+        .lazy("user", || async {
+            Ok::<_, FrameworkError>(json!({ "name": "early", "age": 30 }))
+        })
+        .with("user.name", "later")
+        .resolve(&MockReq::new("/profile").inertia())
+        .await
+        .unwrap();
+    let page = page_of(lazy_parent).await;
+    assert_eq!(
+        page["props"]["user"]["name"],
+        json!("later"),
+        "the later dotted write must win over the earlier lazy parent; got {page}"
+    );
+
+    let eager_parent = InertiaResponse::new("Profile")
+        .with("user", json!({ "name": "early", "age": 30 }))
+        .with("user.name", "later")
+        .resolve(&MockReq::new("/profile").inertia())
+        .await
+        .unwrap();
+    let page = page_of(eager_parent).await;
+    assert_eq!(page["props"]["user"]["name"], json!("later"));
+
+    // And the other way round: a later lazy parent replaces an earlier
+    // eager dotted child, exactly as an eager parent would.
+    let lazy_last = InertiaResponse::new("Profile")
+        .with("user.name", "early")
+        .lazy("user", || async {
+            Ok::<_, FrameworkError>(json!({ "name": "later" }))
+        })
+        .resolve(&MockReq::new("/profile").inertia())
+        .await
+        .unwrap();
+    let page = page_of(lazy_last).await;
+    assert_eq!(page["props"]["user"], json!({ "name": "later" }));
+}
+
+#[tokio::test]
+async fn a_dotted_key_keeps_its_place_when_the_error_bag_header_scopes_errors() {
+    // The `X-Inertia-Error-Bag` post-pass rewraps `errors`. It must do so
+    // in place, or it moves another prop out of registration order and
+    // changes which dotted write wins.
+    let resp = InertiaResponse::new("Profile")
+        .with("user.name", "early")
+        .with("user", json!({ "name": "later" }))
+        .resolve(
+            &MockReq::new("/profile")
+                .inertia()
+                .header("X-Inertia-Error-Bag", "login"),
+        )
+        .await
+        .unwrap();
+    let page = page_of(resp).await;
+    assert_eq!(page["props"]["user"], json!({ "name": "later" }));
+    assert_eq!(page["props"]["errors"], json!({ "login": {} }));
+}

@@ -851,16 +851,28 @@ struct Target {
     params: Vec<(String, String)>,
 }
 
-/// Postgres URL parameters and the libpq variables that carry them.
-const POSTGRES_PARAMETERS: [(&str, &str); 7] = [
-    ("sslmode", "PGSSLMODE"),
-    ("sslrootcert", "PGSSLROOTCERT"),
-    ("sslcert", "PGSSLCERT"),
-    ("sslkey", "PGSSLKEY"),
-    ("hostaddr", "PGHOSTADDR"),
-    ("application_name", "PGAPPNAME"),
-    ("options", "PGOPTIONS"),
+/// Postgres URL parameters, every spelling SQLx accepts for each, and the
+/// libpq variable that carries it.
+const POSTGRES_PARAMETERS: [(&[&str], &str); 7] = [
+    (&["sslmode", "ssl-mode"], "PGSSLMODE"),
+    (&["sslrootcert", "ssl-root-cert", "ssl-ca"], "PGSSLROOTCERT"),
+    (&["sslcert", "ssl-cert"], "PGSSLCERT"),
+    (&["sslkey", "ssl-key"], "PGSSLKEY"),
+    (&["hostaddr"], "PGHOSTADDR"),
+    (&["application_name"], "PGAPPNAME"),
+    (&["options"], "PGOPTIONS"),
 ];
+
+/// MySQL TLS parameters: every spelling SQLx accepts, and the client option
+/// the tools take.
+const MYSQL_TLS_FILES: [(&[&str], &str); 3] = [
+    (&["ssl-ca", "sslca"], "ssl-ca"),
+    (&["ssl-cert", "sslcert"], "ssl-cert"),
+    (&["ssl-key", "sslkey"], "ssl-key"),
+];
+
+/// The spellings of the MySQL TLS mode.
+const MYSQL_SSL_MODE: &[&str] = &["ssl-mode", "sslmode"];
 
 impl Target {
     fn parse(url: &str) -> Result<Self, FrameworkError> {
@@ -891,10 +903,16 @@ impl Target {
     }
 
     fn param(&self, key: &str) -> Option<&str> {
+        self.param_any(&[key])
+    }
+
+    /// The value of the last parameter spelled any of `keys`: SQLx applies
+    /// the query in order, so the later of two spellings wins.
+    fn param_any(&self, keys: &[&str]) -> Option<&str> {
         self.params
             .iter()
             .rev()
-            .find(|(name, _)| name == key)
+            .find(|(name, _)| keys.contains(&name.as_str()))
             .map(|(_, value)| value.as_str())
     }
 
@@ -926,11 +944,13 @@ impl Target {
 
     fn postgres_env(&self) -> Vec<(&'static str, String)> {
         let mut env = Vec::new();
-        if let Some(password) = self.password.as_deref().or(self.param("password")) {
+        // SQLx applies a `password` parameter after the URL's own password,
+        // so the parameter wins, as `user`, `host` and `port` do above.
+        if let Some(password) = self.param("password").or(self.password.as_deref()) {
             env.push(("PGPASSWORD", password.to_owned()));
         }
-        for (key, variable) in POSTGRES_PARAMETERS {
-            if let Some(value) = self.param(key) {
+        for (keys, variable) in POSTGRES_PARAMETERS {
+            if let Some(value) = self.param_any(keys) {
                 env.push((variable, value.to_owned()));
             }
         }
@@ -955,12 +975,12 @@ impl Target {
         if !self.user.is_empty() {
             args.push(format!("--user={}", self.user));
         }
-        for key in ["ssl-ca", "ssl-cert", "ssl-key"] {
-            if let Some(value) = self.param(key) {
-                args.push(format!("--{key}={value}"));
+        for (keys, option) in MYSQL_TLS_FILES {
+            if let Some(value) = self.param_any(keys) {
+                args.push(format!("--{option}={value}"));
             }
         }
-        if let Some(mode) = self.param("ssl-mode") {
+        if let Some(mode) = self.param_any(MYSQL_SSL_MODE) {
             let mode = mode.to_ascii_uppercase().replace('-', "_");
             if !mariadb_client {
                 args.push(format!("--ssl-mode={mode}"));
@@ -1237,6 +1257,55 @@ mod tests {
         assert_eq!(
             socket.mysql_args(true).join(" "),
             "--socket=/run/mysqld.sock --user=app"
+        );
+    }
+
+    /// SQLx accepts two spellings of each TLS parameter and applies the
+    /// query in order, a `password=` parameter after the URL's own
+    /// password. The tools must read the URL the same way, or a URL the
+    /// framework connects with sends them another password or no TLS
+    /// policy at all.
+    #[test]
+    fn the_tools_read_the_url_the_way_the_framework_connection_does() {
+        let pg = Target::parse(
+            "postgres://app:stale@db/shop?ssl-mode=verify-full&ssl-root-cert=/ca.pem\
+             &ssl-cert=/client.pem&ssl-key=/client.key&password=current",
+        )
+        .expect("a URL");
+        assert_eq!(
+            pg.postgres_env(),
+            [
+                ("PGPASSWORD", "current".to_owned()),
+                ("PGSSLMODE", "verify-full".to_owned()),
+                ("PGSSLROOTCERT", "/ca.pem".to_owned()),
+                ("PGSSLCERT", "/client.pem".to_owned()),
+                ("PGSSLKEY", "/client.key".to_owned()),
+            ]
+        );
+        let ca = Target::parse("postgres://app@db/shop?ssl-ca=/ca.pem").expect("a URL");
+        assert_eq!(ca.postgres_env(), [("PGSSLROOTCERT", "/ca.pem".to_owned())]);
+        let later = Target::parse("postgres://app@db/shop?sslmode=require&ssl-mode=verify-full")
+            .expect("a URL");
+        assert_eq!(
+            later.postgres_env(),
+            [("PGSSLMODE", "verify-full".to_owned())],
+            "the later of two spellings wins, as it does for the connection"
+        );
+
+        let my = Target::parse(
+            "mysql://app:pw@db:3306/shop?sslmode=verify_identity&sslca=/ca.pem\
+             &sslcert=/client.pem&sslkey=/client.key",
+        )
+        .expect("a URL");
+        assert_eq!(
+            my.mysql_args(false).join(" "),
+            "--host=db --port=3306 --user=app --ssl-ca=/ca.pem --ssl-cert=/client.pem \
+             --ssl-key=/client.key --ssl-mode=VERIFY_IDENTITY"
+        );
+        assert_eq!(
+            my.mysql_args(true).join(" "),
+            "--host=db --port=3306 --user=app --ssl-ca=/ca.pem --ssl-cert=/client.pem \
+             --ssl-key=/client.key --ssl --ssl-verify-server-cert"
         );
     }
 

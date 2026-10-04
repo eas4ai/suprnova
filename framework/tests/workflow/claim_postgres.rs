@@ -153,3 +153,42 @@ async fn claim_at_minimum_lease_is_server_anchored_and_not_instantly_reclaimable
     assert_eq!(reclaimed.id, claimed.id);
     assert_eq!(reclaimed.attempts, claimed.attempts + 1);
 }
+
+/// A cancelled worker drains and returns `Ok` promptly. It runs on
+/// Postgres, the only database the worker claims from: on any other the
+/// worker now refuses to start, so the SQLite version of this test could
+/// no longer reach the drain.
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_worker_run_with_cancel_returns_cleanly() {
+    let raw = connect_postgres().await;
+    raw.execute_unprepared("DROP TABLE IF EXISTS workflows")
+        .await
+        .expect("drop workflows fixture");
+    Migrator::up(&raw, None)
+        .await
+        .expect("migrate workflows fixture");
+    DB::init_with(DatabaseConfig::builder().url(pg_url()).build())
+        .await
+        .expect("DB::init_with");
+
+    let worker = suprnova::workflow::WorkflowWorker::with_config(WorkflowConfig {
+        poll_interval_ms: 20,
+        ..min_lease_config()
+    });
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_for_worker = cancel.clone();
+    let handle = tokio::spawn(async move { worker.run_with_cancel(cancel_for_worker).await });
+
+    // Let the worker reach its idle poll, with no row to claim.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!handle.is_finished(), "the worker idles on Postgres");
+    cancel.cancel();
+
+    tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("the worker exits within 1s of cancellation")
+        .expect("the worker task does not panic")
+        .expect("run_with_cancel returns Ok on a graceful drain");
+}

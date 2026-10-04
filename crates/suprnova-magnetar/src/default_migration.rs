@@ -586,6 +586,8 @@ impl MigrationTransaction for DefaultMigrationTransaction<'_> {
                         || existing.enrollment_session_id.is_some()
                         || existing.enrollment_expires_at.is_some()
                         || existing.rotation_pending
+                        || existing.pending_secret.is_some()
+                        || existing.pending_recovery_codes.is_some()
                         || existing.confirmed_at != confirmed_at
                         || existing.last_used_timestep != two_factor_record.last_used_timestep
                         || existing.created_at != created_at
@@ -607,6 +609,8 @@ impl MigrationTransaction for DefaultMigrationTransaction<'_> {
                     enrollment_session_id: Set(None),
                     enrollment_expires_at: Set(None),
                     rotation_pending: Set(false),
+                    pending_secret: Set(None),
+                    pending_recovery_codes: Set(None),
                     confirmed_at: Set(confirmed_at),
                     last_used_timestep: Set(two_factor_record.last_used_timestep),
                     created_at: Set(created_at),

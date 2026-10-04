@@ -4,20 +4,23 @@
 //! Composes Task 4's grant executors
 //! ([`crate::oauth::grants::refresh`], [`crate::oauth::grants::client_credentials`])
 //! and the host transport seam ([`crate::plugin::HttpTransport`]) behind a
-//! pre-call lease protocol ([`lease`]) that survives concurrent callers and
-//! multiple broker instances sharing one database with no coordination
-//! beyond conditional writes. [`singleflight`] is an in-process
+//! pre-call lease protocol ([`lease`](crate::broker::lease)) that survives
+//! concurrent callers and multiple broker instances sharing one database
+//! with no coordination beyond conditional writes.
+//! [`singleflight`](crate::broker::singleflight) is an in-process
 //! optimization on top of that protocol, never a correctness requirement.
 //!
 //! Both a linked account's third-party access/refresh token pair and a
 //! cached machine-to-machine (client-credentials) token are "broker
 //! records" -- one [`crate::storage::ProviderTokenStore`] row each,
 //! addressed by the broker's own opaque `record_id`: a linked-account id
-//! for the former, [`M2MCacheKey::record_id`] for the latter. Both go
-//! through the identical claim/commit CAS cycle in [`lease`]; only the
-//! provider call they make (`refresh_token` grant vs `client_credentials`
-//! grant) and their reuse-detection posture differ (M2M records have no
-//! "family" to revoke).
+//! for the former,
+//! [`M2MCacheKey::record_id`](crate::broker::M2MCacheKey::record_id) for
+//! the latter. Both go through the identical claim/commit CAS cycle in
+//! [`lease`](crate::broker::lease); only the provider call they make
+//! (`refresh_token` grant vs `client_credentials` grant) and their
+//! reuse-detection posture differ (M2M records have no "family" to
+//! revoke).
 
 pub mod cache;
 pub mod lease;

@@ -202,6 +202,21 @@ pub async fn start_named(name: &str, input: &str) -> Result<WorkflowHandle, Fram
     store::insert_workflow(name, input, config.max_attempts).await
 }
 
+/// Start the workflow [`crate::start_workflow!`] names: by the path the compiler
+/// resolved when a workflow is registered under it, else by the path as
+/// written.
+#[doc(hidden)]
+pub async fn start_resolved(
+    resolved: &str,
+    written: &str,
+    input: &str,
+) -> Result<WorkflowHandle, FrameworkError> {
+    if registry::find_strict(resolved)?.is_some() {
+        return start_named(resolved, input).await;
+    }
+    start_named(written, input).await
+}
+
 /// Workflow worker daemon
 pub struct WorkflowWorker {
     config: Arc<WorkflowConfig>,
@@ -295,12 +310,22 @@ impl WorkflowWorker {
     /// This is the path the application binary should use so SIGINT /
     /// SIGTERM cleanly drains the worker instead of orphaning in-flight
     /// workflows.
+    ///
+    /// # Errors
+    ///
+    /// Before the first claim, when the config is invalid or the database
+    /// is not Postgres, the only one the claim runs on.
     pub async fn run_with_cancel(self, cancel: CancellationToken) -> Result<(), FrameworkError> {
         self.run(cancel).await
     }
 
     async fn run(self, cancel: CancellationToken) -> Result<(), FrameworkError> {
         self.config.validate()?;
+        // A database the claim cannot run on is a startup error. Inside the
+        // loop it was a claim error like a transient one, logged and
+        // retried forever, so the worker reported itself started and never
+        // ran a workflow.
+        store::ensure_claim_backend()?;
 
         let poll = Duration::from_millis(self.config.poll_interval_ms);
         let semaphore = Arc::new(Semaphore::new(self.config.concurrency));
@@ -554,7 +579,14 @@ async fn process_claimed_workflow(
     Ok(())
 }
 
-/// Enqueue a workflow by function name with serialized args
+/// Enqueue a workflow by its function path, with serialized args.
+///
+/// The path is resolved the way Rust resolves it - through an import, a
+/// re-export, `crate::`, `self::` or `super::` - so it names the workflow
+/// `#[workflow]` registered under its defining module. The macro used to
+/// stringify the path and look the text up, so only the defining module's
+/// bare name or the full crate-named path worked, and any other valid
+/// path enqueued nothing and failed "not registered".
 ///
 /// Example:
 /// ```rust,no_run
@@ -569,16 +601,22 @@ async fn process_claimed_workflow(
 macro_rules! start_workflow {
     ($workflow:path $(, $arg:expr)* $(,)?) => {{
         async {
-            let __name = stringify!($workflow);
-            let __name = if __name.contains("::") {
-                __name.to_string()
+            // The compiler's name for the function's own type is its
+            // defining path, wherever the caller reached it from.
+            let __resolved = ::std::any::type_name_of_val(&$workflow);
+            // The text as written, under the caller's module when it is a
+            // bare name: what this macro used to look up, kept for a
+            // workflow declared inside a function body, whose type name
+            // carries that function and its registration does not.
+            let __written = stringify!($workflow).replace(' ', "");
+            let __written = if __written.contains("::") {
+                __written
             } else {
-                format!("{}::{}", module_path!(), __name)
+                format!("{}::{}", module_path!(), __written)
             };
-            let __name = __name.replace(' ', "");
             let __input = ::suprnova::serde_json::to_string(&( $($arg,)* ))
                 .map_err(|e| ::suprnova::FrameworkError::internal(format!("Workflow input serialize error: {}", e)))?;
-            ::suprnova::workflow::start_named(&__name, &__input).await
+            ::suprnova::workflow::start_resolved(__resolved, &__written, &__input).await
         }
     }};
 }
@@ -1124,6 +1162,166 @@ mod tests {
         assert_eq!(RUN_SCOPED_BUILT.load(Ordering::SeqCst), 2);
     }
 
+    /// A workflow declared in a module of its own, for the path tests below.
+    pub mod billing_flows {
+        use super::*;
+
+        #[workflow]
+        pub async fn settle_invoice(id: i32) -> Result<i32, FrameworkError> {
+            Ok(id)
+        }
+    }
+
+    /// `start_workflow!` takes a path the way Rust resolves it: through an
+    /// import, from `crate::`, or relative with `self::`. It used to
+    /// stringify the path and look the text up, so only the defining
+    /// module's bare name or the full crate-named path was registered;
+    /// every other valid path enqueued nothing and failed "not registered".
+    #[tokio::test]
+    async fn start_workflow_resolves_the_paths_rust_resolves() {
+        use billing_flows::settle_invoice;
+
+        let _db = setup_db().await;
+        let expected = format!("{}::billing_flows::settle_invoice", module_path!());
+
+        let imported = start_workflow!(settle_invoice, 1)
+            .await
+            .expect("an imported workflow starts");
+        let from_crate = start_workflow!(crate::workflow::tests::billing_flows::settle_invoice, 2)
+            .await
+            .expect("a crate:: path starts");
+        let relative = start_workflow!(self::billing_flows::settle_invoice, 3)
+            .await
+            .expect("a self:: path starts");
+        for handle in [imported, from_crate, relative] {
+            let record = store::get_workflow_record(handle.id()).await.unwrap();
+            assert_eq!(record.name, expected);
+        }
+    }
+
+    /// Two steps with one bare name, in two modules.
+    pub mod charges_v1 {
+        use super::*;
+
+        pub static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        #[workflow_step]
+        pub async fn charge(amount: i32) -> Result<i32, FrameworkError> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(amount)
+        }
+    }
+
+    pub mod charges_v2 {
+        use super::*;
+
+        pub static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        #[workflow_step]
+        pub async fn charge(amount: i32) -> Result<i32, FrameworkError> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(amount * 100)
+        }
+    }
+
+    /// A fresh context on the claimed run, as a replay after a restart has.
+    async fn claim_context(workflow_id: i64) -> WorkflowContext {
+        let claimed = store::mark_running(workflow_id, "test-worker", Duration::from_secs(30))
+            .await
+            .expect("mark running");
+        WorkflowContext::new(
+            workflow_id,
+            Duration::from_secs(30),
+            claimed.worker_id.clone(),
+            claimed.attempts,
+        )
+    }
+
+    /// Two steps with one bare name in two modules are two steps. The step
+    /// identity used to be the bare function name, so a replay that reached
+    /// `charges_v2::charge` where the run had recorded `charges_v1::charge`
+    /// reused the old step's output and never ran the new body: the
+    /// name-mismatch guard could not see the difference.
+    #[tokio::test]
+    async fn a_step_is_identified_by_its_module_as_well_as_its_name() {
+        let _db = setup_db().await;
+        charges_v2::CALLS.store(0, Ordering::SeqCst);
+        let handle = store::insert_workflow("step-identity", "{}", 3)
+            .await
+            .expect("workflow insert");
+
+        let recorded = claim_context(handle.id())
+            .await
+            .enter(async { charges_v1::charge(5).await })
+            .await
+            .expect("the first run records its step");
+        assert_eq!(recorded, 5);
+
+        let replayed = claim_context(handle.id())
+            .await
+            .enter(async { charges_v2::charge(5).await })
+            .await;
+        let err = replayed.expect_err("another step at the same index must fail the replay");
+        assert!(err.to_string().contains("step mismatch"), "got: {err}");
+        assert_eq!(charges_v2::CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    /// A run recorded before steps carried their module still replays: a
+    /// step stored under its bare name is the step of that name at that
+    /// index, as it was when the run recorded it.
+    #[tokio::test]
+    async fn a_step_recorded_under_its_bare_name_still_replays() {
+        let _db = setup_db().await;
+        let handle = store::insert_workflow("legacy-step-name", "{}", 3)
+            .await
+            .expect("workflow insert");
+
+        let ctx = claim_context(handle.id()).await;
+        let recorder = ctx.clone();
+        ctx.enter(async move {
+            recorder
+                .run_step_with_input("charge", serde_json::to_string(&(&5,)).unwrap(), || async {
+                    Ok::<_, FrameworkError>(5)
+                })
+                .await
+        })
+        .await
+        .expect("the old shape records its step");
+
+        let calls_before = charges_v1::CALLS.load(Ordering::SeqCst);
+        let replayed = claim_context(handle.id())
+            .await
+            .enter(async { charges_v1::charge(5).await })
+            .await
+            .expect("the step recorded under its bare name replays");
+        assert_eq!(replayed, 5);
+        assert_eq!(
+            charges_v1::CALLS.load(Ordering::SeqCst),
+            calls_before,
+            "the recorded output is reused, the body does not run again"
+        );
+    }
+
+    /// The worker fails at start on a database it cannot claim from. It used
+    /// to log each refused claim and retry forever, so `workflow:work`
+    /// reported a running worker that would never run a workflow.
+    #[tokio::test]
+    async fn a_worker_on_a_database_other_than_postgres_fails_at_start() {
+        let _db = setup_db().await;
+        let mut config = WorkflowConfig::from_env();
+        config.poll_interval_ms = 20;
+        let worker = WorkflowWorker::with_config(config);
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            worker.run_with_cancel(CancellationToken::new()),
+        )
+        .await
+        .expect("the worker returns instead of retrying the claim forever");
+        let err = outcome.expect_err("a SQLite database cannot run the worker");
+        assert!(err.to_string().contains("Postgres"), "got: {err}");
+    }
+
     #[tokio::test]
     async fn test_name_normalization() {
         let _db = setup_db().await;
@@ -1297,9 +1495,11 @@ mod tests {
                     panic!("step row never appeared with status='running'");
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                let step = store::load_step(workflow_id, 0, "slow_step")
-                    .await
-                    .expect("load step");
+                // A step's identity is its module path and name.
+                let step =
+                    store::load_step(workflow_id, 0, &format!("{}::slow_step", module_path!()))
+                        .await
+                        .expect("load step");
                 if let Some(s) = step
                     && s.status == StepStatus::Running.as_str()
                     && s.started_at.is_some()
@@ -1889,38 +2089,6 @@ mod tests {
             .err()
             .expect("the config is refused");
         assert_eq!(error.to_string(), expected.to_string());
-    }
-
-    // A cancelled worker must drain in-flight workflows before returning.
-    // Spawns a worker that has no rows to claim (so it idles in the
-    // poll/sleep path), cancels the token, and asserts run_with_cancel
-    // resolves cleanly to Ok(()) - i.e. the cancellation path exits the
-    // loop rather than blocking on the semaphore or the next claim.
-    #[tokio::test]
-    async fn test_worker_run_with_cancel_returns_cleanly() {
-        let _db = setup_db().await;
-
-        let mut config = WorkflowConfig::from_env();
-        // Tighten poll so the loop reaches a cancellation check fast.
-        config.poll_interval_ms = 20;
-        let worker = WorkflowWorker::with_config(config);
-        let cancel = CancellationToken::new();
-        let cancel_for_worker = cancel.clone();
-
-        let handle = tokio::spawn(async move { worker.run_with_cancel(cancel_for_worker).await });
-
-        // Let the worker reach its idle/sleep path.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        cancel.cancel();
-
-        // The worker must return within a small window after cancel.
-        // 1s budget covers the longest path (poll round-trip + drain).
-        let result = tokio::time::timeout(Duration::from_secs(1), handle)
-            .await
-            .expect("worker did not exit within 1s of cancellation")
-            .expect("worker task panicked");
-
-        result.expect("run_with_cancel must return Ok on graceful drain");
     }
 
     #[tokio::test]

@@ -185,12 +185,15 @@ impl AttemptAdmission {
 /// Lockout policy service.
 pub struct LockoutService {
     store: Arc<dyn LockoutStore>,
-    users: Arc<dyn UserStore>,
+    /// The user lock column, for identities that are email addresses.
+    users: Option<Arc<dyn UserStore>>,
     config: LockoutConfig,
 }
 
 impl LockoutService {
-    /// Bind the policy to attempt storage and the user lock column.
+    /// Bind the policy to attempt storage and the user lock column. Its
+    /// identities are email addresses: a lock stamps the user row with that
+    /// address, and a reset or unlock clears it.
     pub fn new(
         store: Arc<dyn LockoutStore>,
         users: Arc<dyn UserStore>,
@@ -198,7 +201,25 @@ impl LockoutService {
     ) -> Self {
         Self {
             store,
-            users,
+            users: Some(users),
+            config,
+        }
+    }
+
+    /// Bind the policy to attempt storage alone, for identities that are not
+    /// email addresses, such as the second factor's
+    /// [`crate::two_factor::lockout_identity`].
+    ///
+    /// Its locks, resets and unlocks never touch a user row: an account
+    /// whose address happens to equal one of its identities is someone
+    /// else's account. Pair it with a store whose
+    /// [`crate::schema::LockoutFields::IDENTITY_IS_EMAIL`] is `false`, such
+    /// as `SeaOrmStorage<DefaultSecondFactorSchema>`, so the store's own lock
+    /// transitions leave user rows alone too.
+    pub fn without_user_lock(store: Arc<dyn LockoutStore>, config: LockoutConfig) -> Self {
+        Self {
+            store,
+            users: None,
             config,
         }
     }
@@ -262,12 +283,13 @@ impl LockoutService {
             .record_attempt_and_stats(identity, at, context, window_start)
             .await?;
         let status = self.compute(identity, stats.count, stats.latest_at);
-        let locked_event = if status.is_locked {
-            self.users
-                .lock_if_unlocked_by_email(identity, at, window_start)
-                .await?
-        } else {
-            false
+        let locked_event = match &self.users {
+            Some(users) if status.is_locked => {
+                users
+                    .lock_if_unlocked_by_email(identity, at, window_start)
+                    .await?
+            }
+            _ => false,
         };
         Ok(FailedAttempt {
             status,
@@ -401,7 +423,9 @@ impl LockoutService {
     /// Not an admin unlock; no transition signal is produced.
     pub async fn reset_attempts(&self, identity: &str) -> Result<()> {
         self.store.clear_attempts(identity).await?;
-        self.users.set_locked_at_by_email(identity, None).await?;
+        if let Some(users) = &self.users {
+            users.set_locked_at_by_email(identity, None).await?;
+        }
         Ok(())
     }
 
@@ -411,7 +435,9 @@ impl LockoutService {
     pub async fn unlock_account(&self, identity: &str) -> Result<bool> {
         let was_locked = self.is_locked(identity).await?;
         self.store.clear_attempts(identity).await?;
-        self.users.set_locked_at_by_email(identity, None).await?;
+        if let Some(users) = &self.users {
+            users.set_locked_at_by_email(identity, None).await?;
+        }
         Ok(was_locked)
     }
 

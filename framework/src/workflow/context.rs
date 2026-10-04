@@ -98,10 +98,45 @@ impl WorkflowContext {
         Fut: Future<Output = Result<T, FrameworkError>> + Send + 'static,
         T: Serialize + DeserializeOwned + Send + 'static,
     {
+        self.run_named_step(step_name, step_name, input_json, f)
+            .await
+    }
+
+    /// Run the step `#[workflow_step]` generated, under `step_name` - its
+    /// module path and name - and replay a record stored under
+    /// `recorded_name`, its bare name, as the same step.
+    ///
+    /// The macro used to name a step by its bare function name, so two
+    /// steps with one name in two modules shared an identity and a replay
+    /// reused the wrong one's output. Runs recorded before the module was
+    /// part of the name stored the bare name; they replay as they were
+    /// recorded, rather than failing every in-flight workflow on upgrade.
+    #[doc(hidden)]
+    pub async fn run_named_step<F, Fut, T>(
+        &self,
+        step_name: &str,
+        recorded_name: &str,
+        input_json: String,
+        f: F,
+    ) -> Result<T, FrameworkError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, FrameworkError>> + Send + 'static,
+        T: Serialize + DeserializeOwned + Send + 'static,
+    {
         let workflow_id = self.inner.workflow_id;
         let step_index = self.inner.step_index.fetch_add(1, Ordering::SeqCst);
 
-        if let Some(existing) = store::load_step(workflow_id, step_index, step_name).await? {
+        let mut existing = store::load_step(workflow_id, step_index, step_name).await?;
+        let mut step_name = step_name;
+        if existing.is_none() && recorded_name != step_name {
+            existing = store::load_step(workflow_id, step_index, recorded_name).await?;
+            if existing.is_some() {
+                step_name = recorded_name;
+            }
+        }
+
+        if let Some(existing) = existing {
             // Workflows must be deterministic. If the same step at the same
             // index is replayed with different serialized input, the recorded
             // output (if any) belongs to a different invocation and reusing

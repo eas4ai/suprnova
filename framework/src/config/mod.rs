@@ -66,7 +66,14 @@ impl Config {
     /// is not a whole number or breaks its rule, or when a second-factor
     /// lockout key (`TWO_FACTOR_MAX_ATTEMPTS`, `TWO_FACTOR_LOCKOUT_MINUTES`)
     /// is not a whole number of at least 1.
-    /// Missing `.env` files are not an error.
+    /// Missing `.env` files are not an error. A failed call registers no
+    /// config.
+    ///
+    /// Also returns an error, before it writes anything, where writing the
+    /// process environment would not be sound: from inside a Tokio runtime,
+    /// and after `#[suprnova::main]` loaded the environment and built its
+    /// runtime. Call it from a plain `fn main` before any thread starts, or
+    /// let `#[suprnova::main]` call it.
     ///
     /// # Example
     ///
@@ -80,11 +87,14 @@ impl Config {
     pub fn init(project_root: &Path) -> Result<Environment, crate::error::FrameworkError> {
         let env = env::load_dotenv(project_root)?;
 
-        // Register default configs, using the strict variants so a
-        // typo in `SERVER_PORT` or `APP_DEBUG` aborts boot loudly
-        // instead of silently falling back to the default.
-        repository::register(AppConfig::try_from_env()?);
-        repository::register(ServerConfig::try_from_env()?);
+        // Read the default configs with the strict variants, so a typo in
+        // `SERVER_PORT` or `APP_DEBUG` aborts boot loudly instead of
+        // silently falling back to the default. They are registered only
+        // after every check below has passed: registering `AppConfig`
+        // first left it in place when a later check failed, a half-applied
+        // configuration for a caller that handled the error.
+        let app = AppConfig::try_from_env()?;
+        let server = ServerConfig::try_from_env()?;
         // Cookie-prefix constraints, enforced where failure can abort boot.
         // A __Host- cookie violating one is silently rejected by browsers,
         // while SessionConfig::from_env() is per-request and infallible.
@@ -130,6 +140,8 @@ impl Config {
         // sign-in.
         crate::auth_flows::two_factor::TwoFactorLockout::from_env()?;
 
+        repository::register(app);
+        repository::register(server);
         Ok(env)
     }
 

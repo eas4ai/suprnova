@@ -261,6 +261,12 @@ impl SupervisorRegistry {
         }
 
         let mut tasks_guard = SUPERVISOR_TASKS.get().unwrap().lock().await;
+        // The same admission check `spawn` makes: after a shutdown there is
+        // no drain left to cover a fresh supervisor.
+        if cancel.is_cancelled() {
+            tracing::warn!("supervisors not started: the supervisors are shutting down");
+            return;
+        }
         for entry in inventory::iter::<SupervisorEntry> {
             let supervisor: Arc<dyn Supervisor> = Arc::from((entry.factory)());
             let name = supervisor.name();
@@ -289,6 +295,18 @@ impl SupervisorRegistry {
             .clone();
         let name = supervisor.name();
         let mut tasks_guard = SUPERVISOR_TASKS.get().unwrap().lock().await;
+        // Checked under the pool's lock, which `shutdown` takes after it
+        // cancels: a spawn that waited for the lock while the pool drained
+        // sees the cancel here, and one that got the lock first is in the
+        // pool before the drain looks at it. Admitting it after the drain
+        // would start a body no drain covers.
+        if cancel.is_cancelled() {
+            tracing::warn!(
+                supervisor = name,
+                "supervisor not started: the supervisors are shutting down"
+            );
+            return;
+        }
         tasks_guard.spawn(run_with_restart(supervisor, cancel));
         tracing::info!(supervisor = name, "supervisor started (runtime spawn)");
     }
@@ -379,22 +397,6 @@ fn backoff_after_run(current_ms: u64, ran_for: Duration, healthy_reset: Duration
     }
 }
 
-/// Run the supervisor in a restart loop with exponential backoff.
-///
-/// Each call to `run()` is wrapped in a fresh `tokio::spawn` so that panics
-/// are caught via [`tokio::task::JoinHandle`] instead of propagating to the
-/// caller.
-///
-/// The backoff starts at 100 ms and doubles on each restart, capped at 60 s.
-/// Backoff applies on every restart path (both `Err` and `Always`-on-`Ok`).
-/// Each run is timed: one that stays up at least [`HEALTHY_RUNTIME_RESET`]
-/// resets the backoff to [`INITIAL_BACKOFF_MS`] before the next restart (via
-/// [`backoff_after_run`]), so a long-healthy supervisor that blips recovers a
-/// prompt restart instead of waiting out backoff that climbed earlier.
-///
-/// The `cancel` token is shared across all restarts. If it is cancelled at
-/// the top of the loop (or during the backoff sleep), the restart loop exits
-/// immediately without spawning another run.
 /// Aborts the task it holds when dropped.
 ///
 /// `run_with_restart` parks on `handle.await`, so cancelling it drops the
@@ -415,9 +417,35 @@ impl Drop for AbortChildOnDrop {
     }
 }
 
+/// Run the supervisor in a restart loop with exponential backoff.
+///
+/// Each call to `run()` is wrapped in a fresh `tokio::spawn` so that panics
+/// are caught via [`tokio::task::JoinHandle`] instead of propagating to the
+/// caller.
+///
+/// The backoff starts at 100 ms and doubles on each restart, capped at 60 s.
+/// Backoff applies on every restart path (both `Err` and `Always`-on-`Ok`).
+/// Each run is timed: one that stays up at least [`HEALTHY_RUNTIME_RESET`]
+/// resets the backoff to [`INITIAL_BACKOFF_MS`] before the next restart (via
+/// [`backoff_after_run`]), so a long-healthy supervisor that blips recovers a
+/// prompt restart instead of waiting out backoff that climbed earlier.
+///
+/// The `cancel` token is shared across all restarts. If it is cancelled at
+/// the top of the loop (or during the backoff sleep), the restart loop exits
+/// immediately without spawning another run.
 async fn run_with_restart(supervisor: Arc<dyn Supervisor>, cancel: CancellationToken) {
     let mut backoff_ms: u64 = INITIAL_BACKOFF_MS;
     loop {
+        // Before every run, the first one included: a supervisor handed a
+        // token that is already cancelled - spawned while the pool shuts
+        // down - must not start a body after the drain that should cover it.
+        if cancel.is_cancelled() {
+            tracing::info!(
+                supervisor = supervisor.name(),
+                "supervisor shutdown requested; not starting a run"
+            );
+            return;
+        }
         let sv = Arc::clone(&supervisor);
         let cancel_for_run = cancel.clone();
         let started = Instant::now();
