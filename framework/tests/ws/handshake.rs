@@ -1,21 +1,25 @@
-//! What the WebSocket upgrade response carries.
+//! What the WebSocket upgrade response carries, and what runs around it.
 //!
 //! Each test drives the real `handle_request` over a loopback socket with
 //! `.with_upgrades()` and a real `tokio-tungstenite` client, because the
 //! 101 handshake and the client's own validation of it cannot be observed
-//! through a bare in-process call. Every test registers its own route path.
+//! through a bare in-process call. Every test registers its own route path
+//! so the process-global terminable registry can tell their requests apart.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use suprnova::http::Request;
+use suprnova::http::{HttpResponse, Request};
 use suprnova::ws::{OriginPolicy, WebSocketHandler, WsConfig, WsSocket};
-use suprnova::{FrameworkError, Middleware, MiddlewareRegistry, Next, Response, Router};
+use suprnova::{
+    FrameworkError, Middleware, MiddlewareRegistry, Next, Response, Router, Terminable,
+    TerminationSnapshot, register_terminable,
+};
 use tokio::net::TcpListener;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
 /// Echoes each text frame back, so a test can prove the socket works.
 struct EchoHandler;
@@ -59,6 +63,16 @@ impl Middleware for DecoratingMiddleware {
             .header("Connection", "close")
             .header("Upgrade", "h2c")
             .header("Content-Length", "99"))
+    }
+}
+
+/// Rejects every upgrade, as an auth gate would.
+struct RejectingMiddleware;
+
+#[async_trait]
+impl Middleware for RejectingMiddleware {
+    async fn handle(&self, _request: Request, _next: Next) -> Response {
+        Err(HttpResponse::text("not allowed").status(401))
     }
 }
 
@@ -238,4 +252,82 @@ async fn ws_handler_reads_percent_decoded_path_params() {
         .expect("a frame")
         .expect("a valid frame");
     assert_eq!(frame, Message::text("a b/c"));
+}
+
+/// Every WebSocket termination this binary's routes produced, as
+/// `(path, status)`. The terminable registry is process-global and keyed
+/// by type, so one recorder serves every test; each test reads only its
+/// own path.
+static WS_TERMINATIONS: Mutex<Vec<(String, u16)>> = Mutex::new(Vec::new());
+
+struct RecordTerminations;
+
+#[async_trait]
+impl Terminable for RecordTerminations {
+    async fn terminate(&self, snapshot: &TerminationSnapshot) {
+        if let Ok(mut seen) = WS_TERMINATIONS.lock() {
+            seen.push((snapshot.path.clone(), snapshot.status));
+        }
+    }
+}
+
+/// The statuses recorded for `path`, waiting up to two seconds for the
+/// first one: termination is dispatched on a spawned task.
+async fn terminations_for(path: &str) -> Vec<u16> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let statuses: Vec<u16> = WS_TERMINATIONS
+            .lock()
+            .map(|seen| {
+                seen.iter()
+                    .filter(|(p, _)| p == path)
+                    .map(|(_, status)| *status)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !statuses.is_empty() || tokio::time::Instant::now() >= deadline {
+            return statuses;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// PRIOR-06: a WebSocket upgrade that middleware rejects is a response
+/// like any other, so registered terminables run for it with its status.
+#[tokio::test]
+async fn rejected_upgrade_runs_terminables() {
+    register_terminable(RecordTerminations);
+    let path = "/ws/handshake/terminable-rejected";
+    let port = spawn_server(Router::new().ws_with_middleware_and_config(
+        path,
+        EchoHandler,
+        vec![suprnova::middleware::into_boxed(RejectingMiddleware)],
+        open_config(),
+    ))
+    .await;
+
+    match tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}{path}")).await {
+        Err(WsError::Http(response)) => assert_eq!(response.status(), 401),
+        other => panic!("expected the middleware's 401, got {other:?}"),
+    }
+
+    assert_eq!(terminations_for(path).await, vec![401]);
+}
+
+/// PRIOR-06: a successful upgrade runs registered terminables once, with
+/// the 101 the client received.
+#[tokio::test]
+async fn successful_upgrade_runs_terminables() {
+    register_terminable(RecordTerminations);
+    let path = "/ws/handshake/terminable-accepted";
+    let port = spawn_server(Router::new().ws_with_config(path, EchoHandler, open_config())).await;
+
+    let (mut ws, response) =
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}{path}"))
+            .await
+            .expect("upgrade");
+    assert_eq!(response.status(), 101);
+    ws.close(None).await.expect("close");
+
+    assert_eq!(terminations_for(path).await, vec![101]);
 }

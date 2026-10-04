@@ -778,7 +778,13 @@ async fn route_request(
     {
         crate::error::debug_page::note_route_pattern(ws_match.pattern());
         let live_metadata = router.live_route_metadata(&hyper::Method::GET, ws_match.pattern());
-        return handle_ws_upgrade(req, ws_match, middleware_registry, peer_ip, live_metadata).await;
+        let response =
+            handle_ws_upgrade(req, ws_match, middleware_registry, peer_ip, live_metadata).await;
+        // An upgrade answers its GET like any request does - with the 101,
+        // or with the status that refused it - so the terminables run for
+        // it too.
+        spawn_termination(method, path, response.status());
+        return response;
     }
 
     // Built-in health check endpoints under /_suprnova/health.
@@ -915,28 +921,34 @@ async fn route_request(
         response
     };
 
-    // Post-response termination: run every registered `Terminable`
-    // hook. Spawned on the background runtime so the client gets the
-    // response immediately and the slow work (session persistence,
-    // audit logging, metrics flush) runs without blocking the wire.
-    // The count check elides the spawn entirely when no hooks are
-    // registered, keeping the hot path zero-cost.
-    //
-    // The hooks belong to this request, so they carry its container scope:
-    // they resolve the scoped values the request resolved, and the scope
-    // ends when the last of them ends.
+    spawn_termination(terminate_method, terminate_path, response.status());
+
+    response
+}
+
+/// Run every registered `Terminable` hook for a response on its way to the
+/// client.
+///
+/// Spawned on the background runtime so the client gets the response
+/// immediately and the slow work (session persistence, audit logging,
+/// metrics flush) runs without blocking the wire. The count check elides
+/// the spawn entirely when no hooks are registered, keeping the hot path
+/// zero-cost.
+///
+/// The hooks belong to this request, so they carry its container scope:
+/// they resolve the scoped values the request resolved, and the scope
+/// ends when the last of them ends.
+fn spawn_termination(method: hyper::Method, path: String, status: hyper::StatusCode) {
     if crate::middleware::terminable_count() > 0 {
         let snapshot = crate::middleware::TerminationSnapshot {
-            method: terminate_method.clone(),
-            path: terminate_path.clone(),
-            status: response.status().as_u16(),
+            method,
+            path,
+            status: status.as_u16(),
         };
         tokio::spawn(App::in_current_scope(async move {
             crate::middleware::dispatch_termination(snapshot).await;
         }));
     }
-
-    response
 }
 
 /// Replace the body of an outgoing response with an empty `BoxBody`.
