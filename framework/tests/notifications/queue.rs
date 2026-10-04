@@ -834,3 +834,92 @@ fn a_worker_with_no_manual_job_registration_delivers_queued_notifications() {
         output.status
     );
 }
+
+/// A notification whose public `data()` leaves out an internal field the
+/// worker needs to rebuild it.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct ResetLinkNote {
+    user_id: i64,
+    token: String,
+}
+
+impl Notification for ResetLinkNote {
+    fn notification_name() -> &'static str {
+        "ResetLinkNote"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["database", "sms"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::json!({ "user_id": self.user_id })
+    }
+}
+
+struct FailingSms;
+
+#[async_trait]
+impl Channel for FailingSms {
+    fn name(&self) -> &'static str {
+        "sms"
+    }
+    async fn deliver(
+        &self,
+        _route: &str,
+        _notification: &dyn DynNotification,
+    ) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal("synthetic sms failure"))
+    }
+}
+
+/// The lifecycle events carry the payload channels see - `data()` - on the
+/// queued path exactly as on `Notify::send`. The worker rebuilds the whole
+/// notification from its serialized form, and that form, with internal
+/// fields the application kept out of `data()`, must not reach listeners.
+#[tokio::test]
+#[serial]
+async fn queued_lifecycle_events_carry_the_public_data_not_the_serialized_notification() {
+    use std::collections::HashMap;
+    use suprnova::notifications::events::{
+        NotificationFailed, NotificationSending, NotificationSent,
+    };
+
+    let dispatcher = NotificationDispatcher::new()
+        .register_channel(Arc::new(CountingChannel))
+        .register_channel(Arc::new(FailingSms));
+    let _ = suprnova::notifications::set_dispatcher(Arc::new(dispatcher));
+    suprnova::notifications::register_notification_factory::<ResetLinkNote>().unwrap();
+    let _events = EventFacade::fake();
+
+    let notification = ResetLinkNote {
+        user_id: 7,
+        token: "reset-token-secret".into(),
+    };
+    let job = SendNotificationJob {
+        notifiable_route_per_channel: HashMap::from([
+            ("database".to_string(), "7".to_string()),
+            ("sms".to_string(), "+15550100".to_string()),
+        ]),
+        notification_name: "ResetLinkNote".to_string(),
+        notification_payload: serde_json::to_value(&notification).unwrap(),
+        channels: vec!["database".to_string(), "sms".to_string()],
+    };
+    let err = job.handle().await.expect_err("the sms channel fails");
+    assert!(err.to_string().contains("synthetic sms failure"));
+
+    let public = serde_json::json!({ "user_id": 7 });
+    let sending = dispatched::<NotificationSending>(|_| true);
+    assert_eq!(sending.len(), 2, "one Sending per channel");
+    for event in &sending {
+        assert_eq!(
+            event.data, public,
+            "Sending on {} carries data()",
+            event.channel
+        );
+    }
+    let sent = dispatched::<NotificationSent>(|_| true);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].data, public, "Sent carries data()");
+    let failed = dispatched::<NotificationFailed>(|_| true);
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].data, public, "Failed carries data()");
+}
