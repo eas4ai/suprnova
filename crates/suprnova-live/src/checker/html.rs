@@ -200,7 +200,9 @@ struct HtmlFacts {
     submit_forms: BTreeMap<usize, SubmitForm>,
     tokens: usize,
     attributes: usize,
-    loop_depth: usize,
+    /// Where each open loop's `{% for %}` stands, innermost last, so a loop
+    /// whose end never arrived is reported at its own tag.
+    loops: Vec<Position>,
     stopped: bool,
 }
 
@@ -220,17 +222,17 @@ impl HtmlFacts {
             submit_forms: BTreeMap::new(),
             tokens: 0,
             attributes: 0,
-            loop_depth: 0,
+            loops: Vec::new(),
             stopped: false,
         }
     }
 
     /// Whether the rest of the view checks the same on both: the same open
-    /// elements, loop depth, and teleports, and submit forms whose fields
+    /// elements, open loops, and teleports, and submit forms whose fields
     /// fit one request even taken together. Everything else merges.
     fn same_structure(&self, other: &Self) -> bool {
         self.stopped == other.stopped
-            && self.loop_depth == other.loop_depth
+            && self.loops.len() == other.loops.len()
             && self.stack.len() == other.stack.len()
             && self
                 .stack
@@ -527,10 +529,10 @@ impl ViewCheck<'_, '_, '_> {
                 }
             }
             Token::CommentToken(comment) if comment.as_ref() == LOOP_START_MARKER => {
-                facts.loop_depth = facts.loop_depth.saturating_add(1);
+                facts.loops.push(position);
             }
             Token::CommentToken(comment) if comment.as_ref() == LOOP_END_MARKER => {
-                if facts.loop_depth == 0 {
+                if facts.loops.is_empty() {
                     let owner = facts.current_owner(self.root.identity());
                     self.push(
                         DiagnosticCode::HtmlSyntax,
@@ -539,7 +541,7 @@ impl ViewCheck<'_, '_, '_> {
                         &owner,
                     );
                 } else {
-                    facts.loop_depth -= 1;
+                    facts.loops.pop();
                 }
             }
             Token::NullCharacterToken | Token::ParseError(_) => {
@@ -860,7 +862,7 @@ impl ViewCheck<'_, '_, '_> {
                 && !key.contains(DYNAMIC_MARKER);
             let valid = key.len() <= MAX_KEY_BYTES
                 && !key.contains(DYNAMIC_MARKER)
-                && (facts.loop_depth == 0 || checked)
+                && (facts.loops.is_empty() || checked)
                 && in_key_alphabet(key);
             if !valid {
                 self.push(
@@ -920,7 +922,7 @@ impl ViewCheck<'_, '_, '_> {
                 owner,
             );
         } else if !dynamic
-            && (facts.loop_depth > 0 || !facts.element_ids.insert((island, id.clone())))
+            && (!facts.loops.is_empty() || !facts.element_ids.insert((island, id.clone())))
         {
             self.push(
                 DiagnosticCode::DuplicateElementId,
@@ -949,11 +951,13 @@ impl ViewCheck<'_, '_, '_> {
         if facts.stopped {
             return;
         }
-        if !facts.stack.is_empty() || facts.loop_depth != 0 {
+        if !facts.stack.is_empty() || !facts.loops.is_empty() {
             let unclosed = facts
                 .stack
                 .last()
-                .map_or(VIEW_START, |frame| frame.position);
+                .map(|frame| frame.position)
+                .or_else(|| facts.loops.last().copied())
+                .unwrap_or(VIEW_START);
             self.push_stack_error(facts, unclosed);
             return;
         }
@@ -1199,11 +1203,20 @@ fn tokenize(text: &str, at_end: bool) -> Option<Vec<(Token, usize)>> {
     };
     let mut recorded = tokenizer.sink.recorded.into_inner();
     recorded.truncate(settled);
+    // Each tag starts after the construct before it ended, so the search for
+    // its `<` begins at the first chunk after that construct's last one.
+    let mut floor = 0;
     Some(
         recorded
             .into_iter()
             .map(|(token, chunk)| {
-                let offset = token_start(text, &starts, chunk, &token);
+                let offset = token_start(text, &starts, (floor, chunk), &token);
+                if matches!(
+                    token,
+                    Token::TagToken(_) | Token::CommentToken(_) | Token::DoctypeToken(_)
+                ) {
+                    floor = chunk.saturating_add(1);
+                }
                 (token, offset)
             })
             .collect(),
@@ -1237,19 +1250,26 @@ fn probe_reached(tail: &[(Token, usize)]) -> bool {
                 && !tag.self_closing)
 }
 
-/// The byte offset where a token starts. A tag is emitted at its `>`, in the
-/// chunk that holds it; it starts at the latest chunk boundary at or before
-/// that which opens a tag of its name, which is that chunk itself unless an
-/// attribute value held a `<`.
-fn token_start(text: &str, starts: &[usize], chunk: usize, token: &Token) -> usize {
+/// The byte offset where a token starts. A tag is emitted at its `>`, in
+/// the chunk that holds it, and starts after the construct before it ended:
+/// at the first chunk boundary between the two that opens a tag of its
+/// name. A later boundary that also matches lies inside the tag's own
+/// attribute values.
+fn token_start(
+    text: &str,
+    starts: &[usize],
+    (floor, chunk): (usize, usize),
+    token: &Token,
+) -> usize {
     let chunk = chunk.min(starts.len().saturating_sub(1));
     let fallback = starts.get(chunk).copied().unwrap_or(0);
     let Token::TagToken(tag) = token else {
         return fallback;
     };
-    starts[..=chunk]
+    starts
+        .get(floor.min(chunk)..=chunk)
+        .unwrap_or_default()
         .iter()
-        .rev()
         .copied()
         .find(|start| opens_tag(text, *start, tag))
         .unwrap_or(fallback)

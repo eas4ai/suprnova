@@ -782,3 +782,56 @@ fn the_submit_bound_counts_one_path_not_the_union_of_arms() {
         "a path binding 128 fields is still refused"
     );
 }
+/// A literal attribute value holding `<section` does not move the tag's
+/// reported column, and a loop whose end a comment swallowed is reported
+/// at its own `{% for %}` in the template that holds it.
+#[test]
+fn a_tag_start_inside_an_attribute_value_and_an_unclosed_loop_report_their_own_place() {
+    let unclosed = check(
+        "<p>Open</p>\n  <section title=\"a <section b\">",
+        CheckerLimits::default(),
+    );
+    assert_eq!(
+        located(&unclosed, DiagnosticCode::HtmlSyntax),
+        vec![(2, 3)],
+        "{:?}",
+        unclosed.diagnostics()
+    );
+
+    let registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            "<section>\n{% include \"tests/shared.html\" %}\n</section>".to_owned(),
+        ),
+        (
+            view("tests/shared.html"),
+            "<p>x</p>\n{% for item in items %}<i>{{ item }}</i><!-- {% endfor %} -->".to_owned(),
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html").to_owned(),
+        ),
+    ])
+    .expect("template catalog");
+    let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name());
+    let mismatches: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DiagnosticCode::BranchStackMismatch)
+        .map(|diagnostic| {
+            (
+                diagnostic.path().map(|path| path.as_str().to_owned()),
+                diagnostic.line(),
+                diagnostic.column(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        mismatches,
+        vec![(Some("tests/shared.html".to_owned()), 2, 1)],
+        "{:?}",
+        report.diagnostics()
+    );
+}
