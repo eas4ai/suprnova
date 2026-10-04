@@ -283,8 +283,9 @@ A short list of invariants the lifecycle establishes:
   drains on `SIGTERM` instead of being SIGKILLed at the end of the
   orchestrator's grace period.
 - **Every drain aborts what it abandons.** HTTP connections, WebSocket
-  handlers, and supervisors each get a bounded grace window and are
-  then aborted and awaited - including a supervisor's inner task, so
+  handlers, post-response `Terminable` hooks, and supervisors each get
+  a bounded grace window and are then aborted and awaited - including
+  a supervisor's inner task, so
   cancellation reaches the body and not just the restart wrapper.
   Nothing keeps running past its drain to emit telemetry after the
   flush.

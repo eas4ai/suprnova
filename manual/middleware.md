@@ -392,9 +392,12 @@ register_terminable(AuditLogTerminator);
 ```
 
 The server iterates registered terminables in registration order after
-every response (4xx and 5xx included) and awaits each one. Errors are
-logged via `tracing::error!` and swallowed - the response has already
-left the building, so there's nobody left to surface them to.
+every response (4xx and 5xx included) and awaits each one. `terminate`
+returns nothing, because the response has already left the building
+and there's nobody left to surface an error to. A hook that panics is
+logged via `tracing::error!`, and the hooks registered after it still
+run. A graceful shutdown waits up to five seconds for the hooks still
+running, after the connections drain, and aborts the rest.
 
 Registration is idempotent per concrete type. `registered_terminables()`,
 `terminable_count()`, and `has_terminable::<T>()` provide introspection

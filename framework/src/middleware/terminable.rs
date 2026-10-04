@@ -14,17 +14,19 @@
 //!
 //! Termination runs after [`crate::server::Server`] hands the response
 //! to hyper. The server iterates the registered [`Terminable`]
-//! implementations in registration order and awaits each one. Errors
-//! returned by `terminate` are logged via `tracing::error!` and
-//! swallowed - the response has already left the building, so there's
-//! nobody left to surface them to.
+//! implementations in registration order and awaits each one. A hook
+//! that panics is logged via `tracing::error!` and the hooks after it
+//! still run - the response has already left the building, so there's
+//! nobody left to surface the failure to. A graceful shutdown waits a
+//! bounded time for the hooks still running.
 //!
 //! [`Middleware`]: crate::middleware::Middleware
 
 use crate::http::HttpResponse;
 use async_trait::async_trait;
 use std::any::TypeId;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use tokio::task::JoinSet;
 
 /// A middleware-shaped post-response hook.
 ///
@@ -40,8 +42,9 @@ use std::sync::{Arc, OnceLock, RwLock};
 /// already streamed it to the client.
 #[async_trait]
 pub trait Terminable: Send + Sync {
-    /// Run post-response work. Errors are logged and swallowed by the
-    /// runtime; the response has already been sent.
+    /// Run post-response work. The response has already been sent, so
+    /// there is no error to return; a panic is logged and the hooks after
+    /// this one still run.
     async fn terminate(&self, snapshot: &TerminationSnapshot);
 }
 
@@ -145,13 +148,92 @@ pub fn has_terminable<T: Terminable + 'static>() -> bool {
 }
 
 /// Run every registered terminable's `terminate` against the given
-/// snapshot. Used by the server after a response is sent. Errors
-/// inside a terminable are caught by the underlying async runtime;
-/// this entry point simply awaits each hook in order.
+/// snapshot, in registration order. Used by the server after a response
+/// is sent.
+///
+/// Each hook runs inside its own panic boundary. A hook that panics is
+/// logged and the hooks after it still run: they were all awaited in one
+/// task with no boundary, so one panic unwound the batch and every later
+/// hook - an audit record, a metric - was skipped without a trace.
 pub async fn dispatch_termination(snapshot: TerminationSnapshot) {
     let hooks = registered_terminables();
     for hook in hooks {
-        hook.terminate(&snapshot).await;
+        let run = std::panic::AssertUnwindSafe(hook.terminate(&snapshot));
+        if let Err(payload) = futures::FutureExt::catch_unwind(run).await {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "a non-string panic payload".to_string());
+            tracing::error!(
+                method = %snapshot.method,
+                path = %snapshot.path,
+                panic = %message,
+                "a terminable hook panicked; the hooks after it still run"
+            );
+        }
+    }
+}
+
+/// The termination batches still running, one task per response.
+///
+/// The server spawns each batch so the client gets its response at once,
+/// and it used to forget the task: a graceful shutdown drained the
+/// connections, the WebSocket handlers, the supervisors and the queued
+/// listeners, and then let the runtime's teardown cut off a hook that was
+/// still writing its audit record. Holding the tasks here lets
+/// [`drain_terminations`] wait for them.
+static TERMINATIONS: OnceLock<Mutex<JoinSet<()>>> = OnceLock::new();
+
+fn terminations() -> std::sync::MutexGuard<'static, JoinSet<()>> {
+    // A poisoned set is still a set of tasks: recover it rather than
+    // lose the hooks it holds (a hot-path registry, per the lock policy).
+    TERMINATIONS
+        .get_or_init(|| Mutex::new(JoinSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Spawn the termination batch for one response, in the request's
+/// container scope, and keep its task for the shutdown drain.
+pub(crate) fn spawn_termination(snapshot: TerminationSnapshot) {
+    let mut tasks = terminations();
+    // Reap the batches that already finished, so the set holds only
+    // running ones however many responses the server sends.
+    while tasks.try_join_next().is_some() {}
+    tasks.spawn(crate::container::App::in_current_scope(async move {
+        dispatch_termination(snapshot).await;
+    }));
+}
+
+/// Wait up to `grace` for the termination batches still running, then
+/// abort the rest. Returns how many were aborted.
+///
+/// Called by the server's graceful shutdown once the connections are
+/// drained, so no response can start another batch behind it. Bounded
+/// like every other drain there: a hook that never returns must not keep
+/// the process from exiting.
+pub(crate) async fn drain_terminations(grace: std::time::Duration) -> usize {
+    let mut tasks = std::mem::take(&mut *terminations());
+    if tasks.is_empty() {
+        return 0;
+    }
+    let deadline = tokio::time::sleep(grace);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            joined = tasks.join_next() => {
+                if joined.is_none() {
+                    return 0;
+                }
+            }
+            _ = &mut deadline => {
+                let abandoned = tasks.len();
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                return abandoned;
+            }
+        }
     }
 }
 
@@ -250,6 +332,87 @@ mod tests {
         assert!(has_terminable::<Counter>());
         assert!(!has_terminable::<Other>());
         clear_terminables_for_test();
+    }
+
+    struct Panics;
+    #[async_trait]
+    impl Terminable for Panics {
+        async fn terminate(&self, _snapshot: &TerminationSnapshot) {
+            panic!("a terminable that fails on purpose");
+        }
+    }
+
+    /// A hook that panics is reported, and the hooks registered after it
+    /// still run. The hooks used to be awaited one after the other with no
+    /// boundary, so the panic unwound the whole batch and skipped every
+    /// later hook, such as an audit record or a metric.
+    #[tokio::test]
+    async fn a_panicking_hook_does_not_skip_the_hooks_after_it() {
+        let _g = SERIAL.lock().await;
+        clear_terminables_for_test();
+        let after = Arc::new(AtomicUsize::new(0));
+        register_terminable(Panics);
+        register_terminable(Counter {
+            hits: after.clone(),
+        });
+
+        let outcome = tokio::spawn(dispatch_termination(snapshot())).await;
+        clear_terminables_for_test();
+
+        assert!(outcome.is_ok(), "the panic stays inside the dispatch");
+        assert_eq!(after.load(Ordering::SeqCst), 1, "the later hook ran");
+    }
+
+    struct Slow {
+        done: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl Terminable for Slow {
+        async fn terminate(&self, _snapshot: &TerminationSnapshot) {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            self.done.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct NeverEnds;
+    #[async_trait]
+    impl Terminable for NeverEnds {
+        async fn terminate(&self, _snapshot: &TerminationSnapshot) {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// The shutdown drain waits for the hooks of responses already sent.
+    /// The batch used to be spawned and forgotten, so the runtime's
+    /// teardown cut off a hook that was still writing its record.
+    #[tokio::test]
+    async fn the_shutdown_drain_waits_for_a_running_hook() {
+        let _g = SERIAL.lock().await;
+        clear_terminables_for_test();
+        let done = Arc::new(AtomicUsize::new(0));
+        register_terminable(Slow { done: done.clone() });
+
+        spawn_termination(snapshot());
+        let abandoned = drain_terminations(std::time::Duration::from_secs(5)).await;
+        clear_terminables_for_test();
+
+        assert_eq!(abandoned, 0, "the hook finished inside the grace");
+        assert_eq!(done.load(Ordering::SeqCst), 1, "the drain waited for it");
+    }
+
+    /// A hook that outlives the grace is aborted and counted, so the drain
+    /// is bounded and the operator learns what was cut off.
+    #[tokio::test]
+    async fn the_shutdown_drain_aborts_a_hook_past_its_grace() {
+        let _g = SERIAL.lock().await;
+        clear_terminables_for_test();
+        register_terminable(NeverEnds);
+
+        spawn_termination(snapshot());
+        let abandoned = drain_terminations(std::time::Duration::from_millis(50)).await;
+        clear_terminables_for_test();
+
+        assert_eq!(abandoned, 1, "the hook past its grace was aborted");
     }
 
     #[test]

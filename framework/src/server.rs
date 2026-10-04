@@ -658,6 +658,19 @@ impl Server {
             }
         }
 
+        // Drain the post-response hooks (`Terminable`) still running. The
+        // connections are drained above, so no response can start another
+        // batch behind this one. Bounded like the WebSocket drain: a hook
+        // that never returns is aborted after the deadline.
+        let abandoned_hooks =
+            crate::middleware::drain_terminations(std::time::Duration::from_secs(5)).await;
+        if abandoned_hooks > 0 {
+            tracing::warn!(
+                hooks_in_flight = abandoned_hooks,
+                "terminable drain deadline exceeded; aborted the remaining hooks"
+            );
+        }
+
         // Signal supervisors to exit cleanly, then drain their tasks.
         // This runs AFTER WS_TASKS so in-flight WebSocket connections get
         // their close frames before the process tears down background work.
@@ -931,9 +944,7 @@ async fn route_request(
             path: terminate_path.clone(),
             status: response.status().as_u16(),
         };
-        tokio::spawn(App::in_current_scope(async move {
-            crate::middleware::dispatch_termination(snapshot).await;
-        }));
+        crate::middleware::spawn_termination(snapshot);
     }
 
     response
