@@ -617,24 +617,25 @@ The same application team filed issues #137, #139 and #140 for the next
 gaps it met. The developer asked for them to be done on 2026-10-04 ("let's
 knock out the issues").
 
-[PAR-041] A provider identity MUST carry `avatar_url`: the URL of the
-account's picture as the provider reports it, or none, documented as
-untrusted profile data that an application checks (scheme, length)
-before it renders, fetches or stores it. `ProviderIdentity`, which a
-provider plugin returns, and `OAuthIdentity`, which `verify_oauth_identity`
-returns, MUST both hold it. Google MUST take it from the userinfo
-`picture` claim, TikTok from `avatar_url`, Facebook from
-`picture.data.url`, with its profile request naming the fields `id`,
-`name`, `email` and `picture`, and X from `profile_image_url` with that
-among the user fields it requests; Apple reports none. A profile without a picture, or with an
-empty one, MUST give none at both layers, and sign-in MUST proceed as
-before. Adding the field changes the provider SDK: the manual's provider
-chapter and the release notes MUST show a provider adding `avatar_url`
-to its `ProviderIdentity`, and the GitHub provider crate MUST ship a
-release that fills it from GitHub's `avatar_url`.
-Falsifier: a Google, TikTok, Facebook or X callback whose profile carries a picture returns no `avatar_url`, or a value other than the provider's, in `ProviderIdentity` or `OAuthIdentity`; a profile without one, or with an empty string, fails sign-in or returns a value; the Facebook profile request does not name `email` and `picture`, or the X one `profile_image_url`; or a provider built like the manual's example fails to compile.
+[PAR-041] `OAuthIdentity`, which `verify_oauth_identity` returns, MUST
+carry `avatar_url`: the URL of the account's picture as the provider
+reports it, or none, documented as untrusted profile data that an
+application checks (scheme, length) before it renders, fetches or stores
+it. A provider supplies it through an `OAuthProvider` method,
+`avatar_url`, which reads the same profile response `resolve_identity`
+reads and returns none by default, so a provider written before it keeps
+compiling unchanged and reports none; `ProviderIdentity` MUST NOT change.
+Google MUST take it from the userinfo `picture` claim, TikTok from
+`avatar_url`, Facebook from `picture.data.url`, with its profile request
+naming the fields `id`, `name`, `email` and `picture`, and X from
+`profile_image_url` with that among the user fields it requests; Apple
+reports none. A profile without a picture, or with an empty one, MUST
+give none, and sign-in MUST proceed as before. The manual's provider
+chapter MUST show a provider adding the method, and the GitHub provider
+crate MUST ship a release that implements it from GitHub's `avatar_url`.
+Falsifier: a Google, TikTok, Facebook or X callback whose profile carries a picture returns no `avatar_url`, or a value other than the provider's, in `OAuthIdentity`; a profile without one, or with an empty string, fails sign-in or returns a value; the Facebook profile request does not name `email` and `picture`, or the X one `profile_image_url`; a provider that does not implement `avatar_url` fails to compile or fails sign-in; or `ProviderIdentity` gains a field.
 Mechanism: `par-oauth-avatar`.
-Rationale: Socialite's `getAvatar()`; issue #140 asked for Google, and every provider that reports a picture fills it. The Facebook plugin's documentation names `/me?fields=id,name,email`, but it requests a bare `/me`, for which the Graph API returns only `id` and `name`, so Facebook sign-in never received an email.
+Rationale: Socialite's `getAvatar()`; issue #140 asked for Google, and every provider that reports a picture fills it. The developer ruled on 2026-10-04 that it must not break existing providers, so it is a defaulted trait method, not a new identity field. The Facebook plugin's documentation names `/me?fields=id,name,email`, but it requests a bare `/me`, for which the Graph API returns only `id` and `name`, so Facebook sign-in never received an email.
 Status: Agreed 2026-10-04
 
 [PAR-042] `MultipartRequestHooks` MUST offer `after_validation_async`.
