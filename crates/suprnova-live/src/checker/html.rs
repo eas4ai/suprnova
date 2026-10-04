@@ -35,8 +35,9 @@ use crate::registry::ComponentRegistry;
 use crate::view::{MAX_KEY_BYTES, in_key_alphabet};
 
 use super::branch::{
-    CHECKED_DIGEST_MARKER, CHECKED_KEY_MARKER, DYNAMIC_MARKER, Fragment, LOOP_END_MARKER,
-    LOOP_START_MARKER, Origin, Piece, RenderedView, SourceFile, location,
+    CHECKED_DIGEST_MARKER, CHECKED_KEY_MARKER, DYNAMIC_MARKER, Fragment, LINE_BREAKS_MARKER,
+    LOOP_END_MARKER, LOOP_START_MARKER, Origin, PARAGRAPHS_MARKER, Piece, RenderedView, SourceFile,
+    location,
 };
 use super::diagnostic::{DiagnosticCode, DiagnosticCollector, DiagnosticSeverity};
 use super::directive::{
@@ -56,6 +57,42 @@ const MAX_SUBMIT_FORM_FIELDS: usize = 127;
 const PROBE_TAG: &str = "suprnova-checker-probe-7f3e";
 const PROBE: &str = "<suprnova-checker-probe-7f3e>";
 
+/// Elements a `<p>` may stand in: flow-content containers.
+const PARAGRAPH_PARENTS: &[&str] = &[
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "body",
+    "caption",
+    "dd",
+    "details",
+    "dialog",
+    "div",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "header",
+    "li",
+    "main",
+    "nav",
+    "search",
+    "section",
+    "td",
+    "template",
+    "th",
+];
+
+/// Elements a `<br/>` may not stand in: those whose content is rows,
+/// items, options, or raw text rather than phrasing content.
+const NO_PHRASING_PARENTS: &[&str] = &[
+    "colgroup", "datalist", "dl", "head", "html", "menu", "ol", "optgroup", "option", "script",
+    "select", "style", "table", "tbody", "textarea", "tfoot", "thead", "title", "tr", "ul",
+];
+
 /// The island every view renders into before any `live:component`.
 const ROOT_ISLAND: usize = 0;
 
@@ -74,15 +111,22 @@ const VIEW_START: Position = Position { file: 0, offset: 0 };
 /// that attribute's column.
 struct Located {
     position: Position,
-    attributes: Vec<(String, Position)>,
+    attributes: Vec<(String, Position, bool)>,
 }
 
 impl Located {
     fn attribute(&self, name: &str) -> Position {
         self.attributes
             .iter()
-            .find(|(attribute, _)| attribute == name)
-            .map_or(self.position, |(_, position)| *position)
+            .find(|(attribute, _, _)| attribute == name)
+            .map_or(self.position, |(_, position, _)| *position)
+    }
+
+    /// Whether the attribute's value is written without quotes.
+    fn unquoted(&self, name: &str) -> bool {
+        self.attributes
+            .iter()
+            .any(|(attribute, _, unquoted)| attribute == name && *unquoted)
     }
 }
 
@@ -200,7 +244,9 @@ struct HtmlFacts {
     submit_forms: BTreeMap<usize, SubmitForm>,
     tokens: usize,
     attributes: usize,
-    loop_depth: usize,
+    /// Where each open loop's `{% for %}` stands, innermost last, so a loop
+    /// whose end never arrived is reported at its own tag.
+    loops: Vec<Position>,
     stopped: bool,
 }
 
@@ -220,16 +266,17 @@ impl HtmlFacts {
             submit_forms: BTreeMap::new(),
             tokens: 0,
             attributes: 0,
-            loop_depth: 0,
+            loops: Vec::new(),
             stopped: false,
         }
     }
 
     /// Whether the rest of the view checks the same on both: the same open
-    /// elements, loop depth, and teleports. Everything else merges.
+    /// elements, open loops, and teleports, and submit forms whose fields
+    /// fit one request even taken together. Everything else merges.
     fn same_structure(&self, other: &Self) -> bool {
         self.stopped == other.stopped
-            && self.loop_depth == other.loop_depth
+            && self.loops.len() == other.loops.len()
             && self.stack.len() == other.stack.len()
             && self
                 .stack
@@ -242,6 +289,12 @@ impl HtmlFacts {
                 .iter()
                 .zip(&other.teleports)
                 .all(|(left, right)| left.target == right.target && left.owner == right.owner)
+            && self.submit_forms.iter().all(|(form, fields)| {
+                other.submit_forms.get(form).is_none_or(|theirs| {
+                    fields.fields == theirs.fields
+                        || fields.fields.union(&theirs.fields).count() <= MAX_SUBMIT_FORM_FIELDS
+                })
+            })
     }
 
     /// Folds another path's facts into these. A key or id either path
@@ -470,24 +523,63 @@ impl ViewCheck<'_, '_, '_> {
     ) {
         let map = SourceMap::new(&state.pending);
         let facts = Rc::make_mut(&mut state.facts);
+        // The text of an open `script` or `style` element: its name and
+        // where its content starts.
+        let mut raw_text: Option<(String, usize)> = None;
         for (token, offset) in tokens {
-            let attributes = match &token {
-                Token::TagToken(tag) if tag.kind == TagKind::StartTag => {
-                    attribute_offsets(text, offset)
+            let mut attributes = Vec::new();
+            if let Token::TagToken(tag) = &token {
+                let name = tag.name.as_ref().to_ascii_lowercase();
+                if tag.kind == TagKind::StartTag {
+                    let (spans, end) = scan_tag(text, offset);
+                    attributes = spans
                         .into_iter()
-                        .map(|(name, offset)| (name, map.position(offset)))
-                        .collect()
+                        .map(|span| (span.name, map.position(span.offset), span.unquoted))
+                        .collect();
+                    if matches!(name.as_str(), "script" | "style") && !tag.self_closing {
+                        raw_text = Some((name, end));
+                    }
+                } else if raw_text.as_ref().is_some_and(|(open, _)| *open == name)
+                    && let Some((_, start)) = raw_text.take()
+                {
+                    self.dynamic_raw_text(facts, text, &map, start..offset);
                 }
-                _ => Vec::new(),
-            };
+            }
             let located = Located {
                 position: map.position(offset),
                 attributes,
             };
             self.process(facts, token, &located);
         }
+        if let Some((_, start)) = raw_text {
+            self.dynamic_raw_text(facts, text, &map, start..length);
+        }
         state.pending = split_pending(&state.pending, length);
         state.failed_at = 0;
+    }
+
+    /// Askama's escaping covers markup, not script or style syntax, so a
+    /// dynamic value inside `script` or `style` text is unproved.
+    fn dynamic_raw_text(
+        &mut self,
+        facts: &HtmlFacts,
+        text: &str,
+        map: &SourceMap,
+        content: std::ops::Range<usize>,
+    ) {
+        let start = content.start;
+        let found = text
+            .get(content)
+            .and_then(|content| content.find(DYNAMIC_MARKER));
+        if let Some(found) = found {
+            let owner = facts.current_owner(self.root.identity());
+            self.push(
+                DiagnosticCode::DynamicStructureUnproved,
+                DiagnosticSeverity::Unproved,
+                map.position(start + found),
+                &owner,
+            );
+        }
     }
 
     fn process(&mut self, facts: &mut HtmlFacts, token: Token, located: &Located) {
@@ -519,11 +611,34 @@ impl ViewCheck<'_, '_, '_> {
                     facts.stack.pop();
                 }
             }
+            // `linebreaks` and `paragraphbreaks` write `<p>` elements and
+            // `linebreaksbr` writes `<br/>`; where those cannot stand, the
+            // browser builds another tree than the one checked.
+            Token::CommentToken(comment)
+                if comment.as_ref() == PARAGRAPHS_MARKER
+                    || comment.as_ref() == LINE_BREAKS_MARKER =>
+            {
+                let parent = facts.stack.last().map(|frame| frame.tag.as_str());
+                let fits = if comment.as_ref() == PARAGRAPHS_MARKER {
+                    parent.is_none_or(|parent| PARAGRAPH_PARENTS.contains(&parent))
+                } else {
+                    parent.is_none_or(|parent| !NO_PHRASING_PARENTS.contains(&parent))
+                };
+                if !fits {
+                    let owner = facts.current_owner(self.root.identity());
+                    self.push(
+                        DiagnosticCode::DynamicStructureUnproved,
+                        DiagnosticSeverity::Unproved,
+                        position,
+                        &owner,
+                    );
+                }
+            }
             Token::CommentToken(comment) if comment.as_ref() == LOOP_START_MARKER => {
-                facts.loop_depth = facts.loop_depth.saturating_add(1);
+                facts.loops.push(position);
             }
             Token::CommentToken(comment) if comment.as_ref() == LOOP_END_MARKER => {
-                if facts.loop_depth == 0 {
+                if facts.loops.is_empty() {
                     let owner = facts.current_owner(self.root.identity());
                     self.push(
                         DiagnosticCode::HtmlSyntax,
@@ -532,7 +647,7 @@ impl ViewCheck<'_, '_, '_> {
                         &owner,
                     );
                 } else {
-                    facts.loop_depth -= 1;
+                    facts.loops.pop();
                 }
             }
             Token::NullCharacterToken | Token::ParseError(_) => {
@@ -577,6 +692,20 @@ impl ViewCheck<'_, '_, '_> {
             .iter()
             .map(|(name, _)| located.attribute(name))
             .collect();
+        // Askama escapes `"&'<>`, which holds inside a quoted value but not
+        // in an unquoted one, nor in event-handler script.
+        for ((name, value), attribute_position) in attributes.iter().zip(&positions) {
+            if value.contains(DYNAMIC_MARKER) && (located.unquoted(name) || name.starts_with("on"))
+            {
+                let owner = facts.current_owner(self.root.identity());
+                self.push(
+                    DiagnosticCode::DynamicStructureUnproved,
+                    DiagnosticSeverity::Unproved,
+                    *attribute_position,
+                    &owner,
+                );
+            }
+        }
         let dynamic_attribute = attributes
             .iter()
             .position(|(name, _)| name.contains(DYNAMIC_MARKER));
@@ -692,9 +821,10 @@ impl ViewCheck<'_, '_, '_> {
     /// Counts the distinct model fields under the enclosing `live:submit`
     /// form and reports the form once past what one request carries. A
     /// submit proposes every model control of its form, so a larger form
-    /// has no working Live submit (LIVE-029). Merged paths count the fields
-    /// any of them binds, so a form is never proved under the bound when one
-    /// path exceeds it. Returns the form the element's descendants inherit.
+    /// has no working Live submit (LIVE-029). States merge only while the
+    /// fields their paths bind fit the bound together, so a count over it
+    /// is one path's own. Returns the form the element's descendants
+    /// inherit.
     fn observe_submit_form(
         &mut self,
         facts: &mut HtmlFacts,
@@ -852,7 +982,7 @@ impl ViewCheck<'_, '_, '_> {
                 && !key.contains(DYNAMIC_MARKER);
             let valid = key.len() <= MAX_KEY_BYTES
                 && !key.contains(DYNAMIC_MARKER)
-                && (facts.loop_depth == 0 || checked)
+                && (facts.loops.is_empty() || checked)
                 && in_key_alphabet(key);
             if !valid {
                 self.push(
@@ -912,7 +1042,7 @@ impl ViewCheck<'_, '_, '_> {
                 owner,
             );
         } else if !dynamic
-            && (facts.loop_depth > 0 || !facts.element_ids.insert((island, id.clone())))
+            && (!facts.loops.is_empty() || !facts.element_ids.insert((island, id.clone())))
         {
             self.push(
                 DiagnosticCode::DuplicateElementId,
@@ -941,11 +1071,13 @@ impl ViewCheck<'_, '_, '_> {
         if facts.stopped {
             return;
         }
-        if !facts.stack.is_empty() || facts.loop_depth != 0 {
+        if !facts.stack.is_empty() || !facts.loops.is_empty() {
             let unclosed = facts
                 .stack
                 .last()
-                .map_or(VIEW_START, |frame| frame.position);
+                .map(|frame| frame.position)
+                .or_else(|| facts.loops.last().copied())
+                .unwrap_or(VIEW_START);
             self.push_stack_error(facts, unclosed);
             return;
         }
@@ -1191,11 +1323,20 @@ fn tokenize(text: &str, at_end: bool) -> Option<Vec<(Token, usize)>> {
     };
     let mut recorded = tokenizer.sink.recorded.into_inner();
     recorded.truncate(settled);
+    // Each tag starts after the construct before it ended, so the search for
+    // its `<` begins at the first chunk after that construct's last one.
+    let mut floor = 0;
     Some(
         recorded
             .into_iter()
             .map(|(token, chunk)| {
-                let offset = token_start(text, &starts, chunk, &token);
+                let offset = token_start(text, &starts, (floor, chunk), &token);
+                if matches!(
+                    token,
+                    Token::TagToken(_) | Token::CommentToken(_) | Token::DoctypeToken(_)
+                ) {
+                    floor = chunk.saturating_add(1);
+                }
                 (token, offset)
             })
             .collect(),
@@ -1229,19 +1370,26 @@ fn probe_reached(tail: &[(Token, usize)]) -> bool {
                 && !tag.self_closing)
 }
 
-/// The byte offset where a token starts. A tag is emitted at its `>`, in the
-/// chunk that holds it; it starts at the latest chunk boundary at or before
-/// that which opens a tag of its name, which is that chunk itself unless an
-/// attribute value held a `<`.
-fn token_start(text: &str, starts: &[usize], chunk: usize, token: &Token) -> usize {
+/// The byte offset where a token starts. A tag is emitted at its `>`, in
+/// the chunk that holds it, and starts after the construct before it ended:
+/// at the first chunk boundary between the two that opens a tag of its
+/// name. A later boundary that also matches lies inside the tag's own
+/// attribute values.
+fn token_start(
+    text: &str,
+    starts: &[usize],
+    (floor, chunk): (usize, usize),
+    token: &Token,
+) -> usize {
     let chunk = chunk.min(starts.len().saturating_sub(1));
     let fallback = starts.get(chunk).copied().unwrap_or(0);
     let Token::TagToken(tag) = token else {
         return fallback;
     };
-    starts[..=chunk]
+    starts
+        .get(floor.min(chunk)..=chunk)
+        .unwrap_or_default()
         .iter()
-        .rev()
         .copied()
         .find(|start| opens_tag(text, *start, tag))
         .unwrap_or(fallback)
@@ -1268,24 +1416,33 @@ fn opens_tag(text: &str, start: usize, tag: &Tag) -> bool {
             .is_none_or(|next| next.is_ascii_whitespace() || matches!(next, '/' | '>'))
 }
 
-/// Where each attribute of the start tag at `start` is written, by its
-/// lowercase name, first occurrence only, as html5ever keeps the first of a
-/// repeated attribute. The scan follows the HTML attribute syntax only far
-/// enough to place names; html5ever alone decides what the tag holds.
-fn attribute_offsets(text: &str, start: usize) -> Vec<(String, usize)> {
+/// One attribute of a start tag as written: its lowercase name, where the
+/// name starts, and whether its value is written without quotes.
+struct AttributeSpan {
+    name: String,
+    offset: usize,
+    unquoted: bool,
+}
+
+/// The attributes of the start tag at `start`, by lowercase name and first
+/// occurrence only, as html5ever keeps the first of a repeated attribute,
+/// and the offset just past the tag's `>`. The scan follows the HTML
+/// attribute syntax only far enough to place names and quotes; html5ever
+/// alone decides what the tag holds.
+fn scan_tag(text: &str, start: usize) -> (Vec<AttributeSpan>, usize) {
     let bytes = text.as_bytes();
     let space = |byte: u8| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0c);
     let mut index = start.saturating_add(1);
     while index < bytes.len() && !space(bytes[index]) && !matches!(bytes[index], b'/' | b'>') {
         index += 1;
     }
-    let mut attributes: Vec<(String, usize)> = Vec::new();
+    let mut attributes: Vec<AttributeSpan> = Vec::new();
     loop {
         while index < bytes.len() && (space(bytes[index]) || bytes[index] == b'/') {
             index += 1;
         }
         if index >= bytes.len() || bytes[index] == b'>' {
-            return attributes;
+            return (attributes, index.saturating_add(1).min(bytes.len()));
         }
         let name_start = index;
         index += 1;
@@ -1303,6 +1460,7 @@ fn attribute_offsets(text: &str, start: usize) -> Vec<(String, usize)> {
         while after < bytes.len() && space(bytes[after]) {
             after += 1;
         }
+        let mut unquoted = false;
         if after < bytes.len() && bytes[after] == b'=' {
             index = after + 1;
             while index < bytes.len() && space(bytes[index]) {
@@ -1316,13 +1474,18 @@ fn attribute_offsets(text: &str, start: usize) -> Vec<(String, usize)> {
                 }
                 index = index.saturating_add(1);
             } else {
+                unquoted = true;
                 while index < bytes.len() && !space(bytes[index]) && bytes[index] != b'>' {
                     index += 1;
                 }
             }
         }
-        if !attributes.iter().any(|(existing, _)| *existing == name) {
-            attributes.push((name, name_start));
+        if !attributes.iter().any(|attribute| attribute.name == name) {
+            attributes.push(AttributeSpan {
+                name,
+                offset: name_start,
+                unquoted,
+            });
         }
     }
 }

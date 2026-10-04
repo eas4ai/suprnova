@@ -1,6 +1,7 @@
 import {
   directiveContract,
   isReservedDirective,
+  validDirectiveScalarValue,
   type DirectiveFallback,
 } from "../generated/directive-contract.js";
 import { isSignalName } from "../signals/name.js";
@@ -17,7 +18,7 @@ export const MAX_MODIFIER_SEGMENTS = 16;
 export const MAX_PRESENT_DIRECTIVES = 64;
 /** The most literal arguments one action directive carries, the server's schema bound. */
 export const MAX_ACTION_ARGUMENTS = 128;
-const ACTION_VALUE_KIND = 4;
+const ACTION_VALUE_KIND = 4 as const;
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/;
 const TARGET_ID = /^#[A-Za-z][A-Za-z0-9_-]{0,127}$/;
 
@@ -164,6 +165,13 @@ function readString(text: string, start: number, quote: string): [string, number
   return null;
 }
 
+// The directive token grammar of the reviewed fixture, the checker's too:
+// a lowercase letter first, then lowercase letters, digits, `_`, `.`, `:`,
+// or `-`, at most 64 bytes.
+function actionName(name: string): boolean {
+  return validDirectiveScalarValue(ACTION_VALUE_KIND, name) === true;
+}
+
 function readLiteral(text: string, index: number): [ActionLiteral, number] | null {
   for (const [keyword, literal] of KEYWORDS) {
     if (text.startsWith(keyword, index)) return [literal, index + keyword.length];
@@ -178,16 +186,17 @@ function readLiteral(text: string, index: number): [ActionLiteral, number] | nul
 }
 
 /**
- * Parses an action directive value, `name` or `name(literal, ...)`, with the
- * checker's grammar: JSON numbers, strings in single or double quotes with
+ * Parses an action directive value, `name` or `name(literal, ...)`, at most
+ * 2,048 UTF-16 units, with the checker's grammar: JSON numbers, strings in single or double quotes with
  * JSON escapes plus `\'`, `true`, `false`, and `null`, separated by commas,
  * with JSON whitespace around them. Nothing is evaluated.
  */
 export function parseActionCall(value: string): ActionCall | null {
+  if (value.length > MAX_VALUE_UNITS) return null;
   const open = value.indexOf("(");
-  if (open === -1) return IDENTIFIER.test(value) ? { name: value } : null;
+  if (open === -1) return actionName(value) ? { name: value } : null;
   const name = value.slice(0, open);
-  if (!IDENTIFIER.test(name) || !value.endsWith(")")) return null;
+  if (!actionName(name) || !value.endsWith(")")) return null;
   const body = value.slice(open + 1, -1);
   const literals: ActionLiteral[] = [];
   let index = skipSpace(body, 0);

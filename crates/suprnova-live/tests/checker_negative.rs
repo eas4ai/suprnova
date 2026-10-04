@@ -806,3 +806,216 @@ fn action_directive_arguments_are_checked_against_the_action_signature() {
         malformed.diagnostics()
     );
 }
+
+fn check_with(templates: Vec<(&str, &str)>) -> suprnova_live::checker::CheckReport {
+    let registry = registry();
+    let mut sources: Vec<(suprnova_live::identity::ViewName, String)> = templates
+        .into_iter()
+        .map(|(name, source)| (view(name), source.to_owned()))
+        .collect();
+    sources.push((
+        view(CHILD_VIEW),
+        include_str!("fixtures/checker/pass/child.html").to_owned(),
+    ));
+    let catalog = TemplateCatalog::new(sources).expect("template catalog");
+    TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name())
+}
+
+fn has_code(report: &suprnova_live::checker::CheckReport, code: DiagnosticCode) -> bool {
+    report
+        .diagnostics()
+        .iter()
+        .any(|diagnostic| diagnostic.code() == code)
+}
+
+/// Askama treats `{{ show(x) }}` and `{{ ui::show(x) }}` as a macro call, so
+/// the macro's markup is written there and is checked there.
+#[test]
+fn a_macro_called_as_an_expression_is_expanded_and_checked() {
+    let macro_source = "{% macro show(v) %}\n<p>{{ v|safe }}</p>\n{% endmacro %}";
+    for call in ["{{ show(notice) }}", "{{ (show(notice)) }}"] {
+        let report = check(format!("{macro_source}<section>{call}</section>"));
+        assert_eq!(
+            raw_locations(&report),
+            vec![(2, 7)],
+            "{call}: {:?}",
+            report.diagnostics()
+        );
+    }
+    let directive = check(
+        "{% macro go() %}<button type=\"button\" live:click=\"missing\">Go</button>{% endmacro %}<section>{{ go() }}</section>",
+    );
+    assert!(
+        has_code(&directive, DiagnosticCode::UnknownAction),
+        "{:?}",
+        directive.diagnostics()
+    );
+    let scoped = check_with(vec![
+        (
+            ROOT_VIEW,
+            "{% import \"tests/macros.html\" as ui %}<form live:submit=\"save\">{{ ui::input(\"nope\") }}</form>",
+        ),
+        (
+            "tests/macros.html",
+            include_str!("fixtures/checker/pass/macros.html"),
+        ),
+    ]);
+    assert!(
+        has_code(&scoped, DiagnosticCode::UnknownModel),
+        "{:?}",
+        scoped.diagnostics()
+    );
+}
+/// Caller content renders inside the macro's scope, where a macro
+/// parameter shadows the call site's name, and it is spliced wherever the
+/// macro writes `caller()`, grouped or through a `set` alias.
+#[test]
+fn caller_content_renders_in_the_macro_scope_at_every_splice() {
+    let shadowed = check(
+        "{% macro card(body) %}<div>{{ caller() }}</div>{% endmacro %}{% call card(notice|safe) %}\n<p>{{ body }}</p>{% endcall %}",
+    );
+    assert_eq!(
+        raw_locations(&shadowed),
+        vec![(2, 7)],
+        "{:?}",
+        shadowed.diagnostics()
+    );
+    for splice in ["{{ (caller()) }}", "{% set c = caller %}{{ c() }}"] {
+        let report = check(format!(
+            "{{% macro frame() %}}<div>{splice}</div>{{% endmacro %}}{{% call frame() %}}<button type=\"button\" live:click=\"missing\">Go</button>{{% endcall %}}"
+        ));
+        assert!(
+            has_code(&report, DiagnosticCode::UnknownAction),
+            "{splice}: {:?}",
+            report.diagnostics()
+        );
+    }
+}
+/// A child block renders at the parent's block site with the parent's
+/// locals, and `{{ super() }}` writes the next definition up the chain.
+#[test]
+fn inherited_blocks_render_at_the_parent_site_and_super_writes_the_parent_body() {
+    let through_super = check_with(vec![
+        (
+            ROOT_VIEW,
+            "{% extends \"tests/layout.html\" %}{% block content %}<section>{{ super() }}</section>{% endblock %}",
+        ),
+        (
+            "tests/layout.html",
+            "<main>{% block content %}\n<p>{{ notice|safe }}</p>{% endblock %}</main>",
+        ),
+    ]);
+    assert_eq!(
+        locations_of(&through_super, DiagnosticCode::RawSafe),
+        vec![("tests/layout.html".to_owned(), 2, 7)],
+        "{:?}",
+        through_super.diagnostics()
+    );
+    let parent_local = check_with(vec![
+        (
+            ROOT_VIEW,
+            "{% extends \"tests/layout.html\" %}{% block content %}\n<p>{{ banner }}</p>{% endblock %}",
+        ),
+        (
+            "tests/layout.html",
+            "{% let banner = notice|safe %}<main>{% block content %}{% endblock %}</main>",
+        ),
+    ]);
+    assert_eq!(
+        locations_of(&parent_local, DiagnosticCode::RawSafe),
+        vec![(ROOT_VIEW.to_owned(), 2, 7)],
+        "{:?}",
+        parent_local.diagnostics()
+    );
+    let directive = check_with(vec![
+        (
+            ROOT_VIEW,
+            "{% extends \"tests/layout.html\" %}{% block content %}{{ super() }}{% endblock %}",
+        ),
+        (
+            "tests/layout.html",
+            "<main>{% block content %}<button type=\"button\" live:click=\"missing\">Go</button>{% endblock %}</main>",
+        ),
+    ]);
+    assert!(
+        has_code(&directive, DiagnosticCode::UnknownAction),
+        "{:?}",
+        directive.diagnostics()
+    );
+}
+/// A `let` after `&&` in an `if` binds its names as the leading `if let`
+/// does. Askama 0.16 does not parse an array pattern after `&&`, so that
+/// form already fails the check; a pattern it parses carried raw output.
+#[test]
+fn a_let_chain_binding_carries_a_raw_value() {
+    let unparsed = check(
+        "{% let rows = [body|safe] %}{% if open && let [v, ..] = rows.as_slice() %}\n<p>{{ v }}</p>{% endif %}",
+    );
+    assert!(
+        has_code(&unparsed, DiagnosticCode::AskamaSyntax),
+        "{:?}",
+        unparsed.diagnostics()
+    );
+    let report = check(
+        "{% let rows = [body|safe] %}{% if open && let Some(v) = rows.first() %}\n<p>{{ v }}</p>{% endif %}",
+    );
+    assert_eq!(
+        raw_locations(&report),
+        vec![(2, 7)],
+        "{:?}",
+        report.diagnostics()
+    );
+}
+/// Askama writes a path call as given and passes a `Safe` value through, so
+/// a raw wrapper or a filter function called directly is raw output; a
+/// filter the checker does not know, or a Rust macro, is unproved.
+#[test]
+fn raw_wrappers_called_directly_are_raw_and_unknown_filters_are_unproved() {
+    for output in [
+        "askama::filters::Safe(notice)",
+        "askama::filters::HtmlSafeOutput(notice)",
+        "askama::filters::MaybeSafe::Safe(notice)",
+        "askama::filters::linebreaks(notice)?",
+        "filters::safe(notice, askama::filters::Html)?",
+    ] {
+        let report = check(format!("<section>\n<p>{{{{ {output} }}}}</p></section>"));
+        assert_eq!(
+            raw_locations(&report),
+            vec![(2, 7)],
+            "{output}: {:?}",
+            report.diagnostics()
+        );
+    }
+    for output in [
+        "notice|markdown",
+        "notice|crate::filters::render",
+        "format!(\"{}\", notice)",
+    ] {
+        let report = check(format!("<section>\n<p>{{{{ {output} }}}}</p></section>"));
+        let unproved: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.code() == DiagnosticCode::DynamicStructureUnproved
+                    && diagnostic.severity() == DiagnosticSeverity::Unproved
+            })
+            .map(|diagnostic| (diagnostic.line(), diagnostic.column()))
+            .collect();
+        assert_eq!(
+            unproved,
+            vec![(2, 7)],
+            "{output}: {:?}",
+            report.diagnostics()
+        );
+    }
+    for output in [
+        "notice|upper",
+        "notice|trusted_html",
+        "notice|join(\", \")",
+        "items.len()",
+    ] {
+        let report = check(format!("<section><p>{{{{ {output} }}}}</p></section>"));
+        assert!(report.is_proved(), "{output}: {:?}", report.diagnostics());
+    }
+}

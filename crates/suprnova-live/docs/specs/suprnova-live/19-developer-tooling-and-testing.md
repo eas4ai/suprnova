@@ -468,6 +468,20 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-10-04 -- The checker renders templates the way Askama 0.16 does in
+  four more places. A macro called as an expression, `{{ show(x) }}` or
+  `{{ ui::show(x) }}`, is expanded there. Caller content is expanded at
+  each `caller()`, `(caller())`, or `set` alias inside the macro, in the
+  macro's scope. Inherited blocks render the most derived definition at
+  the root template's block site with the locals there, and `super()`
+  renders the next one. A `let` after `&&` in an `if` binds its names. A
+  raw wrapper or filter function called directly (`Safe`, `MaybeSafe`,
+  `HtmlSafeOutput`, `safe`, `escape`, `e`, the line-break filters) is raw
+  output. A filter outside Askama's builtins and the framework's
+  `trusted_html`, `live_key`, and `live_key_digest`, a Rust macro, a
+  dynamic value in an unquoted or `on*` attribute value or in `script` or
+  `style` text, and line-break filter markup where it cannot stand are
+  unproved. A submit form's fields are counted per path.
 - 2026-10-04 -- Checker diagnostics report the real column in the
   template that wrote the markup: a directive or attribute rule at the
   attribute's name, an element rule or stack error at the tag, an element

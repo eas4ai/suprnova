@@ -7,12 +7,11 @@
 //! told apart.
 
 use std::borrow::Cow;
-use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use askama_parser::node::{Call, If, Macro, Node};
+use askama_parser::node::{If, Macro, Node};
 use askama_parser::{
     Ast, Expr, Filter, LetValueOrBlock, PathOrIdentifier, Span, Syntax, Target, WithSpan,
 };
@@ -31,6 +30,10 @@ pub(crate) const CHECKED_DIGEST_MARKER: &str = "suprnova-checker-digest-7f3e-000
 const _: () = assert!(CHECKED_DIGEST_MARKER.len() == crate::view::DIGEST_KEY_BYTES);
 
 pub(crate) const LOOP_START_MARKER: &str = "suprnova-checker-loop-start-7f3e";
+/// Marks where `linebreaks` or `paragraphbreaks` writes `<p>` elements, and
+/// `linebreaksbr` writes `<br/>`, so the HTML check can judge the parent.
+pub(crate) const PARAGRAPHS_MARKER: &str = "suprnova-checker-paragraphs-7f3e";
+pub(crate) const LINE_BREAKS_MARKER: &str = "suprnova-checker-line-breaks-7f3e";
 pub(crate) const LOOP_END_MARKER: &str = "suprnova-checker-loop-end-7f3e";
 
 /// Where a piece of rendered text came from: a template the checker read and
@@ -73,20 +76,6 @@ pub(crate) struct Fragment<'c> {
     pub(crate) pieces: Vec<Piece<'c>>,
 }
 
-impl Fragment<'_> {
-    fn text_bytes(&self) -> usize {
-        self.pieces.iter().fold(0usize, |bytes, piece| {
-            bytes.saturating_add(match piece {
-                Piece::Text(text, _) => text.len(),
-                Piece::Choice(choice) => choice
-                    .arms
-                    .iter()
-                    .fold(0usize, |sum, arm| sum.saturating_add(arm.text_bytes())),
-            })
-        })
-    }
-}
-
 /// The complete rendered tree of one component view.
 pub(crate) struct RenderedView<'c> {
     pub(crate) fragment: Fragment<'c>,
@@ -98,7 +87,28 @@ pub(crate) struct RenderedView<'c> {
     pub(crate) branched: bool,
 }
 
-type Overrides<'c> = BTreeMap<String, Option<Fragment<'c>>>;
+/// One definition of a block along an `{% extends %}` chain: its body and
+/// the template that defines it.
+#[derive(Clone, Copy)]
+struct BlockLink<'c, 'a> {
+    nodes: &'c [Box<Node<'a>>],
+    template: &'c TemplateEnv<'a>,
+}
+
+/// Every definition of each block name along an `{% extends %}` chain, the
+/// most derived first. Askama writes the first where the root template
+/// places the block, with the locals there, and the next one at each
+/// `{{ super() }}` inside it.
+type Chain<'c, 'a> = BTreeMap<&'a str, Vec<BlockLink<'c, 'a>>>;
+
+/// The block definition being rendered, so `{{ super() }}` can write the
+/// next one up the chain.
+#[derive(Clone, Copy)]
+struct BlockCursor<'c, 'a> {
+    name: &'a str,
+    links: &'c [BlockLink<'c, 'a>],
+    index: usize,
+}
 
 /// What a macro argument is bound to during one expansion. A string, number,
 /// or boolean literal at the call site is substituted into the macro body, so
@@ -125,6 +135,65 @@ type RawNames = BTreeSet<String>;
 /// text escaper that writes markup unchanged.
 const HTML_ESCAPERS: &[&str] = &[
     "askama", "html", "htm", "j2", "jinja", "jinja2", "rinja", "svg", "xml",
+];
+
+/// Names that write their argument unescaped when called directly: the
+/// wrappers Askama's escaper passes through, and the filter functions whose
+/// filter form escapes first but whose direct call does not.
+const RAW_CALLEES: &[&str] = &[
+    "Safe",
+    "MaybeSafe",
+    "HtmlSafeOutput",
+    "safe",
+    "escape",
+    "e",
+    "linebreaks",
+    "linebreaksbr",
+    "paragraphbreaks",
+];
+
+/// Filters whose output the checker can classify: Askama 0.16's builtins
+/// and the framework's own. Any other filter is application code that may
+/// return a value Askama writes unescaped.
+const KNOWN_FILTERS: &[&str] = &[
+    "assigned_or",
+    "capitalize",
+    "center",
+    "default",
+    "defined_or",
+    "deref",
+    "e",
+    "escape",
+    "filesizeformat",
+    "fmt",
+    "format",
+    "indent",
+    "join",
+    "json",
+    "linebreaks",
+    "linebreaksbr",
+    "live_key",
+    "live_key_digest",
+    "lower",
+    "lowercase",
+    "paragraphbreaks",
+    "pluralize",
+    "ref",
+    "reject",
+    "safe",
+    "title",
+    "titlecase",
+    "tojson",
+    "trim",
+    "truncate",
+    "trusted_html",
+    "unique",
+    "upper",
+    "uppercase",
+    "urlencode",
+    "urlencode_strict",
+    "value",
+    "wordcount",
 ];
 
 /// A parsed template with the templates it imports, so a macro body can call
@@ -163,6 +232,10 @@ impl<'a> TemplateEnv<'a> {
     }
 }
 
+/// The names that splice a macro's caller content: `caller` itself, and any
+/// alias a `{% set c = caller %}` makes.
+type CallerNames = BTreeSet<String>;
+
 /// The expansion scope handed down the node walk: the template whose macros
 /// are visible, the argument bindings of the macro being expanded, and the
 /// caller content a `{{ caller() }}` splices in.
@@ -170,8 +243,32 @@ struct Scope<'s, 'a> {
     template: &'s TemplateEnv<'a>,
     bindings: &'s Bindings,
     raw: &'s RawNames,
-    caller: Option<&'s Fragment<'a>>,
+    caller: Option<&'s CallerContent<'s, 'a>>,
+    caller_names: &'s CallerNames,
+    block: Option<BlockCursor<'s, 'a>>,
     macro_depth: usize,
+}
+
+/// The body of a `{% call %}` block, kept unrendered. Askama renders it at
+/// each `caller()` inside the macro, in the macro's scope, so a macro
+/// parameter or local shadows the call site's name; it resolves macros
+/// through the call site's template.
+struct CallerContent<'c, 'a> {
+    nodes: &'c [Box<Node<'a>>],
+    template: &'c TemplateEnv<'a>,
+    place: Place<'c, 'a>,
+    chain: &'c Chain<'c, 'a>,
+}
+
+/// One macro expansion: the definition, the template that defines it, the
+/// arguments the call passes, the caller content, if any, and where the
+/// call stands.
+struct Invocation<'i, 'a> {
+    definition: &'i Macro<'a>,
+    template: &'i TemplateEnv<'a>,
+    arguments: &'i [WithSpan<Box<Expr<'a>>>],
+    caller: Option<&'i CallerContent<'i, 'a>>,
+    span: Span,
 }
 
 /// The tag that brought a template in, `{% include %}`, `{% import %}`, or
@@ -228,13 +325,8 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
     /// Renders the view into one tree, or `None` when a failure left nothing
     /// checkable; that failure has reported itself.
     pub(crate) fn render(mut self, view: &ViewName) -> Option<RenderedView<'checker>> {
-        let fragment = self.render_view(
-            view,
-            &Overrides::new(),
-            &RawNames::new(),
-            &mut Vec::new(),
-            None,
-        )?;
+        let fragment =
+            self.render_view(view, &Chain::new(), &RawNames::new(), &mut Vec::new(), None)?;
         Some(RenderedView {
             fragment,
             files: self.files,
@@ -260,7 +352,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
     fn render_view(
         &mut self,
         view: &ViewName,
-        incoming_overrides: &Overrides<'checker>,
+        chain: &Chain<'_, 'checker>,
         raw: &RawNames,
         stack: &mut Vec<ViewName>,
         site: Option<Site<'_>>,
@@ -337,44 +429,29 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             imports,
         };
         let root_bindings = Bindings::new();
+        let no_caller = CallerNames::new();
         let scope = Scope {
             template: &env,
             bindings: &root_bindings,
             raw,
             caller: None,
+            caller_names: &no_caller,
+            block: None,
             macro_depth: 0,
         };
         let place = Place { view, file, source };
+        // This template's block definitions join the chain behind the more
+        // derived ones already in it.
+        let mut extended: Chain<'_, 'checker> = chain.clone();
+        collect_blocks(env.ast.nodes(), &env, &mut extended);
         let parent = env.ast.nodes().iter().find_map(|node| match node.as_ref() {
             Node::Extends(parent) => Some((parent.path, tag_location(source, node.span()))),
             _ => None,
         });
         let rendered = if let Some((parent, (line, column))) = parent {
             let site = Site { view, line, column };
-            let mut overrides = incoming_overrides.clone();
-            for node in env.ast.nodes() {
-                if let Node::BlockDef(block) = node.as_ref() {
-                    let name = (*block.name).to_owned();
-                    if let Entry::Vacant(entry) = overrides.entry(name) {
-                        let mut fragment = Fragment::default();
-                        let rendered = self
-                            .expand_nodes(
-                                &block.nodes,
-                                &mut fragment,
-                                incoming_overrides,
-                                place,
-                                stack,
-                                &scope,
-                            )
-                            .map(|()| fragment);
-                        entry.insert(rendered);
-                    }
-                }
-            }
             match ViewName::parse(parent) {
-                Ok(parent) => {
-                    self.render_view(&parent, &overrides, &RawNames::new(), stack, Some(site))
-                }
+                Ok(parent) => self.render_view(&parent, &extended, raw, stack, Some(site)),
                 Err(_) => {
                     self.push(
                         DiagnosticCode::MissingTemplate,
@@ -391,7 +468,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             self.expand_nodes(
                 env.ast.nodes(),
                 &mut fragment,
-                incoming_overrides,
+                &extended,
                 place,
                 stack,
                 &scope,
@@ -514,7 +591,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         &mut self,
         nodes: &[Box<Node<'checker>>],
         out: &mut Fragment<'checker>,
-        overrides: &Overrides<'checker>,
+        chain: &Chain<'_, 'checker>,
         place: Place<'_, 'checker>,
         stack: &mut Vec<ViewName>,
         scope: &Scope<'_, 'checker>,
@@ -523,17 +600,19 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         // A `{% let %}` rebinds a name for the nodes after it in this block:
         // it shadows a macro argument's literal and makes the name raw or
         // not, by its value.
-        let mut environment: Option<(Bindings, RawNames)> = None;
+        let mut environment: Option<(Bindings, RawNames, CallerNames)> = None;
         for (index, node) in nodes.iter().enumerate() {
-            let (bindings, raw) = match &environment {
-                Some((bindings, raw)) => (bindings, raw),
-                None => (scope.bindings, scope.raw),
+            let (bindings, raw, caller_names) = match &environment {
+                Some((bindings, raw, caller_names)) => (bindings, raw, caller_names),
+                None => (scope.bindings, scope.raw, scope.caller_names),
             };
             let scope = &Scope {
                 template: scope.template,
                 bindings,
                 raw,
                 caller: scope.caller,
+                caller_names,
+                block: scope.block,
                 macro_depth: scope.macro_depth,
             };
             let mut rebound = None;
@@ -549,13 +628,67 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     }
                 }
                 Node::Expr(_, expression) => {
+                    self.check_expression(place, expression);
                     let origin = Origin {
                         file: place.file,
                         offset: offset_u32(expression_start(expression).unwrap_or(0)),
                         literal: false,
                     };
-                    if is_caller_call(expression) {
-                        let Some(caller) = scope.caller else {
+                    // Askama writes `{{ show(x) }}` and `{{ ui::show(x) }}` as
+                    // macro calls when the name resolves to a macro, so the
+                    // body is expanded and checked where the call stands.
+                    // `{{ super() }}` writes the next definition of the block
+                    // being rendered, with the locals here.
+                    if let Expr::Call(call) = strip_groups(expression)
+                        && call.args.is_empty()
+                        && matches!(&**call.path, Expr::Var("super"))
+                    {
+                        match scope.block {
+                            Some(cursor) if cursor.index + 1 < cursor.links.len() => {
+                                self.branched = true;
+                                let next = BlockCursor {
+                                    index: cursor.index + 1,
+                                    ..cursor
+                                };
+                                self.expand_block(
+                                    out,
+                                    next,
+                                    chain,
+                                    stack,
+                                    scope,
+                                    expression.span(),
+                                )?;
+                            }
+                            _ => {
+                                let (line, column) = expression_location(source, expression);
+                                self.push(
+                                    DiagnosticCode::DynamicStructureUnproved,
+                                    DiagnosticSeverity::Unproved,
+                                    view,
+                                    line,
+                                    column,
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    let splices_caller = is_caller_call(expression, scope.caller_names);
+                    if !splices_caller
+                        && let Expr::Call(call) = strip_groups(expression)
+                        && let Some((definition, template)) = expression_macro(scope, call)
+                    {
+                        let invocation = Invocation {
+                            definition,
+                            template,
+                            arguments: &call.args,
+                            caller: None,
+                            span: expression.span(),
+                        };
+                        self.expand_macro(out, invocation, place, stack, scope)?;
+                        continue;
+                    }
+                    if splices_caller || is_caller_call(expression, &bare_caller()) {
+                        let Some(caller) = scope.caller.filter(|_| splices_caller) else {
                             let (line, column) = expression_location(source, expression);
                             self.push(
                                 DiagnosticCode::DynamicStructureUnproved,
@@ -566,7 +699,27 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             );
                             continue;
                         };
-                        self.inline(out, caller, origin, view)?;
+                        // The macro's bindings and raw names here already lie
+                        // over the call site's; `caller` itself is not visible
+                        // inside its own content.
+                        let no_caller = CallerNames::new();
+                        let caller_scope = Scope {
+                            template: caller.template,
+                            bindings: scope.bindings,
+                            raw: scope.raw,
+                            caller: None,
+                            caller_names: &no_caller,
+                            block: None,
+                            macro_depth: scope.macro_depth,
+                        };
+                        self.expand_nodes(
+                            caller.nodes,
+                            out,
+                            caller.chain,
+                            caller.place,
+                            stack,
+                            &caller_scope,
+                        )?;
                         continue;
                     }
                     if let Some(Binding::Literal(literal)) =
@@ -587,22 +740,33 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     }
                     let marker =
                         if expression_uses_filter(source, expression.span(), "live_key_digest") {
-                            CHECKED_DIGEST_MARKER
+                            Cow::Borrowed(CHECKED_DIGEST_MARKER)
                         } else if expression_uses_filter(source, expression.span(), "live_key") {
-                            CHECKED_KEY_MARKER
+                            Cow::Borrowed(CHECKED_KEY_MARKER)
+                        } else if let Some(breaks) = line_break_marker(expression) {
+                            // Still dynamic text, followed by the markup the
+                            // filter inserts.
+                            Cow::Owned(format!("{DYNAMIC_MARKER}<!--{breaks}-->"))
                         } else {
-                            DYNAMIC_MARKER
+                            Cow::Borrowed(DYNAMIC_MARKER)
                         };
-                    self.push_text(out, Cow::Borrowed(marker), origin, view)?;
+                    self.push_text(out, marker, origin, view)?;
                 }
                 Node::If(node) => {
+                    for cond in node
+                        .branches
+                        .iter()
+                        .filter_map(|branch| branch.cond.as_ref())
+                    {
+                        self.check_expression(place, &cond.expr);
+                    }
                     // A condition the macro's literal arguments decide is not
                     // a branch: only the arm they select is rendered, so a
                     // library macro called many times does not add a choice
                     // for every `{% if %}` it carries.
                     if let Some(decided) = decided_branch(node, scope.bindings) {
                         if let Some(nodes) = decided {
-                            self.expand_nodes(nodes, out, overrides, place, stack, scope)?;
+                            self.expand_nodes(nodes, out, chain, place, stack, scope)?;
                         }
                     } else {
                         // A name an `if let` binds shadows a macro argument
@@ -611,18 +775,14 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             .branches
                             .iter()
                             .map(|branch| {
-                                let mut names = Vec::new();
-                                let mut value_is_raw = false;
-                                if let Some(cond) = branch.cond.as_ref()
-                                    && let Some(target) = cond.target.as_ref()
-                                {
-                                    bound_names(target, &mut names);
-                                    value_is_raw = expression_is_raw(&cond.expr, scope.raw);
-                                }
+                                let (names, raw) = branch.cond.as_ref().map_or_else(
+                                    || (Vec::new(), None),
+                                    |cond| bind_let_chain(cond, scope.raw),
+                                );
                                 Choice {
                                     nodes: branch.nodes.as_slice(),
                                     shadowed: shadowed_bindings(scope.bindings, &names),
-                                    raw: rebind_raw(scope.raw, &names, value_is_raw),
+                                    raw,
                                 }
                             })
                             .collect();
@@ -634,10 +794,11 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             });
                         }
                         let origin = tag_origin(place, node.span());
-                        self.expand_choices(out, &choices, origin, overrides, place, stack, scope)?;
+                        self.expand_choices(out, &choices, origin, chain, place, stack, scope)?;
                     }
                 }
                 Node::Match(node) => {
+                    self.check_expression(place, &node.expr);
                     let value_is_raw = expression_is_raw(&node.expr, scope.raw);
                     let choices: Vec<Choice<'_, '_>> = node
                         .arms
@@ -655,9 +816,13 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         })
                         .collect();
                     let origin = tag_origin(place, node.span());
-                    self.expand_choices(out, &choices, origin, overrides, place, stack, scope)?;
+                    self.expand_choices(out, &choices, origin, chain, place, stack, scope)?;
                 }
                 Node::Loop(node) => {
+                    self.check_expression(place, &node.iter);
+                    if let Some(cond) = &node.cond {
+                        self.check_expression(place, cond);
+                    }
                     let mut names = vec!["loop"];
                     bound_names(&node.var, &mut names);
                     let shadowed = shadowed_bindings(scope.bindings, &names);
@@ -677,6 +842,8 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         bindings: shadowed.as_ref().unwrap_or(scope.bindings),
                         raw: loop_raw.as_ref().unwrap_or(scope.raw),
                         caller: scope.caller,
+                        caller_names: scope.caller_names,
+                        block: scope.block,
                         macro_depth: scope.macro_depth,
                     };
                     // The loop's own names are bound in its body, not in
@@ -686,7 +853,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         out,
                         (&node.body, &node.else_nodes),
                         origin,
-                        overrides,
+                        chain,
                         place,
                         stack,
                         (&loop_scope, scope),
@@ -699,7 +866,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             let site = Site { view, line, column };
                             let fragment = self.render_view(
                                 &include,
-                                &Overrides::new(),
+                                &Chain::new(),
                                 scope.raw,
                                 stack,
                                 Some(site),
@@ -719,17 +886,36 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         }
                     }
                 }
+                // Askama writes the most derived definition here, with the
+                // locals at this site; a block nested in itself does not
+                // compile and is not expanded again.
                 Node::BlockDef(block) => {
-                    if let Some(fragment) = overrides.get(*block.name) {
-                        self.branched = true;
-                        self.inline(
-                            out,
-                            fragment.as_ref()?,
-                            tag_origin(place, node.span()),
+                    if scope.block.is_some_and(|cursor| cursor.name == *block.name) {
+                        let (line, column) = tag_location(source, node.span());
+                        self.push(
+                            DiagnosticCode::DynamicStructureUnproved,
+                            DiagnosticSeverity::Unproved,
                             view,
-                        )?;
-                    } else {
-                        self.expand_nodes(&block.nodes, out, overrides, place, stack, scope)?;
+                            line,
+                            column,
+                        );
+                        continue;
+                    }
+                    match chain.get(*block.name).filter(|links| !links.is_empty()) {
+                        Some(links) => {
+                            if links.len() > 1 {
+                                self.branched = true;
+                            }
+                            let cursor = BlockCursor {
+                                name: *block.name,
+                                links,
+                                index: 0,
+                            };
+                            self.expand_block(out, cursor, chain, stack, scope, node.span())?;
+                        }
+                        None => {
+                            self.expand_nodes(&block.nodes, out, chain, place, stack, scope)?;
+                        }
                     }
                 }
                 Node::FilterBlock(block) => {
@@ -750,10 +936,10 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             column,
                         );
                     }
-                    self.expand_nodes(&block.nodes, out, overrides, place, stack, scope)?;
+                    self.expand_nodes(&block.nodes, out, chain, place, stack, scope)?;
                 }
                 // A macro call: the body is walked with the call's literal
-                // arguments bound, the caller content rendered first for
+                // arguments bound, the caller content spliced at each
                 // `{{ caller() }}`, and the defining template's macros in
                 // scope. A call the checker cannot resolve, or one passing
                 // caller arguments, stays an explicit unproved result.
@@ -782,44 +968,23 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         );
                         continue;
                     }
-                    if scope.macro_depth >= self.limits.max_include_depth() {
-                        let (line, column) = tag_location(source, node.span());
-                        self.push(
-                            DiagnosticCode::IncludeDepthLimit,
-                            DiagnosticSeverity::Error,
-                            view,
-                            line,
-                            column,
-                        );
-                        return None;
+                    for argument in call.args.as_deref().unwrap_or(&[]) {
+                        self.check_expression(place, argument);
                     }
-                    let bindings = bind_arguments(definition, call, scope.bindings);
-                    let raw = bind_raw_arguments(definition, call, scope.raw);
-                    // An empty call block is empty caller content. A caller
-                    // that fails to render stops the path, as its failure
-                    // would stop the template.
-                    let mut caller = Fragment::default();
-                    self.expand_nodes(&call.nodes, &mut caller, overrides, place, stack, scope)?;
-                    let inner = Scope {
+                    let caller = CallerContent {
+                        nodes: &call.nodes,
+                        template: scope.template,
+                        place,
+                        chain,
+                    };
+                    let invocation = Invocation {
+                        definition,
                         template,
-                        bindings: &bindings,
-                        raw: &raw,
+                        arguments: call.args.as_deref().unwrap_or(&[]),
                         caller: Some(&caller),
-                        macro_depth: scope.macro_depth + 1,
+                        span: node.span(),
                     };
-                    let body = Place {
-                        view: &template.view,
-                        file: template.file,
-                        source: template.source,
-                    };
-                    self.expand_nodes(
-                        &definition.nodes,
-                        out,
-                        &Overrides::new(),
-                        body,
-                        stack,
-                        &inner,
-                    )?;
+                    self.expand_macro(out, invocation, place, stack, scope)?;
                 }
                 // A definition renders nothing where it stands; its body is
                 // walked at each call.
@@ -835,7 +1000,10 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     };
                     let value_is_raw = reassigned_raw
                         || match &node.val {
-                            LetValueOrBlock::Value(value) => expression_is_raw(value, scope.raw),
+                            LetValueOrBlock::Value(value) => {
+                                self.check_expression(place, value);
+                                expression_is_raw(value, scope.raw)
+                            }
                             // Askama renders a `{% set %}` block into a
                             // string and escapes that string where it is
                             // written, so the name holds escaped text. A raw
@@ -847,7 +1015,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                                 let _ = self.expand_nodes(
                                     block,
                                     &mut discarded,
-                                    overrides,
+                                    chain,
                                     place,
                                     stack,
                                     scope,
@@ -861,7 +1029,22 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     }
                     let raw = rebind_raw(scope.raw, &names, value_is_raw)
                         .unwrap_or_else(|| scope.raw.clone());
-                    rebound = Some((bindings, raw));
+                    // `{% set c = caller %}` makes `c()` splice the caller
+                    // content; any other value shadows a caller alias.
+                    let mut caller_names = scope.caller_names.clone();
+                    let aliases_caller = matches!(
+                        (&node.var, &node.val),
+                        (Target::Name(_), LetValueOrBlock::Value(value))
+                            if matches!(&***value, Expr::Var(name) if scope.caller_names.contains(*name))
+                    );
+                    for name in &names {
+                        if aliases_caller {
+                            caller_names.insert((*name).to_owned());
+                        } else {
+                            caller_names.remove(*name);
+                        }
+                    }
+                    rebound = Some((bindings, raw, caller_names));
                 }
                 // A name declared without a value is assigned later, possibly
                 // inside a nested block whose value it keeps after the block,
@@ -870,17 +1053,18 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     let name = *declare.var_name;
                     let later = possibly_raw_names(&nodes[index + 1..], scope.raw);
                     if let Some(raw) = rebind_raw(scope.raw, &[name], later.contains(name)) {
-                        rebound = Some((scope.bindings.clone(), raw));
+                        rebound = Some((scope.bindings.clone(), raw, scope.caller_names.clone()));
                     }
                 }
                 // `{% mut x = value %}` and the compound forms leave `x` raw
                 // when the assigned value is raw; a raw `x` stays raw.
                 Node::Compound(compound) => {
+                    self.check_expression(place, &compound.op.rhs);
                     if expression_is_raw(&compound.op.rhs, scope.raw)
                         && let Some(name) = assigned_name(&compound.op.lhs)
                         && let Some(raw) = rebind_raw(scope.raw, &[name], true)
                     {
-                        rebound = Some((scope.bindings.clone(), raw));
+                        rebound = Some((scope.bindings.clone(), raw, scope.caller_names.clone()));
                     }
                 }
                 Node::Comment(_)
@@ -896,6 +1080,123 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         Some(())
     }
 
+    /// Reports an expression the checker cannot classify: one that applies a
+    /// filter outside [`KNOWN_FILTERS`], which may return a value Askama
+    /// writes unescaped, or that expands a Rust macro.
+    fn check_expression(
+        &mut self,
+        place: Place<'_, 'checker>,
+        expression: &WithSpan<Box<Expr<'_>>>,
+    ) {
+        if expression_is_unclassified(expression) {
+            let (line, column) = expression_location(place.source, expression);
+            self.push(
+                DiagnosticCode::DynamicStructureUnproved,
+                DiagnosticSeverity::Unproved,
+                place.view,
+                line,
+                column,
+            );
+        }
+    }
+
+    /// Expands one definition of a block where the block, or the
+    /// `{{ super() }}` that asks for it, stands: in the defining template,
+    /// with the bindings and raw names of the site. Block nesting counts
+    /// against the include depth limit.
+    fn expand_block(
+        &mut self,
+        out: &mut Fragment<'checker>,
+        cursor: BlockCursor<'_, 'checker>,
+        chain: &Chain<'_, 'checker>,
+        stack: &mut Vec<ViewName>,
+        scope: &Scope<'_, 'checker>,
+        span: Span,
+    ) -> Option<()> {
+        let link = cursor.links.get(cursor.index)?;
+        if scope.macro_depth >= self.limits.max_include_depth() {
+            let (line, column) = tag_location(link.template.source, span);
+            let view = link.template.view.clone();
+            self.push(
+                DiagnosticCode::IncludeDepthLimit,
+                DiagnosticSeverity::Error,
+                &view,
+                line,
+                column,
+            );
+            return None;
+        }
+        let place = Place {
+            view: &link.template.view,
+            file: link.template.file,
+            source: link.template.source,
+        };
+        let no_caller = CallerNames::new();
+        let block_scope = Scope {
+            template: link.template,
+            bindings: scope.bindings,
+            raw: scope.raw,
+            caller: None,
+            caller_names: &no_caller,
+            block: Some(cursor),
+            macro_depth: scope.macro_depth + 1,
+        };
+        self.expand_nodes(link.nodes, out, chain, place, stack, &block_scope)
+    }
+
+    /// Expands a macro body where the call stands, with the call's arguments
+    /// bound and the defining template's macros in scope, under the include
+    /// depth limit, which also bounds macro recursion.
+    fn expand_macro(
+        &mut self,
+        out: &mut Fragment<'checker>,
+        invocation: Invocation<'_, 'checker>,
+        place: Place<'_, 'checker>,
+        stack: &mut Vec<ViewName>,
+        scope: &Scope<'_, 'checker>,
+    ) -> Option<()> {
+        let Invocation {
+            definition,
+            template,
+            arguments,
+            caller,
+            span,
+        } = invocation;
+        if scope.macro_depth >= self.limits.max_include_depth() {
+            let (line, column) = tag_location(place.source, span);
+            self.push(
+                DiagnosticCode::IncludeDepthLimit,
+                DiagnosticSeverity::Error,
+                place.view,
+                line,
+                column,
+            );
+            return None;
+        }
+        let bindings = bind_arguments(definition, arguments, scope.bindings);
+        let raw = bind_raw_arguments(definition, arguments, scope.raw);
+        let caller_names = if caller.is_some() {
+            bare_caller()
+        } else {
+            CallerNames::new()
+        };
+        let inner = Scope {
+            template,
+            bindings: &bindings,
+            raw: &raw,
+            caller,
+            caller_names: &caller_names,
+            block: None,
+            macro_depth: scope.macro_depth + 1,
+        };
+        let body = Place {
+            view: &template.view,
+            file: template.file,
+            source: template.source,
+        };
+        self.expand_nodes(&definition.nodes, out, &Chain::new(), body, stack, &inner)
+    }
+
     /// Renders each arm once into one choice. An arm whose rendering fails
     /// is not a way through the template; when none is left, the path stops.
     #[allow(
@@ -907,7 +1208,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         out: &mut Fragment<'checker>,
         choices: &[Choice<'_, 'checker>],
         origin: Origin,
-        overrides: &Overrides<'checker>,
+        chain: &Chain<'_, 'checker>,
         place: Place<'_, 'checker>,
         stack: &mut Vec<ViewName>,
         scope: &Scope<'_, 'checker>,
@@ -919,18 +1220,13 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 bindings: choice.shadowed.as_ref().unwrap_or(scope.bindings),
                 raw: choice.raw.as_ref().unwrap_or(scope.raw),
                 caller: scope.caller,
+                caller_names: scope.caller_names,
+                block: scope.block,
                 macro_depth: scope.macro_depth,
             };
             let mut arm = Fragment::default();
             if self
-                .expand_nodes(
-                    choice.nodes,
-                    &mut arm,
-                    overrides,
-                    place,
-                    stack,
-                    &choice_scope,
-                )
+                .expand_nodes(choice.nodes, &mut arm, chain, place, stack, &choice_scope)
                 .is_some()
             {
                 arms.push(arm);
@@ -957,7 +1253,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         out: &mut Fragment<'checker>,
         (body, else_nodes): (&[Box<Node<'checker>>], &[Box<Node<'checker>>]),
         origin: Origin,
-        overrides: &Overrides<'checker>,
+        chain: &Chain<'_, 'checker>,
         place: Place<'_, 'checker>,
         stack: &mut Vec<ViewName>,
         (body_scope, else_scope): (&Scope<'_, 'checker>, &Scope<'_, 'checker>),
@@ -972,9 +1268,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 origin,
                 view,
             )
-            .and_then(|()| {
-                self.expand_nodes(body, &mut repeated, overrides, place, stack, body_scope)
-            })
+            .and_then(|()| self.expand_nodes(body, &mut repeated, chain, place, stack, body_scope))
             .and_then(|()| {
                 self.push_text(
                     &mut repeated,
@@ -990,7 +1284,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         }
         let mut empty = Fragment::default();
         if self
-            .expand_nodes(else_nodes, &mut empty, overrides, place, stack, else_scope)
+            .expand_nodes(else_nodes, &mut empty, chain, place, stack, else_scope)
             .is_some()
         {
             arms.push(empty);
@@ -1040,20 +1334,6 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
     ) -> Option<()> {
         self.charge(text.len(), origin, view)?;
         out.pieces.push(Piece::Text(text, origin));
-        Some(())
-    }
-
-    /// Appends a copy of an already rendered fragment, caller content or an
-    /// inherited block override, at the tag `origin` that splices it in.
-    fn inline(
-        &mut self,
-        out: &mut Fragment<'checker>,
-        fragment: &Fragment<'checker>,
-        origin: Origin,
-        view: &ViewName,
-    ) -> Option<()> {
-        self.charge(fragment.text_bytes(), origin, view)?;
-        out.pieces.extend(fragment.pieces.iter().cloned());
         Some(())
     }
 
@@ -1111,6 +1391,41 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             column,
             Some(self.component),
         );
+    }
+}
+
+/// Adds every block a template defines, at any depth Askama looks, to the
+/// chain behind the definitions already there.
+fn collect_blocks<'c, 'a>(
+    nodes: &'c [Box<Node<'a>>],
+    template: &'c TemplateEnv<'a>,
+    chain: &mut Chain<'c, 'a>,
+) {
+    for node in nodes {
+        match node.as_ref() {
+            Node::BlockDef(block) => {
+                chain.entry(*block.name).or_default().push(BlockLink {
+                    nodes: &block.nodes,
+                    template,
+                });
+                collect_blocks(&block.nodes, template, chain);
+            }
+            Node::If(node) => {
+                for branch in &node.branches {
+                    collect_blocks(&branch.nodes, template, chain);
+                }
+            }
+            Node::Loop(node) => {
+                collect_blocks(&node.body, template, chain);
+                collect_blocks(&node.else_nodes, template, chain);
+            }
+            Node::Match(node) => {
+                for arm in &node.arms {
+                    collect_blocks(&arm.nodes, template, chain);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1177,9 +1492,64 @@ fn expression_is_raw(expression: &Expr<'_>, raw: &RawNames) -> bool {
     match expression {
         Expr::Var(name) => raw.contains(*name),
         Expr::Filter(filter) => filter_writes_raw(filter, raw),
+        // Askama writes a path call as given and passes a `Safe` value
+        // through its escaper, so a raw wrapper or a filter function named
+        // directly writes its argument unescaped.
+        Expr::Call(call) if names_raw_callee(&call.path) => true,
+        Expr::Struct(structure) if names_raw_callee(&structure.path) => true,
+        Expr::Path(path) if path_names_raw_callee(path) => true,
         other => sub_expressions(other)
             .into_iter()
             .any(|inner| expression_is_raw(inner, raw)),
+    }
+}
+
+fn names_raw_callee(callee: &Expr<'_>) -> bool {
+    match callee {
+        Expr::Var(name) => RAW_CALLEES.contains(name),
+        Expr::Path(path) => path_names_raw_callee(path),
+        _ => false,
+    }
+}
+
+fn path_names_raw_callee(path: &[askama_parser::PathComponent<'_>]) -> bool {
+    path.last()
+        .is_some_and(|component| RAW_CALLEES.contains(&*component.name))
+}
+
+/// Whether the expression applies a filter outside [`KNOWN_FILTERS`],
+/// a filter named by path included, or expands a Rust macro.
+fn expression_is_unclassified(expression: &Expr<'_>) -> bool {
+    match expression {
+        Expr::Filter(filter) => {
+            !matches!(&filter.name, PathOrIdentifier::Identifier(name) if KNOWN_FILTERS.contains(&**name))
+                || filter
+                    .arguments
+                    .iter()
+                    .any(|argument| expression_is_unclassified(argument))
+        }
+        Expr::RustMacro(..) => true,
+        other => sub_expressions(other)
+            .into_iter()
+            .any(|inner| expression_is_unclassified(inner)),
+    }
+}
+
+/// The marker for markup a line-break filter in the output's filter chain
+/// inserts: `<p>` elements for `linebreaks` and `paragraphbreaks`, `<br/>`
+/// for `linebreaksbr`.
+fn line_break_marker(expression: &Expr<'_>) -> Option<&'static str> {
+    let Expr::Filter(filter) = strip_groups(expression) else {
+        return None;
+    };
+    let inner = filter
+        .arguments
+        .first()
+        .and_then(|value| line_break_marker(value));
+    match filter_name(filter) {
+        "linebreaks" | "paragraphbreaks" => Some(PARAGRAPHS_MARKER),
+        "linebreaksbr" => inner.or(Some(LINE_BREAKS_MARKER)),
+        _ => inner,
     }
 }
 
@@ -1278,10 +1648,19 @@ fn expression_location(source: &str, expression: &WithSpan<Box<Expr<'_>>>) -> (u
 
 fn expression_start(expression: &WithSpan<Box<Expr<'_>>>) -> Option<usize> {
     let own = expression.span().byte_range().map(|range| range.start);
+    // A Rust macro is spanned from its `!`; its path comes before that.
+    let macro_path = match &***expression {
+        Expr::RustMacro(path, _) => path
+            .first()
+            .and_then(|segment| segment.span().byte_range())
+            .map(|range| range.start),
+        _ => None,
+    };
     sub_expressions(expression)
         .into_iter()
         .filter_map(expression_start)
         .chain(own)
+        .chain(macro_path)
         .min()
 }
 
@@ -1336,14 +1715,12 @@ fn collect_raw_assignments(nodes: &[Box<Node<'_>>], raw: &mut RawNames) {
             Node::If(node) => {
                 for branch in &node.branches {
                     if let Some(cond) = &branch.cond
-                        && let Some(target) = &cond.target
-                        && expression_is_raw(&cond.expr, raw)
+                        && let (_, Some(bound)) = bind_let_chain(cond, raw)
                     {
-                        bound_names(target, &mut names);
+                        raw.extend(bound);
                     }
                     collect_raw_assignments(&branch.nodes, raw);
                 }
-                insert_all(raw, &names);
             }
             Node::Match(node) => {
                 let value_is_raw = expression_is_raw(&node.expr, raw);
@@ -1371,6 +1748,56 @@ fn collect_raw_assignments(nodes: &[Box<Node<'_>>], raw: &mut RawNames) {
             | Node::Raw(_)
             | Node::Break(_)
             | Node::Continue(_) => {}
+        }
+    }
+}
+
+/// The names an `if` condition binds and the raw names after it. A leading
+/// `if let` binds from the condition, and each `let` after `&&` binds from
+/// its own expression, left to right, so a later binding can read an earlier
+/// one. `None` when the raw names do not change.
+fn bind_let_chain<'a>(
+    cond: &askama_parser::node::CondTest<'a>,
+    raw: &RawNames,
+) -> (Vec<&'a str>, Option<RawNames>) {
+    let mut lets = Vec::new();
+    collect_lets(cond, &mut lets);
+    let mut names = Vec::new();
+    let mut after = raw.clone();
+    for (target, value) in lets {
+        let mut bound = Vec::new();
+        bound_names(target, &mut bound);
+        let value_is_raw = expression_is_raw(value, &after);
+        if let Some(rebound) = rebind_raw(&after, &bound, value_is_raw) {
+            after = rebound;
+        }
+        names.extend(bound);
+    }
+    let changed = after != *raw;
+    (names, changed.then_some(after))
+}
+
+/// Each `let` of a condition with the expression it binds from, in order.
+fn collect_lets<'c, 'a>(
+    cond: &'c askama_parser::node::CondTest<'a>,
+    lets: &mut Vec<(&'c Target<'a>, &'c Expr<'a>)>,
+) {
+    if let Some(target) = &cond.target {
+        lets.push((target, &cond.expr));
+    }
+    collect_let_conditions(&cond.expr, lets);
+}
+
+fn collect_let_conditions<'c, 'a>(
+    expression: &'c Expr<'a>,
+    lets: &mut Vec<(&'c Target<'a>, &'c Expr<'a>)>,
+) {
+    match expression {
+        Expr::LetCond(cond) => collect_lets(cond, lets),
+        other => {
+            for inner in sub_expressions(other) {
+                collect_let_conditions(inner, lets);
+            }
         }
     }
 }
@@ -1409,9 +1836,14 @@ fn rebind_raw(raw: &RawNames, names: &[&str], value_is_raw: bool) -> Option<RawN
 /// named ones, then each parameter's default. A literal binds as its text; a
 /// variable that is itself bound in the calling scope carries that binding
 /// through; anything else is dynamic.
-fn bind_arguments(definition: &Macro<'_>, call: &Call<'_>, outer: &Bindings) -> Bindings {
-    let mut bindings = Bindings::new();
-    let supplied: &[_] = call.args.as_deref().unwrap_or(&[]);
+fn bind_arguments(
+    definition: &Macro<'_>,
+    supplied: &[WithSpan<Box<Expr<'_>>>],
+    outer: &Bindings,
+) -> Bindings {
+    // Askama expands a macro in the calling scope, so the caller's literal
+    // bindings stay visible under the parameters.
+    let mut bindings = outer.clone();
     let mut positional = supplied
         .iter()
         .filter(|argument| !matches!(&****argument, Expr::NamedArgument(_, _)));
@@ -1440,9 +1872,12 @@ fn bind_arguments(definition: &Macro<'_>, call: &Call<'_>, outer: &Bindings) -> 
 /// in the calling scope, so the caller's raw names stay visible unless a
 /// parameter shadows one; a parameter is raw when the argument it receives,
 /// or its default, is raw in the calling scope.
-fn bind_raw_arguments(definition: &Macro<'_>, call: &Call<'_>, outer: &RawNames) -> RawNames {
+fn bind_raw_arguments(
+    definition: &Macro<'_>,
+    supplied: &[WithSpan<Box<Expr<'_>>>],
+    outer: &RawNames,
+) -> RawNames {
     let mut raw = outer.clone();
-    let supplied: &[_] = call.args.as_deref().unwrap_or(&[]);
     let mut positional = supplied
         .iter()
         .filter(|argument| !matches!(&****argument, Expr::NamedArgument(_, _)));
@@ -1608,11 +2043,45 @@ fn bound_variable<'b>(expression: &Expr<'_>, bindings: &'b Bindings) -> Option<&
     }
 }
 
-fn is_caller_call(expression: &Expr<'_>) -> bool {
+/// The expression inside any parentheses around it.
+fn strip_groups<'e, 'a>(expression: &'e Expr<'a>) -> &'e Expr<'a> {
     match expression {
-        Expr::Call(call) => call.args.is_empty() && matches!(&**call.path, Expr::Var("caller")),
+        Expr::Group(inner) => strip_groups(inner),
+        other => other,
+    }
+}
+
+/// The macro a call expression names, bare or as `scope::name`, when the
+/// template can see one: Askama writes such a call as the macro's body.
+fn expression_macro<'s, 'a>(
+    scope: &Scope<'s, 'a>,
+    call: &askama_parser::expr::Call<'a>,
+) -> Option<(&'s Macro<'a>, &'s TemplateEnv<'a>)> {
+    match &**call.path {
+        Expr::Var(name) => scope.template.find_macro(None, name),
+        Expr::Path(path) => match path.as_slice() {
+            [module, name] if module.generics.is_none() && name.generics.is_none() => {
+                scope.template.find_macro(Some(&module.name), &name.name)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether the expression, inside any parentheses, calls one of `names` with
+/// no arguments: a splice of the caller content.
+fn is_caller_call(expression: &Expr<'_>, names: &CallerNames) -> bool {
+    match strip_groups(expression) {
+        Expr::Call(call) => {
+            call.args.is_empty() && matches!(&**call.path, Expr::Var(name) if names.contains(*name))
+        }
         _ => false,
     }
+}
+
+fn bare_caller() -> CallerNames {
+    CallerNames::from(["caller".to_owned()])
 }
 
 /// Escapes a substituted literal the way Askama escapes `{{ }}` output, so

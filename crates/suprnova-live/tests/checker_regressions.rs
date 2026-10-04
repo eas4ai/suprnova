@@ -743,3 +743,180 @@ fn the_branch_limit_names_the_conditional_that_crossed_it() {
         report.diagnostics()
     );
 }
+
+/// The submit bound counts the fields one path binds: two arms binding 64
+/// different fields each, and one more after them, is 65 on every path.
+#[test]
+fn the_submit_bound_counts_one_path_not_the_union_of_arms() {
+    let limits = CheckerLimits::new(256 * 1024, 8_192, 16, 128, 32_768, 2_048, 256, 1_024)
+        .expect("checker limits within the engine maxima");
+    let controls = |prefix: &str, count: usize| {
+        (0..count)
+            .map(|index| {
+                format!(r#"<input aria-label="{prefix}{index}" live:model="{prefix}_{index}">"#)
+            })
+            .collect::<String>()
+    };
+    let form = |tail: usize| {
+        format!(
+            r#"<form live:submit.prevent="save">{{% if wide %}}{}{{% else %}}{}{{% endif %}}{}</form>"#,
+            controls("left", 64),
+            controls("right", 64),
+            controls("tail", tail)
+        )
+    };
+    let within = check(&form(1), limits);
+    assert!(
+        located(&within, DiagnosticCode::SubmitProposalLimit).is_empty(),
+        "{:?}",
+        within
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.code() != DiagnosticCode::UnknownModel)
+            .collect::<Vec<_>>()
+    );
+    let over = check(&form(64), limits);
+    assert_eq!(
+        located(&over, DiagnosticCode::SubmitProposalLimit).len(),
+        1,
+        "a path binding 128 fields is still refused"
+    );
+}
+/// A literal attribute value holding `<section` does not move the tag's
+/// reported column, and a loop whose end a comment swallowed is reported
+/// at its own `{% for %}` in the template that holds it.
+#[test]
+fn a_tag_start_inside_an_attribute_value_and_an_unclosed_loop_report_their_own_place() {
+    let unclosed = check(
+        "<p>Open</p>\n  <section title=\"a <section b\">",
+        CheckerLimits::default(),
+    );
+    assert_eq!(
+        located(&unclosed, DiagnosticCode::HtmlSyntax),
+        vec![(2, 3)],
+        "{:?}",
+        unclosed.diagnostics()
+    );
+
+    let registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            "<section>\n{% include \"tests/shared.html\" %}\n</section>".to_owned(),
+        ),
+        (
+            view("tests/shared.html"),
+            "<p>x</p>\n{% for item in items %}<i>{{ item }}</i><!-- {% endfor %} -->".to_owned(),
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html").to_owned(),
+        ),
+    ])
+    .expect("template catalog");
+    let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name());
+    let mismatches: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DiagnosticCode::BranchStackMismatch)
+        .map(|diagnostic| {
+            (
+                diagnostic.path().map(|path| path.as_str().to_owned()),
+                diagnostic.line(),
+                diagnostic.column(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        mismatches,
+        vec![(Some("tests/shared.html".to_owned()), 2, 1)],
+        "{:?}",
+        report.diagnostics()
+    );
+}
+fn unproved_at(report: &suprnova_live::checker::CheckReport) -> Vec<(u32, u32)> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.code() == DiagnosticCode::DynamicStructureUnproved
+                && diagnostic.severity() == DiagnosticSeverity::Unproved
+        })
+        .map(|diagnostic| (diagnostic.line(), diagnostic.column()))
+        .collect()
+}
+
+/// Askama escapes `"&'<>`: enough between tags and inside a quoted
+/// attribute value, not in an unquoted value, an event-handler attribute, or
+/// `script` and `style` text. A dynamic value there is unproved.
+#[test]
+fn a_dynamic_value_where_html_escaping_does_not_hold_is_unproved() {
+    for (line, location) in [
+        ("<div title={{ name }}>x</div>", (2, 6)),
+        (
+            "<button type=\"button\" onclick=\"go('{{ name }}')\">x</button>",
+            (2, 23),
+        ),
+        ("<script>let x = '{{ name }}';</script>", (2, 21)),
+        ("<style>.a { color: {{ color }}; }</style>", (2, 23)),
+    ] {
+        let report = check(
+            &format!("<section>\n{line}</section>"),
+            CheckerLimits::default(),
+        );
+        assert_eq!(
+            unproved_at(&report),
+            vec![location],
+            "{line}: {:?}",
+            report.diagnostics()
+        );
+    }
+    for line in [
+        "<div title=\"{{ name }}\">x</div>",
+        "<div title='{{ name }}'>x</div>",
+        "<p>{{ name }}</p>",
+        "<script>let x = 1;</script><style>.a { color: red; }</style>",
+        "<button type=\"button\" onclick=\"go()\">x</button>",
+    ] {
+        let report = check(
+            &format!("<section>{line}</section>"),
+            CheckerLimits::default(),
+        );
+        assert!(report.is_proved(), "{line}: {:?}", report.diagnostics());
+    }
+}
+
+/// `linebreaks` and `paragraphbreaks` write `<p>` elements and
+/// `linebreaksbr` writes `<br/>`; inside an element that cannot hold them,
+/// the browser builds a different tree than the one checked.
+#[test]
+fn line_break_filters_are_unproved_where_their_markup_cannot_stand() {
+    for (line, location) in [
+        ("<p>{{ notes|linebreaks }}</p>", (2, 7)),
+        ("<span>{{ notes|paragraphbreaks }}</span>", (2, 10)),
+        ("<ul>{{ notes|linebreaksbr }}</ul>", (2, 8)),
+    ] {
+        let report = check(
+            &format!("<section>\n{line}</section>"),
+            CheckerLimits::default(),
+        );
+        assert_eq!(
+            unproved_at(&report),
+            vec![location],
+            "{line}: {:?}",
+            report.diagnostics()
+        );
+    }
+    for line in [
+        "<div>{{ notes|linebreaks }}</div>",
+        "<article>{{ notes|paragraphbreaks }}</article>",
+        "<p>{{ notes|linebreaksbr }}</p>",
+    ] {
+        let report = check(
+            &format!("<section>{line}</section>"),
+            CheckerLimits::default(),
+        );
+        assert!(report.is_proved(), "{line}: {:?}", report.diagnostics());
+    }
+}

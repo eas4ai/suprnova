@@ -4,7 +4,12 @@ import { describe, expect, it } from "vitest";
 
 import { EventRouter } from "../src/directives/events.js";
 import { DirectiveOwnership } from "../src/directives/ownership.js";
-import { parseActionCall, parseDirective } from "../src/directives/parser.js";
+import {
+  MAX_ACTION_ARGUMENTS,
+  MAX_VALUE_UNITS,
+  parseActionCall,
+  parseDirective,
+} from "../src/directives/parser.js";
 import { parseActionParameters, type IslandMetadata } from "../src/islands/metadata.js";
 import type { IslandRecord } from "../src/islands/record.js";
 import type { RuntimeDiagnosticInput } from "../src/runtime/diagnostics.js";
@@ -13,6 +18,11 @@ import type { RuntimeScheduler } from "../src/runtime/ports.js";
 import type { ServerIntent, ServerOperation } from "../src/scheduler/intent.js";
 
 interface GrammarVectors {
+  readonly limits: Readonly<{
+    name: Readonly<{ maximum_bytes: number }>;
+    value_maximum_utf16_units: number;
+    maximum_arguments: number;
+  }>;
   readonly valid: readonly Readonly<{
     value: string;
     name: string;
@@ -145,10 +155,17 @@ describe("action directive arguments", () => {
     for (const value of VECTORS.invalid) {
       expect(parseActionCall(value), value).toBeNull();
     }
-    expect(
-      parseActionCall(`save(${Array.from({ length: 128 }, () => "1").join(",")})`),
-    ).not.toBeNull();
-    expect(parseActionCall(`save(${Array.from({ length: 129 }, () => "1").join(",")})`)).toBeNull();
+    const { limits } = VECTORS;
+    expect(MAX_ACTION_ARGUMENTS).toBe(limits.maximum_arguments);
+    expect(MAX_VALUE_UNITS).toBe(limits.value_maximum_utf16_units);
+    const ones = (count: number) => Array.from({ length: count }, () => "1").join(",");
+    expect(parseActionCall(`save(${ones(limits.maximum_arguments)})`)).not.toBeNull();
+    expect(parseActionCall(`save(${ones(limits.maximum_arguments + 1)})`)).toBeNull();
+    expect(parseActionCall(`${"a".repeat(limits.name.maximum_bytes)}(1)`)).not.toBeNull();
+    expect(parseActionCall(`${"a".repeat(limits.name.maximum_bytes + 1)}(1)`)).toBeNull();
+    const filler = (units: number) => `say('${"é".repeat(units - "say('')".length)}')`;
+    expect(parseActionCall(filler(limits.value_maximum_utf16_units))).not.toBeNull();
+    expect(parseActionCall(filler(limits.value_maximum_utf16_units + 1))).toBeNull();
   });
 
   it("keeps the bare action name as the directive value and adds the literals", () => {
