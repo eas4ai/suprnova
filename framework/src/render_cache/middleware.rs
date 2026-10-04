@@ -1058,10 +1058,10 @@ impl RenderCacheMiddleware {
                     runtime,
                     policy,
                     &found,
+                    coherence,
                     &outcome,
                     &method,
                     if_none_match.as_deref(),
-                    now,
                 ) {
                     Some(response) => {
                         LookupOutcome::Stale.record();
@@ -2144,14 +2144,20 @@ impl RenderJob {
 ///
 /// In both cases the caller returns the failed rebuild's own outcome, which
 /// is what the client sees.
+///
+/// The entry is judged again at the instant the rebuild failed, under the
+/// `coherence` the lookup found, not at the instant the lookup began: a
+/// rebuild can outlast the rest of the stale-on-error window, or a public
+/// seed's deadline, and an entry that is Dead by then is never served
+/// (DATA-041). Its `Age` is computed at that same instant.
 fn stale_on_error_fallback(
     runtime: &RenderCacheRuntime,
     policy: &RenderCachePolicy,
     found: &FoundEntry,
+    coherence: Coherence,
     outcome: &Result<Response, ProviderFailure>,
     method: &hyper::Method,
     if_none_match: Option<&str>,
-    now: u64,
 ) -> Option<HttpResponse> {
     let rebuild_failed = match outcome {
         Ok(response) => {
@@ -2163,6 +2169,18 @@ fn stale_on_error_fallback(
         Err(ProviderFailure(_)) => true,
     };
     if !rebuild_failed || is_stitched(policy) {
+        return None;
+    }
+    let now = runtime.now_ms();
+    let state = freshness_state(
+        policy,
+        coherence,
+        found.header().class,
+        found.published_at_ms(),
+        now,
+        found.header().seed_deadline_ms,
+    );
+    if state == FreshnessState::Dead {
         return None;
     }
     hit_response(
@@ -2343,10 +2361,10 @@ async fn render_and_publish(
                                 runtime,
                                 policy,
                                 &found,
+                                coherence_result,
                                 &outcome,
                                 &method,
                                 if_none_match.as_deref(),
-                                now,
                             ) {
                                 Some(response) => {
                                     LookupOutcome::Stale.record();

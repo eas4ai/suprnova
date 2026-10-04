@@ -85,6 +85,39 @@ async fn stale_on_error_serves_stale_when_the_foreground_rebuild_fails() {
     );
 }
 
+/// DATA-041: the stale-on-error fallback judges the entry when the failed
+/// rebuild returns, not when the lookup began. A rebuild that outlasted the
+/// entry's stale-on-error window used to fall back to an entry that was Dead
+/// by then, and serve it as a 200 with an `Age` from the earlier instant.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_rebuild_that_fails_after_the_stale_on_error_window_closed_serves_the_failure() {
+    let harness = boot_with_render_cache().await;
+    let first = dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1);
+
+    // `/stale/{id}`: fresh 60_000, stale-servable 60_000, stale-on-error
+    // 120_000. Age 130_000 is inside the stale-on-error band, which ends at
+    // age 180_000.
+    clock(&harness).advance_ms(130_000);
+    counting_route::fail_next_render(&harness);
+    counting_route::hold_next_render(&harness);
+    let (served, ()) = tokio::join!(dispatch_get(&harness, "/stale/1", &[]), async {
+        counting_route::wait_until_rendering_count(&harness, 2).await;
+        // The rebuild is running; the window closes before it fails.
+        clock(&harness).advance_ms(60_000);
+        counting_route::release_render(&harness);
+    });
+
+    assert_eq!(
+        served.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the entry was Dead when the rebuild failed, so the failure is what is served"
+    );
+    assert_ne!(served.body, first.body);
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn a_second_request_is_an_l0_hit_that_runs_no_handler_and_carries_validators() {
