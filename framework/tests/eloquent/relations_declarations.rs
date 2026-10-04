@@ -1278,3 +1278,82 @@ async fn has_on_a_morphed_by_many_correlates_on_its_pivot_foreign_key() {
     let tagged = RdGroup::query().has("tags").get().await.unwrap();
     assert_eq!(labels(tagged.iter().map(|g| &g.name)), vec!["group"]);
 }
+
+// ---- A Through second local key defaults to the intermediate's key ------
+
+#[model(table = "rd_hubs", relations = {
+    rims: HasManyThrough<RdSpoke, RdRim>,
+})]
+pub struct RdHub {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "rd_spokes", primary_key = "uid")]
+pub struct RdSpoke {
+    pub uid: i64,
+    pub rd_hub_id: i64,
+    pub name: String,
+}
+
+#[model(table = "rd_rims")]
+pub struct RdRim {
+    pub id: i64,
+    pub rd_spoke_id: i64,
+    pub size: i64,
+}
+
+/// Hub 1 reaches spoke 30 and its two rims. The spokes table has no `id`
+/// column, so a join that named one fails outright.
+async fn hub_fixture() -> TestDatabase {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for sql in [
+        "CREATE TABLE rd_hubs (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE rd_spokes (uid INTEGER PRIMARY KEY, rd_hub_id INTEGER NOT NULL, \
+            name TEXT NOT NULL)",
+        "CREATE TABLE rd_rims (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            rd_spoke_id INTEGER NOT NULL, size INTEGER NOT NULL)",
+        "INSERT INTO rd_hubs (id, name) VALUES (1, 'hub')",
+        "INSERT INTO rd_spokes (uid, rd_hub_id, name) VALUES (30, 1, 'spoke')",
+        "INSERT INTO rd_rims (rd_spoke_id, size) VALUES (30, 15), (30, 17)",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+    db
+}
+
+/// `hub.rims().get()` and `.count()` join the spokes on their primary
+/// key, `uid`.
+#[tokio::test]
+async fn lazy_through_joins_the_intermediate_on_its_primary_key() {
+    let _db = hub_fixture().await;
+    let hub = RdHub::find(1).await.unwrap().unwrap();
+    let mut sizes: Vec<i64> = hub
+        .rims()
+        .get()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.size)
+        .collect();
+    sizes.sort();
+    assert_eq!(sizes, vec![15, 17]);
+    assert_eq!(hub.rims().count().await.unwrap(), 2);
+}
+
+/// The eager load, `with_count` and `with_sum` of a `HasManyThrough` join
+/// the spokes on their primary key, `uid`.
+#[tokio::test]
+async fn eager_through_joins_the_intermediate_on_its_primary_key() {
+    let _db = hub_fixture().await;
+    let hubs = RdHub::query()
+        .with(["rims"])
+        .with_count(["rims"])
+        .with_sum(("rims", "size"))
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(hubs[0].rims_loaded().len(), 2);
+    assert_eq!(hubs[0].rims_count(), 2);
+    assert_eq!(hubs[0].rims_sum_of("size"), Some(32.0));
+}
