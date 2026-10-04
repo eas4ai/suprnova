@@ -722,14 +722,13 @@ impl Middleware for CsrfMiddleware {
         // Parse `_token=...` out of the form bag. `form_urlencoded::parse`
         // URL-decodes values; the token is hex so decoding is a no-op,
         // but using the parser keeps us consistent with how `req.form()`
-        // would later see the same body.
-        let token_field = url::form_urlencoded::parse(body).find_map(|(k, v)| {
-            if k == "_token" {
-                Some(v.into_owned())
-            } else {
-                None
-            }
-        });
+        // would later see the same body. A name sent twice keeps its last
+        // value, as PHP and `req.form()` both read it, so the token checked
+        // is the token Laravel's `$request->input('_token')` would check.
+        let token_field = url::form_urlencoded::parse(body)
+            .filter(|(k, _)| k == "_token")
+            .last()
+            .map(|(_, v)| v.into_owned());
 
         match token_field {
             Some(token) if constant_time_compare(&token, &expected_token) => {
@@ -1192,6 +1191,23 @@ mod tests {
             status, 419,
             "form POST with mismatched _token must reject with 419"
         );
+    }
+
+    /// A form that sends `_token` twice is judged by the last one, the value
+    /// Laravel's `$request->input('_token')` reads and the value the handler's
+    /// own form parse keeps.
+    #[tokio::test]
+    async fn form_post_reads_the_last_body_token() {
+        let token = "real-session-token-xyz";
+
+        let (status, _) = drive_form_post(token, format!("_token=stale&_token={token}")).await;
+        assert_eq!(status, 200, "the last _token matches, so the form passes");
+
+        let (status, _) = drive_form_post(token, format!("_token={token}&_token=stale")).await;
+        assert_eq!(status, 419, "the last _token is wrong, so the form fails");
+
+        let (status, _) = drive_form_post(token, format!("_token={token}&_token=")).await;
+        assert_eq!(status, 419, "an empty last _token is no token");
     }
 
     #[tokio::test]
