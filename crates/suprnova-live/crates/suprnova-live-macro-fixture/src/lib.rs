@@ -43,6 +43,26 @@ pub mod live {
                 output.into_validation_issues()
             }
         }
+
+        /// Session-only field bridge. The fixture has no host session, so
+        /// a field keeps its mounted value and a staged value goes nowhere.
+        pub mod session {
+            use suprnova_live::component::ComponentError;
+
+            /// Reads nothing: the fixture has no session.
+            pub fn load<T>(_component: &str, _field: &str) -> Option<T> {
+                None
+            }
+
+            /// Accepts and drops a staged value.
+            pub fn stage<T>(
+                _component: &str,
+                _field: &str,
+                _value: &T,
+            ) -> Result<(), ComponentError> {
+                Ok(())
+            }
+        }
     }
 }
 
