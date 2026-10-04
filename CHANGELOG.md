@@ -734,7 +734,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   and two concurrent first batch dispatches no longer lose one batch's
   tracking. `JobAttempted` fires for jobs that fail or time out terminally.
   A cache error while `ThrottlesExceptions` clears its counter no longer
-  fails a completed job. A cancelled memory-queue `pop`, delayed `nack` or
+  fails a completed job, and one while it counts a failure no longer
+  replaces the job's own error or turns a backoff release into a failed
+  attempt. A cancelled memory-queue `pop`, delayed `nack` or
   `release` keeps the job. `FailoverQueueDriver` counts a driver registered
   under two labels once. An after-commit `push_unique` whose job fails to
   serialize releases its lease. A started process whose child left its
