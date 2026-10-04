@@ -134,6 +134,12 @@ impl Pagination {
     ///   points at this page's last row (back toward the caller's
     ///   origin).
     ///
+    /// The keyset alone orders the pages: an `ORDER BY` already on
+    /// `query` is dropped, because it would sort ahead of `order_col`
+    /// and make the boundary skip and repeat rows. An `OFFSET` on
+    /// `query` positions the first page only, the one requested without
+    /// a cursor; every later page starts at its cursor.
+    ///
     /// `order_col` should be a column with a total order suitable for
     /// keyset pagination - typically the primary key. Any SeaORM
     /// `Value` variant (`Int`, `BigInt`, `Uuid`, datetimes, decimals,
@@ -199,6 +205,14 @@ impl Pagination {
             Some(c) => Some(CursorPaginator::<E::Model>::decode_value(c)?),
             None => None,
         };
+        let mut query = query;
+        {
+            let statement = sea_orm::QueryTrait::query(&mut query);
+            statement.clear_order_by();
+            if decoded.is_some() {
+                statement.reset_offset();
+            }
+        }
         let plan = plan_scan(decoded);
 
         // Apply the plan to the SeaORM query: order in the plan's

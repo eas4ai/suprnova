@@ -178,6 +178,15 @@ pub fn resolve_middleware_alias(name: &str) -> Option<BoxedMiddleware> {
 /// middleware to return: the alias is not registered, it takes no
 /// arguments and was given some, or its factory refused the arguments.
 pub fn try_resolve_middleware_alias(spec: &str) -> Result<BoxedMiddleware, FrameworkError> {
+    let middleware = build_alias(spec)?;
+    // Remember what the box was resolved from, so a route that reaches the
+    // same alias twice, through a group and on its own, keeps one.
+    super::name_as(&middleware, alias_identity(spec));
+    Ok(middleware)
+}
+
+/// Run the factory `spec` names, with the arguments it gives.
+fn build_alias(spec: &str) -> Result<BoxedMiddleware, FrameworkError> {
     let (name, arguments) = split_alias(spec);
     // Cloned out, so the factory runs without the registry lock: a factory
     // may register or resolve an alias of its own.

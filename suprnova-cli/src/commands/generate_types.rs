@@ -429,6 +429,28 @@ fn parse_serde_rename_all(attrs: &[Attribute]) -> (Option<RenameRule>, Option<Re
     (rule("serialize"), rule("deserialize"))
 }
 
+/// The key serde reads `field` from when it deserializes a struct with
+/// `struct_attrs`, or `None` when serde skips the field on input.
+///
+/// A form request is only ever read from input, so its generated TypeScript
+/// interface must carry these keys, not the Rust field names.
+pub(crate) fn serde_input_key(struct_attrs: &[Attribute], field: &syn::Field) -> Option<String> {
+    let ident = field.ident.as_ref()?;
+    let serde = parse_serde_field(&field.attrs);
+    if serde.skip_deserializing {
+        return None;
+    }
+    if let Some(name) = serde.rename_input {
+        return Some(name);
+    }
+    let base = ident.unraw().to_string();
+    let (_, rename_all_input) = parse_serde_rename_all(struct_attrs);
+    Some(match rename_all_input {
+        Some(rule) => rule.apply(&base),
+        None => base,
+    })
+}
+
 impl<'ast> Visit<'ast> for InertiaPropsVisitor {
     fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
         let data = self.has_data_derive(&node.attrs);
@@ -867,7 +889,7 @@ fn optional_marker(ty: &RustType) -> &'static str {
 /// A property key as TypeScript accepts it: bare when it is an identifier,
 /// quoted otherwise. `#[serde(rename = "display-name")]` or a kebab-case
 /// `rename_all` names a key no identifier can spell.
-fn ts_property_key(name: &str) -> String {
+pub(crate) fn ts_property_key(name: &str) -> String {
     let mut chars = name.chars();
     let identifier = chars
         .next()

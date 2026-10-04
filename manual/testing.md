@@ -269,6 +269,12 @@ async fn order_dispatches_email() {
 }
 ```
 
+The guard clears the container it installed, wherever it drops. A
+harness can share it with spawned tasks inside an `Arc`, so the last
+reference may drop on another thread: that thread's own container is
+left alone, and this one's is gone at its next lookup. Only
+`TestContainer::fake()` makes a guard.
+
 `TestDatabase::fresh` / `sqlite_memory` install their own
 `TestContainer::fake` guard internally - you don't stack them unless
 you're testing the registry itself.

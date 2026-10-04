@@ -91,6 +91,17 @@ In a CI run with `APP_ENV=testing`, the framework loads `.env.testing`
 on top of `.env` so you can override DB URLs and disable mail drivers
 without touching the dev `.env`.
 
+`#[suprnova::main]` does this loading before it builds the Tokio
+runtime, because writing the process environment is only sound while no
+other thread can read it. `Config::init` and `config::load_dotenv`, the
+functions it calls, refuse to run where they cannot be sound: they
+return an error, and write nothing, when you call them from inside a
+Tokio runtime, or again after `#[suprnova::main]` loaded the environment
+and started its runtime threads. To load a changed `.env`, restart the
+process. A file that fails to load leaves the process environment as it
+was: the real process variables still win over what any file set before
+the failure, and `Config::init` registers no config.
+
 ## Direct env access
 
 For one-off reads of strings, numbers, bools - anything implementing

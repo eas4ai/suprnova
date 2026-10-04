@@ -414,6 +414,43 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **Live field and argument names must be ASCII and at most 128 bytes**,
+  and a view-visible field named `component` is a compile error. Such
+  names used to panic at registration or fail later. This landed after the
+  `v3.1.0` tag.
+- **Cron steps count from the first value.** `*/N` in the day-of-month and
+  month fields counts from 1, as cron and Laravel do, so `*/2` means odd
+  days and schedules using it shift; the timezone display now agrees with
+  the scheduler. Ranges with steps (`1-15/7`) and mixed lists parse. This
+  landed after the `v3.1.0` tag.
+- **Workflow steps are named by module path and function name**, so
+  same-named steps in different modules are different steps. Runs recorded
+  with bare names still replay. This landed after the `v3.1.0` tag.
+- **`TestContainerGuard` can no longer be built directly**; use
+  `TestContainer::fake()`. `dispatch_argv_with_init` boots the process and
+  waits for queued listeners after the command; `dispatch_argv` does
+  neither. This landed after the `v3.1.0` tag.
+- **`save` and `update` refuse a model that was never inserted.** A
+  replica, or a new model from `first_or_new` or `find_or_new`, still has
+  its reset key, and `save` updated the row with key 0. It now returns an
+  error naming `persist()`, which inserts the model and returns it with its
+  new key. Laravel's `save` inserts such a model; `save` here takes `&self`
+  and cannot hand the new key back, which the Eloquent manual explains. This
+  landed after the `v3.1.0` tag.
+- **The broadcast fanout no longer uses sea-streamer.**
+  `SeaStreamerBroadcastHub` keeps its name and runs on the framework's own
+  Redis client, and `sea-streamer` and `sea-streamer-redis` left the
+  dependency tree. It supports `redis://`, `rediss://` and `memory://`, a
+  stream shared by hubs in one process; `stdio://` is an alias for
+  `memory://` and no longer reads or writes stdin and stdout. `kafka://`
+  and `file://`, which were never compiled in, now give a clear error, and
+  `new_loopback` behaves like `new`. An event published after the
+  constructor returns always arrives. Stream entries keep their `msg`
+  field, so hubs of the earlier version on the same stream interoperate
+  during a rolling deploy. This landed after the `v3.1.0` tag.
+- **New applications' session, remember-me and auth-flow token tables use
+  `DATETIME` on MySQL**, so these columns stay writable past 2038-01-19.
+  Postgres and SQLite are unchanged. This landed after the `v3.1.0` tag.
 - **Two-factor needs two new migrations.** Add
   `suprnova::auth_flows::two_factor::migration_attempts` (the
   `two_factor_attempts` table) and `migration_rotation` (the
@@ -628,7 +665,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   region; payloads written before still read, but `clear` no longer sweeps
   them. Qdrant ids `"01"`, `"+1"` and non-canonical UUID spellings no longer
   map to the point of `"1"` or the canonical UUID, so items stored under
-  such ids must be written again. Resend tags go out as `tag_<i>` name and
+  such ids must be written again. A caller's version 5 UUID id is hashed
+  like any other string, so it can never name a point a derived id holds;
+  items stored under v5 UUID ids must be written again too. Resend tags go out as `tag_<i>` name and
   value pairs, and a tag Resend cannot carry is refused before sending.
   `DynNotification` gains `as_any`, with a default. This landed after the
   `v3.1.0` tag.
@@ -665,6 +704,160 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Generated routes and types, Inertia props and JSON:API.**
+  `generate-types --routes` applies `group!` path and name prefixes, gives
+  each repeated-handler alias its own helper, percent-encodes path values
+  like `route()`, and uses serde's input keys in request interfaces;
+  helpers for a second route of one handler get a new params interface
+  name. An SSR exclusion glob such as `**/foo/*` matches where `**` spans a
+  repeated literal. The redirect back for an empty Inertia response keeps
+  the handler's cookies, security headers and error report. Replacing a
+  lazy prop drops its `?include=` gate, a later dotted prop wins over an
+  earlier lazy parent, and `App::inertia_shared("users.0.name")` reads into
+  shared lists. A JSON-style `inertia_response!` prop that fails to
+  serialize returns an error instead of panicking. JSON:API documents no
+  longer repeat primary resources in `included`, an empty collection
+  refuses unknown includes with 400, a requested include always returns an
+  `included` array, and error pointers are escaped per RFC 6901. `i128` and
+  `u128` route-parameter fields in Data DTOs extract instead of answering
+  422, and DTOs with route-parameter fields compile without a direct `url`
+  dependency. Live route intents can target resource routes, and `route()`
+  and `try_route()` fill a catch-all `{*rest}` by the name `rest`, keeping
+  its slashes. Numeric `expect!` matchers fail on NaN and other unordered
+  values. Schema dump and load accept every TLS parameter spelling the
+  application's connection accepts and pass the Postgres password through
+  `password=`. The `Idempotency::remember` example key includes the
+  authenticated user. Live component names, views and action text that
+  mention development crate names compile, action arguments named `target`
+  or `request` no longer break generated code, and `#[session]` Live fields
+  load from and persist to the visitor's session once the action's outcome
+  is accepted (they need `SessionMiddleware`). This landed after the
+  `v3.1.0` tag.
+- **Workers, the console and process lifecycle.** Queue, schedule and
+  workflow workers, the `queue:*` commands and console commands boot the
+  `#[injectable]` and `#[service]` inventory, so a job or command that
+  resolves an action no longer fails with `ServiceNotFound`. The console
+  also boots the runtime drivers and `#[policy]` gates, warns on stderr and
+  goes on when a driver cannot boot, and waits for queued listeners before
+  it exits; `down`, `up` and `schedule:list` run the application's
+  bootstrap hook. `schedule:work` stops on SIGTERM while an inline task
+  runs, stopping a task still running after the 30-second grace. A
+  panicking `Terminable` hook no longer skips the hooks after it, and a
+  graceful shutdown waits up to 5 seconds for hooks still running.
+  `Context::get` and `Context::hidden_get` no longer deadlock when a custom
+  `Deserialize` writes to the context. A `TestContainerGuard` or
+  `TestQueryGuard` dropped on another thread clears only what it installed.
+  Binding an `#[injectable]` by hand before boot no longer requires the
+  dependencies only its generated constructor reads. `db:seed
+  --class=<Name>` fails with not-found on an empty registry, and a
+  poisoned registry fails instead of reporting nothing to run. A
+  supervisor spawned during or after shutdown no longer starts outside the
+  drain. A second `init_telemetry` while the first guard lives no longer
+  takes over the global meter provider. `start_workflow!` accepts
+  imported, re-exported, `crate::`, `self::` and `super::` paths, and
+  `workflow:work` on a database other than Postgres exits with an error at
+  startup instead of retrying forever. This landed after the `v3.1.0` tag.
+- **Relations and soft deletes.** `destroy`, `delete_quietly`,
+  `delete_or_fail` and trait-dispatched `delete` permanently deleted
+  soft-delete rows; they now tombstone them, and `delete_or_fail` on an
+  already trashed row is a 404. `with_count` and the `with_sum` family
+  counted trashed rows and rows hidden by global scopes; they now cover
+  exactly the rows `with` loads. `with([..])` and `with_count([..])` on one
+  relation no longer panic, a count no longer makes `load_missing` skip the
+  rows, and a failed or cancelled nested `load_missing` no longer erases
+  relations already loaded. Relations declared with `lk = "..."` read and
+  write by that column, and an `lk` naming no field is a compile error.
+  Eager many-to-many honours `related_key`, a relation's `pivot_table`
+  override is used when loading pivot context, and eager `HasManyThrough`
+  skips rows reached through a trashed intermediate. Eager loads of a
+  `with_tx(&tx)` or `on(name)` query run on that transaction or connection,
+  `MassPrunable` deletes on the connection its dry run counted, and factory
+  inserts of plain SeaORM rows join the surrounding `DB::transaction`.
+  `with_min` and `with_max` of an integer column read on Postgres. This
+  landed after the `v3.1.0` tag.
+- **Magnetar hashing and sign-up races.** Magnetar password hashing runs on
+  Tokio's blocking pool instead of stalling async workers. A magic-link or
+  passkey sign-up that loses a race for a new email address answers as the
+  existing account instead of failing. This landed after the `v3.1.0` tag.
+- **RenderCache stays coherent under cancellation, races and flags.** A
+  write that was cancelled at its generation advance, including a bulk
+  write, `increment`, a soft delete, restore or force delete, could commit
+  while cached pages stayed current; the write and its advance now share
+  one transaction. An unrelated successful write no longer resumes serving
+  pages whose invalidation failed: the missed invalidation is applied
+  first. A process that wrote before installing RenderCache advances
+  generations after the install. Pages rendered with a flag's compiled
+  default refresh when the first rule for that flag is stored, and a page
+  rendered during `set_flag` or `reload` no longer stays cached with the
+  old answer. `DB::unprepared`, `DB::statement` and `statement_on` with a
+  batch that begins with `SELECT` invalidate cached pages. Pages built from
+  `EntityExt` or `QueryBuilder` reads, relation counts and aggregates, or
+  through-relation loads refresh when those tables change.
+  `RenderCache::advance_epoch` reaches the next request even with another
+  request's authority read in flight. A rebuild that fails after the
+  stale-on-error window closed returns its error instead of the expired
+  entry, a node runs at most one background refresh per key, a cancelled
+  L1 publish can no longer overwrite a newer entry, and L1 sweeps no longer
+  scan the whole store. SQL Live record cleanup no longer deletes a fresh
+  instance or reservation another node just created. Renewing an async
+  subscription from an evicted position is refused, so the membership
+  degrades instead of claiming continuity. The Live tooling helper's
+  timeout ends the call even when a process it started keeps its output
+  open. This landed after the `v3.1.0` tag.
+- **Query builder, pagination and Eloquent.** Paginating, ordering and
+  taking `first` of a union works on every engine, and `total` counts its
+  rows; as in Laravel, ordering, limit and offset set before `union` apply
+  to the first query and those set after it to the whole union. `count`,
+  `sum`, `avg`, `min` and `max` work after `select(...)`, after an
+  ordering, on a union and with `having`. `in_random_order` works on MySQL,
+  and `skip` or `offset` without `limit` works on SQLite and MySQL.
+  `chunk_by_id`, `lazy_by_id`, `cursor_paginate` and `Pagination::cursor`
+  visit every row once whatever the query was ordered by, and apply an
+  offset once. `chunk`, `chunk_map`, `each`, `chunk_by_id` and `lazy_by_id`
+  honour the query's `limit` as a cap on the whole walk and its `offset` as
+  a one-time skip, so `.limit(5).chunk_by_id(2, ..)` visits 5 rows instead
+  of the whole table. `cursor_paginate` on a union pages the whole union.
+  `count`, `sum` and `avg` return 0, and `min` and `max` return `None`,
+  when an offset skips the aggregate's row or a grouped query has no rows,
+  instead of failing with "aggregate query returned no row". `filter_json_contains` works on Postgres and MySQL with
+  strings, objects and arrays. `create_or_first` inside a Postgres
+  transaction returns the existing row, and a lost race creating a Live
+  record no longer aborts the host's Postgres transaction. `Unique` and
+  `Exists` inside `DB::transaction` see the transaction's own rows and no
+  longer wait on its connection. `Collection::sort_by` and the by-value
+  `Distinct` rule compare integers above 2^53 exactly. Index and foreign key
+  names holding a backtick or double quote create and drop.
+  `decrement(col, i64::MIN)` subtracts instead of panicking.
+  `UniqueIdKind::Ulid.is_valid` rejects strings that overflow 128 bits.
+  `QueryExecuted::to_raw_sql()` returns the SQL unchanged when a binding is
+  missing or left over, and `QueryBuilder::count` and
+  `Pagination::length_aware` report the `COUNT(*)` they ran to `DB::listen`
+  and the query log. Inertia infinite scroll asks for the paginator's own
+  page or cursor parameter. Concurrent `Schema::dump` calls to one path each
+  write a whole file. `test_database!()` with no argument compiles and uses
+  the crate's own `migrations::Migrator`. This landed after the `v3.1.0`
+  tag.
+- **Sessions and remember-me tokens restore on MySQL and MariaDB.** A
+  scaffolded application's session, remember-me and auth-flow token time
+  columns are `TIMESTAMP` there, and the framework read them as a type the
+  MySQL driver decodes only from `DATETIME`. Every session read failed: a
+  form POST answered 419 and the next page 500, the remember-me cookie
+  never signed anyone back in, and verification and reset links could not
+  be used. The notification inbox and the ceremony store failed the same
+  way, and on Postgres each failed on a `timestamptz` column. They now read
+  `DATETIME`, `TIMESTAMP`, `timestamp`, `timestamptz` and SQLite text, and
+  existing tables need no migration. A notification whose `read_at` does
+  not decode is an error instead of unread. On MySQL, an expiry past
+  2038-01-19 03:14:07 UTC is stored as that moment. This landed after the
+  `v3.1.0` tag.
+- **A new application registers and signs in on every database.** The
+  `users` table and `User` model that `suprnova new` writes disagreed on
+  the time column type, so registering failed on MySQL 8.4, MariaDB and
+  Postgres. The migration now uses `.date_time()` and the model names
+  `AsNaiveDateTime`. An existing application gives its `User` the casts for
+  its columns: the native casts on MySQL and MariaDB, the naive ones on
+  Postgres. See Authentication, "The scaffolded User model". This landed
+  after the `v3.1.0` tag.
 - **Two-factor flows on every engine.** A framework login completed with
   `TwoFactor::complete_challenge` stays signed in under the Magnetar
   engine. The two-factor credentials table and the attempt-counter
@@ -692,8 +885,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   concurrent miss and holds at most 4096 entries. Read-through promotions
   stream into the primary instead of holding the object in memory,
   unpromoted reads fetch only their range, a delete or move during a
-  promotion is not undone within one process, versioned and conditional
-  reads reach the fallback, and a refused move keeps the fallback copy.
+  promotion is not undone, on the same node or another one (a promotion
+  re-checks the fallback after publishing and withdraws its own copy),
+  versioned and conditional reads reach the fallback, and a refused move
+  keeps the fallback copy. Ranged reads stop at the requested range: a
+  server that ignores `Range` can no longer make a small read buffer the
+  whole object, and S3, Azure Blob and GCS refuse a response that is not
+  the requested range before reading its body, open-ended ranges included.
   This landed after the `v3.1.0` tag.
 - **Queues, events and processes.** Cancelling `Transaction::commit()`
   while its COMMIT was in flight could drop its `after_commit` callbacks and
@@ -710,7 +908,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   and two concurrent first batch dispatches no longer lose one batch's
   tracking. `JobAttempted` fires for jobs that fail or time out terminally.
   A cache error while `ThrottlesExceptions` clears its counter no longer
-  fails a completed job. A cancelled memory-queue `pop`, delayed `nack` or
+  fails a completed job, and one while it counts a failure no longer
+  replaces the job's own error or turns a backoff release into a failed
+  attempt. A cancelled memory-queue `pop`, delayed `nack` or
   `release` keeps the job. `FailoverQueueDriver` counts a driver registered
   under two labels once. An after-commit `push_unique` whose job fails to
   serialize releases its lease. A started process whose child left its
@@ -732,11 +932,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   like HTTP ones, subprotocol negotiation echoes the client's own spelling
   as RFC 6455 requires, and `sse::last_event_id` returns Unicode event ids
   instead of `None`. This landed after the `v3.1.0` tag.
-- **Each middleware of a group runs once.** A middleware group included by
-  two sibling groups, or an alias listed twice, ran twice per request, so a
-  throttle there counted each request twice. A resolved group now keeps
-  each middleware once, identified by its alias and parsed arguments, as
-  Laravel's `uniqueMiddleware` does. This landed after the `v3.1.0` tag.
+- **Each named middleware runs once per route.** A middleware group
+  included by two sibling groups, an alias listed twice, or a middleware
+  named both through a group and on the route itself ran twice per
+  request, so a throttle there counted each request twice. A route now runs
+  each named middleware once, identified by its alias and parsed arguments,
+  at its first occurrence, as Laravel's `uniqueMiddleware` does. Middleware
+  added by type with `.middleware(M)` is never dropped. This landed after
+  the `v3.1.0` tag.
 - **Gates, OAuth starts, CSRF bootstraps and registrations.** A gate
   callback that calls `Gate::define` no longer deadlocks the request. An
   OAuth start that is the browser's first request (JSON or POST) sets the
@@ -785,10 +988,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   mail is accepted by Resend. Notification mail renders from the
   notification itself, so `data()` no longer has to hold every field
   `to_mail` reads. An SQS overflow job whose first send went unanswered
-  keeps its payload when the retries are refused. The Redis queue works
-  with `redis://user:password@...` and `rediss://` URLs, and the broadcast
-  fanout authenticates with the URL's credentials. This landed after the
-  `v3.1.0` tag.
+  keeps its payload when the retries are refused, and when SQS took both
+  an unanswered send and its retry, each message now carries its own
+  payload copy, so acknowledging one no longer leaves the other unreadable.
+  The Redis queue and the broadcast fanout work with
+  `redis://user:password@...` and `rediss://` URLs, taking credentials,
+  database and TLS from the URL. This landed after the `v3.1.0` tag.
 - **Middleware, sessions, uploads and test helpers.** A middleware group
   reused by two sibling groups no longer fails with `CycleDetected`. A
   `RateLimiter` counter that expired in the middle of a hit gets its expiry
@@ -1115,6 +1320,38 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **Input-only relationships stay out of JSON:API output.** A relationship
+  marked `#[data(input_only, allow_include)]` was linked and includable in
+  responses; it is now never sent. This landed after the `v3.1.0` tag.
+- **The environment is written only where that is sound.** `Config::init`
+  and `config::load_dotenv` refuse to write the process environment inside
+  a Tokio runtime or after `#[suprnova::main]` loaded it, where another
+  thread could read it mid-write. A failed load restores the real system
+  values and registers no config. This landed after the `v3.1.0` tag.
+- **Route bindings and pivot extras respect what models declare.**
+  `RouteParam<Model>` ignored global scopes on models without
+  `soft_deletes`, so a guessed id of another tenant's row bound to the
+  handler; the binding now applies every global scope, and a hidden row is
+  a 404. `attach_with` wrote pivot extras past the pivot model's casts, so
+  an `AsEncrypted` column was stored as plaintext and an `AsHashed` one
+  unhashed; extras now go through the pivot's casts and mutators, and an
+  extra that does not decode into its field is a validation error. This
+  landed after the `v3.1.0` tag.
+- **RenderCache never stores or reuses a personalized page as shared.**
+  Work a handler joined beside an identity-bound island mount
+  (`tokio::join!`) had its principal, session and table reads dropped from
+  the stitched shell's report, so a personalized shell could be stored as
+  public; those reads now count. `PrivateCached` responses send
+  `Cache-Control: private, no-cache` instead of `private, max-age`, which
+  let a browser show the previous account's page to the next account on
+  the same browser. Oversized Redis hint payloads are dropped before they
+  are copied or queued. This landed after the `v3.1.0` tag.
+- **Redis credentials stay out of the boot log.** When Redis was
+  unreachable at boot, the cache error held the whole `REDIS_URL`, password
+  included, and `CacheConfig` and `CacheConfigBuilder` printed it when
+  debug-formatted. The error now names only the host and port or socket
+  path, and the configurations print the URL as `redis://<redacted>`. This
+  landed after the `v3.1.0` tag.
 - **Second-factor codes are rate limited and single use.**
   `TwoFactor::verify` and `consume_recovery_code` ignored the account
   lockout, so a caller with the password could guess TOTP codes without
@@ -1164,6 +1401,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   served from cache to a visitor without that sign-in. A second token guard
   over another provider answered with the first guard's user. Each now
   reads the user of the route's own guard through that guard's provider.
+  Live gated actions, uploads and subscriptions, `EmailVerification::verify`
+  and the Pusher user and presence endpoints do the same: behind
+  `AuthMiddleware::for_guard(name)` they act for that guard's user, as
+  `<guard>:<id>` (default-guard principals are unchanged), a named guard's
+  logout ends that guard's Live memberships, and a stream with a
+  `:principal` topic is refused behind a non-default guard.
 - **Encoded cookie names cannot stand in for prefixed cookies.** A cookie
   named `%5F%5FHost-suprnova_session` resumed the `__Host-` session; a
   prefix that appears only after decoding is now dropped.
@@ -1171,7 +1414,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   Changing the account's email no longer lets an old link verify the new
   address.
 - **Password reset checks the token before hashing.** A dead or made-up
-  token made the server compute an Argon2id hash first.
+  token made the server compute an Argon2id hash first, in the framework's
+  reset flow and in Magnetar's `PasswordManagementService`.
 - **A session that loses its Magnetar authority ends its Live
   memberships** on this node, so it stops receiving events.
 - **An image cannot allocate past its decode budget.** A crafted PNG

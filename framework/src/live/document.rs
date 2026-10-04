@@ -782,16 +782,21 @@ impl<'a> LiveDocument<'a> {
                 // The mount runs in the slot bucket: whatever it reads is
                 // re-read on every stitched hit and must not be recorded as
                 // something the shared shell depends on.
-                let output = crate::render_cache::collector::slot_scope(
-                    self.runtime.mount_private_component(
-                        &mut self.scope,
-                        PrivateMountRequest::new(key, parameters, flags)
-                            .with_document_path(document_path),
-                        &context,
-                    ),
-                )
-                .await
-                .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?;
+                // Session-only fields the mount staged are written only once
+                // the mount succeeds.
+                let (output, staged_session) =
+                    super::session_state::scope(crate::render_cache::collector::slot_scope(
+                        self.runtime.mount_private_component(
+                            &mut self.scope,
+                            PrivateMountRequest::new(key, parameters, flags)
+                                .with_document_path(document_path),
+                            &context,
+                        ),
+                    ))
+                    .await;
+                let output = output
+                    .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?;
+                super::session_state::commit(staged_session);
                 crate::render_cache::live::record_mount(LiveMountKind::IdentityBound, None);
                 let (html, metadata) = output.into_document_parts();
                 match descriptor {

@@ -443,7 +443,17 @@ For full control, use cron syntax:
 .cron("0 */2 * * *")    // Every 2 hours
 .cron("30 4 * * 1-5")   // 4:30 AM on weekdays
 .cron("0 0 1,15 * *")   // 1st and 15th of each month
+.cron("0 9 1-15/7 * *") // 9:00 AM on the 1st, 8th and 15th
 ```
+
+Each field is a comma-separated list of parts. A part is `*`, a value
+`N`, or a range `N-M`, and any of them can take a `/step`; `N/step` runs
+from `N` to the end of the field. A step counts from the first value of
+its part, and for `*` that is the field's first value: `*/2` in the
+day-of-month field is the 1st, 3rd, 5th, and so on, and `*/3` in the
+month field is January, April, July, and October - what cron and
+Laravel mean. The expressions `schedule:list` prints for another
+timezone use the same grammar, so you can schedule one as it reads.
 
 `.cron(...)` **panics** if the expression is malformed (wrong field count,
 unparseable step/range/list). Use `.try_cron(expr)` when the expression is
@@ -630,7 +640,10 @@ schedule.add(
 with `catch_unwind`, so a panicking task surfaces as a `FrameworkError`
 recorded against the task's name rather than tearing down the scheduler. The
 `schedule:work` daemon drains the JoinSet on shutdown (Ctrl-C / SIGTERM) so
-in-flight background tasks complete before exit.
+in-flight background tasks complete before exit, within a 30-second grace.
+A stop signal that arrives while a tick's inline tasks are still running
+is seen at once: the inline tasks and the background tasks share the
+grace, and whatever is still running at its end is stopped.
 
 **Combine with `without_overlapping`.** The two flags compose - a background
 task with `without_overlapping()` will spawn into the JoinSet and acquire the
@@ -888,8 +901,9 @@ runtime that's already long-lived, so:
   Laravel spawns a child process per background task; we spawn into a
   `JoinSet` and surface completions on the next tick or at shutdown.
 - **Graceful shutdown is a `tokio::select!` arm.** Ctrl-C / SIGTERM
-  drains in-flight background tasks before exit; in-process tasks finish
-  their current call.
+  drains in-flight background tasks before exit, and in-process tasks
+  get the same bounded grace to finish their current call - a task that
+  hangs cannot keep the daemon from stopping.
 - **Same-minute dedup is in-process state.** A `last_run_minute` atomic
   per task guarantees a single process can't double-fire a minute-aligned
   task even if the loop ticks fast. PHP can't do this - every cron tick

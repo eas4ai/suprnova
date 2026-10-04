@@ -262,8 +262,21 @@ async fn request_with_headers(
     request_rx.await.expect("capture in-memory request")
 }
 
+/// Runs in its own process: `init_magnetar_oauth_only` installs the
+/// process-wide Magnetar engines, which every other installing test in this
+/// binary also claims.
+#[test]
+fn oauth_only_initialization_leaves_legacy_session_authority_active() {
+    crate::own_process::run_alone(
+        "oauth_only::oauth_only_initialization_leaves_legacy_session_authority_active_child",
+    );
+}
+
 #[tokio::test]
-async fn oauth_only_initialization_leaves_legacy_session_authority_active() {
+async fn oauth_only_initialization_leaves_legacy_session_authority_active_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
     Crypt::init(EncryptionKey::generate());
     let database = sea_orm::Database::connect("sqlite::memory:")
         .await

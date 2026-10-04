@@ -22,7 +22,7 @@ impl ActionAuthorizationPort for SuprnovaActionAuthorization {
             request.action().as_str()
         );
         Box::pin(async move {
-            let Some(principal) = crate::auth::guard::Auth::id() else {
+            let Some(principal) = super::route_principal().await else {
                 return Ok(AuthorizationDecision::Deny);
             };
             let allowed =

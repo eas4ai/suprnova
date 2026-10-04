@@ -120,16 +120,18 @@ async fn advance_mirror_table<E: sea_orm::EntityTrait>() -> Result<(), PaymentEr
 /// Table-only, same as `advance_mirror_table` - callers push
 /// `entity_table_name::<E>()` for each entity type they wrote, not a
 /// row-level identity.
+///
+/// One advancement for every table, not one per table: the transaction has
+/// already committed, so a drop part-way through a loop of advances would
+/// leave the later tables on their old generations with nothing recording
+/// that they were missed. One advancement is guarded as a whole (DATA-039).
 async fn advance_touched_mirror_tables(touched: &[&'static str]) -> Result<(), PaymentError> {
     let mut unique: Vec<&'static str> = touched.to_vec();
     unique.sort_unstable();
     unique.dedup();
-    for table in unique {
-        crate::render_cache::orm::after_table_write(table)
-            .await
-            .map_err(|e| PaymentError::Internal(format!("{e}")))?;
-    }
-    Ok(())
+    crate::render_cache::orm::after_table_writes(&unique)
+        .await
+        .map_err(|e| PaymentError::Internal(format!("{e}")))
 }
 
 fn validate_provider_event_id(event: &WebhookEvent) -> Result<(), PaymentError> {

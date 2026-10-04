@@ -286,6 +286,7 @@ where
     /// # Ok(()) }
     /// ```
     pub async fn all(self) -> Result<Vec<E::Model>, FrameworkError> {
+        crate::database::model::observe_entity_read::<E>();
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
         exec.select_all(self.select)
@@ -320,6 +321,7 @@ where
     /// # Ok(()) }
     /// ```
     pub async fn first(self) -> Result<Option<E::Model>, FrameworkError> {
+        crate::database::model::observe_entity_read::<E>();
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
         exec.select_one(self.select)
@@ -383,6 +385,7 @@ where
     /// # Ok(()) }
     /// ```
     pub async fn count(self) -> Result<u64, FrameworkError> {
+        crate::database::model::observe_entity_read::<E>();
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
         exec.select_count(self.select)

@@ -331,7 +331,8 @@ async fn named_connection_is_preserved() {
 /// CACHE-009, second sentence: when a write's advancement cannot share
 /// the row write's transaction (a write on a named connection, whose
 /// ledger lives on the primary) and then fails, this process stops
-/// serving stored entries until an advancement succeeds.
+/// serving stored entries until the identities it missed are advanced,
+/// which the next advancement that lands does (DATA-029).
 #[tokio::test]
 #[serial_test::serial]
 async fn serving_stops_while_a_named_connection_advance_is_unconfirmed() {
@@ -377,19 +378,28 @@ async fn serving_stops_while_a_named_connection_advance_is_unconfirmed() {
         )
         .await
         .expect("restore the generation log");
-    // A write the `/cached/1` entry does not depend on: `users`, not
-    // `posts`, so the successful advancement confirms serving without
-    // invalidating the entry this test watches.
+    // A write the `/cached/1` entry does not depend on directly: `users`,
+    // not `posts`. Its successful advancement also carries the broad
+    // identity the failed raw write missed (DATA-029), and every entry
+    // observes the broad identity, so the watched entry is rebuilt once
+    // rather than served on its old generation, and then served again.
     User::create(attrs! { name: "confirms" })
         .await
         .expect("a primary write whose advancement succeeds");
     let renders_before = counting_route::renders();
+    let rebuilt = dispatch_get(&harness, "/cached/1", &[]).await;
+    assert_eq!(rebuilt.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        renders_before + 1,
+        "the missed invalidation was repaired, so the entry it covered is rebuilt"
+    );
     let served = dispatch_get(&harness, "/cached/1", &[]).await;
     assert_eq!(served.status, StatusCode::OK);
     assert_eq!(
         counting_route::renders(),
-        renders_before,
-        "once an advancement lands, stored entries are served again"
+        renders_before + 1,
+        "once every missed advancement lands, stored entries are served again"
     );
 }
 
@@ -417,6 +427,67 @@ async fn head_first_does_not_publish_get() {
         counting_route::renders(),
         2,
         "the HEAD render was not published"
+    );
+}
+
+/// The generation the ledger holds for `identity`, or zero before any
+/// advance.
+async fn generation_of(identity: &suprnova::render_cache::DependencyIdentity) -> u64 {
+    use suprnova::render_cache::ledger::SqlGenerationLedger;
+    use suprnova_live::render_cache::generation::GenerationLedger as _;
+
+    SqlGenerationLedger::new()
+        .current(&[identity.digest()])
+        .await
+        .expect("read the ledger")
+        .get(identity)
+        .unwrap_or(0)
+}
+
+/// DATA-029: a successful write to another table does not erase an
+/// invalidation this process failed to record. A raw named-connection write
+/// advances the broad identity every entry observes; when that dedicated
+/// advancement failed, every entry stayed on its old generation, and the
+/// next unrelated success used to clear the suspension and let those
+/// entries pass full authority validation again. The missed identities are
+/// now kept and advanced by the next advancement that can land, and serving
+/// resumes only once they are.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_unrelated_successful_write_repairs_a_missed_invalidation_before_serving_resumes() {
+    let _harness = boot_with_render_cache().await;
+    let aux = hardening_aux_connection().await;
+    let broad = suprnova::render_cache::DependencyIdentity::broad();
+    let before = generation_of(&broad).await;
+
+    let primary = DB::connection().expect("the harness connected the primary database");
+    primary
+        .inner()
+        .execute_unprepared("DROP TABLE suprnova_render_generation_log")
+        .await
+        .expect("remove the generation log so the dedicated advancement fails");
+    let write = DB::statement_on(
+        aux,
+        "UPDATE markers SET marker = 'changed' WHERE id = 1",
+        Vec::new(),
+    )
+    .await;
+    assert!(write.is_err(), "the failed advancement is reported");
+    primary
+        .inner()
+        .execute_unprepared(
+            "CREATE TABLE suprnova_render_generation_log (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, identity TEXT NOT NULL, generation INTEGER NOT NULL, epoch INTEGER NOT NULL, committed_at TIMESTAMP NOT NULL)",
+        )
+        .await
+        .expect("restore the generation log");
+
+    User::create(attrs! { name: "unrelated" })
+        .await
+        .expect("a primary write whose advancement succeeds");
+
+    assert!(
+        generation_of(&broad).await > before,
+        "the write that confirmed serving also advanced the identity the failed one missed"
     );
 }
 

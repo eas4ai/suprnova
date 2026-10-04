@@ -389,6 +389,9 @@ const ERROR_PAGE_CACHE_CONTROL: &str = "no-cache, private";
 
 /// Whether a header on the replaced response carries over onto the page.
 ///
+/// [`InertiaHeadersMiddleware`](crate::InertiaHeadersMiddleware) applies the
+/// same rule when it turns an empty Inertia response into a redirect back.
+///
 /// One rule, stated as what is **dropped** rather than what is kept, so a
 /// header nobody here thought of survives instead of silently
 /// disappearing. A field is dropped in exactly three cases.
@@ -429,7 +432,7 @@ const ERROR_PAGE_CACHE_CONTROL: &str = "no-cache, private";
 /// client should do next: `Retry-After` on a `429`, `WWW-Authenticate` on
 /// a `401`, `Vary`, `Set-Cookie`, `X-Request-Id`. None of that stopped
 /// being true because the body changed.
-fn header_survives_rewrite(name: &str) -> bool {
+pub(crate) fn header_survives_rewrite(name: &str) -> bool {
     const CONTENT: &[u8] = b"Content-";
     let bytes = name.as_bytes();
     let content_prefixed =

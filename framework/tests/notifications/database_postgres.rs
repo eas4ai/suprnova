@@ -52,14 +52,20 @@ async fn connect_postgres() -> DatabaseConnection {
 /// whose own migrators record there too.
 async fn fresh_db() -> DatabaseConnection {
     let db = connect_postgres().await;
+    recreate_table(&db).await;
+    db
+}
+
+/// Drop `notifications` and create it again with the shipped migration.
+/// Shared with the MySQL/MariaDB run in `database_mysql`.
+pub(crate) async fn recreate_table(db: &DatabaseConnection) {
     db.execute_unprepared("DROP TABLE IF EXISTS notifications")
         .await
         .expect("drop notifications");
     CreateNotificationsTable
-        .up(&SchemaManager::new(&db))
+        .up(&SchemaManager::new(db))
         .await
         .expect("apply notifications migration");
-    db
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -115,11 +121,14 @@ async fn seed_n(db: &DatabaseConnection, user_id: i64, n: usize) -> Vec<String> 
 #[serial]
 #[ignore = "requires disposable Postgres at PG_TEST_URL"]
 async fn postgres_channel_writes_rows_the_read_model_can_load() {
-    let db = fresh_db().await;
-    let ids = seed_n(&db, 1, 3).await;
+    channel_writes_rows_the_read_model_can_load(&fresh_db().await).await;
+}
+
+pub(crate) async fn channel_writes_rows_the_read_model_can_load(db: &DatabaseConnection) {
+    let ids = seed_n(db, 1, 3).await;
     assert_eq!(ids.len(), 3);
 
-    let rows = all_for(&db, "users", "1").await.expect("all_for");
+    let rows = all_for(db, "users", "1").await.expect("all_for");
     assert_eq!(rows.len(), 3);
     for r in &rows {
         assert_eq!(r.notifiable_type, "users");
@@ -135,44 +144,54 @@ async fn postgres_channel_writes_rows_the_read_model_can_load() {
 #[serial]
 #[ignore = "requires disposable Postgres at PG_TEST_URL"]
 async fn postgres_mark_read_unread_and_partitioned_reads() {
-    let db = fresh_db().await;
-    let ids = seed_n(&db, 2, 3).await;
+    mark_read_unread_and_partitioned_reads(&fresh_db().await).await;
+}
 
-    mark_as_read(&db, &ids[0]).await.expect("mark_as_read");
-    mark_as_read(&db, &ids[0]).await.expect("idempotent");
+pub(crate) async fn mark_read_unread_and_partitioned_reads(db: &DatabaseConnection) {
+    let ids = seed_n(db, 2, 3).await;
 
-    let unread = unread_for(&db, "users", "2").await.expect("unread_for");
-    let read = read_for(&db, "users", "2").await.expect("read_for");
+    mark_as_read(db, &ids[0]).await.expect("mark_as_read");
+    mark_as_read(db, &ids[0]).await.expect("idempotent");
+
+    let unread = unread_for(db, "users", "2").await.expect("unread_for");
+    let read = read_for(db, "users", "2").await.expect("read_for");
     assert_eq!(unread.len(), 2);
     assert_eq!(read.len(), 1);
     assert!(read[0].read_at.is_some());
+    assert!(
+        read[0].read_at.unwrap() >= read[0].created_at,
+        "read_at decodes as the time it was marked"
+    );
 
-    mark_as_unread(&db, &ids[0]).await.expect("mark_as_unread");
-    mark_as_unread(&db, &ids[0]).await.expect("idempotent");
-    assert_eq!(unread_for(&db, "users", "2").await.unwrap().len(), 3);
-    assert_eq!(read_for(&db, "users", "2").await.unwrap().len(), 0);
+    mark_as_unread(db, &ids[0]).await.expect("mark_as_unread");
+    mark_as_unread(db, &ids[0]).await.expect("idempotent");
+    assert_eq!(unread_for(db, "users", "2").await.unwrap().len(), 3);
+    assert_eq!(read_for(db, "users", "2").await.unwrap().len(), 0);
 }
 
 #[tokio::test]
 #[serial]
 #[ignore = "requires disposable Postgres at PG_TEST_URL"]
 async fn postgres_mark_all_as_read_and_delete_for_report_row_counts() {
-    let db = fresh_db().await;
-    seed_n(&db, 3, 4).await;
-    // A second recipient must be untouched by both mass operations.
-    seed_n(&db, 4, 2).await;
+    mark_all_as_read_and_delete_for_report_row_counts(&fresh_db().await).await;
+}
 
-    let updated = mark_all_as_read(&db, "users", "3")
+pub(crate) async fn mark_all_as_read_and_delete_for_report_row_counts(db: &DatabaseConnection) {
+    seed_n(db, 3, 4).await;
+    // A second recipient must be untouched by both mass operations.
+    seed_n(db, 4, 2).await;
+
+    let updated = mark_all_as_read(db, "users", "3")
         .await
         .expect("mark_all_as_read");
     assert_eq!(updated, 4);
-    assert_eq!(unread_for(&db, "users", "3").await.unwrap().len(), 0);
-    assert_eq!(unread_for(&db, "users", "4").await.unwrap().len(), 2);
+    assert_eq!(unread_for(db, "users", "3").await.unwrap().len(), 0);
+    assert_eq!(unread_for(db, "users", "4").await.unwrap().len(), 2);
 
-    let deleted = delete_for(&db, "users", "3").await.expect("delete_for");
+    let deleted = delete_for(db, "users", "3").await.expect("delete_for");
     assert_eq!(deleted, 4);
-    assert_eq!(all_for(&db, "users", "3").await.unwrap().len(), 0);
-    assert_eq!(all_for(&db, "users", "4").await.unwrap().len(), 2);
+    assert_eq!(all_for(db, "users", "3").await.unwrap().len(), 0);
+    assert_eq!(all_for(db, "users", "4").await.unwrap().len(), 2);
 }
 
 /// #134 review: `CreateNotificationsTable` run over a table and indexes an

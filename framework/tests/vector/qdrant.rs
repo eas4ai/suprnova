@@ -165,6 +165,35 @@ fn resolve_point_id_keeps_non_canonical_uuid_spellings_apart() {
     }
 }
 
+/// A derived id is a version 5 UUID. A caller who passes the derived UUID of
+/// another id as its own id must get a point of its own, not that one: a
+/// canonical v5 UUID from a caller is derived like any other string.
+#[test]
+fn resolve_point_id_never_lets_a_caller_name_a_derived_point() {
+    let derived = point_id_opts(QdrantVectorDriver::resolve_point_id("doc-42"));
+    let PointIdOptions::Uuid(derived_uuid) = derived.clone() else {
+        panic!("a plain string resolves to a derived UUID, got {derived:?}");
+    };
+    assert_eq!(
+        uuid::Uuid::parse_str(&derived_uuid)
+            .unwrap()
+            .get_version_num(),
+        5
+    );
+    assert_ne!(
+        point_id_opts(QdrantVectorDriver::resolve_point_id(&derived_uuid)),
+        derived,
+        "the caller id {derived_uuid:?} and \"doc-42\" are different items"
+    );
+
+    // Any other version stays verbatim.
+    let v4 = uuid::Uuid::new_v4().to_string();
+    assert_eq!(
+        point_id_opts(QdrantVectorDriver::resolve_point_id(&v4)),
+        PointIdOptions::Uuid(v4.clone())
+    );
+}
+
 // ---------------------------------------------------------------------
 // Pure-function tests - payload encode (build_point)
 // ---------------------------------------------------------------------

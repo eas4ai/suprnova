@@ -351,10 +351,14 @@ async fn verify_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
 }
 ```
 
-`verify` checks `Auth::id()` against the token owner before consumption. A
-token belonging to another account returns the same invalid-token response and
-remains unused. On success, the provider marks the authenticated owner verified
-and the facade fires `EmailVerified`.
+`verify` checks the route's user against the token owner before consumption.
+The route's user is the user of the guard the last `AuthMiddleware` checked,
+or of the default guard, and `verify` reads and stamps it through that guard's
+provider; behind `AuthMiddleware::for_guard("admin")` it is the admin user,
+never the default guard's user in the same session. A token belonging to
+another account returns the same invalid-token response and remains unused.
+On success, the provider marks the authenticated owner verified and the facade
+fires `EmailVerified`.
 
 A link proves the mailbox it was sent to, and no other. The token carries a
 digest of that address, and `verify` compares it with the account's current

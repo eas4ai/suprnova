@@ -56,9 +56,15 @@ use crate::eloquent::changes::RowState;
 /// BelongsTo, `u64` for `with_count` aggregates, and `f64`/`i64`/
 /// arbitrary `T: Clone + Send + Sync` for `with_sum` / `with_avg` /
 /// `with_min` / `with_max` aggregates.
+///
+/// A relation's count is kept apart from its rows, under the same name:
+/// `with(["posts"]).with_count(["posts"])` keeps both, in either order,
+/// and a count alone never reads as loaded rows.
 #[derive(Default)]
 pub struct EagerLoadCache {
     rows: HashMap<String, RelationCell>,
+    /// `with_count` results, by relation name.
+    counts: HashMap<String, u64>,
     /// Whether the model came out of a query that returned more than
     /// one row. Set once, by the read path that hydrated the model.
     from_multi_row_query: bool,
@@ -75,8 +81,6 @@ enum RelationCell {
     /// `Option<T>` row - populated by HasOne / BelongsTo / MorphTo /
     /// MorphOne / HasOneThrough eager loaders.
     One(ClonedBox),
-    /// Plain count - populated by `with_count`.
-    Count(u64),
     /// Aggregate value - populated by `with_sum` / `with_avg` /
     /// `with_min` / `with_max`. Stored type-erased so the same cell
     /// covers `f64` SUM/AVG and `i64` MIN/MAX without per-variant
@@ -89,6 +93,7 @@ impl EagerLoadCache {
     pub fn new() -> Self {
         Self {
             rows: HashMap::new(),
+            counts: HashMap::new(),
             from_multi_row_query: false,
             row: RowState::default(),
         }
@@ -106,6 +111,7 @@ impl EagerLoadCache {
     {
         Self {
             rows: HashMap::new(),
+            counts: HashMap::new(),
             from_multi_row_query: false,
             row: RowState::loaded(row),
         }
@@ -116,14 +122,17 @@ impl EagerLoadCache {
         &self.row
     }
 
-    /// Whether this cache has a value for the given relation name.
+    /// Whether this cache has a value for the given relation name: its
+    /// loaded rows, or an aggregate stored under that exact key. A
+    /// `with_count` count is kept apart and does not count here, so
+    /// `load_missing` still loads the rows of a relation that only has
+    /// a count.
     pub fn has(&self, name: &str) -> bool {
         self.rows.contains_key(name)
     }
 
     /// Whether the rows of the named relation are loaded: a `Many` or a
-    /// `One` cell. A `with_count` count is stored under the relation's
-    /// name too, but it loads no row, so it does not count here.
+    /// `One` cell.
     pub(crate) fn has_rows(&self, name: &str) -> bool {
         matches!(
             self.rows.get(name),
@@ -159,6 +168,7 @@ impl EagerLoadCache {
     pub fn __clone_for_replica(&self) -> Self {
         Self {
             rows: self.clone_rows(),
+            counts: self.counts.clone(),
             from_multi_row_query: false,
             row: RowState::default(),
         }
@@ -185,8 +195,8 @@ impl EagerLoadCache {
     /// user code that forgot `with([...])` and expected eager rows.
     ///
     /// Also panics if the cell exists but stores a different kind
-    /// (HasOne / count / aggregate) - that combination indicates a
-    /// framework bug rather than a user mistake.
+    /// (HasOne / aggregate) - that combination indicates a framework
+    /// bug rather than a user mistake.
     pub fn get_many<T: Any + Send + Sync>(&self, name: &str) -> &[T] {
         match self.rows.get(name) {
             Some(RelationCell::Many(boxed)) => boxed
@@ -201,7 +211,7 @@ impl EagerLoadCache {
                 .as_slice(),
             Some(_) => panic!(
                 "eager-load cache: relation `{name}` was loaded as a different kind (HasOne / \
-                 count / aggregate), not HasMany / BelongsToMany.",
+                 aggregate), not HasMany / BelongsToMany.",
             ),
             None => panic!(
                 "relation `{name}` was not eager-loaded; call `.with([\"{name}\"])` on the query \
@@ -297,20 +307,17 @@ impl EagerLoadCache {
         }
     }
 
-    /// Store a `with_count` aggregate.
+    /// Store a `with_count` aggregate. It sits beside the relation's
+    /// loaded rows, never in their place.
     pub fn set_count(&mut self, name: &'static str, count: u64) {
-        self.rows
-            .insert(name.to_string(), RelationCell::Count(count));
+        self.counts.insert(name.to_string(), count);
     }
 
     /// Read a `with_count` aggregate. Returns `None` if `with_count`
     /// wasn't called for this relation - callers like `<rel>_count()`
     /// turn that into a panic with a clear message.
     pub fn get_count(&self, name: &str) -> Option<u64> {
-        match self.rows.get(name) {
-            Some(RelationCell::Count(c)) => Some(*c),
-            _ => None,
-        }
+        self.counts.get(name).copied()
     }
 
     /// Store a `with_sum` / `with_avg` / `with_min` / `with_max` value.
@@ -344,6 +351,7 @@ impl Clone for EagerLoadCache {
     fn clone(&self) -> Self {
         Self {
             rows: self.clone_rows(),
+            counts: self.counts.clone(),
             from_multi_row_query: self.from_multi_row_query,
             row: self.row.clone(),
         }
@@ -353,7 +361,6 @@ impl Clone for EagerLoadCache {
 impl RelationCell {
     fn clone_cell(&self) -> RelationCell {
         match self {
-            RelationCell::Count(c) => RelationCell::Count(*c),
             RelationCell::Many(inner) => RelationCell::Many(inner.clone()),
             RelationCell::One(inner) => RelationCell::One(inner.clone()),
             RelationCell::Aggregate(inner) => RelationCell::Aggregate(inner.clone()),
@@ -455,6 +462,18 @@ mod tests {
         let mut c = EagerLoadCache::new();
         c.set_count("xs", 7);
         assert_eq!(c.get_count("xs"), Some(7));
+    }
+
+    #[test]
+    fn a_count_and_the_rows_of_one_relation_coexist() {
+        let mut c = EagerLoadCache::new();
+        c.set_count("xs", 2);
+        assert!(!c.has("xs"), "a count alone is not loaded rows");
+        c.set_many("xs", vec![Row { id: 1 }, Row { id: 2 }]);
+        c.set_count("xs", 2);
+        assert_eq!(c.get_many::<Row>("xs").len(), 2);
+        assert_eq!(c.get_count("xs"), Some(2));
+        assert!(c.has_rows("xs"));
     }
 
     #[test]

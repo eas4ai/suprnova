@@ -34,9 +34,9 @@ use render_cache_middleware_support::{
 // Used only by tests gated on the `testing` feature below (ruling R47):
 // `NON_ASCII_LINK` by the non-ASCII header test, `wait_until_background_finished`
 // by the two tests that read `RenderCache::background_rebuilds_for_test` or
-// `RenderCache::hot_serves_for_test`.
+// `RenderCache::hot_serves_for_test`, `race` by the DATA-046 epoch test.
 #[cfg(feature = "testing")]
-use render_cache_middleware_support::{NON_ASCII_LINK, wait_until_background_finished};
+use render_cache_middleware_support::{NON_ASCII_LINK, race, wait_until_background_finished};
 use suprnova::render_cache::{RenderCache, RenderCacheMiddleware};
 use suprnova::{StatusCode, async_trait};
 
@@ -85,6 +85,80 @@ async fn stale_on_error_serves_stale_when_the_foreground_rebuild_fails() {
     );
 }
 
+/// DATA-045: stale hits that arrive while this node's background refresh
+/// of the same key is still running serve the stale entry and start no
+/// further refresh. Each of them used to spawn its own detached refresh:
+/// the coordinator parked them as waiters whose rebuilt response nobody
+/// would receive, and past `max_waiters` they all ran the handler at once
+/// as uncached bypasses. A background refresh now renders only as the
+/// key's leader, and at most one per key is in flight on a node.
+#[cfg(feature = "testing")]
+#[tokio::test]
+#[serial_test::serial]
+async fn stale_hits_during_a_running_background_refresh_start_no_more_refreshes() {
+    let harness = boot_with_render_cache().await;
+    let first = dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+
+    // Inside the stale-servable band: served stale, refreshed in the
+    // background. The refresh is held once it starts rendering.
+    clock(&harness).advance_ms(70_000);
+    counting_route::hold_next_render(&harness);
+    let stale = dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(stale.header("warning"), Some("110 - \"Response is Stale\""));
+    counting_route::wait_until_rendering_count(&harness, 2).await;
+    assert_eq!(RenderCache::background_rebuilds_for_test(), 1);
+
+    for _ in 0..5 {
+        let again = dispatch_get(&harness, "/stale/1", &[]).await;
+        assert_eq!(again.status, StatusCode::OK);
+        assert_eq!(again.header("warning"), Some("110 - \"Response is Stale\""));
+    }
+    assert_eq!(
+        RenderCache::background_rebuilds_for_test(),
+        1,
+        "a refresh of this key is already running, so no stale hit starts another"
+    );
+
+    counting_route::release_render(&harness);
+    // Two leads released: the cold publish and the one background refresh.
+    wait_until_background_finished(&harness, 2).await;
+    assert_eq!(counting_route::renders(), 2, "one background render ran");
+}
+
+/// DATA-041: the stale-on-error fallback judges the entry when the failed
+/// rebuild returns, not when the lookup began. A rebuild that outlasted the
+/// entry's stale-on-error window used to fall back to an entry that was Dead
+/// by then, and serve it as a 200 with an `Age` from the earlier instant.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_rebuild_that_fails_after_the_stale_on_error_window_closed_serves_the_failure() {
+    let harness = boot_with_render_cache().await;
+    let first = dispatch_get(&harness, "/stale/1", &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1);
+
+    // `/stale/{id}`: fresh 60_000, stale-servable 60_000, stale-on-error
+    // 120_000. Age 130_000 is inside the stale-on-error band, which ends at
+    // age 180_000.
+    clock(&harness).advance_ms(130_000);
+    counting_route::fail_next_render(&harness);
+    counting_route::hold_next_render(&harness);
+    let (served, ()) = tokio::join!(dispatch_get(&harness, "/stale/1", &[]), async {
+        counting_route::wait_until_rendering_count(&harness, 2).await;
+        // The rebuild is running; the window closes before it fails.
+        clock(&harness).advance_ms(60_000);
+        counting_route::release_render(&harness);
+    });
+
+    assert_eq!(
+        served.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the entry was Dead when the rebuild failed, so the failure is what is served"
+    );
+    assert_ne!(served.body, first.body);
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn a_second_request_is_an_l0_hit_that_runs_no_handler_and_carries_validators() {
@@ -118,6 +192,45 @@ async fn a_second_request_is_an_l0_hit_that_runs_no_handler_and_carries_validato
     let head = dispatch_head(&harness, "/cached/1").await;
     assert_eq!(head.status, StatusCode::OK);
     assert_eq!(counting_route::renders(), 1);
+}
+
+/// DATA-042: a principal-keyed entry tells the browser to revalidate before
+/// every reuse. The browser keys its HTTP cache by method and URL alone, so
+/// a `max-age` here let it replay the previous account's page to the next
+/// account on the same machine without asking the server, past the auth
+/// guard and the private key both. Revalidation stays cheap: the same
+/// principal presenting the entry's own validator is answered 304 from the
+/// stored entry, with no render.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_private_entry_makes_the_browser_revalidate_before_every_reuse() {
+    let harness = boot_with_render_cache().await;
+    let first = dispatch_get(&harness, "/private/1", &[("x-test-login", "alice")]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(
+        first.header("cache-control"),
+        Some("private, no-cache"),
+        "the render that published the private entry"
+    );
+
+    let hit = dispatch_get(&harness, "/private/1", &[("x-test-login", "alice")]).await;
+    assert_eq!(hit.status, StatusCode::OK);
+    assert_eq!(counting_route::renders(), 1, "the second request is a hit");
+    assert_eq!(
+        hit.header("cache-control"),
+        Some("private, no-cache"),
+        "the hit served from the private entry"
+    );
+
+    let etag = hit.header("etag").expect("etag").to_owned();
+    let revalidated = dispatch_get(
+        &harness,
+        "/private/1",
+        &[("x-test-login", "alice"), ("if-none-match", &etag)],
+    )
+    .await;
+    assert_eq!(revalidated.status, StatusCode::NOT_MODIFIED);
+    assert_eq!(counting_route::renders(), 1, "revalidation runs no handler");
 }
 
 // Ruling R47: gated on the `testing` feature, like `bypass.rs` and
@@ -836,6 +949,46 @@ async fn a_lease_mode_route_trusts_within_the_window_but_still_catches_an_epoch_
         2,
         "the rebuild ran under the advanced epoch and published under the key that epoch \
          derives, so this dispatch is a hit"
+    );
+}
+
+/// DATA-046: an emergency epoch advance on this node reaches the next
+/// request even when another hit's authority read of the old epoch was in
+/// flight while the advance ran. That read used to renew the epoch lease the
+/// advance had just dropped, with the epoch the advance superseded; the next
+/// request then derived its key under the old epoch, missed the cleared L0,
+/// found the old entry in L1, and served it as fresh on its still-live
+/// validation lease. A read that began before the advance no longer renews
+/// the lease.
+#[cfg(feature = "testing")]
+#[tokio::test]
+#[serial_test::serial]
+async fn an_epoch_advance_during_an_in_flight_authority_read_still_reaches_a_leased_l1_entry() {
+    let harness = boot_with_render_cache_and_l1_for_test().await;
+    dispatch_get(&harness, "/l1-leased/1", &[]).await;
+    dispatch_get(&harness, "/l1-leased/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "precondition: the entry is in L0 and L1, and its second request granted the lease"
+    );
+    dispatch_get(&harness, "/l1-leased/2", &[]).await;
+    assert_eq!(counting_route::renders(), 2);
+
+    // The second request to `/l1-leased/2` is a hit with no lease yet, so it
+    // reads the authority; the advance lands between that read and its
+    // renewal of the epoch lease.
+    race::advance_epoch_during_next_authority_read(&harness);
+    dispatch_get(&harness, "/l1-leased/2", &[]).await;
+
+    let before = counting_route::renders();
+    let after_advance = dispatch_get(&harness, "/l1-leased/1", &[]).await;
+    assert_eq!(after_advance.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        before + 1,
+        "an emergency epoch advance must reach the next request, not the end of the \
+         surviving L1 entry's lease"
     );
 }
 

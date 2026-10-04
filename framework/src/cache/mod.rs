@@ -120,20 +120,28 @@ impl Cache {
                 App::bind::<dyn CacheStore>(memory_cache);
             }
             CacheDriver::Redis => {
-                // No silent downgrade - surface the connection failure
-                // so operators notice misconfiguration at boot.
-                let redis_cache = RedisCache::connect(&config).await.map_err(|e| {
-                    FrameworkError::internal(format!(
-                        "Cache::bootstrap: CACHE_DRIVER=redis but Redis is unreachable at \
-                         {url}: {e}. Fix the URL or set CACHE_DRIVER=memory to use the \
-                         in-memory backend explicitly.",
-                        url = config.url,
-                    ))
-                })?;
+                let redis_cache = Self::connect_redis(&config).await?;
                 App::bind::<dyn CacheStore>(Arc::new(redis_cache));
             }
         }
         Ok(())
+    }
+
+    /// Connect the Redis store the bootstrap binds.
+    ///
+    /// No silent downgrade - surface the connection failure so operators
+    /// notice misconfiguration at boot.
+    async fn connect_redis(config: &CacheConfig) -> Result<RedisCache, FrameworkError> {
+        RedisCache::connect(config).await.map_err(|e| {
+            // The endpoint, never the URL: `REDIS_URL` routinely carries a
+            // password, and this message goes to boot logs.
+            FrameworkError::internal(format!(
+                "Cache::bootstrap: CACHE_DRIVER=redis but Redis is unreachable at \
+                 {endpoint}: {e}. Fix REDIS_URL or set CACHE_DRIVER=memory to use the \
+                 in-memory backend explicitly.",
+                endpoint = config::redis_endpoint(&config.url),
+            ))
+        })
     }
 
     /// Get the underlying cache store
@@ -685,6 +693,36 @@ impl LockGuard {
     /// token no longer matches.
     pub async fn refresh(&self, ttl: Duration) -> Result<bool, FrameworkError> {
         self.store.refresh_lock(&self.key, &self.token, ttl).await
+    }
+}
+
+#[cfg(test)]
+mod redis_url_redaction {
+    use super::*;
+
+    /// The bootstrap error for an unreachable Redis names where it tried to
+    /// connect, never the credentials in `REDIS_URL`. The error used to
+    /// carry the whole URL, password included, into boot logs.
+    #[tokio::test]
+    async fn an_unreachable_redis_error_names_the_endpoint_not_the_credentials() {
+        let config = CacheConfig::builder()
+            .driver(CacheDriver::Redis)
+            // Port 1 refuses the connection at once on a local host.
+            .url("redis://cache-user:s3cret-pw@127.0.0.1:1/2")
+            .build();
+        let Err(err) = Cache::connect_redis(&config).await else {
+            panic!("nothing listens on port 1, so the connect must fail");
+        };
+        for rendered in [err.to_string(), format!("{err:?}")] {
+            assert!(
+                !rendered.contains("s3cret-pw") && !rendered.contains("cache-user"),
+                "the error leaks REDIS_URL credentials: {rendered}"
+            );
+        }
+        assert!(
+            err.to_string().contains("127.0.0.1:1"),
+            "the error still names the endpoint it could not reach: {err}"
+        );
     }
 }
 

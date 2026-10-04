@@ -2,8 +2,11 @@
 //!
 //! Per-project entry point for `db:seed`, your own `#[command]`s, and
 //! other one-shot CLI tasks. Calls `{package_name}::bootstrap::register()`
-//! lazily (only when a real subcommand matches), then routes argv to
-//! a registered console command.
+//! lazily (only when a real subcommand matches), boots what a queue worker
+//! boots - the `#[injectable]` services, the `#[policy]` gates, and the
+//! Cache, Queue, Mail and other runtime drivers - and then routes argv to a
+//! registered console command. It waits for the queued event listeners the
+//! command started before it exits.
 //!
 //! ```text
 //! cargo run --bin console -- db:seed

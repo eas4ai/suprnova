@@ -90,6 +90,10 @@ Acceptance criteria:
   without a proven sanitizer/segment boundary.
 - Anonymous and authenticated variants cannot collide.
 - Logout, principal change, and permission version change prevent private reuse.
+  This holds for the browser's own cache too: a private cached response is
+  sent `Cache-Control: private, no-cache`, because the browser keys a stored
+  response by method and URL and never by the principal or tenant material in
+  the server's key.
 - Classification reasoning is inspectable in development and tests.
 
 UX flow:
@@ -352,6 +356,14 @@ prose.
 
 ## Decisions and revisions
 
+- 2026-10-04 -- Sent private cached responses `Cache-Control: private,
+  no-cache` instead of `private, max-age=<fresh>`. The browser keyed the
+  stored response by URL alone, so within the freshness window it replayed one
+  account's body to the next account signed in on the same browser without a
+  request, past both the route's auth guard and the private key, which broke
+  "logout and principal change prevent private reuse" (audit DATA-042).
+  Revalidation keeps the strong validator, so the same principal's
+  conditional request is still a `304` from storage.
 - 2026-09-13 -- Stored a response's content coding with its body and
   replayed it on every hit: the entry header's content-encoding field,
   present since the codec was designed and never filled, now carries the

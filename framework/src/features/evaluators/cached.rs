@@ -492,7 +492,6 @@ mod tests {
         let inner = Arc::new(ScopedEvaluator::new(IdentityScopes {
             principal: true,
             tenant: true,
-            known: false,
         }));
         let cached = Arc::new(CachedEvaluator::new(inner.clone(), Duration::from_secs(60)));
 
@@ -539,7 +538,6 @@ mod tests {
         let inner = Arc::new(ScopedEvaluator::new(IdentityScopes {
             principal: true,
             tenant: true,
-            known: false,
         }));
         let cached = Arc::new(CachedEvaluator::new(inner.clone(), Duration::from_secs(60)));
 

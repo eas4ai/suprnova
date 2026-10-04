@@ -227,7 +227,10 @@ registered. A file is deleted only when the driver knows no message points
 at it any more, so a send that times out, a send that is refused after an
 earlier try timed out or met a fault of the service (5xx), or a settlement
 after its reservation expired, leaves the file on the disk rather than risk
-a message that can no longer be read.
+a message that can no longer be read. A retry after a send that got no
+answer, or met a fault of the service, carries its own copy of the file: if
+SQS took both tries, each of the two messages owns a file, and the job's
+duplicate stays readable after the first one is acknowledged.
 
 `SqsQueueDriver` is behind the `queue-sqs` cargo feature, which is on by
 default and brings `filesystem` with it.

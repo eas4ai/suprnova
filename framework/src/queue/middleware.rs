@@ -327,7 +327,20 @@ impl JobMiddleware for ThrottlesExceptions {
             }
             Ok(other) => Ok(other),
             Err(err) => {
-                RateLimiter::hit(&key, self.decay.as_secs()).await?;
+                // Log the counting failure; do NOT propagate it. The job
+                // failed with an error of its own, and that error is the
+                // reason recorded for this attempt. Returning the cache's
+                // error instead would record the wrong reason and, with a
+                // backoff, turn a release into a failed attempt. A missed
+                // count only throttles this key later than it would have.
+                if let Err(count_err) = RateLimiter::hit(&key, self.decay.as_secs()).await {
+                    tracing::warn!(
+                        %key,
+                        error = %count_err,
+                        "failed to count a job failure for exception throttling; \
+                         the job's own error stands"
+                    );
+                }
                 if self.backoff.is_zero() {
                     Err(err)
                 } else {
@@ -709,6 +722,7 @@ mod release_failure_tests {
         inner: InMemoryCache,
         release_fails: bool,
         forget_fails: bool,
+        increment_fails: bool,
     }
 
     impl ErroringCache {
@@ -717,6 +731,7 @@ mod release_failure_tests {
                 inner: InMemoryCache::new(),
                 release_fails: true,
                 forget_fails: false,
+                increment_fails: false,
             }
         }
 
@@ -725,6 +740,16 @@ mod release_failure_tests {
                 inner: InMemoryCache::new(),
                 release_fails: false,
                 forget_fails: true,
+                increment_fails: false,
+            }
+        }
+
+        fn failing_increment() -> Self {
+            Self {
+                inner: InMemoryCache::new(),
+                release_fails: false,
+                forget_fails: false,
+                increment_fails: true,
             }
         }
     }
@@ -755,6 +780,11 @@ mod release_failure_tests {
             self.inner.flush().await
         }
         async fn increment(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+            if self.increment_fails {
+                return Err(FrameworkError::internal(
+                    "synthetic Redis blip on increment",
+                ));
+            }
             self.inner.increment(key, amount).await
         }
         async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
@@ -911,6 +941,49 @@ mod release_failure_tests {
         assert!(
             matches!(outcome, JobOutcome::Completed),
             "the handler's own outcome must survive the cleanup failure, got {outcome:?}"
+        );
+    }
+
+    /// A cache error while counting a failure replaced the job's own error,
+    /// so the failure reason recorded for the job was the cache's.
+    #[tokio::test]
+    #[serial]
+    async fn throttle_count_failure_keeps_the_jobs_own_error() {
+        let _cache_scope = TestContainer::fake();
+        TestContainer::bind::<dyn CacheStore>(Arc::new(ErroringCache::failing_increment()));
+
+        let next: Next = Box::new(|_env| Box::pin(async { Err(FrameworkError::internal("boom")) }));
+        let mw = ThrottlesExceptions::new(3, Duration::from_secs(60)).by("throttle_hit_blip");
+        let err = mw
+            .handle(env_named("J"), next)
+            .await
+            .expect_err("the handler's own error must still propagate");
+        assert!(
+            err.to_string().contains("boom"),
+            "the surfaced error must be the handler's, not the cache blip; got: {err}"
+        );
+    }
+
+    /// The same blip with a backoff configured: the job is released for the
+    /// backoff, as it would be had the count landed, rather than failed with
+    /// the cache's error.
+    #[tokio::test]
+    #[serial]
+    async fn throttle_count_failure_still_releases_with_backoff() {
+        let _cache_scope = TestContainer::fake();
+        TestContainer::bind::<dyn CacheStore>(Arc::new(ErroringCache::failing_increment()));
+
+        let next: Next = Box::new(|_env| Box::pin(async { Err(FrameworkError::internal("boom")) }));
+        let mw = ThrottlesExceptions::new(3, Duration::from_secs(60))
+            .backoff(Duration::from_secs(5))
+            .by("throttle_hit_blip_backoff");
+        let outcome = mw
+            .handle(env_named("J"), next)
+            .await
+            .expect("a failed count must not turn the release into a cache error");
+        assert!(
+            matches!(outcome, JobOutcome::Released { delay } if delay == Duration::from_secs(5)),
+            "the job is released for its backoff, got {outcome:?}"
         );
     }
 }

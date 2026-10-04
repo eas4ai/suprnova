@@ -176,3 +176,46 @@ async fn a_bound_value_cannot_widen_the_match() {
         assert!(rule.passes(value).await.is_err(), "{value}");
     }
 }
+
+/// ROOT-26: inside a transaction, `exists` and `unique` read through it,
+/// so they see the rows the transaction wrote and have not committed. On a
+/// pool of two connections the check used to run on the other one and
+/// miss them; on a pool of one it waited for the connection the
+/// transaction held.
+#[tokio::test]
+async fn presence_rules_read_through_the_ambient_transaction() {
+    use sea_orm::ConnectOptions;
+    use suprnova::{DB, FrameworkError};
+
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("tags.db").display());
+    let mut options = ConnectOptions::new(url);
+    options.max_connections(2).min_connections(1);
+    let raw = Database::connect(options).await.unwrap();
+    raw.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "CREATE TABLE tags (id INTEGER PRIMARY KEY, team_id INTEGER NOT NULL, slug TEXT NOT NULL)"
+            .to_string(),
+    ))
+    .await
+    .unwrap();
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(raw));
+
+    let (exists, unique) = DB::transaction(|_tx| {
+        Box::pin(async move {
+            DB::statement(
+                "INSERT INTO tags (id, team_id, slug) VALUES (1, 7, 'go')",
+                Vec::<sea_orm::Value>::new(),
+            )
+            .await?;
+            let exists = Exists::new("tags", "slug").passes("go").await.is_ok();
+            let unique = Unique::new("tags", "slug").passes("go").await.is_ok();
+            Ok::<_, FrameworkError>((exists, unique))
+        })
+    })
+    .await
+    .expect("the transaction commits");
+    assert!(exists, "exists sees the row the transaction inserted");
+    assert!(!unique, "unique sees it too, so the value is taken");
+}

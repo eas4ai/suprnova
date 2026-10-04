@@ -394,9 +394,12 @@ register_terminable(AuditLogTerminator);
 The server iterates registered terminables in registration order after
 every response (4xx and 5xx included) and awaits each one. A WebSocket
 upgrade counts as a response: its terminables see status 101, or the
-status that refused the upgrade. Errors are
-logged via `tracing::error!` and swallowed - the response has already
-left the building, so there's nobody left to surface them to.
+status that refused the upgrade. `terminate` returns nothing, because the
+response has already left the building and there's nobody left to
+surface an error to. A hook that panics is logged via `tracing::error!`,
+and the hooks registered after it still run. A graceful shutdown waits up
+to five seconds for the hooks still running, after the connections drain,
+and aborts the rest.
 
 Registration is idempotent per concrete type. `registered_terminables()`,
 `terminable_count()`, and `has_terminable::<T>()` provide introspection
@@ -447,12 +450,16 @@ route builders and `group!` of the `routes!` macro. The name is one of:
 | `throttle:60,1` | The alias `throttle`, called with the arguments `["60", "1"]`. Arguments follow the colon, separated by commas, and spaces around a name or an argument are trimmed. |
 | `api` | Every middleware of the group `api`, in order, each once. A group wins over an alias of the same name. |
 
-A group lists each middleware once, where it first appears, as Laravel's
-`uniqueMiddleware` does. When two nested groups both include a third, or
-a group names the same alias twice, the repeat is dropped, so a
-`throttle:60,1` in a shared group counts one hit per request. The alias
-and its arguments identify the middleware: `throttle:60,1` and
-`throttle:30,1` are two.
+A route runs each named middleware once, where it first appears, as
+Laravel's `uniqueMiddleware` does across group and route middleware. When
+two nested groups both include a third, a group names the same alias
+twice, or a route names an alias a group already gave it, the repeat is
+dropped, so a `throttle:60,1` reached twice counts one hit per request.
+Group middleware comes before the route's own, so a repeat keeps the
+group's place. The alias and its arguments identify the middleware:
+`throttle:60,1` and `throttle: 60, 1` are one, `throttle:30,1` is
+another. Middleware added by type, with `.middleware(M)`, has no alias
+and is never dropped.
 
 A route resolves the name when it is registered, which is at boot. A name
 that no alias or group carries, an alias that takes no arguments but is

@@ -16,6 +16,8 @@
 mod factor;
 #[path = "fixtures/password_harness.rs"]
 mod harness;
+#[path = "fixtures/racing_sign_up.rs"]
+mod racing_sign_up;
 #[path = "fixtures/storage_schema.rs"]
 mod storage_schema;
 
@@ -271,4 +273,46 @@ async fn open_mode_refuses_a_binding_that_cannot_represent_passwordless() {
     // real store issues normally.
     let issued = world.magic.issue(EMAIL).await.unwrap();
     assert!(matches!(issued, MagicLinkIssued::Minted(_)));
+}
+
+/// An open magic-link sign-up that loses the race for a new address answers
+/// as the existing account: the store refuses a second account, and the
+/// link is minted for the account the other sign-up created, as for any
+/// address already on file.
+#[tokio::test]
+async fn a_magic_link_sign_up_that_loses_the_race_answers_as_the_existing_account() {
+    let world = factor_world().await;
+    let existing = world
+        .storage
+        .create_user(NewUser {
+            email: EMAIL.into(),
+            password_hash: None,
+        })
+        .await
+        .unwrap();
+    let service = MagicLinkService::new(
+        Arc::new(racing_sign_up::RacingSignUp::new(world.storage.clone())),
+        world.storage.clone(),
+        world.first_proof.clone(),
+        world.gate.clone(),
+        RegistrationPolicy::Open,
+    );
+    let issued = service
+        .issue(EMAIL)
+        .await
+        .expect("a lost race answers as the existing account, not with an error");
+    let MagicLinkIssued::Minted(token) = issued else {
+        panic!("a link is minted for the existing account");
+    };
+    let decision = service
+        .consume(
+            secrecy::ExposeSecret::expose_secret(&token),
+            magnetar::sessions::SessionMetadata::default(),
+        )
+        .await
+        .unwrap();
+    let magnetar::auth::SignInDecision::SessionAllowed(grant) = decision else {
+        panic!("the existing passwordless account signs in");
+    };
+    assert_eq!(grant.user_id(), existing.user_id);
 }

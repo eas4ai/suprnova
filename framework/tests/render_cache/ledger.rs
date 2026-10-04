@@ -784,6 +784,22 @@ async fn assert_a_write_committed_during_a_cached_render_is_never_published_as_c
     );
 }
 
+/// DATA-055 on PostgreSQL, where `DB::unprepared` runs its string through
+/// the simple-query protocol and so runs every statement in a batch. See
+/// `orm::assert_a_raw_batch_that_begins_with_select_still_advances_the_broad_authority`.
+#[tokio::test]
+#[ignore = "requires live Postgres; run with --ignored live_postgres"]
+async fn live_postgres_a_raw_batch_that_begins_with_select_still_advances_the_broad_authority() {
+    let url = std::env::var("PG_TEST_URL")
+        .expect("set PG_TEST_URL to a disposable Postgres - this test drops and recreates tables");
+    let conn = try_connect_live(&url)
+        .await
+        .expect("Postgres test DB not reachable - check PG_TEST_URL");
+    let _guard = reset_and_migrate(conn).await;
+    crate::orm::assert_a_raw_batch_that_begins_with_select_still_advances_the_broad_authority()
+        .await;
+}
+
 #[tokio::test]
 #[ignore = "requires live Postgres; run with --ignored live_postgres"]
 async fn live_postgres_a_write_committed_during_a_cached_render_is_never_published_as_current() {

@@ -173,12 +173,14 @@ async fn control(request: Request, route: ControlRoute) -> Result<HttpResponse, 
     ) {
         return Err(AsyncErrorKind::ProtocolInvalid.into());
     }
-    if crate::auth::guard::Auth::id().is_none() {
+    // The route's principal: the user of the guard the route's
+    // `AuthMiddleware` checked, never another guard's user.
+    let Some(principal) = super::ports::route_principal().await else {
         return Err(AsyncErrorKind::AuthorizationDenied.into());
-    }
+    };
     Ok(match route {
         ControlRoute::Subscriptions => {
-            subscription_control(&runtime, &state, &request, body).await?
+            subscription_control(&runtime, &state, &request, body, principal).await?
         }
         ControlRoute::Memberships => membership_control(&state, &request, body).await?,
     })
@@ -189,6 +191,7 @@ async fn subscription_control(
     state: &Arc<AsyncState>,
     request: &Request,
     body: &[u8],
+    principal: String,
 ) -> Result<HttpResponse, AsyncErrorKind> {
     let control: SubscriptionControl =
         serde_json::from_slice(body).map_err(|_| AsyncErrorKind::ProtocolInvalid)?;
@@ -210,6 +213,7 @@ async fn subscription_control(
             let baseline = StreamPosition::new(StreamEpoch::new(now.get()), StreamSequence::new(0));
             let (context, parameters) = runtime.validate_async_request_context(
                 request,
+                &principal,
                 &control.island.component,
                 &control.island.slot,
                 &control.island.document_key,
@@ -230,6 +234,7 @@ async fn subscription_control(
                     origin,
                     baseline,
                     session_id,
+                    principal,
                 )
                 .await?;
             Ok(json_response(201, view.value))
@@ -244,6 +249,7 @@ async fn subscription_control(
                 StreamPosition::new(StreamEpoch::new(epoch), StreamSequence::new(sequence));
             let (context, _) = runtime.validate_async_request_context(
                 request,
+                &principal,
                 &control.island.component,
                 &control.island.slot,
                 &control.island.document_key,
@@ -330,7 +336,7 @@ async fn events_inner(request: Request) -> Result<HttpResponse, AsyncRefusal> {
         .filter(|generation| browser_safe_generation(*generation))
         .ok_or(AsyncErrorKind::GenerationInvalid)?;
     let (_, state) = bind_state()?;
-    if crate::auth::guard::Auth::id().is_none() {
+    if super::ports::route_principal().await.is_none() {
         return Err(AsyncErrorKind::AuthorityInvalid.into());
     }
     let facts = request_scope_facts(&request, state.now()?)?;

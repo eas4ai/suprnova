@@ -125,7 +125,7 @@ multer = "3"
 reqsign-aws-v4 = { version = "3.0.0", git = "https://github.com/apache/opendal-reqsign.git", rev = "b49cd2996b9d2d9944e84481f8835ff55b188b97", optional = true, default-features = false }
 reqsign-core = { version = "3.0.1", git = "https://github.com/apache/opendal-reqsign.git", rev = "b49cd2996b9d2d9944e84481f8835ff55b188b97", optional = true, default-features = false }
 reqsign-file-read-tokio = { version = "3.0.1", git = "https://github.com/apache/opendal-reqsign.git", rev = "b49cd2996b9d2d9944e84481f8835ff55b188b97", optional = true, default-features = false }
-opendal = { version = "0.58.0", git = "https://github.com/eas4ai/opendal.git", rev = "88717391eb72c9839d3f8e79fccad9f22fc3a1b4", optional = true, default-features = false, features = [
+opendal = { version = "0.58.0", git = "https://github.com/eas4ai/opendal.git", rev = "83f5a495a11f40885af02c3306fec0e1fda06bc2", optional = true, default-features = false, features = [
     "services-fs",
     "services-s3",
     "services-memory",
@@ -170,8 +170,6 @@ tempfile = "3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "query", "multipart"] }
 getrandom = "0.4.2"
 tokio-util = { version = "0.7.18", features = ["time"] }
-sea-streamer = { version = "0.5.0", features = ["redis", "stdio", "runtime-tokio", "socket", "json"], default-features = false }
-sea-streamer-redis = { version = "0.5.2", features = ["runtime-tokio"] }
 lettre = { version = "0.11.22", default-features = false, features = ["smtp-transport", "pool", "rustls-tls", "hostname", "builder", "tokio1", "tokio1-rustls"] }
 tera = "1"
 aws-sigv4 = "1"
@@ -412,10 +410,10 @@ otel = [
     "dep:opentelemetry-semantic-conventions",
     "dep:tracing-opentelemetry",
 ]
-# Enables SeaStreamerBroadcastHub - cross-process fanout via sea-streamer.
-# sea-streamer (with stdio backend) is already a base dep (required by the
-# queue/redis driver). This feature gates only the fanout module itself,
-# keeping the public API surface opt-in.
+# Enables SeaStreamerBroadcastHub - cross-process fanout over Redis Streams,
+# through the redis client the framework already carries. It costs no
+# dependencies; it gates only the fanout module, keeping that public API
+# surface opt-in.
 broadcasting-fanout = []
 # Enables the Pinecone vector driver. It costs no extra dependencies -
 # the driver speaks Pinecone's REST API over the `reqwest` client the
@@ -514,6 +512,10 @@ path = "tests/live/dogfood_forms.rs"
 [[test]]
 name = "live_dogfood_server"
 path = "tests/live/dogfood_server.rs"
+
+[[test]]
+name = "live_session_fields"
+path = "tests/live/session_fields.rs"
 
 [[test]]
 name = "live_assets"

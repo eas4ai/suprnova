@@ -10,9 +10,9 @@ channel subscriptions, and the hub does the rest.
 The `BroadcastHub` is the bus. The default `InMemoryBroadcastHub` runs
 entirely in-process - perfect for single-replica deployments and the
 test suite. Behind the `broadcasting-fanout` Cargo feature,
-`SeaStreamerBroadcastHub` routes the same events through a stream
-broker (Redis Streams, Kafka, file, stdio) so a publish in one process
-reaches subscribers in every other process.
+`SeaStreamerBroadcastHub` routes the same events through Redis
+Streams so a publish in one process reaches subscribers in every other
+process.
 
 Everything from the [WebSocket](websockets.md) chapter still applies -
 heartbeat pings, `max_missed_pings`, `WsConfig`, per-route middleware,
@@ -678,31 +678,35 @@ pub async fn register() {
 }
 ```
 
-The constructor takes two arguments: the streamer URI (selects the
-backend at runtime by scheme) and the stream key (the topic name
-shared by every process in the cluster). Use the same stream key on
-every replica or they won't see each other's events.
+The constructor takes two arguments: the stream URI (selects the
+backend by scheme) and the stream key (the stream name shared by every
+process in the cluster: at most 249 ASCII letters, digits, `.`, `_` or
+`-`). Use the same stream key on every replica or they won't see each
+other's events.
 
 `new_with_presence_ttl(uri, key, ttl)` overrides the default 60 s
 presence TTL - useful for tests that need to exercise the
-crash-recovery path quickly. `new_loopback(uri, key)` enables stdio
-loopback for single-process integration tests; the duplicate guard
-ensures each app event still delivers exactly once locally.
+crash-recovery path quickly. `new_loopback(uri, key)` and
+`new_loopback_with_presence_ttl` behave as `new` and
+`new_with_presence_ttl`: every backend feeds a hub's own events back to
+it, and the duplicate guard ensures each app event still delivers
+exactly once locally.
 
 ### Backends
 
-The backend is selected at runtime from the URI scheme:
+The backend is selected from the URI scheme:
 
 | URI scheme | Backend | Production-ready | Notes |
 |------------|---------|------------------|-------|
-| `redis://`, `rediss://` | Redis Streams | **Yes** | Default recommendation. `rediss://` uses TLS. Enabled in the default build. |
-| `kafka://`, `kafka+ssl://` | Kafka | **Yes** | Requires `kafka` in the `sea-streamer` feature set (`framework/Cargo.toml`). |
-| `stdio://` | stdin/stdout pipes | No - tests only | Single-process loopback. |
-| `file://` | Local file | No - single-host | Requires `file` in the `sea-streamer` feature set. |
+| `redis://`, `rediss://` | Redis Streams | **Yes** | `rediss://` uses TLS. The URL's `user:password@` and `/db` apply to every connection the hub opens, as they do for the queue's Redis driver. |
+| `memory://` | An in-process stream | No - tests only | Connects the hubs of one process that name the same stream key. `stdio://` is accepted as an alias. |
 
-The default Suprnova build enables `stdio` + `redis` + `socket`. To
-enable Kafka or file, edit `framework/Cargo.toml` and add the
-relevant `sea-streamer` feature.
+A hub reads the stream from the entry that was last when it connected:
+an event published after the constructor returns always reaches it, and
+nothing published before is replayed. Entries carry the event in the
+field `msg`, as they did when the hub went through sea-streamer, so
+replicas of an earlier version on the same stream keep working during
+a rolling deploy.
 
 ### Architecture
 
@@ -711,9 +715,9 @@ Each `publish(envelope)` does two things in parallel:
 1. **Local fanout** - the inner `InMemoryBroadcastHub` delivers to
    subscribers on this process immediately. Local subscribers never
    wait on the network.
-2. **Stream write** - the same envelope is serialized and pushed to
-   the sea-streamer stream so every other process's consumer pump
-   picks it up and delivers it locally.
+2. **Stream write** - the same envelope is serialized and appended to
+   the stream (`XADD`) so every other process's consumer pump reads it
+   (`XREAD`) and delivers it locally.
 
 A duplicate-delivery guard prevents seeing each app-data event twice:
 the hub instance has a random UUID, every envelope it produces carries
@@ -722,10 +726,9 @@ instance id matches the local hub's own. Presence meta-channel
 messages are an exception - each hub needs its own events in the
 cross-process view so the read path is unified.
 
-Backend dispatch is enum-based, not trait-object: the hub stores a
-concrete `SeaProducer` / `SeaConsumer` from sea-streamer's socket
-adapter, which is an enum over every compiled backend. No `dyn`
-overhead at the publish call site.
+Writes go through one writer task per hub, in the order they were
+made, and each `publish` waits up to 5 s for its write to land. A write
+whose caller stopped waiting is dropped instead of being written late.
 
 ### Cross-process presence
 
@@ -885,10 +888,14 @@ routes! {
 - `500` when `PusherAuth` is not bound, when an encrypted channel is
   requested without a master key, or when `member_info` fails.
 
-A presence member's `user_id` is `Auth::id()`, and its `user_info` is
-the channel's `member_info`. `pusher_user_auth` signs
-`{"id": <Auth::id()>}` for pusher-js user authentication and answers
-`403` for a guest.
+A presence member's `user_id` is the route's user, and its `user_info`
+is the channel's `member_info`. `pusher_user_auth` signs `{"id": <the
+route's user>}` for pusher-js user authentication and answers `403` for
+a guest. The route's user is the user of the guard the last
+`AuthMiddleware` checked: the bare id for the default guard, as
+`Auth::id()` reports it, and `<guard>:<id>` behind
+`AuthMiddleware::for_guard(..)` naming another guard. A user of another
+guard in the same session never stands in for it.
 
 ### Connect with Laravel Echo
 
@@ -1070,7 +1077,7 @@ the event itself - see [Events](events.md#testing--eventfacadefake).
 | `Broadcast::fake()` | `RecordingBroadcastHub` bound as `dyn BroadcastHub` |
 | `assertBroadcasted` | `RecordingBroadcastHub::assert_broadcast(channel, event)` |
 | Pusher / Reverb driver | `PusherBroadcastHub` (Pusher Channels, Soketi, Reverb); see [Pusher, Soketi and Reverb](#pusher-soketi-and-reverb) |
-| Ably driver | none; `InMemoryBroadcastHub` (single-process) or `SeaStreamerBroadcastHub` (cross-process: Redis / Kafka / file / stdio) |
+| Ably driver | none; `InMemoryBroadcastHub` (single-process) or `SeaStreamerBroadcastHub` (cross-process over Redis Streams) |
 | `/broadcasting/auth` | `pusher_channel_auth` and `pusher_user_auth`, mounted by hand |
 | Echo client library | Laravel Echo with the `pusher` broadcaster against `PusherBroadcastHub`; for the in-process hub, wire the JSON envelope protocol from the browser by hand |
 

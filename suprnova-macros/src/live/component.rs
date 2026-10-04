@@ -9,6 +9,7 @@ use syn::{Data, DeriveInput, Fields, ItemStruct, Type, Visibility};
 use super::attrs::{
     ComponentArgs, FieldKind, ModelTimingArgs, StreamModeArgs, StreamReconnectArgs,
     StreamTargetArgs, UrlModeArgs, contains_reference, parse_component_args, parse_field_args,
+    wire_name,
 };
 use super::expand::enforce_runtime_path_contract;
 
@@ -59,7 +60,17 @@ pub(crate) fn derive(input: DeriveInput) -> syn::Result<TokenStream2> {
         }
         let field_args = parse_field_args(&field.attrs)?;
         let ident = field.ident.as_ref().expect("named fields have identifiers");
-        let name = ident.unraw().to_string();
+        let name = wire_name(ident, "Live field")?;
+        // The generated view binds the component itself as `component`, and
+        // templates call its methods through that name. A visible field of
+        // the same name would be a second view field under one name.
+        if name == "component" && field_args.kind != FieldKind::Secret {
+            return Err(syn::Error::new(
+                ident.span(),
+                "a Live field the view sees cannot be named `component`: the view binds the \
+                 component itself under that name; rename the field",
+            ));
+        }
         let category = field_category_tokens(field_args.kind);
         let codec = field_codec_tokens(&field.ty);
         let model_codec = model_codec_tokens(&field.ty);
@@ -272,6 +283,53 @@ fn expand_definition(
                 }
             }
         });
+    // Session-only fields never enter the snapshot. They are read from the
+    // host session whenever the component is mounted or reconstructed for
+    // one viewer, and handed back to it before dehydration.
+    let session_fields: Vec<&RuntimeField> = runtime_fields
+        .iter()
+        .filter(|field| field.kind == FieldKind::Session)
+        .collect();
+    let session_runtime = if session_fields.is_empty() {
+        quote! {}
+    } else {
+        let loads = session_fields.iter().map(|field| {
+            let ident = &field.ident;
+            let field_name = &field.name;
+            let ty = &field.ty;
+            quote! {
+                if let ::std::option::Option::Some(value) =
+                    ::suprnova::live::__private::session::load::<#ty>(#name, #field_name)
+                {
+                    self.#ident = value;
+                }
+            }
+        });
+        let stores = session_fields.iter().map(|field| {
+            let ident = &field.ident;
+            let field_name = &field.name;
+            quote! {
+                ::suprnova::live::__private::session::stage(#name, #field_name, &self.#ident)?;
+            }
+        });
+        quote! {
+            fn load_session_state(
+                &mut self,
+            ) -> ::std::result::Result<(), ::suprnova::live::__private::component::ComponentError>
+            {
+                #(#loads)*
+                ::std::result::Result::Ok(())
+            }
+
+            fn store_session_state(
+                &self,
+            ) -> ::std::result::Result<(), ::suprnova::live::__private::component::ComponentError>
+            {
+                #(#stores)*
+                ::std::result::Result::Ok(())
+            }
+        }
+    };
     let public_dehydration = runtime_fields
         .iter()
         .filter(|field| field.kind == FieldKind::Public)
@@ -433,6 +491,8 @@ fn expand_definition(
                     ::suprnova::live::__private::canonical::CanonicalValue::Object(fields),
                 )
             }
+
+            #session_runtime
         }
     };
     enforce_runtime_path_contract(&tokens)?;

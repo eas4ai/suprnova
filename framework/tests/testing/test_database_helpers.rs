@@ -50,3 +50,17 @@ async fn fetch_one_errors_when_no_rows() {
         .unwrap_err();
     assert!(err.to_string().contains("no rows"), "got: {err}");
 }
+
+/// DATA-004: `test_database!()` with no argument migrates with the calling
+/// crate's `crate::migrations::Migrator`, as documented. It used to name
+/// `$crate::migrations::Migrator`, a path inside suprnova that does not
+/// exist, so no application could expand it.
+#[tokio::test]
+async fn test_database_macro_without_arguments_uses_the_crates_migrator() {
+    let db = suprnova::test_database!();
+    let rows = db
+        .fetch_all("SELECT id FROM macro_probes", vec![])
+        .await
+        .expect("the crate's migrator created macro_probes");
+    assert!(rows.is_empty());
+}

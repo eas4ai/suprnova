@@ -567,6 +567,56 @@ async fn connection_established_fires_on_connect() {
     EventFacade::forget::<ConnectionEstablished>();
 }
 
+// ---------- typed COUNT reports what it ran ------------------------------
+
+mod audit_log {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "audit_log")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i32,
+        pub event: String,
+        pub actor_id: i32,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// DATA-003: a typed count is observed as the `COUNT(*)` statement it
+/// executed. It used to report the plain SELECT it was built from, paired
+/// with the COUNT's timing.
+#[tokio::test]
+#[serial]
+async fn typed_count_reports_the_count_statement_it_ran() {
+    let _db = setup().await;
+    let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = captured.clone();
+    DB::listen(move |event: &QueryExecuted| {
+        sink.lock().unwrap().push(event.sql.clone());
+    })
+    .unwrap();
+
+    let total = suprnova::database::QueryBuilder::<audit_log::Entity>::new()
+        .count()
+        .await
+        .unwrap();
+    assert_eq!(total, 2);
+
+    let observed = captured.lock().unwrap().clone();
+    DB::flush_listeners().unwrap();
+    assert_eq!(observed.len(), 1, "one statement ran: {observed:?}");
+    assert!(
+        observed[0].contains("COUNT(*)"),
+        "the observed SQL is the COUNT that ran: {}",
+        observed[0]
+    );
+}
+
 // ---------- to_raw_sql sanity -------------------------------------------
 
 #[tokio::test]

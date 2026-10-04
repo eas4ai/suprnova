@@ -37,6 +37,18 @@ struct ShortDto {
     pub slug: String,
 }
 
+#[derive(Debug, suprnova::Data, validator::Validate)]
+struct WideIdsDto {
+    #[data(from_route_param)]
+    pub small: i128,
+
+    #[data(from_route_param)]
+    pub big: u128,
+
+    #[data(from_route_param)]
+    pub lowest: Option<i128>,
+}
+
 // ── Generic test infrastructure ───────────────────────────────────────────────
 
 /// Spawns a one-shot server that:
@@ -197,4 +209,49 @@ async fn defaults_to_field_name_when_attribute_arg_omitted() {
         .expect("server did not process request");
     let dto = result.expect("expected Ok, got Err");
     assert_eq!(dto.slug, "hello-world");
+}
+
+#[tokio::test]
+async fn wide_integer_route_params_reach_their_fields() {
+    // JSON numbers carry at most 64 bits, so the route value travels as its
+    // decimal text; the field must still read it, small or not.
+    let params = HashMap::from([
+        ("small".to_string(), "42".to_string()),
+        ("big".to_string(), u128::MAX.to_string()),
+        ("lowest".to_string(), i128::MIN.to_string()),
+    ]);
+    let (addr, captured) = spawn_server::<WideIdsDto>(params).await;
+    get_request(addr).await;
+
+    tokio::task::yield_now().await;
+
+    let result = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("server did not process request");
+    let dto = result.expect("valid i128/u128 route params must extract");
+    assert_eq!(dto.small, 42);
+    assert_eq!(dto.big, u128::MAX);
+    assert_eq!(dto.lowest, Some(i128::MIN));
+}
+
+#[tokio::test]
+async fn an_invalid_wide_integer_route_param_is_a_400() {
+    let params = HashMap::from([
+        ("small".to_string(), "not-a-number".to_string()),
+        ("big".to_string(), "1".to_string()),
+    ]);
+    let (addr, captured) = spawn_server::<WideIdsDto>(params).await;
+    get_request(addr).await;
+
+    tokio::task::yield_now().await;
+
+    let result = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("server did not process request");
+    let err = result.expect_err("a non-numeric route value must not extract");
+    assert_eq!(err.status_code(), 400);
 }

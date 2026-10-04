@@ -291,6 +291,92 @@ async fn pagination_cursor_last_page_no_next() {
     panic!("walked too many pages; last page: {last_page_rows:?}");
 }
 
+/// DATA-019: an ordering already on the query does not reorder the keyset
+/// walk. Ordered by id descending, the first page used to be 5 and 4, the
+/// next `id > 4` gave 5 again, and 1 to 3 were never shown.
+#[tokio::test]
+async fn pagination_cursor_replaces_an_existing_order_and_walks_every_row_once() {
+    use sea_orm::QueryOrder;
+    ensure_crypt();
+    let _guard = TestContainer::fake();
+    install_db(make_db_with_n_rows(5).await);
+
+    let mut seen: Vec<i32> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..10 {
+        let page = Pagination::cursor::<toy::Entity, toy::Column>(
+            toy::Entity::find().order_by_desc(toy::Column::Id),
+            cursor.as_deref(),
+            2,
+            toy::Column::Id,
+        )
+        .await
+        .unwrap();
+        seen.extend(page.data.iter().map(|r| r.id));
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen, vec![1, 2, 3, 4, 5]);
+}
+
+/// DATA-019: an offset on the query positions the first page only. Kept
+/// on every page, it skipped two rows after each cursor.
+#[tokio::test]
+async fn pagination_cursor_applies_an_offset_to_the_first_page_only() {
+    use sea_orm::QuerySelect;
+    ensure_crypt();
+    let _guard = TestContainer::fake();
+    install_db(make_db_with_n_rows(8).await);
+
+    let mut seen: Vec<i32> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..10 {
+        let page = Pagination::cursor::<toy::Entity, toy::Column>(
+            toy::Entity::find().offset(2),
+            cursor.as_deref(),
+            2,
+            toy::Column::Id,
+        )
+        .await
+        .unwrap();
+        seen.extend(page.data.iter().map(|r| r.id));
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen, vec![3, 4, 5, 6, 7, 8]);
+}
+
+/// DATA-020: the Inertia scroll metadata names the query parameter the
+/// paginator reads, so infinite scroll asks for `posts_page=2`, not
+/// `page=2`.
+#[test]
+fn inertia_scroll_metadata_uses_the_paginators_page_name() {
+    let (meta, _) = LengthAwarePaginator::new(vec![1, 2], 10, 2, 1)
+        .with_page_name("posts_page")
+        .into_inertia_scroll();
+    assert_eq!(meta.page_name, "posts_page");
+
+    let (meta, _) = LengthAwarePaginator::new(vec![1, 2], 10, 2, 1).into_inertia_scroll();
+    assert_eq!(meta.page_name, "page", "the default name stays `page`");
+}
+
+/// DATA-020: the cursor paginator's metadata names its cursor parameter.
+#[test]
+fn inertia_scroll_metadata_uses_the_paginators_cursor_name() {
+    let (meta, _) = CursorPaginator::new(vec![1, 2], 2, Some("next".to_string()), None)
+        .with_cursor_name("after")
+        .into_inertia_scroll();
+    assert_eq!(meta.page_name, "after");
+
+    let (meta, _) =
+        CursorPaginator::new(vec![1, 2], 2, Some("next".to_string()), None).into_inertia_scroll();
+    assert_eq!(meta.page_name, "cursor", "the default name stays `cursor`");
+}
+
 // --- Live-DB tests (gated by #[ignore]) ---
 //
 // These exercise `Pagination::cursor` against real Postgres / MySQL,

@@ -1542,11 +1542,10 @@ pub mod rules {
                         sa == sb
                     }
                 }
+                // By value, exactly: through `f64`, 2^53 and 2^53 + 1
+                // would be one value.
                 (Value::Number(na), Value::Number(nb)) if !self.strict => {
-                    match (na.as_f64(), nb.as_f64()) {
-                        (Some(fa), Some(fb)) => fa == fb,
-                        _ => na == nb,
-                    }
+                    crate::json_number::compare(na, nb).is_eq()
                 }
                 _ => a == b,
             }
@@ -2576,10 +2575,11 @@ pub mod async_rules {
         ValidationMessage::keyed("validation-unchecked").fallback("could not be checked")
     }
     use crate::database::placeholder::placeholder;
+    use crate::database::transaction::ExecutorChoice;
     use crate::database::validate_identifier;
     use crate::validation::message::ValidationMessage;
-    use crate::{DB, FrameworkError};
-    use sea_orm::{ConnectionTrait, Statement, Value};
+    use crate::{FrameworkError, PRIMARY_CONNECTION_NAME};
+    use sea_orm::{Statement, Value};
 
     /// Laravel `unique:table,column` - issues a single parameterized
     /// `COUNT(*)` against the configured DB connection and fails when a
@@ -2709,8 +2709,8 @@ pub mod async_rules {
             let table = validate_identifier(self.table).map_err(|e| e.to_string())?;
             let column = validate_identifier(self.column).map_err(|e| e.to_string())?;
 
-            let conn = DB::connection().map_err(|e| format!("db: {e}"))?;
-            let backend = conn.inner().get_database_backend();
+            let exec = presence_executor().await?;
+            let backend = exec.backend();
 
             let mut clauses: Vec<String> = Vec::new();
             let mut values: Vec<Value> = Vec::new();
@@ -2758,9 +2758,8 @@ pub mod async_rules {
             );
 
             let stmt = Statement::from_sql_and_values(backend, &sql, values);
-            let row = conn
-                .inner()
-                .query_one_raw(stmt)
+            let row = exec
+                .query_one(stmt)
                 .await
                 .map_err(|e| format!("unique query: {e}"))?
                 .ok_or_else(|| "unique query returned no rows".to_string())?;
@@ -2768,6 +2767,17 @@ pub mod async_rules {
             row.try_get::<i64>("", "c")
                 .map_err(|e| format!("unique decode: {e}"))
         }
+    }
+
+    /// Where `Unique` and `Exists` read: the primary connection, or the
+    /// ambient transaction when one is open, so a check inside
+    /// `DB::transaction` sees the rows that transaction wrote, and on a
+    /// pool of one connection does not wait for the connection the
+    /// transaction holds.
+    async fn presence_executor() -> Result<ExecutorChoice, String> {
+        ExecutorChoice::resolve_read(None, Some(PRIMARY_CONNECTION_NAME), None)
+            .await
+            .map_err(|e| format!("db: {e}"))
     }
 
     /// Laravel `exists:table,column` - the value names a row: a
@@ -2909,8 +2919,8 @@ pub mod async_rules {
             let table = validate_identifier(self.table).map_err(|e| e.to_string())?;
             let column = validate_identifier(self.column).map_err(|e| e.to_string())?;
 
-            let conn = DB::connection().map_err(|e| format!("db: {e}"))?;
-            let backend = conn.inner().get_database_backend();
+            let exec = presence_executor().await?;
+            let backend = exec.backend();
 
             let mut clauses = Vec::with_capacity(1 + self.wheres.len());
             let mut values = Vec::with_capacity(1 + self.wheres.len());
@@ -2931,9 +2941,8 @@ pub mod async_rules {
                 clauses.join(" AND ")
             );
             let stmt = Statement::from_sql_and_values(backend, &sql, values);
-            let row = conn
-                .inner()
-                .query_one_raw(stmt)
+            let row = exec
+                .query_one(stmt)
                 .await
                 .map_err(|e| format!("exists query: {e}"))?;
             Ok(row.is_some())

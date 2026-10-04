@@ -553,8 +553,9 @@ async fn the_private_document_is_cached_per_principal_and_never_crosses() {
     );
     assert_eq!(
         ada_second.header("cache-control"),
-        Some("private, max-age=60"),
-        "a private entry is never offered to a shared cache"
+        Some("private, no-cache"),
+        "a private entry is never offered to a shared cache, and the browser revalidates it \
+         before every reuse"
     );
 
     // 4. A third principal shares neither entry.

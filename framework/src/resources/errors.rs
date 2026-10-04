@@ -63,9 +63,13 @@ impl FrameworkError {
         err_obj.insert("title".into(), Value::String(title.to_string()));
         err_obj.insert("detail".into(), Value::String(detail));
         if let Some(field) = self.field() {
+            // RFC 6901: a reference token writes `~` as `~0` and `/` as
+            // `~1`, so an attribute named `a/b` stays one token instead of
+            // pointing at a nested `b`.
+            let token = field.replace('~', "~0").replace('/', "~1");
             err_obj.insert(
                 "source".into(),
-                json!({ "pointer": format!("/data/attributes/{field}") }),
+                json!({ "pointer": format!("/data/attributes/{token}") }),
             );
         }
 

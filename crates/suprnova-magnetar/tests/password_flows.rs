@@ -1175,3 +1175,127 @@ async fn weak_and_oversized_passwords_are_rejected_at_registration() {
         "no user row is created for rejected passwords"
     );
 }
+
+/// Records the thread every driver call runs on, and counts the mints.
+#[derive(Default)]
+struct ThreadSpyDriver {
+    threads: Mutex<Vec<std::thread::ThreadId>>,
+    mints: AtomicUsize,
+}
+
+impl ThreadSpyDriver {
+    fn drain_threads(&self) -> Vec<std::thread::ThreadId> {
+        std::mem::take(&mut *self.threads.lock())
+    }
+}
+
+impl PasswordHashDriver for ThreadSpyDriver {
+    fn verify(&self, call: &VerificationCall<'_>) -> magnetar::Result<bool> {
+        self.threads.lock().push(std::thread::current().id());
+        StandardPasswordHashDriver.verify(call)
+    }
+
+    fn mint(&self, profile: &HashWorkProfile, password: &SecretString) -> magnetar::Result<String> {
+        self.threads.lock().push(std::thread::current().id());
+        self.mints.fetch_add(1, Ordering::SeqCst);
+        StandardPasswordHashDriver.mint(profile, password)
+    }
+}
+
+/// Password hashing never runs on the async worker. A slow hash on a
+/// runtime worker stalls every other task scheduled there, so registration,
+/// sign-in, the lockout dummy work and password changes all hash on the
+/// blocking pool. The test runs on a current-thread runtime, whose only
+/// worker is the test thread.
+#[tokio::test]
+async fn password_hashing_never_runs_on_the_async_worker() {
+    let driver = Arc::new(ThreadSpyDriver::default());
+    let world = harness_with(driver.clone(), fast_hash_config(), LockoutConfig::default()).await;
+    driver.drain_threads();
+    let worker = std::thread::current().id();
+
+    world
+        .provider
+        .register(RegisterInput {
+            email: EMAIL.into(),
+            password: SecretString::from(PASSWORD),
+        })
+        .await
+        .unwrap();
+    let principal = world
+        .provider
+        .authenticate(PasswordAttempt {
+            email: EMAIL.into(),
+            password: SecretString::from(PASSWORD),
+            metadata: SessionMetadata::default(),
+        })
+        .await
+        .unwrap();
+    world
+        .provider
+        .perform_authentication_work("nobody@example.test", &SecretString::from(PASSWORD))
+        .await
+        .unwrap();
+    world
+        .provider
+        .change_password(
+            principal.user_id(),
+            SecretString::from(PASSWORD),
+            SecretString::from("a second honest password"),
+        )
+        .await
+        .unwrap();
+
+    let threads = driver.drain_threads();
+    assert!(!threads.is_empty(), "the flows hashed through the driver");
+    assert!(
+        threads.iter().all(|thread| *thread != worker),
+        "every hash ran off the async worker"
+    );
+}
+
+/// Completing a reset with a token that is not live is refused before the
+/// candidate password is hashed: the hash is a slow Argon2id mint, and any
+/// caller could otherwise buy one per request with a made-up token. A live
+/// token still resets the password.
+#[tokio::test]
+async fn a_reset_with_a_dead_token_mints_no_hash() {
+    let driver = Arc::new(ThreadSpyDriver::default());
+    let world = harness_with(driver.clone(), fast_hash_config(), LockoutConfig::default()).await;
+    world
+        .provider
+        .register(RegisterInput {
+            email: EMAIL.into(),
+            password: SecretString::from(PASSWORD),
+        })
+        .await
+        .unwrap();
+    let before = driver.mints.load(Ordering::SeqCst);
+    for token in ["", "not-a-live-reset-token"] {
+        assert!(
+            world
+                .management
+                .complete_with_outcome(token, "fresh honest password")
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(
+        driver.mints.load(Ordering::SeqCst),
+        before,
+        "a dead token is refused before any hash"
+    );
+
+    world.management.send_link(EMAIL).await.unwrap();
+    let reset_link = world.mail.last_payload().unwrap()["reset_link"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let token = query_param(&reset_link, "token");
+    world
+        .management
+        .complete_with_outcome(&token, "fresh honest password")
+        .await
+        .expect("a live token resets the password");
+    assert_eq!(driver.mints.load(Ordering::SeqCst), before + 1);
+}

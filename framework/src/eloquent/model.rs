@@ -164,6 +164,117 @@ pub(crate) fn key_beyond_signed(
         .any(|value| crate::eloquent::casts::unsigned::beyond_signed(backend, value))
 }
 
+/// The savepoint `create_or_first` takes inside a Postgres transaction.
+const CREATE_OR_FIRST_SAVEPOINT: &str = "suprnova_create_or_first";
+
+/// Refuse a write that needs the model's row when the model has none: one
+/// built in the process - a replica, a new model from `first_or_new` or
+/// `find_or_new`, a `Default` - that was never read or saved and whose key
+/// still holds its reset value. An `UPDATE` by that key would write over
+/// whatever row holds it instead of creating a row, and the model cannot
+/// receive the key an insert would assign, because these methods borrow it
+/// or return the row they updated. `persist` inserts it and returns the
+/// saved model with its key.
+///
+/// A model built with a real key, or deserialized from one, still updates
+/// that row, and so does a type that keeps no row state: neither can be
+/// told apart from a loaded model here.
+fn refuse_unsaved<M>(model: &M, method: &str) -> Result<(), FrameworkError>
+where
+    M: Model,
+    M: From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    let Some(cache) = model.__eager_cache() else {
+        return Ok(());
+    };
+    if crate::eloquent::changes::original_row(Some(cache.row_state())).is_some() {
+        return Ok(());
+    }
+    let mut reset = model.clone();
+    reset.reset_primary_key();
+    if reset.primary_key_value() != model.primary_key_value() {
+        return Ok(());
+    }
+    Err(FrameworkError::internal(format!(
+        "{method}: this `{}` has not been inserted - it was built in the process \
+         (replicate, first_or_new, find_or_new or Default) and its key still holds \
+         the reset value, which names no row of its own; insert it with persist(), \
+         which returns the saved model with its key",
+        std::any::type_name::<M>(),
+    )))
+}
+
+/// `UPDATE table SET column = column <operator> by WHERE pk = ?`, the
+/// body of [`Model::increment`] and [`Model::decrement`]. The operator is
+/// written rather than the amount negated, because `i64::MIN` has no
+/// negation.
+async fn step_column<M>(
+    model: &M,
+    column: &str,
+    operator: &str,
+    by: i64,
+) -> Result<(), FrameworkError>
+where
+    M: Model,
+    M: From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    // Audit HIGH `eloquent` #1 - column is interpolated raw into
+    // the SQL string and cannot be parameterised. Validate
+    // against the framework's SQL identifier rules before render.
+    crate::database::validate_identifier(column)?;
+    let table = M::TABLE;
+    let pk_name = M::primary_key_name();
+    let pk_value = model.primary_key_value_json();
+    // CACHE-009 / DATA-039: the UPDATE and its generation advance share
+    // one transaction, so a future dropped between them rolls the counter
+    // back instead of leaving it committed ahead of the generations every
+    // cached page that read it depends on.
+    crate::render_cache::orm::atomic(M::default_connection_name(), || async move {
+        // T11/T12: route through resolve_write.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            None,
+            None,
+            M::default_connection_name(),
+        )
+        .await?;
+        let backend = exec.backend();
+        // Rendered after the executor resolves, because only it knows the
+        // backend - and Postgres rejects `?`, so a hard-coded placeholder
+        // made increment/decrement (and every counter built on them) fail
+        // outright there.
+        let by_ph = crate::database::placeholder::placeholder(backend, 1)?;
+        let pk_ph = crate::database::placeholder::placeholder(backend, 2)?;
+        let sql = format!(
+            "UPDATE {table} SET {column} = {column} {operator} {by_ph} WHERE {pk_name} = {pk_ph}"
+        );
+        exec.run(sea_orm::Statement::from_sql_and_values(
+            backend,
+            &sql,
+            vec![by.into(), json_value_to_sea_value(&pk_value)],
+        ))
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        crate::render_cache::orm::after_model_write(model).await
+    })
+    .await
+}
+
 /// The row state a model's relation cache keeps, when it has a cache.
 fn row_state(
     cache: Option<&crate::eloquent::relations::EagerLoadCache>,
@@ -849,7 +960,15 @@ where
     /// the row as the database has it after the UPDATE. A listener
     /// that cancels at (1) or (2) aborts with
     /// `FrameworkError::bad_request(reason)`.
+    ///
+    /// `save` updates a row. A model built in the process that was never
+    /// inserted - a replica, a new model from `first_or_new` or
+    /// `find_or_new` - still holds its reset key, so `save` refuses it
+    /// with `FrameworkError::internal` before any event fires: insert it
+    /// with [`Persistable::persist`](crate::Persistable::persist), which
+    /// returns the saved model with its key.
     async fn save(&self) -> Result<(), FrameworkError> {
+        refuse_unsaved(self, "save")?;
         // Serialize the in-memory model to an Attrs map so listeners
         // see the "what's about to be written" payload through the
         // same Arc<Mutex<Attrs>> shape they see on create.
@@ -910,8 +1029,10 @@ where
     ///
     /// Same event sequence as [`Self::save`] - `Updating` /
     /// `Saving { is_creating: false }` before the UPDATE, then
-    /// `Updated` / `Saved` after.
+    /// `Updated` / `Saved` after. Refuses a model that was never
+    /// inserted, as [`Self::save`] does.
     async fn update(self, attrs: Attrs) -> Result<Self, FrameworkError> {
+        refuse_unsaved(&self, "update")?;
         let previous = self.clone();
         let filtered = Self::fillable_filter().apply_checked(attrs)?;
         let shared = std::sync::Arc::new(tokio::sync::Mutex::new(filtered));
@@ -1067,8 +1188,11 @@ where
     /// 2. *DELETE lands*
     /// 3. `Deleted { model, is_force: false }`
     ///
-    /// Soft-delete models override the inherent `delete` to also
-    /// dispatch `Trashed { model }` after step 2.
+    /// A model declared with `soft_deletes` overrides this method, on the
+    /// trait as well as inherently, with its tombstone `UPDATE`, which
+    /// also dispatches `Trashed { model }` after step 2. A call through
+    /// the trait - generic code, [`Self::destroy`],
+    /// [`Self::delete_quietly`] - tombstones the row too.
     async fn delete(self) -> Result<(), FrameworkError> {
         Self::__dispatch_deleting(&self, false).await?;
         let touch_plan = Self::__plan_touches(Some(&self), &Attrs::new())?;
@@ -1416,8 +1540,10 @@ where
     /// event sequence as [`Self::save`] (`Updating` → `Saving` →
     /// UPDATE → `Updated` → `Saved`). Used with
     /// [`DB::begin_transaction`](crate::DB::begin_transaction) when the
-    /// closure form doesn't fit the caller's control flow.
+    /// closure form doesn't fit the caller's control flow. Refuses a
+    /// model that was never inserted, as [`Self::save`] does.
     async fn save_with_tx(&self, tx: &crate::database::Transaction) -> Result<(), FrameworkError> {
+        refuse_unsaved(self, "save_with_tx")?;
         let attrs_value = serde_json::to_value(self).map_err(|e| {
             FrameworkError::internal(format!(
                 "save_with_tx: serialize self for Saving event: {e}"
@@ -1459,12 +1585,14 @@ where
 
     /// Apply `attrs` to this row through `tx`. Mirrors
     /// [`Self::update`] event-for-event but pins the SQL to the
-    /// supplied transaction. Returns the updated row.
+    /// supplied transaction. Returns the updated row. Refuses a model
+    /// that was never inserted, as [`Self::save`] does.
     async fn update_with_tx(
         self,
         tx: &crate::database::Transaction,
         attrs: Attrs,
     ) -> Result<Self, FrameworkError> {
+        refuse_unsaved(&self, "update_with_tx")?;
         let previous = self.clone();
         let filtered = Self::fillable_filter().apply_checked(attrs)?;
         let shared = std::sync::Arc::new(tokio::sync::Mutex::new(filtered));
@@ -1846,44 +1974,15 @@ where
     /// I/O boundary with [`FrameworkError`]. Same contract as
     /// Laravel's `Model::increment($column, $by)`.
     async fn increment(&self, column: &str, by: i64) -> Result<(), FrameworkError> {
-        // Audit HIGH `eloquent` #1 - column is interpolated raw into
-        // the SQL string and cannot be parameterised. Validate
-        // against the framework's SQL identifier rules before render.
-        crate::database::validate_identifier(column)?;
-        let table = Self::TABLE;
-        let pk_name = Self::primary_key_name();
-        let pk_value = self.primary_key_value_json();
-        // T11/T12: route through resolve_write.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            None,
-            None,
-            Self::default_connection_name(),
-        )
-        .await?;
-        let backend = exec.backend();
-        // Rendered after the executor resolves, because only it knows the
-        // backend - and Postgres rejects `?`, so a hard-coded placeholder
-        // made increment/decrement (and every counter built on them) fail
-        // outright there.
-        let by_ph = crate::database::placeholder::placeholder(backend, 1)?;
-        let pk_ph = crate::database::placeholder::placeholder(backend, 2)?;
-        let sql =
-            format!("UPDATE {table} SET {column} = {column} + {by_ph} WHERE {pk_name} = {pk_ph}");
-        exec.run(sea_orm::Statement::from_sql_and_values(
-            backend,
-            &sql,
-            vec![by.into(), json_value_to_sea_value(&pk_value)],
-        ))
-        .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
-        crate::render_cache::orm::after_model_write(self).await?;
-        Ok(())
+        step_column(self, column, "+", by).await
     }
 
-    /// Atomic `UPDATE table SET col = col - by WHERE pk = ?`. Sugar
-    /// over `increment(column, -by)`.
+    /// Atomic `UPDATE table SET col = col - by WHERE pk = ?`. The
+    /// subtraction is written into the SQL rather than `-by` added, so
+    /// every `i64` amount works, `i64::MIN` included. Same identifier
+    /// validation as [`Self::increment`].
     async fn decrement(&self, column: &str, by: i64) -> Result<(), FrameworkError> {
-        self.increment(column, -by).await
+        step_column(self, column, "-", by).await
     }
 
     // ---- Static destroy / is / is_not (Laravel parity) -----------------
@@ -2071,6 +2170,9 @@ where
     /// after the DELETE lands and surface `0` as 404 - matching what
     /// the caller would have seen had the pre-flight observed the
     /// missing row.
+    ///
+    /// On a model declared with `soft_deletes` the row is tombstoned, as
+    /// [`Self::delete`] does, and a row that is already trashed is a 404.
     async fn delete_or_fail(self) -> Result<(), FrameworkError> {
         if crate::database::after_commit::in_transaction() {
             return delete_one_or_fail::<Self>(self, None).await;
@@ -2423,11 +2525,25 @@ where
     /// "conflict + lookup hits nothing" combination is almost
     /// certainly a serialization / connection failure rather than
     /// a real uniqueness conflict).
+    ///
+    /// Inside a Postgres transaction the insert runs under a savepoint,
+    /// as Laravel's `createOrFirst` runs it: there a failed statement
+    /// aborts the whole transaction, so without one the lookup could not
+    /// run and the transaction could not go on. SQLite and MySQL undo a
+    /// failed statement alone and need none.
     async fn create_or_first(lookup: Attrs, extras: Attrs) -> Result<Self, FrameworkError> {
         let attrs = lookup.clone().merge(extras);
+        let savepoint = crate::database::Transaction::current()
+            .filter(|tx| tx.backend() == sea_orm::DbBackend::Postgres);
+        if let Some(tx) = &savepoint {
+            tx.savepoint(CREATE_OR_FIRST_SAVEPOINT).await?;
+        }
         match Self::create(attrs).await {
             Ok(row) => Ok(row),
             Err(err @ FrameworkError::Database(_)) => {
+                if let Some(tx) = &savepoint {
+                    tx.rollback_to(CREATE_OR_FIRST_SAVEPOINT).await?;
+                }
                 match Self::query().filter_attrs(&lookup).first().await? {
                     Some(found) => Ok(found),
                     None => Err(err),
@@ -2460,11 +2576,19 @@ fn is_record_missing(err: &FrameworkError) -> bool {
     }
 }
 
-/// Execute a hard DELETE for `model` and assert that exactly one row
+/// Execute the DELETE for `model` and assert that exactly one row
 /// was removed. Shared between `delete_or_fail` and its
 /// ambient-transaction branch so both paths fire the same lifecycle
 /// events (`Deleting` → DELETE → `Deleted`) and the same
 /// `rows_affected == 1` check.
+///
+/// A model declared with `soft_deletes` is tombstoned instead, as its
+/// `delete()` does: one `UPDATE ... SET deleted_at = <now>` of the row
+/// while it is not trashed, then `Trashed` before `Deleted`. A row
+/// already trashed is not found, as a scoped read would not find it.
+/// This is generic code, so it reads the model's declaration from
+/// [`EloquentModel::__soft_delete_stamp`]; the concrete `delete()` it
+/// mirrors is an inherent method generic dispatch never reaches.
 ///
 /// When `tx` is `Some` the DELETE is pinned to the supplied
 /// transaction (the `delete_or_fail` no-ambient-tx path uses this
@@ -2490,6 +2614,10 @@ where
         Send + Into<sea_orm::Value>,
 {
     M::__dispatch_deleting(&model, false).await?;
+
+    if let Some(stamp) = M::__soft_delete_stamp()? {
+        return trash_one_or_fail(model, tx, stamp).await;
+    }
 
     let snapshot = model.clone();
     let row = model.try_into_storage()?;
@@ -2531,5 +2659,92 @@ where
     }
 
     M::__dispatch_deleted(&snapshot, false).await?;
+    Ok(())
+}
+
+/// The soft-delete branch of [`delete_one_or_fail`]: tombstone `model`'s
+/// row while it is not trashed, with the stamp the model declares, and
+/// answer not-found when no live row was there to tombstone.
+async fn trash_one_or_fail<M>(
+    model: M,
+    tx: Option<&crate::database::Transaction>,
+    stamp: crate::eloquent::SoftDeleteStamp,
+) -> Result<(), FrameworkError>
+where
+    M: Model,
+    M: From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    crate::database::validate_identifier(M::SOFT_DELETES_COLUMN)?;
+    crate::database::validate_identifier(M::primary_key_name())?;
+    let model_ref = &model;
+    let write = || async move {
+        let exec = match tx {
+            Some(t) => crate::database::transaction::ExecutorChoice::from_tx(t),
+            None => {
+                crate::database::transaction::ExecutorChoice::resolve_write(
+                    None,
+                    None,
+                    M::default_connection_name(),
+                )
+                .await?
+            }
+        };
+        let backend = exec.backend();
+        let placeholder = crate::database::__macro_support::placeholder;
+        let mut values = vec![stamp.deleted_at];
+        let mut sql = format!(
+            "UPDATE {} SET {} = {}",
+            M::TABLE,
+            M::SOFT_DELETES_COLUMN,
+            placeholder(backend, values.len())?
+        );
+        if let Some(updated_at) = stamp.updated_at {
+            crate::database::validate_identifier(M::UPDATED_AT_COLUMN)?;
+            values.push(updated_at);
+            sql.push_str(&format!(
+                ", {} = {}",
+                M::UPDATED_AT_COLUMN,
+                placeholder(backend, values.len())?
+            ));
+        }
+        values.push(model_ref.primary_key_value().into());
+        sql.push_str(&format!(
+            " WHERE {} = {} AND {} IS NULL",
+            M::primary_key_name(),
+            placeholder(backend, values.len())?,
+            M::SOFT_DELETES_COLUMN,
+        ));
+        let result = exec
+            .run(sea_orm::Statement::from_sql_and_values(
+                backend, &sql, values,
+            ))
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        if result.rows_affected() == 0 {
+            return Err(FrameworkError::not_found(
+                "delete_or_fail: row no longer exists",
+            ));
+        }
+        match tx {
+            Some(t) => crate::render_cache::orm::after_model_write_with_tx(t, model_ref).await?,
+            None => crate::render_cache::orm::after_model_write(model_ref).await?,
+        }
+        Ok(())
+    };
+    match tx {
+        Some(_) => write().await?,
+        None => crate::render_cache::orm::atomic(M::default_connection_name(), write).await?,
+    }
+
+    M::__dispatch_trashed(&model).await?;
+    M::__dispatch_deleted(&model, false).await?;
     Ok(())
 }

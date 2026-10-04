@@ -30,7 +30,10 @@ use crate::plugin::{
 };
 use crate::schema::AuthSchema;
 use crate::sessions::SessionMetadata;
-use crate::storage::{IssueToken, NewUser, PresentedToken, TokenStore, UserStore};
+use crate::storage::{
+    IssueToken, NewUser, PresentedToken, SignUpAccount, TokenStore, UserStore,
+    create_or_find_existing,
+};
 use crate::{Error, Result};
 
 use super::{Gate, acquire, bad_request, body_string, generic_ok, request_metadata};
@@ -122,26 +125,36 @@ impl MagicLinkService {
                 RegistrationPolicy::ExistingOnly => return Ok(MagicLinkIssued::Suppressed),
                 RegistrationPolicy::Open => {
                     // Torii's get-or-create: a first-time email is a signup.
-                    let created = self
-                        .users
-                        .create_user(NewUser {
+                    // A sign-up that loses the race for the address mints
+                    // the link for the account the other one created.
+                    let account = create_or_find_existing(
+                        self.users.as_ref(),
+                        NewUser {
                             email: normalized.clone(),
                             password_hash: None,
-                        })
-                        .await?;
-                    // Open mode requires a binding that can represent a
-                    // passwordless account. A binding that surfaces a
-                    // credential where none was stored could let an
-                    // attacker-chosen password authenticate later; refuse
-                    // loudly instead of persisting that row silently.
-                    if created.password_hash.is_some() {
-                        return Err(Error::Internal {
-                            message: "user binding cannot represent passwordless accounts; \
-                                      open magic-link registration is unavailable"
-                                .to_owned(),
-                        });
+                        },
+                    )
+                    .await?;
+                    match account {
+                        SignUpAccount::Existing(existing) => existing,
+                        SignUpAccount::Created(created) => {
+                            // Open mode requires a binding that can represent
+                            // a passwordless account. A binding that surfaces
+                            // a credential where none was stored could let an
+                            // attacker-chosen password authenticate later;
+                            // refuse loudly instead of persisting that row
+                            // silently.
+                            if created.password_hash.is_some() {
+                                return Err(Error::Internal {
+                                    message: "user binding cannot represent passwordless \
+                                              accounts; open magic-link registration is \
+                                              unavailable"
+                                        .to_owned(),
+                                });
+                            }
+                            created
+                        }
                     }
-                    created
                 }
             },
         };

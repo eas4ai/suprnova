@@ -149,9 +149,8 @@ async fn memory_repeated_worker_loss_exhausts_max_tries() {
 //
 // Redis is the awkward one. The stream entry is immutable, so `attempts`
 // stays at whatever was published; the only record that the job was handed
-// out again is Redis's own per-entry delivery counter, which sea-streamer
-// does not carry through (it merges XREADGROUP and XAUTOCLAIM into one
-// message stream with no redelivery flag). The driver therefore asks
+// out again is Redis's own per-entry delivery counter, which neither an
+// XREADGROUP nor an XAUTOCLAIM reply carries. The driver therefore asks
 // XPENDING directly, and this test is the only thing that proves the
 // answer is read correctly.
 
@@ -203,8 +202,8 @@ mod redis_driver {
         // same group claim it - which is what XAUTOCLAIM does for a worker
         // that died, and the only path that reaches a second delivery.
         //
-        // The whole driver goes, not just the reservation: sea-streamer's
-        // consumer keeps polling in the background, and every poll resets
+        // The whole driver goes, not just the reservation: a live driver
+        // keeps reading the stream, and every read resets
         // this consumer's idle time in `XINFO CONSUMERS`. A live consumer
         // never looks dead, so a reclaim would never trigger - which is
         // correct behaviour, and exactly why the test has to actually stop
@@ -224,11 +223,10 @@ mod redis_driver {
         .expect("connect second consumer");
 
         // Comfortably past `2 x visibility_timeout`, which is the bound now
-        // that the driver ties sea-streamer's auto-claim *interval* to the
-        // configured timeout rather than leaving it at the 30s default.
-        // Before that this same assertion needed a 45s window - the wait
-        // was the library's fixed polling interval, not anything about the
-        // job.
+        // that every pop makes its own XAUTOCLAIM attempt with the configured
+        // timeout as the idle threshold. When the claim ran on a library's
+        // fixed 30s interval, this same assertion needed a 45s window - the
+        // wait was that interval, not anything about the job.
         let reclaimed = other
             .pop(Duration::from_secs(15))
             .await
