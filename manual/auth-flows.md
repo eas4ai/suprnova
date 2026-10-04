@@ -167,6 +167,9 @@ enrollment, rotating the secret, and regenerating recovery codes count their
 wrong codes under the same key. Each of these paths reserves its attempt before
 it reads the code, so parallel guesses never get past the limit, and a failure
 the lockout store can't record is returned as an error instead of a wrong code.
+A confirmation confirms only the secret its code was checked against, once, and
+uses the code up: if another request replaces the enrollment in between,
+nothing is confirmed and the caller gets a conflict.
 
 Password reset normalizes an unknown or provider-backed unverified address to
 `Ok(())` only after the abuse-limiter, mail configuration, provider/engine, and

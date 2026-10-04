@@ -88,8 +88,23 @@ pub trait TwoFactorStore: Send + Sync {
         secret: &[u8],
         recovery_codes: Option<&[u8]>,
     ) -> Result<bool>;
-    /// Stamp `confirmed_at` and clear the pending-rotation marker.
-    async fn set_confirmed(&self, actor: &CredentialActor, at: DateTime<Utc>) -> Result<bool>;
+    /// Confirm exactly the enrollment a code was checked against, once.
+    ///
+    /// Stamp `confirmed_at`, clear the pending-rotation marker and claim
+    /// `matched_step` as `last_used_timestep`, in one conditional write that
+    /// holds only while the row still stores `expected_secret`, is still
+    /// unconfirmed, and has not used that timestep. A concurrent enrollment
+    /// that replaced the secret after the check therefore stays unconfirmed:
+    /// the code proved possession of the old secret, not of the new one. A
+    /// second confirmation of the same enrollment, or a later reuse of its
+    /// code, finds nothing to change. Returns whether this caller confirmed.
+    async fn set_confirmed(
+        &self,
+        actor: &CredentialActor,
+        expected_secret: &[u8],
+        matched_step: i64,
+        at: DateTime<Utc>,
+    ) -> Result<bool>;
     /// Claim one matched timestep: set `last_used_timestep = matched_step`
     /// only when the stored value is null or lower. The claim and the
     /// success result are one atomic decision; the returned bool is the

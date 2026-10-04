@@ -1257,6 +1257,8 @@ pub mod sql_two_factor {
         enrollment_auth_epoch: i64,
         enrollment_session_id: Option<&str>,
         enrollment_expires_at: Option<DateTime<Utc>>,
+        expected_secret: &[u8],
+        matched_step: i64,
         at: DateTime<Utc>,
     ) -> Result<bool> {
         let Some(enrollment) = two_factor::Entity::find_by_id(user_id.to_owned())
@@ -1275,7 +1277,18 @@ pub mod sql_two_factor {
         let update = two_factor::Entity::update_many()
             .col_expr(two_factor::Column::ConfirmedAt, Expr::value(at))
             .col_expr(two_factor::Column::RotationPending, Expr::value(false))
+            .col_expr(
+                two_factor::Column::LastUsedTimestep,
+                Expr::value(matched_step),
+            )
             .filter(two_factor::Column::UserId.eq(user_id.to_owned()))
+            .filter(two_factor::Column::Secret.eq(expected_secret.to_vec()))
+            .filter(two_factor::Column::ConfirmedAt.is_null())
+            .filter(
+                Condition::any()
+                    .add(two_factor::Column::LastUsedTimestep.is_null())
+                    .add(two_factor::Column::LastUsedTimestep.lt(matched_step)),
+            )
             .exec(transaction.connection())
             .await
             .map_err(db_error)?;
@@ -1462,11 +1475,18 @@ pub mod sql_two_factor {
             .await
         }
 
-        async fn set_confirmed(&self, actor: &CredentialActor, at: DateTime<Utc>) -> Result<bool> {
+        async fn set_confirmed(
+            &self,
+            actor: &CredentialActor,
+            expected_secret: &[u8],
+            matched_step: i64,
+            at: DateTime<Utc>,
+        ) -> Result<bool> {
             let user_id = actor.user_id().to_owned();
             let enrollment_auth_epoch = actor_epoch(actor)?;
             let enrollment_session_id = actor.opaque_session_id().map(str::to_owned);
             let enrollment_expires_at = actor.expires_at();
+            let expected_secret = expected_secret.to_vec();
             let storage = SeaOrmStorage::<DefaultAuthSchema>::new(self.0.clone());
             fenced_credential_write(&storage, actor, move |transaction| {
                 Box::pin(async move {
@@ -1476,6 +1496,8 @@ pub mod sql_two_factor {
                         enrollment_auth_epoch,
                         enrollment_session_id.as_deref(),
                         enrollment_expires_at,
+                        &expected_secret,
+                        matched_step,
                         at,
                     )
                     .await

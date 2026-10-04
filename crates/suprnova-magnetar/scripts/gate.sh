@@ -50,9 +50,11 @@ if [[ "${1-}" == "--live" ]]; then
     run_live_test test two_factor_live postgres_parallel_wrong_second_factor_proofs_evaluate_at_most_the_threshold
     run_live_test test two_factor_live postgres_a_correct_second_factor_proof_under_contention_is_accepted_once
     run_live_test test two_factor_live postgres_a_password_success_does_not_clear_second_factor_failures
+    run_live_test test two_factor_live postgres_a_confirmation_racing_a_replacement_confirms_neither_secret
     run_live_test test two_factor_live mysql_parallel_wrong_second_factor_proofs_evaluate_at_most_the_threshold
     run_live_test test two_factor_live mysql_a_correct_second_factor_proof_under_contention_is_accepted_once
     run_live_test test two_factor_live mysql_a_password_success_does_not_clear_second_factor_failures
+    run_live_test test two_factor_live mysql_a_confirmation_racing_a_replacement_confirms_neither_secret
     run_live_test lib _ migration::mysql_swap_tests::plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_barrier
     run_live_test lib _ migration::seaorm_upgrade_tests::postgres_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1
     run_live_test lib _ migration::seaorm_upgrade_tests::mysql_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1

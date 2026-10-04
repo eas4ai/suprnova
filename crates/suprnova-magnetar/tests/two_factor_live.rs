@@ -35,9 +35,10 @@ use std::time::Duration;
 use chrono::Utc;
 use magnetar::auth::{FactorGate, OpaqueFactorGate};
 use magnetar::crypto::AeadEncryptor;
-use magnetar::default_schema::DefaultAuthSchema;
+use magnetar::crypto::{CryptoPurpose, Encryptor};
 use magnetar::default_schema::sql_stores::SqlSessionStore;
 use magnetar::default_schema::sql_two_factor::SqlTwoFactorStore;
+use magnetar::default_schema::{DefaultAuthSchema, two_factor};
 use magnetar::password::{
     LockoutConfig, LockoutService, PasswordVerifier, StandardPasswordHashDriver,
 };
@@ -45,8 +46,12 @@ use magnetar::plugin::{PluginContext, PluginRegistry, WireRequest};
 use magnetar::plugins::password::{PasswordAuthService, PasswordPlugin, PasswordPluginConfig};
 use magnetar::sessions::{OpaqueConfig, OpaqueSessionProvider, SessionQueries};
 use magnetar::storage::{CredentialActor, SeaOrmStorage};
-use magnetar::two_factor::{EnrollmentResponse, TwoFactorConfig, TwoFactorService};
-use sea_orm::{ConnectOptions, Database};
+use magnetar::two_factor::{
+    EnrollmentResponse, TwoFactorConfig, TwoFactorProofClaim, TwoFactorRow, TwoFactorService,
+    TwoFactorStore,
+};
+use parking_lot::Mutex;
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectOptions, Database, DatabaseConnection};
 use secrecy::{ExposeSecret, SecretString};
 
 use harness::{
@@ -66,6 +71,8 @@ type Gate = OpaqueFactorGate<SeaOrmStorage<DefaultAuthSchema>, TwoFactorService,
 /// service as the factor gate's verifier, and the password plugin that
 /// signs users in and opens challenges.
 struct LiveWorld {
+    db: DatabaseConnection,
+    storage: Arc<SeaOrmStorage<DefaultAuthSchema>>,
     sessions: Arc<OpaqueSessionProvider<SqlSessionStore>>,
     lockout: Arc<LockoutService>,
     two_factor: Arc<TwoFactorService>,
@@ -126,7 +133,7 @@ async fn live_world(url: &str, max_failed_attempts: u32) -> LiveWorld {
         verifier,
     ));
     let context = PluginContext::new(
-        storage,
+        storage.clone(),
         sessions.clone(),
         gate.clone(),
         Arc::new(IdentityEncryptor),
@@ -147,6 +154,8 @@ async fn live_world(url: &str, max_failed_attempts: u32) -> LiveWorld {
         .await
         .expect("plugin composition is valid");
     LiveWorld {
+        db,
+        storage,
         sessions,
         lockout,
         two_factor,
@@ -176,10 +185,14 @@ fn unique_email(label: &str) -> String {
     )
 }
 
-fn totp_code_now(otpauth_url: &SecretString) -> String {
+fn totp_code_at(otpauth_url: &SecretString, unix_seconds: i64) -> String {
     let totp = totp_rs::TOTP::from_url_unchecked(otpauth_url.expose_secret())
         .expect("enrollment otpauth URL parses");
-    totp.generate(u64::try_from(Utc::now().timestamp()).expect("clock is after the epoch"))
+    totp.generate(u64::try_from(unix_seconds).expect("clock is after the epoch"))
+}
+
+fn totp_code_now(otpauth_url: &SecretString) -> String {
+    totp_code_at(otpauth_url, Utc::now().timestamp())
 }
 
 /// A registered user, signed in with the password before any enrollment.
@@ -358,15 +371,24 @@ async fn parallel_wrong_proofs_evaluate_at_most_the_threshold(url: &str) {
     assert!(problems.is_empty(), "{problems:#?}");
 }
 
-/// The same correct proof raced against itself on each flow that consumes
-/// it: exactly one request is accepted.
+/// The same correct proof raced against itself on each flow: exactly one
+/// request is accepted.
 async fn a_correct_proof_under_contention_is_accepted_once(url: &str) {
     // A threshold no burst reaches, so every request gets to the claim.
     let world = live_world(url, 100).await;
     let mut problems = Vec::new();
-    for flow in [Flow::Challenge, Flow::ReEnroll, Flow::Regenerate] {
+    for flow in [
+        Flow::Challenge,
+        Flow::Confirm,
+        Flow::ReEnroll,
+        Flow::Regenerate,
+    ] {
         let user = signed_in_user(&world, "correct").await;
-        let enrollment = confirmed_enrollment(&world, &user).await;
+        let enrollment = if matches!(flow, Flow::Confirm) {
+            world.two_factor.enroll(&user.actor).await.unwrap()
+        } else {
+            confirmed_enrollment(&world, &user).await
+        };
         let target = Target {
             two_factor: world.two_factor.clone(),
             gate: world.gate.clone(),
@@ -374,12 +396,15 @@ async fn a_correct_proof_under_contention_is_accepted_once(url: &str) {
             selector: None,
         };
         // One code for every request: codes from two timesteps would each
-        // be valid once.
+        // be valid once. A confirmed enrollment used the current code to
+        // confirm, so the proofs after it use the next one.
         let proof = match flow {
             Flow::Regenerate => enrollment.recovery_codes[0].clone(),
-            Flow::Challenge | Flow::Confirm | Flow::ReEnroll => {
-                totp_code_now(&enrollment.otpauth_url)
-            }
+            Flow::Confirm => totp_code_now(&enrollment.otpauth_url),
+            Flow::Challenge | Flow::ReEnroll => totp_code_at(
+                &enrollment.otpauth_url,
+                Utc::now().timestamp() + magnetar::two_factor::totp::STEP_SECONDS,
+            ),
         };
         let mut requests = Vec::with_capacity(PARALLEL);
         for _ in 0..PARALLEL {
@@ -454,6 +479,156 @@ async fn a_password_success_does_not_clear_second_factor_failures(url: &str) {
     assert_eq!(login.status, 200, "password sign-in is not locked");
 }
 
+/// The shipped two-factor store, except that another request changes the
+/// enrollment row right after this request reads it: the read returns the
+/// old row, and the row in the database is already the replacement.
+struct ReplacedAfterRead {
+    inner: SqlTwoFactorStore,
+    db: DatabaseConnection,
+    replacement: Mutex<Option<two_factor::ActiveModel>>,
+}
+
+#[async_trait::async_trait]
+impl TwoFactorStore for ReplacedAfterRead {
+    async fn find_enrollment(&self, user_id: &str) -> magnetar::Result<Option<TwoFactorRow>> {
+        let row = self.inner.find_enrollment(user_id).await?;
+        let replacement = self.replacement.lock().take();
+        if let Some(replacement) = replacement {
+            replacement
+                .update(&self.db)
+                .await
+                .expect("the concurrent write commits");
+        }
+        Ok(row)
+    }
+
+    async fn begin_enrollment(
+        &self,
+        actor: &CredentialActor,
+        secret: &[u8],
+        recovery_codes: Option<&[u8]>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .begin_enrollment(actor, secret, recovery_codes)
+            .await
+    }
+
+    async fn set_confirmed(
+        &self,
+        actor: &CredentialActor,
+        expected_secret: &[u8],
+        matched_step: i64,
+        at: chrono::DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .set_confirmed(actor, expected_secret, matched_step, at)
+            .await
+    }
+
+    async fn claim_timestep(&self, user_id: &str, matched_step: i64) -> magnetar::Result<bool> {
+        self.inner.claim_timestep(user_id, matched_step).await
+    }
+
+    async fn swap_recovery_codes(
+        &self,
+        user_id: &str,
+        expected: &[u8],
+        next: Option<&[u8]>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .swap_recovery_codes(user_id, expected, next)
+            .await
+    }
+
+    async fn rotate_enrollment(
+        &self,
+        actor: &CredentialActor,
+        claim: TwoFactorProofClaim,
+        secret: &[u8],
+        recovery_codes: Option<&[u8]>,
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .rotate_enrollment(actor, claim, secret, recovery_codes)
+            .await
+    }
+
+    async fn regenerate_recovery_codes(
+        &self,
+        actor: &CredentialActor,
+        claim: TwoFactorProofClaim,
+        next: &[u8],
+    ) -> magnetar::Result<bool> {
+        self.inner
+            .regenerate_recovery_codes(actor, claim, next)
+            .await
+    }
+
+    async fn delete_enrollment(&self, actor: &CredentialActor) -> magnetar::Result<bool> {
+        self.inner.delete_enrollment(actor).await
+    }
+}
+
+/// A confirmation whose enrollment another request replaces between the
+/// code check and the stamp: a restarted enrollment of a pending secret,
+/// and a re-enrollment of a confirmed one. Neither replacement was proven,
+/// so neither is confirmed.
+async fn a_confirmation_racing_a_replacement_confirms_neither_secret(url: &str) {
+    let world = live_world(url, THRESHOLD).await;
+    let mut problems = Vec::new();
+    for re_enrollment in [false, true] {
+        let user = signed_in_user(&world, "race").await;
+        let enrollment = if re_enrollment {
+            confirmed_enrollment(&world, &user).await
+        } else {
+            world.two_factor.enroll(&user.actor).await.unwrap()
+        };
+        let replacement_secret = AeadEncryptor::new([21; 32])
+            .encrypt(CryptoPurpose::TwoFactorSecret, b"JBSWY3DPEHPK3PXP")
+            .unwrap();
+        let store = ReplacedAfterRead {
+            inner: SqlTwoFactorStore(world.db.clone()),
+            db: world.db.clone(),
+            // Written by the same session, so only the secret tells the two
+            // enrollments apart.
+            replacement: Mutex::new(Some(two_factor::ActiveModel {
+                user_id: Set(user.user_id.clone()),
+                secret: Set(replacement_secret),
+                enrollment_auth_epoch: Set(i64::try_from(user.actor.issuance_epoch()).unwrap()),
+                enrollment_session_id: Set(user.actor.opaque_session_id().map(str::to_owned)),
+                enrollment_expires_at: Set(user.actor.expires_at()),
+                confirmed_at: Set(None),
+                rotation_pending: Set(re_enrollment),
+                last_used_timestep: Set(None),
+                ..Default::default()
+            })),
+        };
+        let service = TwoFactorService::new(
+            Arc::new(store),
+            world.storage.clone(),
+            world.lockout.clone(),
+            Arc::new(AeadEncryptor::new([21; 32])),
+            TwoFactorConfig::default(),
+        );
+
+        let outcome = service
+            .confirm(&user.actor, &totp_code_now(&enrollment.otpauth_url))
+            .await;
+
+        let row = SqlTwoFactorStore(world.db.clone())
+            .find_enrollment(&user.user_id)
+            .await
+            .unwrap()
+            .expect("the replacement row exists");
+        if outcome.is_ok() || row.confirmed_at.is_some() {
+            problems.push(format!(
+                "re-enrollment {re_enrollment}: {outcome:?}, the unproven replacement confirmed at {:?}",
+                row.confirmed_at
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
 #[cfg(feature = "seaorm-postgres")]
 #[tokio::test]
 #[ignore = "requires T2 live Postgres/MySQL database"]
@@ -481,6 +656,15 @@ async fn postgres_a_password_success_does_not_clear_second_factor_failures() {
     a_password_success_does_not_clear_second_factor_failures(&url).await;
 }
 
+#[cfg(feature = "seaorm-postgres")]
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn postgres_a_confirmation_racing_a_replacement_confirms_neither_secret() {
+    let url = std::env::var("MAGNETAR_POSTGRES_TEST_URL")
+        .expect("MAGNETAR_POSTGRES_TEST_URL is required");
+    a_confirmation_racing_a_replacement_confirms_neither_secret(&url).await;
+}
+
 #[cfg(feature = "seaorm-mysql")]
 #[tokio::test]
 #[ignore = "requires T2 live Postgres/MySQL database"]
@@ -506,4 +690,13 @@ async fn mysql_a_password_success_does_not_clear_second_factor_failures() {
     let url =
         std::env::var("MAGNETAR_MYSQL_TEST_URL").expect("MAGNETAR_MYSQL_TEST_URL is required");
     a_password_success_does_not_clear_second_factor_failures(&url).await;
+}
+
+#[cfg(feature = "seaorm-mysql")]
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn mysql_a_confirmation_racing_a_replacement_confirms_neither_secret() {
+    let url =
+        std::env::var("MAGNETAR_MYSQL_TEST_URL").expect("MAGNETAR_MYSQL_TEST_URL is required");
+    a_confirmation_racing_a_replacement_confirms_neither_secret(&url).await;
 }

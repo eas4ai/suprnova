@@ -240,26 +240,44 @@ impl TwoFactorService {
 
     /// Confirm a pending enrollment with a live code; 2FA is inactive
     /// until this succeeds.
+    ///
+    /// The confirmation stamps exactly the secret the code was checked
+    /// against, once, and uses the code up. When a concurrent enrollment
+    /// replaces the secret between the check and the stamp, nothing is
+    /// confirmed and the caller gets a conflict: the code proved possession
+    /// of the old secret, not of the new one.
     pub async fn confirm(&self, actor: &CredentialActor, code: &str) -> Result<()> {
         let user_id = actor.user_id();
         self.with_reserved_attempt(user_id, "two-factor confirm", async {
-            let Some(row) = self.store.find_enrollment(user_id).await? else {
+            let Some(row) = self
+                .store
+                .find_enrollment(user_id)
+                .await?
+                .filter(|row| row.confirmed_at.is_none())
+            else {
                 return Err(Error::InvalidInput {
                     field: "enrollment".to_owned(),
                     message: "no pending 2FA enrollment".to_owned(),
                 });
             };
             let secret = self.decrypt_secret(&row)?;
-            if totp::matched_step(&secret, code, Utc::now())?.is_none() {
+            let Some(matched_step) = totp::matched_step(&secret, code, Utc::now())? else {
                 return Ok(Evaluated::Rejected(Error::InvalidInput {
                     field: "code".to_owned(),
                     message: "invalid 2FA code".to_owned(),
                 }));
-            }
-            if !self.store.set_confirmed(actor, Utc::now()).await? {
-                return Err(Error::Internal {
-                    message: "two-factor enrollment vanished mid-confirm".to_owned(),
-                });
+            };
+            if !self
+                .store
+                .set_confirmed(actor, &row.secret, matched_step, Utc::now())
+                .await?
+            {
+                return Ok(Evaluated::Superseded(Error::Conflict {
+                    resource: "two-factor enrollment".to_owned(),
+                    message: "the 2FA enrollment changed or was confirmed while its code was \
+                              being checked; confirm a code from the current enrollment"
+                        .to_owned(),
+                }));
             }
             Ok(Evaluated::Accepted(()))
         })
