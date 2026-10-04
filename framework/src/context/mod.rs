@@ -415,8 +415,12 @@ impl Context {
     pub fn get<T: DeserializeOwned>(key: &str) -> Option<T> {
         CONTEXT
             .try_with(|store| {
-                let raw = store.data.get(key)?;
-                match serde_json::from_value::<T>(raw.value().clone()) {
+                // Clone the value out and let the map's shard lock go before
+                // deserializing: a custom `Deserialize` may write to the
+                // context, and with the read lock still held that write
+                // waited on this read forever.
+                let raw = store.data.get(key)?.value().clone();
+                match serde_json::from_value::<T>(raw) {
                     Ok(v) => Some(v),
                     Err(err) => {
                         tracing::trace!(
@@ -567,8 +571,10 @@ impl Context {
     pub fn hidden_get<T: DeserializeOwned>(key: &str) -> Option<T> {
         CONTEXT
             .try_with(|store| {
-                let raw = store.hidden.get(key)?;
-                match serde_json::from_value::<T>(raw.value().clone()) {
+                // The shard lock goes before the value deserializes, as in
+                // `get`.
+                let raw = store.hidden.get(key)?.value().clone();
+                match serde_json::from_value::<T>(raw) {
                     Ok(v) => Some(v),
                     Err(err) => {
                         tracing::trace!(
@@ -1298,5 +1304,51 @@ mod tests {
                 );
             })
             .await;
+    }
+
+    /// A value whose deserialization writes back into the context, as a
+    /// custom `Deserialize` may: it records that it ran by adding `key`.
+    struct WritesBack {
+        hidden: bool,
+    }
+
+    impl<'de> serde::Deserialize<'de> for WritesBack {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let hidden = bool::deserialize(deserializer)?;
+            if hidden {
+                Context::hidden_add("rewritten", true);
+            } else {
+                Context::add("rewritten", false);
+            }
+            Ok(WritesBack { hidden })
+        }
+    }
+
+    /// A typed read releases the map before the value deserializes. It used
+    /// to hold the map's shard lock across `serde_json::from_value`, so a
+    /// value that wrote the same key while deserializing waited on a lock
+    /// its own read held, and the task never returned.
+    ///
+    /// The reads run on a thread of their own, because a deadlock inside a
+    /// poll cannot be cut short by a timeout on the same runtime.
+    #[test]
+    fn a_typed_read_does_not_hold_the_map_while_the_value_deserializes() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("a runtime");
+            runtime.block_on(CONTEXT.scope(ContextStore::default(), async move {
+                Context::add("rewritten", false);
+                let visible = Context::get::<WritesBack>("rewritten").map(|v| v.hidden);
+                Context::hidden_add("rewritten", true);
+                let hidden = Context::hidden_get::<WritesBack>("rewritten").map(|v| v.hidden);
+                let _ = done.send((visible, hidden));
+            }));
+        });
+        let read = finished
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the typed read deadlocked on the lock it was holding");
+        assert_eq!(read, (Some(false), Some(true)));
     }
 }
