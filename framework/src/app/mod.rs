@@ -1077,7 +1077,6 @@ where
     /// - `down` / `up`: Enter / leave maintenance mode
     pub async fn run(self) {
         let cli = Cli::parse();
-
         // Configuration is loaded by `#[suprnova::main]` *before* the
         // runtime exists, not here. Loading it writes to the process
         // environment, which is only sound while the process is
@@ -1095,7 +1094,13 @@ where
             eprintln!("{message}");
             std::process::exit(1);
         }
+        self.run_cli(cli).await;
+    }
 
+    /// Everything [`Self::run`] does after the argv parse and the boot
+    /// precondition. Split out so a test can run one subcommand from an
+    /// argv it builds, rather than the test binary's own.
+    async fn run_cli(self, cli: Cli) {
         // Register all #[policy] gates collected via inventory::submit!.
         // Called here (before the subcommand match) so background workers,
         // CLI commands, and scheduled tasks all see registered gates - not
@@ -1118,12 +1123,9 @@ where
             config_fn();
         }
 
-        // Every command that ran the process boot may have dispatched events
-        // - from jobs, tasks, workflows, or the application's own bootstrap -
-        // and a queued listener runs as a task of its own; see the drain
-        // after the match.
         // What the command boots, from the one table that says so. The server
-        // (no command, `serve`, `web:run`) boots through `Server` itself.
+        // (no command, `serve`, `web:run`) boots through `Server` itself. A
+        // booted command shuts its process down after the match.
         let boot = cli
             .command
             .as_ref()
@@ -1276,11 +1278,12 @@ where
                 Self::run_up(boot, bootstrap_fn).await;
             }
         }
-        // A booted process waits for its queued listeners as the server does
-        // at the end of its graceful shutdown: returning drops the runtime,
-        // and every listener still running would end with it.
+        // A booted process stops its supervisors and waits for its queued
+        // listeners as the server does at the end of its graceful shutdown:
+        // returning drops the runtime, and every task still running would
+        // end with it.
         if booted {
-            crate::events::drain_queued_at_shutdown().await;
+            process_boot::finish_process().await;
         }
         // Every command ends here; the file log channels buffer, and nothing
         // a worker wrote before a clean exit may be lost.
@@ -1620,8 +1623,8 @@ where
         let (results, any_failed) = evaluate_due_once(&schedule).await;
         // The tasks may have started queued listeners, and this process ends
         // next, by returning or by the failure exit below, which would skip
-        // the drain the long-running workers get after the match.
-        crate::events::drain_queued_at_shutdown().await;
+        // the shutdown every booted command gets after the match.
+        process_boot::finish_process().await;
         if results.is_empty() {
             println!("No tasks were due.");
             return;
@@ -2700,6 +2703,109 @@ mod worker_boot_order_tests {
     #[serial]
     async fn schema_dump_boots_nothing() {
         assert_migrations_boot_nothing(&["app", "schema:dump"]).await;
+    }
+}
+
+#[cfg(test)]
+mod process_exit_tests {
+    use super::*;
+    use crate::supervisor::{RestartPolicy, Supervisor, SupervisorRegistry};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const CHILD_MODE: &str = "SUPRNOVA_PROCESS_EXIT_CHILD";
+
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    static STOPPED: AtomicBool = AtomicBool::new(false);
+
+    /// A supervisor the application's bootstrap starts, as the dogfood
+    /// app's does: it runs until its token is cancelled.
+    struct BootstrapSupervisor;
+
+    #[async_trait::async_trait]
+    impl Supervisor for BootstrapSupervisor {
+        fn name(&self) -> &'static str {
+            "bootstrap_supervisor"
+        }
+
+        async fn run(
+            &self,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<(), FrameworkError> {
+            STARTED.store(true, Ordering::SeqCst);
+            cancel.cancelled().await;
+            STOPPED.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn restart_policy(&self) -> RestartPolicy {
+            RestartPolicy::Never
+        }
+    }
+
+    /// The body of the test below, in a process of its own: it cancels the
+    /// process-wide supervisor token, which would refuse every supervisor
+    /// a later test in a shared process starts.
+    #[test]
+    fn booted_command_child() {
+        if std::env::var_os(CHILD_MODE).is_none() {
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            let app = Application::new().bootstrap(|| async {
+                SupervisorRegistry::spawn(std::sync::Arc::new(BootstrapSupervisor)).await;
+                for _ in 0..200 {
+                    if STARTED.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            });
+            let cli = Cli::try_parse_from(["app", "schedule:list"]).expect("the argv parses");
+            app.run_cli(cli).await;
+        });
+        assert!(
+            STARTED.load(Ordering::SeqCst),
+            "the bootstrap's supervisor ran"
+        );
+        assert!(
+            STOPPED.load(Ordering::SeqCst),
+            "the command returned with the bootstrap's supervisor still running"
+        );
+    }
+
+    /// A booted subcommand stops and drains the supervisors its bootstrap
+    /// started before it returns, as `Server::run` does at its shutdown.
+    /// The workers and commands used to return with them still running,
+    /// and the runtime's teardown cut them off mid-work.
+    #[test]
+    fn a_booted_command_drains_the_supervisors_its_bootstrap_started() {
+        let output =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "app::process_exit_tests::booted_command_child",
+                    "--nocapture",
+                ])
+                .env(CHILD_MODE, "1")
+                .output()
+                .expect("spawn the child");
+        assert!(
+            output.status.success(),
+            "status: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+            "child filter matched no test; stdout:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+        );
     }
 }
 

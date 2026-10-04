@@ -164,8 +164,9 @@ pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
 /// resolves the same services and reaches the same drivers a queued job
 /// does. A driver that does not come up is reported on stderr and does
 /// not stop the command, which may use none of them; a worker refuses to
-/// start instead. After the handler returns, the dispatcher waits (up to ten
-/// seconds) for the queued event listeners still running, because the
+/// start instead. After the handler returns, the dispatcher stops the
+/// supervisors the bootstrap started (up to five seconds) and waits for
+/// the queued event listeners still running (up to ten), because the
 /// console's runtime ends when `main` returns and would cut them off.
 ///
 /// None of it runs unless clap matches a real registered subcommand -
@@ -225,11 +226,12 @@ where
             // stays outside.
             let command = (entry.handler)(sub_matches);
             let result = crate::container::scope::run_in_new_scope(command).await;
-            // A queued listener runs as a task of its own, and the console's
-            // runtime ends when `main` returns: an event the command
-            // dispatched last would otherwise be cut off mid-listener.
+            // A supervisor the bootstrap started and a queued listener both
+            // run as tasks of their own, and the console's runtime ends when
+            // `main` returns: stop and drain them first, as the server's
+            // shutdown does, so neither is cut off mid-work.
             if booted {
-                crate::events::drain_queued_at_shutdown().await;
+                crate::app::process_boot::finish_process().await;
             }
             // The file log channels buffer; a command's last records reach
             // the file before the process exits.
