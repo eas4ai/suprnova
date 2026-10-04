@@ -1,5 +1,12 @@
-//! Askama AST walking and bounded branch expansion.
+//! Askama AST walking into a bounded tree of rendered markup.
+//!
+//! The renderer does not enumerate control flow. Each `{% if %}`, `{% match %}`,
+//! and `{% for %}` becomes one choice whose arms are rendered once, so the
+//! rendered view grows with the template, not with the product of its
+//! conditionals. The HTML checker walks the tree and decides where arms must be
+//! told apart.
 
+use std::borrow::Cow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -23,35 +30,75 @@ pub(crate) const CHECKED_KEY_MARKER: &str = "suprnova-checker-key-7f3e";
 pub(crate) const CHECKED_DIGEST_MARKER: &str = "suprnova-checker-digest-7f3e-0000";
 const _: () = assert!(CHECKED_DIGEST_MARKER.len() == crate::view::DIGEST_KEY_BYTES);
 
-/// Attributes no check reads: a control's checked or selected state and the
-/// runtime's server-correction marker. An `{% if %}` whose every arm renders
-/// only these, as a form renders each control's state from the island
-/// (FORM-009), is expanded once without them instead of doubling the branch
-/// states, since no check can see the difference. A check that starts reading
-/// one of them must remove it from this list.
-const UNCHECKED_STATE_ATTRIBUTES: &[&str] =
-    &["checked", "selected", "data-suprnova-live-authoritative"];
 pub(crate) const LOOP_START_MARKER: &str = "suprnova-checker-loop-start-7f3e";
 pub(crate) const LOOP_END_MARKER: &str = "suprnova-checker-loop-end-7f3e";
 
-#[derive(Clone)]
-pub(crate) struct RenderedBranch {
-    pub(crate) html: String,
-    pub(crate) path: ViewName,
-    pub(crate) branched: bool,
+/// Where a piece of rendered text came from: a template the checker read and
+/// a byte offset into it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Origin {
+    pub(crate) file: u32,
+    pub(crate) offset: u32,
+    /// The text is the template's own bytes, so each rendered byte maps to
+    /// the source byte at the same distance. Text the checker substitutes, a
+    /// marker or an escaped literal, maps every byte to `offset`.
+    pub(crate) literal: bool,
 }
 
-impl RenderedBranch {
-    fn empty(path: &ViewName) -> Self {
-        Self {
-            html: String::new(),
-            path: path.clone(),
-            branched: false,
-        }
+/// One template the checker read, so an [`Origin`] can be reported as a
+/// file, line, and column.
+pub(crate) struct SourceFile<'c> {
+    pub(crate) view: ViewName,
+    pub(crate) source: &'c str,
+}
+
+/// One step of a rendered view: text, or a choice between arms of which the
+/// template renders exactly one.
+#[derive(Clone)]
+pub(crate) enum Piece<'c> {
+    Text(Cow<'c, str>, Origin),
+    Choice(ChoicePiece<'c>),
+}
+
+/// The arms of one conditional, match, or loop, and where its tag stands.
+#[derive(Clone)]
+pub(crate) struct ChoicePiece<'c> {
+    pub(crate) arms: Vec<Fragment<'c>>,
+    pub(crate) origin: Origin,
+}
+
+/// A sequence of rendered pieces.
+#[derive(Clone, Default)]
+pub(crate) struct Fragment<'c> {
+    pub(crate) pieces: Vec<Piece<'c>>,
+}
+
+impl Fragment<'_> {
+    fn text_bytes(&self) -> usize {
+        self.pieces.iter().fold(0usize, |bytes, piece| {
+            bytes.saturating_add(match piece {
+                Piece::Text(text, _) => text.len(),
+                Piece::Choice(choice) => choice
+                    .arms
+                    .iter()
+                    .fold(0usize, |sum, arm| sum.saturating_add(arm.text_bytes())),
+            })
+        })
     }
 }
 
-type Overrides = BTreeMap<String, Vec<RenderedBranch>>;
+/// The complete rendered tree of one component view.
+pub(crate) struct RenderedView<'c> {
+    pub(crate) fragment: Fragment<'c>,
+    pub(crate) files: Vec<SourceFile<'c>>,
+    /// The view renders through a choice, an include, or an inherited block,
+    /// so a stack error is reported as a branch mismatch rather than plain
+    /// malformed HTML. Every path through the view shares this, because every
+    /// path passes each choice of the top-level sequence.
+    pub(crate) branched: bool,
+}
+
+type Overrides<'c> = BTreeMap<String, Option<Fragment<'c>>>;
 
 /// What a macro argument is bound to during one expansion. A string, number,
 /// or boolean literal at the call site is substituted into the macro body, so
@@ -84,6 +131,7 @@ const HTML_ESCAPERS: &[&str] = &[
 /// the macros its own template can see, whichever template it was called from.
 struct TemplateEnv<'a> {
     view: ViewName,
+    file: u32,
     source: &'a str,
     ast: Ast<'a>,
     imports: Vec<(String, TemplateEnv<'a>)>,
@@ -122,8 +170,17 @@ struct Scope<'s, 'a> {
     template: &'s TemplateEnv<'a>,
     bindings: &'s Bindings,
     raw: &'s RawNames,
-    caller: Option<&'s [RenderedBranch]>,
+    caller: Option<&'s Fragment<'a>>,
     macro_depth: usize,
+}
+
+/// The template a node list belongs to: its registered name, its index in
+/// the rendered view's file table, and its source text.
+#[derive(Clone, Copy)]
+struct Place<'p, 'a> {
+    view: &'p ViewName,
+    file: u32,
+    source: &'a str,
 }
 
 pub(crate) struct BranchRenderer<'checker, 'diagnostics> {
@@ -131,8 +188,10 @@ pub(crate) struct BranchRenderer<'checker, 'diagnostics> {
     limits: CheckerLimits,
     component: &'checker ComponentName,
     diagnostics: &'diagnostics mut DiagnosticCollector,
+    files: Vec<SourceFile<'checker>>,
     node_count: usize,
-    branch_limit_reported: bool,
+    expanded_bytes: usize,
+    branched: bool,
     source_limit_reported: bool,
 }
 
@@ -148,14 +207,35 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             limits,
             component,
             diagnostics,
+            files: Vec::new(),
             node_count: 0,
-            branch_limit_reported: false,
+            expanded_bytes: 0,
+            branched: false,
             source_limit_reported: false,
         }
     }
 
-    pub(crate) fn render(&mut self, view: &ViewName) -> Vec<RenderedBranch> {
-        self.render_view(view, &Overrides::new(), &RawNames::new(), &mut Vec::new())
+    /// Renders the view into one tree, or `None` when a failure left nothing
+    /// checkable; that failure has reported itself.
+    pub(crate) fn render(mut self, view: &ViewName) -> Option<RenderedView<'checker>> {
+        let fragment =
+            self.render_view(view, &Overrides::new(), &RawNames::new(), &mut Vec::new())?;
+        Some(RenderedView {
+            fragment,
+            files: self.files,
+            branched: self.branched,
+        })
+    }
+
+    fn file_index(&mut self, view: &ViewName, source: &'checker str) -> u32 {
+        if let Some(index) = self.files.iter().position(|file| &file.view == view) {
+            return u32::try_from(index).unwrap_or(u32::MAX);
+        }
+        self.files.push(SourceFile {
+            view: view.clone(),
+            source,
+        });
+        u32::try_from(self.files.len() - 1).unwrap_or(u32::MAX)
     }
 
     /// Renders one template. `raw` holds the raw names of the template that
@@ -164,10 +244,10 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
     fn render_view(
         &mut self,
         view: &ViewName,
-        incoming_overrides: &Overrides,
+        incoming_overrides: &Overrides<'checker>,
         raw: &RawNames,
         stack: &mut Vec<ViewName>,
-    ) -> Vec<RenderedBranch> {
+    ) -> Option<Fragment<'checker>> {
         if stack.len() >= self.limits.max_include_depth() || stack.contains(view) {
             self.push(
                 DiagnosticCode::IncludeDepthLimit,
@@ -176,7 +256,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 1,
                 1,
             );
-            return Vec::new();
+            return None;
         }
         let Some(source) = self.catalog.source(view) else {
             self.push(
@@ -186,7 +266,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 1,
                 1,
             );
-            return Vec::new();
+            return None;
         };
         if source.len() > self.limits.max_source_bytes() {
             self.push(
@@ -196,7 +276,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 1,
                 1,
             );
-            return Vec::new();
+            return None;
         }
 
         let path: Arc<std::path::Path> = Arc::from(PathBuf::from(view.as_str()));
@@ -211,7 +291,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     line,
                     column,
                 );
-                return Vec::new();
+                return None;
             }
         };
         let count = count_nodes(ast.nodes());
@@ -224,13 +304,15 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 1,
                 1,
             );
-            return Vec::new();
+            return None;
         }
 
         stack.push(view.clone());
+        let file = self.file_index(view, source);
         let imports = self.load_imports(&ast, view, stack);
         let env = TemplateEnv {
             view: view.clone(),
+            file,
             source,
             ast,
             imports,
@@ -243,6 +325,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             caller: None,
             macro_depth: 0,
         };
+        let place = Place { view, file, source };
         let parent = env.ast.nodes().iter().find_map(|node| match node.as_ref() {
             Node::Extends(parent) => Some(parent.path),
             _ => None,
@@ -253,16 +336,18 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 if let Node::BlockDef(block) = node.as_ref() {
                     let name = (*block.name).to_owned();
                     if let Entry::Vacant(entry) = overrides.entry(name) {
-                        let branches = self.expand_nodes(
-                            &block.nodes,
-                            vec![RenderedBranch::empty(view)],
-                            incoming_overrides,
-                            view,
-                            source,
-                            stack,
-                            &scope,
-                        );
-                        entry.insert(branches);
+                        let mut fragment = Fragment::default();
+                        let rendered = self
+                            .expand_nodes(
+                                &block.nodes,
+                                &mut fragment,
+                                incoming_overrides,
+                                place,
+                                stack,
+                                &scope,
+                            )
+                            .map(|()| fragment);
+                        entry.insert(rendered);
                     }
                 }
             }
@@ -276,19 +361,20 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         1,
                         1,
                     );
-                    Vec::new()
+                    None
                 }
             }
         } else {
+            let mut fragment = Fragment::default();
             self.expand_nodes(
                 env.ast.nodes(),
-                vec![RenderedBranch::empty(view)],
+                &mut fragment,
                 incoming_overrides,
-                view,
-                source,
+                place,
                 stack,
                 &scope,
             )
+            .map(|()| fragment)
         };
         stack.pop();
         rendered
@@ -298,15 +384,12 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
     /// called, under the same depth and cycle limits as includes. An import
     /// that names no template in the catalog is reported where the import
     /// stands and yields no macros.
-    fn load_imports<'a>(
+    fn load_imports(
         &mut self,
-        ast: &Ast<'a>,
+        ast: &Ast<'checker>,
         view: &ViewName,
         stack: &mut Vec<ViewName>,
-    ) -> Vec<(String, TemplateEnv<'a>)>
-    where
-        'checker: 'a,
-    {
+    ) -> Vec<(String, TemplateEnv<'checker>)> {
         let mut imports = Vec::new();
         for node in ast.nodes() {
             let Node::Import(import) = node.as_ref() else {
@@ -320,15 +403,12 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
         imports
     }
 
-    fn load_template<'a>(
+    fn load_template(
         &mut self,
         path: &str,
         importer: &ViewName,
         stack: &mut Vec<ViewName>,
-    ) -> Option<TemplateEnv<'a>>
-    where
-        'checker: 'a,
-    {
+    ) -> Option<TemplateEnv<'checker>> {
         let Ok(imported) = ViewName::parse(path) else {
             self.push(
                 DiagnosticCode::MissingTemplate,
@@ -363,8 +443,8 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             self.report_source_limit(&imported);
             return None;
         }
-        let file: Arc<std::path::Path> = Arc::from(PathBuf::from(imported.as_str()));
-        let ast = match Ast::from_str(source, Some(file), &Syntax::default()) {
+        let path: Arc<std::path::Path> = Arc::from(PathBuf::from(imported.as_str()));
+        let ast = match Ast::from_str(source, Some(path), &Syntax::default()) {
             Ok(ast) => ast,
             Err(error) => {
                 let (line, column) = location(source, error.offset);
@@ -390,38 +470,36 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             return None;
         }
         stack.push(imported.clone());
+        let file = self.file_index(&imported, source);
         let imports = self.load_imports(&ast, &imported, stack);
         stack.pop();
         Some(TemplateEnv {
             view: imported,
+            file,
             source,
             ast,
             imports,
         })
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "branch expansion keeps its authority inputs explicit"
-    )]
+    /// Renders `nodes` onto the end of `out`. `None` means this path renders
+    /// nothing checkable, after the failure has reported itself, exactly as
+    /// a missing include or a depth limit stops the template there.
     fn expand_nodes(
         &mut self,
-        nodes: &[Box<Node<'_>>],
-        mut branches: Vec<RenderedBranch>,
-        overrides: &Overrides,
-        view: &ViewName,
-        source: &str,
+        nodes: &[Box<Node<'checker>>],
+        out: &mut Fragment<'checker>,
+        overrides: &Overrides<'checker>,
+        place: Place<'_, 'checker>,
         stack: &mut Vec<ViewName>,
-        scope: &Scope<'_, '_>,
-    ) -> Vec<RenderedBranch> {
+        scope: &Scope<'_, 'checker>,
+    ) -> Option<()> {
+        let Place { view, source, .. } = place;
         // A `{% let %}` rebinds a name for the nodes after it in this block:
         // it shadows a macro argument's literal and makes the name raw or
         // not, by its value.
         let mut environment: Option<(Bindings, RawNames)> = None;
         for (index, node) in nodes.iter().enumerate() {
-            if branches.is_empty() {
-                break;
-            }
             let (bindings, raw) = match &environment {
                 Some((bindings, raw)) => (bindings, raw),
                 None => (scope.bindings, scope.raw),
@@ -434,21 +512,26 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                 macro_depth: scope.macro_depth,
             };
             let mut rebound = None;
-            branches = match node.as_ref() {
+            match node.as_ref() {
                 Node::Lit(lit) => {
-                    let branches = self.append_text(branches, *lit.lws, view);
-                    let branches = self.append_text(branches, *lit.val, view);
-                    self.append_text(branches, *lit.rws, view)
+                    for text in [*lit.lws, *lit.val, *lit.rws] {
+                        self.push_literal(out, place, text, node.span())?;
+                    }
                 }
                 Node::Raw(raw) => {
-                    let branches = self.append_text(branches, *raw.lit.lws, view);
-                    let branches = self.append_text(branches, *raw.lit.val, view);
-                    self.append_text(branches, *raw.lit.rws, view)
+                    for text in [*raw.lit.lws, *raw.lit.val, *raw.lit.rws] {
+                        self.push_literal(out, place, text, node.span())?;
+                    }
                 }
                 Node::Expr(_, expression) => {
+                    let origin = Origin {
+                        file: place.file,
+                        offset: offset_u32(expression_start(expression).unwrap_or(0)),
+                        literal: false,
+                    };
                     if is_caller_call(expression) {
                         let Some(caller) = scope.caller else {
-                            let (line, column) = span_location(source, expression.span());
+                            let (line, column) = expression_location(source, expression);
                             self.push(
                                 DiagnosticCode::DynamicStructureUnproved,
                                 DiagnosticSeverity::Unproved,
@@ -458,13 +541,13 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             );
                             continue;
                         };
-                        branches = self.combine(branches, caller, false, view);
+                        self.inline(out, caller, view)?;
                         continue;
                     }
                     if let Some(Binding::Literal(literal)) =
                         bound_variable(expression, scope.bindings)
                     {
-                        branches = self.append_text(branches, &escape_html(literal), view);
+                        self.push_text(out, Cow::Owned(escape_html(literal)), origin, view)?;
                         continue;
                     }
                     if expression_is_raw(expression, scope.raw) {
@@ -477,32 +560,25 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             column,
                         );
                     }
-                    self.append_text(
-                        branches,
+                    let marker =
                         if expression_uses_filter(source, expression.span(), "live_key_digest") {
                             CHECKED_DIGEST_MARKER
                         } else if expression_uses_filter(source, expression.span(), "live_key") {
                             CHECKED_KEY_MARKER
                         } else {
                             DYNAMIC_MARKER
-                        },
-                        view,
-                    )
+                        };
+                    self.push_text(out, Cow::Borrowed(marker), origin, view)?;
                 }
                 Node::If(node) => {
                     // A condition the macro's literal arguments decide is not
                     // a branch: only the arm they select is rendered, so a
-                    // library macro called many times does not multiply the
-                    // branch states by every `{% if %}` it carries.
+                    // library macro called many times does not add a choice
+                    // for every `{% if %}` it carries.
                     if let Some(decided) = decided_branch(node, scope.bindings) {
-                        match decided {
-                            Some(nodes) => self.expand_nodes(
-                                nodes, branches, overrides, view, source, stack, scope,
-                            ),
-                            None => branches,
+                        if let Some(nodes) = decided {
+                            self.expand_nodes(nodes, out, overrides, place, stack, scope)?;
                         }
-                    } else if renders_only_unchecked_state(node, scope.raw) {
-                        branches
                     } else {
                         // A name an `if let` binds shadows a macro argument
                         // only inside the arm that binds it.
@@ -532,9 +608,8 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                                 raw: None,
                             });
                         }
-                        self.expand_choices(
-                            branches, &choices, overrides, view, source, stack, scope,
-                        )
+                        let origin = tag_origin(place, node.span());
+                        self.expand_choices(out, &choices, origin, overrides, place, stack, scope)?;
                     }
                 }
                 Node::Match(node) => {
@@ -554,7 +629,8 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             }
                         })
                         .collect();
-                    self.expand_choices(branches, &choices, overrides, view, source, stack, scope)
+                    let origin = tag_origin(place, node.span());
+                    self.expand_choices(out, &choices, origin, overrides, place, stack, scope)?;
                 }
                 Node::Loop(node) => {
                     let mut names = vec!["loop"];
@@ -580,22 +656,23 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     };
                     // The loop's own names are bound in its body, not in
                     // the `{% else %}` rendered when it has no items.
+                    let origin = tag_origin(place, node.span());
                     self.expand_loop(
-                        branches,
-                        &node.body,
-                        &node.else_nodes,
+                        out,
+                        (&node.body, &node.else_nodes),
+                        origin,
                         overrides,
-                        view,
-                        source,
+                        place,
                         stack,
                         (&loop_scope, scope),
-                    )
+                    )?;
                 }
                 Node::Include(include) => match ViewName::parse(include.path) {
                     Ok(include) => {
-                        let fragments =
-                            self.render_view(&include, &Overrides::new(), scope.raw, stack);
-                        self.combine(branches, &fragments, true, view)
+                        let fragment =
+                            self.render_view(&include, &Overrides::new(), scope.raw, stack)?;
+                        self.branched = true;
+                        out.pieces.extend(fragment.pieces);
                     }
                     Err(_) => {
                         self.push(
@@ -605,22 +682,15 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             1,
                             1,
                         );
-                        Vec::new()
+                        return None;
                     }
                 },
                 Node::BlockDef(block) => {
-                    if let Some(fragments) = overrides.get(*block.name) {
-                        self.combine(branches, fragments, true, view)
+                    if let Some(fragment) = overrides.get(*block.name) {
+                        self.branched = true;
+                        self.inline(out, fragment.as_ref()?, view)?;
                     } else {
-                        self.expand_nodes(
-                            &block.nodes,
-                            branches,
-                            overrides,
-                            view,
-                            source,
-                            stack,
-                            scope,
-                        )
+                        self.expand_nodes(&block.nodes, out, overrides, place, stack, scope)?;
                     }
                 }
                 Node::FilterBlock(block) => {
@@ -641,15 +711,7 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             column,
                         );
                     }
-                    self.expand_nodes(
-                        &block.nodes,
-                        branches,
-                        overrides,
-                        view,
-                        source,
-                        stack,
-                        scope,
-                    )
+                    self.expand_nodes(&block.nodes, out, overrides, place, stack, scope)?;
                 }
                 // A macro call: the body is walked with the call's literal
                 // arguments bound, the caller content rendered first for
@@ -690,27 +752,15 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                             line,
                             column,
                         );
-                        return Vec::new();
+                        return None;
                     }
                     let bindings = bind_arguments(definition, call, scope.bindings);
                     let raw = bind_raw_arguments(definition, call, scope.raw);
-                    // An empty call block is empty caller content: one empty
-                    // branch. Zero branches would multiply every branch after
-                    // the call away and leave the rest of the view unchecked
-                    // (LIVE-025).
-                    let caller = if call.nodes.is_empty() {
-                        vec![RenderedBranch::empty(view)]
-                    } else {
-                        self.expand_nodes(
-                            &call.nodes,
-                            vec![RenderedBranch::empty(view)],
-                            overrides,
-                            view,
-                            source,
-                            stack,
-                            scope,
-                        )
-                    };
+                    // An empty call block is empty caller content. A caller
+                    // that fails to render stops the path, as its failure
+                    // would stop the template.
+                    let mut caller = Fragment::default();
+                    self.expand_nodes(&call.nodes, &mut caller, overrides, place, stack, scope)?;
                     let inner = Scope {
                         template,
                         bindings: &bindings,
@@ -718,21 +768,23 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                         caller: Some(&caller),
                         macro_depth: scope.macro_depth + 1,
                     };
-                    let body_view = template.view.clone();
-                    let fragments = self.expand_nodes(
+                    let body = Place {
+                        view: &template.view,
+                        file: template.file,
+                        source: template.source,
+                    };
+                    self.expand_nodes(
                         &definition.nodes,
-                        vec![RenderedBranch::empty(&body_view)],
+                        out,
                         &Overrides::new(),
-                        &body_view,
-                        template.source,
+                        body,
                         stack,
                         &inner,
-                    );
-                    self.combine(branches, &fragments, false, view)
+                    )?;
                 }
                 // A definition renders nothing where it stands; its body is
                 // walked at each call.
-                Node::Macro(_) => branches,
+                Node::Macro(_) => {}
                 Node::Let(node) => {
                     let mut names = Vec::new();
                     bound_names(&node.var, &mut names);
@@ -745,18 +797,19 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     let value_is_raw = reassigned_raw
                         || match &node.val {
                             LetValueOrBlock::Value(value) => expression_is_raw(value, scope.raw),
-                            // Askama renders a `{% set %}` block into a string
-                            // and escapes that string where it is written, so the
-                            // name holds escaped text. A raw write inside the
-                            // block is still reported where it stands; the
-                            // block's own markup renders nothing here.
+                            // Askama renders a `{% set %}` block into a
+                            // string and escapes that string where it is
+                            // written, so the name holds escaped text. A raw
+                            // write inside the block is still reported where
+                            // it stands; the block's own markup renders
+                            // nothing here.
                             LetValueOrBlock::Block { nodes: block, .. } => {
+                                let mut discarded = Fragment::default();
                                 let _ = self.expand_nodes(
                                     block,
-                                    vec![RenderedBranch::empty(view)],
+                                    &mut discarded,
                                     overrides,
-                                    view,
-                                    source,
+                                    place,
                                     stack,
                                     scope,
                                 );
@@ -770,7 +823,6 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     let raw = rebind_raw(scope.raw, &names, value_is_raw)
                         .unwrap_or_else(|| scope.raw.clone());
                     rebound = Some((bindings, raw));
-                    branches
                 }
                 // A name declared without a value is assigned later, possibly
                 // inside a nested block whose value it keeps after the block,
@@ -781,7 +833,6 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     if let Some(raw) = rebind_raw(scope.raw, &[name], later.contains(name)) {
                         rebound = Some((scope.bindings.clone(), raw));
                     }
-                    branches
                 }
                 // `{% mut x = value %}` and the compound forms leave `x` raw
                 // when the assigned value is raw; a raw `x` stays raw.
@@ -792,174 +843,190 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
                     {
                         rebound = Some((scope.bindings.clone(), raw));
                     }
-                    branches
                 }
                 Node::Comment(_)
                 | Node::Extends(_)
                 | Node::Import(_)
                 | Node::Break(_)
-                | Node::Continue(_) => branches,
-            };
+                | Node::Continue(_) => {}
+            }
             if let Some(next) = rebound {
                 environment = Some(next);
             }
         }
-        branches
+        Some(())
     }
 
+    /// Renders each arm once into one choice. An arm whose rendering fails
+    /// is not a way through the template; when none is left, the path stops.
     #[allow(
         clippy::too_many_arguments,
-        reason = "branch expansion keeps its authority inputs explicit"
+        reason = "choice expansion keeps its authority inputs explicit"
     )]
     fn expand_choices(
         &mut self,
-        branches: Vec<RenderedBranch>,
-        choices: &[Choice<'_, '_>],
-        overrides: &Overrides,
-        view: &ViewName,
-        source: &str,
+        out: &mut Fragment<'checker>,
+        choices: &[Choice<'_, 'checker>],
+        origin: Origin,
+        overrides: &Overrides<'checker>,
+        place: Place<'_, 'checker>,
         stack: &mut Vec<ViewName>,
-        scope: &Scope<'_, '_>,
-    ) -> Vec<RenderedBranch> {
-        let mut expanded = Vec::new();
-        for branch in branches {
-            for choice in choices {
-                let mut seed = branch.clone();
-                seed.branched = true;
-                let choice_scope = Scope {
-                    template: scope.template,
-                    bindings: choice.shadowed.as_ref().unwrap_or(scope.bindings),
-                    raw: choice.raw.as_ref().unwrap_or(scope.raw),
-                    caller: scope.caller,
-                    macro_depth: scope.macro_depth,
-                };
-                let choice_branches = self.expand_nodes(
+        scope: &Scope<'_, 'checker>,
+    ) -> Option<()> {
+        let mut arms = Vec::with_capacity(choices.len());
+        for choice in choices {
+            let choice_scope = Scope {
+                template: scope.template,
+                bindings: choice.shadowed.as_ref().unwrap_or(scope.bindings),
+                raw: choice.raw.as_ref().unwrap_or(scope.raw),
+                caller: scope.caller,
+                macro_depth: scope.macro_depth,
+            };
+            let mut arm = Fragment::default();
+            if self
+                .expand_nodes(
                     choice.nodes,
-                    vec![seed],
+                    &mut arm,
                     overrides,
-                    view,
-                    source,
+                    place,
                     stack,
                     &choice_scope,
-                );
-                for choice_branch in choice_branches {
-                    if !self.admit_branch(&mut expanded, choice_branch, view) {
-                        return expanded;
-                    }
-                }
+                )
+                .is_some()
+            {
+                arms.push(arm);
+            } else if self.source_limit_reported {
+                return None;
             }
         }
-        expanded
-    }
-
-    fn combine(
-        &mut self,
-        branches: Vec<RenderedBranch>,
-        fragments: &[RenderedBranch],
-        branched: bool,
-        view: &ViewName,
-    ) -> Vec<RenderedBranch> {
-        let mut combined = Vec::new();
-        for branch in branches {
-            for fragment in fragments {
-                let mut next = branch.clone();
-                let Some(next_len) = next.html.len().checked_add(fragment.html.len()) else {
-                    self.report_source_limit(view);
-                    return combined;
-                };
-                if next_len > self.limits.max_source_bytes() {
-                    self.report_source_limit(view);
-                    return combined;
-                }
-                next.html.push_str(&fragment.html);
-                next.branched |= branched || fragment.branched;
-                if !self.admit_branch(&mut combined, next, view) {
-                    return combined;
-                }
-            }
+        if arms.is_empty() {
+            return None;
         }
-        combined
+        self.branched = true;
+        out.pieces.push(Piece::Choice(ChoicePiece { arms, origin }));
+        Some(())
     }
 
+    /// A loop is a choice between its body, between the loop markers that
+    /// let the HTML check see it repeats, and its `{% else %}`.
     #[allow(
         clippy::too_many_arguments,
         reason = "loop expansion keeps its authority inputs explicit"
     )]
     fn expand_loop(
         &mut self,
-        branches: Vec<RenderedBranch>,
-        body: &[Box<Node<'_>>],
-        else_nodes: &[Box<Node<'_>>],
-        overrides: &Overrides,
-        view: &ViewName,
-        source: &str,
+        out: &mut Fragment<'checker>,
+        (body, else_nodes): (&[Box<Node<'checker>>], &[Box<Node<'checker>>]),
+        origin: Origin,
+        overrides: &Overrides<'checker>,
+        place: Place<'_, 'checker>,
         stack: &mut Vec<ViewName>,
-        (body_scope, else_scope): (&Scope<'_, '_>, &Scope<'_, '_>),
-    ) -> Vec<RenderedBranch> {
-        let mut expanded = Vec::new();
-        for branch in branches {
-            let mut body_seed = branch.clone();
-            body_seed.branched = true;
-            let body_seeds = self.append_text(
-                vec![body_seed],
-                "<!--suprnova-checker-loop-start-7f3e-->",
+        (body_scope, else_scope): (&Scope<'_, 'checker>, &Scope<'_, 'checker>),
+    ) -> Option<()> {
+        let view = place.view;
+        let mut arms = Vec::with_capacity(2);
+        let mut repeated = Fragment::default();
+        let rendered = self
+            .push_text(
+                &mut repeated,
+                Cow::Borrowed("<!--suprnova-checker-loop-start-7f3e-->"),
+                origin,
                 view,
-            );
-            let body_branches =
-                self.expand_nodes(body, body_seeds, overrides, view, source, stack, body_scope);
-            for body_branch in body_branches {
-                let completed = self.append_text(
-                    vec![body_branch],
-                    "<!--suprnova-checker-loop-end-7f3e-->",
+            )
+            .and_then(|()| {
+                self.expand_nodes(body, &mut repeated, overrides, place, stack, body_scope)
+            })
+            .and_then(|()| {
+                self.push_text(
+                    &mut repeated,
+                    Cow::Borrowed("<!--suprnova-checker-loop-end-7f3e-->"),
+                    origin,
                     view,
-                );
-                for body_branch in completed {
-                    if !self.admit_branch(&mut expanded, body_branch, view) {
-                        return expanded;
-                    }
-                }
-            }
-
-            let mut empty_seed = branch;
-            empty_seed.branched = true;
-            let empty_branches = self.expand_nodes(
-                else_nodes,
-                vec![empty_seed],
-                overrides,
-                view,
-                source,
-                stack,
-                else_scope,
-            );
-            for empty_branch in empty_branches {
-                if !self.admit_branch(&mut expanded, empty_branch, view) {
-                    return expanded;
-                }
-            }
+                )
+            });
+        if rendered.is_some() {
+            arms.push(repeated);
+        } else if self.source_limit_reported {
+            return None;
         }
-        expanded
+        let mut empty = Fragment::default();
+        if self
+            .expand_nodes(else_nodes, &mut empty, overrides, place, stack, else_scope)
+            .is_some()
+        {
+            arms.push(empty);
+        } else if self.source_limit_reported {
+            return None;
+        }
+        if arms.is_empty() {
+            return None;
+        }
+        self.branched = true;
+        out.pieces.push(Piece::Choice(ChoicePiece { arms, origin }));
+        Some(())
     }
 
-    fn append_text(
+    /// Appends template text, mapped byte for byte to its source.
+    fn push_literal(
         &mut self,
-        branches: Vec<RenderedBranch>,
-        text: &str,
-        view: &ViewName,
-    ) -> Vec<RenderedBranch> {
-        let mut appended = Vec::with_capacity(branches.len());
-        for mut branch in branches {
-            let Some(next_len) = branch.html.len().checked_add(text.len()) else {
-                self.report_source_limit(view);
-                continue;
-            };
-            if next_len > self.limits.max_source_bytes() {
-                self.report_source_limit(view);
-                continue;
-            }
-            branch.html.push_str(text);
-            appended.push(branch);
+        out: &mut Fragment<'checker>,
+        place: Place<'_, 'checker>,
+        text: &'checker str,
+        node: Span,
+    ) -> Option<()> {
+        if text.is_empty() {
+            return Some(());
         }
-        appended
+        let origin = match offset_in(place.source, text) {
+            Some(offset) => Origin {
+                file: place.file,
+                offset: offset_u32(offset),
+                literal: true,
+            },
+            None => Origin {
+                file: place.file,
+                offset: offset_u32(node.byte_range().map_or(0, |range| range.start)),
+                literal: false,
+            },
+        };
+        self.push_text(out, Cow::Borrowed(text), origin, place.view)
+    }
+
+    fn push_text(
+        &mut self,
+        out: &mut Fragment<'checker>,
+        text: Cow<'checker, str>,
+        origin: Origin,
+        view: &ViewName,
+    ) -> Option<()> {
+        self.charge(text.len(), view)?;
+        out.pieces.push(Piece::Text(text, origin));
+        Some(())
+    }
+
+    /// Appends a copy of an already rendered fragment: caller content or an
+    /// inherited block override.
+    fn inline(
+        &mut self,
+        out: &mut Fragment<'checker>,
+        fragment: &Fragment<'checker>,
+        view: &ViewName,
+    ) -> Option<()> {
+        self.charge(fragment.text_bytes(), view)?;
+        out.pieces.extend(fragment.pieces.iter().cloned());
+        Some(())
+    }
+
+    /// Counts rendered bytes against the source ceiling. The whole expanded
+    /// view, every arm included, must fit, which also bounds every single
+    /// path through it.
+    fn charge(&mut self, bytes: usize, view: &ViewName) -> Option<()> {
+        self.expanded_bytes = self.expanded_bytes.saturating_add(bytes);
+        if self.expanded_bytes > self.limits.max_source_bytes() {
+            self.report_source_limit(view);
+            return None;
+        }
+        Some(())
     }
 
     fn report_source_limit(&mut self, view: &ViewName) {
@@ -974,29 +1041,6 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             1,
             1,
         );
-    }
-
-    fn admit_branch(
-        &mut self,
-        branches: &mut Vec<RenderedBranch>,
-        branch: RenderedBranch,
-        view: &ViewName,
-    ) -> bool {
-        if branches.len() >= self.limits.max_branch_states() {
-            if !self.branch_limit_reported {
-                self.branch_limit_reported = true;
-                self.push(
-                    DiagnosticCode::BranchLimit,
-                    DiagnosticSeverity::Error,
-                    view,
-                    1,
-                    1,
-                );
-            }
-            return false;
-        }
-        branches.push(branch);
-        true
     }
 
     fn push(
@@ -1015,6 +1059,37 @@ impl<'checker, 'diagnostics> BranchRenderer<'checker, 'diagnostics> {
             column,
             Some(self.component),
         );
+    }
+}
+
+/// The byte offset of `slice` inside `source`, when it is a subslice of it.
+/// The Askama parser borrows every literal from the template text, so this
+/// recovers each literal's place without a second parse.
+fn offset_in(source: &str, slice: &str) -> Option<usize> {
+    let start = slice.as_ptr().addr().checked_sub(source.as_ptr().addr())?;
+    (start.checked_add(slice.len())? <= source.len()).then_some(start)
+}
+
+fn offset_u32(offset: usize) -> u32 {
+    u32::try_from(offset).unwrap_or(u32::MAX)
+}
+
+/// Where a block tag such as `{% if %}` opens. Askama spans a block node
+/// from its keyword, so the origin steps back over the whitespace and
+/// whitespace-control mark to the `{%` that starts the tag.
+fn tag_origin(place: Place<'_, '_>, span: Span) -> Origin {
+    let keyword = span.byte_range().map_or(0, |range| range.start);
+    let before = place.source.get(..keyword).unwrap_or_default();
+    let trimmed = before.trim_end_matches(|character: char| {
+        character.is_whitespace() || matches!(character, '-' | '+' | '~')
+    });
+    let offset = trimmed
+        .strip_suffix("{%")
+        .map_or(keyword, |opening| opening.len());
+    Origin {
+        file: place.file,
+        offset: offset_u32(offset),
+        literal: false,
     }
 }
 
@@ -1355,69 +1430,6 @@ struct Choice<'n, 'a> {
     raw: Option<RawNames>,
 }
 
-/// Whether every arm of `node` renders only attributes no check reads, see
-/// [`UNCHECKED_STATE_ATTRIBUTES`]. An arm qualifies when it is literal text
-/// and expressions, the expressions sit inside quoted attribute values, none
-/// is a raw `safe` output, and the text is whitespace-separated attributes
-/// from that list. An `if let` never qualifies, because it binds names.
-fn renders_only_unchecked_state(node: &If<'_>, raw: &RawNames) -> bool {
-    node.branches.iter().all(|branch| {
-        branch
-            .cond
-            .as_ref()
-            .is_none_or(|cond| cond.target.is_none())
-            && unchecked_state_only(&branch.nodes, raw)
-    })
-}
-
-fn unchecked_state_only(nodes: &[Box<Node<'_>>], raw: &RawNames) -> bool {
-    // An expression is spelled as a NUL, which no attribute name admits, so
-    // one outside a quoted value disqualifies the arm.
-    let mut text = String::new();
-    for node in nodes {
-        match node.as_ref() {
-            Node::Lit(lit) => {
-                text.push_str(*lit.lws);
-                text.push_str(*lit.val);
-                text.push_str(*lit.rws);
-            }
-            Node::Expr(_, expression) => {
-                if expression_is_raw(expression, raw) {
-                    return false;
-                }
-                text.push('\0');
-            }
-            Node::Comment(_) => {}
-            _ => return false,
-        }
-    }
-    let mut rest = text.as_str();
-    loop {
-        let trimmed = rest.trim_start_matches([' ', '\t', '\n', '\r']);
-        if trimmed.is_empty() {
-            return true;
-        }
-        if trimmed.len() == rest.len() {
-            return false;
-        }
-        let name_len = trimmed
-            .bytes()
-            .take_while(|byte| byte.is_ascii_lowercase() || *byte == b'-')
-            .count();
-        let (name, after) = trimmed.split_at(name_len);
-        if !UNCHECKED_STATE_ATTRIBUTES.contains(&name) {
-            return false;
-        }
-        rest = match after.strip_prefix("=\"") {
-            Some(value) => match value.find('"') {
-                Some(end) => &value[end + 1..],
-                None => return false,
-            },
-            None => after,
-        };
-    }
-}
-
 /// Collects the names a `for` target, a `match` arm, or an `if let` binds.
 fn bound_names<'a>(target: &Target<'a>, names: &mut Vec<&'a str>) {
     match target {
@@ -1476,10 +1488,10 @@ fn shadowed_bindings(bindings: &Bindings, names: &[&str]) -> Option<Bindings> {
 /// every condition is false and there is no `{% else %}`, and `None` when a
 /// condition depends on something the bindings do not hold, which leaves the
 /// node a branch.
-fn decided_branch<'n>(
-    node: &'n If<'_>,
+fn decided_branch<'n, 'a>(
+    node: &'n If<'a>,
     bindings: &Bindings,
-) -> Option<Option<&'n [Box<Node<'n>>]>> {
+) -> Option<Option<&'n [Box<Node<'a>>]>> {
     for branch in &node.branches {
         let Some(cond) = &branch.cond else {
             return Some(Some(branch.nodes.as_slice()));
@@ -1590,7 +1602,7 @@ fn span_location(source: &str, span: Span) -> (u32, u32) {
         .map_or((1, 1), |range| location(source, range.start))
 }
 
-fn location(source: &str, offset: usize) -> (u32, u32) {
+pub(crate) fn location(source: &str, offset: usize) -> (u32, u32) {
     let prefix = source.get(..offset).unwrap_or(source);
     let line = prefix
         .bytes()

@@ -53,13 +53,16 @@ pub enum DiagnosticCode {
     UnknownEffect,
     /// A selected accessibility or component-anatomy invariant failed.
     AccessibilityViolation,
-    /// Template source or one expanded branch exceeded the byte ceiling.
+    /// A template's source, or the whole expanded view with every macro
+    /// expansion and conditional arm, exceeded the byte ceiling.
     SourceLimit,
     /// Parsed Askama nodes exceeded the configured ceiling.
     NodeLimit,
     /// Include/inheritance traversal exceeded its depth ceiling or cycled.
     IncludeDepthLimit,
-    /// Control-flow expansion exceeded the branch-state ceiling.
+    /// More distinct paths through the view were alive at once than the
+    /// branch-state ceiling allows, as when one tag's attributes depend on
+    /// many conditionals.
     BranchLimit,
     /// HTML tokenization exceeded the token ceiling.
     HtmlTokenLimit,

@@ -468,6 +468,20 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-10-04 -- The checker checks control flow compositionally. The view
+  renders into a tree in which each `if`, `match`, and loop is one choice
+  whose arms are rendered once; the HTML check continues every path state
+  through each arm and merges the states that leave the same open elements,
+  loop depth, and teleports, uniting the keys, ids, freshness, field
+  declarations, and submit-form fields they hold. Independent conditionals
+  now add to the work: forty of them check like one, where eight had
+  exceeded the 128 branch-state cap. Arms are enumerated only inside one tag
+  or one raw-text element, and across a conditional teleport, whose target
+  must exist on its own path. `branch_limit` names the conditional that
+  crossed the ceiling. The default ceilings were raised for real templates:
+  4 MiB of source or expanded view, 262,144 nodes, 1,024 live branch
+  states, 1,048,576 tokens, 262,144 attributes, and 256 diagnostics per
+  component, each configurable.
 - 2026-10-04 -- The checker reads unescaped output from the parsed Askama
   expression instead of its source text. `safe`, and `escape` or `e` with an
   escaper Askama maps to its text escaper (`none`, `txt`, `md`, `yml`, the
