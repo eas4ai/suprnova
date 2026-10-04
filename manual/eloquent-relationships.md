@@ -372,6 +372,11 @@ The cost is one extra struct per pivot table. The benefit is that the
 pivot can carry behaviour - domain logic, validation rules, audit
 columns - without escaping into raw SQL.
 
+A relation reads its pivot table directly, as Laravel's `using(Pivot)`
+relation does, so the pivot model's own global scopes and soft-delete
+filter apply when you query `RoleUser::query()`, not to the attachments
+`user.roles()` returns. Narrow the attachments with `where_pivot`.
+
 ## `HasOneThrough` and `HasManyThrough`
 
 Two-hop relations: `A → B → C` where `B` is an intermediate model whose

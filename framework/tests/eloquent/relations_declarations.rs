@@ -1079,3 +1079,77 @@ async fn lazy_through_reads_apply_the_targets_global_scopes() {
     assert_eq!(words, vec![10], "the eager load agrees with the lazy read");
     assert_eq!(eager[0].reports_count(), 1);
 }
+
+// ---- A pivot model's own scopes do not filter the relation --------------
+
+#[model(table = "rd_clubs", relations = {
+    people: BelongsToMany<RdPerson, RdClubPerson>,
+})]
+pub struct RdClub {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "rd_people")]
+pub struct RdPerson {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "rd_club_person", timestamps = false)]
+pub struct RdClubPerson {
+    pub id: i64,
+    pub rd_club_id: i64,
+    pub rd_person_id: i64,
+    pub active: i64,
+}
+
+/// Hides the memberships that are not active, when `RdClubPerson` is
+/// queried as a model of its own.
+pub struct RdActiveMemberships;
+
+impl GlobalScope<RdClubPerson> for RdActiveMemberships {
+    fn apply(&self, query: Builder<RdClubPerson>) -> Builder<RdClubPerson> {
+        query.filter("active", 1_i64)
+    }
+}
+
+/// A relation reads the pivot table itself, as Laravel's `using(Pivot)`
+/// relation does: the pivot model's global scopes apply when that model
+/// is queried on its own, not to the attachments of the relation. Every
+/// attached person loads, lazy and eager, each with its pivot row.
+#[tokio::test]
+async fn a_pivot_models_scopes_do_not_filter_the_relation() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for sql in [
+        "CREATE TABLE rd_clubs (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE rd_people (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE rd_club_person (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            rd_club_id INTEGER NOT NULL, rd_person_id INTEGER NOT NULL, active INTEGER NOT NULL)",
+        "INSERT INTO rd_clubs (id, name) VALUES (1, 'club')",
+        "INSERT INTO rd_people (id, name) VALUES (1, 'active'), (2, 'lapsed')",
+        "INSERT INTO rd_club_person (rd_club_id, rd_person_id, active) VALUES (1, 1, 1), (1, 2, 0)",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+    ScopeRegistry::register::<RdClubPerson, _>(RdActiveMemberships);
+    // The scope does apply to the pivot model queried on its own.
+    assert_eq!(RdClubPerson::query().count().await.unwrap(), 1);
+
+    let pivots = |people: &[RdPerson]| {
+        let mut active: Vec<(String, i64)> = people
+            .iter()
+            .map(|p| (p.name.clone(), p.pivot::<RdClubPerson>().active))
+            .collect();
+        active.sort();
+        active
+    };
+    let expected = vec![("active".to_string(), 1), ("lapsed".to_string(), 0)];
+
+    let eager = RdClub::query().with(["people"]).get().await.unwrap();
+    assert_eq!(pivots(eager[0].people_loaded()), expected);
+
+    let club = RdClub::find(1).await.unwrap().unwrap();
+    assert_eq!(pivots(&club.people().get().await.unwrap()), expected);
+    assert_eq!(club.people().count().await.unwrap(), 2);
+}
