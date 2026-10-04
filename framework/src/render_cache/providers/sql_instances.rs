@@ -95,12 +95,31 @@ pub(crate) const RECLAIM_BATCH: usize = 64;
 /// `Debug` prints the test offset only. There is no record state in this
 /// type, and if there were, it would not be printed: a record is instance
 /// authority, and this crate redacts that everywhere.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct SqlInstanceRecordStore {
     /// Milliseconds added to every store-time comparison, for tests alone.
     /// Per instance rather than process-wide: several stores share one test
     /// binary. See [`Self::set_time_offset_for_test`].
     time_offset_ms: std::sync::atomic::AtomicU64,
+    /// A test's pause between reclamation's read and its delete; always
+    /// `None` outside tests. See [`Self::set_reclaim_pause_for_test`].
+    reclaim_pause: std::sync::Mutex<Option<ReclaimPause>>,
+}
+
+/// The pause [`SqlInstanceRecordStore::set_reclaim_pause_for_test`]
+/// installs: a future reclamation awaits between choosing its victims and
+/// deleting them.
+#[doc(hidden)]
+pub type ReclaimPause = std::sync::Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+
+impl std::fmt::Debug for SqlInstanceRecordStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqlInstanceRecordStore")
+            .field("time_offset_ms", &self.time_offset_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SqlInstanceRecordStore {
@@ -124,6 +143,19 @@ impl SqlInstanceRecordStore {
     pub fn set_time_offset_for_test(&self, offset_ms: u64) {
         self.time_offset_ms
             .store(offset_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Pauses every later reclamation on this store between the read that
+    /// chooses its elapsed victims and the delete that removes them, by
+    /// awaiting `pause`; `None` removes it. How a test lands a peer's write
+    /// in that window (DATA-026). Never called by production code, and per
+    /// store for the reason [`Self::set_time_offset_for_test`] gives.
+    #[doc(hidden)]
+    pub fn set_reclaim_pause_for_test(&self, pause: Option<ReclaimPause>) {
+        *self
+            .reclaim_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = pause;
     }
 
     fn offset(&self) -> i64 {
@@ -207,10 +239,12 @@ impl SqlInstanceRecordStore {
     /// deadline first.
     ///
     /// The victims are chosen by an ordered read and then deleted by their
-    /// own primary keys rather than by re-running the expiry predicate as a
-    /// delete: that keeps the delete bounded to exactly the rows this
-    /// operation looked at, on every dialect, and needs no subquery over the
-    /// table a `DELETE` targets - which MySQL refuses outright (error 1093).
+    /// own primary keys, which keeps the delete bounded to exactly the rows
+    /// this operation looked at, on every dialect, and needs no subquery
+    /// over the table a `DELETE` targets - which MySQL refuses outright
+    /// (error 1093). The delete re-checks each key's deadline as well, so a
+    /// fresh record a peer created at a chosen key after the read is never
+    /// one of them (DATA-026).
     ///
     /// It runs in whatever transaction the operation runs in, so inside a
     /// host transaction this delete takes row locks that are held until the
@@ -235,7 +269,15 @@ impl SqlInstanceRecordStore {
         if rows.is_empty() {
             return Ok(());
         }
-        let mut victims: Vec<Value> = Vec::with_capacity(rows.len() * 2);
+        let pause = self
+            .reclaim_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(pause) = pause {
+            pause().await;
+        }
+        let mut victims: Vec<Value> = Vec::with_capacity(rows.len() * 2 + 1);
         for row in &rows {
             let scope: String = row
                 .try_get_by_index(0)
@@ -246,6 +288,7 @@ impl SqlInstanceRecordStore {
             victims.push(Value::from(scope));
             victims.push(Value::from(member));
         }
+        victims.push(Value::from(self.offset()));
         exec.run(sea_orm::Statement::from_sql_and_values(
             backend,
             delete_batch_sql(backend, table, rows.len()).map_err(ledger_error)?,
@@ -936,18 +979,28 @@ fn select_elapsed_sql(backend: DbBackend, table: RecordTable) -> Result<String, 
 }
 
 /// `DELETE` for exactly the `count` records a batch selected, addressed by
-/// their own primary keys.
+/// their own primary keys, and only while each is still elapsed by store
+/// time.
 ///
 /// One statement rather than `count` of them, and an explicit list of keys
 /// rather than a subquery over the table being deleted from: the first keeps
 /// reclamation to one round trip, and the second is what MySQL requires
 /// (error 1093 refuses to read the target table in a subquery). Every key is
 /// bound.
+///
+/// The expiry guard is not redundant with the read that chose the keys. That
+/// read locks nothing, so between it and this delete a peer can reclaim the
+/// same elapsed record and create a fresh one at the same key; deleting by
+/// key alone then deleted the peer's new record (DATA-026). Re-checking the
+/// deadline in the delete itself keeps reclamation to records that are gone
+/// by the port's own definition, so it can never change authority. The last
+/// bound value is the store-time offset.
 fn delete_batch_sql(
     backend: DbBackend,
     table: RecordTable,
     count: usize,
 ) -> Result<String, FrameworkError> {
+    let now = sql_now_ms(backend)?;
     let (name, member) = (table.name(), table.member_column());
     let mut clauses = Vec::with_capacity(count);
     for row in 0..count {
@@ -957,7 +1010,11 @@ fn delete_batch_sql(
             bind(backend, row * 2 + 2)?
         ));
     }
-    Ok(format!("DELETE FROM {name} WHERE {}", clauses.join(" OR ")))
+    Ok(format!(
+        "DELETE FROM {name} WHERE ({}) AND expires_at_ms <= ({now}) + {}",
+        clauses.join(" OR "),
+        bind(backend, count * 2 + 1)?
+    ))
 }
 
 /// `SELECT` for the live instance records whose deadlines come first, the
@@ -1218,8 +1275,9 @@ mod tests {
                 "MySQL refuses a subquery over the table a DELETE targets: {deleted}"
             );
             assert!(
-                !deleted.contains("expires_at_ms"),
-                "the batch is deleted by key, not by re-running the expiry predicate: {deleted}"
+                deleted.contains("expires_at_ms <= ("),
+                "the batch deletes only keys still elapsed by store time, so a peer's fresh \
+                 record at a chosen key survives: {deleted}"
             );
         }
     }
