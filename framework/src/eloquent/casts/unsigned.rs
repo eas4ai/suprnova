@@ -17,7 +17,7 @@
 //!
 //! A read by such a value is not refused: no row of a signed column holds
 //! it, so the answer is known without asking. A lookup by key finds
-//! nothing, and a comparison is [`Settled`], true or false for every row.
+//! nothing, and a comparison is settled, true or false for every row.
 
 use sea_orm::sea_query::{ArrayType, ColumnType, Nullable, ValueType, ValueTypeErr};
 use sea_orm::{ColIdx, DbBackend, DbErr, QueryResult, TryFromU64, TryGetError, TryGetable, Value};
