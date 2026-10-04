@@ -1548,8 +1548,9 @@ async fn iteration_004_reset_upload_window(State(state): State<Arc<HostState>>) 
 }
 
 /// The browser suite's reset between tests. Unlike the strict reset a test
-/// runs on its own uploads, it cancels the uploads a finished test left
-/// unfinished first, so one stalled request fails only its own test.
+/// runs on its own uploads, it first clears what a finished test left behind,
+/// so one stalled request fails only its own test: it releases the pause,
+/// disarms the one-shot faults, and cancels unfinished uploads and records.
 async fn iteration_004_reset_uploads_between_tests(
     State(state): State<Arc<HostState>>,
 ) -> StatusCode {

@@ -9,12 +9,13 @@ const REFERENCE_ORIGIN = "http://127.0.0.1:4175";
  * the connection, and the host restores that upload with its active lease so
  * a retry in the same test could still finish it. The host's clock is fixed,
  * so nothing else ever ends the upload, and the strict reset each test runs
- * on its own uploads would refuse for every later test. This reset cancels
- * the uploads the finished test left unfinished and then resets the creation
- * window, so one stalled request fails only its own test.
+ * on its own uploads would refuse for every later test. This reset releases
+ * the pause and disarms the faults the finished test left, cancels the
+ * uploads it left unfinished, and then resets the creation window, so one
+ * stalled request fails only its own test.
  *
  * Polled, not posted once: the host answers 409 while an operation still
- * holds an upload or a pause holds authority, which end on their own.
+ * holds an upload, which ends on its own.
  */
 export async function resetReferenceUploadsBetweenTests(
   request: APIRequestContext,

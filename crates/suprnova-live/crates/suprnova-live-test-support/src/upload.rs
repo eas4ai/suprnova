@@ -313,6 +313,19 @@ impl MemoryUploadLedger {
         self.len() == 0
     }
 
+    /// Returns a copy of every retained record that is not terminal. A test
+    /// host walks it to close records nothing else points at, such as the one
+    /// a create leaves when it fails after the ledger admitted it.
+    #[must_use]
+    pub fn unfinished_records(&self) -> Vec<UploadRecord> {
+        lock(&self.state)
+            .records
+            .values()
+            .filter(|stored| !stored.record.state().is_terminal())
+            .map(|stored| stored.record.clone())
+            .collect()
+    }
+
     /// Clears only the deterministic creation-rate window when every retained
     /// upload authority is terminal. The check and timestamp reset share the
     /// ledger lock, so admission cannot cross the reset boundary.

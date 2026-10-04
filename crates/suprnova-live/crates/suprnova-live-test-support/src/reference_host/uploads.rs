@@ -386,6 +386,25 @@ impl UploadOperationPause {
         }
     }
 
+    /// Ends the current selection and any operation parked at it, and keeps
+    /// the pause usable. The reset between tests releases what the finished
+    /// test left: that test can no longer resume it, and the fixed pause
+    /// clock never expires it. A parked operation runs on to its own end.
+    fn release(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(selected) = state.selected.take() {
+            state.last_retired_generation = state
+                .last_retired_generation
+                .max(selected.control_generation);
+        }
+        if let Some(active) = state.active.take() {
+            state.last_retired_generation =
+                state.last_retired_generation.max(active.control_generation);
+        }
+        drop(state);
+        self.changed.notify_waiters();
+    }
+
     fn retire(&self) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.retired = true;
@@ -891,7 +910,7 @@ impl UploadRuntime {
         let grant = created.grant().clone();
         let state = created.record().state();
         let revision = created.record().revision();
-        let plan = match mode {
+        let prepared = match mode {
             TransferMode::File => {
                 self.file
                     .prepare(PrepareTransfer::new(
@@ -900,7 +919,7 @@ impl UploadRuntime {
                         &request.filename,
                         CREATED_AT,
                     ))
-                    .await?
+                    .await
             }
             TransferMode::Direct => {
                 self.direct
@@ -910,7 +929,15 @@ impl UploadRuntime {
                         &request.filename,
                         CREATED_AT,
                     ))
-                    .await?
+                    .await
+            }
+        };
+        let plan = match prepared {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.close_failed_creation(grant, field, handle, state, revision)
+                    .await;
+                return Err(error);
             }
         };
         let direct_instruction = plan
@@ -920,7 +947,7 @@ impl UploadRuntime {
         let instruction = direct_instruction.as_ref().map(direct_instruction_json);
         let stored = StoredUpload {
             handle: handle.clone(),
-            field,
+            field: field.clone(),
             client,
             policy: Some(policy),
             expected_bytes: request.expected_bytes,
@@ -949,10 +976,13 @@ impl UploadRuntime {
             }
         };
         if insert_conflict {
-            match mode {
-                TransferMode::File => self.file.cancel(&handle).await?,
-                TransferMode::Direct => self.direct.cancel(&handle).await?,
-            }
+            let canceled = match mode {
+                TransferMode::File => self.file.cancel(&handle).await,
+                TransferMode::Direct => self.direct.cancel(&handle).await,
+            };
+            self.close_failed_creation(grant, field, handle, state, revision)
+                .await;
+            canceled?;
             return Err(UploadError::new(UploadErrorKind::UploadConflict));
         }
         let mut response = json!({
@@ -1972,25 +2002,48 @@ impl UploadRuntime {
     /// its active lease, so a retry in the same test can still finish it.
     /// Nothing else ever ends that upload, because the host's clock is fixed:
     /// the strict reset would refuse, and every later test would fail on the
-    /// lease. Between tests no page owns an upload, so this reset closes each
-    /// idle unfinished one before it resets the window. It still refuses
-    /// while an operation holds a slot or a pause holds authority. Those end
-    /// on their own, and the suite polls this reset until it answers.
+    /// lease. The same holds for whatever else the finished test left armed.
+    /// Between tests no page owns any of it, so this reset releases the pause
+    /// and disarms the one-shot faults, closes each idle unfinished upload
+    /// and each unfinished record no slot points at, and only then resets the
+    /// window. It still refuses while an operation holds a slot; that
+    /// request ends on its own, and the suite polls this reset until it
+    /// answers.
     pub(super) async fn reset_between_tests(&self) -> Result<(), &'static str> {
         let _creation_window_guard = self.creation_window_gate.lock().await;
-        if self.operation_pause.has_authority() {
-            return Err("upload_window_not_quiescent");
-        }
+        self.operation_pause.release();
+        self.disarm_faults();
         let mut all_closed = true;
         for mut operation in self.take_abandoned_uploads()? {
             if self.close_abandoned(operation.upload_mut()).await.is_err() {
                 all_closed = false;
             }
         }
-        if !all_closed {
+        if !all_closed || self.close_slotless_records().await.is_err() {
             return Err("upload_window_not_quiescent");
         }
         self.reset_quiescent_creation_window()
+    }
+
+    /// Disarms the one-shot controls a finished test left: the chunk
+    /// rejection, the finalizer fault, and the scan timeouts. The first two
+    /// arm once per host, so one left armed refuses the next test that arms
+    /// it; a scan timeout left armed would fire on nothing the next test owns.
+    fn disarm_faults(&self) {
+        *self
+            .chunk_rejection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        *self
+            .finalizer
+            .fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        self.scanner
+            .timeouts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
     }
 
     /// Takes every idle upload that is unfinished, or that still holds its
@@ -2053,10 +2106,9 @@ impl UploadRuntime {
     /// The slot can trail the ledger: the validation and finalization
     /// services advance the ledger inside an operation, and a dropped
     /// operation restores the copy it took. So the ledger's state picks the
-    /// transition, and Finalizing, which has no cancel edge, fails instead.
-    /// The lease goes only once the provider has let go of the transfer; a
-    /// transfer an orphaned store operation still holds keeps it, and the
-    /// next reset retries the cancel.
+    /// transition. The lease goes only once the provider has let go of the
+    /// transfer; a transfer an orphaned store operation still holds keeps it,
+    /// and the next reset retries the cancel.
     async fn close_abandoned(&self, upload: &mut StoredUpload) -> Result<(), UploadError> {
         if let Some(current) =
             suprnova_live::upload::UploadLedger::load(self.ledger.as_ref(), &upload.handle).await?
@@ -2065,12 +2117,15 @@ impl UploadRuntime {
             upload.revision = current.revision();
         }
         if !upload.state.is_terminal() {
-            let (closing, key) = if upload.state == UploadState::Finalizing {
-                (UploadTransition::Fail, "abandoned-fail")
-            } else {
-                (UploadTransition::Cancel, "abandoned-cancel")
-            };
-            self.transition(upload, closing, key).await?;
+            (upload.state, upload.revision) = self
+                .close_record(
+                    upload.grant.clone(),
+                    upload.field.clone(),
+                    upload.handle.clone(),
+                    upload.state,
+                    upload.revision,
+                )
+                .await?;
         }
         match upload.mode {
             TransferMode::File => self.file.cancel(&upload.handle).await?,
@@ -2078,6 +2133,88 @@ impl UploadRuntime {
         }
         drop(upload.active_lease.take());
         Ok(())
+    }
+
+    /// Closes every unfinished ledger record no slot points at. Only a create
+    /// that failed after the ledger admitted it, and then could not close its
+    /// record either, leaves one, and the slot walk never reaches it. That
+    /// create handed its grant to no one, so the close runs on a fresh grant
+    /// for the record's own authority.
+    async fn close_slotless_records(&self) -> Result<(), UploadError> {
+        for record in self.ledger.unfinished_records() {
+            let authority = record.authority();
+            let has_slot = self
+                .uploads
+                .records
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains_key(&authority.handle().to_string());
+            if has_slot {
+                continue;
+            }
+            let issued = self.grants.issue(
+                TransferGrantRequest::new(authority.clone(), UnixMillis::new(60_000)),
+                CREATED_AT,
+            )?;
+            self.close_record(
+                issued.grant().clone(),
+                authority.field().clone(),
+                authority.handle().clone(),
+                record.state(),
+                record.revision(),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Closes the ledger record of a create that failed after the ledger
+    /// admitted it. No slot ever points at that record, so left open it would
+    /// keep the strict reset refusing for good. The create fails with its own
+    /// error either way: a record this close cannot end stays for the reset
+    /// between tests, which closes records no slot points at.
+    async fn close_failed_creation(
+        &self,
+        grant: TransferGrant,
+        field: ModelField,
+        handle: UploadHandle,
+        state: UploadState,
+        revision: UploadRevision,
+    ) {
+        let _ = self
+            .close_record(grant, field, handle, state, revision)
+            .await;
+    }
+
+    /// Applies the transition that ends an unfinished record, cancel, or fail
+    /// for Finalizing, which has no cancel edge, and returns the state and
+    /// revision the ledger moved it to.
+    async fn close_record(
+        &self,
+        grant: TransferGrant,
+        field: ModelField,
+        handle: UploadHandle,
+        state: UploadState,
+        revision: UploadRevision,
+    ) -> Result<(UploadState, UploadRevision), UploadError> {
+        let (closing, key) = if state == UploadState::Finalizing {
+            (UploadTransition::Fail, "close-fail")
+        } else {
+            (UploadTransition::Cancel, "close-cancel")
+        };
+        let outcome = self
+            .service
+            .transition(
+                &self.context,
+                UploadTransitionAdmission::new(
+                    grant,
+                    field,
+                    UploadTransitionRequest::new(handle, revision, idempotency(key)?, closing),
+                ),
+                CREATED_AT,
+            )
+            .await?;
+        Ok((outcome.state(), outcome.revision()))
     }
 
     pub(super) async fn retire(&self) -> Result<(), String> {
@@ -2751,17 +2888,17 @@ mod tests {
         UploadPausePoint::Expire,
     ];
 
-    /// Opens a runtime over a fresh quarantine root, returning the root, the
-    /// runtime, its active-upload counter, and the shutdown sender that keeps
-    /// the runtime's shutdown channel open.
-    async fn open_test_runtime(
-        prefix: &str,
-    ) -> (
-        std::path::PathBuf,
-        Arc<UploadRuntime>,
-        Arc<ResourceCounter>,
-        watch::Sender<bool>,
-    ) {
+    /// One runtime over a fresh quarantine root, with the counters the tests
+    /// read and the shutdown sender that keeps its shutdown channel open.
+    struct TestRuntime {
+        root: std::path::PathBuf,
+        runtime: Arc<UploadRuntime>,
+        active: Arc<ResourceCounter>,
+        timers: Arc<ResourceCounter>,
+        _shutdown: watch::Sender<bool>,
+    }
+
+    async fn open_test_runtime(prefix: &str) -> TestRuntime {
         let mut random = [0_u8; 8];
         getrandom::fill(&mut random).expect("test root entropy");
         let root = std::env::temp_dir().join(format!("{prefix}-{}", u64::from_le_bytes(random)));
@@ -2775,12 +2912,18 @@ mod tests {
                 ReferenceFaultSchedule::None,
                 shutdown,
                 Arc::clone(&active),
-                timers,
+                Arc::clone(&timers),
             )
             .await
             .expect("upload runtime"),
         );
-        (root, runtime, active, shutdown_sender)
+        TestRuntime {
+            root,
+            runtime,
+            active,
+            timers,
+            _shutdown: shutdown_sender,
+        }
     }
 
     /// Creates one upload in the state the operation at `point` acts on and
@@ -2930,12 +3073,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn every_detached_upload_operation_restores_state_when_its_future_is_aborted() {
-        let (root, runtime, active, _shutdown) =
-            open_test_runtime("suprnova-live-upload-abort").await;
+        let host = open_test_runtime("suprnova-live-upload-abort").await;
+        let (root, runtime, active) = (&host.root, &host.runtime, &host.active);
 
         for point in PAUSE_POINTS {
-            let (handle, grant, revision) = upload_for(&runtime, point).await;
-            abandon_operation(&runtime, point, &handle, &grant, revision).await;
+            let (handle, grant, revision) = upload_for(runtime, point).await;
+            abandon_operation(runtime, point, &handle, &grant, revision).await;
             if matches!(point, UploadPausePoint::Finalize | UploadPausePoint::Expire) {
                 let parsed_handle = UploadHandle::parse(&handle).expect("stored upload handle");
                 let authoritative = suprnova_live::upload::UploadLedger::load(
@@ -2991,13 +3134,13 @@ mod tests {
 
         runtime.retire().await.expect("runtime retires");
         assert_eq!(active.current(), 0);
-        remove_empty_root(&root).await;
+        remove_empty_root(root).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reset_cancels_the_uploads_an_abandoned_test_left() {
-        let (root, runtime, active, _shutdown) =
-            open_test_runtime("suprnova-live-upload-abandoned").await;
+        let host = open_test_runtime("suprnova-live-upload-abandoned").await;
+        let (root, runtime, active) = (&host.root, &host.runtime, &host.active);
 
         // A browser test that ends while its request is mid-await leaves the
         // upload behind: the operation's drop restores it, with its lease
@@ -3005,8 +3148,8 @@ mod tests {
         // expires it. One upload per pause point, all left at once.
         let mut abandoned = Vec::new();
         for point in PAUSE_POINTS {
-            let (handle, grant, revision) = upload_for(&runtime, point).await;
-            abandon_operation(&runtime, point, &handle, &grant, revision).await;
+            let (handle, grant, revision) = upload_for(runtime, point).await;
+            abandon_operation(runtime, point, &handle, &grant, revision).await;
             abandoned.push((point, handle));
         }
         assert_eq!(
@@ -3050,7 +3193,225 @@ mod tests {
         );
 
         runtime.retire().await.expect("runtime retires");
-        remove_empty_root(&root).await;
+        remove_empty_root(root).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_between_tests_releases_the_pauses_a_finished_test_left() {
+        let host = open_test_runtime("suprnova-live-upload-left-pause").await;
+        let runtime = &host.runtime;
+
+        // A test that selects a pause and ends before its request arrives
+        // leaves the selection armed. The pause clock is fixed too, so the
+        // selection would hold authority, and its timer, for every later test.
+        let (handle, grant, revision) = upload_for(runtime, UploadPausePoint::Chunk).await;
+        let selected = runtime
+            .pause_chunk(&handle, revision)
+            .await
+            .expect("selected pause");
+        runtime
+            .cancel(&handle, &grant)
+            .await
+            .expect("the test's own upload ends");
+        assert_eq!(host.timers.current(), 1);
+        assert_eq!(
+            runtime.reset_creation_window().await,
+            Err("upload_window_not_quiescent"),
+            "the reset a test runs on its own uploads still refuses an armed pause"
+        );
+        runtime
+            .reset_between_tests()
+            .await
+            .expect("the reset between tests releases the armed pause");
+        assert!(!runtime.operation_pause.has_authority());
+        assert_eq!(host.timers.current(), 0);
+        assert_eq!(
+            runtime.resume_chunk(selected),
+            Err("upload_pause_generation_stale")
+        );
+
+        // A request parked at a pause the finished test never resumed still
+        // holds its slot. The reset releases the pause, the request runs to
+        // its end, and the next reset closes the upload it leaves.
+        let (handle, grant, revision) = upload_for(runtime, UploadPausePoint::Chunk).await;
+        let parked = runtime
+            .pause_chunk(&handle, revision)
+            .await
+            .expect("parked pause");
+        let operation_runtime = Arc::clone(runtime);
+        let operation_handle = handle.clone();
+        let task = tokio::spawn(async move {
+            let checksum = hex_digest(Sha256::digest(b"abcdefgh"));
+            operation_runtime
+                .write_chunk(
+                    &operation_handle,
+                    0,
+                    &grant,
+                    &checksum,
+                    Some(8),
+                    Body::from("abcdefgh"),
+                )
+                .await
+        });
+        timeout(
+            Duration::from_secs(1),
+            runtime.wait_until_operation_paused(parked),
+        )
+        .await
+        .expect("the request parked at its pause");
+        // The parked request may still hold its slot when this reset looks,
+        // so only the next one is certain to answer.
+        let _ = runtime.reset_between_tests().await;
+        let written = timeout(Duration::from_secs(1), task)
+            .await
+            .expect("the released request ran to its end")
+            .expect("chunk task completes")
+            .expect("the released chunk write commits");
+        assert_eq!(written["state"], "transferring");
+        runtime
+            .reset_between_tests()
+            .await
+            .expect("the reset between tests closes the upload the request left");
+        let record = suprnova_live::upload::UploadLedger::load(
+            runtime.ledger.as_ref(),
+            &UploadHandle::parse(&handle).expect("stored upload handle"),
+        )
+        .await
+        .expect("authoritative upload")
+        .expect("retained upload");
+        assert_eq!(record.state(), UploadState::Canceled);
+        assert_eq!(host.active.current(), 0);
+        assert_eq!(host.timers.current(), 0);
+
+        runtime.retire().await.expect("runtime retires");
+        remove_empty_root(&host.root).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_between_tests_disarms_the_faults_a_finished_test_left() {
+        let host = open_test_runtime("suprnova-live-upload-left-faults").await;
+        let runtime = &host.runtime;
+
+        // Each control arms once per host. A test that arms one and ends
+        // before its upload consumes it would make every later test that
+        // arms the same control fail.
+        let (rejected, _, revision) = upload_for(runtime, UploadPausePoint::Chunk).await;
+        runtime
+            .reject_chunk_once(&rejected, revision)
+            .expect("armed chunk rejection");
+        let (faulted, _, ready_revision) = upload_for(runtime, UploadPausePoint::Finalize).await;
+        runtime
+            .arm_finalize_fault(&faulted, ready_revision, "commit-unavailable")
+            .expect("armed finalizer fault");
+        let (scanned, _, revision) = upload_for(runtime, UploadPausePoint::Chunk).await;
+        runtime
+            .arm_scan_timeout(&scanned, revision)
+            .expect("armed scan timeout");
+
+        runtime
+            .reset_between_tests()
+            .await
+            .expect("the reset between tests closes the uploads");
+
+        let (next, _, revision) = upload_for(runtime, UploadPausePoint::Chunk).await;
+        assert_eq!(
+            runtime.reject_chunk_once(&next, revision),
+            Ok(()),
+            "the next test arms its own chunk rejection"
+        );
+        let (next, _, ready_revision) = upload_for(runtime, UploadPausePoint::Finalize).await;
+        assert_eq!(
+            runtime.arm_finalize_fault(&next, ready_revision, "ledger-after-commit"),
+            Ok(()),
+            "the next test arms its own finalizer fault"
+        );
+        assert!(
+            runtime
+                .scanner
+                .timeouts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty(),
+            "the finished test's scan timeout is disarmed"
+        );
+
+        runtime.retire().await.expect("runtime retires");
+        remove_empty_root(&host.root).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_create_that_fails_after_the_ledger_admitted_it_leaves_no_unfinished_record() {
+        let host = open_test_runtime("suprnova-live-upload-failed-create").await;
+        let runtime = &host.runtime;
+        let request = || CreateUploadRequest {
+            field: "serial".to_owned(),
+            filename: "failed.bin".to_owned(),
+            content_type: "application/octet-stream".to_owned(),
+            expected_bytes: 8,
+            mode: "file".to_owned(),
+        };
+
+        // Without its root the provider cannot prepare the transfer, and the
+        // ledger has admitted the upload by then. The failed create closes
+        // the record it left, so the strict reset still answers.
+        tokio::fs::remove_dir(&host.root)
+            .await
+            .expect("remove quarantine root");
+        runtime
+            .create(request())
+            .await
+            .expect_err("the provider cannot prepare without its root");
+        tokio::fs::create_dir(&host.root)
+            .await
+            .expect("restore quarantine root");
+        assert_eq!(host.active.current(), 0);
+        assert_eq!(
+            runtime.reset_creation_window().await,
+            Ok(()),
+            "the failed create left no unfinished record"
+        );
+
+        // When the failed create cannot close its record either, no slot
+        // points at it. The reset between tests closes it from the ledger.
+        tokio::fs::remove_dir(&host.root)
+            .await
+            .expect("remove quarantine root");
+        runtime.ledger.fail_next_transition();
+        runtime
+            .create(request())
+            .await
+            .expect_err("the provider cannot prepare without its root");
+        tokio::fs::create_dir(&host.root)
+            .await
+            .expect("restore quarantine root");
+        assert_eq!(
+            runtime.reset_creation_window().await,
+            Err("upload_window_not_quiescent"),
+            "the record the create could not close is unfinished"
+        );
+        runtime
+            .reset_between_tests()
+            .await
+            .expect("the reset between tests closes a record no slot points at");
+        assert_eq!(runtime.reset_creation_window().await, Ok(()));
+
+        // A create the slot table refuses after the provider prepared its
+        // transfer closes its record too.
+        runtime.uploads.retired.store(true, Ordering::Release);
+        let refused = runtime
+            .create(request())
+            .await
+            .expect_err("the slot table refuses the upload");
+        assert_eq!(refused.kind(), UploadErrorKind::UploadConflict);
+        assert_eq!(
+            runtime.reset_creation_window().await,
+            Ok(()),
+            "the refused create left no unfinished record"
+        );
+        assert_eq!(host.active.current(), 0);
+
+        runtime.retire().await.expect("runtime retires");
+        remove_empty_root(&host.root).await;
     }
 
     #[tokio::test]
