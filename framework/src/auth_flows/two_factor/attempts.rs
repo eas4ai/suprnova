@@ -105,7 +105,7 @@ where
         credentials::Entity::update_many()
             .col_expr(
                 credentials::Column::UpdatedAt,
-                Expr::col(credentials::Column::UpdatedAt).into(),
+                Expr::col(credentials::Column::UpdatedAt),
             )
             .filter(credentials::Column::UserId.eq(user_id))
             .exec(&transaction)
