@@ -290,10 +290,11 @@ async fn session_beats_cookie_and_header() {
 /// duplicating catalog setup.
 mod locale_share {
     use super::bind_translator;
+    use crate::config_guard::LocalizationConfigGuard;
 
     use suprnova::{
-        App, Config, InertiaRequestExt, InertiaSharedData, Locale, LocaleShare, LocalizationConfig,
-        Prop, Translator, scope_locale,
+        App, InertiaRequestExt, InertiaSharedData, Locale, LocaleShare, LocalizationConfig, Prop,
+        Translator, scope_locale,
     };
 
     use serde_json::Value;
@@ -338,9 +339,11 @@ mod locale_share {
     /// calls this itself, immediately before its own `share()` call, so
     /// last-write-wins makes every test self-contained regardless of
     /// what a sibling test (in this module or the six above) registered
-    /// or bound first.
-    fn register_config_with_fallback(fallback: &str) {
-        Config::register(LocalizationConfig {
+    /// or bound first, and holds the returned guard, which puts the
+    /// previous config back when the test ends so a later test in this
+    /// process still resolves the default `en` fallback.
+    fn register_config_with_fallback(fallback: &str) -> LocalizationConfigGuard {
+        LocalizationConfigGuard::register(LocalizationConfig {
             default_locale: Locale::parse("en").unwrap(),
             fallback_locale: Locale::parse(fallback).unwrap(),
             use_isolating: false,
@@ -348,7 +351,7 @@ mod locale_share {
             session_key: "locale".into(),
             cookie_name: "locale".into(),
             parents: Default::default(),
-        });
+        })
     }
 
     #[tokio::test]
@@ -360,7 +363,7 @@ mod locale_share {
             .catalog(&Locale::parse("es").unwrap())
             .expect("bind_translator loads an es catalog")
             .hash;
-        register_config_with_fallback("fr");
+        let _config = register_config_with_fallback("fr");
 
         let shared = scope_locale(Locale::parse("es").unwrap(), async {
             LocaleShare.share(&DummyReq, "Home").await
@@ -407,7 +410,7 @@ mod locale_share {
     #[tokio::test]
     #[serial_test::serial]
     async fn catalog_is_null_without_a_usable_translator() {
-        register_config_with_fallback("de");
+        let _config = register_config_with_fallback("de");
 
         let shared = scope_locale(Locale::parse("zz").unwrap(), async {
             LocaleShare.share(&DummyReq, "Home").await

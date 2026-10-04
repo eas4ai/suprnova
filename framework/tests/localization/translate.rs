@@ -272,6 +272,45 @@ fn a_term_and_a_message_with_one_name_both_resolve() {
     assert_eq!(t.translate(&en, "count", &args).unwrap(), "3 items");
 }
 
+/// A message may be named like a built-in function (`NUMBER`, `DATETIME`):
+/// it keeps its key, and the function it shares a name with stays
+/// callable from every other message. fluent-bundle keeps both in one name
+/// map, where the message replaced the function. The catalog served to the
+/// browser keeps the author's names.
+#[test]
+fn a_message_named_like_a_function_keeps_its_key_and_the_function() {
+    let ftl = "NUMBER = Number\n\
+               DATETIME = Date\n\
+               count = { NUMBER($n, minimumFractionDigits: 1) } items\n\
+               when = { DATETIME($d, dateStyle: \"long\") }\n\
+               both = { NUMBER } and { DATETIME }\n";
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(tmp.path(), "en", "app.ftl", ftl);
+    let t = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
+    let en = Locale::parse("en").unwrap();
+    let none = TranslateArgs::new();
+    let mut args = TranslateArgs::new();
+    args.insert("n".into(), serde_json::json!(3));
+    args.insert("d".into(), serde_json::json!("2026-08-01"));
+
+    assert_eq!(t.translate(&en, "NUMBER", &none).unwrap(), "Number");
+    assert_eq!(t.translate(&en, "DATETIME", &none).unwrap(), "Date");
+    assert_eq!(t.translate(&en, "both", &none).unwrap(), "Number and Date");
+    assert!(t.has(&en, "NUMBER") && t.has(&en, "DATETIME"));
+    assert_eq!(t.translate(&en, "count", &args).unwrap(), "3.0 items");
+    assert_eq!(
+        t.translate(&en, "when", &args).unwrap(),
+        "August 1, 2026",
+        "DATETIME() still formats"
+    );
+    let served = t.catalog(&en).unwrap().text;
+    assert!(
+        served.contains("NUMBER = Number")
+            && served.contains("{ NUMBER($n, minimumFractionDigits: 1) }"),
+        "the served catalog keeps the author's names: {served}"
+    );
+}
+
 /// `Lang` facade + `__!` macro tests. These bind a process-global
 /// container binding (`App::bind::<dyn Translator>`), and tests within
 /// one integration-test binary run concurrently by default - a later

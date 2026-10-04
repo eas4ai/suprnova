@@ -202,7 +202,9 @@ score = Your score is { NUMBER($points) } out of { NUMBER($total) }.
 published = Published { DATETIME($when, dateStyle: "medium") }
 ```
 
-See [Locale-aware formatting](#locale-aware-formatting) for both.
+See [Locale-aware formatting](#locale-aware-formatting) for both. A
+message may share a function's name: `NUMBER = Number` keeps its key, and
+`{ NUMBER($points) }` elsewhere still calls the function.
 
 **One deliberate limitation:** Suprnova resolves flat message *values*
 only. Fluent's attribute syntax (`login .placeholder = …`) parses but is
