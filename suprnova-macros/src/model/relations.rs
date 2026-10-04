@@ -797,9 +797,21 @@ fn emit_relation_inventory(
         // BelongsTo: parent_key is the COLUMN on the related table the
         // child's FK references.
         RelationKindAttr::BelongsTo => owner_key_expr(rel, target_ty),
-        // MorphTo: parent_key is the PK on the (variable) target
-        // table - Laravel default "id".
-        RelationKindAttr::MorphTo => quote! { "id" },
+        // MorphTo: parent_key is the key on the (variable) target
+        // table. When every declared target keys on the same column,
+        // that column; when they differ there is no one key, so `""`,
+        // and the key is chosen per row from the type the row names,
+        // through the morph registry (`MorphTypeEntry::primary_key`),
+        // as the owner-touch cascade and `MorphTo::parent_key` do.
+        RelationKindAttr::MorphTo => match morph_targets(rel) {
+            Some(targets) if !targets.is_empty() => {
+                let keys = targets.iter().map(|target| {
+                    quote! { <#target as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY }
+                });
+                quote! { ::suprnova::eloquent::relations::__shared_key(&[#(#keys),*]) }
+            }
+            _ => quote! { "" },
+        },
     };
 
     // Foreign key - what the child / pivot / morph row carries.

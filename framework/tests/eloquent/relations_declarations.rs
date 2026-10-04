@@ -1357,3 +1357,113 @@ async fn eager_through_joins_the_intermediate_on_its_primary_key() {
     assert_eq!(hubs[0].rims_count(), 2);
     assert_eq!(hubs[0].rims_sum_of("size"), Some(32.0));
 }
+
+// ---- Morph relations name the key the target model declares -------------
+
+#[model(table = "rd_keyed_docs", primary_key = "uid", morph_type = "rd_keyed_doc", relations = {
+    remarks: MorphMany<RdRemarkRow> { name = "remarkable" },
+})]
+pub struct RdKeyedDoc {
+    pub uid: i64,
+    pub title: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[model(
+    table = "rd_keyed_sheets",
+    primary_key = "uid",
+    morph_type = "rd_keyed_sheet"
+)]
+pub struct RdKeyedSheet {
+    pub uid: i64,
+    pub title: String,
+}
+
+#[model(table = "rd_plain_sheets", morph_type = "rd_plain_sheet")]
+pub struct RdPlainSheet {
+    pub id: i64,
+    pub title: String,
+}
+
+#[model(table = "rd_remark_rows", touches = ["remarkable"], relations = {
+    remarkable: MorphTo { name = "remarkable", targets = [RdKeyedDoc, RdKeyedSheet] },
+    anything: MorphTo { name = "anything", targets = [RdKeyedDoc, RdPlainSheet] },
+})]
+pub struct RdRemarkRow {
+    pub id: i64,
+    pub remarkable_id: i64,
+    pub remarkable_type: String,
+    pub anything_id: i64,
+    pub anything_type: String,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// The relation registry names each relation's owner-side key from the
+/// models: a `MorphTo` whose targets all key on `uid` names `uid`; one
+/// whose targets key on different columns names none, because the key
+/// is chosen per row; a `MorphMany` names its parent's primary key.
+#[tokio::test]
+async fn the_registry_names_morph_keys_from_the_models() {
+    use suprnova::eloquent::relations::find_relation;
+    let agreed = find_relation::<RdRemarkRow>("remarkable").unwrap();
+    assert_eq!(agreed.parent_key, "uid");
+    let mixed = find_relation::<RdRemarkRow>("anything").unwrap();
+    assert_eq!(mixed.parent_key, "", "no one key covers every target");
+    let remarks = find_relation::<RdKeyedDoc>("remarks").unwrap();
+    assert_eq!(remarks.parent_key, "uid");
+}
+
+/// A `MorphTo` resolves a row's owner key through the morph registry at
+/// run time, from the type the row names.
+#[tokio::test]
+async fn morph_relations_report_the_models_keys_at_run_time() {
+    use suprnova::Relation;
+    let keyed = suprnova::MorphTo::<RdRemarkRow>::__new(
+        suprnova::serde_json::json!(1),
+        "rd_keyed_doc".to_string(),
+    );
+    assert_eq!(keyed.parent_key(), "uid");
+    let plain = suprnova::MorphTo::<RdRemarkRow>::__new(
+        suprnova::serde_json::json!(1),
+        "rd_plain_sheet".to_string(),
+    );
+    assert_eq!(plain.parent_key(), "id");
+    let unknown = suprnova::MorphTo::<RdRemarkRow>::__new(
+        suprnova::serde_json::json!(1),
+        "no_such_type".to_string(),
+    );
+    assert_eq!(unknown.parent_key(), "", "an unknown type has no key");
+}
+
+/// A row touches its `MorphTo` owner, found by the owner's primary key.
+/// Guards the run-time path the registry key comes from.
+#[tokio::test]
+async fn morph_to_touches_find_the_owner_by_its_primary_key() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    for sql in [
+        "CREATE TABLE rd_keyed_docs (uid INTEGER PRIMARY KEY, title TEXT NOT NULL, \
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        "CREATE TABLE rd_remark_rows (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            remarkable_id INTEGER NOT NULL, remarkable_type TEXT NOT NULL, \
+            anything_id INTEGER NOT NULL, anything_type TEXT NOT NULL, body TEXT NOT NULL, \
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        "INSERT INTO rd_keyed_docs (uid, title, created_at, updated_at) VALUES \
+            (5, 'doc', '2001-01-01T00:00:00+00:00', '2001-01-01T00:00:00+00:00')",
+    ] {
+        db.execute_unprepared(sql).await.unwrap();
+    }
+    RdRemarkRow::create(attrs! {
+        remarkable_id: 5,
+        remarkable_type: "rd_keyed_doc",
+        anything_id: 5,
+        anything_type: "rd_keyed_doc",
+        body: "remark",
+    })
+    .await
+    .unwrap();
+    let doc = RdKeyedDoc::find(5).await.unwrap().unwrap();
+    assert_ne!(doc.updated_at.to_rfc3339(), "2001-01-01T00:00:00+00:00");
+}

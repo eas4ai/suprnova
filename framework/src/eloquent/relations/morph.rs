@@ -583,8 +583,12 @@ where
     type Target = ();
     const KIND: RelationKind = RelationKind::MorphTo;
 
+    /// The key column of the model this row points at, chosen by the
+    /// type the row names through the morph registry. `""` when the
+    /// type names no registered model: no column is known.
     fn parent_key(&self) -> &str {
-        "id"
+        crate::eloquent::relations::find_morph_type(&self.morph_type)
+            .map_or("", |entry| entry.primary_key)
     }
 
     fn foreign_key(&self) -> &str {
