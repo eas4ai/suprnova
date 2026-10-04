@@ -728,6 +728,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Durations too long for a date are errors, not panics.** A workflow
+  lease or retry backoff too long for a date is refused at boot:
+  `WORKFLOW_LOCK_TIMEOUT_SECS` above 253402300799, or
+  `WORKFLOW_RETRY_BACKOFF_SECS` times `WORKFLOW_MAX_ATTEMPTS` above it,
+  stops the worker at start with an error naming the setting, and lease
+  refreshes return an error for such a lease. `Queue::later` and its
+  variants, a job's `delay()`, and requeues in the default, SQS and
+  database drivers return an error naming the delay, where they panicked
+  or, past a chrono duration's range, requeued with no delay at all. This
+  landed after the `v3.1.0` tag.
 - **A refused cookieless request stores no session.** `CsrfMiddleware`
   marks a new session for storage only when the response succeeds or
   redirects. An anonymous request that an auth gate refuses with 401, or
