@@ -150,7 +150,9 @@ let refreshed = Cache::touch("session:42", Duration::from_secs(1800)).await?;
 ```
 
 `touch` returns `true` if the key existed and the TTL was extended,
-`false` otherwise. The stored value is untouched.
+`false` otherwise. The stored value is untouched, and so are its tags: a
+touched tagged value is still removed by `flush_tags` after its original TTL
+would have run out.
 
 ## Add - write-if-absent (atomic)
 

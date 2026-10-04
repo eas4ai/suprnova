@@ -106,6 +106,23 @@ end
 return 0
 "#;
 
+/// Extend a value's TTL and its tag-membership record together.
+///
+/// `KEYS[1]` is the value key, `KEYS[2]` its aux tag-membership set, and
+/// `ARGV[1]` the TTL in milliseconds. A tagged write gives the aux set the
+/// value's TTL, and `flush_tags` deletes a value only while the aux set
+/// still names the tag. Extending the value alone let the aux set expire at
+/// the old TTL, after which a tag flush skipped a value that was still live.
+/// The aux set is extended only when the value exists, so a stale aux set
+/// left behind by an expired value is never revived.
+const TOUCH_LUA: &str = r#"
+local touched = redis.call('PEXPIRE', KEYS[1], ARGV[1])
+if touched == 1 then
+    redis.call('PEXPIRE', KEYS[2], ARGV[1])
+end
+return touched
+"#;
+
 /// Convert a `Duration` into a Redis-millisecond TTL argument.
 ///
 /// Redis sub-second TTLs are expressed via `PX` (set) and `PEXPIRE`
@@ -609,13 +626,16 @@ impl CacheStore for RedisCache {
     async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
         let mut conn = self.conn.clone();
         let pkey = self.prefixed_key(key);
+        let aux = self.key_tags_set(&pkey);
         // PEXPIRE returns 1 if the TTL was set, 0 if the key does not
         // exist. PEXPIRE preserves sub-second precision; EXPIRE would
-        // truncate a sub-second ttl to 0 and delete the key.
-        let ok: i64 = redis::cmd("PEXPIRE")
-            .arg(&pkey)
+        // truncate a sub-second ttl to 0 and delete the key. The script
+        // carries the tag record along; see `TOUCH_LUA`.
+        let ok: i64 = redis::Script::new(TOUCH_LUA)
+            .key(&pkey)
+            .key(&aux)
             .arg(redis_ttl_ms(ttl))
-            .query_async(&mut conn)
+            .invoke_async(&mut conn)
             .await
             .map_err(|e| FrameworkError::internal(format!("Cache touch: {e}")))?;
         Ok(ok == 1)

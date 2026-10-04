@@ -759,3 +759,26 @@ async fn redis_flush_handles_a_prefix_ending_in_a_backslash() {
         "flush must remove the store's key when the prefix ends in a backslash"
     );
 }
+
+/// DRIVERS-003: `touch` extends the tag bookkeeping with the value. It used
+/// to extend only the value, so the tag record expired at the old TTL and a
+/// later `flush_tags` skipped a value that was still live.
+#[tokio::test]
+#[ignore = "requires Redis at CACHE_REDIS_TEST_URL or default localhost"]
+async fn redis_touch_keeps_a_tagged_value_flushable_past_its_first_ttl() {
+    let s = fresh_store("touch-tags").await;
+    s.tagged_put_raw(&["t"], "k", "v", Some(Duration::from_millis(150)))
+        .await
+        .unwrap();
+    assert!(s.touch("k", Duration::from_secs(30)).await.unwrap());
+
+    // Past the original TTL, inside the extended one.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(s.has("k").await.unwrap(), "touch extended the value");
+
+    s.flush_tags(&["t"]).await.unwrap();
+    assert!(
+        !s.has("k").await.unwrap(),
+        "a touched tagged value must still be removed by its tag"
+    );
+}
