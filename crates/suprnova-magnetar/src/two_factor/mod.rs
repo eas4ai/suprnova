@@ -5,13 +5,13 @@
 //! enrollment is inactive until confirmed, secrets and recovery codes are
 //! ciphertext under their distinct purposes, every code-checking path is
 //! gated on 05's lockout accounting under a second-factor identity of its
-//! own ([`lockout_identity`]), and rotation paths demand proof of
-//! possession. The one FLAGGED deviation is replay protection: the
-//! verifier records the timestep that actually matched and rejects
-//! `matched_step <= last_used_timestep`, closing the forward-edge replay
-//! the deployed `current + skew` stamp permitted. 2FA is a factor, never a
-//! sign-in method: it cannot start a session alone and never counts in the
-//! census.
+//! own ([`lockout_identity`](crate::two_factor::lockout_identity)), and
+//! rotation paths demand proof of possession. The one FLAGGED deviation is
+//! replay protection: the verifier records the timestep that actually
+//! matched and rejects `matched_step <= last_used_timestep`, closing the
+//! forward-edge replay the deployed `current + skew` stamp permitted. 2FA
+//! is a factor, never a sign-in method: it cannot start a session alone and
+//! never counts in the census.
 
 pub mod recovery;
 pub mod store;
