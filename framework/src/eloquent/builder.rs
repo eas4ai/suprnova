@@ -1796,9 +1796,11 @@ impl<M> Builder<M> {
 
     // ---- JSON ------------------------------------------------------------
 
-    /// JSON containment - backend-specific: Postgres `col @> val`,
+    /// JSON containment - backend-specific: Postgres `col::jsonb @> val`,
     /// MySQL `JSON_CONTAINS(col, val)`, SQLite falls back to substring
-    /// search via `instr`.
+    /// search via `instr`. On Postgres and MySQL `val` is bound as a JSON
+    /// document, so `"admin"` finds the string `"admin"` in an array and
+    /// `json!({"active": true})` finds an object holding that pair.
     #[doc(alias = "where_json_contains")]
     pub fn filter_json_contains(mut self, col: impl IntoColumn, val: impl IntoVal) -> Self {
         self.where_terms
@@ -3303,7 +3305,7 @@ pub(crate) fn render_subquery_term(
         WhereTerm::JsonContains(col, v) => {
             *n += 1;
             let ph = placeholder(backend, *n)?;
-            values.push(json_value_to_sea_value(v));
+            values.push(json_contains_value(backend, v));
             render_json_contains(backend, &q(col), &ph)?
         }
         WhereTerm::JsonLength(col, op, len) => render_json_length(backend, &q(col), op, *len)?,
@@ -3403,9 +3405,12 @@ fn render_binary(
     }
 }
 
+/// JSON containment of `col` over the candidate bound at `ph`. Postgres
+/// casts both sides to `jsonb`, the type `@>` is defined on, so a `json`
+/// or text column holding JSON works too, as in Laravel.
 fn render_json_contains(backend: DbBackend, col: &str, ph: &str) -> Result<String, FrameworkError> {
     Ok(match backend {
-        DbBackend::Postgres => format!("{col} @> {ph}"),
+        DbBackend::Postgres => format!("({col})::jsonb @> CAST({ph} AS jsonb)"),
         DbBackend::MySql => format!("JSON_CONTAINS({col}, {ph})"),
         DbBackend::Sqlite => format!("instr({col}, {ph}) > 0"),
         _ => return Err(crate::database::unsupported_database_backend(backend)),
@@ -3424,6 +3429,19 @@ fn render_json_length(
         DbBackend::Sqlite => format!("json_array_length({col}) {op} {len}"),
         _ => return Err(crate::database::unsupported_database_backend(backend)),
     })
+}
+
+/// The candidate of a JSON containment, bound for `backend`. Postgres and
+/// MySQL compare JSON documents, so the candidate is bound as its JSON
+/// text: a string as `"admin"`, quotes included, an object or an array as
+/// itself, a number and a boolean as JSON. SQLite's containment is the
+/// documented substring search over the stored text, which binds the value
+/// as it is.
+fn json_contains_value(backend: DbBackend, value: &Value) -> SeaValue {
+    match backend {
+        DbBackend::Postgres | DbBackend::MySql => SeaValue::String(Some(value.to_string())),
+        _ => json_value_to_sea_value(value),
+    }
 }
 
 /// Phase 10C T9 - log a single `warn!` per process the first time a
@@ -3566,7 +3584,7 @@ impl<M> Builder<M> {
             WhereTerm::JsonContains(col, v) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
-                values.push(json_value_to_sea_value(v));
+                values.push(json_contains_value(backend, v));
                 render_json_contains(backend, col, &ph)?
             }
             WhereTerm::JsonLength(col, op, len) => render_json_length(backend, col, op, *len)?,

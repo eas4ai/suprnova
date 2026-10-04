@@ -12,6 +12,7 @@
 //! ```
 
 use sea_orm::DatabaseBackend;
+use serde_json::json;
 use suprnova::eloquent::FirstOrCreate;
 use suprnova::{Builder, DB, FrameworkError, Model, attrs, model};
 
@@ -123,6 +124,33 @@ async fn create_or_first_inside_a_transaction() {
     assert_eq!(items().count().await.expect("count"), 6, "no row was added");
 }
 
+/// DATA-053: JSON containment binds the candidate as a JSON document.
+async fn json_containment() {
+    let pluck = |q: Builder<QsDoc>| async move {
+        q.order_by_asc("id")
+            .pluck::<i64>("id")
+            .await
+            .unwrap_or_else(|e| panic!("JSON containment: {e}"))
+    };
+    assert_eq!(
+        pluck(QsDoc::query().filter_json_contains("meta", json!({ "active": true }))).await,
+        vec![1, 3]
+    );
+    assert_eq!(
+        pluck(QsDoc::query().filter_json_contains("meta", json!({ "tier": 1 }))).await,
+        vec![1]
+    );
+    assert_eq!(
+        pluck(QsDoc::query().filter_json_contains("tags", json!("admin"))).await,
+        vec![1],
+        "a string is a JSON string, not bare text"
+    );
+    assert_eq!(
+        pluck(QsDoc::query().filter_json_contains("tags", json!(["user"]))).await,
+        vec![1, 2]
+    );
+}
+
 // ---------- SQLite ------------------------------------------------------------
 
 async fn seeded_sqlite() -> Fixture {
@@ -156,6 +184,14 @@ async fn postgres_create_or_first_inside_a_transaction() {
 }
 
 #[tokio::test]
+#[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
+async fn postgres_json_containment() {
+    let fx = live("PG_TEST_URL", DatabaseBackend::Postgres).await;
+    json_containment().await;
+    finish(fx).await;
+}
+
+#[tokio::test]
 #[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
 async fn mysql_create_or_first_inside_a_transaction() {
     let fx = live("MYSQL_TEST_URL", DatabaseBackend::MySql).await;
@@ -163,3 +199,10 @@ async fn mysql_create_or_first_inside_a_transaction() {
     finish(fx).await;
 }
 
+#[tokio::test]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_json_containment() {
+    let fx = live("MYSQL_TEST_URL", DatabaseBackend::MySql).await;
+    json_containment().await;
+    finish(fx).await;
+}
