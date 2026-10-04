@@ -690,17 +690,17 @@ impl RenderCache {
     ///
     /// Dropped before L0 is cleared, so a request that starts after this
     /// point derives its key under the new epoch and the clear that follows
-    /// has only entries nothing will look for left to reclaim. That is an
-    /// ordering preference, not a barrier: an authority read already in
-    /// flight when this commits can still `refresh` the lease back to the
-    /// pre-advance value afterwards, and a request that captured the old
-    /// epoch before the drop keeps using it. Neither is a correctness
-    /// problem, because both self-heal within one request. L0 is empty, so
-    /// such a request misses and renders; its own
+    /// has only entries nothing will look for left to reclaim. An authority
+    /// read already in flight when this commits cannot put the pre-advance
+    /// epoch back into the lease afterwards: dropping the lease also spends
+    /// the ticket that read took (see `middleware::EpochCache`). It used to
+    /// be able to, and the next request then derived its key under the old
+    /// epoch and, with L1 configured, found the old entry there and served
+    /// it under a still-live validation lease (DATA-046). A request that
+    /// captured the old epoch before the drop keeps using it; L0 is empty,
+    /// so such a request misses and renders, and its own
     /// `fresh_reread_is_coherent` reads the post-advance epoch, finds it
-    /// unequal to the one the render carried, and declines to publish - and
-    /// that same reread stores the new epoch, so the lease is correct again
-    /// from there on.
+    /// unequal to the one the render carried, and declines to publish.
     ///
     /// L0 is cleared, not merely left to age out: every L0 key embeds the
     /// epoch it was derived under

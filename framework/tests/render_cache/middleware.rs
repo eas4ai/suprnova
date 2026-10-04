@@ -34,9 +34,9 @@ use render_cache_middleware_support::{
 // Used only by tests gated on the `testing` feature below (ruling R47):
 // `NON_ASCII_LINK` by the non-ASCII header test, `wait_until_background_finished`
 // by the two tests that read `RenderCache::background_rebuilds_for_test` or
-// `RenderCache::hot_serves_for_test`.
+// `RenderCache::hot_serves_for_test`, `race` by the DATA-046 epoch test.
 #[cfg(feature = "testing")]
-use render_cache_middleware_support::{NON_ASCII_LINK, wait_until_background_finished};
+use render_cache_middleware_support::{NON_ASCII_LINK, race, wait_until_background_finished};
 use suprnova::render_cache::{RenderCache, RenderCacheMiddleware};
 use suprnova::{StatusCode, async_trait};
 
@@ -875,6 +875,46 @@ async fn a_lease_mode_route_trusts_within_the_window_but_still_catches_an_epoch_
         2,
         "the rebuild ran under the advanced epoch and published under the key that epoch \
          derives, so this dispatch is a hit"
+    );
+}
+
+/// DATA-046: an emergency epoch advance on this node reaches the next
+/// request even when another hit's authority read of the old epoch was in
+/// flight while the advance ran. That read used to renew the epoch lease the
+/// advance had just dropped, with the epoch the advance superseded; the next
+/// request then derived its key under the old epoch, missed the cleared L0,
+/// found the old entry in L1, and served it as fresh on its still-live
+/// validation lease. A read that began before the advance no longer renews
+/// the lease.
+#[cfg(feature = "testing")]
+#[tokio::test]
+#[serial_test::serial]
+async fn an_epoch_advance_during_an_in_flight_authority_read_still_reaches_a_leased_l1_entry() {
+    let harness = boot_with_render_cache_and_l1_for_test().await;
+    dispatch_get(&harness, "/l1-leased/1", &[]).await;
+    dispatch_get(&harness, "/l1-leased/1", &[]).await;
+    assert_eq!(
+        counting_route::renders(),
+        1,
+        "precondition: the entry is in L0 and L1, and its second request granted the lease"
+    );
+    dispatch_get(&harness, "/l1-leased/2", &[]).await;
+    assert_eq!(counting_route::renders(), 2);
+
+    // The second request to `/l1-leased/2` is a hit with no lease yet, so it
+    // reads the authority; the advance lands between that read and its
+    // renewal of the epoch lease.
+    race::advance_epoch_during_next_authority_read(&harness);
+    dispatch_get(&harness, "/l1-leased/2", &[]).await;
+
+    let before = counting_route::renders();
+    let after_advance = dispatch_get(&harness, "/l1-leased/1", &[]).await;
+    assert_eq!(after_advance.status, StatusCode::OK);
+    assert_eq!(
+        counting_route::renders(),
+        before + 1,
+        "an emergency epoch advance must reach the next request, not the end of the \
+         surviving L1 entry's lease"
     );
 }
 

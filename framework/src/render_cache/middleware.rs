@@ -319,34 +319,55 @@ pub struct RenderCacheMiddleware;
 /// `fresh_reread_is_coherent`, and the waiter's re-admission in
 /// `render_and_publish` each store the epoch the authority just reported.
 ///
-/// A `Mutex<Option<u64>>` rather than atomics, deliberately. `None` is a
-/// state an integer sentinel cannot express honestly (every `u64` is a
-/// reachable epoch as far as this type is concerned), and a pair of atomics
-/// carrying "present" and "value" separately would need an ordering
-/// argument for a value read at most once per request. Under the lock there
-/// is no tearing to argue about: the `u64` is only ever read or written
-/// inside a critical section, and every one of those sections is a single
-/// statement with no `.await` in it, so no guard is ever held across a
-/// suspension point. Lock poisoning is absorbed with `into_inner`, matching
+/// A `Mutex` rather than atomics, deliberately. `None` is a state an
+/// integer sentinel cannot express honestly (every `u64` is a reachable
+/// epoch as far as this type is concerned), and the lease and its
+/// invalidation count change together. Under the lock there is no tearing
+/// to argue about: every critical section is a single statement with no
+/// `.await` in it, so no guard is ever held across a suspension point. Lock
+/// poisoning is absorbed with `into_inner`, matching
 /// [`RenderCacheRuntime::leases`]: a panic elsewhere must not turn every
 /// later request into an error.
+///
+/// Every authority read takes an [`EpochTicket`] before it starts and
+/// renews the lease only with it. [`Self::invalidate`] spends every ticket
+/// taken before it, so a read of the old epoch that was in flight while
+/// `RenderCache::advance_epoch` ran cannot put that epoch back into the
+/// lease the advance dropped (DATA-046). Without that, the next request
+/// derived its key under the old epoch, missed the cleared L0, and found the
+/// old entry in L1, which a still-live validation lease then served as
+/// fresh.
 ///
 /// Staleness is bounded, and by the same bound spec 18 already applies to a
 /// lease-mode route: see [`coherence`]'s own comment for the three paths an
 /// epoch advance takes to reach a request.
-pub(super) struct EpochCache(Mutex<Option<u64>>);
+pub(super) struct EpochCache(Mutex<EpochSlot>);
+
+/// The leased epoch and how many times it has been invalidated.
+struct EpochSlot {
+    leased: Option<u64>,
+    invalidations: u64,
+}
+
+/// Taken before an authority read, and handed back with the epoch it read:
+/// the read renews the lease only if no invalidation happened in between.
+#[derive(Clone, Copy)]
+pub(super) struct EpochTicket(u64);
 
 impl EpochCache {
     /// An empty cache. The first request that needs the epoch reads the
     /// authority once and fills it.
     pub(super) const fn empty() -> Self {
-        Self(Mutex::new(None))
+        Self(Mutex::new(EpochSlot {
+            leased: None,
+            invalidations: 0,
+        }))
     }
 
-    /// The critical section all three accessors share. Every caller below
+    /// The critical section all accessors share. Every caller below
     /// dereferences the guard in the same statement it takes it, so the
     /// section is one statement long and no `.await` can appear inside it.
-    fn slot(&self) -> std::sync::MutexGuard<'_, Option<u64>> {
+    fn slot(&self) -> std::sync::MutexGuard<'_, EpochSlot> {
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -355,7 +376,14 @@ impl EpochCache {
     /// The leased epoch, or `None` before the first authority read and
     /// after an [`Self::invalidate`].
     pub(super) fn get(&self) -> Option<u64> {
-        *self.slot()
+        self.slot().leased
+    }
+
+    /// A ticket for an authority read about to start. Take it before the
+    /// read, never after: it is what tells [`Self::refresh`] whether an
+    /// invalidation landed while the read was in flight.
+    pub(super) fn ticket(&self) -> EpochTicket {
+        EpochTicket(self.slot().invalidations)
     }
 
     /// Records the epoch an authority read just reported, and reports the
@@ -363,21 +391,31 @@ impl EpochCache {
     /// only mean the authority moved backwards under this node, because
     /// nothing else lowers it.
     ///
-    /// Returning it rather than acting on it keeps this type what it is: a
-    /// slot with a lock around it. The caller has the runtime the lift and
-    /// the L0 clear need.
-    pub(super) fn refresh(&self, epoch: u64) -> Option<u64> {
+    /// Renews nothing, and reports nothing, when `ticket` was taken before
+    /// the latest [`Self::invalidate`]: that read may have returned the
+    /// epoch the invalidation was made to retire.
+    ///
+    /// Returning the replaced epoch rather than acting on it keeps this type
+    /// what it is: a slot with a lock around it. The caller has the runtime
+    /// the lift and the L0 clear need.
+    pub(super) fn refresh(&self, ticket: EpochTicket, epoch: u64) -> Option<u64> {
         let mut slot = self.slot();
-        let previous = slot.replace(epoch);
+        if slot.invalidations != ticket.0 {
+            return None;
+        }
+        let previous = slot.leased.replace(epoch);
         previous.filter(|leased| *leased > epoch)
     }
 
     /// Drops the lease, so the next request that needs the epoch reads the
-    /// authority. Called by [`super::RenderCache::advance_epoch`], which is
-    /// what makes an emergency bump on this node reach the very next
-    /// request, lease-mode routes included.
+    /// authority, and spends every ticket taken so far. Called by
+    /// [`super::RenderCache::advance_epoch`], which is what makes an
+    /// emergency bump on this node reach the very next request, lease-mode
+    /// routes included.
     pub(super) fn invalidate(&self) {
-        *self.slot() = None;
+        let mut slot = self.slot();
+        slot.leased = None;
+        slot.invalidations = slot.invalidations.wrapping_add(1);
     }
 }
 
@@ -534,13 +572,14 @@ impl RenderCacheRuntime {
     /// authority read detects the rewind again. Failing the request instead
     /// would turn a recoverable restore into an outage.
     pub(crate) async fn on_epoch_rewind(&self, stamped: u64) {
+        let ticket = self.epoch_cache.ticket();
         let Ok(lifted_to) = self.epoch_ledger.lift_epoch_above(stamped).await else {
             return;
         };
         // The lift can only ever raise the epoch, so this can never itself
         // report a further rewind; nothing here needs to act on the
         // `Option` it returns.
-        let _ = self.epoch_cache.refresh(lifted_to);
+        let _ = self.epoch_cache.refresh(ticket, lifted_to);
         self.l0.clear();
         Metrics::counter(render_cache_telemetry::EPOCH_REWINDS).inc();
         tracing::warn!(
@@ -810,22 +849,25 @@ impl RenderCacheMiddleware {
         // returns an epoch - never read here on its own. See [`EpochCache`].
         let epoch = match runtime.epoch_cache.get() {
             Some(epoch) => epoch,
-            None => match runtime.ledger.epoch().await {
-                Ok(epoch) => {
-                    if let Some(leased) = runtime.epoch_cache.refresh(epoch) {
-                        runtime.on_epoch_rewind(leased).await;
+            None => {
+                let ticket = runtime.epoch_cache.ticket();
+                match runtime.ledger.epoch().await {
+                    Ok(epoch) => {
+                        if let Some(leased) = runtime.epoch_cache.refresh(ticket, epoch) {
+                            runtime.on_epoch_rewind(leased).await;
+                        }
+                        epoch
                     }
-                    epoch
+                    Err(error) => {
+                        return Err(ProviderFailure::new(
+                            request,
+                            next,
+                            "reading the authority epoch",
+                            error,
+                        ));
+                    }
                 }
-                Err(error) => {
-                    return Err(ProviderFailure::new(
-                        request,
-                        next,
-                        "reading the authority epoch",
-                        error,
-                    ));
-                }
-            },
+            }
         };
         // Test-only race seam (R72/R83): fires right after the epoch this
         // request's `RenderJob` will carry is captured, and before the
@@ -1684,13 +1726,20 @@ async fn authority_coherence(
     // read together (see
     // [`GenerationLedger::current_with_epoch`]), so a hit that has to consult
     // the authority costs one round trip rather than two.
+    let ticket = runtime.epoch_cache.ticket();
     let (current, epoch) = runtime.ledger.current_with_epoch(&digests).await?;
+    // Test-only race seam (DATA-046): fires after the authority read has
+    // returned and before its epoch renews the lease, the window in which a
+    // concurrent `RenderCache::advance_epoch` on this node lands between an
+    // in-flight read of the old epoch and that read's refresh.
+    #[cfg(any(test, feature = "testing"))]
+    race_points::fire(&race_points::AUTHORITY_READ_RETURNED).await;
     // The one authority read a hit may make also renews the epoch lease, so
     // no request ever reads the epoch on its own (task 5b). Done before the
     // comparison, not after: this is the value the comparison judges by. A
     // lease above what the authority now reports is itself a rewind, and is
     // detected here even when the entry's own stamp is not.
-    let lease_rewound = runtime.epoch_cache.refresh(epoch);
+    let lease_rewound = runtime.epoch_cache.refresh(ticket, epoch);
     if let Some(leased) = lease_rewound {
         runtime.on_epoch_rewind(leased).await;
     }
@@ -2245,9 +2294,12 @@ async fn render_and_publish(
                             // `restamp` re-derives the key with the epoch,
                             // which is the only way to change either.
                             if runtime.epoch_cache.get().is_none() {
+                                let ticket = runtime.epoch_cache.ticket();
                                 match runtime.ledger.epoch().await {
                                     Ok(epoch) => {
-                                        if let Some(leased) = runtime.epoch_cache.refresh(epoch) {
+                                        if let Some(leased) =
+                                            runtime.epoch_cache.refresh(ticket, epoch)
+                                        {
                                             runtime.on_epoch_rewind(leased).await;
                                         }
                                     }
@@ -3473,6 +3525,7 @@ async fn fresh_reread_is_coherent(
     let digests = observed.digests();
     // One statement, for the reason `authority_coherence` gives: the reread
     // and the epoch it is judged against are read together.
+    let ticket = runtime.epoch_cache.ticket();
     let (current, fresh_epoch) = runtime
         .ledger
         .current_with_epoch(&digests)
@@ -3482,7 +3535,7 @@ async fn fresh_reread_is_coherent(
     // before the race seam below: a hook armed there that itself advances
     // the epoch drops the lease, and re-filling it afterwards with the
     // pre-hook value would undo that.
-    let lease_rewound = runtime.epoch_cache.refresh(fresh_epoch);
+    let lease_rewound = runtime.epoch_cache.refresh(ticket, fresh_epoch);
     if let Some(leased) = lease_rewound {
         runtime.on_epoch_rewind(leased).await;
     }
@@ -3962,6 +4015,14 @@ pub mod race_points {
     /// fate of the job that carried the stale epoch; it is not a claim
     /// that no entry is published at all.
     pub static EPOCH_CAPTURED: RacePoint = RacePoint::new();
+
+    /// Fires from `authority_coherence`, after the authority read a hit
+    /// made has returned and before the epoch it read renews the runtime's
+    /// lease. An `advance_epoch` armed here is the operator's emergency bump
+    /// landing while that read of the old epoch is in flight: the lease the
+    /// bump dropped must not be refilled with the epoch it superseded
+    /// (DATA-046).
+    pub static AUTHORITY_READ_RETURNED: RacePoint = RacePoint::new();
 
     /// Arms `point` to run `hook` exactly once, the next time it fires.
     /// Replaces any hook already armed there.
