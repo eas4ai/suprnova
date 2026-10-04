@@ -71,16 +71,17 @@ impl TokenPurpose {
 ///   token; the UNIQUE constraint gives `check`/`consume` an indexed
 ///   equality lookup and backs the single-use guarantee at the DB level
 /// - `purpose`    TEXT not null - [`TokenPurpose::as_str`] discriminator
-/// - `expires_at` TIMESTAMP not null - token TTL boundary
-/// - `used_at`    TIMESTAMP null - set atomically on single-use consume
-/// - `created_at` TIMESTAMP not null
+/// - `expires_at` DATETIME not null - token TTL boundary
+/// - `used_at`    DATETIME null - set atomically on single-use consume
+/// - `created_at` DATETIME not null
 ///
-/// Timestamps are plain `.timestamp()` (not `timestamp_with_time_zone`),
-/// written as UTC `NaiveDateTime` - the same convention `auth::remember`
-/// and `magnetar_integration::ceremony` use. On MySQL and MariaDB that is
-/// `TIMESTAMP`, which a `NaiveDateTime` cannot be decoded from, so
-/// [`TokenStore`] never reads these columns into Rust: it filters on them
-/// in SQL.
+/// Timestamps are `.date_time()` (not `timestamp_with_time_zone`): DATETIME
+/// on MySQL, `timestamp` on Postgres, written as the UTC wall clock - the
+/// same convention `auth::remember` and `magnetar_integration::ceremony`
+/// use. DATETIME holds dates past 2038-01-19, where MySQL's TIMESTAMP
+/// stops. Tables an older builder created have `.timestamp()` columns,
+/// TIMESTAMP on MySQL and MariaDB; [`TokenStore`] works with both because
+/// it never reads these columns into Rust: it filters on them in SQL.
 pub fn create_auth_flow_tokens_table() -> sea_orm::sea_query::TableCreateStatement {
     use sea_orm::sea_query::{ColumnDef, Table};
 
@@ -104,13 +105,13 @@ pub fn create_auth_flow_tokens_table() -> sea_orm::sea_query::TableCreateStateme
         .col(ColumnDef::new(AuthFlowTokens::Purpose).text().not_null())
         .col(
             ColumnDef::new(AuthFlowTokens::ExpiresAt)
-                .timestamp()
+                .date_time()
                 .not_null(),
         )
-        .col(ColumnDef::new(AuthFlowTokens::UsedAt).timestamp().null())
+        .col(ColumnDef::new(AuthFlowTokens::UsedAt).date_time().null())
         .col(
             ColumnDef::new(AuthFlowTokens::CreatedAt)
-                .timestamp()
+                .date_time()
                 .not_null(),
         )
         .to_owned()
@@ -362,9 +363,10 @@ impl TokenStore {
 /// The owner of the live, unused token of `purpose` whose hash is
 /// `token_hash`, as a query that reads only `user_id`.
 ///
-/// It leaves the time columns out of the row on purpose: they are
-/// `TIMESTAMP` on MySQL and MariaDB (see [`create_auth_flow_tokens_table`]),
-/// which the entity's `NaiveDateTime` fields cannot decode there.
+/// It leaves the time columns out of the row on purpose: in a table an
+/// older builder created they are `TIMESTAMP` on MySQL and MariaDB (see
+/// [`create_auth_flow_tokens_table`]), which the entity's `NaiveDateTime`
+/// fields cannot decode there.
 fn live_token_owner(
     token_hash: &str,
     purpose: TokenPurpose,
@@ -389,13 +391,13 @@ fn live_token_owner(
 /// - `user_id`    TEXT not null - opaque string id
 /// - `token_hash` TEXT not null UNIQUE - SHA-256 hash of the plaintext token
 /// - `purpose`    TEXT not null - [`TokenPurpose::as_str`] discriminator
-/// - `expires_at` TIMESTAMP not null - token TTL boundary
-/// - `used_at`    TIMESTAMP null - set on single-use consume
-/// - `created_at` TIMESTAMP not null
+/// - `expires_at` DATETIME not null - token TTL boundary
+/// - `used_at`    DATETIME null - set on single-use consume
+/// - `created_at` DATETIME not null
 ///
 /// `Model`'s `NaiveDateTime` fields decode only from `DATETIME` on MySQL
 /// and `timestamp` on Postgres, so reading whole rows through this entity
-/// fails on the `TIMESTAMP` columns the builder creates on MySQL and
+/// fails on the `TIMESTAMP` columns an older builder created on MySQL and
 /// MariaDB. [`TokenStore`] reads only `user_id`.
 pub mod entity {
     use sea_orm::entity::prelude::*;

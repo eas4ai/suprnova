@@ -82,9 +82,9 @@ enum SessionColumn {
 
 /// One stored session row, decoded by column name.
 ///
-/// `last_activity` is a [`StoredDateTime`]: the scaffold creates it with
-/// `.timestamp()`, which is `TIMESTAMP` on MySQL and MariaDB, and a plain
-/// `NaiveDateTime` decodes only from `DATETIME` there.
+/// `last_activity` is a [`StoredDateTime`]: older scaffolds created it
+/// with `.timestamp()`, which is `TIMESTAMP` on MySQL and MariaDB, and a
+/// plain `NaiveDateTime` decodes only from `DATETIME` there.
 #[derive(FromQueryResult)]
 struct SessionRow {
     id: String,

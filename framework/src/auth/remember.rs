@@ -115,7 +115,7 @@ pub const COOKIE_NAME: &str = "remember_me";
 /// The columns verification and revocation read from a token row.
 ///
 /// The time columns are left out on purpose. The queries filter on
-/// `expires_at` in SQL, and the scaffold creates it with `.timestamp()`:
+/// `expires_at` in SQL, and older scaffolds created it with `.timestamp()`:
 /// `TIMESTAMP` on MySQL and MariaDB, which the public [`entity::Model`]'s
 /// `NaiveDateTime` cannot decode there.
 #[derive(FromQueryResult)]
@@ -419,9 +419,9 @@ pub async fn prune_expired() -> Result<u64, FrameworkError> {
 /// - `user_id`      VARCHAR not null - opaque string id (post-Phase-3 String-everywhere)
 /// - `selector`     VARCHAR not null UNIQUE - 22-char URL-safe base64 lookup key
 /// - `token_hash`   VARCHAR not null - bcrypt hash of the verifier plaintext
-/// - `expires_at`   TIMESTAMP not null - token TTL boundary
-/// - `created_at`   TIMESTAMP not null
-/// - `last_used_at` TIMESTAMP null - currently informational (rotation deletes the row before update)
+/// - `expires_at`   DATETIME not null - token TTL boundary
+/// - `created_at`   DATETIME not null
+/// - `last_used_at` DATETIME null - currently informational (rotation deletes the row before update)
 ///
 /// The time columns may be `TIMESTAMP` or `DATETIME` (`timestamp` or
 /// `timestamptz` on Postgres). The functions above work with each, but

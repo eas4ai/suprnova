@@ -20,6 +20,15 @@ use suprnova::{
     fillable = ["name", "email", "password"],
     hidden = ["password", "remember_token"],
     timestamps,
+    // The users migration creates these as DATETIME on MySQL and `timestamp`
+    // on Postgres, columns without a time zone that hold the UTC wall clock.
+    // A `DateTime<Utc>` field defaults to the text cast `AsDateTime`, which
+    // those columns refuse, so each names the cast for its column.
+    casts = {
+        email_verified_at = suprnova::AsOptionalNaiveDateTime,
+        created_at = suprnova::AsNaiveDateTime,
+        updated_at = suprnova::AsNaiveDateTime,
+    },
 )]
 pub struct User {
     pub id: i64,
@@ -27,9 +36,7 @@ pub struct User {
     pub email: String,
     pub password: String,
     pub remember_token: Option<String>,
-    // Nullable verification timestamp. The model macro auto-injects the
-    // `AsOptionalDateTime` cast for `Option<DateTime<Utc>>` fields, so no
-    // explicit `casts = {}` entry is needed. `NULL` means unverified.
+    // Nullable verification timestamp. `NULL` means unverified.
     pub email_verified_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

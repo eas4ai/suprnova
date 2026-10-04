@@ -1,27 +1,27 @@
 //! Email-verification and password-reset tokens work on the
-//! `auth_flow_tokens` table a scaffolded app creates, on every engine.
+//! `auth_flow_tokens` table a scaffolded app creates, on every engine, in
+//! today's shape and in the one older scaffolds created.
 //!
-//! The table's `expires_at`, `used_at` and `created_at` are `.timestamp()`:
-//! `TIMESTAMP` on MySQL and MariaDB. `TokenStore` once read whole rows into
-//! an entity with `NaiveDateTime` fields, which the MySQL driver decodes
-//! only from `DATETIME`, so `check`, `owner` and `consume` failed there and
-//! no verification or reset link could be used.
+//! Older scaffolds created `expires_at`, `used_at` and `created_at` with
+//! `.timestamp()`: `TIMESTAMP` on MySQL and MariaDB. `TokenStore` read whole
+//! rows into an entity with `NaiveDateTime` fields, which the MySQL driver
+//! decodes only from `DATETIME`, so `check`, `owner` and `consume` failed
+//! there and no verification or reset link could be used. The table builder
+//! now creates them with `.date_time()`, `DATETIME` on MySQL; tables an
+//! older migration created keep `TIMESTAMP`.
 //!
 //! ```bash
 //! MYSQL_TEST_URL=mysql://... cargo test -p suprnova --test auth_flows -- --ignored scaffold_token_table::mysql_
 //! PG_TEST_URL=postgres://... cargo test -p suprnova --test auth_flows -- --ignored scaffold_token_table::postgres_
 //! ```
 
-// `include!` rather than `#[path]`: rustfmt follows `#[path]` modules and
-// would reformat the template, which is scaffold output, not workspace
-// source.
-mod scaffold_auth_flow_tokens {
-    include!(
-        "../../../suprnova-cli/src/templates/files/backend/migrations/create_auth_flow_tokens_table.rs.tpl"
-    );
-}
+// `#[rustfmt::skip]`: the template is scaffold output, not workspace
+// source, so `cargo fmt` must not rewrite it.
+#[rustfmt::skip]
+#[path = "../../../suprnova-cli/src/templates/files/backend/migrations/create_auth_flow_tokens_table.rs.tpl"]
+mod scaffold_auth_flow_tokens;
 
-use sea_orm::sea_query::{ColumnDef, Table};
+use sea_orm::sea_query::{ColumnDef, Table, TableCreateStatement};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DbErr, DeriveIden};
 use sea_orm_migration::{MigrationTrait, SchemaManager};
 
@@ -53,14 +53,54 @@ enum AuthFlowTokens {
     CreatedAt,
 }
 
-/// Create `auth_flow_tokens` with the scaffold's migration.
+/// Which `auth_flow_tokens` a test creates.
+#[derive(Clone, Copy, Debug)]
+enum Shape {
+    /// The scaffold's migration, which applies the framework's builder.
+    Current,
+    /// The table older builders created: every time column `.timestamp()`.
+    Legacy,
+}
+
+/// `auth_flow_tokens` with a `VARCHAR(64)` hash and the given time columns.
 ///
-/// MySQL 8.4 refuses that migration's UNIQUE key on a `TEXT` column (error
-/// 1170, a separate defect), so there the same table is created with a
-/// `VARCHAR(64)` hash. Its time columns are the migration's `.timestamp()`.
-async fn create_table(database: &DbConnection) {
+/// MySQL 8.4 refuses the builder's UNIQUE key on a `TEXT` hash (error
+/// 1170, a separate defect), so the legacy shape, and the current one on
+/// MySQL 8.4, use this copy. Only the hash column differs.
+fn varchar_hash_table(time: fn(&mut ColumnDef) -> &mut ColumnDef) -> TableCreateStatement {
+    Table::create()
+        .table(AuthFlowTokens::Table)
+        .col(
+            ColumnDef::new(AuthFlowTokens::Id)
+                .big_integer()
+                .not_null()
+                .auto_increment()
+                .primary_key(),
+        )
+        .col(ColumnDef::new(AuthFlowTokens::UserId).text().not_null())
+        .col(
+            ColumnDef::new(AuthFlowTokens::TokenHash)
+                .string_len(64)
+                .not_null()
+                .unique_key(),
+        )
+        .col(ColumnDef::new(AuthFlowTokens::Purpose).text().not_null())
+        .col(time(&mut ColumnDef::new(AuthFlowTokens::ExpiresAt)).not_null())
+        .col(time(&mut ColumnDef::new(AuthFlowTokens::UsedAt)).null())
+        .col(time(&mut ColumnDef::new(AuthFlowTokens::CreatedAt)).not_null())
+        .to_owned()
+}
+
+async fn create_table(database: &DbConnection, shape: Shape) {
     let manager = SchemaManager::new(database.inner());
-    let created: Result<(), DbErr> = scaffold_auth_flow_tokens::Migration.up(&manager).await;
+    let created: Result<(), DbErr> = match shape {
+        Shape::Current => scaffold_auth_flow_tokens::Migration.up(&manager).await,
+        Shape::Legacy => {
+            manager
+                .create_table(varchar_hash_table(ColumnDef::timestamp))
+                .await
+        }
+    };
     match created {
         Ok(()) => {}
         Err(error)
@@ -72,52 +112,23 @@ async fn create_table(database: &DbConnection) {
                 .execute_unprepared("DROP TABLE IF EXISTS auth_flow_tokens")
                 .await
                 .expect("drop partial table");
-            let table = Table::create()
-                .table(AuthFlowTokens::Table)
-                .col(
-                    ColumnDef::new(AuthFlowTokens::Id)
-                        .big_integer()
-                        .not_null()
-                        .auto_increment()
-                        .primary_key(),
-                )
-                .col(ColumnDef::new(AuthFlowTokens::UserId).text().not_null())
-                .col(
-                    ColumnDef::new(AuthFlowTokens::TokenHash)
-                        .string_len(64)
-                        .not_null()
-                        .unique_key(),
-                )
-                .col(ColumnDef::new(AuthFlowTokens::Purpose).text().not_null())
-                .col(
-                    ColumnDef::new(AuthFlowTokens::ExpiresAt)
-                        .timestamp()
-                        .not_null(),
-                )
-                .col(ColumnDef::new(AuthFlowTokens::UsedAt).timestamp().null())
-                .col(
-                    ColumnDef::new(AuthFlowTokens::CreatedAt)
-                        .timestamp()
-                        .not_null(),
-                )
-                .to_owned();
             manager
-                .create_table(table)
+                .create_table(varchar_hash_table(ColumnDef::date_time))
                 .await
                 .expect("create auth_flow_tokens with a VARCHAR hash");
         }
-        Err(error) => panic!("scaffold auth_flow_tokens migration: {error}"),
+        Err(error) => panic!("{shape:?} auth_flow_tokens: {error}"),
     }
 }
 
-async fn issue_check_consume_and_prune(url: &str) {
+async fn issue_check_consume_and_prune(url: &str, shape: Shape) {
     let database = connect(url).await;
     database
         .inner()
         .execute_unprepared("DROP TABLE IF EXISTS auth_flow_tokens")
         .await
         .expect("drop auth_flow_tokens");
-    create_table(&database).await;
+    create_table(&database, shape).await;
     let _container = TestContainer::fake();
     TestContainer::singleton(database.clone());
 
@@ -142,7 +153,7 @@ async fn issue_check_consume_and_prune(url: &str) {
     assert_eq!(
         format!("{check:?} {owner:?} {consumed:?} {check_after:?} {reset_consumed:?}"),
         r#"Ok(true) Ok(Some("7")) Ok(Some("7")) Ok(false) Ok(Some("7"))"#,
-        "check, owner, consume, check after consume, consume a reset token"
+        "{shape:?}: check, owner, consume, check after consume, consume a reset token"
     );
 
     // An expiry past 2038-01-19, the end of MySQL's `TIMESTAMP` range,
@@ -172,19 +183,22 @@ async fn issue_check_consume_and_prune(url: &str) {
 
 #[tokio::test]
 async fn sqlite_scaffold_token_table_issues_checks_and_consumes() {
-    issue_check_consume_and_prune("sqlite::memory:").await;
+    issue_check_consume_and_prune("sqlite::memory:", Shape::Current).await;
+    issue_check_consume_and_prune("sqlite::memory:", Shape::Legacy).await;
 }
 
 #[tokio::test]
 #[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
 async fn mysql_scaffold_token_table_issues_checks_and_consumes() {
     let url = std::env::var("MYSQL_TEST_URL").expect("set MYSQL_TEST_URL");
-    issue_check_consume_and_prune(&url).await;
+    issue_check_consume_and_prune(&url, Shape::Current).await;
+    issue_check_consume_and_prune(&url, Shape::Legacy).await;
 }
 
 #[tokio::test]
 #[ignore = "requires disposable Postgres at PG_TEST_URL"]
 async fn postgres_scaffold_token_table_issues_checks_and_consumes() {
     let url = std::env::var("PG_TEST_URL").expect("set PG_TEST_URL");
-    issue_check_consume_and_prune(&url).await;
+    issue_check_consume_and_prune(&url, Shape::Current).await;
+    issue_check_consume_and_prune(&url, Shape::Legacy).await;
 }
