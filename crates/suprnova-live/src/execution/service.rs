@@ -46,8 +46,8 @@ use crate::snapshot::{
 use crate::state::ProposalBatch;
 use crate::validation::{BagPolicy, ErrorBag, ValidationEngine, ValidationPort};
 use crate::view::{
-    ChildMountTransition, IslandRender, IslandRootInput, IslandSnapshotForm,
-    MAX_SUCCESSOR_METADATA_BYTES, ViewRenderer, assemble_island_root,
+    ChildMountTransition, IslandRender, IslandRootInput, IslandSnapshotForm, ViewRenderer,
+    assemble_island_root,
 };
 
 use super::{
@@ -1625,7 +1625,10 @@ impl ExecutionService {
                             .then(|| crate::view::declared_stream(descriptor.metadata()))
                             .flatten(),
                     },
-                    MAX_SUCCESSOR_METADATA_BYTES,
+                    // The configured island size, the bound a mount's root
+                    // gets too, not a fixed 1 MiB: the root carries the
+                    // encoded successor snapshot.
+                    self.renderer.limits().max_body_bytes(),
                 )
                 .and_then(|assembled| {
                     self.renderer

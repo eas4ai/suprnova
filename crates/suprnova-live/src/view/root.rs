@@ -7,6 +7,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 
 use crate::identity::{ComponentName, InstanceId, IslandSlot, Revision};
+use crate::limits::SizeBreach;
 
 use super::{IslandRender, ViewError, ViewErrorKind};
 
@@ -15,7 +16,6 @@ const MAX_FLAGS: usize = 64;
 const MAX_FLAG_NAME_BYTES: usize = 32;
 const MAX_FLAG_VALUE_BYTES: usize = 1_024;
 const MAX_DOCUMENT_KEY_BYTES: usize = 128;
-pub(crate) const MAX_SUCCESSOR_METADATA_BYTES: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IslandSnapshotForm {
@@ -155,8 +155,15 @@ pub(crate) fn assemble_island_root(
     if let Some(stream) = &input.stream {
         write_attribute(&mut attributes, "live:stream", stream);
     }
+    // The root's attributes carry the encoded snapshot, so a large state
+    // makes a large root. The bound is the caller's configured island size,
+    // and a breach keeps both sizes so the host can name the setting.
     if attributes.len() > max_metadata_bytes {
-        return Err(ViewError::new(ViewErrorKind::InvalidMountMetadata));
+        return Err(ViewError::metadata_too_large(SizeBreach {
+            measured: attributes.len(),
+            configured: max_metadata_bytes,
+            at_least: false,
+        }));
     }
     let inner = std::str::from_utf8(&render.body)
         .map_err(|_| ViewError::new(ViewErrorKind::TemplateRenderFailed))?;
@@ -231,5 +238,51 @@ fn escape_attribute(output: &mut String, value: &str) {
             '\'' => output.push_str("&#39;"),
             _ => output.push(character),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(snapshot: &[u8]) -> IslandRootInput<'_> {
+        IslandRootInput {
+            component: ComponentName::parse("tests.root").expect("component"),
+            slot: IslandSlot::parse("root").expect("slot"),
+            document_key: "primary".to_owned(),
+            protocol_minimum: 1,
+            runtime_contract: 1,
+            snapshot,
+            snapshot_form: IslandSnapshotForm::Seed,
+            instance_id: None,
+            revision: Revision::new(0),
+            lazy_complete: false,
+            flags: Vec::new(),
+            stream: None,
+        }
+    }
+
+    fn render() -> IslandRender {
+        IslandRender {
+            body: Bytes::from_static(b"<p>ok</p>"),
+            assets: Default::default(),
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_root_past_its_configured_size_reports_both_sizes() {
+        let snapshot = vec![b'x'; 3 * 1024 * 1024];
+        let root = assemble_island_root(render(), input(&snapshot), 16 * 1024 * 1024)
+            .expect("a 4 MiB root inside a 16 MiB island limit");
+        assert!(root.body.len() > 4 * 1024 * 1024);
+
+        let error = assemble_island_root(render(), input(&snapshot), 1024 * 1024)
+            .expect_err("over the configured size");
+        assert_eq!(error.kind(), ViewErrorKind::InvalidMountMetadata);
+        let size = error.size().expect("the breach keeps both sizes");
+        assert!(size.measured > 4 * 1024 * 1024, "{size:?}");
+        assert_eq!(size.configured, 1024 * 1024);
+        assert!(!size.at_least);
     }
 }

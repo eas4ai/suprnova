@@ -514,3 +514,77 @@ async fn a_large_model_state_round_trips_under_the_default_limits() {
         Some(10_000)
     );
 }
+
+/// An island whose root metadata passes 1 MiB renders through an action, and
+/// again from the snapshot that carries it. The successor render once stopped
+/// at a fixed 1 MiB of root attributes while a mount allowed the configured
+/// island HTML size, so a state of about 750 KiB failed on every action with
+/// a bare `invalid_mount_metadata`.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_island_past_one_mib_of_root_metadata_renders_through_actions() {
+    let _container = TestContainer::fake();
+    form_fixture();
+    let router = Arc::new(build_form_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+    let middleware = production_middleware();
+
+    let (status, headers, body) =
+        dispatch(router.clone(), middleware.clone(), get(FORM_DOCUMENT_PATH)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let cookie = session_cookie(&headers);
+    let seed = decoded_snapshot(&body);
+
+    // A 1.25 MiB topic: its snapshot alone encodes to about 1.7 MiB of the
+    // root's `data-suprnova-live-snapshot` attribute.
+    let topics = vec!["t".repeat(1_310_720), "second".to_owned()];
+    let mut snapshot = seed;
+    for (round, (seats, key)) in [(4, "SkpKSkpKSkpKSkpKSkpKSg"), (5, "S0tLS0tLS0tLS0tLS0tLSw")]
+        .into_iter()
+        .enumerate()
+    {
+        let model = if round == 0 {
+            json!({"seats": seats, "topics": topics})
+        } else {
+            json!({"seats": seats})
+        };
+        let (status, _, body) = dispatch(
+            router.clone(),
+            middleware.clone(),
+            form_action_request(
+                ActionRequest {
+                    snapshot,
+                    cookie: &cookie,
+                    fetch_site: Some("same-origin"),
+                    login: Some("user-7"),
+                    idempotency_key: key,
+                },
+                model,
+                true,
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "round {round}: {}",
+            String::from_utf8_lossy(&body[..body.len().min(512)])
+        );
+        let answer: Value = serde_json::from_slice(&body).expect("action JSON");
+        assert_eq!(answer["outcome"], "accepted", "round {round}");
+        let html = answer["render"]["html"].as_str().expect("render html");
+        let root_end = html.find('>').expect("the island root tag closes");
+        assert!(
+            root_end > 1024 * 1024,
+            "round {round}: the root's attributes span {root_end} bytes, past 1 MiB"
+        );
+        assert!(html.contains(&format!("<p id=\"saves\">{}</p>", round + 1)));
+        snapshot = answer["snapshot"].clone();
+        assert_eq!(
+            snapshot["body"]["state"]["topics"][0]
+                .as_str()
+                .map(str::len),
+            Some(1_310_720)
+        );
+    }
+}
