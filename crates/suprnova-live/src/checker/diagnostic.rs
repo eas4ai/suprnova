@@ -20,7 +20,10 @@ pub enum DiagnosticCode {
     BranchStackMismatch,
     /// Dynamic tag or attribute structure could not be proved.
     DynamicStructureUnproved,
-    /// Askama's untyped safe filter crossed the Live view boundary.
+    /// Askama writes a value without HTML escaping into the Live view: the
+    /// untyped `safe` filter, or `escape` with a text escaper such as
+    /// `none`, reached a `{{ }}` directly or through a binding, a loop
+    /// variable, or a macro argument.
     RawSafe,
     /// A directive name is not in the shipped grammar.
     UnknownDirective,

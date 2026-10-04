@@ -526,3 +526,114 @@ fn a_call_to_a_macro_the_catalog_cannot_resolve_stays_unproved() {
             && diagnostic.severity() == DiagnosticSeverity::Unproved
     }));
 }
+
+fn raw_locations(report: &suprnova_live::checker::CheckReport) -> Vec<(u32, u32)> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DiagnosticCode::RawSafe)
+        .map(|diagnostic| (diagnostic.line(), diagnostic.column()))
+        .collect()
+}
+
+/// Unescaped output is classified from the parsed template, not from the
+/// expression's text, and reported where the raw value is written out: a
+/// binding, a macro argument, a loop variable, or caller content carries the
+/// raw value to the `{{ }}` that writes it, and an escaper that does not
+/// escape HTML is as raw as `safe`.
+#[test]
+fn raw_output_is_traced_to_the_place_it_is_written() {
+    let cases: &[(&str, (u32, u32))] = &[
+        ("{% let y = body|safe %}\n<p>{{ y }}</p>", (2, 7)),
+        ("{% set y = body|safe %}\n<p>{{ y }}</p>", (2, 7)),
+        (
+            "{% let (y, z) = (body|safe, name) %}\n<p>{{ y }}</p>",
+            (2, 7),
+        ),
+        ("<p>{{ body|safe|lower }}</p>", (1, 7)),
+        ("<p>{{ body|escape(\"none\") }}</p>", (1, 7)),
+        ("<p>{{ body|e(\"none\") }}</p>", (1, 7)),
+        ("<p>{{ body|escape(\"txt\") }}</p>", (1, 7)),
+        ("<p>{{ body|escape(\"md\") }}</p>", (1, 7)),
+        ("<p>{{ body|escape(\"yml\") }}</p>", (1, 7)),
+        ("<p>{{ body|escape(\"\") }}</p>", (1, 7)),
+        ("<p>{{ body|escape(escaper = \"none\") }}</p>", (1, 7)),
+        (
+            "{% macro show(value) %}\n<p>{{ value }}</p>\n{% endmacro %}\n{% call show(body|safe) %}{% endcall %}",
+            (2, 7),
+        ),
+        (
+            "{% macro show(value = body|safe) %}\n<p>{{ value }}</p>\n{% endmacro %}\n{% call show() %}{% endcall %}",
+            (2, 7),
+        ),
+        (
+            "{% let y = body|safe %}{% macro show() %}\n<p>{{ y }}</p>\n{% endmacro %}\n{% call show() %}{% endcall %}",
+            (2, 7),
+        ),
+        (
+            "{% macro frame() %}<div>{{ caller() }}</div>{% endmacro %}\n{% call frame() %}<p>{{ body|safe }}</p>{% endcall %}",
+            (2, 25),
+        ),
+        (
+            "{% for item in rows|safe %}\n<p>{{ item }}</p>\n{% endfor %}",
+            (2, 7),
+        ),
+        (
+            "{% let rows = list|safe %}{% for (key, item) in rows %}\n<p>{{ item }}</p>\n{% endfor %}",
+            (2, 7),
+        ),
+        (
+            "{% set y %}<b>{{ body|safe }}</b>{% endset %}<p>{{ y }}</p>",
+            (1, 18),
+        ),
+        (
+            "{% decl y %}{% if c %}{% let y = body|safe %}{% else %}{% let y = name %}{% endif %}\n<p>{{ y }}</p>",
+            (2, 7),
+        ),
+        (
+            "{% let mut y = name %}{% if c %}{% mut y = body|safe %}{% endif %}\n<p>{{ y }}</p>",
+            (2, 7),
+        ),
+        (
+            "{% let mut y = name %}{% mut y = body|safe %}\n<p>{{ y }}</p>",
+            (2, 7),
+        ),
+    ];
+    let mismatches: Vec<_> = cases
+        .iter()
+        .filter_map(|(source, location)| {
+            let report = check(*source);
+            let found = raw_locations(&report);
+            (found != vec![*location]).then_some((*source, *location, found))
+        })
+        .collect();
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+
+    let filtered = check("{% filter escape(\"none\") %}<p>{{ body }}</p>{% endfilter %}");
+    assert!(
+        !raw_locations(&filtered).is_empty(),
+        "{:?}",
+        filtered.diagnostics()
+    );
+}
+
+/// The same classification proves what does escape: an HTML escaper, a
+/// binding that rebinds the name to an escaped value, a macro parameter that
+/// shadows a raw local, a `{% set %}` block (Askama stores its rendered body
+/// as a string and escapes it on output), and the framework's own
+/// `trusted_html` filter, which accepts only an audited `TrustedHtml` value.
+#[test]
+fn escaped_output_is_not_mistaken_for_raw_output() {
+    for source in [
+        "<p>{{ body|escape(\"html\") }}</p>",
+        "<p>{{ body|e }}</p>",
+        "<p>{{ body|escape }}</p>",
+        "{% let y = body|safe %}{% let y = name %}<p>{{ y }}</p>",
+        "{% let v = body|safe %}{% macro show(v) %}<p>{{ v }}</p>{% endmacro %}{% call show(name) %}{% endcall %}",
+        "{% set y %}<b>{{ name }}</b>{% endset %}<p>{{ y }}</p>",
+        "<p>{{ island|trusted_html }}</p>",
+    ] {
+        let report = check(source);
+        assert!(report.is_proved(), "{source}: {:?}", report.diagnostics());
+    }
+}
