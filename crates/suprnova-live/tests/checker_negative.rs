@@ -740,3 +740,69 @@ fn diagnostics_report_the_real_column_of_the_attribute_or_element() {
         report.diagnostics()
     );
 }
+
+fn coded(report: &suprnova_live::checker::CheckReport, code: &str) -> Vec<(u32, u32)> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code().as_str() == code)
+        .map(|diagnostic| (diagnostic.line(), diagnostic.column()))
+        .collect()
+}
+
+/// An action directive carries positional literal arguments, checked
+/// against the action's declared parameters in order: `remove(id: u64)`,
+/// `rename(title: String, publish: bool)`, and `note(text: Option<String>)`.
+#[test]
+fn action_directive_arguments_are_checked_against_the_action_signature() {
+    for source in [
+        r#"<section><button type="button" live:click="remove(42)">Remove</button></section>"#,
+        r#"<section><button type="button" live:click="rename('draft', true)">Rename</button></section>"#,
+        r#"<section><button type="button" live:click="rename(&quot;draft&quot;, false)">Rename</button></section>"#,
+        r#"<section><button type="button" live:click="note()">Note</button></section>"#,
+        r#"<section><button type="button" live:click="note">Note</button></section>"#,
+        r#"<section><button type="button" live:click="note(null)">Note</button></section>"#,
+        r#"<section><button type="button" live:click="note('hi')">Note</button></section>"#,
+        r#"<section><button type="button" live:click="save()">Save</button></section>"#,
+        r#"<form live:submit.prevent="remove(7)"><button type="submit">Go</button></form>"#,
+    ] {
+        let report = check(source);
+        assert!(report.is_proved(), "{source}: {:?}", report.diagnostics());
+    }
+
+    let cases = [
+        ("remove", "a required parameter left out"),
+        ("remove()", "a required parameter left out"),
+        ("remove(1, 2)", "one argument too many"),
+        ("save(1)", "an argument to an action without parameters"),
+        ("remove(true)", "a boolean for an integer"),
+        ("remove(-1)", "a negative number for an unsigned integer"),
+        ("remove(1.5)", "a fraction for an integer"),
+        ("remove(null)", "null for a required parameter"),
+        ("rename(1, true)", "a number for a string"),
+        ("rename('draft')", "the second required parameter left out"),
+        ("rename(true, 'draft')", "arguments in the wrong order"),
+    ];
+    for (value, why) in cases {
+        let source = format!(
+            "<section>\n  <button type=\"button\" live:click=\"{value}\">Go</button>\n</section>"
+        );
+        let report = check(source);
+        assert_eq!(
+            coded(&report, "invalid_action_arguments"),
+            vec![(2, 25)],
+            "{value} ({why}): {:?}",
+            report.diagnostics()
+        );
+    }
+
+    let malformed = check(
+        "<section>\n  <button type=\"button\" live:click=\"remove(42\">Go</button>\n</section>",
+    );
+    assert_eq!(
+        coded(&malformed, "invalid_modifier"),
+        vec![(2, 25)],
+        "{:?}",
+        malformed.diagnostics()
+    );
+}

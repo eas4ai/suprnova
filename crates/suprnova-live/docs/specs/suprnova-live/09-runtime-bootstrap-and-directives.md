@@ -1,7 +1,7 @@
 # Suprnova Live -- 09 Runtime Bootstrap and Directives
 
 Status: Normative design specification
-Last revised: 2026-09-30
+Last revised: 2026-10-04
 
 ## Scope
 
@@ -123,6 +123,21 @@ Acceptance criteria:
   documented production behavior.
 - Values identify registered actions, fields, events, or literal configuration;
   they are not executable JavaScript strings.
+- An action directive (`live:click`, `live:submit`, `live:change`,
+  `live:input`, `live:keydown`, `live:init`) names a registered action and may
+  pass positional literal arguments, as in `remove(42)` or
+  `rename('draft', true)`: JSON numbers, strings in single or double quotes
+  with JSON escapes plus `\'`, `true`, `false`, and `null`, comma-separated,
+  with JSON whitespace, at most 128. Each literal binds the action's
+  declared parameter at its position, and a trailing optional parameter may
+  be left out. The checker refuses too many literals, a missing required
+  parameter, and a literal the parameter's codec refuses. The island root
+  lists each action's parameter names in declared order in
+  `data-suprnova-live-actions` (`remove(id) rename(title,publish)`), and the
+  runtime sends the literals as the named arguments the server decodes; a
+  literal with no parameter to bind sends nothing and records a
+  `directive_invalid` diagnostic. The checker and the runtime parse the
+  shared vectors in `tests/fixtures/checker/action-call-grammar.json`.
 - Conflicting directives on the same element are rejected or have one explicit
   precedence rule.
 - The view checker and browser parser share generated grammar metadata or
@@ -226,6 +241,14 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-04 -- An action directive passes positional literal arguments,
+  `live:click="remove(42)"`; it had always sent an empty argument object, so
+  an action with parameters could not be invoked from a template. The
+  literals bind the declared parameters in order, the checker validates them
+  against the action's signature, and the island root's
+  `data-suprnova-live-actions` attribute gives the runtime the parameter
+  names to send them under. The grammar stays closed: literals only, no
+  expressions.
 - 2026-09-30 -- An immediate `live:model` edit on a seed-backed island is its
   first request and promotes the seed; the server now accepts that model
   synchronization as it accepts a first action.

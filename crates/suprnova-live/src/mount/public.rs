@@ -417,6 +417,7 @@ impl PublicSeedMountService {
                     .island_stream_directive
                     .then(|| crate::view::declared_stream(descriptor.metadata()))
                     .flatten(),
+                action_parameters: crate::view::declared_action_parameters(descriptor.metadata()),
             },
             self.max_metadata_bytes,
         )

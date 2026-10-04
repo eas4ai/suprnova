@@ -58,6 +58,9 @@ impl ActionArgumentField {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionArgumentSchema {
     fields: BTreeMap<ModelField, ActionArgumentField>,
+    /// The parameter names in the order the action declares them, which is
+    /// the order positional directive arguments such as `remove(42)` bind.
+    declared: Vec<ModelField>,
 }
 
 impl ActionArgumentSchema {
@@ -67,12 +70,17 @@ impl ActionArgumentSchema {
             return Err(ActionError::invalid_arguments());
         }
         let mut indexed = BTreeMap::new();
+        let mut declared = Vec::with_capacity(fields.len());
         for field in fields {
+            declared.push(field.name.clone());
             if indexed.insert(field.name.clone(), field).is_some() {
                 return Err(ActionError::invalid_arguments());
             }
         }
-        Ok(Self { fields: indexed })
+        Ok(Self {
+            fields: indexed,
+            declared,
+        })
     }
 
     /// Creates an action contract with no browser arguments.
@@ -80,6 +88,7 @@ impl ActionArgumentSchema {
     pub fn empty() -> Self {
         Self {
             fields: BTreeMap::new(),
+            declared: Vec::new(),
         }
     }
 
@@ -87,6 +96,14 @@ impl ActionArgumentSchema {
     #[must_use]
     pub fn fields(&self) -> impl ExactSizeIterator<Item = &ActionArgumentField> {
         self.fields.values()
+    }
+
+    /// Returns generated fields in the order the action declares them: the
+    /// order a directive's positional literal arguments map to.
+    pub fn declared(&self) -> impl Iterator<Item = &ActionArgumentField> {
+        self.declared
+            .iter()
+            .filter_map(|name| self.fields.get(name))
     }
 
     pub(crate) fn field(&self, name: &ModelField) -> Option<&ActionArgumentField> {

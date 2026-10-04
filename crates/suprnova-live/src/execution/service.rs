@@ -1620,6 +1620,9 @@ impl ExecutionService {
                             .island_stream_directive
                             .then(|| crate::view::declared_stream(descriptor.metadata()))
                             .flatten(),
+                        action_parameters: crate::view::declared_action_parameters(
+                            descriptor.metadata(),
+                        ),
                     },
                     MAX_SUCCESSOR_METADATA_BYTES,
                 )

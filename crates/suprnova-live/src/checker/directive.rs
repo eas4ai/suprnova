@@ -1,7 +1,9 @@
 //! Closed server-visible Live directive grammar.
 
+use crate::canonical::CanonicalValue;
 use crate::identity::{ComponentName, ModelField, SignalName};
-use crate::metadata::ComponentMetadata;
+use crate::limits::InputLimits;
+use crate::metadata::{ActionMetadata, ComponentMetadata};
 use crate::registry::ComponentRegistry;
 use crate::snapshot::state::FieldCategory;
 use crate::state::{BindingTiming, UrlBindingMode};
@@ -373,9 +375,8 @@ fn valid_contract_value(contract: &DirectiveContract, value: &str) -> bool {
     }
     match contract.value {
         DirectiveValue::Empty => value.is_empty(),
-        DirectiveValue::Identifier | DirectiveValue::Field | DirectiveValue::Action => {
-            local_identifier(value)
-        }
+        DirectiveValue::Identifier | DirectiveValue::Field => local_identifier(value),
+        DirectiveValue::Action => parse_action_call(value).is_some(),
         DirectiveValue::Target => safe_contract_target(value),
         DirectiveValue::Mapping => valid_mapping(contract.name, value),
         DirectiveValue::Literal => {
@@ -387,7 +388,19 @@ fn valid_contract_value(contract: &DirectiveContract, value: &str) -> bool {
 }
 
 fn validate_action(directive: &str, value: &str, context: &mut DirectiveContext<'_, '_>) {
-    validate_action_identity(value, context);
+    let Some(call) = parse_action_call(value) else {
+        push_error(context, DiagnosticCode::InvalidModifier);
+        return;
+    };
+    validate_action_identity(call.name, context);
+    if let Some(action) = context
+        .owner
+        .actions()
+        .iter()
+        .find(|action| action.name().as_str() == call.name)
+    {
+        validate_action_arguments(action, &call.arguments, context);
+    }
     let accessible = match directive {
         "submit" => context.tag == "form",
         "click" => {
@@ -398,6 +411,33 @@ fn validate_action(directive: &str, value: &str, context: &mut DirectiveContext<
     };
     if !accessible {
         push_error(context, DiagnosticCode::AccessibilityViolation);
+    }
+}
+
+/// Checks a directive's literal arguments against the action's signature
+/// the way the server decodes them: each literal binds the parameter at its
+/// position, a trailing optional parameter may be left out, and each value
+/// must pass the parameter's registered codec, `null` only where the
+/// parameter is optional. One diagnostic names the first mismatch.
+fn validate_action_arguments(
+    action: &ActionMetadata,
+    arguments: &[ActionLiteral],
+    context: &mut DirectiveContext<'_, '_>,
+) {
+    let parameters: Vec<_> = action.arguments().declared().collect();
+    let limits = InputLimits::default();
+    let fits = arguments.len() <= parameters.len()
+        && parameters
+            .iter()
+            .enumerate()
+            .all(|(index, parameter)| match arguments.get(index) {
+                None | Some(ActionLiteral::Null) => !parameter.required(),
+                Some(literal) => literal
+                    .canonical()
+                    .is_some_and(|value| parameter.codec().validate(&value, &limits).is_ok()),
+            });
+    if !fits {
+        push_error(context, DiagnosticCode::InvalidActionArguments);
     }
 }
 
@@ -746,6 +786,194 @@ fn validate_navigation(context: &mut DirectiveContext<'_, '_>) {
     }
 }
 
+/// The most literal arguments one action directive may carry, the bound
+/// the server places on one action's argument schema.
+const MAX_ACTION_ARGUMENTS: usize = 128;
+
+/// An action directive's value: the action's name and the literal arguments
+/// written after it, empty when the value is the bare name.
+#[derive(Debug, PartialEq)]
+struct ActionCall<'v> {
+    name: &'v str,
+    arguments: Vec<ActionLiteral>,
+}
+
+/// One JSON-style literal argument.
+#[derive(Clone, Debug, PartialEq)]
+enum ActionLiteral {
+    Null,
+    Bool(bool),
+    Number(f64),
+    String(String),
+}
+
+impl ActionLiteral {
+    /// The value the browser sends for this literal.
+    fn canonical(&self) -> Option<CanonicalValue> {
+        match self {
+            Self::Null => Some(CanonicalValue::Null),
+            Self::Bool(value) => Some(CanonicalValue::Bool(*value)),
+            Self::Number(value) => CanonicalValue::number(*value).ok(),
+            Self::String(value) => Some(CanonicalValue::String(value.clone())),
+        }
+    }
+}
+
+/// Parses `name` or `name(literal, ...)`. The grammar is closed and shared
+/// with the browser runtime: literals are JSON numbers, strings in single or
+/// double quotes with JSON escapes (plus `\'`), `true`, `false`, and `null`,
+/// separated by commas, with JSON whitespace around them. Nothing is
+/// evaluated, so the same text always yields the same arguments.
+fn parse_action_call(value: &str) -> Option<ActionCall<'_>> {
+    let Some(open) = value.find('(') else {
+        return local_identifier(value).then(|| ActionCall {
+            name: value,
+            arguments: Vec::new(),
+        });
+    };
+    let name = value.get(..open)?;
+    let body = value.get(open + 1..)?.strip_suffix(')')?;
+    if !local_identifier(name) {
+        return None;
+    }
+    let mut scanner = LiteralScanner { rest: body };
+    let mut arguments = Vec::new();
+    scanner.skip_space();
+    if scanner.rest.is_empty() {
+        return Some(ActionCall { name, arguments });
+    }
+    loop {
+        arguments.push(scanner.literal()?);
+        if arguments.len() > MAX_ACTION_ARGUMENTS {
+            return None;
+        }
+        scanner.skip_space();
+        if scanner.rest.is_empty() {
+            return Some(ActionCall { name, arguments });
+        }
+        scanner.rest = scanner.rest.strip_prefix(',')?;
+        scanner.skip_space();
+    }
+}
+
+struct LiteralScanner<'t> {
+    rest: &'t str,
+}
+
+impl LiteralScanner<'_> {
+    fn skip_space(&mut self) {
+        self.rest = self.rest.trim_start_matches([' ', '\t', '\n', '\r']);
+    }
+
+    fn literal(&mut self) -> Option<ActionLiteral> {
+        for (keyword, literal) in [
+            ("true", ActionLiteral::Bool(true)),
+            ("false", ActionLiteral::Bool(false)),
+            ("null", ActionLiteral::Null),
+        ] {
+            if let Some(rest) = self.rest.strip_prefix(keyword) {
+                self.rest = rest;
+                return Some(literal);
+            }
+        }
+        match self.rest.chars().next()? {
+            quote @ ('\'' | '"') => self.string(quote),
+            _ => self.number(),
+        }
+    }
+
+    fn number(&mut self) -> Option<ActionLiteral> {
+        let bytes = self.rest.as_bytes();
+        let digits = |from: usize| {
+            bytes.get(from..).map_or(0, |tail| {
+                tail.iter().take_while(|byte| byte.is_ascii_digit()).count()
+            })
+        };
+        let mut end = usize::from(bytes.first() == Some(&b'-'));
+        match bytes.get(end) {
+            Some(b'0') => end += 1,
+            Some(b'1'..=b'9') => end += digits(end),
+            _ => return None,
+        }
+        if bytes.get(end) == Some(&b'.') {
+            let fraction = digits(end + 1);
+            if fraction == 0 {
+                return None;
+            }
+            end += 1 + fraction;
+        }
+        if matches!(bytes.get(end), Some(b'e' | b'E')) {
+            end += 1;
+            if matches!(bytes.get(end), Some(b'+' | b'-')) {
+                end += 1;
+            }
+            let exponent = digits(end);
+            if exponent == 0 {
+                return None;
+            }
+            end += exponent;
+        }
+        let number: f64 = self.rest.get(..end)?.parse().ok()?;
+        self.rest = self.rest.get(end..)?;
+        number.is_finite().then_some(ActionLiteral::Number(number))
+    }
+
+    fn string(&mut self, quote: char) -> Option<ActionLiteral> {
+        let mut text = String::new();
+        let mut characters = self.rest.char_indices().skip(1);
+        while let Some((index, character)) = characters.next() {
+            match character {
+                _ if character == quote => {
+                    self.rest = self.rest.get(index + character.len_utf8()..)?;
+                    return Some(ActionLiteral::String(text));
+                }
+                '\\' => {
+                    let (_, escaped) = characters.next()?;
+                    text.push(match escaped {
+                        '"' | '\'' | '\\' | '/' => escaped,
+                        'b' => '\u{8}',
+                        'f' => '\u{c}',
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        'u' => {
+                            let unit = hex_unit(&mut characters)?;
+                            if (0xD800..0xDC00).contains(&unit) {
+                                let (_, slash) = characters.next()?;
+                                let (_, marker) = characters.next()?;
+                                let low = hex_unit(&mut characters)?;
+                                if slash != '\\'
+                                    || marker != 'u'
+                                    || !(0xDC00..0xE000).contains(&low)
+                                {
+                                    return None;
+                                }
+                                char::from_u32(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00))?
+                            } else {
+                                char::from_u32(unit)?
+                            }
+                        }
+                        _ => return None,
+                    });
+                }
+                _ if u32::from(character) < 0x20 => return None,
+                _ => text.push(character),
+            }
+        }
+        None
+    }
+}
+
+/// Four hexadecimal digits of a `\u` escape as one UTF-16 code unit.
+fn hex_unit(characters: &mut impl Iterator<Item = (usize, char)>) -> Option<u32> {
+    let mut unit = 0;
+    for _ in 0..4 {
+        let (_, digit) = characters.next()?;
+        unit = unit * 16 + digit.to_digit(16)?;
+    }
+    Some(unit)
+}
+
 fn local_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -777,7 +1005,51 @@ fn push(
 
 #[cfg(test)]
 mod tests {
-    use super::{directive_contract, valid_contract_value};
+    use super::{
+        ActionLiteral, MAX_ACTION_ARGUMENTS, directive_contract, parse_action_call,
+        valid_contract_value,
+    };
+
+    fn literal(value: &serde_json::Value) -> ActionLiteral {
+        match value {
+            serde_json::Value::Null => ActionLiteral::Null,
+            serde_json::Value::Bool(value) => ActionLiteral::Bool(*value),
+            serde_json::Value::Number(value) => {
+                ActionLiteral::Number(value.as_f64().expect("finite vector number"))
+            }
+            serde_json::Value::String(value) => ActionLiteral::String(value.clone()),
+            other => panic!("vector argument is not a literal: {other}"),
+        }
+    }
+
+    /// The browser parser runs the same vectors, so the checker and the
+    /// runtime read every action directive value alike.
+    #[test]
+    fn action_calls_parse_as_the_shared_vectors_say() {
+        let vectors: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/checker/action-call-grammar.json"
+        ))
+        .expect("action call vectors");
+        for case in vectors["valid"].as_array().expect("valid vectors") {
+            let value = case["value"].as_str().expect("vector value");
+            let call = parse_action_call(value).unwrap_or_else(|| panic!("rejected {value:?}"));
+            assert_eq!(Some(call.name), case["name"].as_str(), "{value:?}");
+            let expected: Vec<ActionLiteral> = case["arguments"]
+                .as_array()
+                .map_or_else(Vec::new, |arguments| {
+                    arguments.iter().map(literal).collect()
+                });
+            assert_eq!(call.arguments, expected, "{value:?}");
+        }
+        for value in vectors["invalid"].as_array().expect("invalid vectors") {
+            let value = value.as_str().expect("vector value");
+            assert_eq!(parse_action_call(value), None, "accepted {value:?}");
+        }
+        let at_bound = format!("save({})", vec!["1"; MAX_ACTION_ARGUMENTS].join(","));
+        assert!(parse_action_call(&at_bound).is_some());
+        let past_bound = format!("save({})", vec!["1"; MAX_ACTION_ARGUMENTS + 1].join(","));
+        assert_eq!(parse_action_call(&past_bound), None);
+    }
 
     #[test]
     fn promoted_scalar_values_share_one_bounded_lexical_grammar() {

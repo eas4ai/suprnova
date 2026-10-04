@@ -18,6 +18,12 @@ Server events include `live:click`, `live:submit`, `live:change`, `live:input`,
 behavior remains the fallback where the catalog says `native`; an inert
 fallback never manufactures a request.
 
+An action directive may pass positional literal arguments after the action
+name, `live:click="remove(42)"`: JSON numbers, quoted strings, `true`,
+`false`, and `null`, never expressions. The checker validates them against
+the action's declared parameters, and the runtime sends them under the
+parameter names the island root lists in `data-suprnova-live-actions`.
+
 ```html
 <form live:submit.prevent="save">
   <input name="email" live:model.blur="email">

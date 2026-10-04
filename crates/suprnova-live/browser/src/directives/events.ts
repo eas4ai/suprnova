@@ -222,6 +222,16 @@ export class EventRouter {
   }
 
   #schedule(owned: OwnedDirective, eventType: string, trusted: boolean): boolean {
+    const actionArguments = this.#actionArguments(owned);
+    if (actionArguments === null) {
+      this.#diagnostics.record({
+        code: "directive_invalid",
+        severity: "error",
+        phase: "directive",
+        detailCode: "operation_rejected",
+      });
+      return false;
+    }
     const source: IntentSource = Object.freeze({
       island: owned.island,
       element: owned.element,
@@ -236,7 +246,7 @@ export class EventRouter {
         {
           kind: "invoke_action",
           name: owned.directive.value,
-          arguments: Object.freeze({}),
+          arguments: actionArguments,
         },
       ];
       const intent = createServerIntent(
@@ -261,6 +271,22 @@ export class EventRouter {
       });
     }
     return false;
+  }
+
+  // The directive's literals, named by the action's declared parameters
+  // the island root lists, in order; a parameter left out is absent, which
+  // the server accepts only for an optional one. A literal no parameter
+  // receives is refused here, as the server would refuse the request.
+  #actionArguments(owned: OwnedDirective): Readonly<Record<string, JsonValue>> | null {
+    const literals = owned.directive.arguments ?? [];
+    const names = owned.island.metadata.actionParameters?.get(owned.directive.value) ?? [];
+    const entries: (readonly [string, JsonValue])[] = [];
+    for (const [index, literal] of literals.entries()) {
+      const name = names[index];
+      if (name === undefined) return null;
+      entries.push([name, literal]);
+    }
+    return Object.freeze(Object.fromEntries(entries));
   }
 
   #scheduleModel(dispatch: ModelDispatch): ServerIntent | null {

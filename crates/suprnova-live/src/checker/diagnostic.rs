@@ -31,6 +31,10 @@ pub enum DiagnosticCode {
     ForbiddenLifecycle,
     /// An action identity was not registered by the owning component.
     UnknownAction,
+    /// An action directive's literal arguments do not fit the action's
+    /// declared parameters: too many, a required one left out, or a literal
+    /// the parameter's codec refuses.
+    InvalidActionArguments,
     /// A model identity was not registered.
     UnknownModel,
     /// A field exists but is not browser-bindable.
@@ -98,6 +102,7 @@ impl DiagnosticCode {
             Self::UnknownDirective => "unknown_directive",
             Self::ForbiddenLifecycle => "forbidden_lifecycle",
             Self::UnknownAction => "unknown_action",
+            Self::InvalidActionArguments => "invalid_action_arguments",
             Self::UnknownModel => "unknown_model",
             Self::ForbiddenModel => "forbidden_model",
             Self::InvalidModifier => "invalid_modifier",
