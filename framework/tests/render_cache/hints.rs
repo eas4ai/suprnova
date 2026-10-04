@@ -164,6 +164,40 @@ async fn no_hint_makes_a_refused_entry_serve() {
     );
 }
 
+/// DATA-044: a received payload longer than any well-formed hint is
+/// refused before it is copied out of the Redis message or queued for the
+/// applier. Every payload used to be converted to an owned `String` and
+/// queued first, so the inbound queue's 64-message bound held up to 64
+/// arbitrarily large bodies, and the decoder then scanned each one for
+/// commas before its own length check refused it. A well-formed payload at
+/// the bound is still queued unchanged.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_oversized_payload_is_dropped_before_it_is_queued() {
+    telemetry::reset_recorded_hints_for_test();
+    let oversized = vec![b'a'; 1024 * 1024];
+    assert_eq!(
+        RenderCache::queued_hint_after_receive_for_test(&oversized),
+        None,
+        "nothing over the byte bound reaches the inbound queue"
+    );
+    assert_eq!(
+        message_outcomes(),
+        vec!["dropped_over_bound"],
+        "one message, one outcome, and it is the drop"
+    );
+
+    let digests: Vec<[u8; 32]> = (0..MAX_HINT_DIGESTS)
+        .map(|n| [u8::try_from(n % 251).expect("a byte"); 32])
+        .collect();
+    let at_the_bound = RenderCache::hint_body_for_test(&digests);
+    assert_eq!(
+        RenderCache::queued_hint_after_receive_for_test(at_the_bound.as_bytes()),
+        Some(at_the_bound),
+        "a well-formed hint at the bound is queued as it arrived"
+    );
+}
+
 /// A message carrying more than `MAX_HINT_DIGESTS` digests is dropped
 /// whole, never truncated.
 ///

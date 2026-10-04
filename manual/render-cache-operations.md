@@ -203,8 +203,10 @@ exactly one of `applied` (the message named a digest a validation lease on
 this node observes, and every such lease was shortened),
 `ignored_unknown_key` (it named nothing this node holds a lease against,
 which includes a message this node cannot read at all), `dropped_over_bound`
-(it carried more than 64 digests and was dropped whole rather than
-truncated, because a truncated hint is a silently wrong hint),
+(it carried more than 64 digests, or more bytes than 64 digests take, and
+was dropped whole rather than truncated, because a truncated hint is a
+silently wrong hint; an oversized payload is dropped before it is copied or
+queued),
 `subscriber_dropped` (this node's subscription ended, because it fell behind
 or the connection failed, and is being re-established), and
 `dropped_publish_queue_full` (this node had an advance to announce and its

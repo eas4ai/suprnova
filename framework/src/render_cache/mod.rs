@@ -1178,6 +1178,17 @@ impl RenderCache {
         hints::deliver_for_test(&runtime.leases, runtime.clock.as_ref(), body);
     }
 
+    /// Test-only: runs `payload` through the hint subscriber's receive step,
+    /// exactly as a message arriving on the channel would, and returns the
+    /// body that step queued for the applier, or `None` when it queued
+    /// nothing. Records the same outcome the subscriber records.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn queued_hint_after_receive_for_test(payload: &[u8]) -> Option<String> {
+        hints::queued_after_receive_for_test(payload)
+    }
+
     /// Test-only: parks the next generation advancement that names
     /// `table`, forever, so a test can cancel the write that started it
     /// between its row write and its advance. Returns the count of
