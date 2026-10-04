@@ -61,7 +61,7 @@ async fn private_mount_is_create_only_and_never_recovers_an_exact_retry() {
 }
 
 #[tokio::test]
-async fn private_mount_rejects_elapsed_expiry_and_capacity_without_partial_authority() {
+async fn private_mount_rejects_elapsed_expiry_and_evicts_the_oldest_instance_at_capacity() {
     let clock = Arc::new(ManualClock::new(1_000));
     let ledger = ledger(clock.clone(), 2);
 
@@ -70,23 +70,42 @@ async fn private_mount_rejects_elapsed_expiry_and_capacity_without_partial_autho
         .await
         .expect_err("exclusive elapsed expiry is rejected");
     assert_eq!(expiry_error.kind(), LedgerErrorKind::InvalidExpiry);
+    assert!(
+        ledger
+            .inspect(&scope(0x10), &instance(0x20))
+            .expect("ledger inspection")
+            .is_none(),
+        "a refused mount leaves no partial authority"
+    );
 
     for start in 0_u8..64 {
         ledger
-            .mount_instance(mount_record(start.wrapping_add(0x40), 5_000))
+            .mount_instance(mount_record(
+                start.wrapping_add(0x40),
+                5_000 + u64::from(start),
+            ))
             .await
             .expect("configured capacity remains available");
     }
-    let capacity_error = ledger
-        .mount_instance(mount_record(0x90, 5_000))
+    ledger
+        .mount_instance(mount_record(0x90, 6_000))
         .await
-        .expect_err("one more instance exceeds capacity");
-    assert_eq!(capacity_error.kind(), LedgerErrorKind::CapacityExceeded);
+        .expect("a full ledger admits one more instance by evicting the oldest");
 
     assert!(
         ledger
-            .inspect(&scope(0x10), &instance(0x90))
+            .inspect(&scope(0x10), &instance(0x40))
             .expect("ledger inspection")
-            .is_none()
+            .is_none(),
+        "the instance that expires soonest made room"
     );
+    for start in [0x41, 0x90] {
+        assert!(
+            ledger
+                .inspect(&scope(0x10), &instance(start))
+                .expect("ledger inspection")
+                .is_some(),
+            "every other instance is still authority"
+        );
+    }
 }

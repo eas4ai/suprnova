@@ -2,9 +2,8 @@
 
 mod promotion_support;
 
-use promotion_support::{context, harness, nonce, promotion_limits, signed_seed};
-use suprnova_live::identity::{Revision, UnixMillis};
-use suprnova_live::ledger::{LiveInstanceLedger, PromotionRecord};
+use promotion_support::{context, harness, harness_over, nonce, promotion_limits, signed_seed};
+use suprnova_live::ledger::LedgerLimits;
 use suprnova_live::promotion::{PromotionErrorKind, PromotionLimitConfig, PromotionLimits};
 
 fn configured(
@@ -141,19 +140,12 @@ async fn seed_bytes_reservations_and_rate_bucket_cardinality_are_bounded() {
 
 #[tokio::test]
 async fn ledger_failure_retains_a_bounded_abandoned_nonce_without_partial_instance() {
-    let harness = harness(promotion_limits(), 1);
-    harness
-        .ledger
-        .promote(PromotionRecord::new(
-            promotion_support::scope(0xff),
-            promotion_support::instance(0xee),
-            promotion_support::idempotency(0xdd),
-            promotion_support::digest(0xcc),
-            Revision::new(0),
-            UnixMillis::new(5_000),
-        ))
-        .await
-        .expect("preload fills ledger capacity");
+    // The ledger gives an instance at most 500 ms and the promotion asks for
+    // 1,000, so the ledger refuses every promotion this harness makes.
+    let harness = harness_over(
+        promotion_limits(),
+        LedgerLimits::new(100, 500, 4, 64).expect("ledger limits are valid"),
+    );
     let seed = signed_seed(&harness.keys, "rust");
     let context = context(0xa7);
     let failed_nonce = nonce(0x2c);

@@ -296,10 +296,14 @@ owner lineage records the newly applied parent revision.
   (seven days, which also bounds the snapshot, mount and promotion
   lifetimes), `LIVE_LEDGER_CLAIM_LEASE_MS` (30 seconds) and
   `LIVE_LEDGER_MAX_ACCEPTED_OUTCOMES` (64), each under the engine's ceiling.
-  Nothing retires an instance when its page closes: an instance lives its
-  whole lifetime, so the ledger holds the instance limit's worth of page
-  views per lifetime, about 14,000 private-island views a day at the
-  defaults. A snapshot's generation and extension bounds (1,024) follow
+  Nothing retires an instance when its page closes, so the ledger fills at
+  the instance limit's worth of page views per lifetime, about 14,000
+  private-island views a day at the defaults. A full ledger never refuses a
+  mount or a promotion: it evicts the instance that expires soonest,
+  preferring one with no claim in flight, and creates the new one. The
+  evicted page's next action finds no instance, is told to refresh
+  (`RefreshReason::Missing`), and takes the fresh-render recovery path. A
+  snapshot's generation and extension bounds (1,024) follow
   `LIVE_MAX_JSON_ENTRIES` down when it is smaller, instead of failing
   assembly.
 - 2026-10-04 -- Removed the composition lineage's arbitrary 256-child and

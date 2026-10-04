@@ -64,6 +64,7 @@ use std::time::Duration;
 
 use redis::Script;
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
+use suprnova_live::identity::{InstanceId, ScopeFingerprint};
 use suprnova_live::ledger::{InstanceRecordKey, LedgerError, LedgerErrorKind, PromotionRecordKey};
 use suprnova_live::render_cache::key::RenderKey;
 use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
@@ -389,6 +390,23 @@ pub(crate) fn instance_key(prefix: &str, key: &InstanceRecordKey) -> String {
     )
 }
 
+/// The instance record address [`instance_key`] built `name` from, or `None`
+/// when `name` is not one of this deployment's instance hashes.
+///
+/// An eviction reads index members back as keys, and a member only this
+/// module wrote parses; anything else in the index was written by something
+/// that is not this store.
+pub(crate) fn instance_key_from_name(prefix: &str, name: &str) -> Option<InstanceRecordKey> {
+    let (scope, instance) = name
+        .strip_prefix(prefix)?
+        .strip_prefix("instance:")?
+        .split_once(':')?;
+    Some(InstanceRecordKey {
+        scope: ScopeFingerprint::from_bytes(&hex::decode(scope).ok()?).ok()?,
+        instance_id: InstanceId::from_bytes(&hex::decode(instance).ok()?).ok()?,
+    })
+}
+
 /// The hash holding one reserved retry identity.
 pub(crate) fn promotion_key(prefix: &str, key: &PromotionRecordKey) -> String {
     format!(
@@ -538,6 +556,40 @@ mod tests {
 
     fn scope() -> ScopeFingerprint {
         ScopeFingerprint::from_bytes(&[0x10_u8; 32]).expect("a scope fingerprint")
+    }
+
+    #[test]
+    fn an_instance_hash_name_reads_back_as_the_key_it_was_built_from() {
+        let key = InstanceRecordKey {
+            scope: ScopeFingerprint::from_bytes(&[0x10; 32]).expect("scope"),
+            instance_id: InstanceId::from_bytes(&[0x20; 32]).expect("instance"),
+        };
+        let name = instance_key("suprnova:render:", &key);
+        assert_eq!(
+            instance_key_from_name("suprnova:render:", &name),
+            Some(key.clone())
+        );
+        assert_eq!(
+            instance_key_from_name("another:", &name),
+            None,
+            "another deployment's member is not this one's"
+        );
+        let promotion = PromotionRecordKey {
+            scope: key.scope.clone(),
+            idempotency_key: IdempotencyKey::from_bytes(&[0x30; 16]).expect("retry key"),
+        };
+        assert_eq!(
+            instance_key_from_name(
+                "suprnova:render:",
+                &promotion_key("suprnova:render:", &promotion)
+            ),
+            None,
+            "a reservation's hash is not an instance"
+        );
+        assert_eq!(
+            instance_key_from_name("suprnova:render:", "suprnova:render:instance:zz:00"),
+            None
+        );
     }
 
     #[test]

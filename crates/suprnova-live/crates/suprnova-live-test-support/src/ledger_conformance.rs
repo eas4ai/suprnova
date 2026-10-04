@@ -6,7 +6,7 @@
 //! retry, the expiry of a retry identity, claim and its classified
 //! rejections, two claims racing for one base revision, commit, abandon, the
 //! two synchronous drop paths, claim-lease and instance expiry, bounded
-//! retained outcomes, and configured capacity. Nothing here reaches for
+//! retained outcomes, and eviction at configured capacity. Nothing here reaches for
 //! provider internals or diagnostics, so the same suite runs over the
 //! engine's kernels and over a framework adapter against a real backend.
 //!
@@ -42,8 +42,14 @@ pub const CONFORMANCE_INSTANCE_LIFETIME_MS: u64 = 10_000;
 /// Retained accepted outcomes the suite expects a provider to keep.
 pub const CONFORMANCE_MAX_ACCEPTED_OUTCOMES: usize = 2;
 
-/// Live instances the suite expects a provider to admit.
+/// Live instances the suite expects a provider to hold before it evicts.
 pub const CONFORMANCE_MAX_INSTANCES: usize = 64;
+
+/// How long past its lifetime a provider may keep an elapsed instance
+/// countable: the 60 second clock-skew allowance the engine gives
+/// everywhere, which lets a late request be told its instance expired
+/// rather than that it never existed.
+const ELAPSED_RETENTION_ALLOWANCE_MS: u64 = 60_000;
 
 /// The limits a ledger under conformance must be built with.
 ///
@@ -95,7 +101,7 @@ pub async fn run_all(
     an_elapsed_claim_lease_is_terminal(ledger, clock).await?;
     missing_and_elapsed_instances_are_told_apart(ledger, clock).await?;
     retained_outcomes_are_bounded(ledger, clock).await?;
-    configured_capacity_is_enforced_without_partial_authority(ledger, clock).await
+    a_full_ledger_evicts_its_soonest_expiring_idle_instance(ledger, clock).await
 }
 
 /// Runs the scenarios that need two providers over one backing store.
@@ -901,31 +907,89 @@ async fn retained_outcomes_are_bounded(
     }
 }
 
-async fn configured_capacity_is_enforced_without_partial_authority(
+async fn a_full_ledger_evicts_its_soonest_expiring_idle_instance(
     ledger: &dyn LiveInstanceLedger,
     clock: &ControlledClock,
 ) -> Result<(), String> {
-    let expires_at = lifetime_from_now(clock)?;
-    let mut refused = None;
-
-    for offset in 0..=CONFORMANCE_MAX_INSTANCES {
+    // Every instance an earlier scenario left behind elapses, and so does the
+    // window a provider keeps an elapsed one countable for, so the ledger
+    // this scenario fills holds its instances and nothing else.
+    advance(
+        clock,
+        CONFORMANCE_INSTANCE_LIFETIME_MS + ELAPSED_RETENTION_ALLOWANCE_MS + 1,
+    )?;
+    for offset in 0..CONFORMANCE_MAX_INSTANCES {
         let start = 0x80_u8.wrapping_add(u8::try_from(offset).unwrap_or(0));
-        match ledger.mount_instance(mount_record(start, expires_at)).await {
-            Ok(_) => {}
-            Err(error) if error.kind() == LedgerErrorKind::CapacityExceeded => {
-                refused = Some(start);
-                break;
-            }
-            Err(error) => return Err(failed("mount_instance", error)),
-        }
+        mounted(ledger, clock, start).await?;
+        // One millisecond apart, so each instance expires strictly after the
+        // one mounted before it and the order of eviction is the order here.
+        advance(clock, 1)?;
     }
 
-    let refused =
-        refused.ok_or_else(|| "the configured instance capacity is enforced".to_owned())?;
+    let in_flight = granted(
+        ledger
+            .claim(claim_request(0x80, 0, 0x70))
+            .await
+            .map_err(|error| failed("claim", error))?,
+        "the oldest instance must be claimable",
+    )?;
+    mounted(ledger, clock, 0xc0)
+        .await
+        .map_err(|error| format!("a full ledger admits a new mount: {error}"))?;
+    ledger
+        .commit(
+            &in_flight.into_token(),
+            AcceptedOutcome::new(AcceptedOutcomeKind::Rendered, digest(0x70)),
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "an action in flight keeps its instance through an eviction: {}",
+                failed("commit", error)
+            )
+        })?;
+    match ledger
+        .claim(claim_request(0x81, 0, 0x71))
+        .await
+        .map_err(|error| failed("claim", error))?
+    {
+        ClaimOutcome::RefreshRequired(RefreshReason::Missing) => {}
+        other => {
+            return Err(format!(
+                "the soonest-expiring instance with no claim in flight made room, \
+                 and its next action is told to refresh, got {}",
+                classify(&other)
+            ));
+        }
+    }
     require(
-        accepted(ledger, refused).await?.is_none(),
-        "a mount refused for capacity leaves no partial authority",
-    )
+        accepted(ledger, 0x82).await? == Some(Revision::new(0)),
+        "an eviction takes one instance and leaves the next one alone",
+    )?;
+
+    mounted(ledger, clock, 0xc1)
+        .await
+        .map_err(|error| format!("a full ledger keeps admitting mounts: {error}"))?;
+    match ledger
+        .claim(claim_request(0x80, 1, 0x72))
+        .await
+        .map_err(|error| failed("claim", error))?
+    {
+        ClaimOutcome::RefreshRequired(RefreshReason::Missing) => {}
+        other => {
+            return Err(format!(
+                "once its action committed, the oldest instance is the next to make room, got {}",
+                classify(&other)
+            ));
+        }
+    }
+    for start in [0x82, 0xc0, 0xc1] {
+        require(
+            accepted(ledger, start).await? == Some(Revision::new(0)),
+            "the instances an eviction did not take are still authority",
+        )?;
+    }
+    Ok(())
 }
 
 async fn authority_created_on_one_node_is_authority_on_the_other(

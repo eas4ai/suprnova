@@ -1224,6 +1224,18 @@ constructor and is now this kernel over an in-memory store, so Tier 0 and
 both distributed tiers run one state machine and answer one conformance
 suite.
 
+A creation at the configured `max_instances` never fails for capacity. The
+kernel reads the four live instance records with the soonest store
+deadlines (`soonest_expiring_instances`, an ordered range with a limit over
+the deadline index), decodes them, and removes the first one with no claim in
+flight through `compare_and_remove`, which deletes only the version it read.
+A candidate mid-claim is taken only when every candidate is one. Every
+instance gets the same lifetime, so the soonest to expire is the oldest. The
+evicted page's next action finds no record and is told
+`RefreshReason::Missing`, a fresh-render reason like every other. A store
+over its limit sheds the whole excess, up to those four, at the next
+creation.
+
 `ledger/record.rs` is the record's only encoding: a `RECORD_VERSION` byte
 followed by the RFC 8785 canonical JSON of a mirror of the in-memory record,
 the whole frame bounded at `MAX_RECORD_BYTES` (32,768). Every identity
@@ -1412,12 +1424,14 @@ Each of these is ruled behaviour, not a defect.
   cost is that an elapsed instance occupies configured capacity for that
   window. A promotion reservation gets no such window, because its retry
   identity has to be free the instant it elapses.
-- Capacity is counted and then admitted, and across nodes those are not one
-  atomic step, so N nodes creating instances at once can over-admit by at
-  most N-1 against the configured `max_instances`. Each node's own count is
-  exact: both stores count exactly the records whose store deadline has not
-  passed, which is why an elapsed but still retained record is counted and a
-  record past the retention window is not.
+- Capacity is counted and then made room for, and across nodes those are
+  not one atomic step. N nodes creating instances at once may each evict, so
+  the count can dip below the configured `max_instances`, and a node whose
+  every removal lost to another node's creates anyway, so the count can sit
+  above it by at most N-1 until the next creation sheds the excess. Each
+  node's own count is exact: both stores count exactly the records whose
+  store deadline has not passed, which is why an elapsed but still retained
+  record is counted and a record past the retention window is not.
 - Reclamation of records past their store deadline is bounded to 64 per
   creating operation, on SQL and on Redis alike, the same number the
   in-memory reference store uses. A burst of more than 64 due deadlines
@@ -1432,7 +1446,9 @@ Each of these is ruled behaviour, not a defect.
   memory store reclaims its bounded batch and then answers with its own
   length, so once more than 64 deadlines are due at the same moment it
   counts the surplus elapsed records too and reaches configured capacity a
-  little sooner than a distributed tier would. The divergence is invisible
+  little sooner than a distributed tier would. It offers those records as
+  eviction candidates too, soonest first, so the eviction that follows
+  reclaims one rather than taking a live instance. The divergence is invisible
   below that bound and was not aligned on purpose: an exact live count on
   the memory store is a full scan on every mount, which is the cost the
   bounded reclaim exists to avoid.

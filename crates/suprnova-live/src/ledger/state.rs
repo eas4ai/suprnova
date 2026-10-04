@@ -153,6 +153,21 @@ fn lease_elapsed(record: &InstanceRecord, now: UnixMillis) -> bool {
     )
 }
 
+/// Whether an action is running against the record: it is alive, and its
+/// pending claim's lease has not run out.
+///
+/// A full ledger evicts such a record only when it has no other choice.
+/// Removing it would let the running action commit its host effects and then
+/// fail to record its outcome, so the browser would see a failed action that
+/// in fact took effect.
+pub(crate) fn claim_in_flight(record: &InstanceRecord, now: UnixMillis) -> bool {
+    record.expires_at > now
+        && matches!(
+            &record.phase,
+            InstancePhase::Pending(pending) if pending.lease_expires_at > now
+        )
+}
+
 /// Terminally consumes a pending claim whose lease elapsed, reporting whether
 /// it did.
 fn expire_pending(record: &mut InstanceRecord, now: UnixMillis) -> bool {

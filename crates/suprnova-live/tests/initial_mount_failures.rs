@@ -289,7 +289,7 @@ async fn expired_context_and_executable_mount_metadata_fail_before_publication()
 }
 
 #[tokio::test]
-async fn oversized_inert_metadata_and_ledger_capacity_fail_without_output() {
+async fn oversized_inert_metadata_and_a_ledger_refusal_fail_without_output() {
     let flags = MountFlags::new([("label", "x".repeat(256))])
         .expect("flag shape is valid before service byte budget");
     let control = FixtureControl::new(FailurePoint::None);
@@ -313,25 +313,13 @@ async fn oversized_inert_metadata_and_ledger_capacity_fail_without_output() {
     assert_eq!(error.kind(), MountErrorKind::MetadataTooLarge);
     assert!(control.values().is_empty());
 
-    let capacity_control = FixtureControl::new(FailurePoint::None);
-    let clock = Arc::new(ManualClock::new(1_000));
-    let ledger = memory_ledger(clock.clone(), 1);
-    let context = trusted_context();
-    ledger
-        .mount_instance(MountInstanceRecord::new(
-            context.scope().clone(),
-            InstanceId::from_bytes(&component_support::bytes::<16>(0x70))
-                .expect("occupied identity"),
-            metadata().contract_digest().clone(),
-            Revision::new(0),
-            UnixMillis::new(2_000),
-        ))
-        .await
-        .expect("fill ledger capacity");
+    let refusal_control = FixtureControl::new(FailurePoint::None);
     let service = service(
-        capacity_control.clone(),
-        clock,
-        ledger,
+        refusal_control.clone(),
+        Arc::new(ManualClock::new(1_000)),
+        Arc::new(RefusingLedger {
+            kind: LedgerErrorKind::ProviderUnavailable,
+        }),
         Arc::new(SequenceGenerator::new(0x20)),
         limits(3, 8_192),
     );
@@ -339,17 +327,76 @@ async fn oversized_inert_metadata_and_ledger_capacity_fail_without_output() {
     let error = service
         .mount(
             &mut document,
-            request("capacity", MountFlags::empty()),
-            &context,
+            request("refused", MountFlags::empty()),
+            &trusted_context(),
         )
         .await
         .expect_err("ledger rejection prevents publication");
     assert_eq!(error.kind(), MountErrorKind::LedgerRejected);
-    assert_eq!(error.ledger_kind(), Some(LedgerErrorKind::CapacityExceeded));
     assert_eq!(
-        capacity_control.values().last(),
+        error.ledger_kind(),
+        Some(LedgerErrorKind::ProviderUnavailable)
+    );
+    assert_eq!(
+        refusal_control.values().last(),
         Some(&"teardown"),
         "complete lifecycle precedes the atomic ledger write"
+    );
+}
+
+#[tokio::test]
+async fn a_full_ledger_evicts_its_oldest_instance_and_the_mount_publishes() {
+    let control = FixtureControl::new(FailurePoint::None);
+    let clock = Arc::new(ManualClock::new(1_000));
+    let ledger = memory_ledger(clock.clone(), 1);
+    let context = trusted_context();
+    let occupant =
+        InstanceId::from_bytes(&component_support::bytes::<16>(0x70)).expect("occupied identity");
+    ledger
+        .mount_instance(MountInstanceRecord::new(
+            context.scope().clone(),
+            occupant.clone(),
+            metadata().contract_digest().clone(),
+            Revision::new(0),
+            UnixMillis::new(2_000),
+        ))
+        .await
+        .expect("fill ledger capacity");
+    let service = service(
+        control.clone(),
+        clock,
+        ledger.clone(),
+        Arc::new(SequenceGenerator::new(0x20)),
+        limits(3, 8_192),
+    );
+    let mut document = DocumentMountScope::new();
+
+    service
+        .mount(
+            &mut document,
+            request("evicting", MountFlags::empty()),
+            &context,
+        )
+        .await
+        .expect("a full ledger never refuses a page");
+
+    assert!(
+        ledger
+            .inspect(context.scope(), &occupant)
+            .expect("ledger inspection")
+            .is_none(),
+        "the instance that expires soonest made room"
+    );
+    assert!(
+        ledger
+            .inspect(
+                context.scope(),
+                &InstanceId::from_bytes(&component_support::bytes::<16>(0x20))
+                    .expect("mounted identity"),
+            )
+            .expect("ledger inspection")
+            .is_some(),
+        "the new mount holds authority"
     );
 }
 
