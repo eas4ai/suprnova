@@ -8,6 +8,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`Lang::reload`.** `Lang::reload().await` reloads the translation
+  catalogs and, when their text changed, makes RenderCache pages built from
+  the old translations miss; dev hot reload does the same. Call it from a
+  deploy hook instead of `Translator::reload`, which left cached pages in
+  the old language until their TTL. This landed after the `v3.1.0` tag.
 - **Action directives pass arguments.** `live:click="remove(42)"` and
   `live:click="rename('draft', true)"` send literal arguments to the
   action's parameters in declared order; before, every action directive
@@ -580,8 +585,38 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `DynNotification` gains `as_any`, with a default. This landed after the
   `v3.1.0` tag.
 
+- **`build_docs` refuses chapters that would overwrite each other.** Two
+  chapters with the same file name, or one named `catalog.md`, now fail
+  with the new `ContentError::DuplicateChapterSlug` or
+  `ContentError::ReservedChapterSlug`, naming the files, so an exhaustive
+  `match` on `ContentError` needs the two arms. The same file listed twice
+  is still allowed. This landed after the `v3.1.0` tag.
+
 ### Fixed
 
+- **Localization.** `Accept-Language` negotiation honours q-values:
+  `en;q=0.1, fr` picks `fr`, and a language sent with `q=0` is never
+  chosen. `DATETIME()` formats in the catalog's own locale. A catalog edit
+  saved during a reload is picked up by the next one. `Lang::has` is false
+  for a message that has only attributes, matching `Lang::get`. A Fluent
+  term and a message with the same name both resolve on the server, as in
+  the browser. This landed after the `v3.1.0` tag.
+- **Logging.** A custom driver's failed write or flush, and a file channel
+  that cannot flush (a full disk), are reported once on stderr instead of
+  dropping lines silently. `LogChannel::stack([...]).level(...)` filters
+  every channel the stack lists. A refused second `init_subscriber` or
+  `init_telemetry` no longer changes the live file format or the default
+  channel. `Log::forget_channel` after rotation reopens the file in every
+  stack that lists the channel. A default stack with several stdout
+  channels writes an event when any of them keeps its level. Nested spans
+  that share a field name log the inner value in the message and the
+  context. This landed after the `v3.1.0` tag.
+- **Markdown heading ids are unique, and process output keeps its
+  characters.** A heading titled like a numbered duplicate (`Overview 2`)
+  no longer shares an anchor with a repeated `Overview`. Streamed process
+  output no longer drops a character split across reads after an invalid
+  byte, and `wait_until` sees a final incomplete character. This landed
+  after the `v3.1.0` tag.
 - **Payments, mail, notifications and queues.** `PhoneNumber` and
   `CountryCode` validate when deserialized, where invalid values were
   accepted and `digits()` could panic. `MailFake::assert_not_outgoing`
