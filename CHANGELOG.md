@@ -414,6 +414,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **Live field and argument names must be ASCII and at most 128 bytes**,
+  and a view-visible field named `component` is a compile error. Such
+  names used to panic at registration or fail later. This landed after the
+  `v3.1.0` tag.
 - **Cron steps count from the first value.** `*/N` in the day-of-month and
   month fields counts from 1, as cron and Laravel do, so `*/2` means odd
   days and schedules using it shift; the timezone display now agrees with
@@ -700,6 +704,35 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Generated routes and types, Inertia props and JSON:API.**
+  `generate-types --routes` applies `group!` path and name prefixes, gives
+  each repeated-handler alias its own helper, percent-encodes path values
+  like `route()`, and uses serde's input keys in request interfaces;
+  helpers for a second route of one handler get a new params interface
+  name. An SSR exclusion glob such as `**/foo/*` matches where `**` spans a
+  repeated literal. The redirect back for an empty Inertia response keeps
+  the handler's cookies, security headers and error report. Replacing a
+  lazy prop drops its `?include=` gate, a later dotted prop wins over an
+  earlier lazy parent, and `App::inertia_shared("users.0.name")` reads into
+  shared lists. A JSON-style `inertia_response!` prop that fails to
+  serialize returns an error instead of panicking. JSON:API documents no
+  longer repeat primary resources in `included`, an empty collection
+  refuses unknown includes with 400, a requested include always returns an
+  `included` array, and error pointers are escaped per RFC 6901. `i128` and
+  `u128` route-parameter fields in Data DTOs extract instead of answering
+  422, and DTOs with route-parameter fields compile without a direct `url`
+  dependency. Live route intents can target resource routes, and `route()`
+  and `try_route()` fill a catch-all `{*rest}` by the name `rest`, keeping
+  its slashes. Numeric `expect!` matchers fail on NaN and other unordered
+  values. Schema dump and load accept every TLS parameter spelling the
+  application's connection accepts and pass the Postgres password through
+  `password=`. The `Idempotency::remember` example key includes the
+  authenticated user. Live component names, views and action text that
+  mention development crate names compile, action arguments named `target`
+  or `request` no longer break generated code, and `#[session]` Live fields
+  load from and persist to the visitor's session once the action's outcome
+  is accepted (they need `SessionMiddleware`). This landed after the
+  `v3.1.0` tag.
 - **Workers, the console and process lifecycle.** Queue, schedule and
   workflow workers, the `queue:*` commands and console commands boot the
   `#[injectable]` and `#[service]` inventory, so a job or command that
@@ -1282,6 +1315,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **Input-only relationships stay out of JSON:API output.** A relationship
+  marked `#[data(input_only, allow_include)]` was linked and includable in
+  responses; it is now never sent. This landed after the `v3.1.0` tag.
 - **The environment is written only where that is sound.** `Config::init`
   and `config::load_dotenv` refuse to write the process environment inside
   a Tokio runtime or after `#[suprnova::main]` loaded it, where another
