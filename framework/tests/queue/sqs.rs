@@ -685,6 +685,44 @@ async fn flush_on_clear_deletes_the_stored_payloads() {
     );
 }
 
+/// Two queues with one name, in two accounts (or regions), overflowing onto
+/// one disk. Clearing one must not delete the payloads of the other, whose
+/// messages still point at them.
+#[tokio::test]
+async fn flush_on_clear_keeps_the_payloads_of_a_same_named_queue_elsewhere() {
+    let first = "https://sqs.us-east-1.amazonaws.com/111111111111/default";
+    let second = "https://sqs.us-east-1.amazonaws.com/222222222222/default";
+    let _env = lock_env_async().await;
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    let fake = FakeSqs::start(&[first, second]).await;
+    configure(&fake);
+    let _storage = overflow_on();
+    set_env("SQS_OVERFLOW_FLUSH_ON_CLEAR", Some("true"));
+    set_env("SQS_PREFIX", None);
+    set_env("SQS_QUEUE", Some(first));
+    let cleared = driver();
+    set_env("SQS_QUEUE", Some(second));
+    let other = driver();
+
+    cleared.push(large_envelope()).await.unwrap();
+    let sent = large_envelope();
+    other.push(sent.clone()).await.unwrap();
+    assert_eq!(stored_payloads().await, 2);
+
+    cleared.clear().await.unwrap();
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "only the cleared queue's payload is gone"
+    );
+    let reservation = other
+        .pop(VISIBILITY)
+        .await
+        .expect("the other queue's job can still be read")
+        .expect("and it is there");
+    assert_eq!(reservation.envelope.payload, sent.payload);
+}
+
 #[tokio::test]
 async fn clear_keeps_the_stored_payloads_without_flush_on_clear() {
     let (_env, _restore, _fake) = setup!("default");

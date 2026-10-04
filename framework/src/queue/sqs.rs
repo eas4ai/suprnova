@@ -69,6 +69,10 @@
 //! left on the disk, and so is one whose send was refused after an earlier
 //! try timed out or met a fault of the service: that try may have left a
 //! message in the queue.
+//!
+//! The payloads of a queue live under `sqs-payloads/<name>-<digest>/`, where
+//! the digest is of the whole queue URL, so same-named queues in different
+//! accounts or regions never share a directory.
 
 use crate::error::FrameworkError;
 use crate::filesystem::Storage;
@@ -1372,10 +1376,16 @@ fn delay_secs(available_at: DateTime<Utc>) -> u64 {
 }
 
 /// A directory name for the queue at `queue_url`: its last path segment,
-/// with anything but letters, digits, `-` and `_` replaced.
+/// with anything but letters, digits, `-` and `_` replaced, then `-` and the
+/// first 16 hexadecimal digits of the SHA-256 of the whole URL.
+///
+/// The name alone is not the queue: two accounts, or two regions, each have
+/// a queue named `jobs`, and drivers for both can overflow onto one disk.
+/// `clear` with `flush_on_clear` deletes this directory, so it must hold the
+/// payloads of this queue and of no other.
 fn queue_key(queue_url: &str) -> String {
-    queue_url
-        .trim_end_matches('/')
+    let url = queue_url.trim_end_matches('/');
+    let name: String = url
         .rsplit('/')
         .next()
         .unwrap_or_default()
@@ -1387,7 +1397,9 @@ fn queue_key(queue_url: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    let digest = hex::encode(&Sha256::digest(url.as_bytes())[..8]);
+    format!("{name}-{digest}")
 }
 
 #[cfg(test)]
@@ -1410,12 +1422,31 @@ mod tests {
     }
 
     #[test]
-    fn the_queue_key_is_the_last_segment() {
-        assert_eq!(
-            queue_key("https://sqs.us-east-1.amazonaws.com/1/jobs-prod"),
-            "jobs-prod"
+    fn the_queue_key_is_the_last_segment_and_a_digest_of_the_url() {
+        let key = queue_key("https://sqs.us-east-1.amazonaws.com/1/jobs-prod");
+        assert!(key.starts_with("jobs-prod-"), "{key}");
+        assert_eq!(key.len(), "jobs-prod-".len() + 16, "{key}");
+        assert!(
+            queue_key("http://localhost:9324/queue/a.b").starts_with("a_b-"),
+            "the name keeps its sanitizing"
         );
-        assert_eq!(queue_key("http://localhost:9324/queue/a.b"), "a_b");
+        assert_eq!(
+            key,
+            queue_key("https://sqs.us-east-1.amazonaws.com/1/jobs-prod/"),
+            "a trailing slash is the same queue"
+        );
+    }
+
+    #[test]
+    fn same_named_queues_elsewhere_get_different_keys() {
+        let key = queue_key("https://sqs.us-east-1.amazonaws.com/1/jobs");
+        for other in [
+            "https://sqs.us-east-1.amazonaws.com/2/jobs",
+            "https://sqs.us-west-2.amazonaws.com/1/jobs",
+            "http://localhost:9324/queue/jobs",
+        ] {
+            assert_ne!(key, queue_key(other), "{other}");
+        }
     }
 
     #[test]
