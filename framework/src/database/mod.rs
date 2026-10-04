@@ -70,6 +70,10 @@ pub mod monitor;
 // Internal: hand-written SQL in the queue / notification stores renders its
 // placeholders through here so Postgres gets `$1` instead of `?`.
 pub(crate) mod placeholder;
+// Internal: the stores whose time columns differ by engine read and write
+// them through here, so a `TIMESTAMP` or `timestamptz` column reads like a
+// `DATETIME` or `timestamp` one.
+pub(crate) mod stored_datetime;
 
 /// Implementation details used by Suprnova's generated model code.
 ///

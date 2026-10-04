@@ -8,6 +8,8 @@ mod magnetar_auth;
 pub mod abuse_limiter;
 pub mod atomic_install;
 pub mod binding;
+#[cfg(feature = "testing")]
+pub mod ceremony_store;
 pub mod default_engine;
 pub mod factor_completion;
 pub mod framework_login;

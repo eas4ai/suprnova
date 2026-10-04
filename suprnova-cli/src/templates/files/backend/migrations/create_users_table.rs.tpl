@@ -28,19 +28,22 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Users::Password).string().not_null())
                     .col(ColumnDef::new(Users::RememberToken).string().null())
                     // Nullable verification timestamp. `NULL` = unverified;
-                    // `EmailVerification::verify` stamps it on consume. Paired
-                    // with the `email_verified_at: Option<DateTime<Utc>>` field
-                    // on the `User` model (AsOptionalDateTime cast).
-                    .col(ColumnDef::new(Users::EmailVerifiedAt).timestamp().null())
+                    // `EmailVerification::verify` stamps it on consume.
+                    //
+                    // The time columns are `.date_time()`: DATETIME on MySQL,
+                    // `timestamp` on Postgres, holding the UTC wall clock. The
+                    // `User` model reads and writes them through the
+                    // `AsNaiveDateTime` casts, the casts for that column type.
+                    .col(ColumnDef::new(Users::EmailVerifiedAt).date_time().null())
                     .col(
                         ColumnDef::new(Users::CreatedAt)
-                            .timestamp()
+                            .date_time()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
                     .col(
                         ColumnDef::new(Users::UpdatedAt)
-                            .timestamp()
+                            .date_time()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )

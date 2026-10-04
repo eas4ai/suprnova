@@ -21,14 +21,16 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(RememberTokens::UserId).string().not_null())
                     .col(ColumnDef::new(RememberTokens::Selector).string().not_null())
                     .col(ColumnDef::new(RememberTokens::TokenHash).string().not_null())
-                    .col(ColumnDef::new(RememberTokens::ExpiresAt).timestamp().not_null())
+                    // `.date_time()`: DATETIME on MySQL, which holds dates past
+                    // 2038-01-19 where TIMESTAMP stops. The framework writes UTC.
+                    .col(ColumnDef::new(RememberTokens::ExpiresAt).date_time().not_null())
                     .col(
                         ColumnDef::new(RememberTokens::CreatedAt)
-                            .timestamp()
+                            .date_time()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
-                    .col(ColumnDef::new(RememberTokens::LastUsedAt).timestamp().null())
+                    .col(ColumnDef::new(RememberTokens::LastUsedAt).date_time().null())
                     .to_owned(),
             )
             .await?;

@@ -927,6 +927,11 @@ use suprnova::{attrs, hashing, model, Authenticatable, FrameworkError};
     fillable = ["name", "email", "password"],
     hidden = ["password", "remember_token"],
     timestamps,
+    casts = {
+        email_verified_at = suprnova::AsOptionalNaiveDateTime,
+        created_at = suprnova::AsNaiveDateTime,
+        updated_at = suprnova::AsNaiveDateTime,
+    },
 )]
 pub struct User {
     pub id: i64,
@@ -934,6 +939,7 @@ pub struct User {
     pub email: String,
     pub password: String,
     pub remember_token: Option<String>,
+    pub email_verified_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -969,6 +975,19 @@ impl User {
 The `hidden = ["password", "remember_token"]` attribute makes the model
 skip those columns when serialising to JSON for the wire - they exist
 on the struct but never leak through an Inertia response.
+
+The generated users migration creates `email_verified_at`, `created_at` and
+`updated_at` with `.date_time()`: `DATETIME` on MySQL, `timestamp` on
+Postgres. The casts name the native casts for those columns; the default
+`AsDateTime` stores text, which those columns refuse (see
+[native date-time casts](eloquent-mutators.md#native-date-time-casts)).
+An application generated before this change has `.timestamp()` columns
+instead, `TIMESTAMP` on MySQL and MariaDB and `timestamp` on Postgres, and a
+`User` without casts, which fails to register or sign in a user on those
+engines. Give its three fields the casts for its columns:
+`AsNativeDateTime` and `AsOptionalNativeDateTime` on MySQL and MariaDB,
+`AsNaiveDateTime` and `AsOptionalNaiveDateTime` on Postgres. On SQLite
+either pair reads the rows the text cast wrote.
 
 ## Remember-me
 

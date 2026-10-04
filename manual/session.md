@@ -486,7 +486,7 @@ documents it):
 | `user_id` | VARCHAR NULL | authenticated user id (string, supports opaque ids) |
 | `payload` | TEXT | JSON-serialized session data map |
 | `csrf_token` | VARCHAR | per-session CSRF token |
-| `last_activity` | TIMESTAMP | last access; drives expiry + GC |
+| `last_activity` | DATETIME or TIMESTAMP (`timestamp` or `timestamptz` on Postgres) | last access, in UTC; drives expiry + GC |
 
 Two indexes ship alongside the table: `idx_sessions_user_id` (for
 `destroy_for_user`) and `idx_sessions_last_activity` (for `gc()`).
