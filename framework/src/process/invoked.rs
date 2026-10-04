@@ -213,26 +213,42 @@ pub(crate) struct Utf8Stream {
 }
 
 impl Utf8Stream {
+    /// The text `bytes` complete, each invalid sequence replaced with
+    /// U+FFFD as `String::from_utf8_lossy` replaces it. Only an incomplete
+    /// character at the very end is held back for the next chunk; one
+    /// after an invalid byte is not, so `[0xff, 0xe2]` then `[0x82, 0xac]`
+    /// is the replacement character and then the euro sign.
     pub(crate) fn push(&mut self, bytes: &[u8]) -> String {
         self.pending.extend_from_slice(bytes);
-        match std::str::from_utf8(&self.pending) {
-            Ok(text) => {
-                let text = text.to_owned();
-                self.pending.clear();
-                text
-            }
-            Err(error) if error.error_len().is_none() => {
-                let valid = error.valid_up_to();
-                let text = String::from_utf8_lossy(&self.pending[..valid]).into_owned();
-                self.pending.drain(..valid);
-                text
-            }
-            Err(_) => {
-                let text = String::from_utf8_lossy(&self.pending).into_owned();
-                self.pending.clear();
-                text
+        let mut text = String::new();
+        let mut start = 0;
+        while start < self.pending.len() {
+            let rest = &self.pending[start..];
+            match std::str::from_utf8(rest) {
+                Ok(valid) => {
+                    text.push_str(valid);
+                    start = self.pending.len();
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    text.push_str(&String::from_utf8_lossy(&rest[..valid]));
+                    match error.error_len() {
+                        Some(invalid) => {
+                            text.push('\u{fffd}');
+                            start += valid + invalid;
+                        }
+                        // The rest is the start of a character the next
+                        // chunk may finish.
+                        None => {
+                            start += valid;
+                            break;
+                        }
+                    }
+                }
             }
         }
+        self.pending.drain(..start);
+        text
     }
 
     pub(crate) fn finish(&mut self) -> String {
@@ -577,7 +593,12 @@ impl InvokedProcess {
                 return Err(real.finish_killed(&command, expiry).await);
             }
             if closed && real.status.is_some() {
-                return Ok(false);
+                // The output is complete, so a character it ended inside of
+                // is now a replacement character, which the output
+                // callback is offered too.
+                let (out, err) = (out_text.finish(), err_text.finish());
+                return Ok((!out.is_empty() && until(OutputKind::Out, &out))
+                    || (!err.is_empty() && until(OutputKind::Err, &err)));
             }
             tokio::select! {
                 status = real.child.wait(), if real.status.is_none() => {
@@ -983,6 +1004,39 @@ mod tests {
     fn invalid_bytes_are_replaced() {
         let mut stream = Utf8Stream::default();
         assert_eq!(stream.push(&[b'a', 0xff, b'b']), "a\u{fffd}b");
+    }
+
+    /// DRIVERS-048: an invalid byte before a character the chunk boundary
+    /// cut must not take the cut character's first bytes down with it.
+    #[test]
+    fn an_invalid_byte_does_not_discard_a_cut_character_after_it() {
+        let mut stream = Utf8Stream::default();
+        let mut text = stream.push(&[0xff, 0xe2]);
+        text.push_str(&stream.push(&[0x82, 0xac]));
+        text.push_str(&stream.finish());
+        assert_eq!(text, "\u{fffd}\u{20ac}");
+        assert_eq!(text, String::from_utf8_lossy(&[0xff, 0xe2, 0x82, 0xac]));
+    }
+
+    /// DRIVERS-048, the end-of-output half: `wait_until` offers the
+    /// replacement for an incomplete last character once the process has
+    /// closed its output, as the output callback does.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wait_until_offers_the_unfinished_last_character_at_the_end() {
+        let mut process = crate::process::Process::shell("printf 'a\\342'")
+            .start()
+            .unwrap();
+        let mut seen = String::new();
+        let matched = process
+            .wait_until(|_, text| {
+                seen.push_str(text);
+                seen.contains('\u{fffd}')
+            })
+            .await
+            .unwrap();
+        assert!(matched, "the replacement reached wait_until: {seen:?}");
+        assert_eq!(seen, "a\u{fffd}");
     }
 
     /// MEM-003: a process that is waited on to the end moves its settled
