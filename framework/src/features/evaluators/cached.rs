@@ -53,42 +53,79 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use featureflag::{context::Context, evaluator::Evaluator};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// When the cache size reaches this threshold, a single insert sweeps
-/// every entry whose age is `>= ttl` (i.e. would be re-fetched on its
-/// next read anyway). This caps the map's growth: without it, a
-/// high-cardinality or attacker-influenced `user_id`/`team` stream
-/// would accumulate one never-revisited entry per distinct scope and
-/// never reclaim them, since expired entries are only overwritten when
-/// their exact key is re-read.
+/// The most entries the cache holds. The insert that reaches it frees room
+/// down to half of it: first every entry whose age is `>= ttl` (it would be
+/// re-fetched on its next read anyway), then, if that is not enough, the
+/// oldest live entries.
 ///
-/// The sweep is amortised - it runs only on the miss/expiry insert
-/// path once the map has grown past the threshold, mirroring the
-/// brute-force dedup map's bounded eviction. Sized so a normally-scoped
-/// workload (a bounded set of users/teams) never trips it, while a
-/// pathological scope stream is held to roughly this many live entries
-/// plus whatever was inserted since the last sweep.
+/// Both halves matter. Dropping only expired entries could not bound a
+/// high-cardinality or attacker-influenced `user_id`/`team` stream whose
+/// entries are all still live, and a map stuck at the threshold was swept
+/// in full on every later miss. Freeing down to half means each sweep pays
+/// for many inserts, so the cost stays amortised. Evicting a live entry
+/// costs only a later re-evaluation, never a wrong answer. Sized so a
+/// normally-scoped workload (a bounded set of users/teams) never reaches it.
 const SWEEP_THRESHOLD: usize = 4096;
 
 /// TTL-cached wrapper around any [`Evaluator`].
 pub struct CachedEvaluator {
     inner: Arc<dyn Evaluator + Send + Sync>,
     ttl: Duration,
-    /// Key format: `"{feature}::u={user_id?}::t={team?}"`. Empty
-    /// segments encode "field absent in this context."
+    /// Keyed by the structured `(feature, user, team)` triple. A string
+    /// key made by joining the three was ambiguous: identity values are
+    /// unrestricted strings, so two different identities could join to the
+    /// same key and share one cached decision.
     ///
-    /// Growth is bounded by an opportunistic sweep on insert (see
-    /// [`SWEEP_THRESHOLD`]): once the map reaches the threshold, the
-    /// next insert drops every entry older than `ttl`, so an unbounded
-    /// stream of distinct scopes can't leak memory.
-    cache: DashMap<String, CacheEntry>,
+    /// Growth is bounded by [`SWEEP_THRESHOLD`]: the insert that reaches
+    /// it frees room down to half, expired entries first and the oldest
+    /// live ones after, so an unbounded stream of distinct scopes can't
+    /// leak memory.
+    cache: DashMap<CacheKey, CacheEntry>,
+    /// Set while one thread frees room, so concurrent misses do not all
+    /// walk the map at once; they insert and move on.
+    sweeping: AtomicBool,
+    /// How many times each feature has been invalidated. A miss records the
+    /// count it started under and its entry is served only while the count
+    /// is unchanged, so an evaluation that overlapped an invalidation cannot
+    /// leave its answer behind for later reads.
+    invalidations: DashMap<String, u64>,
+    /// How many times [`CachedEvaluator::invalidate_all`] has run; the same
+    /// guard for every feature at once.
+    invalidated_all: AtomicU64,
+    /// How many times the full-map sweep ran, for the tests that bound it.
+    #[cfg(test)]
+    sweeps: std::sync::atomic::AtomicUsize,
+}
+
+/// The scope one cached answer belongs to.
+///
+/// An absent field and an empty one stay distinct (`None` versus
+/// `Some("")`), because scope resolution treats them differently.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct CacheKey {
+    feature: String,
+    user: Option<String>,
+    team: Option<String>,
+}
+
+/// The invalidation counts a miss started under: the feature's own, and
+/// the [`CachedEvaluator::invalidate_all`] count.
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct Generation {
+    feature: u64,
+    all: u64,
 }
 
 #[derive(Copy, Clone)]
 struct CacheEntry {
     value: Option<bool>,
     inserted_at: Instant,
+    /// The invalidation counts in force when the evaluation that produced
+    /// this entry started.
+    generation: Generation,
     /// Which identity axes the inner evaluation that produced this entry
     /// consulted, replayed on every hit that serves it (fix round 7,
     /// finding 2).
@@ -112,6 +149,11 @@ impl CachedEvaluator {
             inner,
             ttl,
             cache: DashMap::new(),
+            invalidations: DashMap::new(),
+            invalidated_all: AtomicU64::new(0),
+            sweeping: AtomicBool::new(false),
+            #[cfg(test)]
+            sweeps: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -127,14 +169,58 @@ impl CachedEvaluator {
     /// mutates a flag, callers invalidate the corresponding cached
     /// entries so the next `is_enabled` re-reads the snapshot.
     pub fn invalidate(&self, feature: &str) {
-        let prefix = format!("{feature}::");
-        self.cache.retain(|key, _| !key.starts_with(&prefix));
+        // Count first, then drop. A miss that read the old count before
+        // this line still inserts afterwards, but under that old count, so
+        // no read serves it; a miss that reads the new count started after
+        // the caller's flag change and evaluates the new state.
+        *self.invalidations.entry(feature.to_string()).or_insert(0) += 1;
+        self.cache.retain(|key, _| key.feature != feature);
     }
 
     /// Drop every cached entry. Use sparingly - typically only on a
     /// bulk admin reload or in tests.
     pub fn invalidate_all(&self) {
+        // Same order and reason as `invalidate`.
+        self.invalidated_all.fetch_add(1, Ordering::SeqCst);
         self.cache.clear();
+    }
+
+    /// Shrink the map to at most half of [`SWEEP_THRESHOLD`]: drop expired
+    /// entries, then the oldest live ones if that was not enough.
+    fn make_room(&self, now: Instant) {
+        if self
+            .sweeping
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            // Another miss is already freeing room.
+            return;
+        }
+        #[cfg(test)]
+        self.sweeps.fetch_add(1, Ordering::Relaxed);
+
+        self.cache
+            .retain(|_, entry| now.duration_since(entry.inserted_at) < self.ttl);
+        let target = SWEEP_THRESHOLD / 2;
+        let mut ages: Vec<Instant> = self.cache.iter().map(|entry| entry.inserted_at).collect();
+        if ages.len() > target {
+            // The newest `target` entries survive. Entries that share the
+            // cut-off instant all go, which only frees a little more.
+            let excess = ages.len() - target;
+            let (_, cutoff, _) = ages.select_nth_unstable(excess - 1);
+            let cutoff = *cutoff;
+            self.cache.retain(|_, entry| entry.inserted_at > cutoff);
+        }
+
+        self.sweeping.store(false, Ordering::Release);
+    }
+
+    /// The invalidation counts in force for `feature` right now.
+    fn generation(&self, feature: &str) -> Generation {
+        Generation {
+            all: self.invalidated_all.load(Ordering::SeqCst),
+            feature: self.invalidations.get(feature).map_or(0, |count| *count),
+        }
     }
 
     /// Number of entries currently held. Useful for tests + admin
@@ -148,18 +234,20 @@ impl CachedEvaluator {
         self.cache.is_empty()
     }
 
-    fn cache_key(feature: &str, context: &Context) -> String {
+    fn cache_key(feature: &str, context: &Context) -> CacheKey {
         let user = context
             .iter()
             .find_map(|c| c.extensions().get::<UserIdField>())
-            .map(|field| field.as_str().to_string())
-            .unwrap_or_default();
+            .map(|field| field.as_str().to_string());
         let team = context
             .iter()
             .find_map(|c| c.extensions().get::<TeamField>())
-            .map(|field| field.as_str().to_string())
-            .unwrap_or_default();
-        format!("{feature}::u={user}::t={team}")
+            .map(|field| field.as_str().to_string());
+        CacheKey {
+            feature: feature.to_string(),
+            user,
+            team,
+        }
     }
 }
 
@@ -197,9 +285,11 @@ impl Evaluator for CachedEvaluator {
 
         let key = Self::cache_key(feature, context);
 
-        // Fast path: live entry.
+        // Fast path: live entry, produced under the invalidation counts in
+        // force now.
         if let Some(found) = self.cache.get(&key)
             && found.inserted_at.elapsed() < self.ttl
+            && found.generation == self.generation(feature)
         {
             let entry = *found;
             // Released before the replay below: nothing in
@@ -228,27 +318,31 @@ impl Evaluator for CachedEvaluator {
         // happen with no collector active at all, and either would make a
         // difference-based record store nothing where the flag genuinely is
         // identity-dependent.
+        //
+        // The generation is read before `inner` runs, so an invalidation
+        // that lands during the evaluation marks this answer stale.
+        let generation = self.generation(feature);
         let (value, identity) =
             capturing_identity_reads(|| self.inner.is_enabled(feature, context));
+        if generation != self.generation(feature) {
+            // Invalidated while evaluating: this answer may predate the
+            // change, so serve it to this caller only and cache nothing.
+            return value;
+        }
         let now = Instant::now();
         self.cache.insert(
             key,
             CacheEntry {
                 value,
                 inserted_at: now,
+                generation,
                 identity,
             },
         );
 
-        // Bounded-growth backstop: once the map crosses the threshold,
-        // drop every entry that is already past its TTL (those are
-        // dead weight - a read would re-fetch them anyway). This keeps
-        // a high-cardinality scope stream from growing the cache
-        // without bound. Amortised: it runs only on this insert path,
-        // and only after the size trips the threshold.
+        // Bounded-growth backstop; see `SWEEP_THRESHOLD`.
         if self.cache.len() >= SWEEP_THRESHOLD {
-            self.cache
-                .retain(|_, entry| now.duration_since(entry.inserted_at) < self.ttl);
+            self.make_room(now);
         }
 
         value
@@ -665,6 +759,183 @@ mod tests {
                 cached.len()
             );
         });
+    }
+
+    /// Inner evaluator that answers `true` for exactly one user id, and
+    /// translates both identity fields the way the database evaluator does.
+    struct OneUser(&'static str);
+
+    impl Evaluator for OneUser {
+        fn is_enabled(&self, _feature: &str, context: &Context) -> Option<bool> {
+            let user = context
+                .iter()
+                .find_map(|c| c.extensions().get::<UserIdField>())
+                .map(|field| field.as_str().to_string());
+            Some(user.as_deref() == Some(self.0))
+        }
+
+        fn on_new_context(
+            &self,
+            mut context: featureflag::context::ContextRef<'_>,
+            fields: featureflag::fields::Fields<'_>,
+        ) {
+            if let Some(id) = fields.get("user_id").and_then(|v| v.as_str()) {
+                context.extensions_mut().insert(UserIdField(id.to_string()));
+            }
+            if let Some(team) = fields.get("team").and_then(|v| v.as_str()) {
+                context.extensions_mut().insert(TeamField(team.to_string()));
+            }
+        }
+    }
+
+    /// DRIVERS-013: two identities whose user and team concatenate to the
+    /// same string get separate cache entries. The key used to be the string
+    /// `{feature}::u={user}::t={team}`, so `(a::t=b, c)` and `(a, b::t=c)`
+    /// shared one entry and the second read got the first one's answer.
+    #[test]
+    fn identities_that_concatenate_alike_never_share_an_entry() {
+        let inner = Arc::new(OneUser("a::t=b"));
+        let cached = Arc::new(CachedEvaluator::new(inner, Duration::from_secs(60)));
+
+        with_default(cached.clone(), || {
+            let first = featureflag::context! { user_id = "a::t=b", team = "c" };
+            assert_eq!(cached.is_enabled("flag", &first), Some(true));
+            let second = featureflag::context! { user_id = "a", team = "b::t=c" };
+            assert_eq!(
+                cached.is_enabled("flag", &second),
+                Some(false),
+                "user `a` in team `b::t=c` was served user `a::t=b`'s cached answer"
+            );
+        });
+        assert_eq!(cached.len(), 2, "two identities, two entries");
+    }
+
+    /// DRIVERS-013, the empty-string variant: a context with an empty team
+    /// and one with no team are different scopes and are cached apart.
+    #[test]
+    fn an_empty_identity_field_is_not_the_same_scope_as_an_absent_one() {
+        let inner = Arc::new(CountingEvaluator::new(Some(true)));
+        let cached = Arc::new(CachedEvaluator::new(inner.clone(), Duration::from_secs(60)));
+        let translator = Arc::new(OneUser(""));
+
+        with_default(translator, || {
+            let with_empty_team = featureflag::context! { user_id = "u", team = "" };
+            let without_team = featureflag::context! { user_id = "u" };
+            cached.is_enabled("flag", &with_empty_team);
+            cached.is_enabled("flag", &without_team);
+        });
+        assert_eq!(
+            inner.call_count(),
+            2,
+            "each scope reaches the inner evaluator once"
+        );
+        assert_eq!(cached.len(), 2);
+    }
+
+    /// Inner evaluator whose answer can be switched, and which can be held
+    /// in the middle of an evaluation after it has read the old answer.
+    struct Switchable {
+        enabled: std::sync::atomic::AtomicBool,
+        entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl Evaluator for Switchable {
+        fn is_enabled(&self, _feature: &str, _context: &Context) -> Option<bool> {
+            let answer = self.enabled.load(Ordering::SeqCst);
+            let entered = self
+                .entered
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
+            if let Some(entered) = entered {
+                let release = self
+                    .release
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take();
+                let _ = entered.send(());
+                if let Some(release) = release {
+                    let _ = release.recv();
+                }
+            }
+            Some(answer)
+        }
+    }
+
+    /// DRIVERS-014: an invalidation that lands while a miss is evaluating is
+    /// not undone when that miss finishes. The miss used to insert its answer
+    /// unconditionally, so a flag switched off by an admin stayed on in the
+    /// cache until the TTL ran out.
+    #[test]
+    fn an_invalidation_during_a_miss_is_not_undone_by_the_miss() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let inner = Arc::new(Switchable {
+            enabled: std::sync::atomic::AtomicBool::new(true),
+            entered: std::sync::Mutex::new(Some(entered_tx)),
+            release: std::sync::Mutex::new(Some(release_rx)),
+        });
+        let cached = Arc::new(CachedEvaluator::new(inner.clone(), Duration::from_secs(60)));
+
+        let reader = {
+            let cached = cached.clone();
+            std::thread::spawn(move || {
+                with_default(Arc::new(NoopEvaluator), || {
+                    cached.is_enabled("flag", &Context::root())
+                })
+            })
+        };
+        entered_rx
+            .recv()
+            .expect("the miss reached the inner evaluator");
+        // The admin path: change the flag, then invalidate, while the miss
+        // still holds the old answer.
+        inner.enabled.store(false, Ordering::SeqCst);
+        cached.invalidate("flag");
+        release_tx.send(()).expect("release the miss");
+        assert_eq!(
+            reader.join().expect("reader thread"),
+            Some(true),
+            "the overlapping read itself may return the old answer"
+        );
+
+        with_default(Arc::new(NoopEvaluator), || {
+            assert_eq!(
+                cached.is_enabled("flag", &Context::root()),
+                Some(false),
+                "a read after the invalidation returned must see the new answer"
+            );
+        });
+    }
+
+    /// DRIVERS-015: a stream of distinct live scopes cannot grow the map past
+    /// its bound, and reaching the bound does not sweep the whole map on
+    /// every insert. Both used to happen: the sweep removed only expired
+    /// entries, so a full map of live ones kept growing and kept being
+    /// swept once per miss.
+    #[test]
+    fn live_scopes_stay_bounded_and_the_sweep_stays_amortised() {
+        let inner = Arc::new(CountingEvaluator::new(Some(true)));
+        let cached = CachedEvaluator::new(inner, Duration::from_secs(60));
+        let inserts = 3 * SWEEP_THRESHOLD;
+
+        with_default(Arc::new(TranslatingEvaluator), || {
+            for i in 0..inserts {
+                cached.is_enabled("flag", &ctx_for_user(i));
+            }
+        });
+        assert!(
+            cached.len() <= SWEEP_THRESHOLD,
+            "{} live entries held against a bound of {SWEEP_THRESHOLD}",
+            cached.len()
+        );
+        let sweeps = cached.sweeps.load(Ordering::Relaxed);
+        assert!(
+            sweeps <= 2 * inserts / SWEEP_THRESHOLD + 1,
+            "{sweeps} full-map sweeps for {inserts} inserts; each sweep must free room \
+             for many inserts"
+        );
     }
 
     #[test]
