@@ -7,7 +7,7 @@ use suprnova::schema::Schema;
 
 use super::{cases, laravel_cases};
 
-async fn connect_sqlite() -> DatabaseConnection {
+pub(super) async fn connect_sqlite() -> DatabaseConnection {
     Database::connect("sqlite::memory:?mode=rwc")
         .await
         .expect("in-memory SQLite")

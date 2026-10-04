@@ -2690,6 +2690,15 @@ fn write_value_expression(
         return Ok("NULL".to_owned());
     }
 
+    // A `u64` column on Postgres or SQLite is a signed `BIGINT`: a value
+    // above `i64::MAX` is refused here, naming the column, rather than
+    // bound as text the database would refuse or, on SQLite, store as a
+    // rounded real.
+    if let Some(bound @ SeaValue::BigUnsigned(_)) = binder(column, value) {
+        crate::eloquent::casts::unsigned::refuse_unsigned_overflow(backend, "", column, &bound)
+            .map_err(|problem| FrameworkError::validation(column, problem))?;
+    }
+
     *position += 1;
     values.push(bind_value(backend, binder, column, value));
     placeholder(backend, *position)
@@ -2710,6 +2719,13 @@ fn bind_value(backend: DbBackend, binder: ColumnBinder, column: &str, value: &Va
     match binder(column, value) {
         Some(SeaValue::ChronoDateTimeUtc(Some(moment))) if backend == DbBackend::MySql => {
             SeaValue::from(moment.naive_utc())
+        }
+        // Only MySQL has unsigned columns. Elsewhere a comparison with a
+        // `u64` above `i64::MAX`, which no signed column holds, binds the
+        // value as text: sea-query-sqlx's binder would panic on the
+        // unsigned one.
+        Some(SeaValue::BigUnsigned(_)) if backend != DbBackend::MySql => {
+            json_value_to_sea_value(value)
         }
         Some(bound) => bound,
         None => json_value_to_sea_value(value),
@@ -5740,7 +5756,7 @@ where
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         rows.into_iter()
             .map(|r| {
-                r.try_get::<<M as EloquentModel>::Key>("", pk).map_err(|e| {
+                M::__decode_key(&r, pk).map_err(|e| {
                     FrameworkError::database(format!(
                         "model_keys: decoding {}.{pk} failed: {e}",
                         M::TABLE

@@ -58,6 +58,23 @@ fn table_read_then<E>(table: &str, error: E) -> E {
     error
 }
 
+/// Refuses a primary-key value the key column cannot hold on `backend`, a
+/// `u64` above `i64::MAX` on Postgres or SQLite, where the key is a signed
+/// `BIGINT`. sea-query-sqlx's binders there would panic on it, so a lookup
+/// by such a key is an error naming the column instead.
+fn refuse_unsigned_key(
+    backend: sea_orm::DbBackend,
+    table: &str,
+    column: &str,
+    key: &sea_orm::sea_query::ValueTuple,
+) -> Result<(), FrameworkError> {
+    for value in key.iter() {
+        crate::eloquent::casts::unsigned::refuse_unsigned_overflow(backend, table, column, value)
+            .map_err(|problem| FrameworkError::validation(column, problem))?;
+    }
+    Ok(())
+}
+
 /// The row state a model's relation cache keeps, when it has a cache.
 fn row_state(
     cache: Option<&crate::eloquent::relations::EagerLoadCache>,
@@ -367,8 +384,17 @@ where
         )
         .await
         .map_err(|error| table_read_then(Self::TABLE, error))?;
+        // The key is checked before SeaORM binds it, so it is filtered here
+        // the way `find_by_id` would filter it.
+        let key = sea_orm::sea_query::IntoValueTuple::into_value_tuple(id.into());
+        refuse_unsigned_key(exec.backend(), Self::TABLE, Self::primary_key_name(), &key)
+            .map_err(|error| table_read_then(Self::TABLE, error))?;
+        let mut select = Self::Entity::find();
+        for (column, value) in <Self::Entity as EntityTrait>::PrimaryKey::iter().zip(key) {
+            select = select.filter(column.into_column().eq(value));
+        }
         let row = exec
-            .select_one(Self::Entity::find_by_id(id))
+            .select_one(select)
             .await
             .map_err(|e| table_read_then(Self::TABLE, FrameworkError::database(e.to_string())))?;
         let hydrated = row
@@ -459,6 +485,15 @@ where
         )
         .await
         .map_err(|error| table_read_then(Self::TABLE, error))?;
+        for id in &id_vec {
+            refuse_unsigned_key(
+                exec.backend(),
+                Self::TABLE,
+                Self::primary_key_name(),
+                &sea_orm::sea_query::IntoValueTuple::into_value_tuple(id.clone()),
+            )
+            .map_err(|error| table_read_then(Self::TABLE, error))?;
+        }
         let rows = exec
             .select_all(Self::Entity::find().filter(pk.into_column().is_in(id_vec.clone())))
             .await

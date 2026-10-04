@@ -16,7 +16,7 @@ use serial_test::serial;
 
 use super::{cases, laravel_cases};
 
-async fn connect_postgres() -> DatabaseConnection {
+pub(super) async fn connect_postgres() -> DatabaseConnection {
     let url = std::env::var("PG_TEST_URL").expect("set PG_TEST_URL to a disposable Postgres");
     let mut options = ConnectOptions::new(url);
     options

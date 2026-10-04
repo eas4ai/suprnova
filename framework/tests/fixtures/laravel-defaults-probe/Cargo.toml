@@ -1,0 +1,52 @@
+# The package an application ported from Laravel would be: it sets both
+# `[package.metadata.suprnova]` tables, and its tests prove that
+# `#[suprnova::model]` and `#[suprnova::main]` read them (PAR-045). Only a
+# real package can carry `[package.metadata]`, which is why this is one.
+#
+# A separate Cargo workspace - its own `[workspace]` table stops the
+# repository workspace from absorbing it, so `cargo test --workspace` never
+# builds it, and its lockfile is its own - the same isolation
+# `testing-off-probe` uses. Run it from the repository root,
+# `cargo test --manifest-path framework/tests/fixtures/laravel-defaults-probe/Cargo.toml`,
+# so the root's cargo configuration gives it the repository's target
+# directory and the framework is not built twice. The database tests read
+# `PG_TEST_URL` and `MYSQL_TEST_URL`; `scripts/check-laravel-defaults.sh`
+# creates both databases.
+[workspace]
+resolver = "3"
+
+[package]
+name = "laravel-defaults-probe"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94.0"
+license = "MIT"
+publish = false
+
+[package.metadata.suprnova.model]
+datetime_cast = "native"
+
+[package.metadata.suprnova.schema]
+unsigned_ids = true
+
+# `#[suprnova::main]`, which installs `unsigned_ids` from the table above.
+[[bin]]
+name = "laravel-defaults-probe"
+path = "src/main.rs"
+
+# No `#[suprnova::main]`: installs the setting with the documented call.
+[[bin]]
+name = "documented-call-probe"
+path = "src/bin/documented_call.rs"
+
+# Neither: the columns a program gets without the setting.
+[[bin]]
+name = "plain-probe"
+path = "src/bin/plain.rs"
+
+[dependencies]
+suprnova = { path = "../../../../framework" }
+sea-orm-migration = { version = "2.0", default-features = false, features = ["runtime-tokio-rustls"] }
+serde = { version = "1", features = ["derive"] }
+# The model macro names `tokio`, as a `suprnova new` application has it.
+tokio = { version = "1", features = ["macros", "rt"] }

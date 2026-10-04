@@ -3,12 +3,17 @@
 //! Rust-shape (`Runtime`) and the on-disk shape (`Storage`) and
 //! provides the two conversion directions.
 //!
-//! ## Explicit-only
+//! ## Explicit, with two exceptions
 //!
-//! Per the spec's locked decisions there is no auto-detection from
-//! field types - a `Vec<String>` field does not implicitly become
-//! `AsArray<String>`. You must write
+//! A cast is declared per field - a `Vec<String>` field does not
+//! implicitly become `AsArray<String>`. You must write
 //! `#[suprnova::model(casts = { tags = AsArray<String> })]` (T7b).
+//!
+//! The model macro applies two casts by field type, because without them
+//! the field does not work at all: a `DateTime<Utc>` field gets
+//! [`AsDateTime`] (or the cast `[package.metadata.suprnova.model]`
+//! `datetime_cast` names), and a `u64` field gets [`AsU64`]. A field's own
+//! cast wins over both.
 //!
 //! T7a ships the 10 primitive + temporal casts. T7b adds structured +
 //! enum + `with_casts` runtime override. T7c adds encrypted +
@@ -19,6 +24,7 @@ pub mod enum_cast;
 pub mod primitive;
 pub mod structured;
 pub mod temporal;
+pub mod unsigned;
 
 use crate::error::FrameworkError;
 
@@ -135,6 +141,7 @@ pub use temporal::{
     AsDate, AsDateTime, AsImmutableDate, AsImmutableDateTime, AsNaiveDateTime, AsNativeDateTime,
     AsOptionalDateTime, AsOptionalNaiveDateTime, AsOptionalNativeDateTime, AsTimestamp,
 };
+pub use unsigned::{AsOptionalU64, AsU64, StoredU64};
 
 /// Construct a `HashMap<&'static str, Arc<dyn DynCast>>` for use with
 /// `Builder::with_casts(...)`. Each entry is `field_name = CastType`;

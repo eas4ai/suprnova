@@ -316,16 +316,46 @@ Schema::create(manager, "orders", |t| {
 
 A model reads an unsigned column into an unsigned field: the MySQL driver
 refuses to read an unsigned column into a signed type, `BIGINT UNSIGNED` into
-an `i64` included. `u64` reads any of them. Declare the key `u64`, and foreign
-key fields `u64` to match:
+an `i64` included. Declare the key `u64`, and the foreign key fields `u64` to
+match. The model takes its key type from the key field, so it needs no
+`key_type`:
 
 ```rust
-#[model(table = "orders", key_type = "u64")]
+#[model(table = "orders")]
 pub struct Order {
     pub id: u64,
     pub user_id: u64,
     pub status: String,
 }
+```
+
+The same model runs on Postgres and SQLite, which have no unsigned integers.
+There, `unsigned_id()` creates a signed `BIGINT`, and a `u64` field holds `0`
+to `i64::MAX` (9223372036854775807). Writing a larger value fails with an
+error that names the column, before anything reaches the database. A negative
+value in the column fails the read, also naming the column. The tests of a
+Laravel port can therefore run on the SQLite `TestDatabase`.
+
+To give every migration Laravel's keys without writing `unsigned_id()`, set
+`unsigned_ids` in the `Cargo.toml` of the package that builds your binary:
+
+```toml
+[package.metadata.suprnova.schema]
+unsigned_ids = true
+```
+
+`#[suprnova::main]` reads the setting when the binary is built and installs it
+before `main` runs. From then on, `id()` creates what `unsigned_id()` creates
+and `foreign_id()` what `unsigned_foreign_id()` creates, in every migration
+the binary runs, a library's migrations included. Postgres and SQLite columns
+don't change. A key or a value the framework doesn't know fails the build and
+names it. A new project carries the setting commented out in `Cargo.toml`.
+
+A program that runs migrations without `#[suprnova::main]` installs the same
+setting with one call before its first migration:
+
+```rust
+suprnova::schema::Schema::use_unsigned_ids();
 ```
 
 ### Modifiers
@@ -407,6 +437,11 @@ pub struct Order {
 
 Declare a single native column with `t.timestamp_tz("published_at")` or
 `t.date_time("published_at")` and the same casts.
+
+To give every model in a package one of these casts without naming it on each
+field, set `datetime_cast` in the package's `Cargo.toml`. For more
+information, see
+[Native date-time casts](eloquent-mutators.md#native-date-time-casts).
 
 ### Indexes and foreign keys
 
@@ -534,10 +569,12 @@ that an index, a unique constraint or a foreign key covers: record the
 
 ### Why Suprnova diverges
 
-- `id()` is a signed `BIGINT` on MySQL, where Laravel's is unsigned, because a
-  model's key is an `i64` by default and the MySQL driver will not read an
-  unsigned column into it. `unsigned_id()` and `unsigned_foreign_id()` create
-  Laravel's types.
+- `id()` is a signed `BIGINT` on MySQL by default, where Laravel's is
+  unsigned, because the MySQL driver reads a signed column only into a signed
+  field, and Rust code usually keys a row with `i64`. `unsigned_id()` and
+  `unsigned_foreign_id()` create Laravel's types one column at a time, and
+  `unsigned_ids = true` under `[package.metadata.suprnova.schema]` makes
+  `id()` and `foreign_id()` create them in every migration.
 - Laravel's `enum` is `enumeration`: `enum` is a Rust keyword.
 - `references(table, column)` takes both names in one call, where Laravel
   chains `->references($column)->on($table)`.

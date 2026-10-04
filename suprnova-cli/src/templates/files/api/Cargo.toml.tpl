@@ -11,6 +11,34 @@ rust-version = "1.94.0"
 # any work.
 default-run = "{package_name}"
 
+# Two settings that match Laravel's MySQL schema, for an application ported
+# from Laravel; uncomment them to use them. Neither converts a column: they
+# choose how models read columns and how migrations create them.
+#
+# datetime_cast picks the cast of every `DateTime<Utc>` model field that
+# names no cast of its own, `created_at`, `updated_at` and `deleted_at`
+# included. Without it the cast is `AsDateTime`, which needs a text column,
+# the kind the schema builder's `timestamps()` creates. Each value needs:
+#   "native"  `AsNativeDateTime`: a column with a time zone. `TIMESTAMP` (what
+#             Laravel's `timestamps()` creates on MySQL) or `DATETIME` on
+#             MySQL, `timestamp with time zone` on Postgres, text on SQLite.
+#   "naive"   `AsNaiveDateTime`: a column without one. `DATETIME` on MySQL,
+#             `timestamp` (what Laravel creates on Postgres) on Postgres,
+#             text on SQLite.
+# A field whose column differs names its own cast, which wins:
+#   #[model(casts = { published_at = suprnova::AsDateTime })]
+#
+# [package.metadata.suprnova.model]
+# datetime_cast = "native"
+#
+# unsigned_ids makes `id()` and `foreign_id()` create `BIGINT UNSIGNED` on
+# MySQL, as Laravel's `id()` and `foreignId()` do, in every migration this
+# package's binaries run. Postgres and SQLite have no unsigned integers and
+# keep `BIGINT`. Models read these keys into `u64` fields.
+#
+# [package.metadata.suprnova.schema]
+# unsigned_ids = true
+
 [[bin]]
 name = "{package_name}"
 path = "src/main.rs"

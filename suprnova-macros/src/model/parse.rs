@@ -8,6 +8,7 @@ use syn::{
 };
 
 use super::observers::ObserversAttr;
+use crate::package_settings::{DateTimeCast, ModelSettings};
 
 // ---- Relation declarations (Phase 10B T1) ---------------------------------
 //
@@ -195,7 +196,16 @@ pub struct ModelInput {
     pub item: ItemStruct,
     pub table: String,
     pub primary_key: String,
+    /// The key's Rust type: the primary-key field's declared type, which
+    /// a `key_type` attribute may only repeat. `i64` when the struct has
+    /// no such field, which `derive_seaorm` then refuses.
     pub key_type: Type,
+    /// A `key_type` spelled differently from the primary-key field's type,
+    /// with the attribute's span. The two may still name one type
+    /// (`Uuid` and `uuid::Uuid`), which only the compiler can tell, so the
+    /// expansion asserts it and the build fails, naming both, when they
+    /// differ.
+    pub key_type_check: Option<(Type, Span)>,
     pub auto_increment: bool,
     /// Phase 10C T12 - per-model default connection name. `None` means
     /// "use the default routing chain" (tx → on(name) → replica →
@@ -256,16 +266,52 @@ pub struct ModelInput {
 }
 
 impl ModelInput {
+    /// Parses with the defaults of a package that sets nothing in
+    /// `[package.metadata.suprnova.model]`.
+    #[cfg(test)]
     pub fn parse(attr: TokenStream, item: TokenStream) -> Result<Self> {
+        Self::parse_with(attr, item, &ModelSettings::default())
+    }
+
+    /// Parses the attribute and the struct under the package's settings.
+    pub fn parse_with(
+        attr: TokenStream,
+        item: TokenStream,
+        settings: &ModelSettings,
+    ) -> Result<Self> {
         let item: ItemStruct = parse2(item)?;
         let attrs = parse2::<ModelAttrs>(attr)?;
         let struct_name = item.ident.to_string();
 
         let table = attrs.table.unwrap_or_else(|| pluralize_snake(&struct_name));
         let primary_key = attrs.primary_key.unwrap_or_else(|| "id".to_string());
-        let key_type = attrs
-            .key_type
-            .unwrap_or_else(|| syn::parse_str("i64").expect("i64 parses"));
+        // The key type is the primary-key field's type. A `key_type` that
+        // repeats it changes nothing; one spelled otherwise is asserted
+        // equal by the expansion (see `key_type_check`).
+        let key_field_type = match &item.fields {
+            syn::Fields::Named(named) => named
+                .named
+                .iter()
+                .find(|field| {
+                    field
+                        .ident
+                        .as_ref()
+                        .is_some_and(|ident| ident == &primary_key)
+                })
+                .map(|field| field.ty.clone()),
+            _ => None,
+        };
+        let (key_type, key_type_check) = match (key_field_type, attrs.key_type) {
+            (Some(field), Some((declared, span))) => {
+                let check = (quote::quote!(#field).to_string()
+                    != quote::quote!(#declared).to_string())
+                .then_some((declared, span));
+                (field, check)
+            }
+            (Some(field), None) => (field, None),
+            (None, Some((declared, _))) => (declared, None),
+            (None, None) => (syn::parse_quote!(i64), None),
+        };
         let auto_increment = attrs.auto_increment.unwrap_or(true);
         // T12 - `connection = "..."` is optional. `None` means "fall
         // through to the default routing chain". We do NOT default to
@@ -478,6 +524,29 @@ impl ModelInput {
         // Fields with a user-declared cast are skipped - explicit
         // intent wins. So `casts = { foo = AsImmutableDateTime }`
         // overrides the default `AsDateTime` on that field.
+        //
+        // `[package.metadata.suprnova.model] datetime_cast` swaps the
+        // default for the native casts, for an application whose tables
+        // have native date-time columns (Laravel's).
+        //
+        // A field declared `u64` or `Option<u64>` gets `AsU64` /
+        // `AsOptionalU64` the same way, the primary key included: SeaORM
+        // reads a `u64` on MySQL only, and the cast's storage type reads
+        // the column on every database.
+        let (datetime_cast, optional_datetime_cast): (Type, Type) = match settings.datetime_cast {
+            DateTimeCast::Text => (
+                syn::parse_quote!(::suprnova::AsDateTime),
+                syn::parse_quote!(::suprnova::AsOptionalDateTime),
+            ),
+            DateTimeCast::Native => (
+                syn::parse_quote!(::suprnova::AsNativeDateTime),
+                syn::parse_quote!(::suprnova::AsOptionalNativeDateTime),
+            ),
+            DateTimeCast::Naive => (
+                syn::parse_quote!(::suprnova::AsNaiveDateTime),
+                syn::parse_quote!(::suprnova::AsOptionalNaiveDateTime),
+            ),
+        };
         let mut casts = attrs.casts.unwrap_or_default();
         if let syn::Fields::Named(named) = &item.fields {
             for field in &named.named {
@@ -486,15 +555,10 @@ impl ModelInput {
                     None => continue,
                 };
                 let name = ident.to_string();
-                // PK isn't cast-routed (see derive_seaorm.rs - PK
-                // fields keep their declared type), so even if a
-                // PK happened to be DateTime<Utc> the injection
-                // would be a no-op. Skipping explicitly clarifies
-                // intent. Same logic for the auto-injected
-                // `__eager` / `__pivot` fields the relations emitter
-                // adds - they're not database columns and never
-                // need a cast.
-                if name == primary_key || name == "__eager" || name == "__pivot" {
+                // The auto-injected `__eager` / `__pivot` fields the
+                // relations emitter adds are not database columns and
+                // never need a cast.
+                if name == "__eager" || name == "__pivot" {
                     continue;
                 }
                 if casts.iter().any(|(i, _)| i == &name) {
@@ -502,18 +566,28 @@ impl ModelInput {
                     // their intent wins.
                     continue;
                 }
+                match classify_unsigned(&field.ty) {
+                    UnsignedShape::Unsigned => {
+                        casts.push((ident.clone(), syn::parse_quote!(::suprnova::AsU64)));
+                        continue;
+                    }
+                    UnsignedShape::OptionalUnsigned => {
+                        casts.push((ident.clone(), syn::parse_quote!(::suprnova::AsOptionalU64)));
+                        continue;
+                    }
+                    UnsignedShape::Other => {}
+                }
+                // A date-time primary key keeps its declared type: the
+                // key's `Into<ValueType>` conversions are the field's own.
+                if name == primary_key {
+                    continue;
+                }
                 match classify_datetime(&field.ty) {
                     DateTimeShape::DateTime => {
-                        let ty: Type = syn::parse_str("::suprnova::AsDateTime").expect(
-                            "::suprnova::AsDateTime parses - Suprnova lib re-exports this type",
-                        );
-                        casts.push((ident.clone(), ty));
+                        casts.push((ident.clone(), datetime_cast.clone()));
                     }
                     DateTimeShape::OptionalDateTime => {
-                        let ty: Type = syn::parse_str("::suprnova::AsOptionalDateTime").expect(
-                            "::suprnova::AsOptionalDateTime parses - Suprnova lib re-exports this type",
-                        );
-                        casts.push((ident.clone(), ty));
+                        casts.push((ident.clone(), optional_datetime_cast.clone()));
                     }
                     DateTimeShape::Other => {}
                 }
@@ -525,6 +599,7 @@ impl ModelInput {
             table,
             primary_key,
             key_type,
+            key_type_check,
             auto_increment,
             connection,
             fillable: attrs.fillable,
@@ -671,6 +746,49 @@ fn classify_datetime(ty: &Type) -> DateTimeShape {
     }
 }
 
+/// Outcome of [`classify_unsigned`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnsignedShape {
+    /// `u64`.
+    Unsigned,
+    /// `Option<u64>`.
+    OptionalUnsigned,
+    /// Anything else.
+    Other,
+}
+
+/// Recognise `u64` and `Option<u64>`, also through `core::primitive::u64`
+/// and a qualified `Option`. A type alias is not seen through, as
+/// [`classify_datetime`] does not see through one.
+fn classify_unsigned(ty: &Type) -> UnsignedShape {
+    let Type::Path(path) = ty else {
+        return UnsignedShape::Other;
+    };
+    if path.qself.is_some() {
+        return UnsignedShape::Other;
+    }
+    let Some(last) = path.path.segments.last() else {
+        return UnsignedShape::Other;
+    };
+    if last.ident == "u64" && matches!(last.arguments, syn::PathArguments::None) {
+        return UnsignedShape::Unsigned;
+    }
+    if last.ident != "Option" {
+        return UnsignedShape::Other;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return UnsignedShape::Other;
+    };
+    match (args.args.len(), args.args.first()) {
+        (1, Some(syn::GenericArgument::Type(inner)))
+            if classify_unsigned(inner) == UnsignedShape::Unsigned =>
+        {
+            UnsignedShape::OptionalUnsigned
+        }
+        _ => UnsignedShape::Other,
+    }
+}
+
 /// Helper - convert `CamelCase` → `snake_case`.
 pub fn to_snake(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
@@ -712,7 +830,7 @@ fn pluralize_snake(struct_name: &str) -> String {
 struct ModelAttrs {
     table: Option<String>,
     primary_key: Option<String>,
-    key_type: Option<Type>,
+    key_type: Option<(Type, Span)>,
     auto_increment: Option<bool>,
     connection: Option<String>,
     fillable: Option<Vec<String>>,
@@ -758,12 +876,13 @@ impl Parse for ModelAttrs {
                     "primary_key" => out.primary_key = Some(input.parse::<LitStr>()?.value()),
                     "key_type" => {
                         let lit = input.parse::<LitStr>()?;
-                        out.key_type = Some(syn::parse_str::<Type>(&lit.value()).map_err(|e| {
+                        let ty = syn::parse_str::<Type>(&lit.value()).map_err(|e| {
                             syn::Error::new(
                                 lit.span(),
                                 format!("invalid `key_type` Rust type: {e}"),
                             )
-                        })?);
+                        })?;
+                        out.key_type = Some((ty, lit.span()));
                     }
                     "auto_increment" => out.auto_increment = Some(input.parse::<LitBool>()?.value),
                     "connection" => out.connection = Some(input.parse::<LitStr>()?.value()),
@@ -1856,12 +1975,113 @@ mod tests {
         }
     }
 
+    /// `datetime_cast` swaps the cast every `DateTime<Utc>` field without
+    /// its own gets, the managed timestamps included; a field's own cast
+    /// wins, and `u64` fields get the unsigned casts, the key included.
+    #[test]
+    fn package_settings_choose_the_datetime_cast_and_a_field_cast_wins() {
+        let item = quote! {
+            pub struct Post {
+                pub id: u64,
+                pub owner_id: Option<u64>,
+                pub created_at: DateTime<Utc>,
+                pub updated_at: DateTime<Utc>,
+                pub deleted_at: Option<DateTime<Utc>>,
+                pub legacy_at: DateTime<Utc>,
+            }
+        };
+        let cast_of = |input: &ModelInput, field: &str| {
+            let ty = input.cast_for_field(field).expect("a cast");
+            quote!(#ty).to_string().replace(' ', "")
+        };
+        for (datetime_cast, plain, optional) in [
+            (
+                DateTimeCast::Text,
+                "::suprnova::AsDateTime",
+                "::suprnova::AsOptionalDateTime",
+            ),
+            (
+                DateTimeCast::Native,
+                "::suprnova::AsNativeDateTime",
+                "::suprnova::AsOptionalNativeDateTime",
+            ),
+            (
+                DateTimeCast::Naive,
+                "::suprnova::AsNaiveDateTime",
+                "::suprnova::AsOptionalNaiveDateTime",
+            ),
+        ] {
+            let input = ModelInput::parse_with(
+                quote! { soft_deletes, casts = { legacy_at = AsTimestamp } },
+                item.clone(),
+                &ModelSettings { datetime_cast },
+            )
+            .unwrap();
+            assert_eq!(cast_of(&input, "created_at"), plain);
+            assert_eq!(cast_of(&input, "updated_at"), plain);
+            assert_eq!(cast_of(&input, "deleted_at"), optional);
+            assert_eq!(cast_of(&input, "legacy_at"), "AsTimestamp");
+            assert_eq!(cast_of(&input, "id"), "::suprnova::AsU64");
+            assert_eq!(cast_of(&input, "owner_id"), "::suprnova::AsOptionalU64");
+        }
+    }
+
+    #[test]
+    fn the_key_type_comes_from_the_primary_key_field() {
+        let input = ModelInput::parse(
+            quote! { primary_key = "code", auto_increment = false },
+            quote! { pub struct Country { pub code: String, pub name: String } },
+        )
+        .unwrap();
+        let key_type = &input.key_type;
+        assert_eq!(quote!(#key_type).to_string(), "String");
+        assert!(input.key_type_check.is_none());
+
+        let repeated = ModelInput::parse(
+            quote! { key_type = "u64" },
+            quote! { pub struct Order { pub id: u64 } },
+        )
+        .unwrap();
+        assert!(
+            repeated.key_type_check.is_none(),
+            "the same spelling needs no check"
+        );
+
+        let disagreeing = ModelInput::parse(
+            quote! { key_type = "i64" },
+            quote! { pub struct Order { pub id: u64 } },
+        )
+        .unwrap();
+        let (declared, _) = disagreeing.key_type_check.expect("a spelling to check");
+        assert_eq!(quote!(#declared).to_string(), "i64");
+        let key_type = &disagreeing.key_type;
+        assert_eq!(quote!(#key_type).to_string(), "u64");
+    }
+
+    #[test]
+    fn classify_unsigned_recognises_u64_and_its_option() {
+        for (source, shape) in [
+            ("u64", UnsignedShape::Unsigned),
+            ("core::primitive::u64", UnsignedShape::Unsigned),
+            ("Option<u64>", UnsignedShape::OptionalUnsigned),
+            ("std::option::Option<u64>", UnsignedShape::OptionalUnsigned),
+            ("i64", UnsignedShape::Other),
+            ("u32", UnsignedShape::Other),
+            ("Vec<u64>", UnsignedShape::Other),
+            ("Option<Option<u64>>", UnsignedShape::Other),
+        ] {
+            let ty: Type = syn::parse_str(source).unwrap();
+            assert_eq!(classify_unsigned(&ty), shape, "{source}");
+        }
+    }
+
     #[test]
     fn primary_key_with_datetime_type_skipped() {
         // A model with a DateTime PK is unusual but legal. The
         // auto-inject must skip the PK column even when its type
-        // would otherwise match - PKs are not cast-routed
-        // (derive_seaorm.rs keeps PK fields in their declared type).
+        // would otherwise match: the key's `Into<ValueType>`
+        // conversions are the field's own, so only a `u64` key is
+        // cast-routed.
         let input = ModelInput::parse(
             quote! { primary_key = "stamp", key_type = "chrono::DateTime<chrono::Utc>", auto_increment = false, timestamps = false },
             quote! {

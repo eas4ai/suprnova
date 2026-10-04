@@ -182,16 +182,25 @@ pub fn to_storage_arm(ident: &syn::Ident, cast_ty: Option<&Type>) -> TokenStream
 /// Generate the `am.<field> = ...` statement for
 /// `into_active_model_for_update`. Cast fields route through
 /// `Cast::to_storage` (fallible - propagated via `?`); non-cast
-/// fields use the existing `Set(self.<field>.clone())` shape. PK
-/// fields are emitted by the caller with `ActiveValue::Unchanged`
-/// before this arm runs.
+/// fields use the existing `Set(self.<field>.clone())` shape. The PK
+/// is `ActiveValue::Unchanged`, the `WHERE` of the update, stored
+/// through its cast when it has one (a `u64` key).
 pub fn active_model_update_stmt(
     ident: &syn::Ident,
     is_pk: bool,
     cast_ty: Option<&Type>,
 ) -> TokenStream {
     if is_pk {
-        quote! { am.#ident = ::suprnova::sea_orm::ActiveValue::Unchanged(self.#ident.clone()); }
+        match cast_ty {
+            Some(cast_ty) => quote! {
+                am.#ident = ::suprnova::sea_orm::ActiveValue::Unchanged(
+                    <#cast_ty as ::suprnova::eloquent::casts::Cast>::to_storage(&self.#ident)?
+                );
+            },
+            None => quote! {
+                am.#ident = ::suprnova::sea_orm::ActiveValue::Unchanged(self.#ident.clone());
+            },
+        }
     } else {
         match cast_ty {
             Some(cast_ty) => quote! {

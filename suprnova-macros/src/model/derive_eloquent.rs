@@ -517,6 +517,9 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let updated_at_col = &input.updated_at;
     let created_col_ident = quote::format_ident!("{}", input.created_at);
     let updated_col_ident = quote::format_ident!("{}", input.updated_at);
+    // The key of a touch's `UPDATE ... WHERE`, stored through its cast
+    // when it has one (a `u64` key).
+    let touch_key = casts::active_model_update_stmt(&pk_ident, true, input.cast_for_field(pk_name));
     let created_at_cast = input
         .cast_for_field(&input.created_at)
         .cloned()
@@ -747,7 +750,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     let now = ::suprnova::clock::now();
                     let mut am = <<#module_name::Entity as ::suprnova::EntityTrait>::ActiveModel
                         as ::core::default::Default>::default();
-                    am.#pk_ident = ::suprnova::sea_orm::ActiveValue::Unchanged(self.#pk_ident.clone());
+                    #touch_key
                     am.#updated_col_ident = ::suprnova::sea_orm::Set(
                         <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
                             #updated_touch_now,
@@ -813,6 +816,24 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         .cloned()
         .unwrap_or_else(|| syn::parse_quote!(::suprnova::AsOptionalDateTime));
     let key_type = &input.key_type;
+
+    // A key with a cast, a `u64` key, is read through the cast's storage
+    // type: SeaORM decodes a `u64` on MySQL only.
+    let decode_key_impl = match input.cast_for_field(pk_name) {
+        Some(cast_ty) => quote! {
+            fn __decode_key(
+                row: &::suprnova::sea_orm::QueryResult,
+                column: &str,
+            ) -> ::core::result::Result<Self::Key, ::suprnova::sea_orm::DbErr> {
+                let stored = row.try_get::<
+                    <#cast_ty as ::suprnova::eloquent::casts::Cast>::Storage,
+                >("", column)?;
+                <#cast_ty as ::suprnova::eloquent::casts::Cast>::from_storage(&stored)
+                    .map_err(|error| ::suprnova::sea_orm::DbErr::Type(error.to_string()))
+            }
+        },
+        None => quote! {},
+    };
 
     // The soft-delete filter is folded in by the builder when the query
     // runs, so the trait's own `query()` is already right for this model.
@@ -1229,6 +1250,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             const UPDATED_AT_COLUMN: &'static str = #updated_at_col;
             #updated_at_storage_impl
             #bind_column_impl
+            #decode_key_impl
 
             // Per-model default connection override. Lives on
             // `EloquentModel` (not the heavier `Model` trait) so
