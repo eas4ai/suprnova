@@ -168,18 +168,26 @@ rejected if that resolved path lies outside the canonical root, so an in-root
 symlink observed during validation cannot redirect a read, write, list, copy,
 or rename outside the disk.
 
-This is a canonicalize-then-operate guard, not descriptor-relative filesystem
-confinement. It assumes the disk root and its contents are trusted against
-concurrent mutation: an attacker who can replace directories or symlinks after
-validation but before the backend opens the path may win a time-of-check to
-time-of-use race. Use OS-level isolation or a dedicated filesystem when other
-principals can mutate the storage tree concurrently.
+A check followed by a syscall by pathname is a race. Someone who can rename
+entries inside the root could swap a checked directory for a symlink after the
+check and redirect the syscall. On Unix the local disk does not act by
+pathname. Every operation resolves its path one directory at a time, holds each
+directory open, and names the next component relative to it, opening each
+directory and the final entry with `O_NOFOLLOW`. Symlinks inside the root are
+still followed, but by that walk: a link whose target leaves the root is
+refused, and a symlink swapped in after the walk looked at a component fails
+the operation. A write is published with `renameat` or `linkat` relative to its
+held parent directory, so a directory swapped mid-upload cannot carry the
+upload out of the root. On other platforms the guard is a check followed by the
+operation; use OS-level isolation or a dedicated filesystem there when other
+principals can change the storage tree concurrently.
 
-Streaming writers, listers, and copiers perform this resolved-path check once,
-immediately before their first backend I/O. Validation is then fixed for that
-stream session so each chunk or item does not block on filesystem
-canonicalization. Copier and writer aborts always forward cleanup to their
-backends, even before activation or when validation can no longer complete.
+Streaming writers, listers, and copiers perform the resolved-path check once,
+immediately before their first backend I/O, so each chunk or item does not
+block on filesystem canonicalization. On Unix the directory-relative walk
+still runs at publish time, which is what keeps a long upload confined.
+Copier and writer aborts always forward cleanup to their backends, even before
+activation or when validation can no longer complete.
 
 ## The Laravel-shape disk surface
 
@@ -265,15 +273,24 @@ production backends.
 ### Pre-signed URLs
 
 ```rust,ignore
-let read_url   = disk.temporary_url("uploads/a.pdf", Duration::from_secs(900)).await?;
-let upload_url = disk.temporary_upload_url("uploads/new.pdf", Duration::from_secs(900)).await?;
+let read_url = disk.temporary_url("uploads/a.pdf", Duration::from_secs(900)).await?;
+let upload = disk.temporary_upload_url("uploads/new.pdf", Duration::from_secs(900)).await?;
+// upload.url, upload.method ("PUT"), upload.headers
 ```
 
-`temporary_url` and `temporary_upload_url` return the URL as a `String` for
-Laravel parity. They are backed by `Operator::presign_read` /
-`presign_write`, so they error with an `Unsupported` message on backends
-that do not implement presigning (the in-memory and local-filesystem
-drivers fall in this bucket; S3, Azure Blob, and GCS support it).
+`temporary_url` returns the URL as a `String`. `temporary_upload_url` returns
+a `TemporaryUploadUrl` with the URL, the HTTP method, and the headers the
+signature covers. Send the upload with that method and every one of those
+headers: some backends refuse an upload without them. Azure Blob requires
+`x-ms-blob-type`, and an S3 bucket set up for server-side encryption requires
+its encryption headers. The value serializes to
+`{ "url": .., "method": .., "headers": { .. } }`, so a handler can return it to
+the browser as JSON, the shape Laravel's `temporaryUploadUrl` returns.
+
+Both are backed by `Operator::presign_read` and `presign_write`, so they error
+with an `Unsupported` message on backends that do not implement presigning
+(the in-memory and local-filesystem drivers fall in this bucket; S3, Azure
+Blob, and GCS support it).
 
 ### Public URLs
 
@@ -631,16 +648,30 @@ warning if that delete fails rather than failing the read. Nothing sweeps a
 sibling left by a failed delete, a process that crashed, or a read future
 cancelled mid-promotion: those have to be removed by hand.
 
-A read that resolves from the fallback holds the object in memory until the
-promotion write completes, because promotion needs the whole object. That
-suits the tiering case a read-through disk is for. For very large cold
-objects, read the fallback disk directly or use
-[`copy_between_disks`](#cross-disk-streaming-copy) instead.
+A promoting read streams the cold object from the fallback into the primary,
+then answers from the primary. Nothing holds the whole object in memory, but
+the first read of a cold object waits for the whole transfer, even when it
+asks for a small range. A read that is not promoted fetches only the range it
+asked for: a read with `copy: false`, a versioned or conditional read, and the
+rest of a read whose promotion failed. A chunked read does not retry a failed
+promotion for every chunk. A fallback that answers a range with more bytes than
+the range holds, the way a server that ignores `Range` does, fails the read
+after one chunk instead of being read to the end.
 
 Laravel hands back the fallback's own stream when `copy` is `false` and
-buffers through `php://temp` when it is `true`. Suprnova instead narrows the
-fallback fetch to the requested range when `copy` is `false`, and buffers only
-on the promoting path where the whole object is needed anyway.
+buffers through `php://temp` when it is `true`. Suprnova narrows the fallback
+fetch to the requested range when nothing is promoted, and streams the
+promotion instead of buffering it.
+
+A delete or a move of a path that overlaps a promotion of the same path is not
+undone by it. Within one process, the promotion publishes only if no delete or
+move of its path ran after it started fetching; otherwise it discards its
+staged copy. Processes do not coordinate this, so a delete on one node can
+still race a promotion on another.
+
+A versioned or conditional read reaches the fallback even when the primary
+cannot express the version or condition. The primary's refusal applies only
+when the primary holds the object.
 
 Laravel's cross-fallback `copy` and `move` also buffer the source through
 `php://temp`. Suprnova streams it in 64 KiB chunks instead, because the
@@ -652,6 +683,11 @@ OpenDAL carries conditions on `copy` and `rename` that Flysystem has no
 equivalent for, so Suprnova has to decide what each one means when the source
 is only on the fallback: `if_not_exists` and a copy's source version are
 honored, and a copy's `if_match` is refused rather than dropped.
+
+Before it deletes anything, a move checks that the primary accepts the
+destination: a local primary's path guard refuses a destination outside its
+root or inside its staging directory, and a refused move leaves both disks as
+they were.
 
 Laravel deletes the fallback source after the move on both paths. Suprnova
 deletes it first when the primary holds the source, because the two orders

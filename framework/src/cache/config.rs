@@ -76,8 +76,9 @@ pub struct CacheConfig {
     /// Key prefix for all cache entries
     pub prefix: String,
     /// Default TTL in seconds (0 = no expiration). The facade applies
-    /// this to `Cache::put(None)` / `Cache::tags_put(None)`. `Cache::forever`
-    /// and `Cache::remember_forever` always bypass it.
+    /// this to `Cache::put(None)`, `Cache::remember(None)` and
+    /// `Cache::tags_put(None)`. `Cache::forever`, `Cache::remember_forever`
+    /// and `Cache::tags_forever` always bypass it.
     pub default_ttl: u64,
     /// Seconds between sweeps of the in-memory driver's expired entries
     /// (0 = no sweep). A read removes the expired entry it finds, but a

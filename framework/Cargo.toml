@@ -268,6 +268,13 @@ dhat = { version = "0.3", optional = true }
 # process leads, so what it started dies with it. The version suprnova-cli
 # already pins, so the lock gains nothing.
 nix = { version = "=0.31.3", default-features = false, features = ["process", "signal"] }
+# Directory-relative syscalls (`openat`, `renameat`, `linkat`, ...) for the
+# local disk, so a symlink swapped into a disk root cannot redirect an
+# operation out of it, and extended attributes on an open file for its user
+# metadata. Both are the versions opendal's `fs` service already brings, so
+# the lock gains nothing.
+rustix = { version = "1.1.4", optional = true, default-features = false, features = ["std", "fs"] }
+xattr = { version = "1.6.1", optional = true }
 
 [features]
 default = [
@@ -302,7 +309,7 @@ magnetar-oauth = [
 ]
 # Enables the OpenDAL-backed filesystem facade with the local, in-memory,
 # and S3 backends. Kept in the default set for backward compatibility.
-filesystem = ["dep:opendal"]
+filesystem = ["dep:opendal", "dep:rustix", "dep:xattr"]
 # Azure Blob Storage and Google Cloud Storage. Off by default, because
 # each drags `rsa` into the dependency graph and `rsa 0.9.x` carries
 # RUSTSEC-2023-0071 (the Marvin timing attack) with no fixed release

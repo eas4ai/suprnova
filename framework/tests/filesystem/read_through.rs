@@ -746,3 +746,39 @@ async fn a_promotion_carries_the_fallback_objects_content_metadata() {
     );
     assert_eq!(promoted.content_encoding(), Some("identity"));
 }
+
+/// DRIVERS-021: a move the primary's path guard refuses leaves the fallback
+/// copy where it was. The move used to delete the fallback copy first and
+/// only then ask the primary, so a refused destination still destroyed the
+/// cold copy.
+#[tokio::test]
+async fn a_move_the_primary_guard_refuses_leaves_the_fallback_copy_alone() {
+    let _guard = Storage::fake();
+    let _tmp = register_local_primary_pair();
+    let primary = Storage::disk("primary").expect("primary disk");
+    let fallback = Storage::disk("fallback").expect("fallback disk");
+    let assets = Storage::disk("assets").expect("read-through disk");
+    primary
+        .write("held.txt", "hot copy")
+        .await
+        .expect("seed the primary");
+    fallback
+        .write("held.txt", "cold copy")
+        .await
+        .expect("seed the fallback");
+
+    for destination in ["../outside.txt", ".suprnova-atomic/stolen.txt"] {
+        assets
+            .rename("held.txt", destination)
+            .await
+            .expect_err("the primary's guard refuses this destination");
+        assert!(
+            fallback.exists("held.txt").await.expect("exists answers"),
+            "a refused move to {destination} deleted the fallback copy"
+        );
+        assert!(
+            primary.exists("held.txt").await.expect("exists answers"),
+            "a refused move to {destination} must leave the primary source in place"
+        );
+    }
+}

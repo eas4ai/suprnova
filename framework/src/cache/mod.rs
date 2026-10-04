@@ -502,16 +502,25 @@ impl Cache {
 
     /// Get an item or store a default value forever
     ///
-    /// Same as `remember` but with no expiration. Inherits `remember`'s
-    /// non-atomic / stampede-prone semantics - see [`Cache::remember`]
-    /// for the lock-based mitigation.
+    /// Same as `remember` but with no expiration, whatever
+    /// `CACHE_DEFAULT_TTL` says. Inherits `remember`'s non-atomic /
+    /// stampede-prone semantics - see [`Cache::remember`] for the
+    /// lock-based mitigation.
     pub async fn remember_forever<T, F, Fut>(key: &str, default: F) -> Result<T, FrameworkError>
     where
         T: Serialize + DeserializeOwned,
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, FrameworkError>>,
     {
-        Self::remember(key, None, default).await
+        if let Some(cached) = Self::get::<T>(key).await? {
+            return Ok(cached);
+        }
+        let value = default().await?;
+        // Through `forever`, not `remember(key, None, ..)`: a `None` TTL on
+        // `put` means "the configured default", which would make this value
+        // expire after `CACHE_DEFAULT_TTL`.
+        Self::forever(key, &value).await?;
+        Ok(value)
     }
 
     /// Store a tagged value via the static facade.
@@ -519,6 +528,10 @@ impl Cache {
     /// The value is serialized to JSON and stored under `key`. Every tag in
     /// `tags` records this key so that a subsequent `Cache::flush_tags` call
     /// removes it.
+    ///
+    /// If `ttl` is `None`, the configured default TTL applies, exactly as it
+    /// does for [`Cache::put`]. Use [`Cache::tags_forever`] for a tagged
+    /// value that never expires.
     ///
     /// # Example
     ///
@@ -539,7 +552,35 @@ impl Cache {
         let store = Self::store()?;
         let json = serde_json::to_string(value)
             .map_err(|e| FrameworkError::internal(format!("Cache serialize error: {e}")))?;
-        store.tagged_put_raw(tags, key, &json, ttl).await
+        let effective_ttl = ttl.or_else(|| store.default_ttl());
+        store.tagged_put_raw(tags, key, &json, effective_ttl).await
+    }
+
+    /// Store a tagged value that never expires.
+    ///
+    /// The tagged counterpart of [`Cache::forever`]: it bypasses
+    /// `CACHE_DEFAULT_TTL`, and the value stays until it is forgotten,
+    /// overwritten, or flushed through one of its tags.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let settings = "theme=dark";
+    /// Cache::tags_forever(&["settings"], "settings:site", &settings).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn tags_forever<T: Serialize>(
+        tags: &[&str],
+        key: &str,
+        value: &T,
+    ) -> Result<(), FrameworkError> {
+        let store = Self::store()?;
+        let json = serde_json::to_string(value)
+            .map_err(|e| FrameworkError::internal(format!("Cache serialize error: {e}")))?;
+        // `None` reaches the store literally, which means no expiration.
+        store.tagged_put_raw(tags, key, &json, None).await
     }
 
     /// Remove every key that was stored under any of the given tags.

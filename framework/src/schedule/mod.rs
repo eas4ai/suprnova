@@ -165,16 +165,43 @@ fn check_single_server_locking(
     }
     Err(FrameworkError::internal(format!(
         "refusing to boot in production: {} task(s) request single-server \
-         execution ({}) but CACHE_DRIVER is memory or unset, so the election \
-         lock lives in this process's heap. Every replica would win its own \
-         election and run the task, which is what on_one_server() exists to \
-         prevent. Set CACHE_DRIVER=redis with REDIS_URL, or set {}=true to \
-         acknowledge per-process locking - which is only accurate if you run \
-         exactly one scheduler.",
+         execution ({}) but the bound cache store keeps its locks in this \
+         process (CACHE_DRIVER is memory or unset, or the application bound \
+         an in-memory store), so the election lock lives in this process's \
+         heap. Every replica would win its own election and run the task, \
+         which is what on_one_server() exists to prevent. Set \
+         CACHE_DRIVER=redis with REDIS_URL, or set {}=true to acknowledge \
+         per-process locking - which is only accurate if you run exactly one \
+         scheduler.",
         requesting.len(),
         requesting.join(", "),
         ALLOW_MEMORY_ONE_SERVER_ENV,
     )))
+}
+
+/// Whether a lock taken through the cache excludes other processes.
+///
+/// The bound store decides, because it is what [`Cache::lock`] actually
+/// locks through. `CACHE_DRIVER` is only what the bootstrap would have bound:
+/// an application can bind its own store, and a typed `CacheConfig` overrides
+/// the variable, so an in-memory store can sit behind `CACHE_DRIVER=redis`.
+/// The variable decides only when nothing is bound yet. There, unset defaults
+/// to memory, and an unparseable value falls back to memory too - both leave
+/// the lock per-process, so both count as "not shared".
+///
+/// [`Cache::lock`]: crate::cache::Cache::lock
+fn cache_is_shared(cache_driver_env: Option<String>) -> bool {
+    if let Ok(store) = crate::cache::Cache::store() {
+        return store.locks_are_shared();
+    }
+    matches!(
+        cache_driver_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(crate::cache::config::CacheDriver::parse),
+        Some(Ok(crate::cache::config::CacheDriver::Redis))
+    )
 }
 
 impl Schedule {
@@ -215,10 +242,11 @@ impl Schedule {
     /// cache cannot deliver.
     ///
     /// [`TaskBuilder::on_one_server`] elects one replica per tick with a
-    /// [`Cache::lock`]. Under `CACHE_DRIVER=memory` that lock lives in one
+    /// [`Cache::lock`]. With an in-memory cache store that lock lives in one
     /// process's heap, so every replica wins its own election and every
     /// replica runs the task - the exact outcome the call was written to
-    /// prevent, with nothing in the logs to say so.
+    /// prevent, with nothing in the logs to say so. The check asks the bound
+    /// store, not `CACHE_DRIVER`, because the store is what the lock uses.
     ///
     /// That is the same shape as the in-memory rate limiter, and it gets
     /// the same answer: a hard boot failure in production, an
@@ -231,25 +259,15 @@ impl Schedule {
     /// # Errors
     ///
     /// When `APP_ENV` is production, at least one task requests
-    /// single-server execution, `CACHE_DRIVER` is memory or unset, and
+    /// single-server execution, the bound cache store keeps its locks in
+    /// one process (see [`CacheStore::locks_are_shared`]), and
     /// `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION` is not truthy.
+    ///
+    /// [`CacheStore::locks_are_shared`]: crate::cache::CacheStore::locks_are_shared
     ///
     /// [`TaskBuilder::on_one_server`]: crate::schedule::TaskBuilder::on_one_server
     /// [`Cache::lock`]: crate::cache::Cache::lock
     pub fn validate_single_server_locking(&self) -> Result<(), FrameworkError> {
-        // Unset defaults to memory, and an unparseable value falls back to
-        // memory too - both leave the lock per-process, so both have to
-        // count as "not shared". Reading the raw var rather than the bound
-        // store keeps this independent of boot order.
-        let cache_is_shared = matches!(
-            std::env::var("CACHE_DRIVER")
-                .ok()
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .map(crate::cache::config::CacheDriver::parse),
-            Some(Ok(crate::cache::config::CacheDriver::Redis))
-        );
         check_single_server_locking(
             &self
                 .tasks
@@ -258,7 +276,7 @@ impl Schedule {
                 .map(|t| t.name.as_str())
                 .collect::<Vec<_>>(),
             crate::config::Environment::detect().is_production(),
-            cache_is_shared,
+            cache_is_shared(std::env::var("CACHE_DRIVER").ok()),
             crate::config::env::env_flag_enabled(ALLOW_MEMORY_ONE_SERVER_ENV),
         )
     }
@@ -1086,6 +1104,106 @@ mod tests {
     #[test]
     fn no_single_server_tasks_means_nothing_to_check() {
         assert!(check_single_server_locking(&[], true, false, false).is_ok());
+    }
+
+    /// A store that says its locks are shared passes, whatever
+    /// `CACHE_DRIVER` says: an application can bind its own shared store.
+    #[tokio::test]
+    async fn a_bound_store_that_shares_its_locks_counts_as_shared() {
+        struct SharedLocks(crate::cache::InMemoryCache);
+
+        #[async_trait::async_trait]
+        impl crate::cache::CacheStore for SharedLocks {
+            async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError> {
+                self.0.get_raw(key).await
+            }
+            async fn put_raw(
+                &self,
+                key: &str,
+                value: &str,
+                ttl: Option<std::time::Duration>,
+            ) -> Result<(), FrameworkError> {
+                self.0.put_raw(key, value, ttl).await
+            }
+            async fn has(&self, key: &str) -> Result<bool, FrameworkError> {
+                self.0.has(key).await
+            }
+            async fn forget(&self, key: &str) -> Result<bool, FrameworkError> {
+                self.0.forget(key).await
+            }
+            async fn flush(&self) -> Result<(), FrameworkError> {
+                self.0.flush().await
+            }
+            async fn increment(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+                self.0.increment(key, amount).await
+            }
+            async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+                self.0.decrement(key, amount).await
+            }
+            async fn tagged_put_raw(
+                &self,
+                tags: &[&str],
+                key: &str,
+                value: &str,
+                ttl: Option<std::time::Duration>,
+            ) -> Result<(), FrameworkError> {
+                self.0.tagged_put_raw(tags, key, value, ttl).await
+            }
+            async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError> {
+                self.0.flush_tags(tags).await
+            }
+            async fn acquire_lock(
+                &self,
+                key: &str,
+                ttl: std::time::Duration,
+            ) -> Result<Option<String>, FrameworkError> {
+                self.0.acquire_lock(key, ttl).await
+            }
+            async fn release_lock(&self, key: &str, token: &str) -> Result<bool, FrameworkError> {
+                self.0.release_lock(key, token).await
+            }
+            async fn refresh_lock(
+                &self,
+                key: &str,
+                token: &str,
+                ttl: std::time::Duration,
+            ) -> Result<bool, FrameworkError> {
+                self.0.refresh_lock(key, token, ttl).await
+            }
+            async fn touch(
+                &self,
+                key: &str,
+                ttl: std::time::Duration,
+            ) -> Result<bool, FrameworkError> {
+                self.0.touch(key, ttl).await
+            }
+            fn locks_are_shared(&self) -> bool {
+                true
+            }
+        }
+
+        let _scope = crate::testing::TestContainer::fake();
+        crate::testing::TestContainer::bind::<dyn crate::cache::CacheStore>(std::sync::Arc::new(
+            SharedLocks(crate::cache::InMemoryCache::new()),
+        ));
+        assert!(cache_is_shared(None));
+    }
+
+    /// ROOT-23: the guard asks the store the scheduler will actually lock
+    /// through. It used to trust `CACHE_DRIVER`, so an in-memory store the
+    /// application bound itself passed as shared whenever the variable said
+    /// `redis`, and every replica ran every single-server task.
+    #[tokio::test]
+    async fn a_bound_in_memory_store_is_not_shared_whatever_cache_driver_says() {
+        let _scope = crate::testing::TestContainer::fake();
+        crate::testing::TestContainer::bind::<dyn crate::cache::CacheStore>(std::sync::Arc::new(
+            crate::cache::InMemoryCache::new(),
+        ));
+        assert!(
+            !cache_is_shared(Some("redis".to_string())),
+            "the bound store keeps its locks in this process; CACHE_DRIVER=redis does not \
+             make them shared"
+        );
     }
 
     // -------------------------------------------------------------------------
