@@ -1455,3 +1455,47 @@ async fn a_failed_dispatch_cannot_clear_a_window_a_newer_one_armed_meanwhile() {
     );
     assert_eq!(SYNC_ORDER_LAST_REVISION.load(Ordering::SeqCst), 3);
 }
+
+#[derive(Serialize, Deserialize, Clone)]
+struct LongBurstJob;
+
+#[async_trait]
+impl Job for LongBurstJob {
+    fn job_name() -> &'static str {
+        "queue_debounce::LongBurstJob"
+    }
+    fn debounce_for() -> Option<Duration> {
+        Some(Duration::from_secs(5))
+    }
+    fn max_debounce_wait() -> Option<Duration> {
+        Some(Duration::from_secs(600))
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+/// DRIVERS-052: the first-dispatch stamp lived `max(window * 10, 300s)`, so a
+/// 600-second max wait outlasted it. A continuous burst renewed its owner
+/// token on every dispatch while the stamp expired and was re-created, and
+/// the forced run never came.
+#[tokio::test]
+#[serial]
+async fn the_first_dispatch_stamp_outlives_the_max_wait() {
+    let cache = Arc::new(ObservedCache::new(None));
+    let _container = TestContainer::fake();
+    TestContainer::bind::<dyn CacheStore>(cache.clone());
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Queue::push(LongBurstJob).await.expect("push");
+
+    let ttls = cache.stamp_ttls.lock().unwrap().clone();
+    assert_eq!(ttls.len(), 1, "the first dispatch stamps the burst");
+    let ttl = ttls[0].expect("the stamp has a TTL");
+    assert!(
+        ttl > Duration::from_secs(600),
+        "the stamp expires after {ttl:?}, before the 600-second max wait can be \
+         measured against it"
+    );
+}

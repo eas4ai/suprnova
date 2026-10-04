@@ -176,6 +176,12 @@ pub(crate) fn place(token: &str) -> Option<u64> {
 /// because a burst that just started has not been waiting). Clears the stamp on
 /// the branch that answers `true`, so the forced run starts a fresh window.
 /// Ports `DebounceLock::maxWaitExceeded`.
+///
+/// The stamp lives `max_wait` past the owner token's TTL. It is never
+/// refreshed, while the owner token is renewed by every dispatch, so a stamp
+/// living only the token's TTL expired before a long `max_wait` came due: the
+/// next dispatch re-stamped the burst as just started, and a continuous burst
+/// was deferred forever.
 async fn max_wait_exceeded(
     key: &str,
     ttl: Duration,
@@ -187,7 +193,7 @@ async fn max_wait_exceeded(
     let stamp_key = first_dispatched_key(key);
     let now = crate::clock::now().timestamp();
     let Some(first) = Cache::get::<i64>(&stamp_key).await? else {
-        Cache::put(&stamp_key, &now, Some(ttl)).await?;
+        Cache::put(&stamp_key, &now, Some(ttl.saturating_add(max_wait))).await?;
         return Ok(false);
     };
     if now.saturating_sub(first) >= max_wait.as_secs() as i64 {
