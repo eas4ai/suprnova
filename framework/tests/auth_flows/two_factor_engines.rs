@@ -84,41 +84,20 @@ async fn execute(conn: &DatabaseConnection, sql: &str) {
         .unwrap_or_else(|error| panic!("{sql}: {error}"));
 }
 
-/// Create the two-factor tables. PostgreSQL runs the framework migrations.
-/// On MySQL the credentials migration's TEXT primary key cannot be indexed,
-/// so that table is created by hand in the same shape, and the attempt
-/// migration runs as shipped.
-async fn create_tables(conn: &DatabaseConnection, engine: Engine) {
+/// Create the two-factor tables through the shipped framework migrations,
+/// on every engine.
+async fn create_tables(conn: &DatabaseConnection) {
     let manager = SchemaManager::new(conn);
-    match engine {
-        Engine::Postgres => {
-            if !manager
-                .has_table("two_factor_credentials")
-                .await
-                .expect("catalogue")
-            {
-                TwoFactorMigration.up(&manager).await.expect("credentials");
-                TwoFactorReplayMigration
-                    .up(&manager)
-                    .await
-                    .expect("replay column");
-            }
-        }
-        Engine::Mysql => {
-            execute(
-                conn,
-                "CREATE TABLE IF NOT EXISTS two_factor_credentials (\
-                    user_id VARCHAR(255) NOT NULL PRIMARY KEY, \
-                    secret TEXT NOT NULL, \
-                    confirmed_at TIMESTAMP NULL, \
-                    recovery_codes TEXT NULL, \
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
-                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
-                    last_used_timestep BIGINT NULL\
-                 )",
-            )
-            .await;
-        }
+    if !manager
+        .has_table("two_factor_credentials")
+        .await
+        .expect("catalogue")
+    {
+        TwoFactorMigration.up(&manager).await.expect("credentials");
+        TwoFactorReplayMigration
+            .up(&manager)
+            .await
+            .expect("replay column");
     }
     TwoFactorAttemptsMigration
         .up(&manager)
@@ -141,7 +120,7 @@ async fn enrolled(
         Crypt::init(EncryptionKey::generate());
     }
     let conn = connect(engine).await;
-    create_tables(&conn, engine).await;
+    create_tables(&conn).await;
     let guard = TestContainer::fake();
     TestContainer::singleton(DbConnection::from_raw(conn.clone()));
 
@@ -294,11 +273,23 @@ async fn a_correct_code_under_contention_is_accepted_once(engine: Engine) {
 /// already has it.
 async fn the_attempt_migration_runs_over_an_existing_table(engine: Engine) {
     let conn = connect(engine).await;
-    create_tables(&conn, engine).await;
+    create_tables(&conn).await;
     TwoFactorAttemptsMigration
         .up(&SchemaManager::new(&conn))
         .await
         .expect("a second run over the existing table and index succeeds");
+}
+
+/// The credentials migration runs over an existing credentials table, so an
+/// app that created the table before it registered the migration can still
+/// register it.
+async fn the_credentials_migration_runs_over_an_existing_table(engine: Engine) {
+    let conn = connect(engine).await;
+    create_tables(&conn).await;
+    TwoFactorMigration
+        .up(&SchemaManager::new(&conn))
+        .await
+        .expect("a second run over the existing table succeeds");
 }
 
 /// Without the attempt table every proof answers 503, and the log names
@@ -342,6 +333,13 @@ async fn postgres_the_attempt_migration_runs_over_an_existing_table() {
 #[tokio::test]
 #[serial]
 #[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_the_credentials_migration_runs_over_an_existing_table() {
+    the_credentials_migration_runs_over_an_existing_table(Engine::Postgres).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
 #[tracing_test::traced_test]
 async fn postgres_a_missing_attempt_table_logs_the_migration_to_add() {
     a_missing_attempt_table_logs_the_migration_to_add(Engine::Postgres).await;
@@ -367,6 +365,13 @@ async fn mysql_a_correct_code_under_contention_is_accepted_once() {
 #[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
 async fn mysql_the_attempt_migration_runs_over_an_existing_table() {
     the_attempt_migration_runs_over_an_existing_table(Engine::Mysql).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_the_credentials_migration_runs_over_an_existing_table() {
+    the_credentials_migration_runs_over_an_existing_table(Engine::Mysql).await;
 }
 
 #[tokio::test]

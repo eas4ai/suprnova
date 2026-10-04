@@ -645,8 +645,11 @@ impl TwoFactorUser for AppUser2fa<'_> {
 2FA state lives in the framework-owned `two_factor_credentials` table.
 Secrets and recovery codes are encrypted at rest with
 `crate::crypto::Crypt::encrypt_string`, which requires a process-global
-`EncryptionKey`. Apps opt into the schema by listing both migrations
+`EncryptionKey`. Apps opt into the schema by listing the three migrations
 in their `Migrator::migrations()` - see [Bootstrapping](#bootstrapping).
+The table is keyed by `user_id`, a `TEXT` column on PostgreSQL and SQLite.
+MySQL and MariaDB can't index a `TEXT` key, so there the column is
+`VARCHAR(255)`, and a user id longer than 255 characters can't enroll.
 
 ### Enroll, confirm, verify
 
