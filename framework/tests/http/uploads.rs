@@ -3,7 +3,8 @@
 //! Covers the `#[derive(MultipartRequest)]` extractor end-to-end:
 //! all six field shapes (file scalar/option/vec, text scalar/option/vec),
 //! byte-boundary short-circuit on oversize, magic-byte content sniffing,
-//! `authorize` and `after_validation` hooks.
+//! `authorize` and `after_validation` hooks. `multipart_validation` drives
+//! the field errors and the stage order through `handle_request`.
 use crate::common;
 
 use common::{build_multipart_body, request_from_multipart};
@@ -78,7 +79,15 @@ async fn derive_rejects_oversize_at_byte_boundary() {
         .await
         .err()
         .expect("oversize body should fail");
-    assert_eq!(err.status_code(), 413);
+    // A file over `MaxSize` is invalid input for that field, not a
+    // request-wide limit: a 422 under the field's name.
+    assert_eq!(err.status_code(), 422);
+    match err {
+        suprnova::FrameworkError::Validation(errors) => {
+            assert!(errors.errors.contains_key("avatar"), "{errors}");
+        }
+        other => panic!("expected a validation error, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -125,7 +134,7 @@ async fn derive_collects_array_uploads() {
 // but `Vec<UploadedFile<()>>` would accept unlimited part count within
 // budget. A client could send 100k 1-byte parts in a 25 MiB body. The
 // `#[field(name, max_count = N)]` attribute caps Vec growth during
-// parsing; the (N+1)-th part returns 422 immediately, before
+// parsing; the (N+1)-th part returns 413 immediately, before
 // allocating the extra `UploadedFile`.
 
 #[derive(MultipartRequest)]
@@ -145,7 +154,7 @@ async fn vec_count_cap_rejects_when_over_max() {
         .await
         .err()
         .expect("five parts must blow the max_count = 3 cap");
-    assert_eq!(err.status_code(), 422, "got error: {err:?}");
+    assert_eq!(err.status_code(), 413, "got error: {err:?}");
     assert!(
         err.to_string().contains("max_count"),
         "error message should mention max_count: {err}"
@@ -190,7 +199,7 @@ async fn text_vec_count_cap_rejects_when_over_max() {
         .await
         .err()
         .expect("six text parts must blow the max_count = 4 cap");
-    assert_eq!(err.status_code(), 422, "got error: {err:?}");
+    assert_eq!(err.status_code(), 413, "got error: {err:?}");
     assert!(
         err.to_string().contains("max_count"),
         "error message should mention max_count: {err}"
@@ -231,7 +240,8 @@ async fn derive_rejects_unparseable_text_field() {
         .await
         .err()
         .expect("unparseable text should fail FromStr");
-    assert_eq!(err.status_code(), 400);
+    // Invalid input for the field, not a malformed request.
+    assert_eq!(err.status_code(), 422);
 }
 
 // ── Hooks ──

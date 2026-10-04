@@ -47,6 +47,19 @@ validation-password-numbers = The { $field } field must contain at least one num
 validation-password-unverifiable = The { $field } could not be checked against known data leaks. Please try again.
 validation-password-uncompromised = The given { $field } has appeared in a data leak. Please choose a different { $field }.
 
+### Ids for multipart extraction (`#[derive(MultipartRequest)]`) and its
+### upload validators. `validation-format` is a text part that does not
+### parse as its field's type. `validation-max-file` takes `$max` in
+### kilobytes, as Laravel's `max` rule for files does, and
+### `validation-mimetypes` takes `$values`, the allowed types.
+
+validation-format = The { $field } field format is invalid.
+validation-file = The { $field } field must be a file.
+validation-string = The { $field } field must be a string.
+validation-max-file = The { $field } field must not be greater than { $max } kilobytes.
+validation-image = The { $field } field must be an image.
+validation-mimetypes = The { $field } field must be a file of type: { $values }.
+
 ### Ids for the `#[derive(Validate)]` path, whose failure codes are the
 ### validator crate's own vocabulary rather than the rule objects'.
 ### `length` and `range` report only the bounds that were configured, so
