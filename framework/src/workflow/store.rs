@@ -86,16 +86,45 @@ pub async fn get_workflow_record(id: i64) -> Result<workflows::Model, FrameworkE
         .ok_or_else(|| FrameworkError::internal("Workflow not found"))
 }
 
+/// `now` plus a lease of `lock_timeout`.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] naming the lease when no date can hold the
+/// end of it: the seconds overflow a chrono duration, or the sum runs past
+/// the dates the clock represents. The lease is configured or passed by a
+/// caller, so a value that large is an error, not a panic.
+fn lease_until(
+    now: chrono::NaiveDateTime,
+    lock_timeout: Duration,
+) -> Result<chrono::NaiveDateTime, FrameworkError> {
+    i64::try_from(lock_timeout.as_secs())
+        .ok()
+        .and_then(ChronoDuration::try_seconds)
+        .and_then(|lease| now.checked_add_signed(lease))
+        .ok_or_else(|| {
+            FrameworkError::internal(format!(
+                "workflow lock_timeout of {} seconds runs past the dates the clock can hold",
+                lock_timeout.as_secs()
+            ))
+        })
+}
+
 /// Mark workflow as running (used for tests or manual claim)
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] when `lock_timeout` runs past the dates the
+/// clock can hold, when the workflow does not exist, or when the database
+/// fails.
 pub async fn mark_running(
     id: i64,
     worker_id: &str,
     lock_timeout: Duration,
 ) -> Result<ClaimedWorkflow, FrameworkError> {
-    let db = DB::connection()?;
     let now = crate::clock::now().naive_utc();
-    let lock_until =
-        now + ChronoDuration::seconds(i64::try_from(lock_timeout.as_secs()).unwrap_or(i64::MAX));
+    let lock_until = lease_until(now, lock_timeout)?;
+    let db = DB::connection()?;
 
     let model = workflows::Entity::find_by_id(id)
         .one(db.inner())
@@ -341,8 +370,11 @@ pub(crate) async fn refresh_lock_if_owned_at(
     attempts: i32,
     now: chrono::NaiveDateTime,
 ) -> Result<bool, FrameworkError> {
-    let db = DB::connection()?;
+    // Checked on every backend, so a lease no date can hold is an error
+    // here, not a panic below or an interval Postgres refuses.
+    let worker_lease_until = lease_until(now, lock_timeout)?;
     let seconds = i64::try_from(lock_timeout.as_secs()).unwrap_or(i64::MAX);
+    let db = DB::connection()?;
     // PostgreSQL claims and reclaim checks use the database clock. Using a
     // worker timestamp here could immediately expire a successfully renewed
     // lease. The supplied clock remains the deterministic non-Postgres path.
@@ -353,10 +385,7 @@ pub(crate) async fn refresh_lock_if_owned_at(
             Expr::cust("NOW()"),
         )
     } else {
-        (
-            Expr::value(Some(now + ChronoDuration::seconds(seconds))),
-            Expr::value(now),
-        )
+        (Expr::value(Some(worker_lease_until)), Expr::value(now))
     };
 
     let result = workflows::Entity::update_many()

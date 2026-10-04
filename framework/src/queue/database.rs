@@ -488,8 +488,9 @@ impl DatabaseQueueDriver {
         attempts: AttemptPolicy,
         op: &'static str,
     ) -> Result<(), FrameworkError> {
-        let now = crate::clock::now().timestamp();
-        let new_available = now + delay.as_secs().min(i64::MAX as u64) as i64;
+        // Resolved before the transaction opens, so a delay no date can hold
+        // fails with the job still reserved instead of overflowing.
+        let new_available = crate::queue::driver::available_after(delay)?.timestamp();
 
         let txn = self
             .db

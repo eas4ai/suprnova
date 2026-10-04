@@ -364,6 +364,33 @@ async fn a_release_returns_the_job_with_the_same_attempts() {
     );
 }
 
+/// A nack or release delayed past every date the clock can hold is an
+/// error naming the delay, not a panic in the date arithmetic of the copy
+/// the driver sends, and not a copy available at once.
+#[tokio::test]
+async fn a_requeue_delay_too_long_for_a_date_is_an_error() {
+    let (_env, _restore, _fake) = setup!("default");
+    let driver = std::sync::Arc::new(driver());
+    let million_years = Duration::from_secs(1_000_000 * 365 * 86_400);
+    for delay in [million_years, Duration::MAX] {
+        driver.push(envelope(None)).await.unwrap();
+        let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+        let (nacking, token) = (driver.clone(), held.token.clone());
+        let nacked = tokio::spawn(async move { nacking.nack(&token, delay).await }).await;
+        let (releasing, token, running) =
+            (driver.clone(), held.token.clone(), held.envelope.clone());
+        let released =
+            tokio::spawn(async move { releasing.release(&token, &running, delay).await }).await;
+        for (call, outcome) in [("nack", &nacked), ("release", &released)] {
+            assert!(
+                matches!(outcome, Ok(Err(error)) if error.to_string().contains("delay")),
+                "a {call} delayed {delay:?} must return an error, got {outcome:?}"
+            );
+        }
+        driver.ack(&held.token).await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn size_reports_the_counts_sqs_keeps_and_clear_purges_the_queue() {
     let (_env, _restore, fake) = setup!("default");
