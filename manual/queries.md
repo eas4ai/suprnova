@@ -72,6 +72,14 @@ right-hand side, which covers `i64`, `String`, `&str`, `bool`, `f64`,
 `Option<T>`, `chrono::*`, `uuid::Uuid`, and `serde_json::Value` - every
 column type the backend understands.
 
+A `u64` compares as an integer. Postgres and SQLite have no unsigned
+integers, so no integer column there holds a `u64` above `i64::MAX`, and a
+comparison with one gets its answer without sending the value: `=`, `>`,
+`>=` and `where_in` match no row, and `<>`, `<`, `<=` and `where_not_in`
+match every row whose column is not NULL. That is the answer MySQL gives
+for rows that all hold smaller values. To compare a decimal or
+floating-point column with a large number, pass the value as that type.
+
 The rest of the `WHERE` vocabulary uses the Laravel names:
 
 ```rust
