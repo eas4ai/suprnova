@@ -17,7 +17,8 @@ use std::borrow::Cow;
 /// The names of the functions every catalog's bundle registers:
 /// Fluent's builtin `NUMBER()` and the framework's `DATETIME()`.
 /// fluent-bundle keeps functions in the same name map as messages and
-/// terms, so `fluent.rs` needs them to keep a term from shadowing one.
+/// terms, so `fluent.rs` needs them to keep a term or a message from
+/// shadowing one.
 pub(crate) const FUNCTION_NAMES: [&str; 2] = ["NUMBER", "DATETIME"];
 
 /// Register `DATETIME()` on `bundle`, the bundle of `locale`'s catalog.
@@ -34,16 +35,40 @@ pub(crate) fn register(
     bundle: &mut ConcurrentBundle,
     locale: &Locale,
 ) -> Result<(), FrameworkError> {
-    let locale = locale.clone();
-    bundle
-        .add_function("DATETIME", move |positional, named| {
-            datetime_function(&locale, positional, named)
-        })
-        .map_err(|e| {
-            FrameworkError::internal(format!(
-                "failed to register the DATETIME() Fluent function: {e}"
-            ))
-        })
+    register_as(bundle, locale, "DATETIME", "DATETIME")
+}
+
+/// Register `function`, one of [`FUNCTION_NAMES`], on `bundle` under `id`.
+///
+/// A catalog that defines a message named like a function takes that name
+/// in fluent-bundle's one name map, so `fluent.rs` compiles its calls to
+/// the function under an `id` nothing in the catalog uses, and registers
+/// the function under that `id` here as well.
+pub(crate) fn register_as(
+    bundle: &mut ConcurrentBundle,
+    locale: &Locale,
+    function: &str,
+    id: &str,
+) -> Result<(), FrameworkError> {
+    let added = match function {
+        "NUMBER" => bundle.add_function(id, fluent_bundle::builtins::NUMBER),
+        "DATETIME" => {
+            let locale = locale.clone();
+            bundle.add_function(id, move |positional, named| {
+                datetime_function(&locale, positional, named)
+            })
+        }
+        other => {
+            return Err(FrameworkError::internal(format!(
+                "`{other}` is not a Fluent function the framework registers"
+            )));
+        }
+    };
+    added.map_err(|e| {
+        FrameworkError::internal(format!(
+            "failed to register the {function}() Fluent function as `{id}`: {e}"
+        ))
+    })
 }
 
 /// The `DATETIME()` implementation.
