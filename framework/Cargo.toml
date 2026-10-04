@@ -205,10 +205,11 @@ zeroize = { version = "1.8.2", features = ["derive"] }
 comrak = { version = "0.52.0", default-features = false, features = ["syntect"] }
 ammonia = "4.1.4"
 
-# The image subsystem's backend: the pure-Rust OxideAV framework. Eight
-# crates rather than the `oxideav-meta` aggregator, because the framework
-# needs five still-image codecs, not a media framework (oxideav-meta's own
-# README says to skip it for subsets).
+# The image subsystem's backend: the pure-Rust OxideAV framework, and
+# zune-jpeg for decoding JPEG (see below). Eight OxideAV crates rather than
+# the `oxideav-meta` aggregator, because the framework needs five
+# still-image codecs, not a media framework (oxideav-meta's own README says
+# to skip it for subsets).
 #
 # Versions are pinned EXACTLY (`=0.x.y`, the `thiserror = "=2.0.18"`
 # precedent) because these are pre-1.0 crates from a fast-moving
@@ -218,6 +219,13 @@ ammonia = "4.1.4"
 # `oxideav-gif` is Apache-2.0; the other seven are MIT. Compatible, but it
 # is the one non-MIT crate in the set, so it is called out here rather
 # than discovered during a licence audit.
+#
+# `oxideav-gif` is 0.0.12 or later: 0.0.11 changed LZW code width one code
+# early on both sides, so it could not read GIFs other software writes and
+# other software could not read the GIFs it wrote. The driver uses it only
+# to write GIFs (its own `encode_rgba8`, hence no `registry` feature); it
+# decodes a GIF's first frame itself, so that decoding stops when the frame
+# is complete. See `media/oxideav/gif.rs`.
 #
 # `oxideav-io` is deliberately absent. Its open/save facade is the obvious
 # entry point and is unusable here: gif and webp register no demuxer or
@@ -230,8 +238,26 @@ oxideav-pixfmt = { version = "=0.1.7", optional = true }
 oxideav-mjpeg = { version = "=0.1.8", optional = true }
 oxideav-png = { version = "=0.1.8", optional = true }
 oxideav-webp = { version = "=0.2.3", optional = true }
-oxideav-gif = { version = "=0.0.11", optional = true }
+oxideav-gif = { version = "=0.0.12", optional = true, default-features = false }
 oxideav-bmp = { version = "=0.1.6", optional = true }
+# JPEG decoding, except lossless frames. oxideav-mjpeg (0.1.8 to 0.1.11)
+# refuses any frame of more than 64 Mi samples (width x height x
+# components), about 22 megapixels in colour, whatever the caller allows,
+# and decodes arithmetic-coded colour JPEGs to the wrong pixels. zune-jpeg
+# takes its size limits from the caller, so the framework's own limits
+# decide. The release candidate is pinned rather than 0.5.15 because 0.5.15
+# decodes a subsampled sequential JPEG coded one component a scan to the
+# wrong pixels and has no arithmetic decoder; 0.5.16-rc2 decodes both, with
+# the `arith` feature. oxideav-mjpeg still encodes, and still decodes
+# lossless JPEGs, which zune-jpeg reads but cannot decode. zune-jpeg is
+# MIT, Apache-2.0 or Zlib, at the user's choice. See `media/oxideav.rs`
+# and `media/oxideav/peak.rs`.
+zune-jpeg = { version = "=0.5.16-rc2", optional = true, features = ["arith"] }
+# The zlib inflater `oxideav-png` itself uses. The PNG decode inflates the
+# pixel data once first with a cap at the size the header declares, because
+# `oxideav-png` inflates without one. Pinned to the exact version
+# `oxideav-png` resolves to, so both passes run the same decoder.
+compcol = { version = "=0.6.10", optional = true, default-features = false, features = ["zlib"] }
 crypto_secretbox = "0.1.1"
 # Heap profiling behind `heap-profiling`; see `src/profiling.rs`. The
 # allocation tests also use it as a dev-dependency.
@@ -314,9 +340,10 @@ filesystem-gcs = ["filesystem", "opendal/services-gcs"]
 # A feature at all, rather than an unconditional dependency, because a
 # minimal profile (an API-only service that never touches pixels) otherwise
 # pays for five codec compiles it will never call. Turning `media` off
-# removes all eight crates from the tree; `scripts/check-feature-matrix.sh`
-# asserts exactly that.
+# removes the eight OxideAV crates and `compcol` from the tree;
+# `scripts/check-feature-matrix.sh` asserts exactly that.
 media = [
+    "dep:compcol",
     "dep:oxideav-core",
     "dep:oxideav-image-filter",
     "dep:oxideav-pixfmt",
@@ -325,6 +352,7 @@ media = [
     "dep:oxideav-webp",
     "dep:oxideav-gif",
     "dep:oxideav-bmp",
+    "dep:zune-jpeg",
 ]
 # Database drivers are shared by SeaORM, migrations, and Magnetar.
 database-sqlite = [
