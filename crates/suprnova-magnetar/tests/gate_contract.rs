@@ -245,7 +245,7 @@ fn assert_executable(relative: &str) {
 #[cfg(not(unix))]
 fn assert_executable(_relative: &str) {}
 
-const LIVE_TEST_INVOCATIONS: [&str; 14] = [
+const LIVE_TEST_INVOCATIONS: [&str; 20] = [
     "run_live_test test default_schema_backends postgres_default_schema_is_replay_safe",
     "run_live_test test default_schema_backends postgres_api_import_advances_the_default_user_sequence",
     "run_live_test test default_schema_backends mysql_default_schema_is_replay_safe",
@@ -257,12 +257,18 @@ const LIVE_TEST_INVOCATIONS: [&str; 14] = [
     "run_live_test test storage_tokens configured_mysql_target_is_required",
     "run_live_test test token_broker_concurrency two_pod_convergence_postgres",
     "run_live_test test token_broker_concurrency two_pod_convergence_mysql",
+    "run_live_test test two_factor_live postgres_parallel_wrong_second_factor_proofs_evaluate_at_most_the_threshold",
+    "run_live_test test two_factor_live postgres_a_correct_second_factor_proof_under_contention_is_accepted_once",
+    "run_live_test test two_factor_live postgres_a_password_success_does_not_clear_second_factor_failures",
+    "run_live_test test two_factor_live mysql_parallel_wrong_second_factor_proofs_evaluate_at_most_the_threshold",
+    "run_live_test test two_factor_live mysql_a_correct_second_factor_proof_under_contention_is_accepted_once",
+    "run_live_test test two_factor_live mysql_a_password_success_does_not_clear_second_factor_failures",
     "run_live_test lib _ migration::mysql_swap_tests::plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_barrier",
     "run_live_test lib _ migration::seaorm_upgrade_tests::postgres_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1",
     "run_live_test lib _ migration::seaorm_upgrade_tests::mysql_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1",
 ];
 
-const LIVE_TEST_LIVE_COMMANDS: [&str; 14] = [
+const LIVE_TEST_LIVE_COMMANDS: [&str; 20] = [
     "cargo test --test default_schema_backends --all-features postgres_default_schema_is_replay_safe -- --ignored --exact",
     "cargo test --test default_schema_backends --all-features postgres_api_import_advances_the_default_user_sequence -- --ignored --exact",
     "cargo test --test default_schema_backends --all-features mysql_default_schema_is_replay_safe -- --ignored --exact",
@@ -274,12 +280,18 @@ const LIVE_TEST_LIVE_COMMANDS: [&str; 14] = [
     "cargo test --test storage_tokens --all-features configured_mysql_target_is_required -- --ignored --exact",
     "cargo test --test token_broker_concurrency --all-features two_pod_convergence_postgres -- --ignored --exact",
     "cargo test --test token_broker_concurrency --all-features two_pod_convergence_mysql -- --ignored --exact",
+    "cargo test --test two_factor_live --all-features postgres_parallel_wrong_second_factor_proofs_evaluate_at_most_the_threshold -- --ignored --exact",
+    "cargo test --test two_factor_live --all-features postgres_a_correct_second_factor_proof_under_contention_is_accepted_once -- --ignored --exact",
+    "cargo test --test two_factor_live --all-features postgres_a_password_success_does_not_clear_second_factor_failures -- --ignored --exact",
+    "cargo test --test two_factor_live --all-features mysql_parallel_wrong_second_factor_proofs_evaluate_at_most_the_threshold -- --ignored --exact",
+    "cargo test --test two_factor_live --all-features mysql_a_correct_second_factor_proof_under_contention_is_accepted_once -- --ignored --exact",
+    "cargo test --test two_factor_live --all-features mysql_a_password_success_does_not_clear_second_factor_failures -- --ignored --exact",
     "cargo test --lib --all-features migration::mysql_swap_tests::plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_barrier -- --ignored --exact",
     "cargo test --lib --all-features migration::seaorm_upgrade_tests::postgres_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1 -- --ignored --exact",
     "cargo test --lib --all-features migration::seaorm_upgrade_tests::mysql_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1 -- --ignored --exact",
 ];
 
-const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 14] = [
+const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 20] = [
     (
         "tests/default_schema_backends.rs",
         "postgres_default_schema_is_replay_safe",
@@ -317,6 +329,30 @@ const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 14] = [
     (
         "tests/token_broker_concurrency.rs",
         "two_pod_convergence_mysql",
+    ),
+    (
+        "tests/two_factor_live.rs",
+        "postgres_parallel_wrong_second_factor_proofs_evaluate_at_most_the_threshold",
+    ),
+    (
+        "tests/two_factor_live.rs",
+        "postgres_a_correct_second_factor_proof_under_contention_is_accepted_once",
+    ),
+    (
+        "tests/two_factor_live.rs",
+        "postgres_a_password_success_does_not_clear_second_factor_failures",
+    ),
+    (
+        "tests/two_factor_live.rs",
+        "mysql_parallel_wrong_second_factor_proofs_evaluate_at_most_the_threshold",
+    ),
+    (
+        "tests/two_factor_live.rs",
+        "mysql_a_correct_second_factor_proof_under_contention_is_accepted_once",
+    ),
+    (
+        "tests/two_factor_live.rs",
+        "mysql_a_password_success_does_not_clear_second_factor_failures",
     ),
     (
         "src/migration/mysql_swap_tests.rs",
@@ -463,7 +499,7 @@ fn every_live_database_test_is_ignored_and_registered() {
         .collect::<Vec<_>>();
     assert_eq!(
         inventory, expected,
-        "source-discovered live database test inventory must remain the expected fourteen"
+        "source-discovered live database test inventory must remain the expected twenty"
     );
 
     let (output, invocations, directory) = run_live_gate_with_metadata(
