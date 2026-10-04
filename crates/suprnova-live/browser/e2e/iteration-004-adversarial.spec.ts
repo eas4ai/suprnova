@@ -17,6 +17,7 @@ interface Snapshot {
   readonly authorizations: readonly unknown[];
   readonly cspViolations: readonly string[];
   readonly errors: readonly string[];
+  readonly forwardedEnvelopes: number;
   readonly heldEnvelopes: number;
   readonly host: Readonly<{
     readonly active_physical_transports: number;
@@ -896,6 +897,11 @@ for (const format of ["esm", "classic"] as const) {
       "data-live-stream-state",
       "current",
     );
+    // The stream is current from the subscription acknowledgment, before the
+    // initial envelope sent with it has necessarily reached the runtime. A hold
+    // armed earlier takes that envelope, the emitted one then arrives as a gap,
+    // and the runtime starts a reconnect the retirement below has to race.
+    await expect.poll(async () => (await snapshot(page)).forwardedEnvelopes).toBe(1);
     await command(page, "holdNextEnvelope");
     await command(page, "emitNextEnvelope");
     await expect.poll(async () => (await snapshot(page)).heldEnvelopes).toBe(1);
