@@ -1582,8 +1582,14 @@ pub(crate) fn redis_db_from_url(url: &str) -> Result<u32, FrameworkError> {
     if path.is_empty() {
         return Ok(0);
     }
+    // The path is not repeated in the error. In a multi-node URI it runs
+    // into the next node's userinfo, and in a URI whose password holds an
+    // unescaped `/` it starts inside the password.
     path.parse::<u32>().map_err(|_| {
-        FrameworkError::internal(format!("redis URL selects a non-numeric database: {path}"))
+        FrameworkError::internal(
+            "redis URL selects a non-numeric database (the URL is not shown because it \
+             can carry credentials)",
+        )
     })
 }
 
@@ -2728,6 +2734,28 @@ mod tests {
             3
         );
         assert!(redis_db_from_url("redis://127.0.0.1:6379/nine").is_err());
+    }
+
+    /// IDENTITY-030: the database error does not repeat the URL's path.
+    /// In a multi-node URI the path runs into the next node's userinfo, and
+    /// in a URI whose password holds an unescaped `/` it starts inside the
+    /// password, so echoing it can print a credential.
+    #[test]
+    fn redis_db_from_url_error_does_not_echo_the_url() {
+        for url in [
+            "redis://user:first-pass@a.internal:6379/3,user:s3cr3t-pass@b.internal:6379/3",
+            "redis://user:s3cr/et-pass@host.internal:6379/3",
+        ] {
+            let message = redis_db_from_url(url)
+                .expect_err("the path is not a database number")
+                .to_string();
+            assert!(
+                message.contains("non-numeric database"),
+                "the error must still name the problem: {message}"
+            );
+            assert!(!message.contains("pass"), "credential leaked: {message}");
+            assert!(!message.contains("user"), "user leaked: {message}");
+        }
     }
 
     fn lifecycle_envelope() -> Envelope {

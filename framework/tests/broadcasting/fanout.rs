@@ -108,6 +108,45 @@ async fn publish_with_no_subscriber_is_silent() {
         .unwrap();
 }
 
+/// The error a failed connect returns, rendered both ways a caller can
+/// log it.
+async fn connect_error_text(streamer_uri: &str) -> String {
+    match SeaStreamerBroadcastHub::new(streamer_uri, "suprnova-test-credentials").await {
+        Ok(_) => panic!("a malformed streamer URI must not connect"),
+        Err(error) => format!("{error} / {error:?}"),
+    }
+}
+
+/// IDENTITY-030: a Redis fanout URI carries its password in the userinfo.
+/// When the URI does not parse, the connect error is logged and reported
+/// like any other, so it must not repeat the URI - neither the password
+/// nor the user.
+#[tokio::test]
+async fn invalid_streamer_uri_error_does_not_echo_credentials() {
+    // The authority does not parse: the port is not a number.
+    let text = connect_error_text("redis://app-user:s3cr3t-pass@redis.internal:notaport/0").await;
+    assert!(
+        text.contains("invalid streamer URI"),
+        "the error must still name the problem: {text}"
+    );
+    assert!(!text.contains("s3cr3t-pass"), "password leaked: {text}");
+    assert!(!text.contains("app-user"), "user leaked: {text}");
+
+    // Every node parses, but the database path does not: the path of a
+    // multi-node URI runs into the next node's userinfo.
+    let text = connect_error_text(
+        "redis://app-user:first-pass@a.internal:6379/3,app-user:s3cr3t-pass@b.internal:6379/3",
+    )
+    .await;
+    assert!(
+        text.contains("non-numeric database"),
+        "the error must still name the problem: {text}"
+    );
+    assert!(!text.contains("s3cr3t-pass"), "password leaked: {text}");
+    assert!(!text.contains("first-pass"), "password leaked: {text}");
+    assert!(!text.contains("app-user"), "user leaked: {text}");
+}
+
 /// Publishing to the reserved `__presence__` meta-channel (or any
 /// `__`-prefixed name) must be rejected at the publish boundary. The
 /// vulnerability the guard closes: a TaggedEnvelope serialised to the

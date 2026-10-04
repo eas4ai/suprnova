@@ -360,9 +360,13 @@ impl SeaStreamerBroadcastHub {
         loopback: bool,
         presence_ttl: std::time::Duration,
     ) -> Result<Self, FrameworkError> {
+        // The URI is not repeated in the error: a Redis URI carries its
+        // password in the userinfo, and this error is logged and reported
+        // like any other. The parse error names what is wrong without it.
         let uri = StreamerUri::from_str(streamer_uri).map_err(|e| {
             FrameworkError::internal(format!(
-                "SeaStreamerBroadcastHub: invalid streamer URI \"{streamer_uri}\": {e}"
+                "SeaStreamerBroadcastHub: invalid streamer URI: {e} \
+                 (the URI is not shown because it can carry credentials)"
             ))
         })?;
 
