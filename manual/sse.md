@@ -245,11 +245,14 @@ pub async fn stream_from_resume(req: Request) -> Response {
 }
 ```
 
-`sse::last_event_id(&Request) -> Option<String>` returns `None` when the
-header is absent OR when the value contains a NUL byte (per the WHATWG
-spec, NUL invalidates a last-event-id and the browser's parser would
-drop it). The returned `String` is otherwise opaque user input - parse
-it as your own cursor / sequence / offset before using it.
+`sse::last_event_id(&Request) -> Option<String>` returns any id
+`.with_id(...)` accepts, Unicode included: the browser sends the id as
+UTF-8, and the helper decodes it as UTF-8. It returns `None` when the
+header is absent, when its bytes are not UTF-8, or when the value
+contains a NUL byte (per the WHATWG spec, NUL invalidates a
+last-event-id and the browser's parser would drop it). The returned
+`String` is otherwise opaque user input - parse it as your own cursor /
+sequence / offset before using it.
 
 ## Domain-level errors
 
@@ -453,7 +456,7 @@ Suprnova treats SSE as a real subsystem rather than a one-off helper:
 | `.try_with_event(name)` / `.try_with_id(id)` | Fallible siblings - return `Err(FrameworkError::validation(...))` on CR / LF / NUL. Use when the value flows from user input and you want a 4xx instead of a silent strip. |
 | `.event()` / `.id()` / `.retry()` / `.payload()` / `.is_comment()` / `.comment_text()` | Accessors. `payload()` is named to avoid colliding with the `data` constructor. |
 | `SseEvent::to_wire()` | Serialize to `Bytes` in the SSE wire format. Public so tests and adapters can encode without crossing the response builder. |
-| `suprnova::sse::last_event_id(&Request) -> Option<String>` | Read the `Last-Event-ID` header. Returns `None` when absent OR when the value contains a NUL byte (WHATWG drops invalid ids). |
+| `suprnova::sse::last_event_id(&Request) -> Option<String>` | Read the `Last-Event-ID` header, decoded as UTF-8. Returns `None` when absent, when the bytes are not UTF-8, or when the value contains a NUL byte (WHATWG drops invalid ids). |
 | `suprnova::sse::last_event_id_from_value(Option<&str>)` | Pure helper exposing the same validation contract - unit-testable without building a `Request`. |
 | `HttpResponse::sse(stream)` | Build a streaming response from any `Stream<Item = SseEvent> + Send + Sync + 'static`. Sets `Content-Type`, `Cache-Control`, `Connection`, `X-Accel-Buffering`. |
 | `suprnova::sse::StreamedEvent` | One item pushed onto an `event_stream` - `{ event: String, data: serde_json::Value }`. |
