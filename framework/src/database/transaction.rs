@@ -767,38 +767,32 @@ impl ExecutorChoice {
     /// Execute a SeaORM-built `Select<E>` as a `COUNT(*)` and return the
     /// total matching row count. See [`Self::select_all`] for the
     /// observability contract.
+    ///
+    /// The statement is the one SeaORM's `PaginatorTrait::count` runs -
+    /// the SELECT without its ordering, wrapped in
+    /// `SELECT COUNT(*) AS num_items FROM (...)` - built here and run
+    /// through [`Self::query_one`], so an observer sees the COUNT that
+    /// ran, not the SELECT it was built from.
     #[doc(hidden)]
     pub async fn select_count<E>(&self, q: sea_orm::Select<E>) -> Result<u64, sea_orm::DbErr>
     where
         E: sea_orm::EntityTrait,
         E::Model: Send + Sync,
     {
-        use sea_orm::PaginatorTrait;
-        if super::events::is_dispatching() || !super::events::query_observation_active() {
-            return match self {
-                ExecutorChoice::Tx(t, _) => q.count(t.as_ref()).await,
-                ExecutorChoice::Pool(c, _) => q.count(c.inner()).await,
-            };
+        use sea_orm::QueryTrait;
+        use sea_orm::sea_query::{Expr, SelectStatement};
+
+        let mut inner = q.into_query();
+        inner.clear_order_by();
+        let count = SelectStatement::new()
+            .expr(Expr::cust("COUNT(*) AS num_items"))
+            .from_subquery(inner, "sub_query")
+            .to_owned();
+        let stmt = self.backend().build(&count);
+        match self.query_one(stmt).await? {
+            Some(row) => Ok(u64::try_from(row.try_get::<i64>("", "num_items")?).unwrap_or(0)),
+            None => Ok(0),
         }
-        let stmt = sea_orm::QueryTrait::build(&q, self.backend());
-        let (sql, bindings) = (stmt.sql.clone(), stmt_bindings_strings(&stmt));
-        let conn_name = self.connection_name().to_string();
-        let start = std::time::Instant::now();
-        let res = match self {
-            ExecutorChoice::Tx(t, _) => q.count(t.as_ref()).await,
-            ExecutorChoice::Pool(c, _) => q.count(c.inner()).await,
-        };
-        let elapsed = start.elapsed();
-        finish_query_event(
-            sql,
-            bindings,
-            elapsed,
-            super::events::ReadWriteType::Read,
-            conn_name,
-            &res,
-        )
-        .await;
-        res
     }
 
     /// Execute a prepared `Statement` that produces rows.
