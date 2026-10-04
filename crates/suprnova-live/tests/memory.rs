@@ -1,7 +1,9 @@
 //! Heap tests for the memory-footprint commitment (MEM-003) in the engine:
 //! each measures what one operation allocates, with dhat counting every
 //! allocation in this process. Every test holds one lock, so one profiler
-//! runs at a time; the mechanism runs each test in a process of its own.
+//! runs at a time, and each measurement keeps the fewest of several runs,
+//! because the harness's own threads allocate too under `cargo test`; the
+//! mechanism also runs each test in a process of its own.
 
 mod component_support;
 
@@ -39,13 +41,50 @@ use suprnova_live::view::{RenderLimits, ViewRenderer};
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
-async fn exclusive() -> tokio::sync::MutexGuard<'static, ()> {
-    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    LOCK.lock().await
+/// Serializes the heap tests. Each test takes this lock before anything
+/// else, before any runtime exists, so a test waiting its turn is parked
+/// rather than building a runtime while another measures; the pause after
+/// acquiring lets the harness finish reporting the test before.
+fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    guard
+}
+
+/// Runs an async measurement on a runtime built after [`exclusive`].
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime")
+        .block_on(future)
 }
 
 fn heap() -> dhat::HeapStats {
     dhat::HeapStats::get()
+}
+
+/// How many times each measurement is taken. dhat counts every allocation
+/// in the process, and under `cargo test` the harness and other tests'
+/// threads allocate while a measurement runs, which can only raise a count;
+/// the fewest of several runs is the operation's own cost.
+const ATTEMPTS: usize = 5;
+
+/// The fewest blocks and bytes `operation` allocates over [`ATTEMPTS`] runs.
+fn fewest(mut operation: impl FnMut()) -> (u64, u64) {
+    let mut blocks = u64::MAX;
+    let mut bytes = u64::MAX;
+    for _ in 0..ATTEMPTS {
+        let before = heap();
+        operation();
+        let after = heap();
+        blocks = blocks.min(after.total_blocks - before.total_blocks);
+        bytes = bytes.min(after.total_bytes - before.total_bytes);
+    }
+    (blocks, bytes)
 }
 
 fn mount_service() -> PrivateMountService {
@@ -106,21 +145,40 @@ async fn mount_cost(service: &PrivateMountService, key: &str, padding: usize) ->
     (used, output.metadata().signed_snapshot().len())
 }
 
+/// The fewest bytes a mount of `padding` allocates over [`ATTEMPTS`] mounts,
+/// each under its own document key, and the snapshot length it signs.
+async fn fewest_mount_cost(
+    service: &PrivateMountService,
+    key: &str,
+    padding: usize,
+) -> (u64, usize) {
+    let mut fewest = u64::MAX;
+    let mut length = 0;
+    for attempt in 0..ATTEMPTS {
+        let (used, signed) = mount_cost(service, &format!("{key}-{attempt}"), padding).await;
+        fewest = fewest.min(used);
+        length = signed;
+    }
+    (fewest, length)
+}
+
 /// MEM-003: a private mount does not copy the snapshot it signed: what it
 /// allocates grows with the snapshot by less than one more copy of it.
-#[tokio::test]
-async fn mem_audit_a_mount_does_not_copy_its_signed_snapshot() {
-    let _lock = exclusive().await;
-    let service = mount_service();
-    let _profiler = dhat::Profiler::builder().testing().build();
-    mount_cost(&service, "warm-up", 2_300).await;
-    let (small, small_len) = mount_cost(&service, "small", 2_300).await;
-    let (large, large_len) = mount_cost(&service, "large", 3_100).await;
-    let slope = (large - small) as f64 / (large_len - small_len) as f64;
-    assert!(
-        slope < MOUNT_BYTES_PER_SNAPSHOT_BYTE,
-        "a mount allocates {slope:.2} bytes per snapshot byte"
-    );
+#[test]
+fn mem_audit_a_mount_does_not_copy_its_signed_snapshot() {
+    let _lock = exclusive();
+    block_on(async {
+        let service = mount_service();
+        let _profiler = dhat::Profiler::builder().testing().build();
+        mount_cost(&service, "warm-up", 2_300).await;
+        let (small, small_len) = fewest_mount_cost(&service, "small", 2_300).await;
+        let (large, large_len) = fewest_mount_cost(&service, "large", 3_100).await;
+        let slope = (large - small) as f64 / (large_len - small_len) as f64;
+        assert!(
+            slope < MOUNT_BYTES_PER_SNAPSHOT_BYTE,
+            "a mount allocates {slope:.2} bytes per snapshot byte"
+        );
+    });
 }
 
 /// The allocation per signed snapshot byte a private mount may make. The
@@ -221,9 +279,9 @@ fn composite_entry(keys: &SnapshotKeyRing) -> CompositeEntry {
 
 /// MEM-003: an entry's canonical header bytes are serialized from the
 /// entry as it is, allocating no more than serializing an owned header.
-#[tokio::test]
-async fn mem_audit_composite_header_bytes_do_not_clone_the_graph() {
-    let _lock = exclusive().await;
+#[test]
+fn mem_audit_composite_header_bytes_do_not_clone_the_graph() {
+    let _lock = exclusive();
     let entry = composite_entry(&keys());
     let owned = CompositeHeader {
         entry: entry.header().clone(),
@@ -232,16 +290,16 @@ async fn mem_audit_composite_header_bytes_do_not_clone_the_graph() {
     let _profiler = dhat::Profiler::builder().testing().build();
     let max = 64 * 1024;
     owned.canonical_bytes(max).expect("a warm-up");
-    let before = heap();
-    let from_owned = owned.canonical_bytes(max).expect("owned bytes");
-    let after = heap();
-    let from_entry = entry.canonical_header_bytes(max).expect("entry bytes");
-    let last = heap();
-    assert_eq!(from_owned, from_entry);
-    let owned_blocks = after.total_blocks - before.total_blocks;
-    let entry_blocks = last.total_blocks - after.total_blocks;
-    let owned_bytes = after.total_bytes - before.total_bytes;
-    let entry_bytes = last.total_bytes - after.total_bytes;
+    assert_eq!(
+        owned.canonical_bytes(max).expect("owned bytes"),
+        entry.canonical_header_bytes(max).expect("entry bytes")
+    );
+    let (owned_blocks, owned_bytes) = fewest(|| {
+        owned.canonical_bytes(max).expect("owned bytes");
+    });
+    let (entry_blocks, entry_bytes) = fewest(|| {
+        entry.canonical_header_bytes(max).expect("entry bytes");
+    });
     assert!(
         entry_blocks <= owned_blocks && entry_bytes <= owned_bytes,
         "the entry allocated {entry_blocks} blocks and {entry_bytes} bytes, \
@@ -250,14 +308,16 @@ async fn mem_audit_composite_header_bytes_do_not_clone_the_graph() {
 }
 
 /// MEM-003: validating a document path allocates only the owned path.
-#[tokio::test]
-async fn mem_audit_a_document_path_is_validated_without_copies() {
-    let _lock = exclusive().await;
+#[test]
+fn mem_audit_a_document_path_is_validated_without_copies() {
+    let _lock = exclusive();
     let _profiler = dhat::Profiler::builder().testing().build();
-    let before = heap().total_blocks;
     let path = MountedDocumentPath::parse("/docs/guide/intro").expect("a path");
-    let used = heap().total_blocks - before;
     assert_eq!(path.as_str(), "/docs/guide/intro");
+    let (used, _) = fewest(|| {
+        let path = MountedDocumentPath::parse("/docs/guide/intro").expect("a path");
+        assert_eq!(path.as_str().len(), 17);
+    });
     assert_eq!(
         used, 1,
         "parsing a three-segment path made {used} allocations"
